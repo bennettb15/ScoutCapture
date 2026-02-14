@@ -1542,11 +1542,16 @@ struct ContentView: View {
                                         }
                                         .padding(.horizontal, 14)
                                         .frame(width: controlW, height: controlH, alignment: .center)
-                                        .background(Color.white.opacity(locationMode == .interior ? 0.14 : 0.26))
+                                        .background(
+                                            ZStack {
+                                                Color.black.opacity(0.55)
+                                                Color.white.opacity(0.08)
+                                            }
+                                        )
                                         .clipShape(RoundedRectangle(cornerRadius: 18))
                                         .overlay(
                                             RoundedRectangle(cornerRadius: 18)
-                                                .stroke(Color.white.opacity(0.14), lineWidth: 1)
+                                                .stroke(Color.white.opacity(0.12), lineWidth: 1)
                                         )
                                     }
                                     .buttonStyle(.plain)
@@ -1572,11 +1577,16 @@ struct ContentView: View {
                                         }
                                         .padding(.horizontal, 14)
                                         .frame(width: controlW, height: controlH, alignment: .center)
-                                        .background(Color.white.opacity(0.26))
+                                        .background(
+                                            ZStack {
+                                                Color.black.opacity(0.55)
+                                                Color.white.opacity(0.08)
+                                            }
+                                        )
                                         .clipShape(RoundedRectangle(cornerRadius: 18))
                                         .overlay(
                                             RoundedRectangle(cornerRadius: 18)
-                                                .stroke(Color.white.opacity(0.14), lineWidth: 1)
+                                                .stroke(Color.white.opacity(0.12), lineWidth: 1)
                                         )
                                     }
                                     .buttonStyle(.plain)
@@ -2074,7 +2084,12 @@ struct ContentView: View {
                 }
                 .padding(.horizontal, 12)
                 .frame(width: controlW, height: controlH, alignment: .center)
-                .background(Color.white.opacity(locationMode == .interior ? 0.14 : 0.26))
+                .background(
+                    ZStack {
+                        Color.black.opacity(0.65)
+                        Color.white.opacity(0.08)
+                    }
+                )
                 .clipShape(RoundedRectangle(cornerRadius: 14))
                 .overlay(
                     RoundedRectangle(cornerRadius: 14)
@@ -2104,7 +2119,12 @@ struct ContentView: View {
                 }
                 .padding(.horizontal, 12)
                 .frame(width: controlW, height: controlH, alignment: .center)
-                .background(Color.white.opacity(0.26))
+                .background(
+                    ZStack {
+                        Color.black.opacity(0.65)
+                        Color.white.opacity(0.08)
+                    }
+                )
                 .clipShape(RoundedRectangle(cornerRadius: 14))
                 .overlay(
                     RoundedRectangle(cornerRadius: 14)
@@ -2638,7 +2658,7 @@ private struct DetailNoteModal: View {
     var body: some View {
         ZStack {
             // Opaque background (match grouped list background). Camera preview should not show through.
-            Color(uiColor: .systemGroupedBackground)
+            Color.black
                 .ignoresSafeArea()
                 .contentShape(Rectangle())
                 .onTapGesture {
@@ -2649,7 +2669,7 @@ private struct DetailNoteModal: View {
             VStack(spacing: 12) {
                 Text("\(recordId)  \(elevation)")
                     .font(.system(size: 13, weight: .semibold))
-                    .foregroundColor(.secondary)
+                    .foregroundColor(.white.opacity(0.92))
                     .lineLimit(1)
 
                 ZStack(alignment: .trailing) {
@@ -2725,7 +2745,7 @@ private struct DetailNoteModal: View {
             }
             .padding(16)
             // Match the same adaptive grouped background used by the Interior/Exterior managed lists
-            .background(Color(uiColor: .systemGroupedBackground))
+            .background(Color.black.opacity(0.92))
             .clipShape(RoundedRectangle(cornerRadius: 16))
             .overlay(
                 RoundedRectangle(cornerRadius: 16)
