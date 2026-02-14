@@ -731,10 +731,15 @@ private struct ReportPhotoViewer: View {
                 .ignoresSafeArea()
 
                 if barVisible, assets.count > 1 {
-                    filmStrip()
-                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
-                        .padding(.bottom, 18)
-                        .transition(.move(edge: .bottom).combined(with: .opacity))
+                    VStack {
+                        Spacer(minLength: 0)
+                        filmStrip()
+                            .padding(.bottom, 18)
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+                    // Ensure taps and drags only interact where the strip is.
+                    .allowsHitTesting(true)
                 }
             }
             // Native top bar styling (dark, glassy)
@@ -778,8 +783,8 @@ private struct ReportPhotoViewer: View {
         @ObservedObject var cache: AssetImageCache
 
         // Tight scrubber thumbnails (squarer + tighter)
-        private let thumbSide: CGFloat = 40
-        private let spacing: CGFloat = 4
+        private let thumbSide: CGFloat = 36
+        private let spacing: CGFloat = 2
 
         private struct ItemBoundsKey: PreferenceKey {
             static var defaultValue: [Int: Anchor<CGRect>] = [:]
@@ -791,70 +796,72 @@ private struct ReportPhotoViewer: View {
 
         var body: some View {
             ScrollViewReader { proxy in
-                ScrollView(.horizontal, showsIndicators: false) {
-                    LazyHStack(spacing: spacing) {
-                        ForEach(Array(assets.enumerated()), id: \.element.localIdentifier) { idx, asset in
-                            FilmThumb(
-                                asset: asset,
-                                isSelected: idx == selectedIndex,
-                                cache: cache,
-                                side: thumbSide
-                            )
-                            .id(idx)
-                            // Make the hit area full thumb size
-                            .contentShape(Rectangle())
-                            .onTapGesture {
-                                selectedIndex = idx
-                            }
-                            // Record each thumb bounds for scrubbing hit-testing
-                            .anchorPreference(key: ItemBoundsKey.self, value: .bounds) { [idx: $0] }
-                        }
-                    }
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 8)
-                }
-                .frame(height: thumbSide + 16) // prevents the strip from expanding vertically
-                .background(
-                    RoundedRectangle(cornerRadius: 12)
-                        .fill(Color.black.opacity(0.55))
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: 12)
-                        .stroke(Color.white.opacity(0.10), lineWidth: 1)
-                )
-                // Drag anywhere across the strip to scrub (hit testing limited to the strip bounds)
-                .overlayPreferenceValue(ItemBoundsKey.self) { anchors in
-                    GeometryReader { geo in
-                        Color.clear
-                            .contentShape(Rectangle())
-                            .gesture(
-                                DragGesture(minimumDistance: 0)
-                                    .onChanged { value in
-                                        let point = value.location
+                ZStack {
+                    // Visual container only as tall as the strip.
+                    RoundedRectangle(cornerRadius: 10)
+                        .fill(Color.black.opacity(0.45))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 10)
+                                .stroke(Color.white.opacity(0.10), lineWidth: 1)
+                        )
 
-                                        var hit: Int? = nil
-                                        for (idx, anchor) in anchors {
-                                            let rect = geo[anchor]
-                                            if rect.contains(point) {
-                                                hit = idx
-                                                break
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        LazyHStack(spacing: spacing) {
+                            ForEach(Array(assets.enumerated()), id: \.element.localIdentifier) { idx, asset in
+                                FilmThumb(
+                                    asset: asset,
+                                    isSelected: idx == selectedIndex,
+                                    cache: cache,
+                                    side: thumbSide
+                                )
+                                .id(idx)
+                                .contentShape(Rectangle())
+                                .onTapGesture {
+                                    selectedIndex = idx
+                                }
+                                .anchorPreference(key: ItemBoundsKey.self, value: .bounds) { [idx: $0] }
+                            }
+                        }
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 6)
+                    }
+                    // Scrub gesture is limited to the strip rectangle only.
+                    .overlayPreferenceValue(ItemBoundsKey.self) { anchors in
+                        GeometryReader { geo in
+                            Color.clear
+                                .contentShape(Rectangle())
+                                .gesture(
+                                    DragGesture(minimumDistance: 0)
+                                        .onChanged { value in
+                                            let point = value.location
+
+                                            var hit: Int? = nil
+                                            for (idx, anchor) in anchors {
+                                                let rect = geo[anchor]
+                                                if rect.contains(point) {
+                                                    hit = idx
+                                                    break
+                                                }
+                                            }
+
+                                            if let hit, hit != selectedIndex {
+                                                selectedIndex = hit
                                             }
                                         }
-
-                                        if let hit, hit != selectedIndex {
-                                            selectedIndex = hit
-                                        }
-                                    }
-                            )
+                                )
+                        }
+                        // Critical: do not let this GeometryReader become full screen.
+                        .frame(height: thumbSide + 12)
                     }
                 }
+                .frame(height: thumbSide + 12)
                 .onAppear {
                     DispatchQueue.main.async {
                         proxy.scrollTo(selectedIndex, anchor: .center)
                     }
                 }
                 .onChange(of: selectedIndex) { _, newValue in
-                    withAnimation(.easeOut(duration: 0.15)) {
+                    withAnimation(.easeOut(duration: 0.12)) {
                         proxy.scrollTo(newValue, anchor: .center)
                     }
                 }
@@ -872,7 +879,7 @@ private struct ReportPhotoViewer: View {
 
             var body: some View {
                 ZStack {
-                    RoundedRectangle(cornerRadius: 4)
+                    RoundedRectangle(cornerRadius: 2)
                         .fill(Color.white.opacity(0.10))
                         .frame(width: side, height: side)
 
@@ -882,11 +889,11 @@ private struct ReportPhotoViewer: View {
                             .scaledToFill()
                             .frame(width: side, height: side)
                             .clipped()
-                            .clipShape(RoundedRectangle(cornerRadius: 4))
+                            .clipShape(RoundedRectangle(cornerRadius: 2))
                     }
                 }
                 .overlay(
-                    RoundedRectangle(cornerRadius: 4)
+                    RoundedRectangle(cornerRadius: 2)
                         .stroke(isSelected ? Color.white.opacity(0.95) : Color.white.opacity(0.10), lineWidth: isSelected ? 2 : 1)
                 )
                 .onAppear {
@@ -907,67 +914,192 @@ private struct ReportPhotoViewer: View {
         @ObservedObject var cache: AssetImageCache
 
         @State private var img: UIImage? = nil
-        @State private var scale: CGFloat = 1.0
-        @State private var offset: CGSize = .zero
 
         var body: some View {
-            GeometryReader { geo in
-                ZStack {
-                    if let img {
-                        Image(uiImage: img)
-                            .resizable()
-                            .scaledToFit()
-                            // Force true centering inside the fullscreen viewer container
-                            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
-                            .background(Color.black)
-                            .ignoresSafeArea()
-                            .scaleEffect(scale)
-                            .offset(offset)
-                            .simultaneousGesture(
-                                MagnificationGesture()
-                                    .onChanged { v in
-                                        let clamped = max(1.0, min(v, 4.0))
-                                        scale = clamped
-                                        if clamped <= 1.02 { offset = .zero }
-                                    }
-                                    .onEnded { _ in
-                                        if scale <= 1.02 { offset = .zero }
-                                    }
-                            )
-                            .gesture(
-                                scale > 1.02
-                                ? DragGesture()
-                                    .onChanged { v in
-                                        offset = v.translation
-                                    }
-                                    .onEnded { _ in
-                                        if scale <= 1.02 { offset = .zero }
-                                    }
-                                : nil
-                            )
-                            .onTapGesture(count: 2) {
-                                withAnimation(.easeOut(duration: 0.18)) {
-                                    if scale > 1.02 {
-                                        scale = 1.0
-                                        offset = .zero
-                                    } else {
-                                        scale = 2.0
-                                        offset = .zero
-                                    }
-                                }
-                            }
-                    } else {
-                        ProgressView()
-                            .progressViewStyle(.circular)
-                            .tint(.white)
+            ZStack {
+                Color.black.ignoresSafeArea()
+
+                if let img {
+                    ZoomableScrollImage(image: img)
+                        .ignoresSafeArea()
+                } else {
+                    ProgressView()
+                        .progressViewStyle(.circular)
+                        .tint(.white)
+                }
+            }
+            .onAppear {
+                if img != nil { return }
+                cache.requestFull(for: asset) { im in
+                    DispatchQueue.main.async { self.img = im }
+                }
+            }
+        }
+    }
+
+    // MARK: - UIKit zoom (Photos-like pinch + pan + inertia)
+
+    private struct ZoomableScrollImage: UIViewRepresentable {
+
+        let image: UIImage
+
+        func makeUIView(context: Context) -> PhotoZoomContainerView {
+            let v = PhotoZoomContainerView()
+            v.setImage(image)
+            return v
+        }
+
+        func updateUIView(_ uiView: PhotoZoomContainerView, context: Context) {
+            uiView.setImage(image)
+        }
+
+        // A dedicated UIKit view to avoid SwiftUI layout timing issues.
+        final class PhotoZoomContainerView: UIView, UIScrollViewDelegate {
+
+            private let scrollView = UIScrollView()
+            private let imageView = UIImageView()
+
+            private var currentImageId: ObjectIdentifier? = nil
+            private var needsInitialFit: Bool = true
+            private var lastBoundsSize: CGSize = .zero
+
+            override init(frame: CGRect) {
+                super.init(frame: frame)
+                commonInit()
+            }
+
+            required init?(coder: NSCoder) {
+                super.init(coder: coder)
+                commonInit()
+            }
+
+            private func commonInit() {
+                backgroundColor = .black
+
+                scrollView.backgroundColor = .black
+                scrollView.showsHorizontalScrollIndicator = false
+                scrollView.showsVerticalScrollIndicator = false
+                scrollView.bouncesZoom = true
+                scrollView.decelerationRate = .fast
+                scrollView.delegate = self
+                scrollView.alwaysBounceVertical = false
+                scrollView.alwaysBounceHorizontal = false
+
+                imageView.contentMode = .scaleAspectFit
+                imageView.backgroundColor = .clear
+                imageView.isUserInteractionEnabled = true
+
+                addSubview(scrollView)
+                scrollView.addSubview(imageView)
+
+                let doubleTap = UITapGestureRecognizer(target: self, action: #selector(handleDoubleTap(_:)))
+                doubleTap.numberOfTapsRequired = 2
+                scrollView.addGestureRecognizer(doubleTap)
+            }
+
+            func setImage(_ image: UIImage) {
+                let newId = ObjectIdentifier(image)
+                if currentImageId != newId {
+                    currentImageId = newId
+                    imageView.image = image
+                    needsInitialFit = true
+                    setNeedsLayout()
+                }
+            }
+
+            override func layoutSubviews() {
+                super.layoutSubviews()
+
+                scrollView.frame = bounds
+
+                let boundsSize = scrollView.bounds.size
+                guard boundsSize.width > 1, boundsSize.height > 1 else { return }
+
+                if boundsSize != lastBoundsSize {
+                    lastBoundsSize = boundsSize
+                    needsInitialFit = true
+                }
+
+                guard let img = imageView.image else { return }
+
+                // Use the image pixel size in points for consistent zoom math.
+                let imageSize = img.size
+
+                // The image view starts at its natural size; UIScrollView zoom does the scaling.
+                imageView.frame = CGRect(origin: .zero, size: imageSize)
+                scrollView.contentSize = imageSize
+
+                // Compute aspect-fit scale. Never exceed 1.0, so we never open "pre-zoomed".
+                let scaleW = boundsSize.width / max(imageSize.width, 1)
+                let scaleH = boundsSize.height / max(imageSize.height, 1)
+                let fitScaleUncapped = min(scaleW, scaleH)
+                let fitScale = min(fitScaleUncapped, 1.0)
+
+                // Apply scales every layout pass in case bounds changed.
+                // Do not animate; this must be stable on first open.
+                scrollView.minimumZoomScale = fitScale
+                scrollView.maximumZoomScale = max(fitScale * 6.0, 3.0)
+
+                if needsInitialFit {
+                    needsInitialFit = false
+                    scrollView.zoomScale = fitScale
+                    scrollView.contentOffset = .zero
+                } else {
+                    // Clamp zoom to valid range if something drifted.
+                    if scrollView.zoomScale < scrollView.minimumZoomScale {
+                        scrollView.zoomScale = scrollView.minimumZoomScale
+                    }
+                    if scrollView.zoomScale > scrollView.maximumZoomScale {
+                        scrollView.zoomScale = scrollView.maximumZoomScale
                     }
                 }
-                .onAppear {
-                    if img != nil { return }
-                    cache.requestFull(for: asset) { im in
-                        DispatchQueue.main.async { self.img = im }
-                    }
+
+                centerImage()
+            }
+
+            // MARK: - UIScrollViewDelegate
+
+            func viewForZooming(in scrollView: UIScrollView) -> UIView? {
+                imageView
+            }
+
+            func scrollViewDidZoom(_ scrollView: UIScrollView) {
+                centerImage()
+            }
+
+            private func centerImage() {
+                let boundsSize = scrollView.bounds.size
+                let contentSize = scrollView.contentSize
+
+                let offsetX = max(0, (boundsSize.width - contentSize.width) * 0.5)
+                let offsetY = max(0, (boundsSize.height - contentSize.height) * 0.5)
+
+                imageView.center = CGPoint(
+                    x: contentSize.width * 0.5 + offsetX,
+                    y: contentSize.height * 0.5 + offsetY
+                )
+            }
+
+            @objc private func handleDoubleTap(_ gr: UITapGestureRecognizer) {
+                let minScale = scrollView.minimumZoomScale
+                let maxScale = scrollView.maximumZoomScale
+
+                // Photos-like: toggle between fitted and a moderate zoom.
+                let targetScale: CGFloat
+                if abs(scrollView.zoomScale - minScale) < 0.01 {
+                    targetScale = min(minScale * 2.5, maxScale)
+                } else {
+                    targetScale = minScale
                 }
+
+                let point = gr.location(in: imageView)
+
+                let w = scrollView.bounds.size.width / targetScale
+                let h = scrollView.bounds.size.height / targetScale
+                let x = point.x - (w * 0.5)
+                let y = point.y - (h * 0.5)
+
+                scrollView.zoom(to: CGRect(x: x, y: y, width: w, height: h), animated: true)
             }
         }
     }
