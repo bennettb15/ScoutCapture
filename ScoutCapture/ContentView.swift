@@ -1943,8 +1943,8 @@ struct ContentView: View {
             }
             .fullScreenCover(isPresented: $showDetailOverlay) {
                 DetailNoteModal(
-                    recordId: recordId,
                     elevation: elevation,
+                    detailType: currentDetailType,
                     existingNote: detailNote,
                     onCancel: {
                         showDetailOverlay = false
@@ -2626,8 +2626,8 @@ import Photos
 
 private struct DetailNoteModal: View {
 
-    let recordId: String
     let elevation: String
+    let detailType: String
     let existingNote: String
 
     let onCancel: () -> Void
@@ -2637,14 +2637,14 @@ private struct DetailNoteModal: View {
     @FocusState private var isFocused: Bool
 
     init(
-        recordId: String,
         elevation: String,
+        detailType: String,
         existingNote: String,
         onCancel: @escaping () -> Void,
         onSave: @escaping (String) -> Void
     ) {
-        self.recordId = recordId
         self.elevation = elevation
+        self.detailType = detailType
         self.existingNote = existingNote
         self.onCancel = onCancel
         self.onSave = onSave
@@ -2667,7 +2667,7 @@ private struct DetailNoteModal: View {
                 }
 
             VStack(spacing: 12) {
-                Text("\(recordId)  \(elevation)")
+                Text("\(elevation)  \(detailType)")
                     .font(.system(size: 13, weight: .semibold))
                     .foregroundColor(.white.opacity(0.92))
                     .lineLimit(1)
