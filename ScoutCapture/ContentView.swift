@@ -9,6 +9,7 @@ import CoreLocation
 import CoreMotion
 import Combine
 import UIKit
+import AVKit
 
 // MARK: - UIScreen compatibility helper (avoids iOS 26 UIScreen warnings)
 
@@ -142,6 +143,40 @@ private struct CameraGlassCircle: ViewModifier {
 private extension View {
     func cameraGlassCircle(size: CGFloat = 44) -> some View {
         modifier(CameraGlassCircle(size: size))
+    }
+}
+
+// MARK: - Physical shutter buttons (Camera Control + volume buttons)
+
+private struct CameraCaptureButtons: ViewModifier {
+
+    let onCapture: () -> Void
+
+    func body(content: Content) -> some View {
+        if #available(iOS 17.2, *) {
+            content
+                // Primary action: Camera Control (iPhone 16+), volume down, Action button (when mapped)
+                // Secondary action: volume up (optional handler)
+                .onCameraCaptureEvent(isEnabled: true,
+                                      primaryAction: { event in
+                    if event.phase == .ended {
+                        onCapture()
+                    }
+                },
+                                      secondaryAction: { event in
+                    if event.phase == .ended {
+                        onCapture()
+                    }
+                })
+        } else {
+            content
+        }
+    }
+}
+
+private extension View {
+    func cameraCaptureButtons(onCapture: @escaping () -> Void) -> some View {
+        modifier(CameraCaptureButtons(onCapture: onCapture))
     }
 }
 
@@ -1620,6 +1655,11 @@ struct ContentView: View {
                                 }
                             }
                         )
+                        .cameraCaptureButtons {
+                            shutterHaptic.impactOccurred()
+                            shutterHaptic.prepare()
+                            capture()
+                        }
                         // Always occupy the full preview rect and stay centered
                         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
                         .frame(width: w, height: previewH)
