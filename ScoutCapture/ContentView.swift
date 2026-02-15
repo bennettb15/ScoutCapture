@@ -1693,19 +1693,28 @@ struct ContentView: View {
                         
                         if (lastValidDeviceOrientation == .landscapeLeft || lastValidDeviceOrientation == .landscapeRight) {
                             let isLandscapeLeft = (lastValidDeviceOrientation == .landscapeLeft)
-                            let anchor: UnitPoint = isLandscapeLeft ? .topTrailing : .topLeading
+
+                            // When the physical device rotates:
+                            // - landscapeLeft: controls should read upright, rotated +90
+                            // - landscapeRight: controls should read upright, rotated -90
+                            let rotationDegrees: Double = isLandscapeLeft ? 90 : -90
+
+                            // Mirror placement so the dropdowns stay in the top-right of the *preview*
+                            // for both orientations.
                             let alignment: Alignment = isLandscapeLeft ? .topTrailing : .topLeading
+                            let anchor: UnitPoint = isLandscapeLeft ? .topTrailing : .topLeading
 
                             // Anchor to the preview rectangle explicitly so it cannot drift into the header mask.
                             Color.clear
                                 .frame(width: w, height: previewH)
                                 .overlay(alignment: alignment) {
+                                    // Nudge inward from the preview edge in each orientation.
                                     let xNudge: CGFloat = isLandscapeLeft ? -10 : 10
                                     let yNudge: CGFloat = 200
 
                                     landscapeDropdownStack()
-                                        // Fixed 90° rotation for landscape controls
-                                        .rotationEffect(.degrees(90), anchor: anchor)
+                                        // Rotate correctly for the current landscape direction.
+                                        .rotationEffect(.degrees(rotationDegrees), anchor: anchor)
                                         .offset(x: xNudge, y: yNudge)
                                         // Prevent flicker during Menu open/close
                                         .compositingGroup()
