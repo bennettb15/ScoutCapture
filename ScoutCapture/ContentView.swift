@@ -621,196 +621,154 @@ private struct RecentAlbumPreviewCircleButton: View {
 
 // MARK: - Fullscreen Library (grid + contextual top bar)
 
-private struct ReportLibraryFullscreen: View {
-
-    @ObservedObject var reportLibrary: ReportLibraryModel
-    @ObservedObject var cache: AssetImageCache
-
-    @Environment(\.dismiss) private var dismiss
-
-    private struct ViewerContext: Identifiable {
-        let id: Int
-        let startIndex: Int
-    }
-
-    @State private var viewerContext: ViewerContext? = nil
-    @State private var viewerToken: Int = 0
-
-    // Subtle Photos-like entrance
-    @State private var appearScale: CGFloat = 0.992
-    @State private var appearOpacity: CGFloat = 0.0
-
-    var body: some View {
-        let title = reportLibrary.albumTitle.isEmpty ? "Library" : reportLibrary.albumTitle
-
-        return NavigationStack {
-            ZStack {
-                Color.black.ignoresSafeArea()
-
-                GeometryReader { geo in
-                    let w = geo.size.width
-
-                    // Photos-like tight grid: always 3 columns, square thumbnails.
-                    let spacing: CGFloat = 2
-                    let side: CGFloat = floor((w - (spacing * 4)) / 3)
-                    let columns = Array(repeating: GridItem(.flexible(), spacing: spacing), count: 3)
-
-                    ScrollView {
-                        LazyVGrid(columns: columns, spacing: spacing) {
-                            ForEach(Array(reportLibrary.assets.enumerated()), id: \.element.localIdentifier) { idx, asset in
-                                ThumbCell(asset: asset, cache: cache, side: side)
-                                    .contentShape(Rectangle())
-                                    .onTapGesture {
-                                        viewerToken &+= 1
-                                        viewerContext = ViewerContext(id: viewerToken, startIndex: idx)
-                                    }
-                            }
-                        }
-                        .padding(spacing)
-                    }
-                    .scrollIndicators(.visible)
-                    .scaleEffect(appearScale)
-                    .opacity(appearOpacity)
-                    .onAppear {
-                        reportLibrary.reloadAssets()
-                        withAnimation(.easeOut(duration: 0.18)) {
-                            appearScale = 1.0
-                            appearOpacity = 1.0
-                        }
-                    }
-                }
-            }
-            .navigationTitle(title)
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbarBackground(.hidden, for: .navigationBar)
-            .toolbarColorScheme(.dark, for: .navigationBar)
-            .tint(.white)
-            .toolbar {
-                // Photos-like close affordance
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button("Done") {
-                        dismiss()
-                    }
-                }
-            }
-        }
-        .fullScreenCover(item: $viewerContext) { ctx in
-            ReportPhotoViewer(
-                assets: reportLibrary.assets,
-                startIndex: ctx.startIndex,
-                cache: cache,
-                viewerToken: ctx.id
-            )
-        }
-    }
-
-    private struct ThumbCell: View {
-
-        let asset: PHAsset
-        @ObservedObject var cache: AssetImageCache
-        let side: CGFloat
-
-        @State private var img: UIImage? = nil
-
-        var body: some View {
-            ZStack {
-                Rectangle()
-                    .fill(Color.white.opacity(0.08))
-
-                if let img {
-                    Image(uiImage: img)
-                        .resizable()
-                        .scaledToFill()
-                }
-            }
-            .frame(width: side, height: side)
-            .clipped()
-            // Mostly square corners like Photos
-            .clipShape(RoundedRectangle(cornerRadius: 2))
-            .onAppear {
-                if img != nil { return }
-                let scale = UIScreen.currentScale
-                let px: CGFloat = max(520 * scale, side * scale * 2.0)
-                cache.requestThumbnail(for: asset, pixelSize: px) { im in
-                    DispatchQueue.main.async { self.img = im }
-                }
-            }
-        }
-    }
-}
 // MARK: - Fullscreen viewer with swipe + filmstrip
 
 private struct ReportPhotoViewer: View {
 
+    let title: String
     let assets: [PHAsset]
     let startIndex: Int
     @ObservedObject var cache: AssetImageCache
     let viewerToken: Int
 
     @Environment(\.dismiss) private var dismiss
+
+    // Physical device orientation (UI is portrait locked, we rotate the content ourselves)
+    @State private var lastValidOrientation: UIDeviceOrientation = .portrait
+
+    private var isLandscape: Bool {
+        lastValidOrientation == .landscapeLeft || lastValidOrientation == .landscapeRight
+    }
+
+    private var rotationDegrees: Double {
+        switch lastValidOrientation {
+        case .landscapeLeft:
+            return 90
+        case .landscapeRight:
+            return -90
+        default:
+            return 0
+        }
+    }
+
+    private func refreshOrientation() {
+        let o = UIDevice.current.orientation
+
+        // IMPORTANT:
+        // In a portrait-locked app, iOS can report `.portrait` while the phone is physically upside down.
+        // If we accept upside-down as portrait, the viewer will snap back to portrait while you are inverted.
+        // Photos-like behavior: stay in the last landscape until you return to a true upright portrait.
+        if o == .portraitUpsideDown {
+            return
+        }
+
+        let newValue: UIDeviceOrientation? = {
+            switch o {
+            case .portrait:
+                return .portrait
+            case .landscapeLeft, .landscapeRight:
+                return o
+            default:
+                return nil
+            }
+        }()
+
+        guard let newValue else { return }
+        guard newValue != lastValidOrientation else { return }
+
+        // Only force a rebuild when switching between portrait and landscape.
+        // Rotating between landscapeLeft and landscapeRight should not reset zoom.
+        let wasLandscape = (lastValidOrientation == .landscapeLeft || lastValidOrientation == .landscapeRight)
+        let willBeLandscape = (newValue == .landscapeLeft || newValue == .landscapeRight)
+
+        lastValidOrientation = newValue
+
+        if wasLandscape != willBeLandscape {
+            orientationResetToken &+= 1
+        }
+    }
+
     @State private var index: Int
     @State private var barVisible: Bool = true
 
-    init(assets: [PHAsset], startIndex: Int, cache: AssetImageCache, viewerToken: Int) {
+    // Forces the zoom container to re-fit on device rotation
+    @State private var orientationResetToken: Int = 0
+
+    init(title: String, assets: [PHAsset], startIndex: Int, cache: AssetImageCache, viewerToken: Int) {
+        self.title = title
         self.assets = assets
         self.startIndex = startIndex
         self.cache = cache
         self.viewerToken = viewerToken
         _index = State(initialValue: min(max(0, startIndex), max(0, assets.count - 1)))
     }
-
+       
+   
     var body: some View {
-        NavigationStack {
+        GeometryReader { geo in
+            let w = geo.size.width
+            let h = geo.size.height
+
+            // When we rotate content inside a portrait locked app, swap the content frame.
+            let contentW = isLandscape ? h : w
+            let contentH = isLandscape ? w : h
+
             ZStack {
                 Color.black.ignoresSafeArea()
 
-                TabView(selection: $index) {
-                    ForEach(Array(assets.enumerated()), id: \.element.localIdentifier) { idx, asset in
-                        FullImage(asset: asset, cache: cache)
-                            .tag(idx)
-                            .contentShape(Rectangle())
-                            .onTapGesture {
-                                withAnimation(.easeOut(duration: 0.18)) {
-                                    barVisible.toggle()
-                                }
+                ZStack {
+                    ZStack {
+                        TabView(selection: $index) {
+                            ForEach(Array(assets.enumerated()), id: \.element.localIdentifier) { idx, asset in
+                                FullImage(asset: asset, cache: cache, resetToken: orientationResetToken)
+                                    .tag(idx)
+                                    .contentShape(Rectangle())
+                                    .onTapGesture {
+                                        withAnimation(.easeOut(duration: 0.18)) {
+                                            barVisible.toggle()
+                                        }
+                                    }
                             }
-                    }
-                }
-                .id(viewerToken) // this forces the viewer to open on the tapped photo every time
-                .tabViewStyle(.page(indexDisplayMode: .never))
-                // Ensure the image area uses the full screen so the photo can center vertically
-                .ignoresSafeArea()
+                        }
+                        .id("\(viewerToken)-\(orientationResetToken)")
+                        .tabViewStyle(.page(indexDisplayMode: .never))
+                        .ignoresSafeArea()
 
-                if barVisible, assets.count > 1 {
-                    VStack {
-                        Spacer(minLength: 0)
-                        filmStrip()
-                            .padding(.bottom, 18)
+                        if barVisible, assets.count > 1 {
+                            VStack {
+                                Spacer(minLength: 0)
+                                filmStrip()
+                                    .padding(.bottom, 18)
+                            }
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                            .transition(.move(edge: .bottom).combined(with: .opacity))
+                            .allowsHitTesting(true)
+                        }
                     }
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .transition(.move(edge: .bottom).combined(with: .opacity))
-                    // Ensure taps and drags only interact where the strip is.
-                    .allowsHitTesting(true)
-                }
-            }
-            // Native top bar styling (dark, glassy)
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbarBackground(.hidden, for: .navigationBar)
-            .toolbarColorScheme(.dark, for: .navigationBar)
-            .tint(.white)
-            // Hide/show the native toolbar with the same tap used for the film strip
-            .toolbar(barVisible ? .visible : .hidden, for: .navigationBar)
-            .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button("Done") {
-                        dismiss()
+
+                    if barVisible {
+                        headerOverlay()
+                            .zIndex(50)
                     }
                 }
+                .frame(width: contentW, height: contentH, alignment: .center)
+                .rotationEffect(.degrees(rotationDegrees))
+                .position(x: w * 0.5, y: h * 0.5)
             }
-        }
-        .onAppear {
-            let v = min(max(0, startIndex), max(0, assets.count - 1))
-            index = v
+            .statusBarHidden(isLandscape)
+            .onAppear {
+                UIDevice.current.beginGeneratingDeviceOrientationNotifications()
+                refreshOrientation()
+
+                let v = min(max(0, startIndex), max(0, assets.count - 1))
+                index = v
+            }
+            .onReceive(NotificationCenter.default.publisher(for: UIDevice.orientationDidChangeNotification)) { _ in
+                refreshOrientation()
+            }
+            .onDisappear {
+                UIDevice.current.endGeneratingDeviceOrientationNotifications()
+            }
         }
         .onChange(of: startIndex) { _, newValue in
             let v = min(max(0, newValue), max(0, assets.count - 1))
@@ -827,13 +785,66 @@ private struct ReportPhotoViewer: View {
         .padding(.horizontal, 14)
     }
 
+    @ViewBuilder
+    private func headerOverlay() -> some View {
+        VStack(spacing: 0) {
+            ZStack {
+                LinearGradient(
+                    colors: [
+                        Color.black.opacity(0.92),
+                        Color.black.opacity(0.70),
+                        Color.black.opacity(0.35),
+                        Color.black.opacity(0.0)
+                    ],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
+                .ignoresSafeArea(edges: .top)
+                .allowsHitTesting(false)
+
+                HStack {
+                    Text(title)
+                        .font(.system(size: 20, weight: .bold))
+                        .foregroundColor(.white)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.75)
+
+                    Spacer(minLength: 0)
+
+                    Button {
+                        dismiss()
+                    } label: {
+                        Text("Done")
+                            .font(.system(size: 17, weight: .semibold))
+                            .foregroundColor(.white)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 8)
+                            .background(Color.black.opacity(0.35))
+                            .clipShape(RoundedRectangle(cornerRadius: 12))
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 12)
+                                    .stroke(Color.white.opacity(0.28), lineWidth: 1)
+                            )
+                    }
+                    .buttonStyle(.plain)
+                }
+                .padding(.horizontal, 14)
+                .padding(.top, 10)
+                .padding(.bottom, 10)
+            }
+            .frame(height: 96)
+
+            Spacer(minLength: 0)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+    }
+
     private struct FilmStrip: View {
 
         let assets: [PHAsset]
         @Binding var selectedIndex: Int
         @ObservedObject var cache: AssetImageCache
 
-        // Tight scrubber thumbnails (squarer + tighter)
         private let thumbSide: CGFloat = 36
         private let spacing: CGFloat = 2
 
@@ -848,7 +859,6 @@ private struct ReportPhotoViewer: View {
         var body: some View {
             ScrollViewReader { proxy in
                 ZStack {
-                    // Visual container only as tall as the strip.
                     RoundedRectangle(cornerRadius: 10)
                         .fill(Color.black.opacity(0.45))
                         .overlay(
@@ -876,7 +886,6 @@ private struct ReportPhotoViewer: View {
                         .padding(.horizontal, 8)
                         .padding(.vertical, 6)
                     }
-                    // Scrub gesture is limited to the strip rectangle only.
                     .overlayPreferenceValue(ItemBoundsKey.self) { anchors in
                         GeometryReader { geo in
                             Color.clear
@@ -901,7 +910,6 @@ private struct ReportPhotoViewer: View {
                                         }
                                 )
                         }
-                        // Critical: do not let this GeometryReader become full screen.
                         .frame(height: thumbSide + 12)
                     }
                 }
@@ -963,6 +971,7 @@ private struct ReportPhotoViewer: View {
 
         let asset: PHAsset
         @ObservedObject var cache: AssetImageCache
+        let resetToken: Int
 
         @State private var img: UIImage? = nil
 
@@ -972,6 +981,7 @@ private struct ReportPhotoViewer: View {
 
                 if let img {
                     ZoomableScrollImage(image: img)
+                        .id(resetToken)
                         .ignoresSafeArea()
                 } else {
                     ProgressView()
@@ -988,8 +998,6 @@ private struct ReportPhotoViewer: View {
         }
     }
 
-    // MARK: - UIKit zoom (Photos-like pinch + pan + inertia)
-
     private struct ZoomableScrollImage: UIViewRepresentable {
 
         let image: UIImage
@@ -1004,7 +1012,6 @@ private struct ReportPhotoViewer: View {
             uiView.setImage(image)
         }
 
-        // A dedicated UIKit view to avoid SwiftUI layout timing issues.
         final class PhotoZoomContainerView: UIView, UIScrollViewDelegate {
 
             private let scrollView = UIScrollView()
@@ -1073,21 +1080,16 @@ private struct ReportPhotoViewer: View {
 
                 guard let img = imageView.image else { return }
 
-                // Use the image pixel size in points for consistent zoom math.
                 let imageSize = img.size
 
-                // The image view starts at its natural size; UIScrollView zoom does the scaling.
                 imageView.frame = CGRect(origin: .zero, size: imageSize)
                 scrollView.contentSize = imageSize
 
-                // Compute aspect-fit scale. Never exceed 1.0, so we never open "pre-zoomed".
                 let scaleW = boundsSize.width / max(imageSize.width, 1)
                 let scaleH = boundsSize.height / max(imageSize.height, 1)
                 let fitScaleUncapped = min(scaleW, scaleH)
                 let fitScale = min(fitScaleUncapped, 1.0)
 
-                // Apply scales every layout pass in case bounds changed.
-                // Do not animate; this must be stable on first open.
                 scrollView.minimumZoomScale = fitScale
                 scrollView.maximumZoomScale = max(fitScale * 6.0, 3.0)
 
@@ -1096,7 +1098,6 @@ private struct ReportPhotoViewer: View {
                     scrollView.zoomScale = fitScale
                     scrollView.contentOffset = .zero
                 } else {
-                    // Clamp zoom to valid range if something drifted.
                     if scrollView.zoomScale < scrollView.minimumZoomScale {
                         scrollView.zoomScale = scrollView.minimumZoomScale
                     }
@@ -1107,8 +1108,6 @@ private struct ReportPhotoViewer: View {
 
                 centerImage()
             }
-
-            // MARK: - UIScrollViewDelegate
 
             func viewForZooming(in scrollView: UIScrollView) -> UIView? {
                 imageView
@@ -1135,7 +1134,6 @@ private struct ReportPhotoViewer: View {
                 let minScale = scrollView.minimumZoomScale
                 let maxScale = scrollView.maximumZoomScale
 
-                // Photos-like: toggle between fitted and a moderate zoom.
                 let targetScale: CGFloat
                 if abs(scrollView.zoomScale - minScale) < 0.01 {
                     targetScale = min(minScale * 2.5, maxScale)
@@ -2004,6 +2002,7 @@ struct ContentView: View {
                     // Fullscreen library
                     .fullScreenCover(isPresented: $showLibraryFullscreen) {
                         ReportLibraryFullscreen(reportLibrary: reportLibrary, cache: imageCache)
+                            .ignoresSafeArea()
                     }
                 }
                 .frame(width: geo.size.width, height: geo.size.height, alignment: .top)
@@ -2684,8 +2683,239 @@ struct ContentView: View {
 
 // MARK: - Report Library Fullscreen (Grid)
 
+private struct ReportLibraryFullscreen: View {
 
-// MARK: - Fullscreen viewer with swipe + filmstrip
+    @ObservedObject var reportLibrary: ReportLibraryModel
+    @ObservedObject var cache: AssetImageCache
+
+    @Environment(\.dismiss) private var dismiss
+    @State private var orientationResetToken: Int = 0
+    // Physical device orientation (UI is portrait locked, we rotate the content ourselves)
+    @State private var lastValidOrientation: UIDeviceOrientation = .portrait
+
+    private var isLandscape: Bool {
+        lastValidOrientation == .landscapeLeft || lastValidOrientation == .landscapeRight
+    }
+
+    private var rotationDegrees: Double {
+        switch lastValidOrientation {
+        case .landscapeLeft:
+            return 90
+        case .landscapeRight:
+            return -90
+        default:
+            return 0
+        }
+    }
+
+    private func refreshOrientation() {
+        let o = UIDevice.current.orientation
+
+        // Accept only portrait (upright) and the two landscapes.
+        // Explicitly ignore portraitUpsideDown so the UI does not snap back to portrait when the phone is inverted.
+        // Also ignore transitional/invalid states (faceUp, faceDown, unknown).
+        let newValue: UIDeviceOrientation? = {
+            switch o {
+            case .portrait:
+                return .portrait
+            case .landscapeLeft, .landscapeRight:
+                return o
+            default:
+                return nil
+            }
+        }()
+
+        guard let newValue else { return }
+        guard newValue != lastValidOrientation else { return }
+        lastValidOrientation = newValue
+
+        // Rebuild zoom view so it re-fits instead of keeping an old zoom scale
+        orientationResetToken &+= 1
+    }
+
+    private struct ViewerState: Identifiable {
+        let id = UUID()
+        let startIndex: Int
+    }
+
+    @State private var viewerState: ViewerState? = nil
+
+    var body: some View {
+        GeometryReader { geo in
+            let w = geo.size.width
+            let h = geo.size.height
+
+            // When we rotate content inside a portrait locked app, swap the content frame.
+            let contentW = isLandscape ? h : w
+            let contentH = isLandscape ? w : h
+
+            // Grid config
+            let columnsCount: Int = isLandscape ? 5 : 3
+
+            // Portrait should be tight (nearly touching), like landscape
+            let spacing: CGFloat = isLandscape ? 2 : 2
+
+            // Reduce portrait side padding so it reads closer to edge to edge
+            let horizontalPadding: CGFloat = isLandscape ? 0 : 2
+
+            let totalSpacing = CGFloat(max(0, columnsCount - 1)) * spacing
+            let side = (contentW - (horizontalPadding * 2) - totalSpacing) / CGFloat(columnsCount)
+            let headerH: CGFloat = isLandscape ? 96 : 112
+
+            ZStack {
+                Color.black.ignoresSafeArea()
+
+                // Rotated content container
+                ZStack {
+                    // Grid
+                    ScrollView(.vertical, showsIndicators: false) {
+                        LazyVGrid(
+                            columns: Array(repeating: GridItem(.fixed(side), spacing: spacing, alignment: .center), count: columnsCount),
+                            alignment: .center,
+                            spacing: spacing
+                        ) {
+                            ForEach(Array(reportLibrary.assets.enumerated()), id: \.element.localIdentifier) { idx, asset in
+                                LibraryThumb(asset: asset, cache: cache, side: side)
+                                    .contentShape(Rectangle())
+                                    .onTapGesture {
+                                        viewerState = ViewerState(startIndex: idx)
+                                    }
+                            }
+                        }
+                        .padding(.horizontal, horizontalPadding)
+                        .padding(.top, headerH)
+                        .padding(.bottom, isLandscape ? 0 : 8)
+                    }
+                    // In landscape, remove safe areas so the grid goes edge to edge.
+                    .ignoresSafeArea(isLandscape ? .all : [])
+
+                    // Header overlay (Photos style): stays visible, content can scroll behind it.
+                    headerOverlay()
+                        .zIndex(50)
+                }
+                .frame(width: contentW, height: contentH, alignment: .center)
+                .rotationEffect(.degrees(rotationDegrees))
+                .position(x: w * 0.5, y: h * 0.5)
+            }
+            // Hide the status bar only in landscape.
+            .statusBarHidden(isLandscape)
+            .onAppear {
+                UIDevice.current.beginGeneratingDeviceOrientationNotifications()
+                refreshOrientation()
+            }
+            .onReceive(NotificationCenter.default.publisher(for: UIDevice.orientationDidChangeNotification)) { _ in
+                refreshOrientation()
+            }
+            .onDisappear {
+                UIDevice.current.endGeneratingDeviceOrientationNotifications()
+            }
+        }
+        .fullScreenCover(item: $viewerState) { state in
+            ReportPhotoViewer(
+                title: reportLibrary.albumTitle,
+                assets: reportLibrary.assets,
+                startIndex: state.startIndex,
+                cache: cache,
+                viewerToken: state.startIndex
+            )
+        }
+    }
+
+    @ViewBuilder
+    private func headerOverlay() -> some View {
+        VStack(spacing: 0) {
+            ZStack {
+                // Opaque gradient that keeps header readable while allowing photos behind it.
+                LinearGradient(
+                    colors: [
+                        Color.black.opacity(0.92),
+                        Color.black.opacity(0.70),
+                        Color.black.opacity(0.35),
+                        Color.black.opacity(0.0)
+                    ],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
+                .ignoresSafeArea(edges: .top)
+                .allowsHitTesting(false)
+
+                HStack {
+                    Text(reportLibrary.albumTitle)
+                        .font(.system(size: 20, weight: .bold))
+                        .foregroundColor(.white)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.75)
+
+                    Spacer(minLength: 0)
+
+                    Button {
+                        dismiss()
+                    } label: {
+                        Text("Done")
+                            .font(.system(size: 17, weight: .semibold))
+                            .foregroundColor(.white)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 8)
+                            .background(Color.black.opacity(0.35))
+                            .clipShape(RoundedRectangle(cornerRadius: 12))
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 12)
+                                    .stroke(Color.white.opacity(0.28), lineWidth: 1)
+                            )
+                    }
+                    .buttonStyle(.plain)
+                }
+                .padding(.horizontal, 14)
+                .padding(.top, isLandscape ? 10 : 50)
+                .padding(.bottom, 10)
+            }
+            .frame(height: isLandscape ? 96 : 112)
+
+            Spacer(minLength: 0)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .allowsHitTesting(true)
+    }
+
+    private struct LibraryThumb: View {
+
+        let asset: PHAsset
+        @ObservedObject var cache: AssetImageCache
+        let side: CGFloat
+
+        @State private var img: UIImage? = nil
+
+        var body: some View {
+            ZStack {
+                Color.black
+
+                if let img {
+                    Image(uiImage: img)
+                        .resizable()
+                        .scaledToFill()
+                        .frame(width: side, height: side)
+                        .clipped()
+                } else {
+                    Color.white.opacity(0.06)
+                        .frame(width: side, height: side)
+                }
+            }
+            .frame(width: side, height: side)
+            .clipped()
+            .onAppear {
+                if img != nil { return }
+                let scale = UIScreen.currentScale
+                let px = max(300, side * 3) * scale
+                cache.requestThumbnail(for: asset, pixelSize: px) { im in
+                    DispatchQueue.main.async {
+                        self.img = im
+                    }
+                }
+            }
+        }
+    }
+}
+
 
 
 // MARK: - Detail Note Modal (rotates + landscape keyboard)
