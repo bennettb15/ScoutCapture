@@ -4032,4 +4032,3 @@ private final class GlyphRotationMotionModel: ObservableObject {
     }
 }
 
-// Updated double tap zoom behavior to hide header and swiping off zoomed photo resets size on return
