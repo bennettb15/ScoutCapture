@@ -11,6 +11,7 @@ import Combine
 import UIKit
 import AVKit
 
+
 // MARK: - UIScreen compatibility helper (avoids iOS 26 UIScreen warnings)
 
 extension UIScreen {
@@ -690,9 +691,33 @@ private struct ReportPhotoViewer: View {
 
     @State private var index: Int
     @State private var barVisible: Bool = true
+    @State private var barsManuallyHidden: Bool = false
+
+
+    private func setBarsVisible(_ visible: Bool, animated: Bool) {
+        if animated {
+            withAnimation(.easeOut(duration: 0.18)) {
+                barVisible = visible
+            }
+        } else {
+            var t = Transaction()
+            t.disablesAnimations = true
+            withTransaction(t) {
+                barVisible = visible
+            }
+        }
+    }
+
+    // True while the user is actively swiping the main photo (TabView paging).
+    // Used to prevent the filmstrip scrub logic from fighting the page swipe.
+    @State private var isPagingDrag: Bool = false
 
     // Forces the zoom container to re-fit on device rotation
     @State private var orientationResetToken: Int = 0
+
+    // Per-page zoom reset tokens.
+    // When you swipe away from a page, we increment that page's token so returning to it is back at fit.
+    @State private var pageResetTokens: [Int: Int] = [:]
 
     init(title: String, assets: [PHAsset], startIndex: Int, cache: AssetImageCache, viewerToken: Int) {
         self.title = title
@@ -720,12 +745,36 @@ private struct ReportPhotoViewer: View {
                     ZStack {
                         TabView(selection: $index) {
                             ForEach(Array(assets.enumerated()), id: \.element.localIdentifier) { idx, asset in
-                                FullImage(asset: asset, cache: cache, resetToken: orientationResetToken)
+                                FullImage(
+                                    asset: asset,
+                                    assetId: asset.localIdentifier,
+                                    cache: cache,
+                                    resetToken: (orientationResetToken * 10_000) + (pageResetTokens[idx, default: 0]),
+                                    onHideBars: {
+                                        // Only auto-hide if user did NOT manually hide bars.
+                                        if barVisible && !barsManuallyHidden {
+                                            setBarsVisible(false, animated: false)
+                                        }
+                                    },
+                                    onShowBars: {
+                                        // Only auto-show if bars were hidden by zoom behavior, not manual tap.
+                                        if !barVisible && !barsManuallyHidden {
+                                            setBarsVisible(true, animated: false)
+                                        }
+                                    }
+                                )
                                     .tag(idx)
                                     .contentShape(Rectangle())
                                     .onTapGesture {
                                         withAnimation(.easeOut(duration: 0.18)) {
                                             barVisible.toggle()
+                                        }
+
+                                        // Manual override flag
+                                        if barVisible {
+                                            barsManuallyHidden = false
+                                        } else {
+                                            barsManuallyHidden = true
                                         }
                                     }
                             }
@@ -733,22 +782,37 @@ private struct ReportPhotoViewer: View {
                         .id("\(viewerToken)-\(orientationResetToken)")
                         .tabViewStyle(.page(indexDisplayMode: .never))
                         .ignoresSafeArea()
+                        .animation(nil, value: barVisible)
+                        
+                        .simultaneousGesture(
+                            DragGesture(minimumDistance: 8)
+                                .onChanged { _ in
+                                    // While swiping pages, suspend filmstrip-driven selection updates.
+                                    if !isPagingDrag { isPagingDrag = true }
+                                }
+                                .onEnded { _ in
+                                    // Let the page settle before re-enabling filmstrip scrub updates.
+                                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.18) {
+                                        isPagingDrag = false
+                                    }
+                                }
+                        )
 
-                        if barVisible, assets.count > 1 {
-                            VStack {
-                                Spacer(minLength: 0)
+                        .overlay(alignment: .bottom) {
+                            if barVisible, assets.count > 1 {
                                 filmStrip()
                                     .padding(.bottom, 18)
+                                    .transition(.move(edge: .bottom).combined(with: .opacity))
                             }
-                            .frame(maxWidth: .infinity, maxHeight: .infinity)
-                            .transition(.move(edge: .bottom).combined(with: .opacity))
-                            .allowsHitTesting(true)
                         }
                     }
 
-                    if barVisible {
-                        headerOverlay()
-                            .zIndex(50)
+                    // Header overlay should NOT be a full-screen hit-testing layer.
+                    // Keep it pinned to the top with its intrinsic height so swipes on the photo still page.
+                    .overlay(alignment: .top) {
+                        if barVisible {
+                            headerOverlay()
+                        }
                     }
                 }
                 .frame(width: contentW, height: contentH, alignment: .center)
@@ -766,8 +830,15 @@ private struct ReportPhotoViewer: View {
             .onReceive(NotificationCenter.default.publisher(for: UIDevice.orientationDidChangeNotification)) { _ in
                 refreshOrientation()
             }
+            
             .onDisappear {
                 UIDevice.current.endGeneratingDeviceOrientationNotifications()
+            }
+        }
+        .onChange(of: index) { oldValue, newValue in
+            // When leaving a page, reset its zoom so returning to it is back at fit.
+            if oldValue != newValue {
+                pageResetTokens[oldValue, default: 0] &+= 1
             }
         }
         .onChange(of: startIndex) { _, newValue in
@@ -780,78 +851,183 @@ private struct ReportPhotoViewer: View {
         FilmStrip(
             assets: assets,
             selectedIndex: $index,
+            isPagingDrag: $isPagingDrag,
             cache: cache
         )
         .padding(.horizontal, 14)
     }
 
+    private struct HeaderMeta {
+        let elevation: String
+        let detailId: String
+        let detailNote: String?
+    }
+
+    private func headerMeta(for asset: PHAsset, index: Int) -> HeaderMeta {
+        // If you do not have metadata yet, we try to parse from filename.
+        // You can standardize later and only adjust parsing here.
+        let filename = PHAssetResource.assetResources(for: asset).first?.originalFilename ?? ""
+
+        // Expected optional tokens anywhere in filename (case insensitive):
+        // "elev=Front" or "elev-Front" or "elev_Front"
+        // "detail=DT-01" or "detail-DT-01" or "detail_DT-01"
+        // "note=Something here" or "note-Something here" or "note_Something here"
+        func extractToken(_ key: String) -> String? {
+            let lower = filename.lowercased()
+            guard let r = lower.range(of: key.lowercased()) else { return nil }
+
+            // Start right after the key
+            var i = filename.index(r.upperBound, offsetBy: 0)
+
+            // Allow separators after key
+            if i < filename.endIndex {
+                let c = filename[i]
+                if c == "=" || c == "-" || c == "_" || c == " " {
+                    i = filename.index(after: i)
+                }
+            }
+
+            // Read until we hit a delimiter
+            var j = i
+            while j < filename.endIndex {
+                let c = filename[j]
+                if c == "_" || c == "-" || c == "." {
+                    break
+                }
+                j = filename.index(after: j)
+            }
+
+            let raw = String(filename[i..<j]).trimmingCharacters(in: .whitespacesAndNewlines)
+            return raw.isEmpty ? nil : raw
+        }
+
+        let elev = extractToken("elev") ?? extractToken("elevation")
+        let detail = extractToken("detail") ?? extractToken("detailid") ?? extractToken("id")
+        let note = extractToken("note")
+
+        let elevationText = elev ?? title
+        let detailIdText = detail ?? "Photo \(index + 1) of \(max(assets.count, 1))"
+
+        return HeaderMeta(
+            elevation: elevationText,
+            detailId: detailIdText,
+            detailNote: note
+        )
+    }
+
     @ViewBuilder
     private func headerOverlay() -> some View {
-        VStack(spacing: 0) {
-            ZStack {
-                LinearGradient(
-                    colors: [
-                        Color.black.opacity(0.92),
-                        Color.black.opacity(0.70),
-                        Color.black.opacity(0.35),
-                        Color.black.opacity(0.0)
-                    ],
-                    startPoint: .top,
-                    endPoint: .bottom
-                )
-                .ignoresSafeArea(edges: .top)
-                .allowsHitTesting(false)
+        let safeIndex = min(max(0, index), max(0, assets.count - 1))
+        let meta = assets.isEmpty ? HeaderMeta(elevation: title, detailId: "", detailNote: nil)
+                                : headerMeta(for: assets[safeIndex], index: safeIndex)
 
-                HStack {
-                    Text(title)
-                        .font(.system(size: 20, weight: .bold))
+        ZStack(alignment: .top) {
+            // Background gradient should never intercept gestures.
+            LinearGradient(
+                colors: [
+                    Color.black.opacity(0.92),
+                    Color.black.opacity(0.70),
+                    Color.black.opacity(0.35),
+                    Color.black.opacity(0.0)
+                ],
+                startPoint: .top,
+                endPoint: .bottom
+            )
+            .ignoresSafeArea(edges: .top)
+            .allowsHitTesting(false)
+
+            HStack(alignment: .top, spacing: 10) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(meta.elevation)
+                        .font(.system(size: 19, weight: .bold))
                         .foregroundColor(.white)
                         .lineLimit(1)
                         .minimumScaleFactor(0.75)
 
-                    Spacer(minLength: 0)
-
-                    Button {
-                        dismiss()
-                    } label: {
-                        Text("Done")
-                            .font(.system(size: 17, weight: .semibold))
-                            .foregroundColor(.white)
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 8)
-                            .background(Color.black.opacity(0.35))
-                            .clipShape(RoundedRectangle(cornerRadius: 12))
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 12)
-                                    .stroke(Color.white.opacity(0.28), lineWidth: 1)
-                            )
+                    if !meta.detailId.isEmpty {
+                        Text(meta.detailId)
+                            .font(.system(size: 15, weight: .semibold))
+                            .foregroundColor(.white.opacity(0.92))
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.75)
                     }
-                    .buttonStyle(.plain)
-                }
-                .padding(.horizontal, 14)
-                .padding(.top, 10)
-                .padding(.bottom, 10)
-            }
-            .frame(height: 96)
 
-            Spacer(minLength: 0)
+                    if let note = meta.detailNote, !note.isEmpty {
+                        Text(note)
+                            .font(.system(size: 13, weight: .regular))
+                            .italic()
+                            .foregroundColor(.white.opacity(0.82))
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.75)
+                    }
+                }
+
+                Spacer(minLength: 0)
+
+                Button {
+                    dismiss()
+                } label: {
+                    Text("Done")
+                        .font(.system(size: 17, weight: .semibold))
+                        .foregroundColor(.white)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 8)
+                        .background(Color.black.opacity(0.35))
+                        .clipShape(RoundedRectangle(cornerRadius: 12))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 12)
+                                .stroke(Color.white.opacity(0.28), lineWidth: 1)
+                        )
+                }
+                .buttonStyle(.plain)
+            }
+            .padding(.horizontal, 14)
+            .padding(.top, 10)
+            .padding(.bottom, 10)
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        // Critical: do NOT make this a full-screen view.
+        // Keeping it to its intrinsic height prevents it from competing with TabView paging.
+        .frame(height: 96, alignment: .top)
     }
 
     private struct FilmStrip: View {
 
         let assets: [PHAsset]
         @Binding var selectedIndex: Int
+        @Binding var isPagingDrag: Bool
         @ObservedObject var cache: AssetImageCache
 
         private let thumbSide: CGFloat = 36
         private let spacing: CGFloat = 2
 
-        private struct ItemBoundsKey: PreferenceKey {
-            static var defaultValue: [Int: Anchor<CGRect>] = [:]
+        // Selected styling
+        // Slightly larger when settled to match Photos feel.
+        private let selectedScale: CGFloat = 1.28
+        private let selectedExtraSidePadding: CGFloat = 10
 
-            static func reduce(value: inout [Int: Anchor<CGRect>], nextValue: () -> [Int: Anchor<CGRect>]) {
+        // While the user is dragging the strip, do NOT fight them with scrollTo.
+        @State private var isUserDragging: Bool = false
+
+        // Viewport width for proper end padding so the first/last thumb can reach center.
+        @State private var viewportWidth: CGFloat = 0
+
+        // Momentum haptics window (keeps ticking during deceleration)
+        @State private var momentumHapticsUntil: Date = .distantPast
+        @State private var lastHapticIndex: Int = -1
+        // Avoid “random” haptics caused by layout/appearance updates (eg. bars reappearing on zoom-out).
+        // We only tick haptics after the user has actually interacted with the filmstrip.
+        @State private var hasUserInteractedWithStrip: Bool = false
+
+        // Debounced "settle" so we do NOT kill momentum.
+        // We only snap-to-center after scrolling activity has stopped.
+        @State private var settleWorkItem: DispatchWorkItem? = nil
+
+        // Haptic on each index change while the user is interacting with the strip.
+        private let haptic = UIImpactFeedbackGenerator(style: .light)
+
+        private struct ItemMidXKey: PreferenceKey {
+            static var defaultValue: [Int: CGFloat] = [:]
+            static func reduce(value: inout [Int: CGFloat], nextValue: () -> [Int: CGFloat]) {
                 value.merge(nextValue(), uniquingKeysWith: { $1 })
             }
         }
@@ -861,65 +1037,176 @@ private struct ReportPhotoViewer: View {
                 ZStack {
                     RoundedRectangle(cornerRadius: 10)
                         .fill(Color.black.opacity(0.45))
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 10)
-                                .stroke(Color.white.opacity(0.10), lineWidth: 1)
-                        )
 
-                    ScrollView(.horizontal, showsIndicators: false) {
-                        LazyHStack(spacing: spacing) {
-                            ForEach(Array(assets.enumerated()), id: \.element.localIdentifier) { idx, asset in
-                                FilmThumb(
-                                    asset: asset,
-                                    isSelected: idx == selectedIndex,
-                                    cache: cache,
-                                    side: thumbSide
-                                )
-                                .id(idx)
-                                .contentShape(Rectangle())
-                                .onTapGesture {
-                                    selectedIndex = idx
+                    GeometryReader { outerGeo in
+                        let w = outerGeo.size.width
+                        let maxThumbWidth = (thumbSide * selectedScale) + (selectedExtraSidePadding * 2)
+                        let sidePad = max(0, (w - maxThumbWidth) * 0.5)
+
+                        ScrollView(.horizontal, showsIndicators: false) {
+                            LazyHStack(spacing: spacing) {
+                                ForEach(Array(assets.enumerated()), id: \.element.localIdentifier) { idx, asset in
+                                    let selected = (idx == selectedIndex)
+
+                                    FilmThumb(
+                                        asset: asset,
+                                        isSelected: selected,
+                                        cache: cache,
+                                        side: thumbSide
+                                    )
+                                    .scaleEffect(selected ? selectedScale : 1.0)
+                                    .padding(.horizontal, selected ? selectedExtraSidePadding : 0)
+                                    .animation(.easeOut(duration: 0.10), value: selectedIndex)
+                                    .id(idx)
+                                    .contentShape(Rectangle())
+                                    .onTapGesture {
+                                        // Tap should jump immediately and center.
+                                        isUserDragging = false
+                                        momentumHapticsUntil = .distantPast
+                                        selectedIndex = idx
+
+                                        haptic.impactOccurred()
+                                        haptic.prepare()
+                                        lastHapticIndex = idx
+
+                                        withAnimation(.easeOut(duration: 0.12)) {
+                                            proxy.scrollTo(idx, anchor: .center)
+                                        }
+                                    }
+                                    // Measure each thumb’s midX in the *visible viewport* coordinate space.
+                                    .background(
+                                        GeometryReader { itemGeo in
+                                            Color.clear
+                                                .preference(
+                                                    key: ItemMidXKey.self,
+                                                    value: [idx: itemGeo.frame(in: .named("filmstripViewport")).midX]
+                                                )
+                                        }
+                                    )
                                 }
-                                .anchorPreference(key: ItemBoundsKey.self, value: .bounds) { [idx: $0] }
+                            }
+                            // Critical: real padding so end items can reach the center.
+                            .padding(.horizontal, sidePad)
+                            .padding(.vertical, 6)
+                        }
+                        .scrollIndicators(.hidden)
+                        .coordinateSpace(name: "filmstripViewport")
+                        .onAppear {
+                            viewportWidth = w
+
+                            // Prime haptics and state. Doing a second prepare on the next run loop
+                            // prevents the “first open has no haptics” behavior.
+                            lastHapticIndex = selectedIndex
+                            hasUserInteractedWithStrip = false
+                            isUserDragging = false
+                            momentumHapticsUntil = .distantPast
+
+                            haptic.prepare()
+                            DispatchQueue.main.async {
+                                haptic.prepare()
+                                proxy.scrollTo(selectedIndex, anchor: .center)
                             }
                         }
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 6)
-                    }
-                    .overlayPreferenceValue(ItemBoundsKey.self) { anchors in
-                        GeometryReader { geo in
-                            Color.clear
-                                .contentShape(Rectangle())
-                                .gesture(
-                                    DragGesture(minimumDistance: 0)
-                                        .onChanged { value in
-                                            let point = value.location
-
-                                            var hit: Int? = nil
-                                            for (idx, anchor) in anchors {
-                                                let rect = geo[anchor]
-                                                if rect.contains(point) {
-                                                    hit = idx
-                                                    break
-                                                }
-                                            }
-
-                                            if let hit, hit != selectedIndex {
-                                                selectedIndex = hit
-                                            }
-                                        }
-                                )
+                        .onChange(of: w) { _, newW in
+                            viewportWidth = newW
                         }
-                        .frame(height: thumbSide + 12)
+                        // Track user drag so programmatic centering does not fight their finger.
+                        .simultaneousGesture(
+                            DragGesture(minimumDistance: 0)
+                                .onChanged { _ in
+                                    // If the user is paging the main photo, do not let the filmstrip logic fight it.
+                                    if isPagingDrag { return }
+
+                                    if !isUserDragging {
+                                        isUserDragging = true
+                                        hasUserInteractedWithStrip = true
+
+                                        // Re-prime haptics at the exact moment the user begins interacting.
+                                        haptic.prepare()
+                                    }
+
+                                    // While finger is down, keep the momentum window alive.
+                                    momentumHapticsUntil = Date().addingTimeInterval(0.90)
+
+                                    // Cancel any pending settle snap while user is actively moving.
+                                    settleWorkItem?.cancel()
+                                    settleWorkItem = nil
+                                }
+                                .onEnded { _ in
+                                    if isPagingDrag { return }
+
+                                    // Finger lifted. Do NOT snap here. Let the scroll view decelerate naturally.
+                                    isUserDragging = false
+                                    momentumHapticsUntil = Date().addingTimeInterval(0.90)
+                                },
+                            including: .all
+                        )
+                        // This is the core behavior:
+                        // As the strip scrolls (drag or momentum), pick the thumb closest to center.
+                        .onPreferenceChange(ItemMidXKey.self) { midXs in
+                            if isPagingDrag { return }
+                            guard viewportWidth > 1 else { return }
+                            guard !midXs.isEmpty else { return }
+
+                            // Critical fix for the neighbor-page "blip":
+                            // Only allow midX-driven selection changes when the user has actually interacted
+                            // with the strip (dragging) or we're in momentum deceleration from that interaction.
+                            // Layout / overlay transitions can fire preference updates; those must NOT change pages.
+                            let allowSelectionUpdates = hasUserInteractedWithStrip && (isUserDragging || (Date() < momentumHapticsUntil))
+                            if !allowSelectionUpdates {
+                                return
+                            }
+
+                            let centerX = viewportWidth * 0.5
+
+                            var bestIdx: Int = selectedIndex
+                            var bestDist: CGFloat = .greatestFiniteMagnitude
+
+                            for (idx, midX) in midXs {
+                                let d = abs(midX - centerX)
+                                if d < bestDist {
+                                    bestDist = d
+                                    bestIdx = idx
+                                }
+                            }
+
+                            if bestIdx != selectedIndex {
+                                selectedIndex = bestIdx
+
+                                // Haptic per photo change while dragging AND during momentum deceleration.
+                                if bestIdx != lastHapticIndex {
+                                    haptic.impactOccurred()
+                                    haptic.prepare()
+                                    lastHapticIndex = bestIdx
+                                }
+                            }
+
+                            // Debounced settle: do not fight momentum.
+                            // When scrolling activity stops (no more midX updates), snap once to center.
+                            settleWorkItem?.cancel()
+                            let work = DispatchWorkItem {
+                                // Only settle when finger is up.
+                                guard !isUserDragging else { return }
+                                withAnimation(.easeOut(duration: 0.14)) {
+                                    proxy.scrollTo(selectedIndex, anchor: .center)
+                                }
+                            }
+                            settleWorkItem = work
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.18, execute: work)
+                        }
                     }
+                    .frame(height: thumbSide + 12)
                 }
                 .frame(height: thumbSide + 12)
-                .onAppear {
-                    DispatchQueue.main.async {
-                        proxy.scrollTo(selectedIndex, anchor: .center)
-                    }
-                }
+                // If selection changes from outside (page swipe or tap), keep strip centered.
+                // Do not fight active dragging or deceleration.
                 .onChange(of: selectedIndex) { _, newValue in
+                    // If selection changes from outside (page swipe or tap), keep strip centered.
+                    // Do not fight active dragging, momentum, or page swipes.
+                    if isPagingDrag { return }
+                    if isUserDragging { return }
+                    if Date() < momentumHapticsUntil { return }
+
                     withAnimation(.easeOut(duration: 0.12)) {
                         proxy.scrollTo(newValue, anchor: .center)
                     }
@@ -966,60 +1253,156 @@ private struct ReportPhotoViewer: View {
             }
         }
     }
+private struct FullImage: View {
 
-    private struct FullImage: View {
+    let asset: PHAsset
+    let assetId: String
+    @ObservedObject var cache: AssetImageCache
+    let resetToken: Int
+    let onHideBars: () -> Void
+    let onShowBars: () -> Void
 
-        let asset: PHAsset
-        @ObservedObject var cache: AssetImageCache
-        let resetToken: Int
+    @State private var full: UIImage? = nil
+    @State private var thumb: UIImage? = nil
 
-        @State private var img: UIImage? = nil
+    // A stable key that changes whenever we need a hard reset, even if UIImage instances are reused.
+    private var zoomKey: String { "\(assetId)-\(resetToken)" }
 
-        var body: some View {
-            ZStack {
+    var body: some View {
+        ZStack {
+            Color.black.ignoresSafeArea()
+
+            if let full {
+                ZoomableScrollImage(
+                    image: full,
+                    imageKey: zoomKey,
+                    onHideBars: onHideBars,
+                    onShowBars: onShowBars
+                )
+                .id(zoomKey)
+                .ignoresSafeArea()
+            } else if let thumb {
+                Image(uiImage: thumb)
+                    .resizable()
+                    .scaledToFit()
+                    .ignoresSafeArea()
+            } else {
+                // No spinner: avoid the “scroll wheel” flash during first fast scrub.
                 Color.black.ignoresSafeArea()
-
-                if let img {
-                    ZoomableScrollImage(image: img)
-                        .id(resetToken)
-                        .ignoresSafeArea()
-                } else {
-                    ProgressView()
-                        .progressViewStyle(.circular)
-                        .tint(.white)
-                }
             }
-            .onAppear {
-                if img != nil { return }
-                cache.requestFull(for: asset) { im in
-                    DispatchQueue.main.async { self.img = im }
-                }
-            }
+        }
+        .onAppear {
+            loadImagesIfNeeded()
+        }
+        .onChange(of: assetId) { _, _ in
+            // Ensure we reset state if SwiftUI reuses the view.
+            full = nil
+            thumb = nil
+            loadImagesIfNeeded()
         }
     }
 
-    private struct ZoomableScrollImage: UIViewRepresentable {
+    private func loadImagesIfNeeded() {
+        // Kick a quick thumbnail first so scrubbing feels instant.
+        if thumb == nil {
+            let scale = UIScreen.currentScale
+            let px: CGFloat = 420 * scale
+            cache.requestThumbnail(for: asset, pixelSize: px) { im in
+                DispatchQueue.main.async { self.thumb = im }
+            }
+        }
+
+        if full != nil { return }
+        cache.requestFull(for: asset) { im in
+            DispatchQueue.main.async { self.full = im }
+        }
+    }
+}
+
+        private struct ZoomableScrollImage: UIViewRepresentable {
 
         let image: UIImage
+        let imageKey: String
+        let onHideBars: () -> Void
+        let onShowBars: () -> Void
 
         func makeUIView(context: Context) -> PhotoZoomContainerView {
             let v = PhotoZoomContainerView()
-            v.setImage(image)
+            v.onHideBars = onHideBars
+            v.onShowBars = onShowBars
+            v.setImage(image, key: imageKey)
             return v
         }
 
         func updateUIView(_ uiView: PhotoZoomContainerView, context: Context) {
-            uiView.setImage(image)
+            uiView.onHideBars = onHideBars
+            uiView.onShowBars = onShowBars
+            uiView.setImage(image, key: imageKey)
+        }
+
+        final class PhotoZoomScrollView: UIScrollView, UIGestureRecognizerDelegate {
+
+            /// Return true to allow the scroll view pan gesture to begin.
+            /// We use this to let the parent TabView own horizontal paging when the image is at-fit.
+            var shouldAllowPan: (() -> Bool)? = nil
+
+            override init(frame: CGRect) {
+                super.init(frame: frame)
+                // Apple requirement: UIScrollViewPanGestureRecognizer delegate must be the scroll view.
+                panGestureRecognizer.delegate = self
+            }
+
+            required init?(coder: NSCoder) {
+                super.init(coder: coder)
+                // Apple requirement: UIScrollViewPanGestureRecognizer delegate must be the scroll view.
+                panGestureRecognizer.delegate = self
+            }
+
+            override func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
+                if gestureRecognizer === panGestureRecognizer {
+                    return shouldAllowPan?() ?? true
+                }
+                return true
+            }
         }
 
         final class PhotoZoomContainerView: UIView, UIScrollViewDelegate {
 
-            private let scrollView = UIScrollView()
-            private let imageView = UIImageView()
+            var onHideBars: (() -> Void)? = nil
+            var onShowBars: (() -> Void)? = nil
+            
 
-            private var currentImageId: ObjectIdentifier? = nil
+            private let scrollView = PhotoZoomScrollView()
+            private let imageView = UIImageView()
+            private var currentImageKey: String? = nil
             private var needsInitialFit: Bool = true
             private var lastBoundsSize: CGSize = .zero
+
+            private var barsAreHidden: Bool = false
+            // True while the user is actively pinching (UIScrollView zoom gesture).
+            private var isUserZooming: Bool = false
+            // True while we are performing a programmatic zoom animation (double tap).
+            // While this is true, we must NOT flip the paging/gesture handshake mid-animation,
+            // or certain images (commonly those whose fitScale == 1.0) will “snap” at the end.
+            private var isProgrammaticZooming: Bool = false
+
+            // While zooming out to fit, suppress recent TabView/page swipes from affecting layout.
+            // This prevents the adjacent page from flashing during the zoom-out animation.
+            private var isZoomingOutToFit: Bool = false
+            private var zoomOutBeganAt: CFTimeInterval = 0
+            private let zoomOutBlockSeconds: CFTimeInterval = 0.22
+
+            // Stable haptic gating: avoid any incidental feedback during zoom-out settle.
+            private var pendingShowBarsAfterZoomOut: Bool = false
+
+            // When we restore bars (header + filmstrip), SwiftUI can trigger a layout transaction
+            // that briefly lets the TabView show an adjacent page snapshot. Suppress handshake churn
+            // during that restore window.
+            private var isRestoringBars: Bool = false
+            private var restoreBarsBeganAt: CFTimeInterval = 0
+            private let restoreBarsBlockSeconds: CFTimeInterval = 0.18
+
+           
 
             override init(frame: CGRect) {
                 super.init(frame: frame)
@@ -1054,14 +1437,104 @@ private struct ReportPhotoViewer: View {
                 doubleTap.numberOfTapsRequired = 2
                 scrollView.addGestureRecognizer(doubleTap)
             }
+            private func updatePagingHandshake() {
+                let now = CACurrentMediaTime()
 
-            func setImage(_ image: UIImage) {
-                let newId = ObjectIdentifier(image)
-                if currentImageId != newId {
-                    currentImageId = newId
-                    imageView.image = image
+                // During programmatic zoom-out and immediately after bar restoration, do NOT let TabView
+                // see a 1-finger horizontal gesture. We temporarily let the scroll view "own" the pan
+                // (even at-fit) so TabView cannot peek the neighbor page for a frame.
+                var blockPaging = false
+
+                if isZoomingOutToFit {
+                    let elapsed = now - zoomOutBeganAt
+                    if elapsed < zoomOutBlockSeconds {
+                        blockPaging = true
+                    } else {
+                        isZoomingOutToFit = false
+                    }
+                }
+
+                if isRestoringBars {
+                    let elapsed = now - restoreBarsBeganAt
+                    if elapsed < restoreBarsBlockSeconds {
+                        blockPaging = true
+                    } else {
+                        isRestoringBars = false
+                    }
+                }
+
+                let tol: CGFloat = 0.03
+                let atFit = abs(scrollView.zoomScale - scrollView.minimumZoomScale) <= tol
+
+                // Always keep the scroll view enabled for pinch + double tap.
+                scrollView.panGestureRecognizer.isEnabled = true
+                scrollView.isScrollEnabled = true
+
+                // Gesture ownership:
+                // - Normal state at-fit: require 2 fingers so a 1-finger swipe pages the TabView.
+                // - While blockPaging at-fit: require only 1 finger so the scroll view captures the gesture
+                //   and TabView cannot page/peek during zoom-out or bar restore transactions.
+                if atFit {
+                    scrollView.panGestureRecognizer.minimumNumberOfTouches = blockPaging ? 1 : 2
+                } else {
+                    scrollView.panGestureRecognizer.minimumNumberOfTouches = 1
+                }
+
+                // Bars behavior:
+                if atFit {
+                    if barsAreHidden {
+                        if blockPaging || isProgrammaticZooming || isUserZooming {
+                            pendingShowBarsAfterZoomOut = true
+                        } else {
+                            barsAreHidden = false
+                            onShowBars?()
+                        }
+                    }
+                } else {
+                    if !barsAreHidden {
+                        barsAreHidden = true
+                        onHideBars?()
+                    }
+                }
+
+                // Delegate gate:
+                // - Normal at-fit: do not allow 1-finger panning inside the scroll view.
+                // - While blockPaging: DO allow it so the scroll view can "eat" the gesture and prevent
+                //   TabView from showing the adjacent page.
+                let allowAtFitPanDuringBlock = blockPaging
+                scrollView.shouldAllowPan = { [weak self] in
+                    guard let self else { return true }
+                    let tol: CGFloat = 0.03
+                    let atFit = abs(self.scrollView.zoomScale - self.scrollView.minimumZoomScale) <= tol
+                    if atFit {
+                        return allowAtFitPanDuringBlock
+                    }
+                    return true
+                }
+            }
+
+            func setImage(_ image: UIImage, key: String) {
+                if currentImageKey != key {
+                    currentImageKey = key
+
+                    // Hard reset state for a new asset.
+                    // IMPORTANT: do NOT set zoomScale to minimumZoomScale here because minimumZoomScale
+                    // is not valid until we have bounds and compute fitScale in layoutSubviews.
                     needsInitialFit = true
+                    barsAreHidden = false
+                    isProgrammaticZooming = false
+                    lastBoundsSize = .zero
+
+                    imageView.image = image
+
+                    // Reset to a neutral zoom immediately; layoutSubviews will apply the true fitScale.
+                    scrollView.setZoomScale(1.0, animated: false)
+                    scrollView.contentOffset = .zero
+
                     setNeedsLayout()
+                } else {
+                    // Same key: allow opportunistic -> HQ image swap without resetting zoom.
+                    imageView.image = image
                 }
             }
 
@@ -1082,8 +1555,10 @@ private struct ReportPhotoViewer: View {
 
                 let imageSize = img.size
 
+                // Base (unzoomed) image view size.
+                // Do NOT force scrollView.contentSize here.
+                // UIScrollView manages contentSize for zooming based on the zoomed view.
                 imageView.frame = CGRect(origin: .zero, size: imageSize)
-                scrollView.contentSize = imageSize
 
                 let scaleW = boundsSize.width / max(imageSize.width, 1)
                 let scaleH = boundsSize.height / max(imageSize.height, 1)
@@ -1095,14 +1570,19 @@ private struct ReportPhotoViewer: View {
 
                 if needsInitialFit {
                     needsInitialFit = false
-                    scrollView.zoomScale = fitScale
+
+                    // Apply true fit now that minimumZoomScale is valid.
+                    scrollView.setZoomScale(fitScale, animated: false)
                     scrollView.contentOffset = .zero
+
+                    updatePagingHandshake()
                 } else {
+                    // Clamp into the new range if needed (eg after rotation).
                     if scrollView.zoomScale < scrollView.minimumZoomScale {
-                        scrollView.zoomScale = scrollView.minimumZoomScale
+                        scrollView.setZoomScale(scrollView.minimumZoomScale, animated: false)
                     }
                     if scrollView.zoomScale > scrollView.maximumZoomScale {
-                        scrollView.zoomScale = scrollView.maximumZoomScale
+                        scrollView.setZoomScale(scrollView.maximumZoomScale, animated: false)
                     }
                 }
 
@@ -1112,14 +1592,80 @@ private struct ReportPhotoViewer: View {
             func viewForZooming(in scrollView: UIScrollView) -> UIView? {
                 imageView
             }
-
+            
+            func scrollViewWillBeginZooming(_ scrollView: UIScrollView, with view: UIView?) {
+                isUserZooming = true
+            }
+            
             func scrollViewDidZoom(_ scrollView: UIScrollView) {
                 centerImage()
+
+                let tol: CGFloat = 0.03
+                let atFit = abs(scrollView.zoomScale - scrollView.minimumZoomScale) <= tol
+
+                // Hide bars as soon as we leave fit (pinch or programmatic).
+                if !atFit {
+                    if !barsAreHidden {
+                        barsAreHidden = true
+                        onHideBars?()
+                    }
+                    return
+                }
+
+                // We are at fit. Do NOT show bars during the zoom gesture or animation.
+                // Defer bar restore until zoom ends to prevent TabView neighbor-page peeks.
+                if barsAreHidden {
+                    if isProgrammaticZooming || isUserZooming {
+                        pendingShowBarsAfterZoomOut = true
+                    } else {
+                        barsAreHidden = false
+                        onShowBars?()
+                    }
+                }
             }
+
+            func scrollViewDidEndZooming(_ scrollView: UIScrollView, with view: UIView?, atScale scale: CGFloat) {
+                // Pinch session ended.
+                isUserZooming = false
+
+                // Programmatic zoom animation has finished; it is now safe to update the paging handshake.
+                if isProgrammaticZooming {
+                    isProgrammaticZooming = false
+
+                    // If we were zooming out to fit, keep suppression briefly to avoid neighbor-page peek.
+                    if isZoomingOutToFit {
+                        zoomOutBeganAt = CACurrentMediaTime()
+                    }
+                }
+
+                // If we deferred bar restoration (double tap or pinch back to fit), restore now.
+                if pendingShowBarsAfterZoomOut {
+                    pendingShowBarsAfterZoomOut = false
+                    barsAreHidden = false
+
+                    // Mark a short restore window to prevent TabView neighbor-page peeks
+                    // during the SwiftUI overlay transition.
+                    isRestoringBars = true
+                    restoreBarsBeganAt = CACurrentMediaTime()
+
+                    // Restore bars on the next run loop tick to avoid participating in the zoom transaction.
+                    DispatchQueue.main.async { [weak self] in
+                        guard let self else { return }
+                        self.onShowBars?()
+                    }
+                }
+
+                // Only update the paging handshake after the zoom transaction and any bar restore tick.
+                DispatchQueue.main.async { [weak self] in
+                    guard let self else { return }
+                    self.updatePagingHandshake()
+                }
+            }
+
 
             private func centerImage() {
                 let boundsSize = scrollView.bounds.size
-                let contentSize = scrollView.contentSize
+                let contentSize = imageView.frame.size
 
                 let offsetX = max(0, (boundsSize.width - contentSize.width) * 0.5)
                 let offsetY = max(0, (boundsSize.height - contentSize.height) * 0.5)
@@ -1134,21 +1680,40 @@ private struct ReportPhotoViewer: View {
                 let minScale = scrollView.minimumZoomScale
                 let maxScale = scrollView.maximumZoomScale
 
-                let targetScale: CGFloat
-                if abs(scrollView.zoomScale - minScale) < 0.01 {
-                    targetScale = min(minScale * 2.5, maxScale)
+                let isAtMin = abs(scrollView.zoomScale - minScale) < 0.01
+
+                if isAtMin {
+                    // Zoom in around the tapped point.
+                    let targetScale = min(minScale * 2.5, maxScale)
+
+                    if !barsAreHidden {
+                        barsAreHidden = true
+                        onHideBars?()
+                    }
+
+                    let point = gr.location(in: imageView)
+
+                    let w = scrollView.bounds.size.width / targetScale
+                    let h = scrollView.bounds.size.height / targetScale
+                    let x = point.x - (w * 0.5)
+                    let y = point.y - (h * 0.5)
+
+                    // Mark that we are starting a programmatic zoom animation.
+                    isProgrammaticZooming = true
+                    scrollView.zoom(to: CGRect(x: x, y: y, width: w, height: h), animated: true)
                 } else {
-                    targetScale = minScale
+                    // Mark that we are starting a programmatic zoom animation.
+                    isProgrammaticZooming = true
+
+                    // We are zooming out to fit. Suppress gesture-handshake churn briefly so TabView
+                    // never peeks the adjacent page (the "second-to-last flashes" symptom).
+                    isZoomingOutToFit = true
+                    zoomOutBeganAt = CACurrentMediaTime()
+                    pendingShowBarsAfterZoomOut = true
+
+                    // Zooming out: use setZoomScale so it animates smoothly even when minScale == 1.0
+                    scrollView.setZoomScale(minScale, animated: true)
                 }
-
-                let point = gr.location(in: imageView)
-
-                let w = scrollView.bounds.size.width / targetScale
-                let h = scrollView.bounds.size.height / targetScale
-                let x = point.x - (w * 0.5)
-                let y = point.y - (h * 0.5)
-
-                scrollView.zoom(to: CGRect(x: x, y: y, width: w, height: h), animated: true)
             }
         }
     }
