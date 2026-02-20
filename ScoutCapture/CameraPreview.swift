@@ -6,6 +6,11 @@
 import SwiftUI
 import AVFoundation
 import Combine
+import UIKit
+
+private extension Notification.Name {
+    static let scoutFreezePreviewRotation = Notification.Name("ScoutCapture.FreezePreviewRotation")
+}
 
 // MARK: - Preview View
 
@@ -19,20 +24,28 @@ struct CameraPreviewView: UIViewRepresentable {
     func makeUIView(context: Context) -> PreviewUIView {
         let v = PreviewUIView()
         v.videoPreviewLayer.session = session
-        v.videoPreviewLayer.videoGravity = .resizeAspect
+        v.videoPreviewLayer.videoGravity = .resizeAspectFill
 
         v.onTap = { devicePoint, normalizedPoint in
             onTapDevicePoint?(devicePoint)
             onTapNormalizedPoint?(normalizedPoint)
         }
 
+        // Apply orientation and mirroring immediately to reduce visible settling.
+        v.applyImmediately()
+
         return v
     }
 
     func updateUIView(_ uiView: PreviewUIView, context: Context) {
         uiView.videoPreviewLayer.session = session
-        // Keep preview behavior consistent across updates
-        uiView.videoPreviewLayer.videoGravity = .resizeAspect
+        uiView.videoPreviewLayer.videoGravity = .resizeAspectFill
+
+        // Do not force orientation or mirroring changes on every SwiftUI update.
+        // SwiftUI can call updateUIView on many UI events (capture, zoom, toggles).
+        // Re-applying orientation here can cause the preview to visibly rotate.
+        // Preview rotation locking is handled in `layoutSubviews()` and during camera swaps
+        // via the `.scoutFreezePreviewRotation` notification.
         uiView.setNeedsLayout()
     }
 }
@@ -47,22 +60,133 @@ final class PreviewUIView: UIView {
 
     var onTap: ((CGPoint, CGPoint) -> Void)?
 
+    // Observe preview-layer connection swaps so we can immediately re-lock portrait on the new connection.
+    private var connectionObservation: NSKeyValueObservation?
+
     override init(frame: CGRect) {
         super.init(frame: frame)
         backgroundColor = .black
+        clipsToBounds = true
+        videoPreviewLayer.videoGravity = .resizeAspectFill
+
+        // When the session input changes, the preview layer connection can be replaced.
+        // Re-apply immediately at the moment the new connection appears.
+        connectionObservation = videoPreviewLayer.observe(\.connection, options: [.new]) { [weak self] _, _ in
+            DispatchQueue.main.async {
+                self?.applyImmediately()
+            }
+        }
+
+        // Disable implicit Core Animation on the preview layer.
+        // This prevents the preview from visibly "spinning" during camera swaps and reconfiguration.
+        videoPreviewLayer.actions = [
+            "bounds": NSNull(),
+            "position": NSNull(),
+            "transform": NSNull(),
+            "sublayers": NSNull(),
+            "contents": NSNull(),
+            "opacity": NSNull()
+        ]
 
         let tap = UITapGestureRecognizer(target: self, action: #selector(handleTap(_:)))
         addGestureRecognizer(tap)
+
+        // When swapping cameras, force an immediate re-apply so the first post-swap frame
+        // does not show intermediate orientation/mirroring.
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handleFreezePreviewRotation),
+            name: .scoutFreezePreviewRotation,
+            object: nil
+        )
     }
 
     required init?(coder: NSCoder) {
         fatalError("init(coder:) has not been implemented")
     }
+    
+    deinit {
+        connectionObservation?.invalidate()
+        connectionObservation = nil
+        NotificationCenter.default.removeObserver(self, name: .scoutFreezePreviewRotation, object: nil)
+    }
 
+    func applyImmediately() {
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        videoPreviewLayer.frame = bounds
+        applyStablePreviewRotationAndMirroring()
+        CATransaction.commit()
+    }
+
+    // Cache the last applied values so we do not continuously reassign and cause visible hunting.
+    private var lastAppliedMirrored: Bool?
+
+    private func applyStablePreviewRotationAndMirroring() {
+        guard let conn = videoPreviewLayer.connection else { return }
+
+        // HARD RULE: preview is always portrait on screen.
+        // Use AVCaptureVideoOrientation when it is supported. Do NOT mix this with
+        // videoRotationAngle on iOS 17+, because switching between the two can cause
+        // visible flip-flopping.
+        if conn.isVideoOrientationSupported {
+            if conn.videoOrientation != .portrait {
+                conn.videoOrientation = .portrait
+            }
+        } else if #available(iOS 17.0, *), conn.isVideoRotationAngleSupported(0) {
+            // Fallback only when videoOrientation is not supported.
+            // 0 degrees corresponds to portrait for the preview layer.
+            if conn.videoRotationAngle != 0 {
+                conn.videoRotationAngle = 0
+            }
+        }
+
+        // Keep mirroring stable: front camera mirrored, back camera not mirrored.
+        if conn.isVideoMirroringSupported {
+            conn.automaticallyAdjustsVideoMirroring = false
+
+            let activePosition: AVCaptureDevice.Position? = {
+                for input in (videoPreviewLayer.session?.inputs ?? []) {
+                    if let di = input as? AVCaptureDeviceInput {
+                        return di.device.position
+                    }
+                }
+                return nil
+            }()
+
+            let wantsMirrored: Bool = {
+                if let pos = activePosition {
+                    return pos == .front
+                }
+                return lastAppliedMirrored ?? false
+            }()
+
+            if conn.isVideoMirrored != wantsMirrored {
+                conn.isVideoMirrored = wantsMirrored
+            }
+            lastAppliedMirrored = wantsMirrored
+        }
+    }
     override func layoutSubviews() {
         super.layoutSubviews()
-        // Ensure the preview layer always matches the view bounds
+
+        // Ensure the preview layer always matches the view bounds.
+        // Wrap in a transaction to prevent implicit animations (rotation, resizing) during camera swaps.
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
         videoPreviewLayer.frame = bounds
+        applyStablePreviewRotationAndMirroring()
+        CATransaction.commit()
+    }
+
+    @objc private func handleFreezePreviewRotation() {
+        // Apply immediately to avoid visible settling during input swaps.
+        applyImmediately()
+
+        // One more apply on the next run loop tick to catch the new connection.
+        DispatchQueue.main.async { [weak self] in
+            self?.applyImmediately()
+        }
     }
 
     @objc private func handleTap(_ gr: UITapGestureRecognizer) {
@@ -99,6 +223,15 @@ final class CameraManager: NSObject, ObservableObject {
     // Lens debug label for toast in ContentView
     @Published var lensDebugText: String = ""
 
+    // Debug UI master toggle (used by ContentView)
+    @Published var debugEnabled: Bool = true
+
+    // Shows the last captured megapixel class from resolvedSettings (example: "12MP").
+    @Published var debugMegapixelLabel: String = ""
+
+    // Shows the live target megapixel class based on current state (example: "T48MP").
+    @Published var debugTargetMegapixelLabel: String = ""
+
     // Fires on every zoom press (after a small delay for accurate labeling)
     @Published var lensDebugPulse: Int = 0
 
@@ -110,18 +243,142 @@ final class CameraManager: NSObject, ObservableObject {
 
     @Published var flashSetting: FlashSetting = .off
 
+    // MARK: HD State
+
+    // User controlled HD toggle
+    @Published var manualHDEnabled: Bool = false {
+        didSet {
+            // Do not allow HD routing changes while a capture is in-flight.
+            // Reconfiguring inputs/outputs mid-capture can lock up the UI.
+            let previous = oldValue
+            if isCapturing {
+                DispatchQueue.main.async {
+                    self.manualHDEnabled = previous
+                }
+                return
+            }
+            // Update the target label immediately.
+            refreshTargetMegapixelLabelForUIZoom(currentUIZoom)
+
+            // Re-route the capture input on the session queue.
+            let desiredZoom = self.currentUIZoom
+            sessionQueue.async { [weak self] in
+                self?.applyHDModeRouting(desiredUIZoom: desiredZoom)
+            }
+        }
+    }
+
+    // Whether the current device configuration supports HD capture
+    @Published private(set) var hdSupported: Bool = true
+
+    // Internal mirror of Detail Note state (set from ContentView)
+    @Published private var detailNoteActive: Bool = false
+    private var hdForcedByDetail: Bool = false
+
+    // Derived effective HD state
+    var effectiveHDEnabled: Bool {
+        if !hdSupported { return false }
+        if detailNoteActive { return true }
+        return manualHDEnabled
+    }
+
+    // All AVCaptureSession work must run on a dedicated queue.
+    private let sessionQueue = DispatchQueue(label: "ScoutCapture.CameraSession")
     private var videoDevice: AVCaptureDevice?
     private let photoOutput = AVCapturePhotoOutput()
+
+    // Deliver photo data off the main thread so downstream work (e.g. Photos writes) cannot freeze UI.
+    private let photoDeliveryQueue = DispatchQueue(label: "ScoutCapture.PhotoDelivery", qos: .userInitiated)
     private var inFlightCapture: PhotoCaptureDelegate?
 
     private var currentPosition: AVCaptureDevice.Position = .back
 
+    private let frontSelfieCropFactor: CGFloat = 1.155
+
+    // Tracks the last UI zoom the user selected (0.5/1/2/4/8). Used for HD routing.
+    private var currentUIZoom: CGFloat = 1.0
+
     // Debug delay work item so we do not mislabel during smooth ramp
     private var debugWorkItem: DispatchWorkItem?
 
+    // Stable orientation tracking for capture.
+    // UIDevice.current.orientation can be faceUp/unknown at shutter time.
+    private var lastDeviceOrientation: UIDeviceOrientation = .portrait
+    private var orientationObserver: NSObjectProtocol?
+
     override init() {
         super.init()
-        configureSession()
+
+        // Configure capture session off the main thread.
+        sessionQueue.async { [weak self] in
+            self?.configureSession()
+        }
+
+        // Stop/start the session when the app backgrounds/foregrounds.
+        NotificationCenter.default.addObserver(self, selector: #selector(appWillResignActive), name: UIApplication.willResignActiveNotification, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(appDidBecomeActive), name: UIApplication.didBecomeActiveNotification, object: nil)
+
+        // Track device orientation reliably for capture rotation.
+        UIDevice.current.beginGeneratingDeviceOrientationNotifications()
+        orientationObserver = NotificationCenter.default.addObserver(
+            forName: UIDevice.orientationDidChangeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.updateLastDeviceOrientation()
+        }
+        updateLastDeviceOrientation()
+    }
+
+    // MARK: App lifecycle
+
+    @objc private func appWillResignActive() {
+        sessionQueue.async { [weak self] in
+            guard let self else { return }
+            if self.session.isRunning {
+                self.session.stopRunning()
+            }
+        }
+    }
+
+    @objc private func appDidBecomeActive() {
+        sessionQueue.async { [weak self] in
+            guard let self else { return }
+            if !self.session.isRunning {
+                self.session.startRunning()
+            }
+        }
+    }
+    
+    deinit {
+        if let orientationObserver {
+            NotificationCenter.default.removeObserver(orientationObserver)
+        }
+        UIDevice.current.endGeneratingDeviceOrientationNotifications()
+    }
+
+    private func updateLastDeviceOrientation() {
+        let o = UIDevice.current.orientation
+        switch o {
+        case .portrait, .portraitUpsideDown, .landscapeLeft, .landscapeRight:
+            lastDeviceOrientation = o
+        default:
+            // Do not overwrite with faceUp/faceDown/unknown.
+            break
+        }
+    }
+
+    private func stableDeviceOrientationForCapture() -> UIDeviceOrientation {
+        // At shutter time, UIDevice can report faceUp/unknown even when the phone is held portrait.
+        // If we do not have a definite orientation, bias to portrait to prevent portrait shots
+        // from being tagged as landscape.
+        let o = UIDevice.current.orientation
+        switch o {
+        case .portrait, .portraitUpsideDown, .landscapeLeft, .landscapeRight:
+            return o
+        default:
+            return .portrait
+        }
     }
 
     // MARK: Flash
@@ -143,8 +400,38 @@ final class CameraManager: NSObject, ObservableObject {
     // MARK: Camera swap
 
     func toggleCamera() {
+        NotificationCenter.default.post(name: .scoutFreezePreviewRotation, object: nil)
+
         currentPosition = (currentPosition == .back) ? .front : .back
-        reconfigureForCurrentPosition()
+        currentUIZoom = 1.0
+        sessionQueue.async { [weak self] in
+            self?.reconfigureForCurrentPosition()
+        }
+    }
+
+    // MARK: Detail Note Bridge
+
+    func updateDetailNoteActive(_ active: Bool) {
+        let wasActive = detailNoteActive
+        detailNoteActive = active
+
+        if active && !wasActive {
+            if !manualHDEnabled {
+                manualHDEnabled = true
+                hdForcedByDetail = true
+            }
+            refreshTargetMegapixelLabelForUIZoom(currentUIZoom)
+            return
+        }
+
+        if !active && wasActive {
+            if hdForcedByDetail {
+                manualHDEnabled = false
+                hdForcedByDetail = false
+            }
+        }
+
+        refreshTargetMegapixelLabelForUIZoom(currentUIZoom)
     }
 
     // MARK: Focus
@@ -169,46 +456,194 @@ final class CameraManager: NSObject, ObservableObject {
         } catch {}
     }
 
+    // MARK: Max photo dimensions (iOS 16+)
+
+    @available(iOS 16.0, *)
+    private func bestSupportedMaxPhotoDimensions(for device: AVCaptureDevice) -> CMVideoDimensions? {
+        // On this SDK, `AVCapturePhotoOutput` does not expose `supportedMaxPhotoDimensions`.
+        // The safest source is the ACTIVE device format for the current session input.
+        let supported = device.activeFormat.supportedMaxPhotoDimensions
+        guard !supported.isEmpty else { return nil }
+
+        var best: CMVideoDimensions? = nil
+        var bestArea: Int64 = 0
+        for d in supported {
+            let area = Int64(d.width) * Int64(d.height)
+            if area > bestArea {
+                bestArea = area
+                best = d
+            }
+        }
+        return best
+    }
+
+    @available(iOS 16.0, *)
+    private func syncPhotoOutputMaxDimensions(to device: AVCaptureDevice) {
+        // AVCapturePhotoSettings.maxPhotoDimensions must be <= AVCapturePhotoOutput.maxPhotoDimensions
+        guard let best = bestSupportedMaxPhotoDimensions(for: device) else { return }
+        if best.width > 0, best.height > 0 {
+            photoOutput.maxPhotoDimensions = best
+        }
+    }
+
     // MARK: Capture
 
     func capturePhoto(completion: @escaping (Data?) -> Void) {
 
-        guard !isCapturing else { return }
-        guard session.isRunning else { completion(nil); return }
+        if isCapturing { return }
 
-        isCapturing = true
-
-        // Make the captured photo match how the user is physically holding the phone.
-        // The UI can be portrait locked, but the photo orientation should follow device orientation.
-        if let conn = photoOutput.connection(with: .video), conn.isVideoOrientationSupported {
-            conn.videoOrientation = captureVideoOrientation()
+        DispatchQueue.main.async {
+            self.isCapturing = true
+            self.refreshTargetMegapixelLabelForUIZoom(self.currentUIZoom)
         }
 
-        let settings = AVCapturePhotoSettings()
+        // Snapshot the effective HD flag on the main thread to avoid races.
+        let hd = effectiveHDEnabled
 
-        let supported = photoOutput.supportedFlashModes
-        let desired = avFlashMode(for: flashSetting)
-        settings.flashMode = supported.contains(desired) ? desired : .off
+        // Snapshot a stable orientation on the calling thread.
+        // If the device reports faceUp/unknown, force portrait so portrait shots do not save as landscape.
+        let orientationForCapture = stableDeviceOrientationForCapture()
 
-        if #available(iOS 16.0, *) {
-            settings.maxPhotoDimensions = photoOutput.maxPhotoDimensions
-        }
+        sessionQueue.async { [weak self] in
+            guard let self else {
+                DispatchQueue.main.async { completion(nil) }
+                return
+            }
 
-        let delegate = PhotoCaptureDelegate { [weak self] data in
-            DispatchQueue.main.async {
-                self?.isCapturing = false
-                self?.inFlightCapture = nil
-                completion(data)
+            guard self.session.isRunning else {
+                DispatchQueue.main.async {
+                    self.isCapturing = false
+                    completion(nil)
+                }
+                return
+            }
+
+            // Make the captured photo match how the user is physically holding the phone.
+            // Use videoOrientation when available (it is far less error-prone than guessing rotation angles).
+            if let conn = self.photoOutput.connection(with: .video) {
+                if conn.isVideoOrientationSupported {
+                    conn.videoOrientation = self.captureVideoOrientation(from: orientationForCapture)
+                } else if #available(iOS 17.0, *) {
+                    let angle = self.captureVideoRotationAngleFallback(from: orientationForCapture)
+                    if conn.isVideoRotationAngleSupported(angle) {
+                        conn.videoRotationAngle = angle
+                    }
+                }
+
+                if conn.isVideoMirroringSupported {
+                    conn.automaticallyAdjustsVideoMirroring = false
+                    conn.isVideoMirrored = (self.currentPosition == .front)
+                }
+            }
+
+            // Prefer HEIC (HEVC) when supported.
+            let settings: AVCapturePhotoSettings
+            if self.photoOutput.availablePhotoCodecTypes.contains(.hevc) {
+                settings = AVCapturePhotoSettings(format: [AVVideoCodecKey: AVVideoCodecType.hevc])
+            } else {
+                settings = AVCapturePhotoSettings()
+            }
+
+            let supported = self.photoOutput.supportedFlashModes
+            let desired = self.avFlashMode(for: self.flashSetting)
+            settings.flashMode = supported.contains(desired) ? desired : .off
+
+            // HD capture profile: prefer quality.
+            if #available(iOS 15.0, *) {
+                let desired: AVCapturePhotoOutput.QualityPrioritization = hd ? .quality : .balanced
+                let maxAllowed = self.photoOutput.maxPhotoQualityPrioritization
+
+                let rank: (AVCapturePhotoOutput.QualityPrioritization) -> Int = { q in
+                    switch q {
+                    case .speed: return 0
+                    case .balanced: return 1
+                    case .quality: return 2
+                    @unknown default: return 1
+                    }
+                }
+
+                settings.photoQualityPrioritization = (rank(desired) <= rank(maxAllowed)) ? desired : maxAllowed
+            }
+
+            // iOS 16+: request max still dimensions based on the ACTIVE input device format.
+            // This must match the device currently feeding the session.
+            if #available(iOS 16.0, *) {
+                if hd, let device = self.videoDevice {
+                    // Ensure the output allows the requested still size.
+                    self.syncPhotoOutputMaxDimensions(to: device)
+
+                    if let best = self.bestSupportedMaxPhotoDimensions(for: device),
+                       best.width > 0, best.height > 0 {
+                        // Defensive: never exceed the output max dimensions.
+                        let outMax = self.photoOutput.maxPhotoDimensions
+                        if outMax.width > 0, outMax.height > 0,
+                           (best.width > outMax.width || best.height > outMax.height) {
+                            settings.maxPhotoDimensions = outMax
+                        } else {
+                            settings.maxPhotoDimensions = best
+                        }
+                    }
+                }
+            }
+
+            let delegate = PhotoCaptureDelegate(
+                onResolvedMegapixel: { [weak self] mp in
+                    DispatchQueue.main.async {
+                        self?.debugMegapixelLabel = mp + "MP"
+                    }
+                },
+                onFinish: { [weak self] data in
+                    DispatchQueue.main.async {
+                        self?.isCapturing = false
+                        self?.inFlightCapture = nil
+                    }
+
+                    self?.photoDeliveryQueue.async {
+                        completion(data)
+                    }
+                }
+            )
+
+            self.inFlightCapture = delegate
+
+            // Safety: if the photo delegate never returns, do not leave the UI stuck.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 6.0) { [weak self] in
+                guard let self else { return }
+                if self.isCapturing, self.inFlightCapture === delegate {
+                    self.isCapturing = false
+                    self.inFlightCapture = nil
+                    self.photoDeliveryQueue.async {
+                        completion(nil)
+                    }
+                }
+            }
+
+            // Swift 6: this module is built with default MainActor isolation.
+            // Dispatch the capture call onto the MainActor to avoid using a MainActor-isolated
+            // delegate conformance from a nonisolated context.
+            Task { @MainActor in
+                self.photoOutput.capturePhoto(with: settings, delegate: delegate)
             }
         }
-
-        inFlightCapture = delegate
-        photoOutput.capturePhoto(with: settings, delegate: delegate)
     }
 
     // MARK: Zoom
 
     func setZoomStep(_ step: ZoomStep) {
+        currentUIZoom = step.factor
+
+        if effectiveHDEnabled && currentPosition == .back {
+            sessionQueue.async { [weak self] in
+                self?.applyHDModeRouting(desiredUIZoom: step.factor)
+            }
+
+            DispatchQueue.main.async {
+                self.selectedZoomId = step.id
+                self.refreshTargetMegapixelLabelForUIZoom(step.factor)
+            }
+            return
+        }
+
         setNativeZoom(uiZoom: step.factor, selectedId: step.id)
     }
 
@@ -222,12 +657,13 @@ final class CameraManager: NSObject, ObservableObject {
         let minZ = CGFloat(device.minAvailableVideoZoomFactor)
         let maxZ = CGFloat(device.maxAvailableVideoZoomFactor)
 
-        // BACK camera: UI 0.5 can exist
-        // FRONT camera: UI starts at 1.0
         let uiBase: CGFloat = (currentPosition == .back) ? 0.5 : 1.0
         let uiToDeviceScale: CGFloat = (minZ <= uiBase + 0.01) ? 1.0 : (minZ / uiBase)
 
-        let deviceZoom = uiZoom * uiToDeviceScale
+        var deviceZoom = uiZoom * uiToDeviceScale
+        if currentPosition == .front {
+            deviceZoom *= frontSelfieCropFactor
+        }
         let target = max(minZ, min(deviceZoom, maxZ))
 
         do {
@@ -240,28 +676,29 @@ final class CameraManager: NSObject, ObservableObject {
             }
         } catch {}
 
-        // Update lens text immediately for internal state
         DispatchQueue.main.async {
             self.refreshLensDebug()
+            if !(self.effectiveHDEnabled && self.currentPosition == .back) {
+                self.refreshTargetMegapixelLabelForUIZoom(uiZoom)
+            }
         }
 
-        // Fire toast slightly later so the system has time to settle on the final lens
         scheduleLensDebugPulse(after: 0.28)
     }
 
-    // Critical: used ONLY during camera swap to guarantee the preview matches the selected button immediately.
-    // Normal zoom presses still use ramp.
     private func setNativeZoomImmediate(uiZoom: CGFloat, selectedId: String) {
         guard let device = videoDevice else { return }
 
         let minZ = CGFloat(device.minAvailableVideoZoomFactor)
         let maxZ = CGFloat(device.maxAvailableVideoZoomFactor)
 
-        // Same exact mapping as setNativeZoom (do not change)
         let uiBase: CGFloat = (currentPosition == .back) ? 0.5 : 1.0
         let uiToDeviceScale: CGFloat = (minZ <= uiBase + 0.01) ? 1.0 : (minZ / uiBase)
 
-        let deviceZoom = uiZoom * uiToDeviceScale
+        var deviceZoom = uiZoom * uiToDeviceScale
+        if currentPosition == .front {
+            deviceZoom *= frontSelfieCropFactor
+        }
         let target = max(minZ, min(deviceZoom, maxZ))
 
         do {
@@ -273,6 +710,9 @@ final class CameraManager: NSObject, ObservableObject {
             DispatchQueue.main.async {
                 self.selectedZoomId = selectedId
                 self.refreshLensDebug()
+                if !(self.effectiveHDEnabled && self.currentPosition == .back) {
+                    self.refreshTargetMegapixelLabelForUIZoom(uiZoom)
+                }
             }
         } catch {}
     }
@@ -296,12 +736,15 @@ final class CameraManager: NSObject, ObservableObject {
 
         session.beginConfiguration()
         session.sessionPreset = .photo
-        defer { session.commitConfiguration() }
 
         currentPosition = .back
+        currentUIZoom = 1.0
 
         guard let device = pickBestCameraDevice(for: currentPosition) else { return }
         videoDevice = device
+        DispatchQueue.main.async {
+            self.hdSupported = (self.currentPosition == .back)
+        }
 
         do {
             let input = try AVCaptureDeviceInput(device: device)
@@ -314,23 +757,35 @@ final class CameraManager: NSObject, ObservableObject {
             session.addOutput(photoOutput)
         }
 
-        rebuildZoomSteps(for: device, position: currentPosition)
-        refreshLensDebug()
-
-        if let one = zoomSteps.first(where: { $0.id == "1" }) {
-            setNativeZoom(uiZoom: one.factor, selectedId: one.id)
-        } else if let first = zoomSteps.first {
-            setNativeZoom(uiZoom: first.factor, selectedId: first.id)
+        if #available(iOS 17.0, *), photoOutput.isAutoDeferredPhotoDeliverySupported {
+            photoOutput.isAutoDeferredPhotoDeliveryEnabled = false
         }
 
-        DispatchQueue.main.async { [weak self] in
-            self?.session.startRunning()
+        photoOutput.maxPhotoQualityPrioritization = .quality
+
+        rebuildZoomSteps(for: device, position: currentPosition)
+        refreshLensDebug()
+        refreshTargetMegapixelLabelForUIZoom(currentUIZoom)
+
+        if let one = zoomSteps.first(where: { $0.id == "1" }) {
+            setNativeZoomImmediate(uiZoom: one.factor, selectedId: one.id)
+        } else if let first = zoomSteps.first {
+            setNativeZoomImmediate(uiZoom: first.factor, selectedId: first.id)
+        }
+
+        session.commitConfiguration()
+
+        if !session.isRunning {
+            session.startRunning()
+        }
+
+        if effectiveHDEnabled && currentPosition == .back {
+            applyHDModeRouting(desiredUIZoom: currentUIZoom)
         }
     }
 
     private func reconfigureForCurrentPosition() {
         session.beginConfiguration()
-        defer { session.commitConfiguration() }
 
         for input in session.inputs {
             if let di = input as? AVCaptureDeviceInput {
@@ -340,6 +795,9 @@ final class CameraManager: NSObject, ObservableObject {
 
         guard let device = pickBestCameraDevice(for: currentPosition) else { return }
         videoDevice = device
+        DispatchQueue.main.async {
+            self.hdSupported = (self.currentPosition == .back)
+        }
 
         do {
             let input = try AVCaptureDeviceInput(device: device)
@@ -348,15 +806,26 @@ final class CameraManager: NSObject, ObservableObject {
             }
         } catch {}
 
+        currentUIZoom = 1.0
         rebuildZoomSteps(for: device, position: currentPosition)
         refreshLensDebug()
+        refreshTargetMegapixelLabelForUIZoom(currentUIZoom)
 
-        // Force the preview to match the default selected button immediately on swap.
-        // This prevents "1x" showing while the preview is still at 0.5 ultrawide.
         if let one = zoomSteps.first(where: { $0.id == "1" }) {
             setNativeZoomImmediate(uiZoom: one.factor, selectedId: one.id)
         } else if let first = zoomSteps.first {
             setNativeZoomImmediate(uiZoom: first.factor, selectedId: first.id)
+        }
+
+        if effectiveHDEnabled && currentPosition == .back {
+            applyHDModeRouting(desiredUIZoom: currentUIZoom)
+        }
+
+        session.commitConfiguration()
+
+        // Post after commit so the preview layer can re-lock portrait on the newly created connection.
+        DispatchQueue.main.async {
+            NotificationCenter.default.post(name: .scoutFreezePreviewRotation, object: nil)
         }
     }
 
@@ -367,15 +836,21 @@ final class CameraManager: NSObject, ObservableObject {
             if let dualWide = AVCaptureDevice.default(.builtInDualWideCamera, for: .video, position: .back) { return dualWide }
             return AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back)
         } else {
+            if let td = AVCaptureDevice.default(.builtInTrueDepthCamera, for: .video, position: .front) {
+                return td
+            }
             return AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .front)
         }
     }
 
     private func rebuildZoomSteps(for device: AVCaptureDevice, position: AVCaptureDevice.Position) {
 
-        // BACK: 0.5, 1, 2, 4, 8
-        // FRONT: 1, 2
-        let desired: [CGFloat] = (position == .back) ? [0.5, 1, 2, 4, 8] : [1, 2]
+        let desired: [CGFloat]
+        if position == .back, effectiveHDEnabled {
+            desired = [0.5, 1, 4]
+        } else {
+            desired = (position == .back) ? [0.5, 1, 2, 4, 8] : [1, 2]
+        }
 
         let minZ = CGFloat(device.minAvailableVideoZoomFactor)
         let maxZ = CGFloat(device.maxAvailableVideoZoomFactor)
@@ -413,11 +888,89 @@ final class CameraManager: NSObject, ObservableObject {
         if #available(iOS 15.0, *) {
             if let active = device.activePrimaryConstituent {
                 lensDebugText = lensName(for: active, position: currentPosition)
+                refreshTargetMegapixelLabelForUIZoom(currentUIZoom)
                 return
             }
         }
 
         lensDebugText = lensName(for: device, position: currentPosition)
+        refreshTargetMegapixelLabelForUIZoom(currentUIZoom)
+    }
+
+    // MARK: Target MP prediction
+
+    private func predictedBackConstituentDevice(forUIZoom uiZoom: CGFloat) -> AVCaptureDevice? {
+        guard currentPosition == .back else { return nil }
+
+        let deviceType: AVCaptureDevice.DeviceType
+        if uiZoom <= 0.75 {
+            deviceType = .builtInUltraWideCamera
+        } else if uiZoom < 3.0 {
+            deviceType = .builtInWideAngleCamera
+        } else {
+            deviceType = .builtInTelephotoCamera
+        }
+
+        if let d = AVCaptureDevice.default(deviceType, for: .video, position: .back) {
+            return d
+        }
+
+        if deviceType != .builtInWideAngleCamera,
+           let wide = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back) {
+            return wide
+        }
+
+        return videoDevice
+    }
+
+    private func refreshTargetMegapixelLabelForUIZoom(_ uiZoom: CGFloat) {
+        let predicted = predictedBackConstituentDevice(forUIZoom: uiZoom)
+        refreshTargetMegapixelLabel(overrideDevice: predicted)
+    }
+
+    private func refreshTargetMegapixelLabel(overrideDevice: AVCaptureDevice? = nil) {
+        let wantsHD = effectiveHDEnabled && (currentPosition == .back)
+
+        guard wantsHD else {
+            DispatchQueue.main.async {
+                self.debugTargetMegapixelLabel = "T12MP"
+            }
+            return
+        }
+
+        let device = overrideDevice ?? videoDevice
+
+        guard let device else {
+            DispatchQueue.main.async {
+                self.debugTargetMegapixelLabel = "T--"
+            }
+            return
+        }
+
+        let dims: CMVideoDimensions
+        if #available(iOS 16.0, *) {
+            let candidates = device.activeFormat.supportedMaxPhotoDimensions
+            dims = candidates.max(by: { ($0.width * $0.height) < ($1.width * $1.height) }) ?? CMVideoDimensions(width: 0, height: 0)
+        } else {
+            dims = device.activeFormat.highResolutionStillImageDimensions
+        }
+
+        let pixels = Int64(dims.width) * Int64(dims.height)
+
+        let mp: String
+        if pixels >= Int64(8000) * Int64(6000) {
+            mp = "T48MP"
+        } else if pixels >= Int64(5600) * Int64(4200) {
+            mp = "T24MP"
+        } else if pixels > 0 {
+            mp = "T12MP"
+        } else {
+            mp = "T--"
+        }
+
+        DispatchQueue.main.async {
+            self.debugTargetMegapixelLabel = mp
+        }
     }
 
     private func lensName(for device: AVCaptureDevice, position: AVCaptureDevice.Position) -> String {
@@ -434,6 +987,139 @@ final class CameraManager: NSObject, ObservableObject {
             return "Telephoto"
         default:
             return "Wide"
+        }
+    }
+
+    // MARK: HD routing (physical lenses)
+
+    private func applyHDModeRouting(desiredUIZoom: CGFloat?) {
+        guard currentPosition == .back else { return }
+
+        if !effectiveHDEnabled {
+            guard let virtual = pickBestCameraDevice(for: .back) else { return }
+
+            // When leaving HD mode and returning to the virtual multi camera device,
+            // force the UI and actual zoom to a consistent 1.0.
+            currentUIZoom = 1.0
+
+            reconfigureSessionInput(to: virtual)
+
+            // Ensure the preview matches the UI immediately.
+            setNativeZoomImmediate(uiZoom: 1.0, selectedId: "1")
+
+            DispatchQueue.main.async {
+                self.selectedZoomId = "1"
+                self.rebuildZoomSteps(for: virtual, position: self.currentPosition)
+                self.refreshLensDebug()
+                self.refreshTargetMegapixelLabelForUIZoom(self.currentUIZoom)
+            }
+            return
+        }
+
+        let ui = desiredUIZoom ?? currentUIZoom
+        let physical = pickBackPhysicalDevice(forUIZoom: ui)
+        reconfigureSessionInput(to: physical)
+
+        DispatchQueue.main.async {
+            self.rebuildZoomSteps(for: physical, position: self.currentPosition)
+            self.refreshLensDebug()
+            self.refreshTargetMegapixelLabelForUIZoom(ui)
+
+            if self.zoomSteps.first(where: { $0.factor == ui }) == nil {
+                self.currentUIZoom = 1.0
+                self.selectedZoomId = "1"
+                self.refreshTargetMegapixelLabelForUIZoom(1.0)
+            }
+        }
+    }
+
+    private func pickBackPhysicalDevice(forUIZoom uiZoom: CGFloat) -> AVCaptureDevice {
+        if uiZoom <= 0.75 {
+            if let uw = AVCaptureDevice.default(.builtInUltraWideCamera, for: .video, position: .back) {
+                return uw
+            }
+        }
+
+        if uiZoom >= 3.0 {
+            if let tele = AVCaptureDevice.default(.builtInTelephotoCamera, for: .video, position: .back) {
+                return tele
+            }
+        }
+
+        if let wide = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back) {
+            return wide
+        }
+
+        return videoDevice ?? AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back)!
+    }
+
+    private func reconfigureSessionInput(to device: AVCaptureDevice) {
+        session.beginConfiguration()
+
+        for input in session.inputs {
+            if let di = input as? AVCaptureDeviceInput {
+                session.removeInput(di)
+            }
+        }
+
+        do {
+            let input = try AVCaptureDeviceInput(device: device)
+            if session.canAddInput(input) {
+                session.addInput(input)
+            }
+
+            // Update the active device reference.
+            videoDevice = device
+            // When HD is enabled on the back camera, force the device into the format
+            // that supports the largest still photo dimensions.
+            if self.currentPosition == .back, self.effectiveHDEnabled {
+                self.selectBestStillFormatForHD(on: device)
+
+                if #available(iOS 16.0, *) {
+                    // Must happen after activeFormat is set.
+                    self.syncPhotoOutputMaxDimensions(to: device)
+                }
+            }
+        } catch {
+            // No-op
+        }
+
+        session.commitConfiguration()
+
+        // Post after commit so the preview layer can re-lock portrait on the newly created connection.
+        DispatchQueue.main.async {
+            NotificationCenter.default.post(name: .scoutFreezePreviewRotation, object: nil)
+        }
+    }
+
+
+    private func selectBestStillFormatForHD(on device: AVCaptureDevice) {
+        // Goal: select the format whose supportedMaxPhotoDimensions includes the largest still size.
+        // This is what enables true 48MP on devices/lenses that support it.
+        guard #available(iOS 16.0, *) else { return }
+
+        // Pick the format with the largest max photo dimensions.
+        var bestFormat: AVCaptureDevice.Format?
+        var bestArea: Int64 = 0
+
+        for format in device.formats {
+            let dimsList = format.supportedMaxPhotoDimensions
+            guard let bestDims = dimsList.max(by: { ($0.width * $0.height) < ($1.width * $1.height) }) else { continue }
+            let area = Int64(bestDims.width) * Int64(bestDims.height)
+            if area > bestArea {
+                bestArea = area
+                bestFormat = format
+            }
+        }
+
+        guard let bestFormat else { return }
+
+        do {
+            try device.lockForConfiguration()
+            device.activeFormat = bestFormat
+            device.unlockForConfiguration()
+        } catch {
+            // If we cannot lock, keep current format.
         }
     }
 
@@ -456,29 +1142,50 @@ final class CameraManager: NSObject, ObservableObject {
         }
     }
 
-    private func captureVideoOrientation() -> AVCaptureVideoOrientation {
-        // Note: landscape mapping is intentionally flipped.
-        // When the device is rotated left, the camera connection needs the opposite landscape value.
-        switch UIDevice.current.orientation {
-        case .landscapeLeft:
-            return .landscapeRight
-        case .landscapeRight:
-            return .landscapeLeft
+    private func captureVideoOrientation(from deviceOrientation: UIDeviceOrientation) -> AVCaptureVideoOrientation {
+        switch deviceOrientation {
+        case .portrait:
+            return .portrait
         case .portraitUpsideDown:
             return .portraitUpsideDown
+        case .landscapeLeft:
+            return (currentPosition == .front) ? .landscapeLeft : .landscapeRight
+        case .landscapeRight:
+            return (currentPosition == .front) ? .landscapeRight : .landscapeLeft
         default:
             return .portrait
+        }
+    }
+
+    @available(iOS 17.0, *)
+    private func captureVideoRotationAngleFallback(from deviceOrientation: UIDeviceOrientation) -> Double {
+        // Fallback only when videoOrientation is not supported.
+        switch deviceOrientation {
+        case .portrait:
+            return 90
+        case .portraitUpsideDown:
+            return 270
+        case .landscapeLeft:
+            return 180
+        case .landscapeRight:
+            return 0
+        default:
+            return 90
         }
     }
 }
 
 // MARK: - Photo Delegate
 
-final class PhotoCaptureDelegate: NSObject, AVCapturePhotoCaptureDelegate {
+final class PhotoCaptureDelegate: NSObject, AVCapturePhotoCaptureDelegate, @unchecked Sendable {
 
-    private let onFinish: (Data?) -> Void
+    // Delegate callbacks can arrive off-main.
+    private let onFinish: @Sendable (Data?) -> Void
+    private let onResolvedMegapixel: @Sendable (String) -> Void
 
-    init(onFinish: @escaping (Data?) -> Void) {
+    init(onResolvedMegapixel: @escaping @Sendable (String) -> Void,
+         onFinish: @escaping @Sendable (Data?) -> Void) {
+        self.onResolvedMegapixel = onResolvedMegapixel
         self.onFinish = onFinish
         super.init()
     }
@@ -490,6 +1197,38 @@ final class PhotoCaptureDelegate: NSObject, AVCapturePhotoCaptureDelegate {
             onFinish(nil)
             return
         }
+        
+
+        let dims = photo.resolvedSettings.photoDimensions
+        let pixels = Int64(dims.width) * Int64(dims.height)
+
+        let mp: String
+        if pixels >= Int64(8000) * Int64(6000) {
+            mp = "48"
+        } else if pixels >= Int64(5600) * Int64(4200) {
+            mp = "24"
+        } else {
+            mp = "12"
+        }
+
+        onResolvedMegapixel(mp)
         onFinish(photo.fileDataRepresentation())
     }
+
+    func photoOutput(_ output: AVCapturePhotoOutput,
+                     didFinishCaptureFor resolvedSettings: AVCaptureResolvedPhotoSettings,
+                     error: Error?) {
+        // This fires even when capture fails before processing finishes.
+        // If we do not release here, the shutter can appear to freeze.
+        if error != nil {
+            onFinish(nil)
+        }
+    }
+    
+    func photoOutput(_ output: AVCapturePhotoOutput,
+                     didFinishCapturingDeferredPhotoProxy deferredPhotoProxy: AVCaptureDeferredPhotoProxy?,
+                     error: Error?) {
+        // No-op. Final image data arrives in didFinishProcessingPhoto.
+    }
 }
+
