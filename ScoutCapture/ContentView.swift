@@ -23,6 +23,8 @@ extension UIScreen {
     }
 }
 
+
+
 // MARK: - UIKit label button (native text rendering + reliable hit testing)
 
 private struct UIKitCircleTextButton: UIViewRepresentable {
@@ -1920,60 +1922,89 @@ private final class DetailTypesModel: ObservableObject {
 // MARK: - ContentView
 
 struct ContentView: View {
-
+    
     private let shutterHaptic = UIImpactFeedbackGenerator(style: .medium)
+    private let quickButtonHaptic = UIImpactFeedbackGenerator(style: .light)
+    private let hdButtonHaptic = UIImpactFeedbackGenerator(style: .soft)
     private let successHaptic = UINotificationFeedbackGenerator()
-
+    
     @StateObject private var camera = CameraManager()
     @StateObject private var levelModel = LevelMotionModel()
     @StateObject private var detailTypesModel = DetailTypesModel()
     @StateObject private var locationManager = LocationManager()
-
+    
     @StateObject private var reportLibrary = ReportLibraryModel()
     @StateObject private var imageCache = AssetImageCache()
-
+    
     @State private var recordId: String = "SC-2026-001"
     @State private var elevation: String = "North Elevation"
-
+    
     @State private var detailNote: String = ""
     @State private var showSavedToast: Bool = false
     @State private var showNotSavedToast: Bool = false
-
+    
     @State private var focusPoint: CGPoint? = nil
     @State private var showFocusRing: Bool = false
-
+    
     @State private var showDetailTypeSheet: Bool = false
     @State var locationMode: LocationMode = .exterior
-
+    
     @State private var showQuickMenu: Bool = false
     @State private var manageContext: ManageContext? = nil
-
+    
     // Custom centered overlays for rotated dropdowns (used in landscape-with-portrait-lock UI)
     @State private var showLandscapeElevationMenu: Bool = false
     @State private var showLandscapeDetailMenu: Bool = false
-
+    
     @State private var lensToastText: String = ""
     @State private var showLensToast: Bool = false
     @State private var lensToastToken: Int = 0
-
+    
     @State private var showGrid: Bool = false
     @State private var showLevel: Bool = false
-
+    
+    @State private var showHDEnabledToast: Bool = false
+    @State private var hdEnabledToastText: String = "HD Enabled"
+    
+    // MARK: - Debug overlay
+    
+    @State private var debugEnabled: Bool = UserDefaults.standard.bool(forKey: "scout.debug.enabled.v1")
+    
+    private func setDebugEnabled(_ enabled: Bool) {
+        debugEnabled = enabled
+        UserDefaults.standard.set(enabled, forKey: "scout.debug.enabled.v1")
+    }
+    
     @State private var showDetailOverlay: Bool = false
     @State private var draftDetailNote: String = ""
-
+    
     @State private var showLibraryFullscreen: Bool = false
     
     // MARK: - Physical device rotation for glyphs (UI is locked to portrait)
-
+    
     @State private var lastValidDeviceOrientation: UIDeviceOrientation = .portrait
     @State private var glyphAngleDegrees: Double = 0
-
+    
     // Polling helps rotation start a touch sooner than UIDevice.orientationDidChangeNotification.
     // This is still discrete (0 / +90 / -90) and does NOT introduce continuous motion.
     @State private var isPollingDeviceOrientation: Bool = false
+    
+    // During certain UI actions (like swapping cameras), device orientation can briefly flicker.
+    // This prevents multiple rotation animations.
+    
+    @State private var isSwappingCamera: Bool = false
+    @State private var suppressRotationUpdatesUntil: Date? = nil
+    
+    // UI-side truth for which camera is active (used for the toast label)
+    @State private var isFrontCameraUI: Bool = false
+    
+    // Simple toast shown above the Quick Menu sheet during camera swap
+    @State private var showCameraSwapToast: Bool = false
+    @State private var cameraSwapToastText: String = ""
+    @State private var cameraSwapToastToken: Int = 0
+    
     private let deviceOrientationPoll = Timer.publish(every: 0.06, on: .main, in: .common).autoconnect()
-
+    
     // Discrete rotation like the native Camera app: animate to 0, +90, or -90 and stop.
     // Slightly slower than before.
     private let glyphRotationAnimation = Animation.interactiveSpring(
@@ -1981,14 +2012,87 @@ struct ContentView: View {
         dampingFraction: 0.90,
         blendDuration: 0.18
     )
-
+    
     private var bottomGlyphRotationAngle: Angle {
         .degrees(glyphAngleDegrees)
     }
-
+    
+    private var isLandscapeUI: Bool {
+        lastValidDeviceOrientation == .landscapeLeft || lastValidDeviceOrientation == .landscapeRight
+    }
+    
+    private func debugOverlayInline() -> some View {
+        Group {
+            if !debugEnabled {
+                EmptyView()
+            } else {
+                let actualDigits = camera.debugMegapixelLabel
+                    .replacingOccurrences(of: "MP", with: "")
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                
+                let targetClean = camera.debugTargetMegapixelLabel
+                    .replacingOccurrences(of: "MP", with: "")
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                
+                let actualText = actualDigits.isEmpty ? "--" : "\(actualDigits)MP"
+                
+                let targetCore = targetClean.hasPrefix("T") ? targetClean : ("T" + targetClean)
+                let targetText = (targetClean.isEmpty || targetClean == "T--") ? "T--" : "\(targetCore)MP"
+                
+                HStack(spacing: 6) {
+                    Text(actualText)
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundColor(.yellow)
+                    
+                    Text(targetText)
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundColor(Color.yellow.opacity(0.80))
+                }
+            }
+        }
+    }
+    
+    private func debugOverlayStacked() -> some View {
+        Group {
+            if !debugEnabled {
+                EmptyView()
+            } else {
+                let actualDigits = camera.debugMegapixelLabel
+                    .replacingOccurrences(of: "MP", with: "")
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                
+                let targetClean = camera.debugTargetMegapixelLabel
+                    .replacingOccurrences(of: "MP", with: "")
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                
+                let actualText = actualDigits.isEmpty ? "--" : "\(actualDigits)MP"
+                
+                let targetCore = targetClean.hasPrefix("T") ? targetClean : ("T" + targetClean)
+                let targetText = (targetClean.isEmpty || targetClean == "T--") ? "T--" : "\(targetCore)MP"
+                
+                VStack(spacing: 2) {
+                    Text(actualText)
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundColor(.yellow)
+                    
+                    Text(targetText)
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundColor(Color.yellow.opacity(0.80))
+                }
+            }
+        }
+    }
+    
     private func refreshBottomGlyphRotation() {
+        if isSwappingCamera {
+            return
+        }
+        if let until = suppressRotationUpdatesUntil, Date() < until {
+            return
+        }
+        
         let o = UIDevice.current.orientation
-
+        
         // Ignore transitional or invalid states.
         let newValue: UIDeviceOrientation? = {
             switch o {
@@ -2000,12 +2104,13 @@ struct ContentView: View {
                 return nil
             }
         }()
-
+        
+        
         guard let newValue else { return }
         guard newValue != lastValidDeviceOrientation else { return }
-
+        
         lastValidDeviceOrientation = newValue
-
+        
         // Your spec:
         // Phone rotated to the left -> rotate glyphs 90 degrees to the right (clockwise)
         // Phone rotated to the right -> rotate glyphs 90 degrees to the left (counterclockwise)
@@ -2018,26 +2123,143 @@ struct ContentView: View {
         default:
             target = 0
         }
-
+        
         withAnimation(glyphRotationAnimation) {
             glyphAngleDegrees = target
         }
     }
-
+    
+    // Helper to instantly sync the glyph rotation to the current device orientation, without animation.
+    private func syncGlyphRotationWithoutAnimation() {
+        let o = UIDevice.current.orientation
+        
+        // Ignore transitional or invalid states.
+        let newValue: UIDeviceOrientation? = {
+            switch o {
+            case .portrait, .portraitUpsideDown:
+                return .portrait
+            case .landscapeLeft, .landscapeRight:
+                return o
+            default:
+                return nil
+            }
+        }()
+        
+        guard let newValue else { return }
+        
+        let target: Double
+        switch newValue {
+        case .landscapeLeft:
+            target = 90
+        case .landscapeRight:
+            target = -90
+        default:
+            target = 0
+        }
+        
+        // Snap without animation.
+        var tx = Transaction()
+        tx.animation = nil
+        withTransaction(tx) {
+            lastValidDeviceOrientation = newValue
+            glyphAngleDegrees = target
+        }
+    }
+    
+    
+    private func swapCameraWithRotationFreeze() {
+        // Prevent double taps
+        if isSwappingCamera {
+            return
+        }
+        
+        // Freeze orientation updates long enough for the session reconfigure to settle
+        isSwappingCamera = true
+        suppressRotationUpdatesUntil = Date().addingTimeInterval(2.2)
+        
+        // Pause polling to prevent repeated refreshes
+        isPollingDeviceOrientation = false
+        
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        UIView.performWithoutAnimation {
+            camera.toggleCamera()
+            isFrontCameraUI.toggle()
+        }
+        CATransaction.commit()
+        
+        // Toast above the Quick Menu sheet (no snapshot cover).
+        cameraSwapToastToken += 1
+        let toastToken = cameraSwapToastToken
+        
+        cameraSwapToastText = isFrontCameraUI ? "Front Camera" : "Rear Camera"
+        showCameraSwapToast = true
+        
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.95) {
+            guard toastToken == cameraSwapToastToken else { return }
+            showCameraSwapToast = false
+        }
+        
+        // After the swap settles, snap to the current stable device orientation WITHOUT animation,
+        // then re-enable rotation updates.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.15) {
+            let o = UIDevice.current.orientation
+            let stable: UIDeviceOrientation? = {
+                switch o {
+                case .portrait, .portraitUpsideDown:
+                    return .portrait
+                case .landscapeLeft, .landscapeRight:
+                    return o
+                default:
+                    return nil
+                }
+            }()
+            
+            let newValue = stable ?? lastValidDeviceOrientation
+            
+            // Snap rotation state without animation.
+            var tx = Transaction()
+            tx.animation = nil
+            withTransaction(tx) {
+                lastValidDeviceOrientation = newValue
+                
+                let target: Double
+                switch newValue {
+                case .landscapeLeft:
+                    target = 90
+                case .landscapeRight:
+                    target = -90
+                default:
+                    target = 0
+                }
+                glyphAngleDegrees = target
+            }
+            
+            // Resume polling
+            isPollingDeviceOrientation = true
+            
+            // Clear suppression shortly after we resume
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                suppressRotationUpdatesUntil = nil
+                isSwappingCamera = false
+            }
+        }
+    }
+    
     enum LocationMode: String, CaseIterable, Identifiable {
         case interior = "Interior"
         case exterior = "Exterior"
         var id: String { rawValue }
     }
-
-    private enum Direction: String, CaseIterable, Identifiable {
+    
+    fileprivate enum Direction: String, CaseIterable, Identifiable {
         case north = "North"
         case south = "South"
         case east  = "East"
         case west  = "West"
-
+        
         var id: String { rawValue }
-
+        
         var elevationValue: String {
             switch self {
             case .north: return "North Elevation"
@@ -2046,7 +2268,7 @@ struct ContentView: View {
             case .west:  return "West Elevation"
             }
         }
-
+        
         static func fromElevation(_ elevation: String) -> Direction {
             switch elevation {
             case "South Elevation": return .south
@@ -2056,523 +2278,33 @@ struct ContentView: View {
             }
         }
     }
-
+    
     private struct ManageContext: Identifiable {
         let id = UUID()
         let mode: LocationMode
     }
-
+    
     private var hasDetailNote: Bool {
         !detailNote.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
-
+    
     private var currentDetailType: String {
         detailTypesModel.selected(for: locationMode)
     }
 
+    // MARK: - SwiftUI View conformance
     var body: some View {
-        
-        ZStack {
+        contentBody
+    }
 
+    @ViewBuilder
+    private var contentBody: some View {
+        ZStack {
             Color.black
                 .ignoresSafeArea()
 
             GeometryReader { geo in
-                let w = geo.size.width
-                let h = geo.size.height
-
-                // Top mask: use a fixed inset (do not bind to safe area) so layout is stable and tight.
-                // You can tweak this number to nudge the whole top mask down/up.
-                let topInset: CGFloat = 30
-
-                // Fine-tune ONLY the internal content position without changing the mask inset.
-                // Negative moves the Report ID + dropdowns up.
-                let topContentLift: CGFloat = -22
-                
-                // Compact header height (fixed inset + content)
-                let topBarH: CGFloat = topInset + 56
-
-                let _: CGFloat = max(geo.safeAreaInsets.bottom, 0)
-
-                // Bottom mask should extend fully to the physical bottom of screen.
-                // Do NOT include safeBottom in the height or it will push content upward.
-                let bottomBarH: CGFloat = 178
-
-                let previewH: CGFloat = max(1, h - topBarH - bottomBarH)
-
-                let baseToastTop: CGFloat = 10
-                let _: CGFloat = 10 // toastGap (unused)
-                let _: CGFloat = 44 // assumedToastHeight (unused)
-
-                VStack(spacing: 0) {
-
-                    // Top header (compact, consistent, and not oversized)
-                    ZStack {
-                        Color.black
-
-                        let rowPadding: CGFloat = 16
-                        let controlH: CGFloat = 44
-                        let gap: CGFloat = 10
-                        let controlW: CGFloat = (w - (rowPadding * 2) - gap) / 2.0
-
-                        VStack(spacing: 10) {
-
-                            // Report ID is the focal point
-                            Text(recordId)
-                                .font(.system(size: 30, weight: .bold))
-                                .tracking(0.4)
-                                .foregroundColor(.white)
-                                .lineLimit(1)
-                                .minimumScaleFactor(0.72)
-                                .frame(maxWidth: .infinity, alignment: .center)
-
-                            if !(lastValidDeviceOrientation == .landscapeLeft || lastValidDeviceOrientation == .landscapeRight) {
-                                // Two controls side-by-side using custom centered overlay toggles (same as landscape)
-                                HStack(spacing: gap) {
-
-                                    // Elevation dropdown (custom centered overlay)
-                                    Button {
-                                        // Only allow elevation picking in exterior mode
-                                        if locationMode == .interior {
-                                            return
-                                        }
-                                        showLandscapeDetailMenu = false
-                                        showLandscapeElevationMenu.toggle()
-                                    } label: {
-                                        let elevationLabel = (locationMode == .interior) ? "Interior" : elevation
-
-                                        HStack(spacing: 8) {
-                                            Text(elevationLabel)
-                                                .font(.system(size: 15, weight: .semibold))
-                                                .foregroundColor(.white.opacity(0.95))
-                                                .lineLimit(1)
-                                                .minimumScaleFactor(0.78)
-
-                                            Spacer(minLength: 0)
-
-                                            Image(systemName: "chevron.down")
-                                                .font(.system(size: 12, weight: .semibold))
-                                                .foregroundColor(.white.opacity(0.90))
-                                        }
-                                        .padding(.horizontal, 14)
-                                        .frame(width: controlW, height: controlH, alignment: .center)
-                                        .background(
-                                            ZStack {
-                                                Color.black.opacity(0.55)
-                                                Color.white.opacity(0.08)
-                                            }
-                                        )
-                                        .clipShape(RoundedRectangle(cornerRadius: 18))
-                                        .overlay(
-                                            RoundedRectangle(cornerRadius: 18)
-                                                .stroke(Color.white.opacity(0.12), lineWidth: 1)
-                                        )
-                                    }
-                                    .buttonStyle(.plain)
-                                    .disabled(locationMode == .interior)
-
-                                    // Detail type dropdown (custom centered overlay)
-                                    Button {
-                                        showLandscapeElevationMenu = false
-                                        showLandscapeDetailMenu.toggle()
-                                    } label: {
-                                        HStack(spacing: 8) {
-                                            Text(currentDetailType.isEmpty ? "Select" : currentDetailType)
-                                                .font(.system(size: 15, weight: .semibold))
-                                                .foregroundColor(.white.opacity(0.95))
-                                                .lineLimit(1)
-                                                .minimumScaleFactor(0.78)
-
-                                            Spacer(minLength: 0)
-
-                                            Image(systemName: "chevron.down")
-                                                .font(.system(size: 12, weight: .semibold))
-                                                .foregroundColor(.white.opacity(0.90))
-                                        }
-                                        .padding(.horizontal, 14)
-                                        .frame(width: controlW, height: controlH, alignment: .center)
-                                        .background(
-                                            ZStack {
-                                                Color.black.opacity(0.55)
-                                                Color.white.opacity(0.08)
-                                            }
-                                        )
-                                        .clipShape(RoundedRectangle(cornerRadius: 18))
-                                        .overlay(
-                                            RoundedRectangle(cornerRadius: 18)
-                                                .stroke(Color.white.opacity(0.12), lineWidth: 1)
-                                        )
-                                    }
-                                    .buttonStyle(.plain)
-                                }
-                                .padding(.horizontal, rowPadding)
-                            }
-                        }
-                        .frame(maxWidth: .infinity, alignment: .center)
-                        // Push content below the status bar without making controls huge
-                        .padding(.top, topInset)
-                        .padding(.bottom, 0)
-                        .padding(.horizontal, 10)
-                        .offset(y: topContentLift)
-                    }
-                    .frame(height: topBarH)
-                    
-                    // PREVIEW
-                    ZStack {
-                        CameraPreviewView(
-                            session: camera.session,
-                            onTapDevicePoint: { devicePoint in
-                                camera.focus(atDevicePoint: devicePoint)
-                            },
-                            onTapNormalizedPoint: { normalizedPoint in
-                                let x = normalizedPoint.x * w
-                                let y = normalizedPoint.y * previewH
-                                focusPoint = CGPoint(x: x, y: y)
-                                showFocusRing = true
-                                DispatchQueue.main.asyncAfter(deadline: .now() + 0.75) {
-                                    showFocusRing = false
-                                }
-                            }
-                        )
-                        .cameraCaptureButtons(
-                            onPressBegan: {
-                                shutterHaptic.impactOccurred()
-                                shutterHaptic.prepare()
-                            },
-                            onCapture: {
-                                capture()
-                            }
-                        )
-                        // Always occupy the full preview rect and stay centered
-                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
-                        .frame(width: w, height: previewH)
-                        .background(Color.black)
-                        .clipped()
-                        // Helps hide any 1px camera-layer seam by ensuring the container is pixel-aligned
-                        .compositingGroup()
-                        
-                        .transaction { tx in
-                            tx.animation = nil
-                        }
-                        
-                        if showGrid {
-                            GridOverlay()
-                                .stroke(Color.white.opacity(0.22), lineWidth: 1)
-                                .allowsHitTesting(false)
-                                .zIndex(5)
-                        }
-                        
-                        if showLevel {
-                            LevelOverlay(
-                                rollDegrees: levelModel.rollDegrees,
-                                isLevel: levelModel.isLevel
-                            )
-                            // Keep the level aligned to the physical device orientation
-                            // while the UI remains portrait-locked.
-                            .rotationEffect(bottomGlyphRotationAngle)
-                            .allowsHitTesting(false)
-                            .zIndex(6)
-                        }
-                        
-                        if (lastValidDeviceOrientation == .landscapeLeft || lastValidDeviceOrientation == .landscapeRight) {
-                            let isLandscapeLeft = (lastValidDeviceOrientation == .landscapeLeft)
-
-                            // When the physical device rotates:
-                            // - landscapeLeft: controls should read upright, rotated +90
-                            // - landscapeRight: controls should read upright, rotated -90
-                            let rotationDegrees: Double = isLandscapeLeft ? 90 : -90
-
-                            // Mirror placement so the dropdowns stay in the top-right of the *preview*
-                            // for both orientations.
-                            let alignment: Alignment = isLandscapeLeft ? .topTrailing : .topLeading
-                            let anchor: UnitPoint = isLandscapeLeft ? .topTrailing : .topLeading
-
-                            // Anchor to the preview rectangle explicitly so it cannot drift into the header mask.
-                            Color.clear
-                                .frame(width: w, height: previewH)
-                                .overlay(alignment: alignment) {
-                                    // Nudge inward from the preview edge in each orientation.
-                                    let xNudge: CGFloat = isLandscapeLeft ? -10 : 10
-                                    let yNudge: CGFloat = 200
-
-                                    landscapeDropdownStack()
-                                        // Rotate correctly for the current landscape direction.
-                                        .rotationEffect(.degrees(rotationDegrees), anchor: anchor)
-                                        .offset(x: xNudge, y: yNudge)
-                                        // Prevent flicker during Menu open/close
-                                        .compositingGroup()
-                                }
-                                .zIndex(80)
-                        }
-                        // Lens debug toast (temporarily disabled)
-                        // if showLensToast, !lensToastText.isEmpty {
-                        //     toastPill(text: lensToastText)
-                        //         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
-                        //         .rotationEffect(bottomGlyphRotationAngle)
-                        //         .allowsHitTesting(false)
-                        //         .zIndex(60)
-                        // }
-                        
-                        if hasDetailNote {
-                            let isLandscape = (lastValidDeviceOrientation == .landscapeLeft || lastValidDeviceOrientation == .landscapeRight)
-
-                            if isLandscape {
-                                // In landscape, keep the note on the bottom edge of the preview.
-                                // Remove rotation animation for this toast only.
-                                toastPill(text: detailNote)
-                                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
-                                    .padding(.bottom, 96)
-                                    .padding(.horizontal, 18)
-                                    .rotationEffect(bottomGlyphRotationAngle)
-                                    .transaction { transaction in
-                                        transaction.animation = nil
-                                    }
-                                    .allowsHitTesting(false)
-                                    .zIndex(55)
-                            } else {
-                                // Portrait behavior stays the same
-                                toastPill(text: detailNote)
-                                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-                                    .padding(.top, baseToastTop)
-                                    .padding(.horizontal, 18)
-                                    .allowsHitTesting(false)
-                                    .zIndex(55)
-                            }
-                        }
-                        
-                        zoomRowNativeCentered(inWidth: w)
-                            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
-                            .padding(.bottom, 18) // move closer to the lower mask
-                            .zIndex(20)
-                        
-                        if showFocusRing, let fp = focusPoint {
-                            Circle()
-                                .stroke(Color.white, lineWidth: 3)
-                                .frame(width: 74, height: 74)
-                                .position(fp)
-                                .transition(.opacity)
-                                .allowsHitTesting(false)
-                                .zIndex(30)
-                        }
-                        
-                        if showSavedToast {
-                            Text("Saved to Photos")
-                                .font(.system(size: 14, weight: .semibold))
-                                .foregroundColor(.white)
-                                .padding(.horizontal, 16)
-                                .padding(.vertical, 10)
-                                .background(Color.black.opacity(0.55))
-                                .clipShape(RoundedRectangle(cornerRadius: 12))
-                                .overlay(
-                                    RoundedRectangle(cornerRadius: 12)
-                                        .stroke(Color.white.opacity(0.18), lineWidth: 1)
-                                )
-                                // Center of the preview area
-                                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
-                                // Rotate like the native camera UI glyphs
-                                .rotationEffect(bottomGlyphRotationAngle)
-                                .allowsHitTesting(false)
-                                .zIndex(25)
-                        }
-
-                        if showNotSavedToast {
-                            Text("Photos access needed")
-                                .font(.system(size: 14, weight: .semibold))
-                                .foregroundColor(.white)
-                                .padding(.horizontal, 16)
-                                .padding(.vertical, 10)
-                                .background(Color.black.opacity(0.55))
-                                .clipShape(RoundedRectangle(cornerRadius: 12))
-                                .overlay(
-                                    RoundedRectangle(cornerRadius: 12)
-                                        .stroke(Color.white.opacity(0.18), lineWidth: 1)
-                                )
-                                // Center of the preview area
-                                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
-                                // Rotate like the native camera UI glyphs
-                                .rotationEffect(bottomGlyphRotationAngle)
-                                .allowsHitTesting(false)
-                                .zIndex(25)
-                        }
-                    }
-                    .clipped()
-                    .frame(height: previewH)
-                    // .onChange(of: camera.lensDebugPulse) { _, _ in
-                    //     showLensToastNow(camera.lensDebugText)
-                    // }
-                    .onAppear {
-                        // showLensToastNow(camera.lensDebugText)
-                        shutterHaptic.prepare()
-                    }
-                    .onChange(of: showLevel) { _, newValue in
-                        if newValue { levelModel.start() } else { levelModel.stop() }
-                    }
-                    
-                    // BOTTOM MASK
-                    ZStack {
-                        Color.black
-
-                        // Native-style bottom layout: shutter row, then mode slider row under it.
-                        VStack(spacing: 12) {
-
-                            // Shutter centered
-                            HStack {
-                                Spacer(minLength: 0)
-
-                                Button(action: {
-                                    shutterHaptic.impactOccurred()
-                                    shutterHaptic.prepare()
-                                    capture()
-                                }) {
-                                    ZStack {
-                                        Circle()
-                                            .fill(Color.white)
-                                            .frame(width: 74, height: 74)
-                                            .shadow(radius: 2)
-                                            .overlay(
-                                                Circle().stroke(Color.black.opacity(0.18), lineWidth: 1)
-                                            )
-
-                                        Circle()
-                                            .stroke(Color.white.opacity(0.18), lineWidth: 1)
-                                            .frame(width: 92, height: 92)
-
-                                        Circle()
-                                            .fill(Color.black.opacity(0.08))
-                                            .frame(width: 74, height: 74)
-                                    }
-                                }
-                                .disabled(camera.isCapturing)
-                                .buttonStyle(.plain)
-                                .offset(y: -13)
-                                // Quick-access Detail Note aligned to shutter center (moves ONLY this control)
-                                .overlay(alignment: .center) {
-                                    detailNoteQuickButton(size: 44)
-                                        // 35pt gap from shutter edge: 74/2 + 35 + 44/2 = 94
-                                        // Compensate for shutter vertical offset so the button is vertically centered
-                                        .rotationEffect(bottomGlyphRotationAngle)
-                                        .offset(x: 94, y: -12)
-                                }
-
-                                Spacer(minLength: 0)
-                            }
-
-                            // Album • Interior/Exterior pill • Menu  (edge buttons, center pill)
-                            HStack(alignment: .center) {
-
-                                RecentAlbumPreviewCircleButton(
-                                    lastAsset: reportLibrary.assets.last,
-                                    size: 44,
-                                    action: { showLibraryFullscreen = true },
-                                    cache: imageCache
-                                )
-                                .frame(width: 44, height: 44)
-                                .rotationEffect(bottomGlyphRotationAngle)
-
-                                
-                                Spacer(minLength: 0)
-
-                                locationModeSlider()
-                                    .frame(height: 44)
-
-                                Spacer(minLength: 0)
-
-                                topRightEllipsisCircle()
-                                    .frame(width: 44, height: 44)
-                                    .rotationEffect(bottomGlyphRotationAngle)
-                            }
-                            .padding(.horizontal, 22)
-                        }
-                        .frame(maxWidth: .infinity)
-                        .frame(height: bottomBarH, alignment: .bottom)
-                        .padding(.bottom, 12)
-                       
-                    }
-                    .frame(height: bottomBarH)
-                    
-                    // Detail type dropdown sheet
-                    .sheet(isPresented: $showDetailTypeSheet) {
-                        NavigationStack {
-                            List {
-                                let list = detailTypesModel.types(for: locationMode)
-                                ForEach(list) { item in
-                                    Button(action: {
-                                        detailTypesModel.setSelected(item.name, for: locationMode)
-                                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.18) {
-                                            showDetailTypeSheet = false
-                                        }
-                                    }) {
-                                        HStack {
-                                            Text(item.name)
-                                                .font(.system(size: 16, weight: detailTypesModel.selected(for: locationMode) == item.name ? .semibold : .regular))
-                                                .foregroundColor(.primary)
-                                            Spacer()
-                                            if detailTypesModel.selected(for: locationMode) == item.name {
-                                                Image(systemName: "checkmark")
-                                                    .font(.system(size: 14, weight: .semibold))
-                                                    .foregroundColor(.accentColor)
-                                            }
-                                        }
-                                        .padding(.vertical, 4)
-                                    }
-                                    .buttonStyle(.plain)
-                                }
-                            }
-                            .listStyle(.insetGrouped)
-                            .navigationTitle(locationMode == .interior ? "Interior Detail Type" : "Exterior Detail Type")
-                            .navigationBarTitleDisplayMode(.inline)
-                            .toolbar {
-                                ToolbarItem(placement: .cancellationAction) {
-                                    Button("Done") { showDetailTypeSheet = false }
-                                }
-                            }
-                        }
-                    }
-                    
-                    // Quick menu
-                    .sheet(isPresented: $showQuickMenu) {
-                        QuickMenuSheet(
-                            glyphRotationAngle: bottomGlyphRotationAngle,
-                            flashSetting: camera.flashSetting,
-                            isGridOn: $showGrid,
-                            isLevelOn: $showLevel,
-                            onInteriorList: {
-                                showQuickMenu = false
-                                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
-                                    manageContext = ManageContext(mode: .interior)
-                                }
-                            },
-                            onStamp: { },
-                            onExteriorList: {
-                                showQuickMenu = false
-                                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
-                                    manageContext = ManageContext(mode: .exterior)
-                                }
-                            },
-                            onFlash: { camera.cycleFlash() },
-                            onCameraSwap: { camera.toggleCamera() }
-                        )
-                        .presentationDetents([.medium])
-                        .presentationDragIndicator(.hidden)
-                    }
-                    
-                    // Manage list sheet
-                    .sheet(item: $manageContext) { ctx in
-                        ManageDetailTypesView(
-                            mode: ctx.mode,
-                            model: detailTypesModel
-                        )
-                    }
-                    
-                    // Fullscreen library
-                    .fullScreenCover(isPresented: $showLibraryFullscreen) {
-                        ReportLibraryFullscreen(reportLibrary: reportLibrary, cache: imageCache)
-                            .ignoresSafeArea()
-                    }
-                }
-                .frame(width: geo.size.width, height: geo.size.height, alignment: .top)
-                .clipped()
-                
+                layoutContent(in: geo)
             }
             .fullScreenCover(isPresented: $showDetailOverlay) {
                 DetailNoteModal(
@@ -2592,6 +2324,27 @@ struct ContentView: View {
             }
             .overlay {
                 centeredLandscapeMenuOverlay()
+            }
+            .overlay {
+                if showCameraSwapToast {
+                    Text(cameraSwapToastText)
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundColor(.white)
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 10)
+                        .background(Color.black.opacity(0.72))
+                        .clipShape(RoundedRectangle(cornerRadius: 12))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 12)
+                                .stroke(Color.white.opacity(0.18), lineWidth: 1)
+                        )
+                        .rotationEffect(bottomGlyphRotationAngle)
+                        .allowsHitTesting(false)
+                        .transition(.opacity)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                        .padding(.top, 18)
+                        .zIndex(999)
+                }
             }
             .onAppear {
                 UIDevice.current.beginGeneratingDeviceOrientationNotifications()
@@ -2617,82 +2370,583 @@ struct ContentView: View {
                 locationManager.stop()
                 UIDevice.current.endGeneratingDeviceOrientationNotifications()
             }
-            
-            
             .onChange(of: recordId) { _, newValue in
                 reportLibrary.setActiveReportTitle(newValue)
                 reportLibrary.ensureAlbumExists { _ in
                     DispatchQueue.main.async { reportLibrary.reloadAssets() }
                 }
             }
+            .onChange(of: detailNote) { _, _ in
+                let wasOn = camera.effectiveHDEnabled
+                let wasManual = camera.manualHDEnabled
+
+                camera.updateDetailNoteActive(hasDetailNote)
+
+                // If the note just became active and HD was previously off, show toast
+                if hasDetailNote && camera.hdSupported && !wasOn && !wasManual {
+                    hdEnabledToastText = "HD Enabled for Detail Capture"
+                    showHDEnabledToast = true
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+                        showHDEnabledToast = false
+                    }
+                }
+            }
         }
         .ignoresSafeArea(.keyboard, edges: .bottom)
-    }
-    
-
-    
-     
-    
-    
-    // MARK: - Top right ellipsis circle
-
-    private func topRightEllipsisCircle(size: CGFloat = 44) -> some View {
-        @State var isPressed: Bool = false
-
-        return Button(action: {
-            showQuickMenu = true
-        }) {
-            ZStack {
-                // Match darker segmented pill tone (same style as detail note quick button)
-                Circle()
-                    .fill(Color.white.opacity(0.14))
-                    .frame(width: size, height: size)
-
-                Image(systemName: "ellipsis")
-                    .font(.system(size: 20, weight: .semibold))
-                    .foregroundColor(.white.opacity(0.92))
+        // 3-dot quick menu
+        .sheet(isPresented: $showQuickMenu) {
+            QuickMenuSheet(
+                glyphRotationAngle: bottomGlyphRotationAngle,
+                flashSetting: camera.flashSetting,
+                isFrontCamera: isFrontCameraUI,
+                isGridOn: $showGrid,
+                isLevelOn: $showLevel,
+                debugEnabled: debugEnabled,
+                onToggleDebug: { newValue in
+                    setDebugEnabled(newValue)
+                },
+                onInteriorList: {
+                    showQuickMenu = false
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                        manageContext = ManageContext(mode: .interior)
+                    }
+                },
+                onStamp: { },
+                onExteriorList: {
+                    showQuickMenu = false
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                        manageContext = ManageContext(mode: .exterior)
+                    }
+                },
+                onFlash: { camera.cycleFlash() },
+                onCameraSwap: { swapCameraWithRotationFreeze() }
+            )
+            .presentationDetents([.medium])
+            .presentationDragIndicator(.visible)
+            .onDisappear {
+                showQuickMenu = false
             }
-            .frame(width: size, height: size)
-            .contentShape(Circle())
-            .pressScaleEffect(isPressed)
         }
-        .buttonStyle(.plain)
-        .frame(width: size, height: size)
-        .zIndex(50)
-        .simultaneousGesture(
-            DragGesture(minimumDistance: 0)
-                .onChanged { _ in isPressed = true }
-                .onEnded { _ in isPressed = false }
+        // Album fullscreen
+        .fullScreenCover(isPresented: $showLibraryFullscreen) {
+            ReportLibraryFullscreen(reportLibrary: reportLibrary, cache: imageCache)
+        }
+        // Manage (from dropdown or quick menu)
+        .sheet(item: $manageContext) { ctx in
+            ManageDetailTypesView(mode: ctx.mode, model: detailTypesModel)
+        }
+    }
+
+    @ViewBuilder
+    private func layoutContent(in geo: GeometryProxy) -> some View {
+        let w = geo.size.width
+        let h = geo.size.height
+
+        // Top mask: fixed inset so layout is stable.
+        let topInset: CGFloat = 30
+
+        // Fine tune ONLY the internal content position.
+        let topContentLift: CGFloat = -22
+
+        // Compact header height.
+        let topBarH: CGFloat = topInset + 56
+
+        // Bottom mask should extend fully to the physical bottom of screen.
+        let bottomBarH: CGFloat = 178
+
+        let previewH: CGFloat = max(1, h - topBarH - bottomBarH)
+        let baseToastTop: CGFloat = 10
+
+        // Type erasure boundary so the compiler does not attempt to build one massive generic type.
+        AnyView(
+            VStack(spacing: 0) {
+                topHeaderView(w: w, topInset: topInset, topContentLift: topContentLift, topBarH: topBarH)
+                previewAreaView(w: w, previewH: previewH, baseToastTop: baseToastTop)
+                bottomMaskView(bottomBarH: bottomBarH)
+            }
+            .frame(width: geo.size.width, height: geo.size.height, alignment: .top)
+            .clipped()
         )
     }
 
-    // MARK: - Lens toast control
+    private func topHeaderView(w: CGFloat, topInset: CGFloat, topContentLift: CGFloat, topBarH: CGFloat) -> some View {
+        ZStack {
+            Color.black
 
+            let rowPadding: CGFloat = 16
+            let controlH: CGFloat = 44
+            let gap: CGFloat = 10
+            let controlW: CGFloat = (w - (rowPadding * 2) - gap) / 2.0
+
+            VStack(spacing: 10) {
+                VStack(spacing: 2) {
+                    Text(recordId)
+                        .font(.system(size: 30, weight: .bold))
+                        .tracking(0.4)
+                        .foregroundColor(.white)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.72)
+                        .frame(maxWidth: .infinity, alignment: .center)
+                        .overlay(alignment: .leading) {
+                            Group {
+                                if isLandscapeUI {
+                                    debugOverlayStacked()
+                                } else {
+                                    debugOverlayInline()
+                                }
+                            }
+                            .fixedSize()
+                            .rotationEffect(bottomGlyphRotationAngle)
+                            .padding(.leading, 14)
+                            .padding(.top, isLandscapeUI ? 6 : 0)
+                            .offset(y: isLandscapeUI ? 0 : 2)
+                            .allowsHitTesting(false)
+                        }
+                }
+
+                if !(lastValidDeviceOrientation == .landscapeLeft || lastValidDeviceOrientation == .landscapeRight) {
+                    HStack(spacing: gap) {
+                        Button {
+                            if locationMode == .interior {
+                                return
+                            }
+                            showLandscapeDetailMenu = false
+                            showLandscapeElevationMenu.toggle()
+                        } label: {
+                            let elevationLabel = (locationMode == .interior) ? "Interior" : elevation
+
+                            HStack(spacing: 8) {
+                                Text(elevationLabel)
+                                    .font(.system(size: 15, weight: .semibold))
+                                    .foregroundColor(.white.opacity(0.95))
+                                    .lineLimit(1)
+                                    .minimumScaleFactor(0.78)
+
+                                Spacer(minLength: 0)
+
+                                Image(systemName: "chevron.down")
+                                    .font(.system(size: 12, weight: .semibold))
+                                    .foregroundColor(.white.opacity(0.90))
+                            }
+                            .padding(.horizontal, 14)
+                            .frame(width: controlW, height: controlH, alignment: .center)
+                            .background(
+                                ZStack {
+                                    Color.black.opacity(0.55)
+                                    Color.white.opacity(0.08)
+                                }
+                            )
+                            .clipShape(RoundedRectangle(cornerRadius: 18))
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 18)
+                                    .stroke(Color.white.opacity(0.12), lineWidth: 1)
+                            )
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(locationMode == .interior)
+
+                        Button {
+                            showLandscapeElevationMenu = false
+                            showLandscapeDetailMenu.toggle()
+                        } label: {
+                            HStack(spacing: 8) {
+                                Text(currentDetailType.isEmpty ? "Select" : currentDetailType)
+                                    .font(.system(size: 15, weight: .semibold))
+                                    .foregroundColor(.white.opacity(0.95))
+                                    .lineLimit(1)
+                                    .minimumScaleFactor(0.78)
+
+                                Spacer(minLength: 0)
+
+                                Image(systemName: "chevron.down")
+                                    .font(.system(size: 12, weight: .semibold))
+                                    .foregroundColor(.white.opacity(0.90))
+                            }
+                            .padding(.horizontal, 14)
+                            .frame(width: controlW, height: controlH, alignment: .center)
+                            .background(
+                                ZStack {
+                                    Color.black.opacity(0.55)
+                                    Color.white.opacity(0.08)
+                                }
+                            )
+                            .clipShape(RoundedRectangle(cornerRadius: 18))
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 18)
+                                    .stroke(Color.white.opacity(0.12), lineWidth: 1)
+                            )
+                        }
+                        .buttonStyle(.plain)
+                    }
+                    .padding(.horizontal, rowPadding)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .center)
+            .padding(.top, topInset)
+            .padding(.bottom, 0)
+            .padding(.horizontal, 10)
+            .offset(y: topContentLift)
+        }
+        .frame(height: topBarH)
+    }
+
+    private func previewAreaView(w: CGFloat, previewH: CGFloat, baseToastTop: CGFloat) -> some View {
+        ZStack {
+            CameraPreviewView(
+                session: camera.session,
+                onTapDevicePoint: { devicePoint in
+                    camera.focus(atDevicePoint: devicePoint)
+                },
+                onTapNormalizedPoint: { normalizedPoint in
+                    let x = normalizedPoint.x * w
+                    let y = normalizedPoint.y * previewH
+                    focusPoint = CGPoint(x: x, y: y)
+                    showFocusRing = true
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.75) {
+                        showFocusRing = false
+                    }
+                }
+            )
+            .cameraCaptureButtons(
+                onPressBegan: {
+                    shutterHaptic.impactOccurred()
+                    shutterHaptic.prepare()
+                },
+                onCapture: {
+                    capture()
+                }
+            )
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+            .frame(width: w, height: previewH)
+            .background(Color.black)
+            .clipped()
+            .compositingGroup()
+            .transaction { tx in
+                tx.animation = nil
+            }
+
+            if showGrid {
+                GridOverlay()
+                    .stroke(Color.white.opacity(0.22), lineWidth: 1)
+                    .allowsHitTesting(false)
+                    .zIndex(5)
+            }
+
+            if showLevel {
+                LevelOverlay(
+                    rollDegrees: levelModel.rollDegrees,
+                    isLevel: levelModel.isLevel
+                )
+                .rotationEffect(bottomGlyphRotationAngle)
+                .allowsHitTesting(false)
+                .zIndex(6)
+            }
+
+            if (lastValidDeviceOrientation == .landscapeLeft || lastValidDeviceOrientation == .landscapeRight) {
+                let isLandscapeLeft = (lastValidDeviceOrientation == .landscapeLeft)
+                let rotationDegrees: Double = isLandscapeLeft ? 90 : -90
+                let alignment: Alignment = isLandscapeLeft ? .topTrailing : .topLeading
+                let anchor: UnitPoint = isLandscapeLeft ? .topTrailing : .topLeading
+
+                Color.clear
+                    .frame(width: w, height: previewH)
+                    .overlay(alignment: alignment) {
+                        let xNudge: CGFloat = isLandscapeLeft ? -10 : 10
+                        let yNudge: CGFloat = 200
+
+                        landscapeDropdownStack()
+                            .rotationEffect(.degrees(rotationDegrees), anchor: anchor)
+                            .offset(x: xNudge, y: yNudge)
+                            .compositingGroup()
+                    }
+                    .zIndex(80)
+            }
+
+            if showHDEnabledToast {
+                Text(hdEnabledToastText)
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundColor(.white)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 10)
+                    .background(Color.black.opacity(0.55))
+                    .clipShape(RoundedRectangle(cornerRadius: 12))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 12)
+                            .stroke(Color.white.opacity(0.18), lineWidth: 1)
+                    )
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+                    .rotationEffect(bottomGlyphRotationAngle)
+                    .allowsHitTesting(false)
+                    .zIndex(26)
+            }
+
+            if hasDetailNote {
+                let isLandscape = (lastValidDeviceOrientation == .landscapeLeft || lastValidDeviceOrientation == .landscapeRight)
+
+                if isLandscape {
+                    toastPill(text: detailNote)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+                        .padding(.bottom, 96)
+                        .padding(.horizontal, 18)
+                        .rotationEffect(bottomGlyphRotationAngle)
+                        .transaction { transaction in
+                            transaction.animation = nil
+                        }
+                        .allowsHitTesting(false)
+                        .zIndex(55)
+                } else {
+                    toastPill(text: detailNote)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                        .padding(.top, baseToastTop)
+                        .padding(.horizontal, 18)
+                        .allowsHitTesting(false)
+                        .zIndex(55)
+                }
+            }
+
+            zoomRowNativeCentered(inWidth: w)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+                .padding(.bottom, 18)
+                .zIndex(20)
+
+            if showFocusRing, let fp = focusPoint {
+                Circle()
+                    .stroke(Color.white, lineWidth: 3)
+                    .frame(width: 74, height: 74)
+                    .position(fp)
+                    .transition(.opacity)
+                    .allowsHitTesting(false)
+                    .zIndex(30)
+            }
+
+            if showSavedToast {
+                Text("Saved to Photos")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundColor(.white)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 10)
+                    .background(Color.black.opacity(0.55))
+                    .clipShape(RoundedRectangle(cornerRadius: 12))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 12)
+                            .stroke(Color.white.opacity(0.18), lineWidth: 1)
+                    )
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+                    .padding(.top, isLandscapeUI ? 44 : 0)
+                    .rotationEffect(bottomGlyphRotationAngle)
+                    .allowsHitTesting(false)
+                    .zIndex(25)
+            }
+
+            if showNotSavedToast {
+                Text("Photos access needed")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundColor(.white)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 10)
+                    .background(Color.black.opacity(0.55))
+                    .clipShape(RoundedRectangle(cornerRadius: 12))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 12)
+                            .stroke(Color.white.opacity(0.18), lineWidth: 1)
+                    )
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+                    .padding(.top, isLandscapeUI ? 44 : 0)
+                    .rotationEffect(bottomGlyphRotationAngle)
+                    .allowsHitTesting(false)
+                    .zIndex(25)
+            }
+        }
+        .clipped()
+        .frame(height: previewH)
+        .onAppear {
+            shutterHaptic.prepare()
+            quickButtonHaptic.prepare()
+            hdButtonHaptic.prepare()
+        }
+        .onChange(of: showLevel) { _, newValue in
+            if newValue { levelModel.start() } else { levelModel.stop() }
+        }
+    }
+
+    private func bottomMaskView(bottomBarH: CGFloat) -> some View {
+        ZStack {
+            Color.black
+
+            VStack(spacing: 12) {
+                HStack {
+                    Spacer(minLength: 0)
+
+                    Button(action: {
+                        shutterHaptic.impactOccurred()
+                        shutterHaptic.prepare()
+                        capture()
+                    }) {
+                        ZStack {
+                            Circle()
+                                .fill(Color.white)
+                                .frame(width: 74, height: 74)
+                                .shadow(radius: 2)
+                                .overlay(
+                                    Circle().stroke(Color.black.opacity(0.18), lineWidth: 1)
+                                )
+
+                            Circle()
+                                .stroke(Color.white.opacity(0.18), lineWidth: 1)
+                                .frame(width: 92, height: 92)
+
+                            Circle()
+                                .fill(Color.black.opacity(0.08))
+                                .frame(width: 74, height: 74)
+                        }
+                    }
+                    .disabled(camera.isCapturing)
+                    .buttonStyle(.plain)
+                    .offset(y: -13)
+                    .overlay(alignment: .center) {
+                        ZStack {
+                            hdQuickButton(size: 44)
+                                .rotationEffect(bottomGlyphRotationAngle)
+                                .offset(x: -94, y: -12)
+
+                            detailNoteQuickButton(size: 44)
+                                .rotationEffect(bottomGlyphRotationAngle)
+                                .offset(x: 94, y: -12)
+                        }
+                    }
+
+                    Spacer(minLength: 0)
+                }
+
+                HStack(alignment: .center) {
+                    RecentAlbumPreviewCircleButton(
+                        lastAsset: reportLibrary.assets.last,
+                        size: 44,
+                        action: {
+                            fireQuickButtonHaptic()
+                            showLibraryFullscreen = true
+                        },
+                        cache: imageCache
+                    )
+                    .frame(width: 44, height: 44)
+                    .rotationEffect(bottomGlyphRotationAngle)
+
+                    Spacer(minLength: 0)
+
+                    locationModeSlider()
+                        .frame(height: 44)
+
+                    Spacer(minLength: 0)
+
+                    topRightEllipsisCircle()
+                        .frame(width: 44, height: 44)
+                        .rotationEffect(bottomGlyphRotationAngle)
+                }
+                .padding(.horizontal, 22)
+            }
+            .frame(maxWidth: .infinity)
+            .frame(height: bottomBarH, alignment: .bottom)
+            .padding(.bottom, 12)
+        }
+        .frame(height: bottomBarH)
+    }
+}
+
+    
+
+extension ContentView {
+    
+    // MARK: - Top right ellipsis circle
+    
+    private struct PopEllipsisButton: View {
+        let size: CGFloat
+        let onHaptic: () -> Void
+        let onTap: () -> Void
+        
+        @State private var isPressed: Bool = false
+        @State private var isPopping: Bool = false
+        
+        private func triggerPop() {
+            withAnimation(.interactiveSpring(response: 0.22, dampingFraction: 0.62, blendDuration: 0.08)) {
+                isPopping = true
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.16) {
+                withAnimation(.interactiveSpring(response: 0.22, dampingFraction: 0.72, blendDuration: 0.08)) {
+                    isPopping = false
+                }
+            }
+        }
+        
+        var body: some View {
+            Button(action: {
+                onHaptic()
+                triggerPop()
+                onTap()
+            }) {
+                ZStack {
+                    Circle()
+                        .fill(Color.white.opacity(0.14))
+                        .frame(width: size, height: size)
+                    
+                    Image(systemName: "ellipsis")
+                        .font(.system(size: 20, weight: .semibold))
+                        .foregroundColor(.white.opacity(0.92))
+                }
+                .frame(width: size, height: size)
+                .contentShape(Circle())
+                .scaleEffect(isPopping ? 1.12 : 1.0)
+                .pressScaleEffect(isPressed)
+            }
+            .buttonStyle(.plain)
+            .frame(width: size, height: size)
+            .simultaneousGesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { _ in isPressed = true }
+                    .onEnded { _ in isPressed = false }
+            )
+        }
+    }
+    
+    private func topRightEllipsisCircle(size: CGFloat = 44) -> some View {
+        PopEllipsisButton(
+            size: size,
+            onHaptic: {
+                fireQuickButtonHaptic()
+            },
+            onTap: {
+                showQuickMenu = true
+            }
+        )
+        .zIndex(50)
+    }
+    
+    // MARK: - Lens toast control
+    
     private func showLensToastNow(_ text: String) {
         lensToastToken += 1
         let token = lensToastToken
-
+        
         lensToastText = text
         showLensToast = true
-
+        
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.9) {
             guard token == lensToastToken else { return }
             showLensToast = false
         }
     }
-
+    
     // MARK: - UI pieces
-
+    
     @ViewBuilder
     private func landscapeDropdownStack() -> some View {
         let controlH: CGFloat = 36
         let controlW: CGFloat = 190
-
+        
         let elevationLabel = (locationMode == .interior) ? "Interior" : elevation
         let detailLabel = currentDetailType.isEmpty ? "Select" : currentDetailType
-
+        
         VStack(alignment: .leading, spacing: 10) {
-
+            
             // Elevation dropdown (compact) - custom (opens centered overlay)
             Button {
                 // Only allow elevation picking in exterior mode
@@ -2708,9 +2962,9 @@ struct ContentView: View {
                         .foregroundColor(.white.opacity(0.95))
                         .lineLimit(1)
                         .minimumScaleFactor(0.78)
-
+                    
                     Spacer(minLength: 0)
-
+                    
                     Image(systemName: "chevron.down")
                         .font(.system(size: 11, weight: .semibold))
                         .foregroundColor(.white.opacity(0.90))
@@ -2731,7 +2985,7 @@ struct ContentView: View {
             }
             .buttonStyle(.plain)
             .disabled(locationMode == .interior)
-
+            
             // Detail type dropdown (compact) - custom (opens centered overlay)
             Button {
                 showLandscapeElevationMenu = false
@@ -2743,9 +2997,9 @@ struct ContentView: View {
                         .foregroundColor(.white.opacity(0.95))
                         .lineLimit(1)
                         .minimumScaleFactor(0.78)
-
+                    
                     Spacer(minLength: 0)
-
+                    
                     Image(systemName: "chevron.down")
                         .font(.system(size: 11, weight: .semibold))
                         .foregroundColor(.white.opacity(0.90))
@@ -2770,47 +3024,45 @@ struct ContentView: View {
             tx.animation = nil
         }
     }
-
+    
     // MARK: - Centered custom overlays for landscape dropdowns
-
+    
     @ViewBuilder
     private func centeredLandscapeMenuOverlay() -> some View {
         let isShowing = showLandscapeElevationMenu || showLandscapeDetailMenu
-        if !isShowing { EmptyView() }
-        else {
-            ZStack {
+        
+        ZStack {
+            if isShowing {
                 Color.black.opacity(0.55)
                     .ignoresSafeArea()
                     .contentShape(Rectangle())
                     .onTapGesture {
                         dismissLandscapeMenus()
                     }
-
+                
                 VStack(spacing: 12) {
                     if showLandscapeElevationMenu {
                         centeredElevationMenuContent()
                     }
-
+                    
                     if showLandscapeDetailMenu {
                         centeredDetailMenuContent()
                     }
                 }
-                // Keep the menu readable relative to the physical device, like native camera glyphs
                 .rotationEffect(bottomGlyphRotationAngle)
                 .padding(.horizontal, 18)
                 .frame(maxWidth: 360)
             }
-            .transition(.opacity)
-            .animation(.easeOut(duration: 0.18), value: isShowing)
-            .zIndex(500)
         }
+        .allowsHitTesting(isShowing)
+        .zIndex(500)
     }
-
+    
     private func dismissLandscapeMenus() {
         showLandscapeElevationMenu = false
         showLandscapeDetailMenu = false
     }
-
+    
     @ViewBuilder
     private func centeredElevationMenuContent() -> some View {
         // Only relevant for exterior; if interior somehow triggers this, show nothing
@@ -2819,7 +3071,7 @@ struct ContentView: View {
         } else {
             VStack(spacing: 0) {
                 centeredMenuHeader(title: "Elevation")
-
+                
                 VStack(spacing: 0) {
                     centeredMenuRow(title: "North Elevation", isSelected: elevation == "North Elevation") {
                         elevation = "North Elevation"
@@ -2852,26 +3104,26 @@ struct ContentView: View {
             .shadow(color: Color.black.opacity(0.45), radius: 16, x: 0, y: 10)
         }
     }
-
+    
     @ViewBuilder
     private func centeredDetailMenuContent() -> some View {
         let list = detailTypesModel.types(for: locationMode)
-
+        
         VStack(spacing: 0) {
             centeredMenuHeader(title: locationMode == .interior ? "Interior Detail Type" : "Exterior Detail Type")
-
+            
             // Scroll the selectable rows when the list gets long.
             ScrollView(.vertical, showsIndicators: true) {
                 LazyVStack(spacing: 0) {
                     ForEach(list) { item in
                         let name = item.name.isEmpty ? " " : item.name
                         let isSelected = (detailTypesModel.selected(for: locationMode) == item.name)
-
+                        
                         centeredMenuRow(title: name, isSelected: isSelected) {
                             detailTypesModel.setSelected(item.name, for: locationMode)
                             dismissLandscapeMenus()
                         }
-
+                        
                         if item.id != list.last?.id {
                             centeredMenuDivider()
                         }
@@ -2881,9 +3133,9 @@ struct ContentView: View {
             }
             // Keep the popup from growing off-screen.
             .frame(maxHeight: 320)
-
+            
             centeredMenuDivider()
-
+            
             centeredMenuRow(title: "Manage…", isSelected: false) {
                 dismissLandscapeMenus()
                 manageContext = ManageContext(mode: locationMode)
@@ -2897,7 +3149,7 @@ struct ContentView: View {
         )
         .shadow(color: Color.black.opacity(0.45), radius: 16, x: 0, y: 10)
     }
-
+    
     private func centeredMenuHeader(title: String) -> some View {
         HStack {
             Text(title)
@@ -2915,7 +3167,7 @@ struct ContentView: View {
         .padding(.vertical, 12)
         .background(Color.black.opacity(0.20))
     }
-
+    
     private func centeredMenuRow(title: String, isSelected: Bool, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             HStack(spacing: 10) {
@@ -2924,9 +3176,9 @@ struct ContentView: View {
                     .foregroundColor(.white.opacity(0.95))
                     .lineLimit(1)
                     .minimumScaleFactor(0.78)
-
+                
                 Spacer(minLength: 0)
-
+                
                 if isSelected {
                     Image(systemName: "checkmark")
                         .font(.system(size: 14, weight: .semibold))
@@ -2940,14 +3192,14 @@ struct ContentView: View {
         }
         .buttonStyle(.plain)
     }
-
+    
     private func centeredMenuDivider() -> some View {
         Rectangle()
             .fill(Color.white.opacity(0.12))
             .frame(height: 1)
             .padding(.horizontal, 12)
     }
-
+    
     private func toastPill(text: String) -> some View {
         Text(text)
             .font(.system(size: 14, weight: .semibold))
@@ -2961,37 +3213,176 @@ struct ContentView: View {
                     .stroke(Color.white.opacity(0.18), lineWidth: 1)
             )
     }
-
-    private func detailNoteQuickButton(size: CGFloat = 44) -> some View {
-        @State var isPressed: Bool = false
-
-        return Button(action: {
-            draftDetailNote = detailNote
-            showDetailOverlay = true
-        }) {
-            ZStack {
-                // Match the darker segmented pill tone (no border)
-                Circle()
-                    .fill(Color.white.opacity(hasDetailNote ? 0.20 : 0.14))
-                    .frame(width: size, height: size)
-
-                Image(systemName: "note.text")
-                    .font(.system(size: 20, weight: .semibold))
-                    .foregroundColor(hasDetailNote ? .yellow : .white.opacity(0.92))
+    private struct HDQuickButton: View {
+        let size: CGFloat
+        let hasDetailNote: Bool
+        let isEnabled: Bool
+        let isOn: Bool
+        let onToggle: () -> Void
+        let onForcedTap: () -> Void
+        let onHaptic: () -> Void
+        
+        @State private var isPressed: Bool = false
+        @State private var isPopping: Bool = false
+        
+        private func triggerPop() {
+            withAnimation(.interactiveSpring(response: 0.22, dampingFraction: 0.62, blendDuration: 0.08)) {
+                isPopping = true
             }
-            .frame(width: size, height: size)
-            .contentShape(Circle())
-            .pressScaleEffect(isPressed)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.16) {
+                withAnimation(.interactiveSpring(response: 0.22, dampingFraction: 0.72, blendDuration: 0.08)) {
+                    isPopping = false
+                }
+            }
         }
-        .buttonStyle(.plain)
-        .frame(width: size, height: size)
-        .simultaneousGesture(
-            DragGesture(minimumDistance: 0)
-                .onChanged { _ in isPressed = true }
-                .onEnded { _ in isPressed = false }
+        
+        var body: some View {
+            Button(action: {
+                guard isEnabled else { return }
+                onHaptic()
+                
+                // If detail note exists, HD cannot be turned off.
+                // Still provide pop feedback.
+                if hasDetailNote {
+                    triggerPop()
+                    onForcedTap()
+                    return
+                }
+                
+                triggerPop()
+                onToggle()
+            }) {
+                ZStack {
+                    Circle()
+                        .fill(
+                            isEnabled
+                            ? Color.white.opacity(isOn ? 0.22 : 0.14)
+                            : Color.white.opacity(0.08)
+                        )
+                        .frame(width: size, height: size)
+                    
+                    // Subtle glow ring when ON
+                    Circle()
+                        .stroke(
+                            isEnabled && isOn ? Color.yellow.opacity(0.55) : Color.clear,
+                            lineWidth: 2
+                        )
+                        .frame(width: size + 6, height: size + 6)
+                        .opacity(isOn ? 1.0 : 0.0)
+                    
+                    Text("HD")
+                        .font(.system(size: 14, weight: .bold))
+                        .foregroundColor(
+                            isEnabled
+                            ? (isOn ? .yellow : .white.opacity(0.92))
+                            : .white.opacity(0.35)
+                        )
+                }
+                .frame(width: size, height: size)
+                .contentShape(Circle())
+                .scaleEffect(isPopping ? 1.12 : 1.0)
+                .pressScaleEffect(isPressed)
+            }
+            .buttonStyle(.plain)
+            .frame(width: size, height: size)
+            .disabled(!isEnabled)
+            .simultaneousGesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { _ in isPressed = true }
+                    .onEnded { _ in isPressed = false }
+            )
+        }
+    }
+    
+    private func hdQuickButton(size: CGFloat = 44) -> some View {
+        HDQuickButton(
+            size: size,
+            hasDetailNote: hasDetailNote,
+            isEnabled: camera.hdSupported,
+            isOn: camera.effectiveHDEnabled,
+            onToggle: {
+                camera.manualHDEnabled.toggle()
+            },
+            onForcedTap: {
+                // Do nothing here. We just want the pop feedback.
+            },
+            onHaptic: {
+                fireHDButtonHaptic()
+            }
         )
     }
-
+    private struct PopDetailNoteButton: View {
+        let size: CGFloat
+        let hasDetailNote: Bool
+        let onHaptic: () -> Void
+        let onTap: () -> Void
+        
+        @State private var isPressed: Bool = false
+        @State private var isPopping: Bool = false
+        
+        private func triggerPop() {
+            withAnimation(.interactiveSpring(response: 0.22, dampingFraction: 0.62, blendDuration: 0.08)) {
+                isPopping = true
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.16) {
+                withAnimation(.interactiveSpring(response: 0.22, dampingFraction: 0.72, blendDuration: 0.08)) {
+                    isPopping = false
+                }
+            }
+        }
+        
+        var body: some View {
+            Button(action: {
+                onHaptic()
+                triggerPop()
+                onTap()
+            }) {
+                ZStack {
+                    Circle()
+                        .fill(Color.white.opacity(hasDetailNote ? 0.20 : 0.14))
+                        .frame(width: size, height: size)
+                    
+                    Circle()
+                        .stroke(
+                            hasDetailNote ? Color.yellow.opacity(0.55) : Color.clear,
+                            lineWidth: 2
+                        )
+                        .frame(width: size + 6, height: size + 6)
+                        .opacity(hasDetailNote ? 1.0 : 0.0)
+                    
+                    Image(systemName: "note.text")
+                        .font(.system(size: 20, weight: .semibold))
+                        .foregroundColor(hasDetailNote ? .yellow : .white.opacity(0.92))
+                }
+                .frame(width: size, height: size)
+                .contentShape(Circle())
+                .scaleEffect(isPopping ? 1.12 : 1.0)
+                .pressScaleEffect(isPressed)
+            }
+            .buttonStyle(.plain)
+            .frame(width: size, height: size)
+            .simultaneousGesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { _ in isPressed = true }
+                    .onEnded { _ in isPressed = false }
+            )
+        }
+    }
+    
+    private func detailNoteQuickButton(size: CGFloat = 44) -> some View {
+        PopDetailNoteButton(
+            size: size,
+            hasDetailNote: hasDetailNote,
+            onHaptic: {
+                fireQuickButtonHaptic()
+            },
+            onTap: {
+                draftDetailNote = detailNote
+                showDetailOverlay = true
+            }
+        )
+    }
+    
     private func locationModeSlider() -> some View {
         Picker("", selection: $locationMode) {
             Text("Interior").tag(LocationMode.interior)
@@ -3005,42 +3396,56 @@ struct ContentView: View {
                 .foregroundColor: UIColor.white.withAlphaComponent(0.92),
                 .font: UIFont.systemFont(ofSize: 17, weight: .semibold)
             ]
-
+            
             let selectedAttrs: [NSAttributedString.Key: Any] = [
                 .foregroundColor: UIColor.systemYellow,
                 .font: UIFont.systemFont(ofSize: 17, weight: .semibold)
             ]
-
+            
             UISegmentedControl.appearance().setTitleTextAttributes(normalAttrs, for: .normal)
             UISegmentedControl.appearance().setTitleTextAttributes(selectedAttrs, for: .selected)
         }
         .frame(width: 190)
         .frame(height: 44) // force exact match with 44pt note button height
     }
-
+    
     private func zoomRowNativeCentered(inWidth w: CGFloat) -> some View {
         let itemW: CGFloat = 36
         let spacing: CGFloat = 10
-
+        
         let steps = camera.zoomSteps
         let count = steps.count
-
+        
         let selectedIndex: Int = {
             if let i = steps.firstIndex(where: { camera.isZoomSelected($0) }) { return i }
             return 0
         }()
-
+        
         let totalW = CGFloat(count) * itemW + CGFloat(max(0, count - 1)) * spacing
         let leading = (w - totalW) / 2.0
         let selectedCenterX = leading + CGFloat(selectedIndex) * (itemW + spacing) + (itemW / 2.0)
         let offsetX = (w / 2.0) - selectedCenterX
-
+        
+        // Key used to animate reflow when the available zoom steps change (for example HD toggles).
+        let stepsKey = steps.map { String(describing: $0.id) }.joined(separator: ",")
+        
+        let reflowAnimation = Animation.interactiveSpring(
+            response: 0.34,
+            dampingFraction: 0.88,
+            blendDuration: 0.12
+        )
+        
+        let buttonTransition: AnyTransition = .asymmetric(
+            insertion: .move(edge: .bottom).combined(with: .opacity),
+            removal: .move(edge: .bottom).combined(with: .opacity)
+        )
+        
         return HStack(spacing: spacing) {
             ForEach(steps) { step in
                 let selected = camera.isZoomSelected(step)
                 let base = (step.label == "1") ? "1" : step.label
                 let label = selected ? "\(base)x" : base
-
+                
                 Button(action: { camera.setZoomStep(step) }) {
                     Text(label)
                         .font(.system(size: 15, weight: selected ? .semibold : .regular))
@@ -3063,34 +3468,39 @@ struct ContentView: View {
                         )
                 }
                 .buttonStyle(.plain)
+                // Animate insert/remove (example: 2x and 8x disappear in HD)
+                .transition(buttonTransition)
             }
         }
+        // Keep selected zoom centered.
         .offset(x: offsetX)
-        .id(camera.selectedZoomId)
+        // Animate horizontal reflow and selection changes.
+        .animation(reflowAnimation, value: stepsKey)
+        .animation(reflowAnimation, value: camera.selectedZoomId)
         .frame(width: w, alignment: .center)
         .padding(.vertical, 2)
         .contentShape(Rectangle())
     }
-
+    
     private func directionSlider() -> some View {
-        let selection = Binding<Direction>(
-            get: { Direction.fromElevation(elevation) },
+        let selection = Binding<ContentView.Direction>(
+            get: { ContentView.Direction.fromElevation(elevation) },
             set: { elevation = $0.elevationValue }
         )
-
+        
         return DirectionSegmentedControl(selection: selection)
             .frame(maxWidth: .infinity)
             .frame(height: 56)
     }
-
+    
     private struct DirectionSegmentedControl: UIViewRepresentable {
-
-        @Binding var selection: Direction
-
+        
+        @Binding var selection: ContentView.Direction
+        
         func makeCoordinator() -> Coordinator {
             Coordinator(parent: self)
         }
-
+        
         func makeUIView(context: Context) -> UISegmentedControl {
             let control = TallSegmentedControl(items: [
                 "NORTH",
@@ -3098,59 +3508,59 @@ struct ContentView: View {
                 "EAST",
                 "WEST"
             ])
-
+            
             // Match selection
             control.selectedSegmentIndex = index(for: selection)
             control.addTarget(context.coordinator, action: #selector(Coordinator.changed(_:)), for: .valueChanged)
-
+            
             // Even distribution like native pills
             control.apportionsSegmentWidthsByContent = false
-
+            
             // Use native UIKit appearance (no custom background or border styling)
-
+            
             // Typography + Photos-style selected blue
             let normalAttrs: [NSAttributedString.Key: Any] = [
                 .foregroundColor: UIColor.white.withAlphaComponent(0.88),
                 .font: UIFont.systemFont(ofSize: 17, weight: .semibold)
             ]
-
+            
             let selectedAttrs: [NSAttributedString.Key: Any] = [
                 .foregroundColor: UIColor.systemBlue,
                 .font: UIFont.systemFont(ofSize: 17, weight: .semibold)
             ]
-
+            
             control.setTitleTextAttributes(normalAttrs, for: .normal)
             control.setTitleTextAttributes(selectedAttrs, for: .selected)
-
+            
             // Make it taller (Music-style) without custom drawing
             control.forcedHeight = 56
-
+            
             return control
         }
-
+        
         func updateUIView(_ uiView: UISegmentedControl, context: Context) {
             let idx = index(for: selection)
             if uiView.selectedSegmentIndex != idx {
                 uiView.selectedSegmentIndex = idx
             }
         }
-
+        
         private final class TallSegmentedControl: UISegmentedControl {
             var forcedHeight: CGFloat = 56
-
+            
             override var intrinsicContentSize: CGSize {
                 let size = super.intrinsicContentSize
                 return CGSize(width: size.width, height: forcedHeight)
             }
-
+            
             override func layoutSubviews() {
                 super.layoutSubviews()
                 // Ensure the control re-evaluates size after layout changes
                 invalidateIntrinsicContentSize()
             }
         }
-
-        private func index(for dir: Direction) -> Int {
+        
+        private func index(for dir: ContentView.Direction) -> Int {
             switch dir {
             case .north: return 0
             case .south: return 1
@@ -3158,39 +3568,39 @@ struct ContentView: View {
             case .west:  return 3
             }
         }
-
+        
         final class Coordinator: NSObject {
             var parent: DirectionSegmentedControl
-
+            
             init(parent: DirectionSegmentedControl) {
                 self.parent = parent
             }
-
+            
             @objc func changed(_ sender: UISegmentedControl) {
                 switch sender.selectedSegmentIndex {
-                case 0: parent.selection = .north
-                case 1: parent.selection = .south
-                case 2: parent.selection = .east
-                case 3: parent.selection = .west
-                default: parent.selection = .north
+                case 0: parent.selection = ContentView.Direction.north
+                case 1: parent.selection = ContentView.Direction.south
+                case 2: parent.selection = ContentView.Direction.east
+                case 3: parent.selection = ContentView.Direction.west
+                default: parent.selection = ContentView.Direction.north
                 }
             }
         }
     }
-
-
+    
+    
     private func rightButtonsCluster() -> some View {
         let r: CGFloat = 24
         let gap: CGFloat = 14
         let xOffset: CGFloat = (r + gap)
-
+        
         func circleIconButton(systemName: String, selected: Bool, action: @escaping () -> Void) -> some View {
             Button(action: action) {
                 ZStack {
                     Circle()
                         .fill(selected ? Color.white : Color.white.opacity(0.18))
                         .frame(width: 52, height: 52)
-
+                    
                     Image(systemName: systemName)
                         .font(.system(size: 20, weight: .semibold))
                         .foregroundColor(selected ? .black : .white)
@@ -3200,16 +3610,16 @@ struct ContentView: View {
             }
             .buttonStyle(.plain)
         }
-
+        
         let lastAsset = reportLibrary.assets.last
-
+        
         return ZStack {
             circleIconButton(systemName: "note.text", selected: hasDetailNote) {
                 draftDetailNote = detailNote
                 showDetailOverlay = true
             }
             .offset(x: -xOffset, y: 0)
-
+            
             RecentAlbumPreviewCircleButton(
                 lastAsset: lastAsset,
                 size: 52,
@@ -3219,11 +3629,21 @@ struct ContentView: View {
             .offset(x: xOffset, y: 0)
         }
     }
-
+    
+    private func fireQuickButtonHaptic() {
+        quickButtonHaptic.impactOccurred()
+        quickButtonHaptic.prepare()
+    }
+    
+    private func fireHDButtonHaptic() {
+        quickButtonHaptic.impactOccurred()
+        quickButtonHaptic.prepare()
+    }
+    
     private func capture() {
         camera.capturePhoto { data in
             guard let data else { return }
-
+            
             reportLibrary.savePhotoDataToAlbum(data: data, location: locationManager.lastLocation) { success in
                 DispatchQueue.main.async {
                     if success {
@@ -3242,794 +3662,818 @@ struct ContentView: View {
             }
         }
     }
-}
-
-
-
-// MARK: - Report Library Fullscreen (Grid)
-
-private struct ReportLibraryFullscreen: View {
-
-    @ObservedObject var reportLibrary: ReportLibraryModel
-    @ObservedObject var cache: AssetImageCache
-
-    @Environment(\.dismiss) private var dismiss
-    @State private var orientationResetToken: Int = 0
-    // Physical device orientation (UI is portrait locked, we rotate the content ourselves)
-    @State private var lastValidOrientation: UIDeviceOrientation = .portrait
-
-    private var isLandscape: Bool {
-        lastValidOrientation == .landscapeLeft || lastValidOrientation == .landscapeRight
-    }
-
-    private var rotationDegrees: Double {
-        switch lastValidOrientation {
-        case .landscapeLeft:
-            return 90
-        case .landscapeRight:
-            return -90
-        default:
-            return 0
-        }
-    }
-
-    private func refreshOrientation() {
-        let o = UIDevice.current.orientation
-
-        // Accept only portrait (upright) and the two landscapes.
-        // Explicitly ignore portraitUpsideDown so the UI does not snap back to portrait when the phone is inverted.
-        // Also ignore transitional/invalid states (faceUp, faceDown, unknown).
-        let newValue: UIDeviceOrientation? = {
-            switch o {
-            case .portrait:
-                return .portrait
-            case .landscapeLeft, .landscapeRight:
-                return o
-            default:
-                return nil
-            }
-        }()
-
-        guard let newValue else { return }
-        guard newValue != lastValidOrientation else { return }
-        lastValidOrientation = newValue
-
-        // Rebuild zoom view so it re-fits instead of keeping an old zoom scale
-        orientationResetToken &+= 1
-    }
-
-    private struct ViewerState: Identifiable {
-        let id = UUID()
-        let startIndex: Int
-    }
-
-    @State private var viewerState: ViewerState? = nil
-
-    var body: some View {
-        GeometryReader { geo in
-            let w = geo.size.width
-            let h = geo.size.height
-
-            // When we rotate content inside a portrait locked app, swap the content frame.
-            let contentW = isLandscape ? h : w
-            let contentH = isLandscape ? w : h
-
-            // Grid config
-            let columnsCount: Int = isLandscape ? 5 : 3
-
-            // Portrait should be tight (nearly touching), like landscape
-            let spacing: CGFloat = isLandscape ? 2 : 2
-
-            // Reduce portrait side padding so it reads closer to edge to edge
-            let horizontalPadding: CGFloat = isLandscape ? 0 : 2
-
-            let totalSpacing = CGFloat(max(0, columnsCount - 1)) * spacing
-            let side = (contentW - (horizontalPadding * 2) - totalSpacing) / CGFloat(columnsCount)
-            let headerH: CGFloat = isLandscape ? 96 : 112
-
-            ZStack {
-                Color.black.ignoresSafeArea()
-
-                // Rotated content container
-                ZStack {
-                    // Grid
-                    ScrollView(.vertical, showsIndicators: false) {
-                        LazyVGrid(
-                            columns: Array(repeating: GridItem(.fixed(side), spacing: spacing, alignment: .center), count: columnsCount),
-                            alignment: .center,
-                            spacing: spacing
-                        ) {
-                            ForEach(Array(reportLibrary.assets.enumerated()), id: \.element.localIdentifier) { idx, asset in
-                                LibraryThumb(asset: asset, cache: cache, side: side)
-                                    .contentShape(Rectangle())
-                                    .onTapGesture {
-                                        viewerState = ViewerState(startIndex: idx)
-                                    }
-                            }
-                        }
-                        .padding(.horizontal, horizontalPadding)
-                        .padding(.top, headerH)
-                        .padding(.bottom, isLandscape ? 0 : 8)
-                    }
-                    // In landscape, remove safe areas so the grid goes edge to edge.
-                    .ignoresSafeArea(isLandscape ? .all : [])
-
-                    // Header overlay (Photos style): stays visible, content can scroll behind it.
-                    headerOverlay()
-                        .zIndex(50)
-                }
-                .frame(width: contentW, height: contentH, alignment: .center)
-                .rotationEffect(.degrees(rotationDegrees))
-                .position(x: w * 0.5, y: h * 0.5)
-            }
-            // Hide the status bar only in landscape.
-            .statusBarHidden(isLandscape)
-            .onAppear {
-                UIDevice.current.beginGeneratingDeviceOrientationNotifications()
-                refreshOrientation()
-            }
-            .onReceive(NotificationCenter.default.publisher(for: UIDevice.orientationDidChangeNotification)) { _ in
-                refreshOrientation()
-            }
-            .onDisappear {
-                UIDevice.current.endGeneratingDeviceOrientationNotifications()
-            }
-        }
-        .fullScreenCover(item: $viewerState) { state in
-            ReportPhotoViewer(
-                title: reportLibrary.albumTitle,
-                assets: reportLibrary.assets,
-                startIndex: state.startIndex,
-                cache: cache,
-                viewerToken: state.startIndex
-            )
-        }
-    }
-
-    @ViewBuilder
-    private func headerOverlay() -> some View {
-        VStack(spacing: 0) {
-            ZStack {
-                // Opaque gradient that keeps header readable while allowing photos behind it.
-                LinearGradient(
-                    colors: [
-                        Color.black.opacity(0.92),
-                        Color.black.opacity(0.70),
-                        Color.black.opacity(0.35),
-                        Color.black.opacity(0.0)
-                    ],
-                    startPoint: .top,
-                    endPoint: .bottom
-                )
-                .ignoresSafeArea(edges: .top)
-                .allowsHitTesting(false)
-
-                HStack {
-                    Text(reportLibrary.albumTitle)
-                        .font(.system(size: 20, weight: .bold))
-                        .foregroundColor(.white)
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.75)
-
-                    Spacer(minLength: 0)
-
-                    Button {
-                        dismiss()
-                    } label: {
-                        Text("Done")
-                            .font(.system(size: 17, weight: .semibold))
-                            .foregroundColor(.white)
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 8)
-                            .background(Color.black.opacity(0.35))
-                            .clipShape(RoundedRectangle(cornerRadius: 12))
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 12)
-                                    .stroke(Color.white.opacity(0.28), lineWidth: 1)
-                            )
-                    }
-                    .buttonStyle(.plain)
-                }
-                .padding(.horizontal, 14)
-                .padding(.top, isLandscape ? 10 : 50)
-                .padding(.bottom, 10)
-            }
-            .frame(height: isLandscape ? 96 : 112)
-
-            Spacer(minLength: 0)
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-        .allowsHitTesting(true)
-    }
-
-    private struct LibraryThumb: View {
-
-        let asset: PHAsset
+    
+    
+    
+    
+    
+    // MARK: - Report Library Fullscreen (Grid)
+    
+    private struct ReportLibraryFullscreen: View {
+        
+        @ObservedObject var reportLibrary: ReportLibraryModel
         @ObservedObject var cache: AssetImageCache
-        let side: CGFloat
-
-        @State private var img: UIImage? = nil
-
-        var body: some View {
-            ZStack {
-                Color.black
-
-                if let img {
-                    Image(uiImage: img)
-                        .resizable()
-                        .scaledToFill()
-                        .frame(width: side, height: side)
-                        .clipped()
-                } else {
-                    Color.white.opacity(0.06)
-                        .frame(width: side, height: side)
-                }
-            }
-            .frame(width: side, height: side)
-            .clipped()
-            .onAppear {
-                if img != nil { return }
-                let scale = UIScreen.currentScale
-                let px = max(300, side * 3) * scale
-                cache.requestThumbnail(for: asset, pixelSize: px) { im in
-                    DispatchQueue.main.async {
-                        self.img = im
-                    }
-                }
+        
+        @Environment(\.dismiss) private var dismiss
+        @State private var orientationResetToken: Int = 0
+        // Physical device orientation (UI is portrait locked, we rotate the content ourselves)
+        @State private var lastValidOrientation: UIDeviceOrientation = .portrait
+        
+        private var isLandscape: Bool {
+            lastValidOrientation == .landscapeLeft || lastValidOrientation == .landscapeRight
+        }
+        
+        private var rotationDegrees: Double {
+            switch lastValidOrientation {
+            case .landscapeLeft:
+                return 90
+            case .landscapeRight:
+                return -90
+            default:
+                return 0
             }
         }
-    }
-}
-
-
-
-// MARK: - Detail Note Modal (rotates + landscape keyboard)
-
-import Photos
-
-
-private struct DetailNoteModal: View {
-
-    let elevation: String
-    let detailType: String
-    let existingNote: String
-
-    let onCancel: () -> Void
-    let onSave: (String) -> Void
-
-    @State private var draft: String
-    @FocusState private var isFocused: Bool
-
-    init(
-        elevation: String,
-        detailType: String,
-        existingNote: String,
-        onCancel: @escaping () -> Void,
-        onSave: @escaping (String) -> Void
-    ) {
-        self.elevation = elevation
-        self.detailType = detailType
-        self.existingNote = existingNote
-        self.onCancel = onCancel
-        self.onSave = onSave
-        _draft = State(initialValue: existingNote)
-    }
-
-    private var hasExistingNote: Bool {
-        !existingNote.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-    }
-
-    var body: some View {
-        ZStack {
-            // Opaque background (match grouped list background). Camera preview should not show through.
-            Color.black
-                .ignoresSafeArea()
-                .contentShape(Rectangle())
-                .onTapGesture {
-                    isFocused = false
-                    onCancel()
+        
+        private func refreshOrientation() {
+            let o = UIDevice.current.orientation
+            
+            // Accept only portrait (upright) and the two landscapes.
+            // Explicitly ignore portraitUpsideDown so the UI does not snap back to portrait when the phone is inverted.
+            // Also ignore transitional/invalid states (faceUp, faceDown, unknown).
+            let newValue: UIDeviceOrientation? = {
+                switch o {
+                case .portrait:
+                    return .portrait
+                case .landscapeLeft, .landscapeRight:
+                    return o
+                default:
+                    return nil
                 }
-
-            VStack(spacing: 12) {
-                Text("\(elevation)  \(detailType)")
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundColor(.white.opacity(0.92))
-                    .lineLimit(1)
-
-                ZStack(alignment: .trailing) {
-                    TextField("Enter detail note", text: $draft)
-                        .textInputAutocapitalization(.sentences)
-                        .autocorrectionDisabled(false)
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 12)
-                        .padding(.trailing, draft.isEmpty ? 12 : 34)
-                        .background(Color(uiColor: .secondarySystemGroupedBackground))
-                        .clipShape(RoundedRectangle(cornerRadius: 12))
-                        .foregroundColor(.primary)
-                        .focused($isFocused)
-                        .submitLabel(.done)
-                        .onSubmit {
-                            let trimmed = draft.trimmingCharacters(in: .whitespacesAndNewlines)
-                            onSave(trimmed)
+            }()
+            
+            guard let newValue else { return }
+            guard newValue != lastValidOrientation else { return }
+            lastValidOrientation = newValue
+            
+            // Rebuild zoom view so it re-fits instead of keeping an old zoom scale
+            orientationResetToken &+= 1
+        }
+        
+        private struct ViewerState: Identifiable {
+            let id = UUID()
+            let startIndex: Int
+        }
+        
+        @State private var viewerState: ViewerState? = nil
+        
+        var body: some View {
+            GeometryReader { geo in
+                let w = geo.size.width
+                let h = geo.size.height
+                
+                // When we rotate content inside a portrait locked app, swap the content frame.
+                let contentW = isLandscape ? h : w
+                let contentH = isLandscape ? w : h
+                
+                // Grid config
+                let columnsCount: Int = isLandscape ? 5 : 3
+                
+                // Portrait should be tight (nearly touching), like landscape
+                let spacing: CGFloat = isLandscape ? 2 : 2
+                
+                // Reduce portrait side padding so it reads closer to edge to edge
+                let horizontalPadding: CGFloat = isLandscape ? 0 : 2
+                
+                let totalSpacing = CGFloat(max(0, columnsCount - 1)) * spacing
+                let side = (contentW - (horizontalPadding * 2) - totalSpacing) / CGFloat(columnsCount)
+                let headerH: CGFloat = isLandscape ? 96 : 112
+                
+                ZStack {
+                    Color.black.ignoresSafeArea()
+                    
+                    // Rotated content container
+                    ZStack {
+                        // Grid
+                        ScrollView(.vertical, showsIndicators: false) {
+                            LazyVGrid(
+                                columns: Array(repeating: GridItem(.fixed(side), spacing: spacing, alignment: .center), count: columnsCount),
+                                alignment: .center,
+                                spacing: spacing
+                            ) {
+                                ForEach(Array(reportLibrary.assets.enumerated()), id: \.element.localIdentifier) { idx, asset in
+                                    LibraryThumb(asset: asset, cache: cache, side: side)
+                                        .contentShape(Rectangle())
+                                        .onTapGesture {
+                                            viewerState = ViewerState(startIndex: idx)
+                                        }
+                                }
+                            }
+                            .padding(.horizontal, horizontalPadding)
+                            .padding(.top, headerH)
+                            .padding(.bottom, isLandscape ? 0 : 8)
                         }
-
-                    if !draft.isEmpty {
-                        Button { draft = "" } label: {
-                            Image(systemName: "xmark.circle.fill")
-                                .font(.system(size: 18, weight: .semibold))
-                                .foregroundColor(.secondary)
-                                .padding(.trailing, 10)
+                        // In landscape, remove safe areas so the grid goes edge to edge.
+                        .ignoresSafeArea(isLandscape ? .all : [])
+                        
+                        // Header overlay (Photos style): stays visible, content can scroll behind it.
+                        headerOverlay()
+                            .zIndex(50)
+                    }
+                    .frame(width: contentW, height: contentH, alignment: .center)
+                    .rotationEffect(.degrees(rotationDegrees))
+                    .position(x: w * 0.5, y: h * 0.5)
+                }
+                // Hide the status bar only in landscape.
+                .statusBarHidden(isLandscape)
+                .onAppear {
+                    UIDevice.current.beginGeneratingDeviceOrientationNotifications()
+                    refreshOrientation()
+                }
+                .onReceive(NotificationCenter.default.publisher(for: UIDevice.orientationDidChangeNotification)) { _ in
+                    refreshOrientation()
+                }
+                .onDisappear {
+                    UIDevice.current.endGeneratingDeviceOrientationNotifications()
+                }
+            }
+            .fullScreenCover(item: $viewerState) { state in
+                ReportPhotoViewer(
+                    title: reportLibrary.albumTitle,
+                    assets: reportLibrary.assets,
+                    startIndex: state.startIndex,
+                    cache: cache,
+                    viewerToken: state.startIndex
+                )
+            }
+        }
+        
+        @ViewBuilder
+        private func headerOverlay() -> some View {
+            VStack(spacing: 0) {
+                ZStack {
+                    // Opaque gradient that keeps header readable while allowing photos behind it.
+                    LinearGradient(
+                        colors: [
+                            Color.black.opacity(0.92),
+                            Color.black.opacity(0.70),
+                            Color.black.opacity(0.35),
+                            Color.black.opacity(0.0)
+                        ],
+                        startPoint: .top,
+                        endPoint: .bottom
+                    )
+                    .ignoresSafeArea(edges: .top)
+                    .allowsHitTesting(false)
+                    
+                    HStack {
+                        Text(reportLibrary.albumTitle)
+                            .font(.system(size: 20, weight: .bold))
+                            .foregroundColor(.white)
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.75)
+                        
+                        Spacer(minLength: 0)
+                        
+                        Button {
+                            dismiss()
+                        } label: {
+                            Text("Done")
+                                .font(.system(size: 17, weight: .semibold))
+                                .foregroundColor(.white)
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 8)
+                                .background(Color.black.opacity(0.35))
+                                .clipShape(RoundedRectangle(cornerRadius: 12))
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 12)
+                                        .stroke(Color.white.opacity(0.28), lineWidth: 1)
+                                )
                         }
                         .buttonStyle(.plain)
                     }
+                    .padding(.horizontal, 14)
+                    .padding(.top, isLandscape ? 10 : 50)
+                    .padding(.bottom, 10)
                 }
-
-                HStack(spacing: 10) {
-                    Button(action: {
+                .frame(height: isLandscape ? 96 : 112)
+                
+                Spacer(minLength: 0)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+            .allowsHitTesting(true)
+        }
+        
+        private struct LibraryThumb: View {
+            
+            let asset: PHAsset
+            @ObservedObject var cache: AssetImageCache
+            let side: CGFloat
+            
+            @State private var img: UIImage? = nil
+            
+            var body: some View {
+                ZStack {
+                    Color.black
+                    
+                    if let img {
+                        Image(uiImage: img)
+                            .resizable()
+                            .scaledToFill()
+                            .frame(width: side, height: side)
+                            .clipped()
+                    } else {
+                        Color.white.opacity(0.06)
+                            .frame(width: side, height: side)
+                    }
+                }
+                .frame(width: side, height: side)
+                .clipped()
+                .onAppear {
+                    if img != nil { return }
+                    let scale = UIScreen.currentScale
+                    let px = max(300, side * 3) * scale
+                    cache.requestThumbnail(for: asset, pixelSize: px) { im in
+                        DispatchQueue.main.async {
+                            self.img = im
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    
+    
+    // MARK: - Detail Note Modal (rotates + landscape keyboard)
+    
+    
+    
+    
+    private struct DetailNoteModal: View {
+        
+        let elevation: String
+        let detailType: String
+        let existingNote: String
+        
+        let onCancel: () -> Void
+        let onSave: (String) -> Void
+        
+        @State private var draft: String
+        @FocusState private var isFocused: Bool
+        
+        init(
+            elevation: String,
+            detailType: String,
+            existingNote: String,
+            onCancel: @escaping () -> Void,
+            onSave: @escaping (String) -> Void
+        ) {
+            self.elevation = elevation
+            self.detailType = detailType
+            self.existingNote = existingNote
+            self.onCancel = onCancel
+            self.onSave = onSave
+            _draft = State(initialValue: existingNote)
+        }
+        
+        private var hasExistingNote: Bool {
+            !existingNote.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }
+        
+        var body: some View {
+            ZStack {
+                // Opaque background (match grouped list background). Camera preview should not show through.
+                Color.black
+                    .ignoresSafeArea()
+                    .contentShape(Rectangle())
+                    .onTapGesture {
                         isFocused = false
                         onCancel()
-                    }) {
-                        Text("Cancel")
-                            .font(.system(size: 15, weight: .semibold))
-                            .foregroundColor(.white.opacity(0.90))
-                            .frame(maxWidth: .infinity)
-                            .frame(height: 44)
-                            .contentShape(Rectangle())
                     }
-                    .buttonStyle(.plain)
-                    .background(Color.white.opacity(0.10))
-                    .clipShape(RoundedRectangle(cornerRadius: 12))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 12)
-                            .stroke(Color.white.opacity(0.12), lineWidth: 1)
-                    )
-                    .contentShape(Rectangle())
-
-                    Button(action: {
-                        isFocused = false
-                        let trimmed = draft.trimmingCharacters(in: .whitespacesAndNewlines)
-                        onSave(trimmed)
-                    }) {
-                        Text(hasExistingNote ? "Update" : "Save")
-                            .font(.system(size: 15, weight: .semibold))
-                            .foregroundColor(.black)
-                            .frame(maxWidth: .infinity)
-                            .frame(height: 44)
-                            .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                    .background(Color.white.opacity(0.92))
-                    .clipShape(RoundedRectangle(cornerRadius: 12))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 12)
-                            .stroke(Color.black.opacity(0.10), lineWidth: 1)
-                    )
-                    .contentShape(Rectangle())
-                }
-            }
-            .padding(16)
-            // Match the same adaptive grouped background used by the Interior/Exterior managed lists
-            .background(Color.black.opacity(0.92))
-            .clipShape(RoundedRectangle(cornerRadius: 16))
-            .overlay(
-                RoundedRectangle(cornerRadius: 16)
-                    .stroke(Color.white.opacity(0.18), lineWidth: 1)
-            )
-            .padding(.horizontal, 18)
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
-            .offset(y: 0)
-        }
-        .onAppear {
-            // Focus immediately
-            isFocused = true
-        }
-        // Keep the popup centered. Do not let SwiftUI move the layout to avoid the keyboard.
-        .ignoresSafeArea(.keyboard, edges: .bottom)
-    }
-}
-
-// MARK: - Manage Detail Types View
-
-private struct ManageDetailTypesView: View {
-
-    let mode: ContentView.LocationMode
-    @ObservedObject var model: DetailTypesModel
-
-    @Environment(\.dismiss) private var dismiss
-    @State private var editModeState: EditMode = .inactive
-    @FocusState private var focusedRow: UUID?
-
-    private var titleText: String {
-        mode == .interior ? "Interior Detail Types" : "Exterior Detail Types"
-    }
-
-    private var isEditing: Bool { editModeState == .active }
-
-    var body: some View {
-        NavigationStack {
-            List {
-                let items = model.types(for: mode)
-
-                ForEach(items) { item in
-                    rowView(item: item)
-                }
-                .onDelete { offsets in
-                    withAnimation(.none) { model.delete(at: offsets, for: mode) }
-                }
-                .onMove { source, destination in
-                    withAnimation(.none) { model.move(from: source, to: destination, for: mode) } // fixed label for iOS 26
-                }
-            }
-            .environment(\.editMode, $editModeState)
-            .listStyle(.insetGrouped)
-            .navigationTitle(titleText)
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button {
-                        if editModeState != .active { editModeState = .active }
-                        let newId = model.insertBlankItem(for: mode)
-                        DispatchQueue.main.async { focusedRow = newId }
-                    } label: {
-                        Image(systemName: "plus")
-                            .font(.system(size: 16, weight: .semibold))
-                    }
-                }
-
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button {
-                        if editModeState == .active {
-                            editModeState = .inactive
-                            focusedRow = nil
-                        } else {
-                            editModeState = .active
+                
+                VStack(spacing: 12) {
+                    Text("\(elevation)  \(detailType)")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundColor(.white.opacity(0.92))
+                        .lineLimit(1)
+                    
+                    ZStack(alignment: .trailing) {
+                        TextField("Enter detail note", text: $draft)
+                            .textInputAutocapitalization(.sentences)
+                            .autocorrectionDisabled(false)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 12)
+                            .padding(.trailing, draft.isEmpty ? 12 : 34)
+                            .background(Color(uiColor: .secondarySystemGroupedBackground))
+                            .clipShape(RoundedRectangle(cornerRadius: 12))
+                            .foregroundColor(.primary)
+                            .focused($isFocused)
+                            .submitLabel(.done)
+                            .onSubmit {
+                                let trimmed = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+                                onSave(trimmed)
+                            }
+                        
+                        if !draft.isEmpty {
+                            Button { draft = "" } label: {
+                                Image(systemName: "xmark.circle.fill")
+                                    .font(.system(size: 18, weight: .semibold))
+                                    .foregroundColor(.secondary)
+                                    .padding(.trailing, 10)
+                            }
+                            .buttonStyle(.plain)
                         }
-                    } label: {
-                        if editModeState == .active {
-                            Image(systemName: "checkmark.circle.fill")
-                                .font(.system(size: 18, weight: .semibold))
-                        } else {
-                            Text("Edit")
+                    }
+                    
+                    HStack(spacing: 10) {
+                        Button(action: {
+                            isFocused = false
+                            onCancel()
+                        }) {
+                            Text("Cancel")
+                                .font(.system(size: 15, weight: .semibold))
+                                .foregroundColor(.white.opacity(0.90))
+                                .frame(maxWidth: .infinity)
+                                .frame(height: 44)
+                                .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .background(Color.white.opacity(0.10))
+                        .clipShape(RoundedRectangle(cornerRadius: 12))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 12)
+                                .stroke(Color.white.opacity(0.12), lineWidth: 1)
+                        )
+                        .contentShape(Rectangle())
+                        
+                        Button(action: {
+                            isFocused = false
+                            let trimmed = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+                            onSave(trimmed)
+                        }) {
+                            Text(hasExistingNote ? "Update" : "Save")
+                                .font(.system(size: 15, weight: .semibold))
+                                .foregroundColor(.black)
+                                .frame(maxWidth: .infinity)
+                                .frame(height: 44)
+                                .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .background(Color.white.opacity(0.92))
+                        .clipShape(RoundedRectangle(cornerRadius: 12))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 12)
+                                .stroke(Color.black.opacity(0.10), lineWidth: 1)
+                        )
+                        .contentShape(Rectangle())
+                    }
+                }
+                .padding(16)
+                // Match the same adaptive grouped background used by the Interior/Exterior managed lists
+                .background(Color.black.opacity(0.92))
+                .clipShape(RoundedRectangle(cornerRadius: 16))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 16)
+                        .stroke(Color.white.opacity(0.18), lineWidth: 1)
+                )
+                .padding(.horizontal, 18)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+                .offset(y: 0)
+            }
+            .onAppear {
+                // Focus immediately
+                isFocused = true
+            }
+            // Keep the popup centered. Do not let SwiftUI move the layout to avoid the keyboard.
+            .ignoresSafeArea(.keyboard, edges: .bottom)
+        }
+    }
+    
+    // MARK: - Manage Detail Types View
+    
+    private struct ManageDetailTypesView: View {
+        
+        let mode: ContentView.LocationMode
+        @ObservedObject var model: DetailTypesModel
+        
+        @Environment(\.dismiss) private var dismiss
+        @State private var editModeState: EditMode = .inactive
+        @FocusState private var focusedRow: UUID?
+        
+        private var titleText: String {
+            mode == .interior ? "Interior Detail Types" : "Exterior Detail Types"
+        }
+        
+        private var isEditing: Bool { editModeState == .active }
+        
+        var body: some View {
+            NavigationStack {
+                List {
+                    let items = model.types(for: mode)
+                    
+                    ForEach(items) { item in
+                        rowView(item: item)
+                    }
+                    .onDelete { offsets in
+                        withAnimation(.none) { model.delete(at: offsets, for: mode) }
+                    }
+                    .onMove { source, destination in
+                        withAnimation(.none) { model.move(from: source, to: destination, for: mode) } // fixed label for iOS 26
+                    }
+                }
+                .environment(\.editMode, $editModeState)
+                .listStyle(.insetGrouped)
+                .navigationTitle(titleText)
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    
+                    ToolbarItem(placement: .topBarTrailing) {
+                        Button {
+                            if editModeState != .active { editModeState = .active }
+                            let newId = model.insertBlankItem(for: mode)
+                            DispatchQueue.main.async { focusedRow = newId }
+                        } label: {
+                            Image(systemName: "plus")
                                 .font(.system(size: 16, weight: .semibold))
                         }
                     }
-                }
-
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Done") { dismiss() }
-                }
-            }
-        }
-    }
-
-    @ViewBuilder
-    private func rowView(item: DetailTypesModel.DetailTypeItem) -> some View {
-        if isEditing {
-            TextField("Name", text: bindingForRow(id: item.id))
-                .focused($focusedRow, equals: item.id)
-                .submitLabel(.done)
-                .onSubmit { focusedRow = nil }
-        } else {
-            Text(item.name.isEmpty ? " " : item.name)
-                .font(.system(size: 16, weight: .regular))
-                .foregroundColor(.primary)
-        }
-    }
-
-    private func bindingForRow(id: UUID) -> Binding<String> {
-        Binding(
-            get: {
-                let items = model.types(for: mode)
-                return items.first(where: { $0.id == id })?.name ?? ""
-            },
-            set: { newValue in
-                withAnimation(.none) {
-                    model.updateItem(newValue, id: id, for: mode)
-                }
-            }
-        )
-    }
-}
-
-// MARK: - Quick Menu Sheet
-
-private struct QuickMenuSheet: View {
-
-    let glyphRotationAngle: Angle
-    let flashSetting: CameraManager.FlashSetting
-
-    @Binding var isGridOn: Bool
-    @Binding var isLevelOn: Bool
-
-    let onInteriorList: () -> Void
-    let onStamp: () -> Void
-    let onExteriorList: () -> Void
-    let onFlash: () -> Void
-    let onCameraSwap: () -> Void
-
-    var body: some View {
-        GeometryReader { geo in
-            let spacing: CGFloat = 12
-            let contentW = geo.size.width - 36
-            let btnW = (contentW - (spacing * 2)) / 3.0
-            let bottomInset = (btnW / 2.0) + (spacing / 2.0)
-
-            NavigationStack {
-                ZStack {
-                    Color(white: 0.10).ignoresSafeArea()
-
-                    VStack(spacing: 18) {
-
-                        HStack(spacing: spacing) {
-                            QuickMenuButton(glyphRotationAngle: glyphRotationAngle, icon: "seal", title: "STAMP", isSelected: false, selectedStyle: false, action: onStamp)
-                                .frame(width: btnW)
-
-                            QuickMenuButton(glyphRotationAngle: glyphRotationAngle, icon: "list.bullet", title: "INTERIOR", isSelected: false, selectedStyle: false, action: onInteriorList)
-                                .frame(width: btnW)
-
-                            QuickMenuButton(glyphRotationAngle: glyphRotationAngle, icon: "list.bullet", title: "EXTERIOR", isSelected: false, selectedStyle: false, action: onExteriorList)
-                                .frame(width: btnW)
-                        }
-
-                        HStack(spacing: spacing) {
-                            let flashIcon: String = {
-                                switch flashSetting {
-                                case .off: return "bolt.slash"
-                                case .auto: return "bolt.badge.a"
-                                case .on: return "bolt"
-                                }
-                            }()
-
-                            QuickMenuButton(glyphRotationAngle: glyphRotationAngle, icon: flashIcon, title: "FLASH", isSelected: flashSetting == .on, selectedStyle: true, action: onFlash)
-                                .frame(width: btnW)
-
-                            QuickMenuButton(glyphRotationAngle: glyphRotationAngle, icon: "square.grid.3x3", title: "GRID", isSelected: isGridOn, selectedStyle: true) {
-                                isGridOn.toggle()
+                    
+                    ToolbarItem(placement: .topBarTrailing) {
+                        Button {
+                            if editModeState == .active {
+                                editModeState = .inactive
+                                focusedRow = nil
+                            } else {
+                                editModeState = .active
                             }
-                            .frame(width: btnW)
-
-                            QuickMenuButton(glyphRotationAngle: glyphRotationAngle, icon: "level", title: "LEVEL", isSelected: isLevelOn, selectedStyle: true) {
-                                isLevelOn.toggle()
+                        } label: {
+                            if editModeState == .active {
+                                Image(systemName: "checkmark.circle.fill")
+                                    .font(.system(size: 18, weight: .semibold))
+                            } else {
+                                Text("Edit")
+                                    .font(.system(size: 16, weight: .semibold))
                             }
-                            .frame(width: btnW)
                         }
-                        .padding(.horizontal, bottomInset)
-
-                        HStack {
-                            Spacer()
-                            QuickMenuButton(glyphRotationAngle: glyphRotationAngle, icon: "camera.rotate", title: "CAMERA", isSelected: false, selectedStyle: false, action: onCameraSwap)
-                                .frame(width: btnW)
-                            Spacer()
-                        }
-                        .padding(.horizontal, bottomInset)
-
-                        Spacer(minLength: 0)
                     }
-                    .padding(.top, 18)
-                    .padding(.horizontal, 18)
+                    
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button("Done") { dismiss() }
+                    }
                 }
-                .navigationBarTitleDisplayMode(.inline)
+            }
+        }
+        
+        @ViewBuilder
+        private func rowView(item: DetailTypesModel.DetailTypeItem) -> some View {
+            if isEditing {
+                TextField("Name", text: bindingForRow(id: item.id))
+                    .focused($focusedRow, equals: item.id)
+                    .submitLabel(.done)
+                    .onSubmit { focusedRow = nil }
+            } else {
+                Text(item.name.isEmpty ? " " : item.name)
+                    .font(.system(size: 16, weight: .regular))
+                    .foregroundColor(.primary)
+            }
+        }
+        
+        private func bindingForRow(id: UUID) -> Binding<String> {
+            Binding(
+                get: {
+                    let items = model.types(for: mode)
+                    return items.first(where: { $0.id == id })?.name ?? ""
+                },
+                set: { newValue in
+                    withAnimation(.none) {
+                        model.updateItem(newValue, id: id, for: mode)
+                    }
+                }
+            )
+        }
+    }
+    
+    // MARK: - Quick Menu Sheet
+    
+    private struct QuickMenuSheet: View {
+        
+        let glyphRotationAngle: Angle
+        let flashSetting: CameraManager.FlashSetting
+        
+        // Current active camera (provided by ContentView)
+        let isFrontCamera: Bool
+        
+        @Binding var isGridOn: Bool
+        @Binding var isLevelOn: Bool
+        
+        let debugEnabled: Bool
+        let onToggleDebug: (Bool) -> Void
+        let onInteriorList: () -> Void
+        let onStamp: () -> Void
+        let onExteriorList: () -> Void
+        let onFlash: () -> Void
+        
+        // Pass the target camera: true = front, false = rear
+        let onCameraSwap: () -> Void
+        
+        @State private var showCameraSwapToast: Bool = false
+        @State private var cameraSwapToastText: String = ""
+        
+        var body: some View {
+            GeometryReader { geo in
+                let spacing: CGFloat = 12
+                
+                // During sheet presentation / rotation, GeometryReader can briefly report 0 or non-finite sizes.
+                // Clamp everything so we never pass a negative or non-finite width into `.frame(width:)`.
+                let rawContentW = geo.size.width - 36
+                let contentW: CGFloat = rawContentW.isFinite ? max(0, rawContentW) : 0
+                
+                let rawBtnW = (contentW - (spacing * 2)) / 3.0
+                let btnW: CGFloat = rawBtnW.isFinite ? max(0, rawBtnW) : 0
+                
+                let bottomInset: CGFloat = (btnW / 2.0) + (spacing / 2.0)
+                
+                NavigationStack {
+                    ZStack {
+                        Color(white: 0.10).ignoresSafeArea()
+                        
+                        VStack(spacing: 18) {
+                            
+                            HStack(spacing: spacing) {
+                                QuickMenuButton(glyphRotationAngle: glyphRotationAngle, icon: "seal", title: "STAMP", isSelected: false, selectedStyle: false, action: onStamp)
+                                    .frame(width: btnW)
+                                
+                                QuickMenuButton(glyphRotationAngle: glyphRotationAngle, icon: "list.bullet", title: "INTERIOR", isSelected: false, selectedStyle: false, action: onInteriorList)
+                                    .frame(width: btnW)
+                                
+                                QuickMenuButton(glyphRotationAngle: glyphRotationAngle, icon: "list.bullet", title: "EXTERIOR", isSelected: false, selectedStyle: false, action: onExteriorList)
+                                    .frame(width: btnW)
+                            }
+                            
+                            HStack(spacing: spacing) {
+                                let flashIcon: String = {
+                                    switch flashSetting {
+                                    case .off: return "bolt.slash"
+                                    case .auto: return "bolt.badge.a"
+                                    case .on: return "bolt"
+                                    }
+                                }()
+                                
+                                QuickMenuButton(glyphRotationAngle: glyphRotationAngle, icon: flashIcon, title: "FLASH", isSelected: flashSetting == .on, selectedStyle: true, action: onFlash)
+                                    .frame(width: btnW)
+                                
+                                QuickMenuButton(glyphRotationAngle: glyphRotationAngle, icon: "square.grid.3x3", title: "GRID", isSelected: isGridOn, selectedStyle: true) {
+                                    isGridOn.toggle()
+                                }
+                                .frame(width: btnW)
+                                
+                                QuickMenuButton(glyphRotationAngle: glyphRotationAngle, icon: "level", title: "LEVEL", isSelected: isLevelOn, selectedStyle: true) {
+                                    isLevelOn.toggle()
+                                }
+                                .frame(width: btnW)
+                            }
+                            .padding(.horizontal, bottomInset)
+                            
+                            HStack(spacing: spacing) {
+                                QuickMenuButton(glyphRotationAngle: glyphRotationAngle, icon: "ladybug", title: "DEBUG", isSelected: debugEnabled, selectedStyle: true) {
+                                    onToggleDebug(!debugEnabled)
+                                }
+                                .frame(width: btnW)
+                                
+                                QuickMenuButton(glyphRotationAngle: glyphRotationAngle, icon: "camera.rotate", title: "CAMERA", isSelected: false, selectedStyle: false, action: onCameraSwap)
+                                    .frame(width: btnW)
+                                
+                                Color.clear
+                                    .frame(width: btnW, height: 1)
+                            }
+                            .padding(.horizontal, bottomInset)
+                            
+                            Spacer(minLength: 0)
+                        }
+                        .padding(.top, 18)
+                        .padding(.horizontal, 18)
+                    }
+                    .navigationBarTitleDisplayMode(.inline)
+                }
             }
         }
     }
-}
-
-private struct QuickMenuButton: View {
-
-    let glyphRotationAngle: Angle
-    let icon: String
-    let title: String
-    let isSelected: Bool
-    let selectedStyle: Bool
-    let action: () -> Void
-
-    var body: some View {
-        Button(action: action) {
-            VStack(spacing: 10) {
-
-                let bg: Color = {
-                    guard selectedStyle else { return Color.white.opacity(0.14) }
-                    return isSelected ? Color.white : Color.white.opacity(0.14)
-                }()
-
-                let fg: Color = {
-                    guard selectedStyle else { return Color.white.opacity(0.92) }
-                    return isSelected ? Color.black : Color.white.opacity(0.92)
-                }()
-
+    
+    private struct QuickMenuButton: View {
+        
+        let glyphRotationAngle: Angle
+        let icon: String
+        let title: String
+        let isSelected: Bool
+        let selectedStyle: Bool
+        let action: () -> Void
+        
+        var body: some View {
+            Button(action: action) {
                 VStack(spacing: 10) {
-                    Circle()
-                        .fill(bg)
-                        .frame(width: 74, height: 74)
-                        .overlay(
-                            Image(systemName: icon)
-                                .font(.system(size: 22, weight: .semibold))
-                                .foregroundColor(fg)
-                        )
-
-                    Text(title)
-                        .font(.system(size: 13, weight: .semibold))
-                        .foregroundColor(Color.white.opacity(0.90))
+                    
+                    let bg: Color = {
+                        guard selectedStyle else { return Color.white.opacity(0.14) }
+                        return isSelected ? Color.white : Color.white.opacity(0.14)
+                    }()
+                    
+                    let fg: Color = {
+                        guard selectedStyle else { return Color.white.opacity(0.92) }
+                        return isSelected ? Color.black : Color.white.opacity(0.92)
+                    }()
+                    
+                    VStack(spacing: 10) {
+                        Circle()
+                            .fill(bg)
+                            .frame(width: 74, height: 74)
+                            .overlay(
+                                Image(systemName: icon)
+                                    .font(.system(size: 22, weight: .semibold))
+                                    .foregroundColor(fg)
+                            )
+                        
+                        Text(title)
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundColor(Color.white.opacity(0.90))
+                    }
+                    .rotationEffect(glyphRotationAngle)
                 }
-                .rotationEffect(glyphRotationAngle)
+                .frame(maxWidth: .infinity)
             }
-            .frame(maxWidth: .infinity)
-        }
-        .buttonStyle(.plain)
-    }
-}
-
-// MARK: - Grid Overlay
-
-private struct GridOverlay: Shape {
-    func path(in rect: CGRect) -> Path {
-        var p = Path()
-
-        let x1 = rect.minX + rect.width / 3
-        let x2 = rect.minX + 2 * rect.width / 3
-        let y1 = rect.minY + rect.height / 3
-        let y2 = rect.minY + 2 * rect.height / 3
-
-        p.move(to: CGPoint(x: x1, y: rect.minY))
-        p.addLine(to: CGPoint(x: x1, y: rect.maxY))
-
-        p.move(to: CGPoint(x: x2, y: rect.minY))
-        p.addLine(to: CGPoint(x: x2, y: rect.maxY))
-
-        p.move(to: CGPoint(x: rect.minX, y: y1))
-        p.addLine(to: CGPoint(x: rect.maxX, y: y1))
-
-        p.move(to: CGPoint(x: rect.minX, y: y2))
-        p.addLine(to: CGPoint(x: rect.maxX, y: y2))
-
-        return p
-    }
-}
-
-// MARK: - Level Overlay
-
-private struct LevelOverlay: View {
-
-    let rollDegrees: Double
-    let isLevel: Bool
-
-    var body: some View {
-        GeometryReader { geo in
-            let w = geo.size.width
-            let h = geo.size.height
-            let size: CGFloat = min(w, h) * 0.46
-
-            Rectangle()
-                .fill(isLevel ? Color.green : Color.white)
-                .frame(width: size * 0.72, height: 3)
-                .rotationEffect(.degrees(rollDegrees))
-                .shadow(color: Color.black.opacity(0.25), radius: 2, x: 0, y: 1)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .buttonStyle(.plain)
         }
     }
-}
-
-// MARK: - Level / Horizon model (stable in portrait-locked UI)
-
-final class LevelMotionModel: ObservableObject {
-
-    @Published var rollDegrees: Double = 0
-    @Published var isLevel: Bool = false
-
-    private let motion = CMMotionManager()
-
-    // Filtering + hysteresis
-    private var filteredDegrees: Double = 0
-    private let alpha: Double = 0.18
-    private let levelOnThreshold: Double = 1.0
-    private let levelOffThreshold: Double = 1.4
-
-    private(set) var isRunning: Bool = false
-
-    func start() {
-        guard !isRunning else { return }
-        guard motion.isDeviceMotionAvailable else { return }
-
-        isRunning = true
-        motion.deviceMotionUpdateInterval = 1.0 / 60.0
-
-        motion.startDeviceMotionUpdates(using: .xArbitraryZVertical, to: .main) { [weak self] m, _ in
-            guard let self else { return }
-            guard let m else { return }
-
-            let gx = m.gravity.x
-            let gy = m.gravity.y
-
-            // Decide portrait vs landscape from gravity (NOT UIDevice.orientation)
-            let usePortraitAxis = abs(gy) >= abs(gx)
-
-            var angleRad: Double
-
-            if usePortraitAxis {
-                angleRad = m.attitude.roll
-                if gy < 0 { angleRad = -angleRad }
-            } else {
-                angleRad = m.attitude.pitch
-                if gx > 0 { angleRad = -angleRad }
-            }
-
-            var deg = angleRad * 180.0 / .pi
-
-            if deg > 90 { deg = 90 }
-            if deg < -90 { deg = -90 }
-
-            // Low-pass smoothing
-            self.filteredDegrees += self.alpha * (deg - self.filteredDegrees)
-            self.rollDegrees = self.filteredDegrees
-
-            // Hysteresis for green state
-            let absDeg = abs(self.filteredDegrees)
-            if self.isLevel {
-                if absDeg > self.levelOffThreshold {
-                    self.isLevel = false
-                }
-            } else {
-                if absDeg < self.levelOnThreshold {
-                    self.isLevel = true
-                }
+    
+    // MARK: - Grid Overlay
+    
+    private struct GridOverlay: Shape {
+        func path(in rect: CGRect) -> Path {
+            var p = Path()
+            
+            let x1 = rect.minX + rect.width / 3
+            let x2 = rect.minX + 2 * rect.width / 3
+            let y1 = rect.minY + rect.height / 3
+            let y2 = rect.minY + 2 * rect.height / 3
+            
+            p.move(to: CGPoint(x: x1, y: rect.minY))
+            p.addLine(to: CGPoint(x: x1, y: rect.maxY))
+            
+            p.move(to: CGPoint(x: x2, y: rect.minY))
+            p.addLine(to: CGPoint(x: x2, y: rect.maxY))
+            
+            p.move(to: CGPoint(x: rect.minX, y: y1))
+            p.addLine(to: CGPoint(x: rect.maxX, y: y1))
+            
+            p.move(to: CGPoint(x: rect.minX, y: y2))
+            p.addLine(to: CGPoint(x: rect.maxX, y: y2))
+            
+            return p
+        }
+    }
+    
+    // MARK: - Level Overlay
+    
+    private struct LevelOverlay: View {
+        
+        let rollDegrees: Double
+        let isLevel: Bool
+        
+        var body: some View {
+            GeometryReader { geo in
+                let w = geo.size.width
+                let h = geo.size.height
+                let size: CGFloat = min(w, h) * 0.46
+                
+                Rectangle()
+                    .fill(isLevel ? Color.green : Color.white)
+                    .frame(width: size * 0.72, height: 3)
+                    .rotationEffect(.degrees(rollDegrees))
+                    .shadow(color: Color.black.opacity(0.25), radius: 2, x: 0, y: 1)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
     }
-
-    func stop() {
-        guard isRunning else { return }
-        isRunning = false
-        motion.stopDeviceMotionUpdates()
-        filteredDegrees = 0
-        rollDegrees = 0
-        isLevel = false
-    }
-}
-// MARK: - Glyph Rotation Motion Model
-
-private final class GlyphRotationMotionModel: ObservableObject {
-
-    @Published var angleDegrees: Double = 0
-
-    private let manager = CMMotionManager()
-
-    // Low pass smoothing to match Apple camera feel
-    private var filtered: Double = 0
-    private let alpha: Double = 0.18
-
-    func start() {
-        guard manager.isDeviceMotionAvailable else { return }
-
-        manager.deviceMotionUpdateInterval = 1.0 / 60.0
-        manager.startDeviceMotionUpdates(to: .main) { [weak self] motion, _ in
-            guard let self else { return }
-            guard let m = motion else { return }
-
-            let g = m.gravity
-
-            // Map gravity to a continuous angle in portrait coordinate space.
-            // Portrait upright yields 0.
-            // Rotate device left yields about +90 for glyphs.
-            // Rotate device right yields about -90 for glyphs.
-            let rawRad = atan2(g.x, -g.y)
-            let rawDeg = rawRad * 180.0 / Double.pi
-
-            // Invert so glyphs rotate opposite the physical roll.
-            var target = -rawDeg
-
-            // Keep it in a stable range so it does not flip.
-            if target > 90 { target = 90 }
-            if target < -90 { target = -90 }
-
-            filtered = (alpha * target) + ((1.0 - alpha) * filtered)
-            angleDegrees = filtered
+    
+    // MARK: - Level / Horizon model (stable in portrait-locked UI)
+    
+    final class LevelMotionModel: ObservableObject {
+        
+        @Published var rollDegrees: Double = 0
+        @Published var isLevel: Bool = false
+        
+        private let motion = CMMotionManager()
+        
+        // Filtering + hysteresis
+        private var filteredDegrees: Double = 0
+        private let alpha: Double = 0.18
+        private let levelOnThreshold: Double = 1.0
+        private let levelOffThreshold: Double = 1.4
+        
+        private(set) var isRunning: Bool = false
+        
+        func start() {
+            guard !isRunning else { return }
+            guard motion.isDeviceMotionAvailable else { return }
+            
+            isRunning = true
+            motion.deviceMotionUpdateInterval = 1.0 / 60.0
+            
+            motion.startDeviceMotionUpdates(using: .xArbitraryZVertical, to: .main) { [weak self] m, _ in
+                guard let self else { return }
+                guard let m else { return }
+                
+                let gx = m.gravity.x
+                let gy = m.gravity.y
+                
+                // Decide portrait vs landscape from gravity (NOT UIDevice.orientation)
+                let usePortraitAxis = abs(gy) >= abs(gx)
+                
+                var angleRad: Double
+                
+                if usePortraitAxis {
+                    angleRad = m.attitude.roll
+                    if gy < 0 { angleRad = -angleRad }
+                } else {
+                    angleRad = m.attitude.pitch
+                    if gx > 0 { angleRad = -angleRad }
+                }
+                
+                var deg = angleRad * 180.0 / .pi
+                
+                if deg > 90 { deg = 90 }
+                if deg < -90 { deg = -90 }
+                
+                // Low-pass smoothing
+                self.filteredDegrees += self.alpha * (deg - self.filteredDegrees)
+                self.rollDegrees = self.filteredDegrees
+                
+                // Hysteresis for green state
+                let absDeg = abs(self.filteredDegrees)
+                if self.isLevel {
+                    if absDeg > self.levelOffThreshold {
+                        self.isLevel = false
+                    }
+                } else {
+                    if absDeg < self.levelOnThreshold {
+                        self.isLevel = true
+                    }
+                }
+            }
+        }
+        
+        func stop() {
+            guard isRunning else { return }
+            isRunning = false
+            motion.stopDeviceMotionUpdates()
+            filteredDegrees = 0
+            rollDegrees = 0
+            isLevel = false
         }
     }
-
-    func stop() {
-        manager.stopDeviceMotionUpdates()
+    // MARK: - Glyph Rotation Motion Model
+    
+    private final class GlyphRotationMotionModel: ObservableObject {
+        
+        @Published var angleDegrees: Double = 0
+        
+        private let manager = CMMotionManager()
+        
+        // Low pass smoothing to match Apple camera feel
+        private var filtered: Double = 0
+        private let alpha: Double = 0.18
+        
+        func start() {
+            guard manager.isDeviceMotionAvailable else { return }
+            
+            manager.deviceMotionUpdateInterval = 1.0 / 60.0
+            manager.startDeviceMotionUpdates(to: .main) { [weak self] motion, _ in
+                guard let self else { return }
+                guard let m = motion else { return }
+                
+                let g = m.gravity
+                
+                // Map gravity to a continuous angle in portrait coordinate space.
+                // Portrait upright yields 0.
+                // Rotate device left yields about +90 for glyphs.
+                // Rotate device right yields about -90 for glyphs.
+                let rawRad = atan2(g.x, -g.y)
+                let rawDeg = rawRad * 180.0 / Double.pi
+                
+                // Invert so glyphs rotate opposite the physical roll.
+                var target = -rawDeg
+                
+                // Keep it in a stable range so it does not flip.
+                if target > 90 { target = 90 }
+                if target < -90 { target = -90 }
+                
+                filtered = (alpha * target) + ((1.0 - alpha) * filtered)
+                angleDegrees = filtered
+            }
+        }
+        
+        func stop() {
+            manager.stopDeviceMotionUpdates()
+        }
     }
 }
-
 //Testing batch upload
