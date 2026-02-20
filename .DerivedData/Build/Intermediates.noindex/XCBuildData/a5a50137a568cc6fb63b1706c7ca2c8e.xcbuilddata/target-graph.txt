@@ -1,2 +1,0 @@
-Target dependency graph (1 target)
-Target 'ScoutCapture' in project 'ScoutCapture' (no dependencies)
