@@ -2002,6 +2002,10 @@ struct ContentView: View {
     @State private var showCameraSwapToast: Bool = false
     @State private var cameraSwapToastText: String = ""
     @State private var cameraSwapToastToken: Int = 0
+    @State private var showCameraSwapBlackout: Bool = false
+    @State private var displayedZoomSteps: [ZoomStep] = []
+    @State private var zoomStepsWorkItem: DispatchWorkItem? = nil
+    private let cameraSwapOverlayDuration: Double = 0.72
     
     private let deviceOrientationPoll = Timer.publish(every: 0.06, on: .main, in: .common).autoconnect()
     
@@ -2179,7 +2183,7 @@ struct ContentView: View {
         
         // Pause polling to prevent repeated refreshes
         isPollingDeviceOrientation = false
-        
+
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         UIView.performWithoutAnimation {
@@ -2188,16 +2192,18 @@ struct ContentView: View {
         }
         CATransaction.commit()
         
-        // Toast above the Quick Menu sheet (no snapshot cover).
+        // Fixed-duration blackout + toast so behavior is consistent in both directions.
         cameraSwapToastToken += 1
         let toastToken = cameraSwapToastToken
         
         cameraSwapToastText = isFrontCameraUI ? "Front Camera" : "Rear Camera"
         showCameraSwapToast = true
+        showCameraSwapBlackout = true
         
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.95) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + cameraSwapOverlayDuration) {
             guard toastToken == cameraSwapToastToken else { return }
             showCameraSwapToast = false
+            showCameraSwapBlackout = false
         }
         
         // After the swap settles, snap to the current stable device orientation WITHOUT animation,
@@ -2324,27 +2330,6 @@ struct ContentView: View {
             }
             .overlay {
                 centeredLandscapeMenuOverlay()
-            }
-            .overlay {
-                if showCameraSwapToast {
-                    Text(cameraSwapToastText)
-                        .font(.system(size: 14, weight: .semibold))
-                        .foregroundColor(.white)
-                        .padding(.horizontal, 16)
-                        .padding(.vertical, 10)
-                        .background(Color.black.opacity(0.72))
-                        .clipShape(RoundedRectangle(cornerRadius: 12))
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 12)
-                                .stroke(Color.white.opacity(0.18), lineWidth: 1)
-                        )
-                        .rotationEffect(bottomGlyphRotationAngle)
-                        .allowsHitTesting(false)
-                        .transition(.opacity)
-                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-                        .padding(.top, 18)
-                        .zIndex(999)
-                }
             }
             .onAppear {
                 UIDevice.current.beginGeneratingDeviceOrientationNotifications()
@@ -2640,6 +2625,33 @@ struct ContentView: View {
                 .rotationEffect(bottomGlyphRotationAngle)
                 .allowsHitTesting(false)
                 .zIndex(6)
+            }
+
+            if showCameraSwapBlackout {
+                Color.black
+                    .frame(width: w, height: previewH)
+                    .allowsHitTesting(false)
+                    .zIndex(85)
+            }
+
+            if showCameraSwapToast {
+                Text(cameraSwapToastText)
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundColor(.white)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 10)
+                    .background(Color.black.opacity(0.72))
+                    .clipShape(RoundedRectangle(cornerRadius: 12))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 12)
+                            .stroke(Color.white.opacity(0.18), lineWidth: 1)
+                    )
+                    .rotationEffect(bottomGlyphRotationAngle)
+                    .allowsHitTesting(false)
+                    .transition(.opacity)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                    .padding(.top, max(14, previewH * 0.18))
+                    .zIndex(86)
             }
 
             if (lastValidDeviceOrientation == .landscapeLeft || lastValidDeviceOrientation == .landscapeRight) {
@@ -3413,7 +3425,7 @@ extension ContentView {
         let itemW: CGFloat = 36
         let spacing: CGFloat = 10
         
-        let steps = camera.zoomSteps
+        let steps = displayedZoomSteps.isEmpty ? camera.zoomSteps : displayedZoomSteps
         let count = steps.count
         
         let selectedIndex: Int = {
@@ -3428,12 +3440,6 @@ extension ContentView {
         
         // Key used to animate reflow when the available zoom steps change (for example HD toggles).
         let stepsKey = steps.map { String(describing: $0.id) }.joined(separator: ",")
-        
-        let reflowAnimation = Animation.interactiveSpring(
-            response: 0.34,
-            dampingFraction: 0.88,
-            blendDuration: 0.12
-        )
         
         let buttonTransition: AnyTransition = .asymmetric(
             insertion: .move(edge: .bottom).combined(with: .opacity),
@@ -3475,11 +3481,79 @@ extension ContentView {
         // Keep selected zoom centered.
         .offset(x: offsetX)
         // Animate horizontal reflow and selection changes.
-        .animation(reflowAnimation, value: stepsKey)
-        .animation(reflowAnimation, value: camera.selectedZoomId)
+        .animation(zoomReflowAnimation, value: stepsKey)
+        .animation(zoomReflowAnimation, value: camera.selectedZoomId)
         .frame(width: w, alignment: .center)
         .padding(.vertical, 2)
         .contentShape(Rectangle())
+        .onAppear {
+            syncDisplayedZoomSteps(immediate: true)
+        }
+        .onChange(of: camera.zoomSteps) { _, _ in
+            syncDisplayedZoomSteps(immediate: false)
+        }
+    }
+
+    private var zoomReflowAnimation: Animation {
+        Animation.interactiveSpring(
+            response: 0.34,
+            dampingFraction: 0.88,
+            blendDuration: 0.12
+        )
+    }
+
+    private func syncDisplayedZoomSteps(immediate: Bool) {
+        let target = camera.zoomSteps
+        zoomStepsWorkItem?.cancel()
+        zoomStepsWorkItem = nil
+
+        guard !target.isEmpty else {
+            displayedZoomSteps = []
+            return
+        }
+
+        if immediate || displayedZoomSteps.isEmpty {
+            displayedZoomSteps = target
+            return
+        }
+
+        let current = displayedZoomSteps
+        let currentIds = Set(current.map(\.id))
+        let targetIds = Set(target.map(\.id))
+        if currentIds == targetIds {
+            withAnimation(zoomReflowAnimation) {
+                displayedZoomSteps = target
+            }
+            return
+        }
+
+        // Phase 1: when the list shrinks, remove non-native/cropped steps first.
+        if target.count < current.count {
+            let nativeSet = Set(camera.nativeBackZoomStepIds)
+            let removable = current.filter { step in
+                !targetIds.contains(step.id) && !nativeSet.contains(step.id)
+            }
+
+            if !removable.isEmpty {
+                let removableIds = Set(removable.map(\.id))
+                withAnimation(zoomReflowAnimation) {
+                    displayedZoomSteps = current.filter { !removableIds.contains($0.id) }
+                }
+
+                let work = DispatchWorkItem {
+                    withAnimation(zoomReflowAnimation) {
+                        displayedZoomSteps = target
+                    }
+                }
+                zoomStepsWorkItem = work
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.14, execute: work)
+                return
+            }
+        }
+
+        withAnimation(zoomReflowAnimation) {
+            displayedZoomSteps = target
+        }
     }
     
     private func directionSlider() -> some View {

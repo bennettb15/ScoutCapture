@@ -121,38 +121,36 @@ final class PreviewUIView: UIView {
 
     // Cache the last applied values so we do not continuously reassign and cause visible hunting.
     private var lastAppliedMirrored: Bool?
+    private var lastAppliedPreviewAngle: CGFloat?
 
     private func applyStablePreviewRotationAndMirroring() {
         guard let conn = videoPreviewLayer.connection else { return }
 
+        let activePosition: AVCaptureDevice.Position? = {
+            for input in (videoPreviewLayer.session?.inputs ?? []) {
+                if let di = input as? AVCaptureDeviceInput {
+                    return di.device.position
+                }
+            }
+            return nil
+        }()
+
         // HARD RULE: preview is always portrait on screen.
-        // Use AVCaptureVideoOrientation when it is supported. Do NOT mix this with
-        // videoRotationAngle on iOS 17+, because switching between the two can cause
-        // visible flip-flopping.
-        if conn.isVideoOrientationSupported {
-            if conn.videoOrientation != .portrait {
-                conn.videoOrientation = .portrait
+        // Portrait lock for the preview layer.
+        let portraitAngle: CGFloat = {
+            if let pos = activePosition {
+                return pos == .front ? 0 : 90
             }
-        } else if #available(iOS 17.0, *), conn.isVideoRotationAngleSupported(0) {
-            // Fallback only when videoOrientation is not supported.
-            // 0 degrees corresponds to portrait for the preview layer.
-            if conn.videoRotationAngle != 0 {
-                conn.videoRotationAngle = 0
-            }
+            return lastAppliedPreviewAngle ?? 90
+        }()
+        if conn.isVideoRotationAngleSupported(portraitAngle), conn.videoRotationAngle != portraitAngle {
+            conn.videoRotationAngle = portraitAngle
         }
+        lastAppliedPreviewAngle = portraitAngle
 
         // Keep mirroring stable: front camera mirrored, back camera not mirrored.
         if conn.isVideoMirroringSupported {
             conn.automaticallyAdjustsVideoMirroring = false
-
-            let activePosition: AVCaptureDevice.Position? = {
-                for input in (videoPreviewLayer.session?.inputs ?? []) {
-                    if let di = input as? AVCaptureDeviceInput {
-                        return di.device.position
-                    }
-                }
-                return nil
-            }()
 
             let wantsMirrored: Bool = {
                 if let pos = activePosition {
@@ -219,6 +217,7 @@ final class CameraManager: NSObject, ObservableObject {
     @Published var isCapturing: Bool = false
     @Published private(set) var zoomSteps: [ZoomStep] = []
     @Published private(set) var selectedZoomId: String = "1"
+    @Published private(set) var nativeBackZoomStepIds: [String] = []
 
     // Lens debug label for toast in ContentView
     @Published var lensDebugText: String = ""
@@ -344,6 +343,8 @@ final class CameraManager: NSObject, ObservableObject {
     @objc private func appDidBecomeActive() {
         sessionQueue.async { [weak self] in
             guard let self else { return }
+            let hasAnyDeviceInput = self.session.inputs.contains { $0 is AVCaptureDeviceInput }
+            guard hasAnyDeviceInput else { return }
             if !self.session.isRunning {
                 self.session.startRunning()
             }
@@ -519,15 +520,10 @@ final class CameraManager: NSObject, ObservableObject {
             }
 
             // Make the captured photo match how the user is physically holding the phone.
-            // Use videoOrientation when available (it is far less error-prone than guessing rotation angles).
             if let conn = self.photoOutput.connection(with: .video) {
-                if conn.isVideoOrientationSupported {
-                    conn.videoOrientation = self.captureVideoOrientation(from: orientationForCapture)
-                } else if #available(iOS 17.0, *) {
-                    let angle = self.captureVideoRotationAngleFallback(from: orientationForCapture)
-                    if conn.isVideoRotationAngleSupported(angle) {
-                        conn.videoRotationAngle = angle
-                    }
+                let angle = self.captureVideoRotationAngle(from: orientationForCapture)
+                if conn.isVideoRotationAngleSupported(angle) {
+                    conn.videoRotationAngle = angle
                 }
 
                 if conn.isVideoMirroringSupported {
@@ -740,7 +736,13 @@ final class CameraManager: NSObject, ObservableObject {
         currentPosition = .back
         currentUIZoom = 1.0
 
-        guard let device = pickBestCameraDevice(for: currentPosition) else { return }
+        guard let device = pickBestCameraDevice(for: currentPosition) else {
+            session.commitConfiguration()
+            DispatchQueue.main.async {
+                self.hdSupported = false
+            }
+            return
+        }
         videoDevice = device
         DispatchQueue.main.async {
             self.hdSupported = (self.currentPosition == .back)
@@ -775,7 +777,8 @@ final class CameraManager: NSObject, ObservableObject {
 
         session.commitConfiguration()
 
-        if !session.isRunning {
+        let hasAnyDeviceInput = session.inputs.contains { $0 is AVCaptureDeviceInput }
+        if hasAnyDeviceInput, !session.isRunning {
             session.startRunning()
         }
 
@@ -793,7 +796,13 @@ final class CameraManager: NSObject, ObservableObject {
             }
         }
 
-        guard let device = pickBestCameraDevice(for: currentPosition) else { return }
+        guard let device = pickBestCameraDevice(for: currentPosition) else {
+            session.commitConfiguration()
+            DispatchQueue.main.async {
+                self.hdSupported = false
+            }
+            return
+        }
         videoDevice = device
         DispatchQueue.main.async {
             self.hdSupported = (self.currentPosition == .back)
@@ -847,7 +856,8 @@ final class CameraManager: NSObject, ObservableObject {
 
         let desired: [CGFloat]
         if position == .back, effectiveHDEnabled {
-            desired = [0.5, 1, 4]
+            // In HD mode, only show zoom steps that map to physically available back lenses.
+            desired = hdBackZoomStepsForAvailableLenses()
         } else {
             desired = (position == .back) ? [0.5, 1, 2, 4, 8] : [1, 2]
         }
@@ -880,6 +890,107 @@ final class CameraManager: NSObject, ObservableObject {
         if zoomSteps.isEmpty {
             zoomSteps = [ZoomStep(id: "1", factor: 1.0, label: "1")]
         }
+
+        if position == .back {
+            let nativeIds = backLensAnchors()
+                .map { anchor -> String in
+                    if anchor.uiFactor == 0.5 { return "0.5" }
+                    if anchor.uiFactor == 1.0 { return "1" }
+                    return String(Int(anchor.uiFactor))
+                }
+                .sorted { a, b in
+                    let av = (a == "0.5") ? 0.5 : Double(a) ?? 0
+                    let bv = (b == "0.5") ? 0.5 : Double(b) ?? 0
+                    return av < bv
+                }
+            DispatchQueue.main.async {
+                self.nativeBackZoomStepIds = nativeIds
+            }
+        } else {
+            DispatchQueue.main.async {
+                self.nativeBackZoomStepIds = []
+            }
+        }
+    }
+
+    private func hdBackZoomStepsForAvailableLenses() -> [CGFloat] {
+        var steps = backLensAnchors().map { $0.uiFactor }.sorted()
+
+        // Defensive fallback: every supported iPhone should at least provide wide.
+        if steps.isEmpty {
+            steps = [1.0]
+        }
+
+        return steps
+    }
+
+    private func nearestZoomStep(to target: CGFloat, in steps: [CGFloat]) -> CGFloat? {
+        guard !steps.isEmpty else { return nil }
+        let safeTarget = max(0.01, target)
+        let t = log(Double(safeTarget))
+        return steps.min { a, b in
+            let da = abs(log(Double(max(0.01, a))) - t)
+            let db = abs(log(Double(max(0.01, b))) - t)
+            return da < db
+        }
+    }
+
+    private func nonHDBackZoomStepsForDevice(_ device: AVCaptureDevice) -> [CGFloat] {
+        let desired: [CGFloat] = [0.5, 1, 2, 4, 8]
+        let minZ = CGFloat(device.minAvailableVideoZoomFactor)
+        let maxZ = CGFloat(device.maxAvailableVideoZoomFactor)
+
+        let uiBase: CGFloat = 0.5
+        let uiToDeviceScale: CGFloat = (minZ <= uiBase + 0.01) ? 1.0 : (minZ / uiBase)
+
+        let filtered = desired.filter { ui in
+            let dz = ui * uiToDeviceScale
+            return dz >= minZ - 0.001 && dz <= maxZ + 0.001
+        }
+
+        return filtered.isEmpty ? [1.0] : filtered
+    }
+
+    private func backLensAnchors() -> [(uiFactor: CGFloat, device: AVCaptureDevice)] {
+        var anchors: [(uiFactor: CGFloat, device: AVCaptureDevice)] = []
+
+        if let uw = AVCaptureDevice.default(.builtInUltraWideCamera, for: .video, position: .back) {
+            anchors.append((0.5, uw))
+        }
+        if let wide = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back) {
+            anchors.append((1.0, wide))
+        }
+        if let tele = AVCaptureDevice.default(.builtInTelephotoCamera, for: .video, position: .back) {
+            anchors.append((4.0, tele))
+        }
+
+        // Some devices can expose the same underlying lens across multiple types.
+        // Keep one anchor per unique device identity.
+        var seen = Set<String>()
+        return anchors.filter { entry in
+            let key = entry.device.uniqueID
+            if seen.contains(key) { return false }
+            seen.insert(key)
+            return true
+        }
+    }
+
+    private func nearestBackLensDevice(forUIZoom uiZoom: CGFloat) -> AVCaptureDevice? {
+        let anchors = backLensAnchors()
+        guard !anchors.isEmpty else { return nil }
+
+        // Compare in log space so distances are more perceptual across zoom scales.
+        // Example: 0.5->1 and 1->2 are treated similarly.
+        let safeZoom = max(0.01, uiZoom)
+        let target = log(Double(safeZoom))
+
+        let best = anchors.min { a, b in
+            let da = abs(log(Double(a.uiFactor)) - target)
+            let db = abs(log(Double(b.uiFactor)) - target)
+            return da < db
+        }
+
+        return best?.device
     }
 
     private func refreshLensDebug() {
@@ -901,26 +1012,7 @@ final class CameraManager: NSObject, ObservableObject {
 
     private func predictedBackConstituentDevice(forUIZoom uiZoom: CGFloat) -> AVCaptureDevice? {
         guard currentPosition == .back else { return nil }
-
-        let deviceType: AVCaptureDevice.DeviceType
-        if uiZoom <= 0.75 {
-            deviceType = .builtInUltraWideCamera
-        } else if uiZoom < 3.0 {
-            deviceType = .builtInWideAngleCamera
-        } else {
-            deviceType = .builtInTelephotoCamera
-        }
-
-        if let d = AVCaptureDevice.default(deviceType, for: .video, position: .back) {
-            return d
-        }
-
-        if deviceType != .builtInWideAngleCamera,
-           let wide = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back) {
-            return wide
-        }
-
-        return videoDevice
+        return nearestBackLensDevice(forUIZoom: uiZoom) ?? videoDevice
     }
 
     private func refreshTargetMegapixelLabelForUIZoom(_ uiZoom: CGFloat) {
@@ -998,17 +1090,23 @@ final class CameraManager: NSObject, ObservableObject {
         if !effectiveHDEnabled {
             guard let virtual = pickBestCameraDevice(for: .back) else { return }
 
-            // When leaving HD mode and returning to the virtual multi camera device,
-            // force the UI and actual zoom to a consistent 1.0.
-            currentUIZoom = 1.0
+            // Preserve the current lens intent while leaving HD by mapping to the nearest
+            // valid non-HD zoom step on the virtual back camera.
+            let targetUI = nearestZoomStep(to: currentUIZoom, in: nonHDBackZoomStepsForDevice(virtual)) ?? 1.0
+            currentUIZoom = targetUI
 
             reconfigureSessionInput(to: virtual)
 
             // Ensure the preview matches the UI immediately.
-            setNativeZoomImmediate(uiZoom: 1.0, selectedId: "1")
+            let selectedId: String = {
+                if targetUI == 0.5 { return "0.5" }
+                if targetUI == 1.0 { return "1" }
+                return String(Int(targetUI))
+            }()
+            setNativeZoomImmediate(uiZoom: targetUI, selectedId: selectedId)
 
             DispatchQueue.main.async {
-                self.selectedZoomId = "1"
+                self.selectedZoomId = selectedId
                 self.rebuildZoomSteps(for: virtual, position: self.currentPosition)
                 self.refreshLensDebug()
                 self.refreshTargetMegapixelLabelForUIZoom(self.currentUIZoom)
@@ -1016,7 +1114,12 @@ final class CameraManager: NSObject, ObservableObject {
             return
         }
 
-        let ui = desiredUIZoom ?? currentUIZoom
+        // Entering HD: collapse to the nearest available physical-lens anchor (for example
+        // 1x/2x -> 1x, 4x/8x -> tele anchor, 0.5x -> ultra-wide when available).
+        let requested = desiredUIZoom ?? currentUIZoom
+        let ui = nearestZoomStep(to: requested, in: hdBackZoomStepsForAvailableLenses()) ?? 1.0
+        currentUIZoom = ui
+
         let physical = pickBackPhysicalDevice(forUIZoom: ui)
         reconfigureSessionInput(to: physical)
 
@@ -1025,31 +1128,24 @@ final class CameraManager: NSObject, ObservableObject {
             self.refreshLensDebug()
             self.refreshTargetMegapixelLabelForUIZoom(ui)
 
-            if self.zoomSteps.first(where: { $0.factor == ui }) == nil {
-                self.currentUIZoom = 1.0
-                self.selectedZoomId = "1"
-                self.refreshTargetMegapixelLabelForUIZoom(1.0)
+            if let exact = self.zoomSteps.first(where: { $0.factor == ui }) {
+                self.selectedZoomId = exact.id
+            } else if let nearest = self.nearestZoomStep(to: ui, in: self.zoomSteps.map(\.factor)),
+                      let step = self.zoomSteps.first(where: { $0.factor == nearest }) {
+                self.currentUIZoom = step.factor
+                self.selectedZoomId = step.id
+                self.refreshTargetMegapixelLabelForUIZoom(step.factor)
             }
         }
     }
 
     private func pickBackPhysicalDevice(forUIZoom uiZoom: CGFloat) -> AVCaptureDevice {
-        if uiZoom <= 0.75 {
-            if let uw = AVCaptureDevice.default(.builtInUltraWideCamera, for: .video, position: .back) {
-                return uw
-            }
+        if let nearest = nearestBackLensDevice(forUIZoom: uiZoom) {
+            return nearest
         }
-
-        if uiZoom >= 3.0 {
-            if let tele = AVCaptureDevice.default(.builtInTelephotoCamera, for: .video, position: .back) {
-                return tele
-            }
-        }
-
         if let wide = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back) {
             return wide
         }
-
         return videoDevice ?? AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back)!
     }
 
@@ -1142,24 +1238,22 @@ final class CameraManager: NSObject, ObservableObject {
         }
     }
 
-    private func captureVideoOrientation(from deviceOrientation: UIDeviceOrientation) -> AVCaptureVideoOrientation {
-        switch deviceOrientation {
-        case .portrait:
-            return .portrait
-        case .portraitUpsideDown:
-            return .portraitUpsideDown
-        case .landscapeLeft:
-            return (currentPosition == .front) ? .landscapeLeft : .landscapeRight
-        case .landscapeRight:
-            return (currentPosition == .front) ? .landscapeRight : .landscapeLeft
-        default:
-            return .portrait
+    private func captureVideoRotationAngle(from deviceOrientation: UIDeviceOrientation) -> Double {
+        if currentPosition == .front {
+            switch deviceOrientation {
+            case .portrait:
+                return 0
+            case .portraitUpsideDown:
+                return 180
+            case .landscapeLeft:
+                return 90
+            case .landscapeRight:
+                return 270
+            default:
+                return 0
+            }
         }
-    }
 
-    @available(iOS 17.0, *)
-    private func captureVideoRotationAngleFallback(from deviceOrientation: UIDeviceOrientation) -> Double {
-        // Fallback only when videoOrientation is not supported.
         switch deviceOrientation {
         case .portrait:
             return 90
@@ -1231,4 +1325,3 @@ final class PhotoCaptureDelegate: NSObject, AVCapturePhotoCaptureDelegate, @unch
         // No-op. Final image data arrives in didFinishProcessingPhoto.
     }
 }
-
