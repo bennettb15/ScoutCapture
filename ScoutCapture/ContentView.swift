@@ -2915,6 +2915,12 @@ struct ContentView: View {
                 .zIndex(6)
             }
 
+            topLeftPreviewPlaceholders()
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                .padding(.top, 14)
+                .padding(.leading, 14)
+                .zIndex(12)
+
             if showCameraSwapBlackout {
                 Color.black
                     .frame(width: w, height: previewH)
@@ -3760,6 +3766,38 @@ extension ContentView {
                 showDetailOverlay = true
             }
         )
+    }
+
+    private func topLeftPreviewPlaceholders() -> some View {
+        VStack(spacing: 2) {
+            placeholderQuickButton(systemName: "flag.fill") {
+                fireQuickButtonHaptic()
+            }
+            .disabled(!hasActiveSession)
+
+            placeholderQuickButton(systemName: "safari") {
+                fireQuickButtonHaptic()
+            }
+            .disabled(!hasActiveSession)
+        }
+    }
+
+    private func placeholderQuickButton(
+        systemName: String,
+        action: @escaping () -> Void
+    ) -> some View {
+        let hitArea: CGFloat = 44
+        let symbolSize: CGFloat = 22
+        return Button(action: action) {
+            Image(systemName: systemName)
+                .font(.system(size: symbolSize, weight: .medium))
+                .foregroundColor(.white.opacity(0.75))
+                .rotationEffect(bottomGlyphRotationAngle)
+            .frame(width: hitArea, height: hitArea)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .frame(width: hitArea, height: hitArea)
     }
     
     private func locationModeSlider() -> some View {
