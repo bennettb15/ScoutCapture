@@ -2915,6 +2915,12 @@ struct ContentView: View {
                 .zIndex(6)
             }
 
+            topLeftPreviewPlaceholders()
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                .padding(.top, 14)
+                .padding(.leading, 14)
+                .zIndex(12)
+
             if showCameraSwapBlackout {
                 Color.black
                     .frame(width: w, height: previewH)
@@ -3760,6 +3766,70 @@ extension ContentView {
                 showDetailOverlay = true
             }
         )
+    }
+
+    private func topLeftPreviewPlaceholders() -> some View {
+        let showBadgeSpike = true
+        return VStack(spacing: 2) {
+            placeholderQuickButton(
+                systemName: "flag.fill",
+                spikeGlyphColor: showBadgeSpike ? .orange : .white.opacity(0.75),
+                spikeBadgeText: showBadgeSpike ? "2" : nil,
+                showBadgeSpike: showBadgeSpike
+            ) {
+                fireQuickButtonHaptic()
+            }
+
+            placeholderQuickButton(
+                systemName: "safari",
+                spikeGlyphColor: showBadgeSpike ? .green : .white.opacity(0.75),
+                spikeBadgeText: showBadgeSpike ? "3" : nil,
+                showBadgeSpike: showBadgeSpike
+            ) {
+                fireQuickButtonHaptic()
+            }
+        }
+    }
+
+    private func placeholderQuickButton(
+        systemName: String,
+        spikeGlyphColor: Color,
+        spikeBadgeText: String?,
+        showBadgeSpike: Bool,
+        action: @escaping () -> Void
+    ) -> some View {
+        let hitArea: CGFloat = 44
+        let symbolSize: CGFloat = 22
+        let badgeSize: CGFloat = 13
+        let badgeFontSize: CGFloat = 9
+        return Button(action: action) {
+            ZStack(alignment: .topTrailing) {
+                Image(systemName: systemName)
+                    .font(.system(size: symbolSize, weight: .medium))
+                    .foregroundColor(spikeGlyphColor)
+
+                if showBadgeSpike, let spikeBadgeText {
+                    ZStack {
+                        Circle()
+                            .fill(Color.white)
+                            .frame(width: badgeSize, height: badgeSize)
+
+                        Text(spikeBadgeText)
+                            .font(.system(size: badgeFontSize, weight: .semibold))
+                            .foregroundColor(.black)
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.8)
+                    }
+                    .shadow(color: .black.opacity(0.35), radius: 1, x: 0, y: 0.5)
+                    .offset(x: 1.5, y: -1.5)
+                }
+            }
+                .rotationEffect(bottomGlyphRotationAngle)
+                .frame(width: hitArea, height: hitArea)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .frame(width: hitArea, height: hitArea)
     }
     
     private func locationModeSlider() -> some View {
