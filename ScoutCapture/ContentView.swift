@@ -3769,64 +3769,32 @@ extension ContentView {
     }
 
     private func topLeftPreviewPlaceholders() -> some View {
-        let showBadgeSpike = true
-        return VStack(spacing: 2) {
-            placeholderQuickButton(
-                systemName: "flag.fill",
-                spikeGlyphColor: showBadgeSpike ? .orange : .white.opacity(0.75),
-                spikeBadgeText: showBadgeSpike ? "2" : nil,
-                showBadgeSpike: showBadgeSpike
-            ) {
+        VStack(spacing: 2) {
+            placeholderQuickButton(systemName: "flag.fill") {
                 fireQuickButtonHaptic()
             }
+            .disabled(!hasActiveSession)
 
-            placeholderQuickButton(
-                systemName: "safari",
-                spikeGlyphColor: showBadgeSpike ? .green : .white.opacity(0.75),
-                spikeBadgeText: showBadgeSpike ? "3" : nil,
-                showBadgeSpike: showBadgeSpike
-            ) {
+            placeholderQuickButton(systemName: "safari") {
                 fireQuickButtonHaptic()
             }
+            .disabled(!hasActiveSession)
         }
     }
 
     private func placeholderQuickButton(
         systemName: String,
-        spikeGlyphColor: Color,
-        spikeBadgeText: String?,
-        showBadgeSpike: Bool,
         action: @escaping () -> Void
     ) -> some View {
         let hitArea: CGFloat = 44
         let symbolSize: CGFloat = 22
-        let badgeSize: CGFloat = 13
-        let badgeFontSize: CGFloat = 9
         return Button(action: action) {
-            ZStack(alignment: .topTrailing) {
-                Image(systemName: systemName)
-                    .font(.system(size: symbolSize, weight: .medium))
-                    .foregroundColor(spikeGlyphColor)
-
-                if showBadgeSpike, let spikeBadgeText {
-                    ZStack {
-                        Circle()
-                            .fill(Color.white)
-                            .frame(width: badgeSize, height: badgeSize)
-
-                        Text(spikeBadgeText)
-                            .font(.system(size: badgeFontSize, weight: .semibold))
-                            .foregroundColor(.black)
-                            .lineLimit(1)
-                            .minimumScaleFactor(0.8)
-                    }
-                    .shadow(color: .black.opacity(0.35), radius: 1, x: 0, y: 0.5)
-                    .offset(x: 1.5, y: -1.5)
-                }
-            }
+            Image(systemName: systemName)
+                .font(.system(size: symbolSize, weight: .medium))
+                .foregroundColor(.white.opacity(0.75))
                 .rotationEffect(bottomGlyphRotationAngle)
-                .frame(width: hitArea, height: hitArea)
-                .contentShape(Rectangle())
+            .frame(width: hitArea, height: hitArea)
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .frame(width: hitArea, height: hitArea)
