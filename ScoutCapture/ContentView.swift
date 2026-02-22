@@ -2168,6 +2168,7 @@ private final class DetailTypesModel: ObservableObject {
 // MARK: - ContentView
 
 struct ContentView: View {
+    @EnvironmentObject private var appState: AppState
     
     private let shutterHaptic = UIImpactFeedbackGenerator(style: .medium)
     private let quickButtonHaptic = UIImpactFeedbackGenerator(style: .light)
@@ -2182,14 +2183,6 @@ struct ContentView: View {
     @StateObject private var reportLibrary = ReportLibraryModel()
     @StateObject private var imageCache = AssetImageCache()
     
-    @State private var recordId: String = "SC-2026-001"
-    @State private var reportPrefix: String = "SC"
-    @State private var reportIncludeYear: Bool = true
-    @State private var reportYear: Int = Calendar.current.component(.year, from: Date())
-    @State private var reportSequence: Int = 1
-    @State private var reportPrefixLocked: Bool = true
-    @State private var reportYearLocked: Bool = true
-    @State private var reportSequenceLocked: Bool = false
     @State private var elevation: String = "North Elevation"
     
     @State private var detailNote: String = ""
@@ -2204,18 +2197,6 @@ struct ContentView: View {
     
     @State private var showQuickMenu: Bool = false
     @State private var manageContext: ManageContext? = nil
-    @State private var pendingOpenReportMenuFromQuickMenu: Bool = false
-    @State private var showReportMenu: Bool = false
-    @State private var pendingOpenReportSwitcherFromReportMenu: Bool = false
-    @State private var pendingOpenReportEditorFromReportMenu: ReportEditorMode? = nil
-    @State private var pendingReopenReportMenuFromChildSheet: Bool = false
-    @State private var showReportSwitcher: Bool = false
-    @State private var showReportEditor: Bool = false
-    @State private var reportEditorMode: ReportEditorMode = .editCurrent
-    @State private var availableReportAlbums: [String] = []
-    @State private var loadingReportAlbums: Bool = false
-    @State private var pendingReportSwitchTitle: String? = nil
-    @State private var showReportSwitchConfirmation: Bool = false
     
     // Custom centered overlays for rotated dropdowns (used in landscape-with-portrait-lock UI)
     @State private var showLandscapeElevationMenu: Bool = false
@@ -2231,7 +2212,6 @@ struct ContentView: View {
     @State private var showHDEnabledToast: Bool = false
     @State private var hdEnabledToastText: String = "HD Enabled"
     @State private var hdEnabledToastToken: Int = 0
-    @Environment(\.scenePhase) private var scenePhase
     
     // MARK: - Debug overlay
     
@@ -2246,6 +2226,17 @@ struct ContentView: View {
     @State private var draftDetailNote: String = ""
     
     @State private var showLibraryFullscreen: Bool = false
+    @State private var showEndSessionConfirmation: Bool = false
+
+    private var headerPropertyName: String {
+        let trimmed = appState.selectedProperty?.name.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return trimmed.isEmpty ? "No Property Selected" : trimmed
+    }
+
+    private var hasActiveSession: Bool {
+        guard let session = appState.currentSession else { return false }
+        return session.endedAt == nil
+    }
     
     // MARK: - Physical device rotation for glyphs (UI is locked to portrait)
     
@@ -2562,146 +2553,6 @@ struct ContentView: View {
         case newReport
     }
 
-    private struct ParsedReportId {
-        let prefix: String
-        let year: Int?
-        let sequence: Int
-    }
-
-    private func parseReportId(_ value: String) -> ParsedReportId? {
-        let title = value.trimmingCharacters(in: .whitespacesAndNewlines)
-        let regex = try? NSRegularExpression(pattern: #"^([A-Za-z0-9]+)(?:-(\d{4}))?-(\d{3,5})$"#, options: [])
-        guard let regex else { return nil }
-        let ns = title as NSString
-        let fullRange = NSRange(location: 0, length: ns.length)
-        guard let match = regex.firstMatch(in: title, options: [], range: fullRange) else { return nil }
-        guard match.numberOfRanges == 4 else { return nil }
-
-        let prefix = ns.substring(with: match.range(at: 1))
-        let year: Int? = {
-            let r = match.range(at: 2)
-            guard r.location != NSNotFound else { return nil }
-            return Int(ns.substring(with: r))
-        }()
-        let sequenceRange = match.range(at: 3)
-        guard sequenceRange.location != NSNotFound else { return nil }
-        guard let sequence = Int(ns.substring(with: sequenceRange)) else { return nil }
-        return ParsedReportId(prefix: prefix, year: year, sequence: sequence)
-    }
-
-    private func normalizePrefix(_ value: String) -> String {
-        let filtered = value
-            .uppercased()
-            .filter { $0.isASCII && ($0.isLetter || $0.isNumber) }
-        return filtered.isEmpty ? "SC" : String(filtered.prefix(8))
-    }
-
-    private func normalizeYear(_ value: Int) -> Int {
-        min(9999, max(2000, value))
-    }
-
-    private func normalizeSequence(_ value: Int) -> Int {
-        min(99999, max(0, value))
-    }
-
-    private func formatSequenceForId(_ sequence: Int) -> String {
-        let n = normalizeSequence(sequence)
-        if n < 100 {
-            return String(format: "%03d", n)
-        }
-        return String(n)
-    }
-
-    private func composeReportId(prefix: String, includeYear: Bool, year: Int, sequence: Int) -> String {
-        let cleanPrefix = normalizePrefix(prefix)
-        let cleanYear = normalizeYear(year)
-        let seq = formatSequenceForId(sequence)
-        if includeYear {
-            return "\(cleanPrefix)-\(cleanYear)-\(seq)"
-        }
-        return "\(cleanPrefix)-\(seq)"
-    }
-
-    private func syncReportComponentsFromRecordId() {
-        guard let parsed = parseReportId(recordId) else { return }
-        reportPrefix = normalizePrefix(parsed.prefix)
-        reportIncludeYear = (parsed.year != nil)
-        if let parsedYear = parsed.year {
-            reportYear = normalizeYear(parsedYear)
-        }
-        reportSequence = normalizeSequence(parsed.sequence)
-    }
-
-    private func openReportMenuFromQuickMenu() {
-        pendingOpenReportMenuFromQuickMenu = true
-        showQuickMenu = false
-    }
-
-    private func openReportSwitcher() {
-        pendingOpenReportSwitcherFromReportMenu = true
-        showReportMenu = false
-    }
-
-    private func openEditCurrentReport() {
-        pendingOpenReportEditorFromReportMenu = .editCurrent
-        showReportMenu = false
-    }
-
-    private func openNewReport() {
-        pendingOpenReportEditorFromReportMenu = .newReport
-        showReportMenu = false
-    }
-
-    private func loadReportAlbumsForSwitching() {
-        loadingReportAlbums = true
-        reportLibrary.fetchMatchingReportAlbums { titles in
-            availableReportAlbums = titles
-            loadingReportAlbums = false
-        }
-    }
-
-    private func requestReportSwitch(to title: String) {
-        let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty, trimmed != recordId else { return }
-        pendingReportSwitchTitle = trimmed
-        showReportSwitchConfirmation = true
-    }
-
-    private func confirmReportSwitch() {
-        guard let pending = pendingReportSwitchTitle else { return }
-        recordId = pending
-        showReportSwitcher = false
-        pendingReportSwitchTitle = nil
-        syncReportComponentsFromRecordId()
-    }
-
-    private func openReportEditor(mode: ReportEditorMode) {
-        reportEditorMode = mode
-        switch mode {
-        case .editCurrent:
-            syncReportComponentsFromRecordId()
-        case .newReport:
-            syncReportComponentsFromRecordId()
-            reportSequence = normalizeSequence(reportSequence + 1)
-            reportSequenceLocked = false
-        }
-        showReportEditor = true
-    }
-
-    private func applyReportEditorSave(prefix: String, includeYear: Bool, year: Int, sequence: Int) {
-        reportPrefix = normalizePrefix(prefix)
-        reportIncludeYear = includeYear
-        reportYear = normalizeYear(year)
-        reportSequence = normalizeSequence(sequence)
-        recordId = composeReportId(
-            prefix: reportPrefix,
-            includeYear: reportIncludeYear,
-            year: reportYear,
-            sequence: reportSequence
-        )
-        showReportEditor = false
-    }
-
     private func showHDToast(_ text: String, duration: Double = 2.0) {
         hdEnabledToastToken += 1
         let token = hdEnabledToastToken
@@ -2712,25 +2563,6 @@ struct ContentView: View {
             guard token == hdEnabledToastToken else { return }
             showHDEnabledToast = false
         }
-    }
-
-    private func backToReportMenuFromChildSheet() {
-        pendingReopenReportMenuFromChildSheet = true
-        showReportSwitcher = false
-        showReportEditor = false
-    }
-
-    private func autoRollReportYearIfNeeded() {
-        guard let parsed = parseReportId(recordId), parsed.year != nil else { return }
-        let currentYear = Calendar.current.component(.year, from: Date())
-        guard parsed.year != currentYear else { return }
-
-        recordId = composeReportId(
-            prefix: parsed.prefix,
-            includeYear: true,
-            year: currentYear,
-            sequence: parsed.sequence
-        )
     }
     
     private var hasDetailNote: Bool {
@@ -2779,9 +2611,6 @@ struct ContentView: View {
 
                 locationManager.start()
 
-                syncReportComponentsFromRecordId()
-                autoRollReportYearIfNeeded()
-                reportLibrary.setActiveReportTitle(recordId)
                 reportLibrary.warmUpAlbumIfAuthorized()
                 isPollingDeviceOrientation = true
             }
@@ -2796,16 +2625,6 @@ struct ContentView: View {
                 isPollingDeviceOrientation = false
                 locationManager.stop()
                 UIDevice.current.endGeneratingDeviceOrientationNotifications()
-            }
-            .onChange(of: recordId) { _, newValue in
-                syncReportComponentsFromRecordId()
-                reportLibrary.setActiveReportTitle(newValue)
-                reportLibrary.warmUpAlbumIfAuthorized()
-            }
-            .onChange(of: scenePhase) { _, newPhase in
-                if newPhase == .active {
-                    autoRollReportYearIfNeeded()
-                }
             }
             .onChange(of: detailNote) { _, _ in
                 let wasOn = camera.effectiveHDEnabled
@@ -2838,7 +2657,6 @@ struct ContentView: View {
                         manageContext = ManageContext(mode: .interior)
                     }
                 },
-                onReport: { openReportMenuFromQuickMenu() },
                 onExteriorList: {
                     showQuickMenu = false
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
@@ -2852,107 +2670,6 @@ struct ContentView: View {
             .presentationDragIndicator(.visible)
             .onDisappear {
                 showQuickMenu = false
-                if pendingOpenReportMenuFromQuickMenu {
-                    pendingOpenReportMenuFromQuickMenu = false
-                    DispatchQueue.main.async {
-                        showReportMenu = true
-                    }
-                }
-            }
-        }
-        .sheet(isPresented: $showReportMenu) {
-            ReportMenuSheet(
-                activeReportTitle: recordId,
-                onSwitchReport: { openReportSwitcher() },
-                onNewReport: { openNewReport() },
-                onEditCurrent: { openEditCurrentReport() }
-            )
-            .presentationDetents([.medium])
-            .presentationDragIndicator(.visible)
-            .onDisappear {
-                showReportMenu = false
-                if pendingOpenReportSwitcherFromReportMenu {
-                    pendingOpenReportSwitcherFromReportMenu = false
-                    DispatchQueue.main.async {
-                        showReportSwitcher = true
-                        loadReportAlbumsForSwitching()
-                    }
-                }
-                if let pendingMode = pendingOpenReportEditorFromReportMenu {
-                    pendingOpenReportEditorFromReportMenu = nil
-                    DispatchQueue.main.async {
-                        openReportEditor(mode: pendingMode)
-                    }
-                }
-            }
-        }
-        .sheet(isPresented: $showReportSwitcher) {
-            ReportSwitcherSheet(
-                activeReportTitle: recordId,
-                reports: availableReportAlbums,
-                isLoading: loadingReportAlbums,
-                onRefresh: { loadReportAlbumsForSwitching() },
-                onBack: { backToReportMenuFromChildSheet() },
-                onSelectReport: { title in
-                    requestReportSwitch(to: title)
-                }
-            )
-            .presentationDetents([.large])
-            .presentationDragIndicator(.visible)
-            .onDisappear {
-                showReportSwitcher = false
-                if pendingReopenReportMenuFromChildSheet {
-                    pendingReopenReportMenuFromChildSheet = false
-                    DispatchQueue.main.async {
-                        showReportMenu = true
-                    }
-                }
-            }
-        }
-        .confirmationDialog(
-            "Switch Report?",
-            isPresented: $showReportSwitchConfirmation,
-            titleVisibility: .visible
-        ) {
-            Button("Switch") {
-                confirmReportSwitch()
-            }
-            Button("Cancel", role: .cancel) {
-                pendingReportSwitchTitle = nil
-            }
-        } message: {
-            if let pendingReportSwitchTitle {
-                Text("Active report will change to \(pendingReportSwitchTitle).")
-            }
-        }
-        .sheet(isPresented: $showReportEditor) {
-            ReportIdEditorSheet(
-                mode: reportEditorMode,
-                prefix: reportPrefix,
-                includeYear: reportIncludeYear,
-                year: reportYear,
-                sequence: reportSequence,
-                prefixLocked: reportPrefixLocked,
-                yearLocked: reportYearLocked,
-                sequenceLocked: reportSequenceLocked,
-                onCancel: { backToReportMenuFromChildSheet() },
-                onSave: { prefix, includeYear, year, sequence, prefixLocked, yearLocked, sequenceLocked in
-                    reportPrefixLocked = prefixLocked
-                    reportYearLocked = yearLocked
-                    reportSequenceLocked = sequenceLocked
-                    applyReportEditorSave(prefix: prefix, includeYear: includeYear, year: year, sequence: sequence)
-                }
-            )
-            .presentationDetents([.medium, .large])
-            .presentationDragIndicator(.visible)
-            .onDisappear {
-                showReportEditor = false
-                if pendingReopenReportMenuFromChildSheet {
-                    pendingReopenReportMenuFromChildSheet = false
-                    DispatchQueue.main.async {
-                        showReportMenu = true
-                    }
-                }
             }
         }
         // Album fullscreen
@@ -3008,7 +2725,7 @@ struct ContentView: View {
 
             VStack(spacing: 10) {
                 VStack(spacing: 2) {
-                    Text(recordId)
+                    Text(headerPropertyName)
                         .font(.system(size: 30, weight: .medium))
                         .tracking(0.4)
                         .foregroundColor(.white)
@@ -3030,10 +2747,36 @@ struct ContentView: View {
                             .offset(y: isLandscapeUI ? 0 : 2)
                             .allowsHitTesting(false)
                         }
+                        .overlay(alignment: .trailing) {
+                            if hasActiveSession {
+                                Button {
+                                    showEndSessionConfirmation = true
+                                } label: {
+                                    Group {
+                                        if isLandscapeUI {
+                                            VStack(spacing: 0) {
+                                                Text("End")
+                                                Text("Session")
+                                            }
+                                            .font(.system(size: 14, weight: .semibold))
+                                            .multilineTextAlignment(.center)
+                                        } else {
+                                            Text("End Session")
+                                                .font(.system(size: 16, weight: .semibold))
+                                        }
+                                    }
+                                    .foregroundColor(.red.opacity(0.95))
+                                    .shadow(color: .black.opacity(0.45), radius: 2, x: 0, y: 1)
+                                    .rotationEffect(isLandscapeUI ? bottomGlyphRotationAngle : .zero)
+                                }
+                                .buttonStyle(.plain)
+                                .padding(.trailing, rowPadding)
+                            }
+                        }
                 }
 
                 if !(lastValidDeviceOrientation == .landscapeLeft || lastValidDeviceOrientation == .landscapeRight) {
-                    HStack(spacing: gap) {
+                HStack(spacing: gap) {
                         Button {
                             if locationMode == .interior {
                                 return
@@ -3137,10 +2880,12 @@ struct ContentView: View {
             )
             .cameraCaptureButtons(
                 onPressBegan: {
+                    guard hasActiveSession else { return }
                     shutterHaptic.impactOccurred()
                     shutterHaptic.prepare()
                 },
                 onCapture: {
+                    guard hasActiveSession else { return }
                     capture()
                 }
             )
@@ -3311,6 +3056,75 @@ struct ContentView: View {
                     .allowsHitTesting(false)
                     .zIndex(25)
             }
+
+            if !hasActiveSession {
+                VStack(spacing: 12) {
+                    Text("No Active Session")
+                        .font(.system(size: 18, weight: .semibold))
+                        .foregroundColor(.white)
+
+                    Button("Start Session") {
+                        _ = appState.startSession()
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(.blue)
+                    .foregroundStyle(.white)
+                }
+                .padding(.horizontal, 22)
+                .padding(.vertical, 18)
+                .background(Color.black.opacity(0.5))
+                .clipShape(RoundedRectangle(cornerRadius: 16))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 16)
+                        .stroke(Color.white.opacity(0.18), lineWidth: 1)
+                )
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+                .rotationEffect(bottomGlyphRotationAngle)
+                .zIndex(90)
+            }
+
+            if showEndSessionConfirmation {
+                Color.black.opacity(0.48)
+                    .frame(width: w, height: previewH)
+                    .zIndex(105)
+
+                VStack(spacing: 14) {
+                    Text("Finish Session?")
+                        .font(.system(size: 20, weight: .semibold))
+                        .foregroundColor(.white)
+
+                    Text("This will end the current session.")
+                        .font(.system(size: 14, weight: .medium))
+                        .foregroundColor(.white.opacity(0.9))
+                        .multilineTextAlignment(.center)
+
+                    HStack(spacing: 10) {
+                        Button("Cancel") {
+                            showEndSessionConfirmation = false
+                        }
+                        .buttonStyle(.bordered)
+                        .tint(.white)
+
+                        Button("End Session") {
+                            appState.finishSession()
+                            showEndSessionConfirmation = false
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .tint(.red)
+                    }
+                }
+                .padding(.horizontal, 20)
+                .padding(.vertical, 18)
+                .background(Color.black.opacity(0.7))
+                .clipShape(RoundedRectangle(cornerRadius: 16))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 16)
+                        .stroke(Color.white.opacity(0.18), lineWidth: 1)
+                )
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+                .rotationEffect(bottomGlyphRotationAngle)
+                .zIndex(110)
+            }
         }
         .clipped()
         .frame(height: previewH)
@@ -3333,6 +3147,7 @@ struct ContentView: View {
                     Spacer(minLength: 0)
 
                     Button(action: {
+                        guard hasActiveSession else { return }
                         shutterHaptic.impactOccurred()
                         shutterHaptic.prepare()
                         capture()
@@ -3355,7 +3170,7 @@ struct ContentView: View {
                                 .frame(width: 74, height: 74)
                         }
                     }
-                    .disabled(camera.isCapturing)
+                    .disabled(camera.isCapturing || !hasActiveSession)
                     .buttonStyle(.plain)
                     .offset(y: -13)
                     .overlay(alignment: .center) {
@@ -3363,10 +3178,12 @@ struct ContentView: View {
                             hdQuickButton(size: 44)
                                 .rotationEffect(bottomGlyphRotationAngle)
                                 .offset(x: -94, y: -12)
+                                .disabled(!hasActiveSession)
 
                             detailNoteQuickButton(size: 44)
                                 .rotationEffect(bottomGlyphRotationAngle)
                                 .offset(x: 94, y: -12)
+                                .disabled(!hasActiveSession)
                         }
                     }
 
@@ -3390,12 +3207,14 @@ struct ContentView: View {
 
                     locationModeSlider()
                         .frame(height: 44)
+                        .disabled(!hasActiveSession)
 
                     Spacer(minLength: 0)
 
                     topRightEllipsisCircle()
                         .frame(width: 44, height: 44)
                         .rotationEffect(bottomGlyphRotationAngle)
+                        .disabled(!hasActiveSession)
                 }
                 .padding(.horizontal, 22)
             }
@@ -3811,7 +3630,7 @@ extension ContentView {
                     Circle()
                         .fill(
                             isEnabled
-                            ? Color.white.opacity(isOn ? 0.22 : 0.14)
+                            ? (isOn ? Color.blue : Color.white.opacity(0.14))
                             : Color.white.opacity(0.08)
                         )
                         .frame(width: size, height: size)
@@ -3819,7 +3638,7 @@ extension ContentView {
                     // Subtle glow ring when ON
                     Circle()
                         .stroke(
-                            isEnabled && isOn ? Color.yellow.opacity(0.55) : Color.clear,
+                            isEnabled && isOn ? Color.white.opacity(0.70) : Color.clear,
                             lineWidth: 2
                         )
                         .frame(width: size + 6, height: size + 6)
@@ -3829,7 +3648,7 @@ extension ContentView {
                         .font(.system(size: proportionalCircleTextSize(for: size), weight: .medium))
                         .foregroundColor(
                             isEnabled
-                            ? (isOn ? .yellow : .white.opacity(0.92))
+                            ? (isOn ? .white : .white.opacity(0.92))
                             : .white.opacity(0.35)
                         )
                 }
@@ -3899,12 +3718,12 @@ extension ContentView {
             }) {
                 ZStack {
                     Circle()
-                        .fill(Color.white.opacity(hasDetailNote ? 0.20 : 0.14))
+                        .fill(hasDetailNote ? Color.blue : Color.white.opacity(0.14))
                         .frame(width: size, height: size)
                     
                     Circle()
                         .stroke(
-                            hasDetailNote ? Color.yellow.opacity(0.55) : Color.clear,
+                            hasDetailNote ? Color.white.opacity(0.70) : Color.clear,
                             lineWidth: 2
                         )
                         .frame(width: size + 6, height: size + 6)
@@ -3912,7 +3731,7 @@ extension ContentView {
                     
                     Image(systemName: "note.text")
                         .font(.system(size: proportionalCircleGlyphSize(for: size), weight: .medium))
-                        .foregroundColor(hasDetailNote ? .yellow : .white.opacity(0.92))
+                        .foregroundColor(hasDetailNote ? .white : .white.opacity(0.92))
                 }
                 .frame(width: size, height: size)
                 .contentShape(Circle())
@@ -3962,8 +3781,8 @@ extension ContentView {
             control.selectedSegmentIndex = index(for: selection)
             control.addTarget(context.coordinator, action: #selector(Coordinator.changed(_:)), for: .valueChanged)
 
-            // Keep native look; only force selected segment away from bright white in light mode.
-            control.selectedSegmentTintColor = UIColor(white: 0.28, alpha: 1.0)
+            // Keep native look with a blue active segment.
+            control.selectedSegmentTintColor = UIColor.systemBlue
 
             let normalAttrs: [NSAttributedString.Key: Any] = [
                 .foregroundColor: UIColor.white.withAlphaComponent(0.92),
@@ -3971,7 +3790,7 @@ extension ContentView {
             ]
 
             let selectedAttrs: [NSAttributedString.Key: Any] = [
-                .foregroundColor: UIColor.systemYellow,
+                .foregroundColor: UIColor.white,
                 .font: UIFont.systemFont(ofSize: 19, weight: .medium)
             ]
 
@@ -4055,17 +3874,17 @@ extension ContentView {
                 Button(action: { camera.setZoomStep(step) }) {
                     Text(label)
                         .font(.system(size: 15, weight: selected ? .semibold : .regular))
-                        .foregroundColor(selected ? Color.yellow : Color.white.opacity(0.92))
+                        .foregroundColor(selected ? .white : Color.white.opacity(0.92))
                         .rotationEffect(bottomGlyphRotationAngle)
                         .frame(width: itemW, height: itemW)
                         .background(
                             Group {
                                 if selected {
-                                    // Match native iOS: slightly lighter translucent circle for active zoom
+                                    // Active zoom uses blue fill with white text.
                                     Circle()
-                                        .fill(Color(white: 0.22))
+                                        .fill(Color.blue)
                                         .overlay(
-                                            Circle().fill(Color.white.opacity(0.06)).blendMode(.overlay)
+                                            Circle().fill(Color.white.opacity(0.10)).blendMode(.overlay)
                                         )
                                 } else {
                                     Color.clear
@@ -4347,6 +4166,7 @@ extension ContentView {
         
         @ObservedObject var reportLibrary: ReportLibraryModel
         @ObservedObject var cache: AssetImageCache
+        @EnvironmentObject private var appState: AppState
         
         @Environment(\.dismiss) private var dismiss
         @State private var orientationResetToken: Int = 0
@@ -4355,6 +4175,11 @@ extension ContentView {
         
         private var isLandscape: Bool {
             lastValidOrientation == .landscapeLeft || lastValidOrientation == .landscapeRight
+        }
+
+        private var headerPropertyName: String {
+            let trimmed = appState.selectedProperty?.name.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            return trimmed.isEmpty ? "No Property Selected" : trimmed
         }
         
         private var rotationDegrees: Double {
@@ -4402,6 +4227,19 @@ extension ContentView {
             case albumOnly
             case library
         }
+
+        private enum DragSelectionMode {
+            case add
+            case remove
+        }
+
+        private struct ThumbnailFramePreferenceKey: PreferenceKey {
+            static var defaultValue: [String: CGRect] = [:]
+
+            static func reduce(value: inout [String: CGRect], nextValue: () -> [String: CGRect]) {
+                value.merge(nextValue(), uniquingKeysWith: { _, new in new })
+            }
+        }
         
         @State private var viewerState: ViewerState? = nil
         @State private var isSelectionMode: Bool = false
@@ -4411,6 +4249,14 @@ extension ContentView {
         @State private var isPreparingShare: Bool = false
         @State private var showShareSheet: Bool = false
         @State private var shareItems: [Any] = []
+        @State private var thumbnailFrames: [String: CGRect] = [:]
+        @State private var isDragSelecting: Bool = false
+        @State private var dragSelectionMode: DragSelectionMode? = nil
+        @State private var dragAnchorAssetIndex: Int? = nil
+        @State private var dragBaselineSelection: Set<String> = []
+        @State private var dragCurrentAssetIndex: Int? = nil
+        @State private var dragAutoScrollDirection: Int = 0
+        @State private var dragAutoScrollWorkItem: DispatchWorkItem? = nil
         
         var body: some View {
             GeometryReader { geo in
@@ -4440,33 +4286,63 @@ extension ContentView {
                     // Rotated content container
                     ZStack {
                         // Grid
-                        ScrollView(.vertical, showsIndicators: false) {
-                            LazyVGrid(
-                                columns: Array(repeating: GridItem(.fixed(side), spacing: spacing, alignment: .center), count: columnsCount),
-                                alignment: .center,
-                                spacing: spacing
-                            ) {
-                                ForEach(Array(reportLibrary.assets.enumerated()), id: \.element.localIdentifier) { idx, asset in
-                                    LibraryThumb(
-                                        asset: asset,
-                                        cache: cache,
-                                        side: side,
-                                        isSelectionMode: isSelectionMode,
-                                        isSelected: selectedAssetIds.contains(asset.localIdentifier)
-                                    )
-                                        .contentShape(Rectangle())
-                                        .onTapGesture {
-                                            if isSelectionMode {
-                                                toggleAssetSelection(asset.localIdentifier)
-                                            } else {
-                                                viewerState = ViewerState(startIndex: idx)
+                        ScrollViewReader { scrollProxy in
+                            ScrollView(.vertical, showsIndicators: false) {
+                                LazyVGrid(
+                                    columns: Array(repeating: GridItem(.fixed(side), spacing: spacing, alignment: .center), count: columnsCount),
+                                    alignment: .center,
+                                    spacing: spacing
+                                ) {
+                                    ForEach(Array(reportLibrary.assets.enumerated()), id: \.element.localIdentifier) { idx, asset in
+                                        LibraryThumb(
+                                            asset: asset,
+                                            cache: cache,
+                                            side: side,
+                                            isSelectionMode: isSelectionMode,
+                                            isSelected: selectedAssetIds.contains(asset.localIdentifier)
+                                        )
+                                            .id(asset.localIdentifier)
+                                            .background(
+                                                GeometryReader { proxy in
+                                                    Color.clear.preference(
+                                                        key: ThumbnailFramePreferenceKey.self,
+                                                        value: [asset.localIdentifier: proxy.frame(in: .named("libraryGridSelectionSpace"))]
+                                                    )
+                                                }
+                                            )
+                                            .contentShape(Rectangle())
+                                            .onTapGesture {
+                                                if isSelectionMode {
+                                                    toggleAssetSelection(asset.localIdentifier)
+                                                } else {
+                                                    viewerState = ViewerState(startIndex: idx)
+                                                }
                                             }
-                                        }
+                                    }
                                 }
+                                .padding(.horizontal, horizontalPadding)
+                                .padding(.top, headerH)
+                                .padding(.bottom, isLandscape ? 0 : 8)
                             }
-                            .padding(.horizontal, horizontalPadding)
-                            .padding(.top, headerH)
-                            .padding(.bottom, isLandscape ? 0 : 8)
+                            .scrollDisabled(isSelectionMode && isDragSelecting)
+                            .coordinateSpace(name: "libraryGridSelectionSpace")
+                            .onPreferenceChange(ThumbnailFramePreferenceKey.self) { frames in
+                                thumbnailFrames = frames
+                            }
+                            .simultaneousGesture(
+                                DragGesture(minimumDistance: 8, coordinateSpace: .named("libraryGridSelectionSpace"))
+                                    .onChanged { value in
+                                        handleSelectionDragChanged(
+                                            at: value.location,
+                                            contentHeight: contentH,
+                                            columnsCount: columnsCount,
+                                            scrollProxy: scrollProxy
+                                        )
+                                    }
+                                    .onEnded { _ in
+                                        handleSelectionDragEnded()
+                                    }
+                            )
                         }
                         // In landscape, remove safe areas so the grid goes edge to edge.
                         .ignoresSafeArea(isLandscape ? .all : [])
@@ -4493,6 +4369,7 @@ extension ContentView {
                 }
                 .onDisappear {
                     UIDevice.current.endGeneratingDeviceOrientationNotifications()
+                    handleSelectionDragEnded()
                     selectedAssetIds.removeAll()
                     isSelectionMode = false
                 }
@@ -4546,18 +4423,16 @@ extension ContentView {
                     .ignoresSafeArea(edges: .top)
                     .allowsHitTesting(false)
                     
-                    HStack {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(reportLibrary.albumTitle)
-                                .font(.system(size: 20, weight: .medium))
+                        HStack {
+                            VStack(alignment: .leading, spacing: 2) {
+                            Text(headerPropertyName)
+                                .font(.system(size: 38, weight: .medium))
                                 .foregroundColor(.white)
                                 .lineLimit(1)
-                                .minimumScaleFactor(0.75)
-                            if isSelectionMode {
-                                Text("\(selectedAssetIds.count) selected")
-                                    .font(.system(size: 13, weight: .medium))
-                                    .foregroundColor(.white.opacity(0.82))
-                            }
+                                .minimumScaleFactor(0.4)
+                                .allowsTightening(true)
+                                .truncationMode(.tail)
+                                .layoutPriority(1)
                         }
                         
                         Spacer(minLength: 0)
@@ -4662,7 +4537,7 @@ extension ContentView {
 
                         Spacer(minLength: 0)
 
-                        Text("Select Items")
+                        Text(selectedAssetIds.isEmpty ? "Select Items" : "\(selectedAssetIds.count) Selected")
                             .font(.system(size: 19, weight: .semibold))
                             .foregroundColor(.white)
                             .lineLimit(1)
@@ -4774,6 +4649,125 @@ extension ContentView {
             }
         }
 
+        private func assetID(at location: CGPoint) -> String? {
+            thumbnailFrames.first(where: { $0.value.contains(location) })?.key
+        }
+
+        private func handleSelectionDragChanged(
+            at location: CGPoint,
+            contentHeight: CGFloat,
+            columnsCount: Int,
+            scrollProxy: ScrollViewProxy
+        ) {
+            guard isSelectionMode else { return }
+            guard let localId = assetID(at: location) else { return }
+            guard let index = reportLibrary.assets.firstIndex(where: { $0.localIdentifier == localId }) else { return }
+
+            if !isDragSelecting {
+                isDragSelecting = true
+                dragSelectionMode = selectedAssetIds.contains(localId) ? .remove : .add
+                dragAnchorAssetIndex = index
+                dragBaselineSelection = selectedAssetIds
+            }
+
+            dragCurrentAssetIndex = index
+            applyDragRangeSelection(currentIndex: index)
+
+            let edgeThreshold: CGFloat = 72
+            let direction: Int
+            if location.y <= edgeThreshold {
+                direction = -1
+            } else if location.y >= (contentHeight - edgeThreshold) {
+                direction = 1
+            } else {
+                direction = 0
+            }
+
+            updateAutoScroll(
+                direction: direction,
+                columnsCount: columnsCount,
+                scrollProxy: scrollProxy
+            )
+        }
+
+        private func applyDragRangeSelection(currentIndex: Int) {
+            guard let anchorIndex = dragAnchorAssetIndex else { return }
+            guard let mode = dragSelectionMode else { return }
+
+            let lower = min(anchorIndex, currentIndex)
+            let upper = max(anchorIndex, currentIndex)
+            let rangedIDs = Set(reportLibrary.assets[lower...upper].map(\.localIdentifier))
+
+            switch mode {
+            case .add:
+                selectedAssetIds = dragBaselineSelection.union(rangedIDs)
+            case .remove:
+                selectedAssetIds = dragBaselineSelection.subtracting(rangedIDs)
+            }
+        }
+
+        private func updateAutoScroll(
+            direction: Int,
+            columnsCount: Int,
+            scrollProxy: ScrollViewProxy
+        ) {
+            guard direction != dragAutoScrollDirection else { return }
+            dragAutoScrollDirection = direction
+            dragAutoScrollWorkItem?.cancel()
+            dragAutoScrollWorkItem = nil
+
+            guard direction != 0 else { return }
+            scheduleAutoScrollTick(columnsCount: columnsCount, scrollProxy: scrollProxy)
+        }
+
+        private func scheduleAutoScrollTick(columnsCount: Int, scrollProxy: ScrollViewProxy) {
+            let work = DispatchWorkItem {
+                guard isDragSelecting else { return }
+                guard dragAutoScrollDirection != 0 else { return }
+                guard !reportLibrary.assets.isEmpty else { return }
+
+                let step = max(1, columnsCount)
+                let currentIndex = dragCurrentAssetIndex ?? 0
+                let maxIndex = reportLibrary.assets.count - 1
+                let nextIndex = min(
+                    max(0, currentIndex + (dragAutoScrollDirection * step)),
+                    maxIndex
+                )
+
+                guard nextIndex != currentIndex else {
+                    scheduleAutoScrollTick(columnsCount: columnsCount, scrollProxy: scrollProxy)
+                    return
+                }
+
+                let nextId = reportLibrary.assets[nextIndex].localIdentifier
+                dragCurrentAssetIndex = nextIndex
+                applyDragRangeSelection(currentIndex: nextIndex)
+
+                withAnimation(.linear(duration: 0.12)) {
+                    scrollProxy.scrollTo(
+                        nextId,
+                        anchor: dragAutoScrollDirection > 0 ? .bottom : .top
+                    )
+                }
+
+                scheduleAutoScrollTick(columnsCount: columnsCount, scrollProxy: scrollProxy)
+            }
+
+            dragAutoScrollWorkItem = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.14, execute: work)
+        }
+
+        private func handleSelectionDragEnded() {
+            isDragSelecting = false
+            dragSelectionMode = nil
+            dragAnchorAssetIndex = nil
+            dragBaselineSelection.removeAll()
+            dragCurrentAssetIndex = nil
+            dragAutoScrollDirection = 0
+            dragAutoScrollWorkItem?.cancel()
+            dragAutoScrollWorkItem = nil
+        }
+
         private func deleteSelectedAssets(scope: DeleteScope) {
             let ids = Array(selectedAssetIds)
             guard !ids.isEmpty else { return }
@@ -4819,15 +4813,25 @@ extension ContentView {
                     }
 
                     if isSelectionMode {
-                        RoundedRectangle(cornerRadius: 0)
-                            .stroke(isSelected ? Color.yellow : Color.white.opacity(0.45), lineWidth: isSelected ? 3 : 1)
-                            .frame(width: side, height: side)
+                        if isSelected {
+                            Color.black.opacity(0.28)
+                                .frame(width: side, height: side)
+                        }
 
-                        Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
-                            .font(.system(size: 20, weight: .medium))
-                            .foregroundColor(isSelected ? .yellow : .white.opacity(0.90))
+                        Circle()
+                            .fill(isSelected ? Color.blue : Color.black.opacity(0.30))
+                            .frame(width: 22, height: 22)
+                            .overlay(
+                                Circle()
+                                    .stroke(Color.white, lineWidth: 1.6)
+                            )
+                            .overlay(
+                                Image(systemName: isSelected ? "checkmark" : "")
+                                    .font(.system(size: 11, weight: .bold))
+                                    .foregroundColor(.white)
+                            )
                             .padding(8)
-                            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
+                            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
                     }
                 }
                 .frame(width: side, height: side)
@@ -5687,7 +5691,6 @@ extension ContentView {
         let debugEnabled: Bool
         let onToggleDebug: (Bool) -> Void
         let onInteriorList: () -> Void
-        let onReport: () -> Void
         let onExteriorList: () -> Void
         let onFlash: () -> Void
         
@@ -5705,6 +5708,8 @@ extension ContentView {
                 
                 let rawBtnW = (contentW - (spacing * 2)) / 3.0
                 let btnW: CGFloat = rawBtnW.isFinite ? max(0, rawBtnW) : 0
+                let rawTopBtnW = (contentW - spacing) / 2.0
+                let topBtnW: CGFloat = rawTopBtnW.isFinite ? max(0, rawTopBtnW) : 0
                 
                 let bottomInset: CGFloat = (btnW / 2.0) + (spacing / 2.0)
                 
@@ -5718,17 +5723,6 @@ extension ContentView {
                             HStack(spacing: spacing) {
                                 QuickMenuButton(
                                     glyphRotationAngle: glyphRotationAngle,
-                                    icon: "number.square",
-                                    title: "REPORT",
-                                    isSelected: false,
-                                    selectedStyle: false,
-                                    theme: theme,
-                                    action: onReport
-                                )
-                                    .frame(width: btnW)
-                                
-                                QuickMenuButton(
-                                    glyphRotationAngle: glyphRotationAngle,
                                     icon: "list.bullet",
                                     title: "INTERIOR",
                                     isSelected: false,
@@ -5736,7 +5730,7 @@ extension ContentView {
                                     theme: theme,
                                     action: onInteriorList
                                 )
-                                    .frame(width: btnW)
+                                    .frame(width: topBtnW)
                                 
                                 QuickMenuButton(
                                     glyphRotationAngle: glyphRotationAngle,
@@ -5747,7 +5741,7 @@ extension ContentView {
                                     theme: theme,
                                     action: onExteriorList
                                 )
-                                    .frame(width: btnW)
+                                    .frame(width: topBtnW)
                             }
 
                             Rectangle()
@@ -5862,13 +5856,13 @@ extension ContentView {
                     
                     let fg: Color = {
                         if isSelected {
-                            return .yellow
+                            return .blue
                         }
                         return selectedStyle ? theme.label.opacity(0.92) : theme.label
                     }()
                     
-                    let ring: Color = isSelected ? Color.yellow.opacity(0.65) : theme.stroke.opacity(0.70)
-                    let titleColor: Color = isSelected ? Color.yellow.opacity(0.94) : theme.label.opacity(0.88)
+                    let ring: Color = isSelected ? Color.blue.opacity(0.72) : theme.stroke.opacity(0.70)
+                    let titleColor: Color = isSelected ? Color.blue.opacity(0.96) : theme.label.opacity(0.88)
                     
                     VStack(spacing: 10) {
                         Circle()
