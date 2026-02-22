@@ -1260,9 +1260,9 @@ final class CameraManager: NSObject, ObservableObject {
         case .portraitUpsideDown:
             return 270
         case .landscapeLeft:
-            return 180
-        case .landscapeRight:
             return 0
+        case .landscapeRight:
+            return 180
         default:
             return 90
         }
