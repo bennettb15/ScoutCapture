@@ -22,10 +22,40 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
 @main
 struct ScoutCaptureApp: App {
     @UIApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
+    @StateObject private var appState = AppState()
 
     var body: some Scene {
         WindowGroup {
-            ContentView()
+            AppRootView()
+                .environmentObject(appState)
+        }
+    }
+}
+
+private struct AppRootView: View {
+    @EnvironmentObject private var appState: AppState
+
+    private var showPropertyPicker: Binding<Bool> {
+        Binding(
+            get: { !appState.isLoading && appState.selectedPropertyID == nil },
+            set: { _ in }
+        )
+    }
+
+    var body: some View {
+        Group {
+            if appState.isLoading {
+                LoadingView()
+            } else {
+                ContentView()
+            }
+        }
+        .task {
+            appState.loadIfNeeded()
+        }
+        .sheet(isPresented: showPropertyPicker) {
+            PropertyPickerSheet()
+                .environmentObject(appState)
         }
     }
 }
