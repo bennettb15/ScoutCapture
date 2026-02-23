@@ -48,12 +48,17 @@ struct Session: Codable, Identifiable, Equatable {
 }
 
 enum SkipReason: String, Codable, CaseIterable {
-    case notVisible
     case inaccessible
+    case obstructed
+    case activeConstruction
+    case safetyConcern
+    case other
+
+    // Legacy values retained for backwards compatibility with existing saved data.
+    case notVisible
     case unsafe
     case blocked
     case notApplicable
-    case other
 }
 
 struct Shot: Codable, Identifiable, Equatable {
@@ -78,22 +83,34 @@ struct Shot: Codable, Identifiable, Equatable {
 struct GuidedShot: Codable, Identifiable, Equatable {
     let id: UUID
     var title: String
+    var building: String?
+    var targetElevation: String?
+    var referenceImageLocalIdentifier: String?
     var shot: Shot?
     var isCompleted: Bool
     var skipReason: SkipReason?
+    var skipReasonNote: String?
 
     init(
         id: UUID = UUID(),
         title: String,
+        building: String? = nil,
+        targetElevation: String? = nil,
+        referenceImageLocalIdentifier: String? = nil,
         shot: Shot? = nil,
         isCompleted: Bool = false,
-        skipReason: SkipReason? = nil
+        skipReason: SkipReason? = nil,
+        skipReasonNote: String? = nil
     ) {
         self.id = id
         self.title = title
+        self.building = building
+        self.targetElevation = targetElevation
+        self.referenceImageLocalIdentifier = referenceImageLocalIdentifier
         self.shot = shot
         self.isCompleted = isCompleted
         self.skipReason = skipReason
+        self.skipReasonNote = skipReasonNote
     }
 }
 

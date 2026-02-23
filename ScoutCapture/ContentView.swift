@@ -925,6 +925,7 @@ private struct ReportPhotoViewer: View {
     let title: String
     let assets: [PHAsset]
     let startIndex: Int
+    let detailIdOverride: String?
     @ObservedObject var cache: AssetImageCache
     let viewerToken: Int
 
@@ -1015,10 +1016,18 @@ private struct ReportPhotoViewer: View {
     // When you swipe away from a page, we increment that page's token so returning to it is back at fit.
     @State private var pageResetTokens: [Int: Int] = [:]
 
-    init(title: String, assets: [PHAsset], startIndex: Int, cache: AssetImageCache, viewerToken: Int) {
+    init(
+        title: String,
+        assets: [PHAsset],
+        startIndex: Int,
+        detailIdOverride: String? = nil,
+        cache: AssetImageCache,
+        viewerToken: Int
+    ) {
         self.title = title
         self.assets = assets
         self.startIndex = startIndex
+        self.detailIdOverride = detailIdOverride
         self.cache = cache
         self.viewerToken = viewerToken
         _index = State(initialValue: min(max(0, startIndex), max(0, assets.count - 1)))
@@ -1202,7 +1211,7 @@ private struct ReportPhotoViewer: View {
         let note = extractToken("note")
 
         let elevationText = elev ?? title
-        let detailIdText = detail ?? "Photo \(index + 1) of \(max(assets.count, 1))"
+        let detailIdText = detail ?? detailIdOverride ?? "Photo \(index + 1) of \(max(assets.count, 1))"
 
         return HeaderMeta(
             elevation: elevationText,
@@ -2249,8 +2258,16 @@ struct ContentView: View {
     
     @State private var showQuickMenu: Bool = false
     @State private var manageContext: ManageContext? = nil
+    @State private var selectedBuilding: String = "B1"
     @State private var showActiveIssuesSheet: Bool = false
     @State private var activeObservations: [Observation] = []
+    @State private var showGuidedChecklist: Bool = false
+    @State private var guidedShots: [GuidedShot] = []
+    @State private var armedGuidedShotID: UUID? = nil
+    @State private var armedGuidedRetakeShotID: UUID? = nil
+    @State private var guidedReferenceAssetLocalID: String? = nil
+    @State private var guidedReferenceThumbnail: UIImage? = nil
+    @State private var showGuidedAlignmentOverlay: Bool = false
     @State private var armedUpdateObservationID: UUID? = nil
     @State private var resolutionTargetObservation: Observation? = nil
     @State private var resolutionCapturedShot: Shot? = nil
@@ -2258,6 +2275,7 @@ struct ContentView: View {
     @State private var resolutionCapturedImage: UIImage? = nil
     
     // Custom centered overlays for rotated dropdowns (used in landscape-with-portrait-lock UI)
+    @State private var showLandscapeBuildingMenu: Bool = false
     @State private var showLandscapeElevationMenu: Bool = false
     @State private var showLandscapeDetailMenu: Bool = false
     
@@ -2340,6 +2358,52 @@ struct ContentView: View {
     
     private var isLandscapeUI: Bool {
         lastValidDeviceOrientation == .landscapeLeft || lastValidDeviceOrientation == .landscapeRight
+    }
+
+    private func buildingSelectorOverlay() -> some View {
+        Button {
+            showLandscapeElevationMenu = false
+            showLandscapeDetailMenu = false
+            showLandscapeBuildingMenu.toggle()
+        } label: {
+            HStack(spacing: 6) {
+                Text(selectedBuilding)
+                    .font(.system(size: 12, weight: .semibold))
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 10, weight: .semibold))
+            }
+            .foregroundColor(.white.opacity(0.92))
+            .padding(.horizontal, 10)
+            .frame(height: 26)
+            .background(
+                ZStack {
+                    Color.black.opacity(0.55)
+                    Color.white.opacity(0.08)
+                }
+            )
+            .clipShape(RoundedRectangle(cornerRadius: 10))
+            .overlay(
+                RoundedRectangle(cornerRadius: 10)
+                    .stroke(Color.white.opacity(0.12), lineWidth: 1)
+            )
+        }
+        .buttonStyle(.plain)
+    }
+
+    private var buildingOptions: [String] {
+        ["B1", "B2", "B3", "B4", "B5", "Add"]
+    }
+
+    private func buildingDisplayName(for option: String) -> String {
+        switch option {
+        case "B1": return "B1 - Building 1"
+        case "B2": return "B2 - Building 2"
+        case "B3": return "B3 - Building 3"
+        case "B4": return "B4 - Building 4"
+        case "B5": return "B5 - Building 5"
+        case "Add": return "Add - Additional"
+        default: return option
+        }
     }
     
     private func debugOverlayInline() -> some View {
@@ -2672,6 +2736,7 @@ struct ContentView: View {
 
                 reportLibrary.warmUpAlbumIfAuthorized()
                 refreshActiveIssues()
+                refreshGuidedShots()
                 isPollingDeviceOrientation = true
             }
             .onReceive(NotificationCenter.default.publisher(for: UIDevice.orientationDidChangeNotification)) { _ in
@@ -2688,6 +2753,7 @@ struct ContentView: View {
             }
             .onChange(of: appState.selectedPropertyID) { _, _ in
                 refreshActiveIssues()
+                refreshGuidedShots()
             }
             .onChange(of: detailNote) { _, _ in
                 let wasOn = camera.effectiveHDEnabled
@@ -2757,6 +2823,27 @@ struct ContentView: View {
                 }
             )
         }
+        .fullScreenCover(isPresented: $showGuidedChecklist) {
+            GuidedChecklistOverlay(
+                guidedShots: guidedShots,
+                cache: imageCache,
+                onClose: {
+                    showGuidedChecklist = false
+                },
+                onRefresh: {
+                    refreshGuidedShots()
+                },
+                onSelectPending: { guidedShot in
+                    armGuidedShot(guidedShot)
+                },
+                onSkip: { guidedShot, reason, otherNote in
+                    markGuidedShotSkipped(guidedShot, reason: reason, otherNote: otherNote)
+                },
+                onRetake: { guidedShot in
+                    armGuidedRetake(guidedShot)
+                }
+            )
+        }
     }
 
     @ViewBuilder
@@ -2810,19 +2897,11 @@ struct ContentView: View {
                         .minimumScaleFactor(0.72)
                         .frame(maxWidth: .infinity, alignment: .center)
                         .overlay(alignment: .leading) {
-                            Group {
-                                if isLandscapeUI {
-                                    debugOverlayStacked()
-                                } else {
-                                    debugOverlayInline()
-                                }
-                            }
-                            .fixedSize()
+                            buildingSelectorOverlay()
                             .rotationEffect(bottomGlyphRotationAngle)
-                            .padding(.leading, 14)
+                            .padding(.leading, 18)
                             .padding(.top, isLandscapeUI ? 6 : 0)
-                            .offset(y: isLandscapeUI ? 0 : 2)
-                            .allowsHitTesting(false)
+                            .offset(y: isLandscapeUI ? 3 : 5)
                         }
                         .overlay(alignment: .trailing) {
                             if hasActiveSession {
@@ -2855,6 +2934,7 @@ struct ContentView: View {
                 if !(lastValidDeviceOrientation == .landscapeLeft || lastValidDeviceOrientation == .landscapeRight) {
                 HStack(spacing: gap) {
                         Button {
+                            showLandscapeBuildingMenu = false
                             if locationMode == .interior {
                                 return
                             }
@@ -2894,6 +2974,7 @@ struct ContentView: View {
                         .disabled(locationMode == .interior)
 
                         Button {
+                            showLandscapeBuildingMenu = false
                             showLandscapeElevationMenu = false
                             showLandscapeDetailMenu.toggle()
                         } label: {
@@ -3002,6 +3083,23 @@ struct ContentView: View {
                 .padding(.leading, lastValidDeviceOrientation == .landscapeRight ? 0 : 14)
                 .padding(.trailing, lastValidDeviceOrientation == .landscapeRight ? 14 : 0)
                 .zIndex(12)
+
+            if showGuidedAlignmentOverlay && armedGuidedShotID != nil {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 8)
+                        .stroke(Color.white.opacity(0.55), style: StrokeStyle(lineWidth: 1.2, dash: [8, 6]))
+                    Rectangle()
+                        .fill(Color.white.opacity(0.35))
+                        .frame(width: 1.0)
+                    Rectangle()
+                        .fill(Color.white.opacity(0.35))
+                        .frame(height: 1.0)
+                }
+                .padding(.horizontal, 18)
+                .padding(.vertical, 12)
+                .allowsHitTesting(false)
+                .zIndex(11)
+            }
 
             if showCameraSwapBlackout {
                 Color.black
@@ -3374,6 +3472,13 @@ struct ContentView: View {
                                 .rotationEffect(bottomGlyphRotationAngle)
                                 .offset(x: 94, y: -12)
                                 .disabled(!hasActiveSession)
+
+                            if armedGuidedShotID != nil {
+                                guidedReferenceCard(size: 88)
+                                    .rotationEffect(bottomGlyphRotationAngle)
+                                    .offset(x: 170, y: -12)
+                                    .disabled(!hasActiveSession)
+                            }
                         }
                     }
 
@@ -3513,6 +3618,7 @@ extension ContentView {
             
             // Elevation dropdown (compact) - custom (opens centered overlay)
             Button {
+                showLandscapeBuildingMenu = false
                 // Only allow elevation picking in exterior mode
                 if locationMode == .interior {
                     return
@@ -3552,6 +3658,7 @@ extension ContentView {
             
             // Detail type dropdown (compact) - custom (opens centered overlay)
             Button {
+                showLandscapeBuildingMenu = false
                 showLandscapeElevationMenu = false
                 showLandscapeDetailMenu.toggle()
             } label: {
@@ -3593,7 +3700,7 @@ extension ContentView {
     
     @ViewBuilder
     private func centeredLandscapeMenuOverlay() -> some View {
-        let isShowing = showLandscapeElevationMenu || showLandscapeDetailMenu
+        let isShowing = showLandscapeBuildingMenu || showLandscapeElevationMenu || showLandscapeDetailMenu
         
         ZStack {
             if isShowing {
@@ -3605,6 +3712,10 @@ extension ContentView {
                     }
                 
                 VStack(spacing: 12) {
+                    if showLandscapeBuildingMenu {
+                        centeredBuildingMenuContent()
+                    }
+
                     if showLandscapeElevationMenu {
                         centeredElevationMenuContent()
                     }
@@ -3623,8 +3734,37 @@ extension ContentView {
     }
     
     private func dismissLandscapeMenus() {
+        showLandscapeBuildingMenu = false
         showLandscapeElevationMenu = false
         showLandscapeDetailMenu = false
+    }
+
+    @ViewBuilder
+    private func centeredBuildingMenuContent() -> some View {
+        VStack(spacing: 0) {
+            centeredMenuHeader(title: "Building")
+
+            VStack(spacing: 0) {
+                ForEach(buildingOptions, id: \.self) { option in
+                    centeredMenuRow(title: buildingDisplayName(for: option), isSelected: selectedBuilding == option) {
+                        selectedBuilding = option
+                        dismissLandscapeMenus()
+                    }
+
+                    if option != buildingOptions.last {
+                        centeredMenuDivider()
+                    }
+                }
+            }
+            .padding(.vertical, 6)
+        }
+        .background(.ultraThinMaterial)
+        .clipShape(RoundedRectangle(cornerRadius: 16))
+        .overlay(
+            RoundedRectangle(cornerRadius: 16)
+                .stroke(Color.white.opacity(0.18), lineWidth: 1)
+        )
+        .shadow(color: Color.black.opacity(0.45), radius: 16, x: 0, y: 10)
     }
     
     @ViewBuilder
@@ -3952,6 +4092,38 @@ extension ContentView {
         )
     }
 
+    private func guidedReferenceCard(size: CGFloat = 88) -> some View {
+        Button(action: {
+            fireQuickButtonHaptic()
+            showGuidedAlignmentOverlay.toggle()
+        }) {
+            Group {
+                if let guidedReferenceThumbnail {
+                    Image(uiImage: guidedReferenceThumbnail)
+                        .resizable()
+                        .scaledToFill()
+                } else {
+                    ZStack {
+                        Color.white.opacity(0.08)
+                        Image(systemName: "photo")
+                            .font(.system(size: 20, weight: .medium))
+                            .foregroundColor(.secondary)
+                    }
+                }
+            }
+            .frame(width: size, height: size)
+            .clipShape(RoundedRectangle(cornerRadius: 10))
+            .overlay(
+                RoundedRectangle(cornerRadius: 10)
+                    .stroke(Color.white.opacity(0.22), lineWidth: 1)
+            )
+            .frame(width: size, height: size)
+            .contentShape(RoundedRectangle(cornerRadius: 10))
+        }
+        .buttonStyle(.plain)
+        .frame(width: size, height: size)
+    }
+
     private func topLeftPreviewPlaceholders() -> some View {
         VStack(spacing: 2) {
             activeIssuesFlagButton()
@@ -3959,6 +4131,8 @@ extension ContentView {
 
             placeholderQuickButton(systemName: "safari") {
                 fireQuickButtonHaptic()
+                refreshGuidedShots()
+                showGuidedChecklist = true
             }
             .disabled(!hasActiveSession)
         }
@@ -4403,14 +4577,17 @@ extension ContentView {
             reportLibrary.savePhotoDataToAlbum(data: data, location: locationManager.lastLocation) { success, photoRef in
                 DispatchQueue.main.async {
                     if success {
+                        let captureShotID = armedGuidedRetakeShotID ?? UUID()
                         let shot = Shot(
+                            id: captureShotID,
                             capturedAt: Date(),
                             imageLocalIdentifier: photoRef,
                             note: noteAtCapture.isEmpty ? nil : noteAtCapture
                         )
+                        let didApplyGuidedShot = applyArmedGuidedShotIfNeeded(with: shot)
                         let didApplyIssueUpdate = applyArmedIssueUpdateIfNeeded(with: shot)
                         let didQueueResolution = queueResolutionCaptureIfNeeded(with: shot, data: data)
-                        if !didApplyIssueUpdate && !didQueueResolution {
+                        if !didApplyGuidedShot && !didApplyIssueUpdate && !didQueueResolution {
                             createObservationFromCapturedDetailNote(noteAtCapture, shot: shot)
                         }
                         successHaptic.notificationOccurred(.success)
@@ -4449,6 +4626,236 @@ extension ContentView {
             refreshActiveIssues()
         } catch {
             // Keep capture UX resilient if local observation persistence fails.
+        }
+    }
+
+    private func guidedChecklistTemplate() -> [GuidedShot] {
+        [
+            GuidedShot(title: "Front Elevation", building: "B1", targetElevation: "North Elevation"),
+            GuidedShot(title: "Rear Elevation", building: "B1", targetElevation: "South Elevation"),
+            GuidedShot(title: "Left Side Elevation", building: "B1", targetElevation: "West Elevation"),
+            GuidedShot(title: "Right Side Elevation", building: "B1", targetElevation: "East Elevation"),
+            GuidedShot(title: "Main Entry", building: "B1", targetElevation: "North Elevation"),
+            GuidedShot(title: "Service Panel", building: "B1"),
+            GuidedShot(title: "Water Heater", building: "B1"),
+            GuidedShot(title: "Mechanical Equipment", building: "B1")
+        ]
+    }
+
+    private func refreshGuidedShots() {
+        guard let propertyID = appState.selectedPropertyID else {
+            guidedShots = []
+            armedGuidedShotID = nil
+            armedGuidedRetakeShotID = nil
+            guidedReferenceAssetLocalID = nil
+            guidedReferenceThumbnail = nil
+            showGuidedAlignmentOverlay = false
+            return
+        }
+
+        do {
+            let existing = try localStore.fetchGuidedShots(propertyID: propertyID)
+            if existing.isEmpty {
+                let seeded = guidedChecklistTemplate()
+                try localStore.saveGuidedShots(seeded, propertyID: propertyID)
+                guidedShots = seeded
+            } else {
+                guidedShots = existing
+            }
+
+            if let armedID = armedGuidedShotID, guidedShots.contains(where: { $0.id == armedID }) == false {
+                armedGuidedShotID = nil
+                armedGuidedRetakeShotID = nil
+            }
+        } catch {
+            guidedShots = []
+            armedGuidedShotID = nil
+            armedGuidedRetakeShotID = nil
+            guidedReferenceAssetLocalID = nil
+            guidedReferenceThumbnail = nil
+            showGuidedAlignmentOverlay = false
+        }
+    }
+
+    private func armGuidedShot(_ guidedShot: GuidedShot) {
+        guard guidedShot.isCompleted == false, guidedShot.skipReason == nil else { return }
+        if let building = guidedShot.building, !building.isEmpty {
+            selectedBuilding = building
+        }
+        if let targetElevation = guidedShot.targetElevation, !targetElevation.isEmpty {
+            elevation = targetElevation
+        } else if let inferredElevation = inferElevation(from: guidedShot.title) {
+            elevation = inferredElevation
+        }
+        loadGuidedReferenceThumbnail(for: guidedShot.referenceImageLocalIdentifier ?? guidedShot.shot?.imageLocalIdentifier)
+        showGuidedAlignmentOverlay = false
+        armedGuidedRetakeShotID = nil
+        armedGuidedShotID = guidedShot.id
+        showGuidedChecklist = false
+    }
+
+    private func armGuidedRetake(_ guidedShot: GuidedShot) {
+        guard guidedShot.isCompleted, let existingShot = guidedShot.shot else { return }
+        if let building = guidedShot.building, !building.isEmpty {
+            selectedBuilding = building
+        }
+        if let targetElevation = guidedShot.targetElevation, !targetElevation.isEmpty {
+            elevation = targetElevation
+        } else if let inferredElevation = inferElevation(from: guidedShot.title) {
+            elevation = inferredElevation
+        }
+        loadGuidedReferenceThumbnail(for: guidedShot.referenceImageLocalIdentifier ?? existingShot.imageLocalIdentifier)
+        showGuidedAlignmentOverlay = false
+        armedGuidedRetakeShotID = existingShot.id
+        armedGuidedShotID = guidedShot.id
+        showGuidedChecklist = false
+    }
+
+    private func markGuidedShotSkipped(_ guidedShot: GuidedShot, reason: SkipReason, otherNote: String?) {
+        guard let propertyID = appState.selectedPropertyID else { return }
+        guard guidedShot.isCompleted == false else { return }
+
+        do {
+            var allGuidedShots = try localStore.fetchGuidedShots(propertyID: propertyID)
+            guard let idx = allGuidedShots.firstIndex(where: { $0.id == guidedShot.id }) else { return }
+
+            allGuidedShots[idx].skipReason = reason
+            allGuidedShots[idx].skipReasonNote = reason == .other ? otherNote?.trimmingCharacters(in: .whitespacesAndNewlines) : nil
+            allGuidedShots[idx].isCompleted = false
+            allGuidedShots[idx].shot = nil
+
+            try localStore.saveGuidedShots(allGuidedShots, propertyID: propertyID)
+            guidedShots = allGuidedShots
+
+            if armedGuidedShotID == guidedShot.id {
+                armedGuidedShotID = nil
+                armedGuidedRetakeShotID = nil
+                guidedReferenceAssetLocalID = nil
+                guidedReferenceThumbnail = nil
+                showGuidedAlignmentOverlay = false
+            }
+        } catch {
+            print("Failed to mark guided shot skipped: \(error)")
+        }
+    }
+
+    private func applyArmedGuidedShotIfNeeded(with shot: Shot) -> Bool {
+        guard let armedID = armedGuidedShotID else { return false }
+        guard let propertyID = appState.selectedPropertyID else {
+            armedGuidedShotID = nil
+            armedGuidedRetakeShotID = nil
+            return false
+        }
+
+        do {
+            var allGuidedShots = try localStore.fetchGuidedShots(propertyID: propertyID)
+            guard let idx = allGuidedShots.firstIndex(where: { $0.id == armedID }) else {
+                armedGuidedShotID = nil
+                armedGuidedRetakeShotID = nil
+                return false
+            }
+
+            let isRetake = armedGuidedRetakeShotID != nil
+            if isRetake {
+                guard allGuidedShots[idx].isCompleted,
+                      allGuidedShots[idx].shot?.id == armedGuidedRetakeShotID else {
+                    armedGuidedShotID = nil
+                    armedGuidedRetakeShotID = nil
+                    return false
+                }
+            } else if allGuidedShots[idx].isCompleted || allGuidedShots[idx].skipReason != nil {
+                armedGuidedShotID = nil
+                armedGuidedRetakeShotID = nil
+                return false
+            }
+
+            allGuidedShots[idx].shot = shot
+            allGuidedShots[idx].isCompleted = true
+            allGuidedShots[idx].skipReason = nil
+            allGuidedShots[idx].skipReasonNote = nil
+            try localStore.saveGuidedShots(allGuidedShots, propertyID: propertyID)
+            guidedShots = allGuidedShots
+
+            if isRetake {
+                refreshLinkedIssuePhotos(for: shot, propertyID: propertyID)
+            }
+
+            armedGuidedShotID = nil
+            armedGuidedRetakeShotID = nil
+            guidedReferenceAssetLocalID = nil
+            guidedReferenceThumbnail = nil
+            showGuidedAlignmentOverlay = false
+            return true
+        } catch {
+            armedGuidedShotID = nil
+            armedGuidedRetakeShotID = nil
+            guidedReferenceAssetLocalID = nil
+            guidedReferenceThumbnail = nil
+            showGuidedAlignmentOverlay = false
+            return false
+        }
+    }
+
+    private func refreshLinkedIssuePhotos(for shot: Shot, propertyID: UUID) {
+        do {
+            let observations = try localStore.fetchObservations(propertyID: propertyID)
+            var didUpdate = false
+            for existing in observations {
+                let hasLinkedShot = existing.linkedShotID == shot.id
+                let hasShotInHistory = existing.shots.contains(where: { $0.id == shot.id })
+                guard hasLinkedShot || hasShotInHistory else { continue }
+
+                var updated = existing
+                var replaced = false
+                for index in updated.shots.indices {
+                    if updated.shots[index].id == shot.id {
+                        updated.shots[index] = shot
+                        replaced = true
+                    }
+                }
+                if hasLinkedShot && !replaced {
+                    updated.shots.append(shot)
+                }
+
+                _ = try localStore.updateObservation(updated)
+                didUpdate = true
+            }
+            if didUpdate {
+                refreshActiveIssues()
+            }
+        } catch {
+            // Keep retake workflow resilient if issue-photo sync fails.
+        }
+    }
+
+    private func inferElevation(from title: String) -> String? {
+        let lower = title.lowercased()
+        if lower.contains("front") { return "North Elevation" }
+        if lower.contains("rear") || lower.contains("back") { return "South Elevation" }
+        if lower.contains("left") { return "West Elevation" }
+        if lower.contains("right") { return "East Elevation" }
+        return nil
+    }
+
+    private func loadGuidedReferenceThumbnail(for localIdentifier: String?) {
+        let id = localIdentifier?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !id.isEmpty else {
+            guidedReferenceAssetLocalID = nil
+            guidedReferenceThumbnail = nil
+            return
+        }
+        guidedReferenceAssetLocalID = id
+        let fetch = PHAsset.fetchAssets(withLocalIdentifiers: [id], options: nil)
+        guard let asset = fetch.firstObject else {
+            guidedReferenceThumbnail = nil
+            return
+        }
+        let px = max(180, 88 * UIScreen.currentScale * 2.0)
+        imageCache.requestThumbnail(for: asset, pixelSize: px) { image in
+            DispatchQueue.main.async {
+                guard guidedReferenceAssetLocalID == id else { return }
+                guidedReferenceThumbnail = image
+            }
         }
     }
 
@@ -5589,66 +5996,708 @@ extension ContentView {
     
     // MARK: - Report Sheets
 
+    private struct GuidedChecklistOverlay: View {
+        let guidedShots: [GuidedShot]
+        @ObservedObject var cache: AssetImageCache
+        @Environment(\.colorScheme) private var colorScheme
+        private var theme: SheetControlTheme { .forScheme(colorScheme) }
+        let onClose: () -> Void
+        let onRefresh: () -> Void
+        let onSelectPending: (GuidedShot) -> Void
+        let onSkip: (GuidedShot, SkipReason, String?) -> Void
+        let onRetake: (GuidedShot) -> Void
+
+        @State private var skipTarget: GuidedShot? = nil
+        @State private var showSkipReasonDialog: Bool = false
+        @State private var showSkipOtherSheet: Bool = false
+        @State private var skipOtherText: String = ""
+        @State private var retakeTarget: GuidedShot? = nil
+        @State private var showRetakeConfirmation: Bool = false
+        @State private var guidedViewerState: GuidedViewerState? = nil
+        @State private var overflowTargetShot: GuidedShot? = nil
+        @State private var overflowTargetStatus: GuidedChecklistRow.RowStatus = .pending
+        @State private var lastValidOrientation: UIDeviceOrientation = .portrait
+
+        private struct GuidedViewerState: Identifiable {
+            let id = UUID()
+            let title: String
+            let detailId: String
+            let assets: [PHAsset]
+            let startIndex: Int
+            let viewerToken: Int
+        }
+
+        private var isLandscape: Bool {
+            lastValidOrientation == .landscapeLeft || lastValidOrientation == .landscapeRight
+        }
+
+        private var rotationDegrees: Double {
+            switch lastValidOrientation {
+            case .landscapeLeft:
+                return 90
+            case .landscapeRight:
+                return -90
+            default:
+                return 0
+            }
+        }
+
+        var body: some View {
+            GeometryReader { geo in
+                let w = geo.size.width
+                let h = geo.size.height
+                let contentW = isLandscape ? h : w
+                let contentH = isLandscape ? w : h
+
+                NavigationStack {
+                    List(guidedShots) { item in
+                        GuidedChecklistRow(
+                            guidedShot: item,
+                            cache: cache,
+                            onTapPending: {
+                                onSelectPending(item)
+                            },
+                            onTapSkip: {
+                                skipTarget = item
+                                showSkipReasonDialog = true
+                            },
+                            onTapRetake: {
+                                retakeTarget = item
+                                showRetakeConfirmation = true
+                            },
+                            onTapViewReferenceImage: {
+                            showImagePreview(
+                                localIdentifier: item.referenceImageLocalIdentifier,
+                                title: "Reference Image",
+                                detailId: item.title
+                            )
+                        },
+                        onTapViewCapturedImage: {
+                            showImagePreview(
+                                localIdentifier: item.shot?.imageLocalIdentifier,
+                                title: "Captured Image",
+                                detailId: item.title
+                            )
+                        },
+                            onTapPendingOverflow: {
+                                overflowTargetShot = item
+                                overflowTargetStatus = .pending
+                            },
+                            onTapCapturedOverflow: {
+                                overflowTargetShot = item
+                                overflowTargetStatus = .captured
+                            }
+                        )
+                    }
+                    .listStyle(.insetGrouped)
+                    .scrollIndicators(.hidden)
+                    .toolbar(.hidden, for: .navigationBar)
+                    .safeAreaInset(edge: .top, spacing: 0) {
+                        HStack(spacing: 10) {
+                            Button(action: onRefresh) {
+                                Image(systemName: "arrow.clockwise")
+                                    .font(.system(size: 19, weight: .medium))
+                                    .foregroundColor(theme.label)
+                                    .frame(width: 44, height: 42)
+                                    .background(theme.fill)
+                                    .clipShape(Capsule())
+                                    .overlay(
+                                        Capsule()
+                                            .stroke(theme.stroke, lineWidth: 1)
+                                    )
+                            }
+                            .buttonStyle(.plain)
+
+                            Spacer(minLength: 0)
+
+                            Text("Guided Checklist")
+                                .font(.system(size: 18, weight: .medium))
+                                .foregroundColor(theme.label)
+                                .minimumScaleFactor(0.75)
+                                .lineLimit(1)
+
+                            Spacer(minLength: 0)
+
+                            Button(action: onClose) {
+                                Text("Done")
+                                    .font(.system(size: 18, weight: .medium))
+                                    .foregroundColor(theme.label)
+                                    .frame(width: 72, height: 42)
+                                    .background(theme.fill)
+                                    .clipShape(Capsule())
+                                    .overlay(
+                                        Capsule()
+                                            .stroke(theme.stroke, lineWidth: 1)
+                                    )
+                            }
+                            .buttonStyle(.plain)
+                        }
+                        .padding(.horizontal, 14)
+                        .padding(.top, 14)
+                        .padding(.bottom, 4)
+                    }
+                    .confirmationDialog("Skip reason", isPresented: $showSkipReasonDialog, titleVisibility: .visible) {
+                        Button("Inaccessible") {
+                            submitSkip(.inaccessible)
+                        }
+                        Button("Obstructed") {
+                            submitSkip(.obstructed)
+                        }
+                        Button("Active construction") {
+                            submitSkip(.activeConstruction)
+                        }
+                        Button("Safety concern") {
+                            submitSkip(.safetyConcern)
+                        }
+                        Button("Other") {
+                            showSkipOtherSheet = true
+                        }
+                        Button("Cancel", role: .cancel) {
+                            skipTarget = nil
+                        }
+                    }
+                    .sheet(isPresented: $showSkipOtherSheet, onDismiss: {
+                        skipOtherText = ""
+                        skipTarget = nil
+                    }) {
+                        NavigationStack {
+                            VStack(spacing: 14) {
+                                Text("Enter skip reason")
+                                    .font(.system(size: 17, weight: .semibold))
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+
+                                TextField("Reason", text: $skipOtherText, axis: .vertical)
+                                    .font(.system(size: 16, weight: .regular))
+                                    .lineLimit(3...6)
+                                    .padding(12)
+                                    .background(Color(UIColor.secondarySystemBackground))
+                                    .clipShape(RoundedRectangle(cornerRadius: 12))
+
+                                Spacer(minLength: 0)
+                            }
+                            .padding(16)
+                            .navigationTitle("Other")
+                            .navigationBarTitleDisplayMode(.inline)
+                            .toolbar {
+                                ToolbarItem(placement: .topBarLeading) {
+                                    Button("Cancel") {
+                                        showSkipOtherSheet = false
+                                    }
+                                }
+                                ToolbarItem(placement: .topBarTrailing) {
+                                    Button("Save") {
+                                        submitSkip(.other, otherNote: skipOtherText)
+                                        showSkipOtherSheet = false
+                                    }
+                                    .disabled(skipOtherText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                                }
+                            }
+                        }
+                        .presentationDetents([.height(280)])
+                    }
+                    .confirmationDialog("Retake this guided shot?", isPresented: $showRetakeConfirmation, titleVisibility: .visible) {
+                        Button("Retake") {
+                            guard let item = retakeTarget else { return }
+                            onRetake(item)
+                            retakeTarget = nil
+                        }
+                        Button("Cancel", role: .cancel) {
+                            retakeTarget = nil
+                        }
+                    }
+                    .fullScreenCover(item: $guidedViewerState) { state in
+                        ReportPhotoViewer(
+                            title: state.title,
+                            assets: state.assets,
+                            startIndex: state.startIndex,
+                            detailIdOverride: state.detailId,
+                            cache: cache,
+                            viewerToken: state.viewerToken
+                        )
+                    }
+                    .overlay {
+                        if let target = overflowTargetShot {
+                            guidedOverflowActionOverlay(for: target, status: overflowTargetStatus)
+                        }
+                    }
+                }
+                .frame(width: contentW, height: contentH, alignment: .center)
+                .rotationEffect(.degrees(rotationDegrees))
+                .position(x: w * 0.5, y: h * 0.5)
+                .statusBarHidden(isLandscape)
+                .onAppear {
+                    UIDevice.current.beginGeneratingDeviceOrientationNotifications()
+                    refreshOrientation()
+                }
+                .onReceive(NotificationCenter.default.publisher(for: UIDevice.orientationDidChangeNotification)) { _ in
+                    refreshOrientation()
+                }
+                .onDisappear {
+                    UIDevice.current.endGeneratingDeviceOrientationNotifications()
+                }
+            }
+        }
+
+        private func submitSkip(_ reason: SkipReason, otherNote: String? = nil) {
+            guard let item = skipTarget else { return }
+            onSkip(item, reason, otherNote)
+            skipTarget = nil
+            skipOtherText = ""
+        }
+
+        private func showImagePreview(localIdentifier: String?, title: String, detailId: String) {
+            let trimmed = localIdentifier?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            guard !trimmed.isEmpty else { return }
+
+            let fetch = PHAsset.fetchAssets(withLocalIdentifiers: [trimmed], options: nil)
+            guard let asset = fetch.firstObject else { return }
+            guidedViewerState = GuidedViewerState(
+                title: title,
+                detailId: detailId,
+                assets: [asset],
+                startIndex: 0,
+                viewerToken: trimmed.hashValue
+            )
+        }
+
+        @ViewBuilder
+        private func guidedOverflowActionOverlay(for guidedShot: GuidedShot, status: GuidedChecklistRow.RowStatus) -> some View {
+            ZStack {
+                Color.black.opacity(0.55)
+                    .ignoresSafeArea()
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        overflowTargetShot = nil
+                    }
+
+                VStack(spacing: 0) {
+                    HStack {
+                        Text("Actions")
+                            .font(.system(size: 14, weight: .medium))
+                            .foregroundColor(.white.opacity(0.92))
+                        Spacer(minLength: 0)
+                        Button("Done") {
+                            overflowTargetShot = nil
+                        }
+                        .font(.system(size: 14, weight: .medium))
+                        .foregroundColor(.white.opacity(0.92))
+                        .buttonStyle(.plain)
+                    }
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 12)
+                    .background(Color.black.opacity(0.20))
+
+                    VStack(spacing: 0) {
+                        if status == .pending {
+                            actionMenuRow(title: "Skip") {
+                                overflowTargetShot = nil
+                                skipTarget = guidedShot
+                                showSkipReasonDialog = true
+                            }
+                        } else if status == .captured {
+                            actionMenuRow(title: "Retake") {
+                                overflowTargetShot = nil
+                                retakeTarget = guidedShot
+                                showRetakeConfirmation = true
+                            }
+                            actionMenuDivider()
+
+                            actionMenuRow(title: "View Reference Image") {
+                                overflowTargetShot = nil
+                                showImagePreview(
+                                    localIdentifier: guidedShot.referenceImageLocalIdentifier,
+                                    title: "Reference Image",
+                                    detailId: guidedShot.title
+                                )
+                            }
+                            .opacity(((guidedShot.referenceImageLocalIdentifier ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty) ? 0.45 : 1.0)
+                            .allowsHitTesting((guidedShot.referenceImageLocalIdentifier ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false)
+
+                            actionMenuDivider()
+
+                            actionMenuRow(title: "View Captured Image") {
+                                overflowTargetShot = nil
+                                showImagePreview(
+                                    localIdentifier: guidedShot.shot?.imageLocalIdentifier,
+                                    title: "Captured Image",
+                                    detailId: guidedShot.title
+                                )
+                            }
+                            .opacity(((guidedShot.shot?.imageLocalIdentifier ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty) ? 0.45 : 1.0)
+                            .allowsHitTesting((guidedShot.shot?.imageLocalIdentifier ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false)
+                        }
+                    }
+                    .padding(.vertical, 6)
+
+                }
+                .background(.ultraThinMaterial)
+                .clipShape(RoundedRectangle(cornerRadius: 16))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 16)
+                        .stroke(Color.white.opacity(0.18), lineWidth: 1)
+                )
+                .shadow(color: Color.black.opacity(0.45), radius: 16, x: 0, y: 10)
+                .padding(.horizontal, 20)
+                .frame(maxWidth: 360)
+            }
+            .zIndex(999)
+        }
+
+        private func actionMenuRow(title: String, action: @escaping () -> Void) -> some View {
+            Button(action: action) {
+                HStack(spacing: 10) {
+                    Text(title)
+                        .font(.system(size: 16, weight: .medium))
+                        .foregroundColor(.white.opacity(0.95))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.78)
+                    Spacer(minLength: 0)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
+                .padding(.horizontal, 14)
+                .padding(.vertical, 12)
+            }
+            .buttonStyle(.plain)
+        }
+
+        private func actionMenuDivider() -> some View {
+            Rectangle()
+                .fill(Color.white.opacity(0.12))
+                .frame(height: 1)
+                .padding(.horizontal, 12)
+        }
+
+        private func refreshOrientation() {
+            let o = UIDevice.current.orientation
+            let newValue: UIDeviceOrientation? = {
+                switch o {
+                case .portrait:
+                    return .portrait
+                case .landscapeLeft, .landscapeRight:
+                    return o
+                default:
+                    return nil
+                }
+            }()
+
+            guard let newValue else { return }
+            guard newValue != lastValidOrientation else { return }
+            lastValidOrientation = newValue
+        }
+    }
+
+    private struct GuidedChecklistRow: View {
+        enum RowStatus {
+            case pending
+            case captured
+            case skipped
+        }
+
+        let guidedShot: GuidedShot
+        @ObservedObject var cache: AssetImageCache
+        let onTapPending: () -> Void
+        let onTapSkip: () -> Void
+        let onTapRetake: () -> Void
+        let onTapViewReferenceImage: () -> Void
+        let onTapViewCapturedImage: () -> Void
+        let onTapPendingOverflow: () -> Void
+        let onTapCapturedOverflow: () -> Void
+
+        @State private var thumbnail: UIImage? = nil
+        @State private var loadedID: String = ""
+
+        private var status: RowStatus {
+            if guidedShot.skipReason != nil { return .skipped }
+            if guidedShot.isCompleted, guidedShot.shot != nil { return .captured }
+            return .pending
+        }
+
+        private var statusLabel: String {
+            switch status {
+            case .pending: return "Pending"
+            case .captured: return "Captured"
+            case .skipped:
+                return guidedShot.skipReason.map(skipReasonTitle(for:)) ?? "Skipped"
+            }
+        }
+
+        private var statusColor: Color {
+            switch status {
+            case .pending: return .orange
+            case .captured: return .green
+            case .skipped: return .gray
+            }
+        }
+
+        private var isPending: Bool {
+            status == .pending
+        }
+
+        private var isCaptured: Bool {
+            status == .captured
+        }
+
+        var body: some View {
+            HStack(spacing: 12) {
+                thumbnailView
+                textView
+                Spacer(minLength: 0)
+                trailingActions
+            }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 10)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Color.black.opacity(0.55))
+                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .stroke(Color.white.opacity(0.12), lineWidth: 1)
+                )
+                .opacity(status == .skipped ? 0.58 : 1.0)
+                .contentShape(Rectangle())
+            .onTapGesture {
+                guard isPending else { return }
+                onTapPending()
+            }
+            .listRowInsets(EdgeInsets(top: 6, leading: 12, bottom: 6, trailing: 12))
+            .listRowBackground(Color.clear)
+            .onAppear {
+                loadThumbnailIfNeeded()
+            }
+            .onChange(of: guidedShot.shot?.imageLocalIdentifier ?? "") { _, _ in
+                loadThumbnailIfNeeded()
+            }
+            .onChange(of: guidedShot.referenceImageLocalIdentifier ?? "") { _, _ in
+                loadThumbnailIfNeeded()
+            }
+        }
+
+        private var thumbnailView: some View {
+            Group {
+                if let thumbnail {
+                    Image(uiImage: thumbnail)
+                        .resizable()
+                        .scaledToFill()
+                } else {
+                    ZStack {
+                        Color.white.opacity(0.08)
+                        Image(systemName: "photo")
+                            .font(.system(size: 14, weight: .medium))
+                            .foregroundColor(.secondary)
+                    }
+                }
+            }
+            .frame(width: 56, height: 56)
+            .clipShape(RoundedRectangle(cornerRadius: 8))
+            .overlay(
+                RoundedRectangle(cornerRadius: 8)
+                    .stroke(Color.white.opacity(0.12), lineWidth: 1)
+            )
+            .overlay(alignment: .topTrailing) {
+                if isCaptured {
+                    Image(systemName: "checkmark.circle.fill")
+                        .font(.system(size: 16, weight: .semibold))
+                        .foregroundColor(.white)
+                        .shadow(color: .black.opacity(0.45), radius: 1.5, x: 0, y: 1)
+                        .padding(4)
+                }
+            }
+        }
+
+        private var textView: some View {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(guidedShot.title)
+                    .font(.system(size: 15, weight: .medium))
+                    .foregroundColor(.primary)
+                    .lineLimit(1)
+
+                Text(statusLabel)
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundColor(statusColor)
+            }
+        }
+
+        @ViewBuilder
+        private var trailingActions: some View {
+            if isPending {
+                Button {
+                    onTapPendingOverflow()
+                } label: {
+                    Image(systemName: "ellipsis.circle")
+                        .font(.system(size: 18, weight: .semibold))
+                        .foregroundColor(.white.opacity(0.82))
+                        .frame(width: 26, height: 26)
+                }
+                .buttonStyle(.plain)
+            } else if isCaptured {
+                Button {
+                    onTapCapturedOverflow()
+                } label: {
+                    Image(systemName: "ellipsis.circle")
+                        .font(.system(size: 18, weight: .semibold))
+                        .foregroundColor(.white.opacity(0.82))
+                        .frame(width: 26, height: 26)
+                }
+                .buttonStyle(.plain)
+            }
+        }
+
+        private func loadThumbnailIfNeeded() {
+            let preferredID = guidedShot.referenceImageLocalIdentifier ?? guidedShot.shot?.imageLocalIdentifier
+            guard let localID = preferredID, !localID.isEmpty else {
+                thumbnail = nil
+                loadedID = ""
+                return
+            }
+            guard localID != loadedID || thumbnail == nil else { return }
+            loadedID = localID
+
+            let fetch = PHAsset.fetchAssets(withLocalIdentifiers: [localID], options: nil)
+            guard let asset = fetch.firstObject else {
+                thumbnail = nil
+                return
+            }
+
+            let px = max(120, 56 * UIScreen.currentScale * 2.0)
+            cache.requestThumbnail(for: asset, pixelSize: px) { image in
+                DispatchQueue.main.async {
+                    self.thumbnail = image
+                }
+            }
+        }
+
+        private func skipReasonTitle(for reason: SkipReason) -> String {
+            switch reason {
+            case .inaccessible: return "Skipped - Inaccessible"
+            case .obstructed: return "Skipped - Obstructed"
+            case .activeConstruction: return "Skipped - Active construction"
+            case .safetyConcern: return "Skipped - Safety concern"
+            case .other: return "Skipped - Other"
+            case .notVisible: return "Skipped - Not visible"
+            case .unsafe: return "Skipped - Unsafe"
+            case .blocked: return "Skipped - Blocked"
+            case .notApplicable: return "Skipped - Not applicable"
+            }
+        }
+    }
+
     private struct ActiveIssuesSheet: View {
         @Environment(\.dismiss) private var dismiss
         let observations: [Observation]
         let onRefresh: () -> Void
         let onUpdate: (Observation) -> Void
         let onResolve: (Observation) -> Void
+        @State private var lastValidOrientation: UIDeviceOrientation = .portrait
+
+        private var isLandscape: Bool {
+            lastValidOrientation == .landscapeLeft || lastValidOrientation == .landscapeRight
+        }
+
+        private var rotationDegrees: Double {
+            switch lastValidOrientation {
+            case .landscapeLeft:
+                return 90
+            case .landscapeRight:
+                return -90
+            default:
+                return 0
+            }
+        }
 
         var body: some View {
-            NavigationStack {
-                Group {
-                    if observations.isEmpty {
-                        VStack(spacing: 10) {
-                            Image(systemName: "flag.slash")
-                                .font(.system(size: 28, weight: .medium))
-                                .foregroundColor(.secondary)
-                            Text("No active issues")
-                                .font(.system(size: 16, weight: .medium))
-                                .foregroundColor(.secondary)
-                        }
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    } else {
-                        List(observations) { observation in
-                            VStack(alignment: .leading, spacing: 10) {
-                                Text(observation.statement.isEmpty ? "Untitled issue" : observation.statement)
+            GeometryReader { geo in
+                let w = geo.size.width
+                let h = geo.size.height
+                let contentW = isLandscape ? h : w
+                let contentH = isLandscape ? w : h
+
+                NavigationStack {
+                    Group {
+                        if observations.isEmpty {
+                            VStack(spacing: 10) {
+                                Image(systemName: "flag.slash")
+                                    .font(.system(size: 28, weight: .medium))
+                                    .foregroundColor(.secondary)
+                                Text("No active issues")
                                     .font(.system(size: 16, weight: .medium))
-                                    .foregroundColor(.primary)
-
-                                HStack(spacing: 10) {
-                                    Button("Update") {
-                                        onUpdate(observation)
-                                    }
-                                    .buttonStyle(.bordered)
-
-                                    Button("Resolve") {
-                                        onResolve(observation)
-                                    }
-                                    .buttonStyle(.borderedProminent)
-                                    .tint(.green)
-                                }
+                                    .foregroundColor(.secondary)
                             }
-                            .padding(.vertical, 4)
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        } else {
+                            List(observations) { observation in
+                                VStack(alignment: .leading, spacing: 10) {
+                                    Text(observation.statement.isEmpty ? "Untitled issue" : observation.statement)
+                                        .font(.system(size: 16, weight: .medium))
+                                        .foregroundColor(.primary)
+
+                                    HStack(spacing: 10) {
+                                        Button("Update") {
+                                            onUpdate(observation)
+                                        }
+                                        .buttonStyle(.bordered)
+
+                                        Button("Resolve") {
+                                            onResolve(observation)
+                                        }
+                                        .buttonStyle(.borderedProminent)
+                                        .tint(.green)
+                                    }
+                                }
+                                .padding(.vertical, 4)
+                            }
+                            .listStyle(.insetGrouped)
+                            .scrollIndicators(.hidden)
                         }
-                        .listStyle(.insetGrouped)
+                    }
+                    .navigationTitle("Active Issues")
+                    .navigationBarTitleDisplayMode(.inline)
+                    .toolbar {
+                        ToolbarItem(placement: .topBarLeading) {
+                            Button(action: onRefresh) {
+                                Image(systemName: "arrow.clockwise")
+                            }
+                        }
+                        ToolbarItem(placement: .topBarTrailing) {
+                            Button("Done") {
+                                dismiss()
+                            }
+                        }
                     }
                 }
-                .navigationTitle("Active Issues")
-                .navigationBarTitleDisplayMode(.inline)
-                .toolbar {
-                    ToolbarItem(placement: .topBarLeading) {
-                        Button(action: onRefresh) {
-                            Image(systemName: "arrow.clockwise")
-                        }
-                    }
-                    ToolbarItem(placement: .topBarTrailing) {
-                        Button("Done") {
-                            dismiss()
-                        }
-                    }
+                .frame(width: contentW, height: contentH, alignment: .center)
+                .rotationEffect(.degrees(rotationDegrees))
+                .position(x: w * 0.5, y: h * 0.5)
+                .statusBarHidden(isLandscape)
+                .onAppear {
+                    UIDevice.current.beginGeneratingDeviceOrientationNotifications()
+                    refreshOrientation()
+                }
+                .onReceive(NotificationCenter.default.publisher(for: UIDevice.orientationDidChangeNotification)) { _ in
+                    refreshOrientation()
+                }
+                .onDisappear {
+                    UIDevice.current.endGeneratingDeviceOrientationNotifications()
                 }
             }
+        }
+
+        private func refreshOrientation() {
+            let o = UIDevice.current.orientation
+            let newValue: UIDeviceOrientation? = {
+                switch o {
+                case .portrait:
+                    return .portrait
+                case .landscapeLeft, .landscapeRight:
+                    return o
+                default:
+                    return nil
+                }
+            }()
+
+            guard let newValue else { return }
+            guard newValue != lastValidOrientation else { return }
+            lastValidOrientation = newValue
         }
     }
 
