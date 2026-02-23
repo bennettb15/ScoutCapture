@@ -278,10 +278,12 @@ final class ReportLibraryModel: ObservableObject {
     @Published private(set) var assets: [PHAsset] = []
     @Published private(set) var albumTitle: String = ""
     @Published private(set) var albumLocalId: String = ""
+    @Published private(set) var activeIssueCount: Int = 0
 
     private let activeAlbumIdKey = "scout.activeReport.albumLocalId.v1"
     private let activeAlbumTitleKey = "scout.activeReport.albumTitle.v1"
-    private var pendingRetrySaves: [(data: Data, location: CLLocation?, completion: (Bool) -> Void)] = []
+    private let activeIssueCountsKey = "scout.activeReport.activeIssueCountsByTitle.v1"
+    private var pendingRetrySaves: [(data: Data, location: CLLocation?, completion: (Bool, String?) -> Void)] = []
     private var didBecomeActiveObserver: NSObjectProtocol?
     private static let reportAlbumRegex = try? NSRegularExpression(
         pattern: #"^([A-Za-z0-9]+)(?:-(\d{4}))?-(\d{3,5})$"#,
@@ -291,6 +293,7 @@ final class ReportLibraryModel: ObservableObject {
     init() {
         albumTitle = UserDefaults.standard.string(forKey: activeAlbumTitleKey) ?? ""
         albumLocalId = UserDefaults.standard.string(forKey: activeAlbumIdKey) ?? ""
+        activeIssueCount = loadActiveIssueCount(for: albumTitle)
 
         didBecomeActiveObserver = NotificationCenter.default.addObserver(
             forName: UIApplication.didBecomeActiveNotification,
@@ -313,12 +316,33 @@ final class ReportLibraryModel: ObservableObject {
         if t != albumTitle {
             albumTitle = t
             albumLocalId = ""
+            activeIssueCount = loadActiveIssueCount(for: t)
             UserDefaults.standard.set(t, forKey: activeAlbumTitleKey)
             UserDefaults.standard.set("", forKey: activeAlbumIdKey)
         } else {
             albumTitle = t
+            activeIssueCount = loadActiveIssueCount(for: t)
             UserDefaults.standard.set(t, forKey: activeAlbumTitleKey)
         }
+    }
+
+    func incrementActiveIssueCount() {
+        let title = albumTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !title.isEmpty else { return }
+        let updated = max(0, activeIssueCount + 1)
+        activeIssueCount = updated
+        storeActiveIssueCount(updated, for: title)
+    }
+
+    func setActiveIssueCount(_ count: Int) {
+        let title = albumTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !title.isEmpty else {
+            activeIssueCount = max(0, count)
+            return
+        }
+        let normalized = max(0, count)
+        activeIssueCount = normalized
+        storeActiveIssueCount(normalized, for: title)
     }
 
     func fetchMatchingReportAlbums(completion: @escaping ([String]) -> Void) {
@@ -502,20 +526,20 @@ final class ReportLibraryModel: ObservableObject {
         }
     }
 
-    func savePhotoDataToAlbum(data: Data, location: CLLocation?, completion: @escaping (Bool) -> Void) {
+    func savePhotoDataToAlbum(data: Data, location: CLLocation?, completion: @escaping (Bool, String?) -> Void) {
         savePhotoDataToAlbum(data: data, location: location, retryIfInterrupted: true, completion: completion)
     }
 
-    private func savePhotoDataToAlbum(data: Data, location: CLLocation?, retryIfInterrupted: Bool, completion: @escaping (Bool) -> Void) {
+    private func savePhotoDataToAlbum(data: Data, location: CLLocation?, retryIfInterrupted: Bool, completion: @escaping (Bool, String?) -> Void) {
         ensureAlbumExists { ok, albumId in
             guard ok, !albumId.isEmpty else {
-                DispatchQueue.main.async { completion(false) }
+                DispatchQueue.main.async { completion(false, nil) }
                 return
             }
 
             let fetch = PHAssetCollection.fetchAssetCollections(withLocalIdentifiers: [albumId], options: nil)
             guard let album = fetch.firstObject else {
-                DispatchQueue.main.async { completion(false) }
+                DispatchQueue.main.async { completion(false, nil) }
                 return
             }
 
@@ -550,7 +574,7 @@ final class ReportLibraryModel: ObservableObject {
                 }
 
                 DispatchQueue.main.async {
-                    completion(didSave)
+                    completion(didSave, didSave ? createdAssetId : nil)
                 }
             })
         }
@@ -680,6 +704,30 @@ final class ReportLibraryModel: ObservableObject {
         guard let sequence = Int(ns.substring(with: sequenceRange)) else { return nil }
 
         return ParsedReportAlbum(title: title, prefix: prefix, year: year, sequence: sequence)
+    }
+
+    private func loadActiveIssueCount(for reportTitle: String) -> Int {
+        let key = reportTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !key.isEmpty else { return 0 }
+        let all = readIssueCountsByTitle()
+        return max(0, all[key] ?? 0)
+    }
+
+    private func storeActiveIssueCount(_ count: Int, for reportTitle: String) {
+        let key = reportTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !key.isEmpty else { return }
+        var all = readIssueCountsByTitle()
+        all[key] = max(0, count)
+        guard let data = try? JSONEncoder().encode(all) else { return }
+        UserDefaults.standard.set(data, forKey: activeIssueCountsKey)
+    }
+
+    private func readIssueCountsByTitle() -> [String: Int] {
+        guard let data = UserDefaults.standard.data(forKey: activeIssueCountsKey),
+              let decoded = try? JSONDecoder().decode([String: Int].self, from: data) else {
+            return [:]
+        }
+        return decoded
     }
 }
 
@@ -2169,6 +2217,7 @@ private final class DetailTypesModel: ObservableObject {
 
 struct ContentView: View {
     @EnvironmentObject private var appState: AppState
+    private let localStore = LocalStore()
     
     private let shutterHaptic = UIImpactFeedbackGenerator(style: .medium)
     private let quickButtonHaptic = UIImpactFeedbackGenerator(style: .light)
@@ -2188,6 +2237,9 @@ struct ContentView: View {
     @State private var detailNote: String = ""
     @State private var showSavedToast: Bool = false
     @State private var showNotSavedToast: Bool = false
+    @State private var showNoFlaggedIssuesToast: Bool = false
+    @State private var showIssueUpdateArmedToast: Bool = false
+    @State private var showResolutionModeToast: Bool = false
     
     @State private var focusPoint: CGPoint? = nil
     @State private var showFocusRing: Bool = false
@@ -2197,6 +2249,13 @@ struct ContentView: View {
     
     @State private var showQuickMenu: Bool = false
     @State private var manageContext: ManageContext? = nil
+    @State private var showActiveIssuesSheet: Bool = false
+    @State private var activeObservations: [Observation] = []
+    @State private var armedUpdateObservationID: UUID? = nil
+    @State private var resolutionTargetObservation: Observation? = nil
+    @State private var resolutionCapturedShot: Shot? = nil
+    @State private var resolutionCapturedPhotoRef: String? = nil
+    @State private var resolutionCapturedImage: UIImage? = nil
     
     // Custom centered overlays for rotated dropdowns (used in landscape-with-portrait-lock UI)
     @State private var showLandscapeElevationMenu: Bool = false
@@ -2612,6 +2671,7 @@ struct ContentView: View {
                 locationManager.start()
 
                 reportLibrary.warmUpAlbumIfAuthorized()
+                refreshActiveIssues()
                 isPollingDeviceOrientation = true
             }
             .onReceive(NotificationCenter.default.publisher(for: UIDevice.orientationDidChangeNotification)) { _ in
@@ -2625,6 +2685,9 @@ struct ContentView: View {
                 isPollingDeviceOrientation = false
                 locationManager.stop()
                 UIDevice.current.endGeneratingDeviceOrientationNotifications()
+            }
+            .onChange(of: appState.selectedPropertyID) { _, _ in
+                refreshActiveIssues()
             }
             .onChange(of: detailNote) { _, _ in
                 let wasOn = camera.effectiveHDEnabled
@@ -2679,6 +2742,20 @@ struct ContentView: View {
         // Manage (from dropdown or quick menu)
         .sheet(item: $manageContext) { ctx in
             ManageDetailTypesView(mode: ctx.mode, model: detailTypesModel)
+        }
+        .sheet(isPresented: $showActiveIssuesSheet) {
+            ActiveIssuesSheet(
+                observations: activeObservations,
+                onRefresh: {
+                    refreshActiveIssues()
+                },
+                onUpdate: { observation in
+                    armIssueUpdate(observation)
+                },
+                onResolve: { observation in
+                    enterResolutionMode(observation)
+                }
+            )
         }
     }
 
@@ -2916,9 +2993,14 @@ struct ContentView: View {
             }
 
             topLeftPreviewPlaceholders()
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                .frame(
+                    maxWidth: .infinity,
+                    maxHeight: .infinity,
+                    alignment: lastValidDeviceOrientation == .landscapeRight ? .topTrailing : .topLeading
+                )
                 .padding(.top, 14)
-                .padding(.leading, 14)
+                .padding(.leading, lastValidDeviceOrientation == .landscapeRight ? 0 : 14)
+                .padding(.trailing, lastValidDeviceOrientation == .landscapeRight ? 14 : 0)
                 .zIndex(12)
 
             if showCameraSwapBlackout {
@@ -3061,6 +3143,108 @@ struct ContentView: View {
                     .rotationEffect(bottomGlyphRotationAngle)
                     .allowsHitTesting(false)
                     .zIndex(25)
+            }
+
+            if showNoFlaggedIssuesToast {
+                Text("No active flagged issues")
+                    .font(.system(size: 14, weight: .medium))
+                    .foregroundColor(.white)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 10)
+                    .background(Color.black.opacity(0.55))
+                    .clipShape(RoundedRectangle(cornerRadius: 12))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 12)
+                            .stroke(Color.white.opacity(0.18), lineWidth: 1)
+                    )
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+                    .padding(.top, isLandscapeUI ? 44 : 0)
+                    .rotationEffect(bottomGlyphRotationAngle)
+                    .allowsHitTesting(false)
+                    .zIndex(25)
+            }
+
+            if showIssueUpdateArmedToast {
+                Text("Issue update armed. Capture next photo to relink.")
+                    .font(.system(size: 14, weight: .medium))
+                    .foregroundColor(.white)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 10)
+                    .background(Color.black.opacity(0.55))
+                    .clipShape(RoundedRectangle(cornerRadius: 12))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 12)
+                            .stroke(Color.white.opacity(0.18), lineWidth: 1)
+                    )
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+                    .padding(.top, isLandscapeUI ? 44 : 0)
+                    .rotationEffect(bottomGlyphRotationAngle)
+                    .allowsHitTesting(false)
+                    .zIndex(25)
+            }
+
+            if showResolutionModeToast {
+                Text("Resolution mode active. Capture a resolution photo.")
+                    .font(.system(size: 14, weight: .medium))
+                    .foregroundColor(.white)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 10)
+                    .background(Color.black.opacity(0.55))
+                    .clipShape(RoundedRectangle(cornerRadius: 12))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 12)
+                            .stroke(Color.white.opacity(0.18), lineWidth: 1)
+                    )
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+                    .padding(.top, isLandscapeUI ? 44 : 0)
+                    .rotationEffect(bottomGlyphRotationAngle)
+                    .allowsHitTesting(false)
+                    .zIndex(25)
+            }
+
+            if let freezeFrame = resolutionCapturedImage {
+                Color.black.opacity(0.82)
+                    .frame(width: w, height: previewH)
+                    .zIndex(100)
+
+                Image(uiImage: freezeFrame)
+                    .resizable()
+                    .scaledToFit()
+                    .frame(width: w, height: previewH)
+                    .clipped()
+                    .zIndex(101)
+
+                VStack(spacing: 12) {
+                    Text("Confirm Resolution Photo")
+                        .font(.system(size: 18, weight: .semibold))
+                        .foregroundColor(.white)
+
+                    HStack(spacing: 10) {
+                        Button("Retake") {
+                            resetResolutionCapturePreview()
+                        }
+                        .buttonStyle(.bordered)
+                        .tint(.white)
+
+                        Button("Confirm") {
+                            confirmResolution()
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .tint(.green)
+                    }
+                }
+                .padding(.horizontal, 20)
+                .padding(.vertical, 18)
+                .background(Color.black.opacity(0.72))
+                .clipShape(RoundedRectangle(cornerRadius: 16))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 16)
+                        .stroke(Color.white.opacity(0.18), lineWidth: 1)
+                )
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+                .padding(.bottom, 28)
+                .rotationEffect(bottomGlyphRotationAngle)
+                .zIndex(102)
             }
 
             if !hasActiveSession {
@@ -3770,9 +3954,7 @@ extension ContentView {
 
     private func topLeftPreviewPlaceholders() -> some View {
         VStack(spacing: 2) {
-            placeholderQuickButton(systemName: "flag.fill") {
-                fireQuickButtonHaptic()
-            }
+            activeIssuesFlagButton()
             .disabled(!hasActiveSession)
 
             placeholderQuickButton(systemName: "safari") {
@@ -3780,6 +3962,48 @@ extension ContentView {
             }
             .disabled(!hasActiveSession)
         }
+    }
+
+    private func activeIssuesFlagButton() -> some View {
+        let hitArea: CGFloat = 44
+        let symbolSize: CGFloat = 22
+        let count = reportLibrary.activeIssueCount
+        let hasIssues = count > 0
+
+        return Button(action: {
+            fireQuickButtonHaptic()
+            guard hasActiveSession else { return }
+            refreshActiveIssues()
+            if reportLibrary.activeIssueCount > 0 {
+                showActiveIssuesSheet = true
+            } else {
+                showNoFlaggedIssuesToast = true
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.8) {
+                    showNoFlaggedIssuesToast = false
+                }
+            }
+        }) {
+            ZStack(alignment: .topTrailing) {
+                Image(systemName: "flag.fill")
+                    .font(.system(size: symbolSize, weight: .medium))
+                    .foregroundColor(hasIssues ? .red : .white.opacity(0.75))
+                    .rotationEffect(bottomGlyphRotationAngle)
+
+                if hasIssues {
+                    Text("\(count)")
+                        .font(.system(size: 11, weight: .bold))
+                        .foregroundColor(.black)
+                        .frame(minWidth: 20, minHeight: 20)
+                        .background(Color.white)
+                        .clipShape(Circle())
+                        .offset(x: 6, y: -6)
+                }
+            }
+            .frame(width: hitArea, height: hitArea)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .frame(width: hitArea, height: hitArea)
     }
 
     private func placeholderQuickButton(
@@ -4172,12 +4396,23 @@ extension ContentView {
     }
     
     private func capture() {
+        let noteAtCapture = detailNote.trimmingCharacters(in: .whitespacesAndNewlines)
         camera.capturePhoto { data in
             guard let data else { return }
             
-            reportLibrary.savePhotoDataToAlbum(data: data, location: locationManager.lastLocation) { success in
+            reportLibrary.savePhotoDataToAlbum(data: data, location: locationManager.lastLocation) { success, photoRef in
                 DispatchQueue.main.async {
                     if success {
+                        let shot = Shot(
+                            capturedAt: Date(),
+                            imageLocalIdentifier: photoRef,
+                            note: noteAtCapture.isEmpty ? nil : noteAtCapture
+                        )
+                        let didApplyIssueUpdate = applyArmedIssueUpdateIfNeeded(with: shot)
+                        let didQueueResolution = queueResolutionCaptureIfNeeded(with: shot, data: data)
+                        if !didApplyIssueUpdate && !didQueueResolution {
+                            createObservationFromCapturedDetailNote(noteAtCapture, shot: shot)
+                        }
                         successHaptic.notificationOccurred(.success)
                         showSavedToast = true
                         DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
@@ -4191,6 +4426,136 @@ extension ContentView {
                     }
                 }
             }
+        }
+    }
+
+    private func createObservationFromCapturedDetailNote(_ noteText: String, shot: Shot) {
+        guard !noteText.isEmpty else { return }
+        guard let propertyID = appState.selectedPropertyID else { return }
+
+        let observation = Observation(
+            propertyID: propertyID,
+            sessionID: appState.currentSession?.id,
+            statement: noteText,
+            status: .active,
+            linkedShotID: shot.id,
+            note: noteText,
+            shots: [shot]
+        )
+
+        do {
+            _ = try localStore.createObservation(observation)
+            reportLibrary.incrementActiveIssueCount()
+            refreshActiveIssues()
+        } catch {
+            // Keep capture UX resilient if local observation persistence fails.
+        }
+    }
+
+    private func applyArmedIssueUpdateIfNeeded(with shot: Shot) -> Bool {
+        guard let armedID = armedUpdateObservationID else { return false }
+        guard let propertyID = appState.selectedPropertyID else {
+            armedUpdateObservationID = nil
+            return false
+        }
+
+        do {
+            let observations = try localStore.fetchObservations(propertyID: propertyID)
+            guard let existing = observations.first(where: { $0.id == armedID }) else {
+                armedUpdateObservationID = nil
+                return false
+            }
+
+            var updated = existing
+            updated.linkedShotID = shot.id
+            updated.shots.append(shot)
+            _ = try localStore.updateObservation(updated)
+            armedUpdateObservationID = nil
+            refreshActiveIssues()
+            return true
+        } catch {
+            armedUpdateObservationID = nil
+            return false
+        }
+    }
+
+    private func queueResolutionCaptureIfNeeded(with shot: Shot, data: Data) -> Bool {
+        guard resolutionTargetObservation != nil else { return false }
+        resolutionCapturedShot = shot
+        resolutionCapturedPhotoRef = shot.imageLocalIdentifier
+        resolutionCapturedImage = UIImage(data: data)
+        return true
+    }
+
+    private func refreshActiveIssues() {
+        guard let propertyID = appState.selectedPropertyID else {
+            activeObservations = []
+            reportLibrary.setActiveIssueCount(0)
+            return
+        }
+
+        do {
+            let observations = try localStore.fetchObservations(propertyID: propertyID)
+            let active = observations.filter { $0.status == .active }
+                .sorted { $0.createdAt > $1.createdAt }
+            activeObservations = active
+            reportLibrary.setActiveIssueCount(active.count)
+        } catch {
+            activeObservations = []
+            reportLibrary.setActiveIssueCount(0)
+        }
+    }
+
+    private func armIssueUpdate(_ observation: Observation) {
+        showActiveIssuesSheet = false
+        resolutionTargetObservation = nil
+        resetResolutionCapturePreview()
+        armedUpdateObservationID = observation.id
+        showIssueUpdateArmedToast = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.8) {
+            showIssueUpdateArmedToast = false
+        }
+    }
+
+    private func enterResolutionMode(_ observation: Observation) {
+        showActiveIssuesSheet = false
+        armedUpdateObservationID = nil
+        resolutionTargetObservation = observation
+        resetResolutionCapturePreview()
+        showResolutionModeToast = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.8) {
+            showResolutionModeToast = false
+        }
+    }
+
+    private func resetResolutionCapturePreview() {
+        resolutionCapturedShot = nil
+        resolutionCapturedPhotoRef = nil
+        resolutionCapturedImage = nil
+    }
+
+    private func confirmResolution() {
+        guard let target = resolutionTargetObservation else { return }
+        guard let shot = resolutionCapturedShot else { return }
+        guard let propertyID = appState.selectedPropertyID else { return }
+
+        do {
+            let observations = try localStore.fetchObservations(propertyID: propertyID)
+            guard let existing = observations.first(where: { $0.id == target.id }) else { return }
+
+            var updated = existing
+            updated.status = .resolved
+            updated.linkedShotID = shot.id
+            updated.shots.append(shot)
+            updated.resolutionPhotoRef = resolutionCapturedPhotoRef
+            updated.resolutionStatement = "Condition no longer visibly present at time of documentation."
+            _ = try localStore.updateObservation(updated)
+
+            resolutionTargetObservation = nil
+            resetResolutionCapturePreview()
+            refreshActiveIssues()
+        } catch {
+            // Keep UI responsive if persistence fails.
         }
     }
     
@@ -5223,6 +5588,69 @@ extension ContentView {
     }
     
     // MARK: - Report Sheets
+
+    private struct ActiveIssuesSheet: View {
+        @Environment(\.dismiss) private var dismiss
+        let observations: [Observation]
+        let onRefresh: () -> Void
+        let onUpdate: (Observation) -> Void
+        let onResolve: (Observation) -> Void
+
+        var body: some View {
+            NavigationStack {
+                Group {
+                    if observations.isEmpty {
+                        VStack(spacing: 10) {
+                            Image(systemName: "flag.slash")
+                                .font(.system(size: 28, weight: .medium))
+                                .foregroundColor(.secondary)
+                            Text("No active issues")
+                                .font(.system(size: 16, weight: .medium))
+                                .foregroundColor(.secondary)
+                        }
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    } else {
+                        List(observations) { observation in
+                            VStack(alignment: .leading, spacing: 10) {
+                                Text(observation.statement.isEmpty ? "Untitled issue" : observation.statement)
+                                    .font(.system(size: 16, weight: .medium))
+                                    .foregroundColor(.primary)
+
+                                HStack(spacing: 10) {
+                                    Button("Update") {
+                                        onUpdate(observation)
+                                    }
+                                    .buttonStyle(.bordered)
+
+                                    Button("Resolve") {
+                                        onResolve(observation)
+                                    }
+                                    .buttonStyle(.borderedProminent)
+                                    .tint(.green)
+                                }
+                            }
+                            .padding(.vertical, 4)
+                        }
+                        .listStyle(.insetGrouped)
+                    }
+                }
+                .navigationTitle("Active Issues")
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    ToolbarItem(placement: .topBarLeading) {
+                        Button(action: onRefresh) {
+                            Image(systemName: "arrow.clockwise")
+                        }
+                    }
+                    ToolbarItem(placement: .topBarTrailing) {
+                        Button("Done") {
+                            dismiss()
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     private struct ReportMenuSheet: View {
         let activeReportTitle: String
