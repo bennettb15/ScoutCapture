@@ -98,11 +98,21 @@ struct GuidedShot: Codable, Identifiable, Equatable {
 }
 
 struct Observation: Codable, Identifiable, Equatable {
+    enum Status: String, Codable, CaseIterable {
+        case active = "Active"
+        case resolved = "Resolved"
+    }
+
     let id: UUID
     let propertyID: UUID
     let sessionID: UUID?
     var createdAt: Date
     var updatedAt: Date
+    var statement: String
+    var status: Status
+    var linkedShotID: UUID?
+    var resolutionPhotoRef: String?
+    var resolutionStatement: String?
     var note: String?
     var shots: [Shot]
     var guidedShots: [GuidedShot]
@@ -113,6 +123,11 @@ struct Observation: Codable, Identifiable, Equatable {
         sessionID: UUID? = nil,
         createdAt: Date = Date(),
         updatedAt: Date = Date(),
+        statement: String = "",
+        status: Status = .active,
+        linkedShotID: UUID? = nil,
+        resolutionPhotoRef: String? = nil,
+        resolutionStatement: String? = nil,
         note: String? = nil,
         shots: [Shot] = [],
         guidedShots: [GuidedShot] = []
@@ -122,6 +137,11 @@ struct Observation: Codable, Identifiable, Equatable {
         self.sessionID = sessionID
         self.createdAt = createdAt
         self.updatedAt = updatedAt
+        self.statement = statement
+        self.status = status
+        self.linkedShotID = linkedShotID
+        self.resolutionPhotoRef = resolutionPhotoRef
+        self.resolutionStatement = resolutionStatement
         self.note = note
         self.shots = shots
         self.guidedShots = guidedShots
