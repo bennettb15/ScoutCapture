@@ -12,6 +12,7 @@ final class LocalStore {
 
     private let propertiesURL: URL
     private let observationsDirectoryURL: URL
+    private let guidedShotsDirectoryURL: URL
 
     init(fileManager: FileManager = .default) {
         self.fileManager = fileManager
@@ -29,6 +30,7 @@ final class LocalStore {
         let baseDirectory = appSupport.appendingPathComponent("ScoutCapture", isDirectory: true)
         self.propertiesURL = baseDirectory.appendingPathComponent("properties.json")
         self.observationsDirectoryURL = baseDirectory.appendingPathComponent("observations", isDirectory: true)
+        self.guidedShotsDirectoryURL = baseDirectory.appendingPathComponent("guided-shots", isDirectory: true)
 
         try? createStorageDirectories(baseDirectoryURL: baseDirectory)
     }
@@ -70,6 +72,11 @@ final class LocalStore {
         if fileManager.fileExists(atPath: propertyObservationURL.path) {
             try fileManager.removeItem(at: propertyObservationURL)
         }
+
+        let propertyGuidedShotsURL = guidedShotsFileURL(for: id)
+        if fileManager.fileExists(atPath: propertyGuidedShotsURL.path) {
+            try fileManager.removeItem(at: propertyGuidedShotsURL)
+        }
     }
 
     // MARK: - Observations CRUD (per-property)
@@ -110,6 +117,18 @@ final class LocalStore {
         try writeObservations(observations, propertyID: propertyID)
     }
 
+    // MARK: - Guided Shots CRUD (per-property)
+
+    func fetchGuidedShots(propertyID: UUID) throws -> [GuidedShot] {
+        try ensurePropertyExists(propertyID)
+        return try readGuidedShots(propertyID: propertyID)
+    }
+
+    func saveGuidedShots(_ guidedShots: [GuidedShot], propertyID: UUID) throws {
+        try ensurePropertyExists(propertyID)
+        try writeGuidedShots(guidedShots, propertyID: propertyID)
+    }
+
     // MARK: - Private Helpers
 
     private func createStorageDirectories(baseDirectoryURL: URL) throws {
@@ -119,6 +138,10 @@ final class LocalStore {
 
         if !fileManager.fileExists(atPath: observationsDirectoryURL.path) {
             try fileManager.createDirectory(at: observationsDirectoryURL, withIntermediateDirectories: true)
+        }
+
+        if !fileManager.fileExists(atPath: guidedShotsDirectoryURL.path) {
+            try fileManager.createDirectory(at: guidedShotsDirectoryURL, withIntermediateDirectories: true)
         }
     }
 
@@ -147,6 +170,10 @@ final class LocalStore {
         observationsDirectoryURL.appendingPathComponent("\(propertyID.uuidString).json")
     }
 
+    private func guidedShotsFileURL(for propertyID: UUID) -> URL {
+        guidedShotsDirectoryURL.appendingPathComponent("\(propertyID.uuidString).json")
+    }
+
     private func readObservations(propertyID: UUID) throws -> [Observation] {
         let fileURL = observationsFileURL(for: propertyID)
         guard fileManager.fileExists(atPath: fileURL.path) else {
@@ -160,6 +187,22 @@ final class LocalStore {
     private func writeObservations(_ observations: [Observation], propertyID: UUID) throws {
         let data = try encoder.encode(observations)
         let fileURL = observationsFileURL(for: propertyID)
+        try data.write(to: fileURL, options: .atomic)
+    }
+
+    private func readGuidedShots(propertyID: UUID) throws -> [GuidedShot] {
+        let fileURL = guidedShotsFileURL(for: propertyID)
+        guard fileManager.fileExists(atPath: fileURL.path) else {
+            return []
+        }
+
+        let data = try Data(contentsOf: fileURL)
+        return try decoder.decode([GuidedShot].self, from: data)
+    }
+
+    private func writeGuidedShots(_ guidedShots: [GuidedShot], propertyID: UUID) throws {
+        let data = try encoder.encode(guidedShots)
+        let fileURL = guidedShotsFileURL(for: propertyID)
         try data.write(to: fileURL, options: .atomic)
     }
 }
