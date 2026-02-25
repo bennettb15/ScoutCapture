@@ -10,6 +10,7 @@ import CoreMotion
 import Combine
 import UIKit
 import AVKit
+import AVFoundation
 
 private func proportionalCircleGlyphSize(for diameter: CGFloat) -> CGFloat {
     min(30, max(18, (diameter * 0.5).rounded()))
@@ -2227,13 +2228,14 @@ private final class DetailTypesModel: ObservableObject {
 struct ContentView: View {
     @EnvironmentObject private var appState: AppState
     private let localStore = LocalStore()
+    let onExitToHub: (() -> Void)?
     
     private let shutterHaptic = UIImpactFeedbackGenerator(style: .medium)
     private let quickButtonHaptic = UIImpactFeedbackGenerator(style: .light)
     private let hdButtonHaptic = UIImpactFeedbackGenerator(style: .soft)
     private let successHaptic = UINotificationFeedbackGenerator()
     
-    @StateObject private var camera = CameraManager()
+    @StateObject private var camera: CameraManager
     @StateObject private var levelModel = LevelMotionModel()
     @StateObject private var detailTypesModel = DetailTypesModel()
     @StateObject private var locationManager = LocationManager()
@@ -2241,14 +2243,17 @@ struct ContentView: View {
     @StateObject private var reportLibrary = ReportLibraryModel()
     @StateObject private var imageCache = AssetImageCache()
     
-    @State private var elevation: String = "North Elevation"
+    @State private var elevation: String = "North"
     
     @State private var detailNote: String = ""
     @State private var showSavedToast: Bool = false
     @State private var showNotSavedToast: Bool = false
     @State private var showNoFlaggedIssuesToast: Bool = false
-    @State private var showIssueUpdateArmedToast: Bool = false
     @State private var showResolutionModeToast: Bool = false
+    @State private var showFlaggedActionToast: Bool = false
+    @State private var flaggedActionToastText: String = ""
+    @State private var flaggedActionToastToken: Int = 0
+    @State private var isArmedIssueDetailNoteReadOnly: Bool = false
     
     @State private var focusPoint: CGPoint? = nil
     @State private var showFocusRing: Bool = false
@@ -2258,9 +2263,12 @@ struct ContentView: View {
     
     @State private var showQuickMenu: Bool = false
     @State private var manageContext: ManageContext? = nil
+    @State private var showManageBuildingsSheet: Bool = false
+    @State private var buildingOptions: [String] = ["B1", "B2", "B3", "B4", "B5", "Add"]
     @State private var selectedBuilding: String = "B1"
     @State private var showActiveIssuesSheet: Bool = false
     @State private var activeObservations: [Observation] = []
+    @State private var carryoverIssueBadgeCount: Int = 0
     @State private var showGuidedChecklist: Bool = false
     @State private var guidedShots: [GuidedShot] = []
     @State private var armedGuidedShotID: UUID? = nil
@@ -2268,7 +2276,20 @@ struct ContentView: View {
     @State private var guidedReferenceAssetLocalID: String? = nil
     @State private var guidedReferenceThumbnail: UIImage? = nil
     @State private var showGuidedAlignmentOverlay: Bool = false
+    @State private var referenceOverlayOpacity: Double = 0.45
     @State private var armedUpdateObservationID: UUID? = nil
+    @State private var armedIssueNoteText: String = ""
+    @State private var armedIssuePreviousManualHD: Bool? = nil
+    @State private var armedIssueRevisedObservationText: String? = nil
+    @State private var showArmedReferenceMenu: Bool = false
+    @State private var armedReferenceViewerState: ArmedReferenceViewerState? = nil
+    @State private var flaggedActionTargetObservation: Observation? = nil
+    @State private var pendingFlaggedDecisionShot: Shot? = nil
+    @State private var pendingFlaggedDecisionPhotoRef: String? = nil
+    @State private var showFlaggedActionPrimaryChoice: Bool = false
+    @State private var showFlaggedUpdateCommentChoice: Bool = false
+    @State private var showFlaggedUpdatedObservationInput: Bool = false
+    @State private var draftUpdatedObservation: String = ""
     @State private var resolutionTargetObservation: Observation? = nil
     @State private var resolutionCapturedShot: Shot? = nil
     @State private var resolutionCapturedPhotoRef: String? = nil
@@ -2285,6 +2306,13 @@ struct ContentView: View {
     
     @State private var showGrid: Bool = false
     @State private var showLevel: Bool = false
+
+    private let buildingOptionsDefaultsKey = "scout.capture.building.options.v1"
+
+    init(cameraManager: CameraManager = .shared, onExitToHub: (() -> Void)? = nil) {
+        _camera = StateObject(wrappedValue: cameraManager)
+        self.onExitToHub = onExitToHub
+    }
     
     @State private var showHDEnabledToast: Bool = false
     @State private var hdEnabledToastText: String = "HD Enabled"
@@ -2303,16 +2331,134 @@ struct ContentView: View {
     @State private var draftDetailNote: String = ""
     
     @State private var showLibraryFullscreen: Bool = false
-    @State private var showEndSessionConfirmation: Bool = false
+    @State private var showSessionActionsSheet: Bool = false
+    @State private var sessionActionsSummary: SessionActionsSummary? = nil
+    @State private var isPreparingSessionExport: Bool = false
+    @State private var sessionExportChecklist = ExportChecklistState()
+    @State private var sessionExportFile: SessionExportFile? = nil
+    @State private var showSessionExportErrorPopup: Bool = false
+    @State private var sessionExportErrorMessage: String? = nil
+    @State private var didTriggerExitToHubForMissingSession: Bool = false
 
     private var headerPropertyName: String {
         let trimmed = appState.selectedProperty?.name.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         return trimmed.isEmpty ? "No Property Selected" : trimmed
     }
 
-    private var hasActiveSession: Bool {
+    private var hasValidCurrentSession: Bool {
         guard let session = appState.currentSession else { return false }
-        return session.endedAt == nil
+        guard let selectedPropertyID = appState.selectedPropertyID else { return false }
+        return session.propertyID == selectedPropertyID
+    }
+
+    private var shouldShowStartingCameraOverlay: Bool {
+        guard hasValidCurrentSession else { return false }
+        let auth = AVCaptureDevice.authorizationStatus(for: .video)
+        guard auth == .authorized else { return false }
+        return camera.isStartingPreview || !camera.isPreviewRunning
+    }
+
+    private var hasGuidedBaselineForSelectedProperty: Bool {
+        guard let propertyID = appState.selectedPropertyID else { return false }
+        return appState.propertyHasBaseline(propertyID)
+    }
+
+    private var guidedRemainingForCompass: Int {
+        guard hasGuidedBaselineForSelectedProperty else { return 0 }
+        return guidedShots.filter { !isGuidedShotHandledInCurrentSession($0) }.count
+    }
+
+    private var shouldShowGuidedCompassBadge: Bool {
+        guidedRemainingForCompass > 0
+    }
+
+    private struct ArmedReferenceViewerState: Identifiable {
+        let id = UUID()
+        let title: String
+        let detailId: String
+        let localIdentifier: String
+    }
+
+    private var flaggedActionTargetObservationTextForPopup: String? {
+        guard let observation = flaggedActionTargetObservation else { return nil }
+        let note = observation.note?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !note.isEmpty { return note }
+        let statement = observation.statement.trimmingCharacters(in: .whitespacesAndNewlines)
+        return statement.isEmpty ? nil : statement
+    }
+
+    private static func shortElevationLabel(_ value: String?) -> String {
+        let raw = (value ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let lower = raw.lowercased()
+        if lower.contains("north") { return "N" }
+        if lower.contains("south") { return "S" }
+        if lower.contains("east") { return "E" }
+        if lower.contains("west") { return "W" }
+        return raw
+    }
+
+    private static func conciseContextLabel(building: String?, elevation: String?, detailType: String?) -> String {
+        let buildingPart = (building ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let elevationPart = shortElevationLabel(elevation)
+        let detailPart = (detailType ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        return [buildingPart, elevationPart, detailPart]
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
+    }
+
+    private static func normalizedContextFilename(_ filename: String) -> String {
+        var output = filename
+        let replacements: [(String, String)] = [
+            ("North Elevation", "N"),
+            ("South Elevation", "S"),
+            ("East Elevation", "E"),
+            ("West Elevation", "W"),
+            ("North", "N"),
+            ("South", "S"),
+            ("East", "E"),
+            ("West", "W")
+        ]
+        for (source, target) in replacements {
+            output = output.replacingOccurrences(of: source, with: target, options: .caseInsensitive)
+        }
+        output = output.replacingOccurrences(of: "Elevation", with: "", options: .caseInsensitive)
+        output = output.replacingOccurrences(of: "__", with: "_")
+        output = output.replacingOccurrences(of: "  ", with: " ")
+        return output.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private struct SessionActionsSummary {
+        let guidedRemainingCount: Int
+        let flaggedRemainingCount: Int
+        let hasBaseline: Bool
+        let currentSessionCaptureCount: Int
+
+        var isCompletionEligible: Bool {
+            hasBaseline && guidedRemainingCount == 0 && flaggedRemainingCount == 0
+        }
+
+        var isExportEnabled: Bool {
+            if hasBaseline {
+                return isCompletionEligible
+            }
+            return currentSessionCaptureCount > 0
+        }
+
+        var isExportLaterEnabled: Bool {
+            hasBaseline && isCompletionEligible
+        }
+    }
+
+    private struct SessionExportFile: Identifiable {
+        let id = UUID()
+        let url: URL
+    }
+
+    private struct ExportChecklistState {
+        var originalsComplete: Bool = false
+        var sessionDataComplete: Bool = false
+        var stampedComplete: Bool = false
+        var zipReady: Bool = false
     }
     
     // MARK: - Physical device rotation for glyphs (UI is locked to portrait)
@@ -2360,6 +2506,10 @@ struct ContentView: View {
         lastValidDeviceOrientation == .landscapeLeft || lastValidDeviceOrientation == .landscapeRight
     }
 
+    private var isCaptureTargetArmed: Bool {
+        armedGuidedShotID != nil || armedUpdateObservationID != nil
+    }
+
     private func buildingSelectorOverlay() -> some View {
         Button {
             showLandscapeElevationMenu = false
@@ -2388,21 +2538,83 @@ struct ContentView: View {
             )
         }
         .buttonStyle(.plain)
+        .disabled(isCaptureTargetArmed)
     }
 
-    private var buildingOptions: [String] {
-        ["B1", "B2", "B3", "B4", "B5", "Add"]
+    private func elevationPillLabel() -> String {
+        if locationMode == .interior { return "Interior" }
+        return CanonicalElevation.normalize(elevation) ?? elevation
+    }
+
+    private func buildingCode(from option: String) -> String {
+        let trimmed = option.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return "" }
+
+        let rawCode: String
+        if let dashRange = trimmed.range(of: "-") {
+            rawCode = String(trimmed[..<dashRange.lowerBound]).trimmingCharacters(in: .whitespacesAndNewlines)
+        } else {
+            rawCode = trimmed
+        }
+
+        if rawCode.compare("add", options: .caseInsensitive) == .orderedSame {
+            return "Add"
+        }
+        return rawCode.uppercased()
     }
 
     private func buildingDisplayName(for option: String) -> String {
-        switch option {
-        case "B1": return "B1 - Building 1"
-        case "B2": return "B2 - Building 2"
-        case "B3": return "B3 - Building 3"
-        case "B4": return "B4 - Building 4"
-        case "B5": return "B5 - Building 5"
-        case "Add": return "Add - Additional"
-        default: return option
+        let trimmed = option.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.contains(" - ") {
+            return trimmed
+        }
+
+        let code = buildingCode(from: trimmed)
+        if code == "Add" {
+            return "Add - Additional"
+        }
+        if code.hasPrefix("B") {
+            let suffix = code.dropFirst()
+            if !suffix.isEmpty, suffix.allSatisfy(\.isNumber) {
+                return "\(code) - Building \(suffix)"
+            }
+        }
+        return code
+    }
+
+    private func loadBuildingOptions() {
+        guard let data = UserDefaults.standard.data(forKey: buildingOptionsDefaultsKey),
+              let decoded = try? JSONDecoder().decode([String].self, from: data) else {
+            return
+        }
+        let cleaned = decoded
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        if !cleaned.isEmpty {
+            buildingOptions = cleaned
+            let selectedCode = buildingCode(from: selectedBuilding)
+            if buildingOptions.contains(where: { buildingCode(from: $0) == selectedCode }) == false {
+                selectedBuilding = buildingCode(from: cleaned[0])
+            } else {
+                selectedBuilding = selectedCode
+            }
+        }
+    }
+
+    private func persistBuildingOptions() {
+        let cleaned = buildingOptions
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        let final = cleaned.isEmpty ? ["B1", "B2", "B3", "B4", "B5", "Add"] : cleaned
+        buildingOptions = final
+        let selectedCode = buildingCode(from: selectedBuilding)
+        if buildingOptions.contains(where: { buildingCode(from: $0) == selectedCode }) == false {
+            selectedBuilding = buildingCode(from: final[0])
+        } else {
+            selectedBuilding = selectedCode
+        }
+        if let data = try? JSONEncoder().encode(final) {
+            UserDefaults.standard.set(data, forKey: buildingOptionsDefaultsKey)
         }
     }
     
@@ -2649,19 +2861,19 @@ struct ContentView: View {
         
         var elevationValue: String {
             switch self {
-            case .north: return "North Elevation"
-            case .south: return "South Elevation"
-            case .east:  return "East Elevation"
-            case .west:  return "West Elevation"
+            case .north: return "North"
+            case .south: return "South"
+            case .east:  return "East"
+            case .west:  return "West"
             }
         }
         
         static func fromElevation(_ elevation: String) -> Direction {
-            switch elevation {
-            case "South Elevation": return .south
-            case "East Elevation":  return .east
-            case "West Elevation":  return .west
-            default:                 return .north
+            switch CanonicalElevation.normalize(elevation) ?? elevation {
+            case "South": return .south
+            case "East":  return .east
+            case "West":  return .west
+            default:      return .north
             }
         }
     }
@@ -2687,7 +2899,7 @@ struct ContentView: View {
             showHDEnabledToast = false
         }
     }
-    
+
     private var hasDetailNote: Bool {
         !detailNote.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
@@ -2732,9 +2944,16 @@ struct ContentView: View {
                 UIDevice.current.beginGeneratingDeviceOrientationNotifications()
                 refreshBottomGlyphRotation()
 
+                camera.prepareForPreviewAsync()
+                camera.ensurePreviewRunningAsync()
+
                 locationManager.start()
+                if armedUpdateObservationID == nil && pendingFlaggedDecisionShot == nil {
+                    restoreArmedIssueHDIfNeeded()
+                }
 
                 reportLibrary.warmUpAlbumIfAuthorized()
+                loadBuildingOptions()
                 refreshActiveIssues()
                 refreshGuidedShots()
                 isPollingDeviceOrientation = true
@@ -2752,8 +2971,25 @@ struct ContentView: View {
                 UIDevice.current.endGeneratingDeviceOrientationNotifications()
             }
             .onChange(of: appState.selectedPropertyID) { _, _ in
+                resetSelectionForSwitch()
                 refreshActiveIssues()
                 refreshGuidedShots()
+            }
+            .onChange(of: appState.currentSession?.id) { _, _ in
+                ensureCameraSessionPrecondition()
+                if hasValidCurrentSession {
+                    camera.ensurePreviewRunningAsync()
+                }
+                resetSelectionForSwitch()
+                refreshActiveIssues()
+            }
+            .onChange(of: appState.currentSession?.status) { _, _ in
+                ensureCameraSessionPrecondition()
+                if hasValidCurrentSession {
+                    camera.ensurePreviewRunningAsync()
+                }
+                resetSelectionForSwitch()
+                refreshActiveIssues()
             }
             .onChange(of: detailNote) { _, _ in
                 let wasOn = camera.effectiveHDEnabled
@@ -2766,6 +3002,54 @@ struct ContentView: View {
                     showHDToast("HD Enabled for Detail Capture")
                 }
             }
+            .onAppear {
+                ensureCameraSessionPrecondition()
+                if hasValidCurrentSession {
+                    camera.ensurePreviewRunningAsync()
+                }
+            }
+
+            if showSessionActionsSheet, let summary = sessionActionsSummary {
+                SessionActionsSheet(
+                    summary: summary,
+                    isPreparingExport: isPreparingSessionExport,
+                    onResume: {
+                        showSessionActionsSheet = false
+                    },
+                    onSaveDraftAndExit: {
+                        handleSaveDraftAndExit(summary: summary)
+                    },
+                    onExportNow: {
+                        startExportNowFlow()
+                    },
+                    onExportLater: {
+                        handleExportLaterAndExit(summary: summary)
+                    }
+                )
+                .zIndex(500)
+            }
+
+            if isPreparingSessionExport {
+                SessionExportChecklistOverlay(checklist: sessionExportChecklist)
+                    .zIndex(700)
+            }
+
+            if showSessionExportErrorPopup {
+                ExportErrorOverlay(
+                    title: "Export Failed",
+                    message: sessionExportErrorMessage ?? "Unable to build export ZIP.",
+                    retryTitle: "Retry",
+                    cancelTitle: "Cancel",
+                    onRetry: {
+                        showSessionExportErrorPopup = false
+                        startExportNowFlow()
+                    },
+                    onCancel: {
+                        showSessionExportErrorPopup = false
+                    }
+                )
+                .zIndex(710)
+            }
         }
         .ignoresSafeArea(.keyboard, edges: .bottom)
         // 3-dot quick menu
@@ -2774,11 +3058,16 @@ struct ContentView: View {
                 glyphRotationAngle: bottomGlyphRotationAngle,
                 flashSetting: camera.flashSetting,
                 isFrontCamera: isFrontCameraUI,
+                selectedBuildingLabel: selectedBuilding,
                 isGridOn: $showGrid,
                 isLevelOn: $showLevel,
-                debugEnabled: debugEnabled,
-                onToggleDebug: { newValue in
-                    setDebugEnabled(newValue)
+                onBuildingList: {
+                    showQuickMenu = false
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                        showLandscapeElevationMenu = false
+                        showLandscapeDetailMenu = false
+                        showLandscapeBuildingMenu = true
+                    }
                 },
                 onInteriorList: {
                     showQuickMenu = false
@@ -2801,6 +3090,19 @@ struct ContentView: View {
                 showQuickMenu = false
             }
         }
+        .sheet(isPresented: $showManageBuildingsSheet, onDismiss: {
+            persistBuildingOptions()
+        }) {
+            ManageBuildingsSheet(
+                options: $buildingOptions,
+                selectedBuilding: $selectedBuilding,
+                buildingCodeForOption: buildingCode(from:),
+                buildingFullLabelForOption: buildingDisplayName(for:),
+                onClose: {
+                    showManageBuildingsSheet = false
+                }
+            )
+        }
         // Album fullscreen
         .fullScreenCover(isPresented: $showLibraryFullscreen) {
             ReportLibraryFullscreen(reportLibrary: reportLibrary, cache: imageCache)
@@ -2809,23 +3111,28 @@ struct ContentView: View {
         .sheet(item: $manageContext) { ctx in
             ManageDetailTypesView(mode: ctx.mode, model: detailTypesModel)
         }
-        .sheet(isPresented: $showActiveIssuesSheet) {
+        .fullScreenCover(isPresented: $showActiveIssuesSheet) {
             ActiveIssuesSheet(
                 observations: activeObservations,
+                currentSessionID: appState.currentSession?.id,
+                cache: imageCache,
                 onRefresh: {
                     refreshActiveIssues()
                 },
-                onUpdate: { observation in
-                    armIssueUpdate(observation)
+                onSelectIssue: { observation in
+                    beginFlaggedIssueInteraction(observation)
                 },
-                onResolve: { observation in
-                    enterResolutionMode(observation)
+                onRetakeIssue: { observation in
+                    beginFlaggedIssueInteraction(observation)
                 }
             )
         }
         .fullScreenCover(isPresented: $showGuidedChecklist) {
             GuidedChecklistOverlay(
                 guidedShots: guidedShots,
+                currentSessionID: appState.currentSession?.id,
+                currentSessionStartedAt: appState.currentSession?.startedAt,
+                currentSessionEndedAt: appState.currentSession?.endedAt,
                 cache: imageCache,
                 onClose: {
                     showGuidedChecklist = false
@@ -2839,9 +3146,38 @@ struct ContentView: View {
                 onSkip: { guidedShot, reason, otherNote in
                     markGuidedShotSkipped(guidedShot, reason: reason, otherNote: otherNote)
                 },
+                onUndoSkip: { guidedShot in
+                    undoGuidedShotSkip(guidedShot)
+                },
                 onRetake: { guidedShot in
                     armGuidedRetake(guidedShot)
                 }
+            )
+        }
+        .sheet(item: $sessionExportFile) { file in
+            SessionDocumentExportPicker(
+                fileURL: file.url,
+                onComplete: { didExport in
+                    if didExport {
+                        finalizeBaselineIfNeededAfterSuccessfulExport()
+                        appState.markCurrentSessionExported()
+                    }
+                    sessionExportFile = nil
+                    appState.refreshProperties()
+                    onExitToHub?()
+                }
+            )
+        }
+        .fullScreenCover(item: $armedReferenceViewerState) { state in
+            let fetch = PHAsset.fetchAssets(withLocalIdentifiers: [state.localIdentifier], options: nil)
+            let assets = fetch.firstObject.map { [$0] } ?? []
+            ReportPhotoViewer(
+                title: state.title,
+                assets: assets,
+                startIndex: 0,
+                detailIdOverride: state.detailId,
+                cache: imageCache,
+                viewerToken: state.localIdentifier.hashValue
             )
         }
     }
@@ -2871,7 +3207,7 @@ struct ContentView: View {
             VStack(spacing: 0) {
                 topHeaderView(w: w, topInset: topInset, topContentLift: topContentLift, topBarH: topBarH)
                 previewAreaView(w: w, previewH: previewH, baseToastTop: baseToastTop)
-                bottomMaskView(bottomBarH: bottomBarH)
+                bottomMaskView(bottomBarH: bottomBarH, containerWidth: w)
             }
             .frame(width: geo.size.width, height: geo.size.height, alignment: .top)
             .clipped()
@@ -2884,8 +3220,7 @@ struct ContentView: View {
 
             let rowPadding: CGFloat = 16
             let controlH: CGFloat = 44
-            let gap: CGFloat = 10
-            let controlW: CGFloat = (w - (rowPadding * 2) - gap) / 2.0
+            let gap: CGFloat = 8
 
             VStack(spacing: 10) {
                 VStack(spacing: 2) {
@@ -2896,43 +3231,67 @@ struct ContentView: View {
                         .lineLimit(1)
                         .minimumScaleFactor(0.72)
                         .frame(maxWidth: .infinity, alignment: .center)
-                        .overlay(alignment: .leading) {
-                            buildingSelectorOverlay()
-                            .rotationEffect(bottomGlyphRotationAngle)
-                            .padding(.leading, 18)
-                            .padding(.top, isLandscapeUI ? 6 : 0)
-                            .offset(y: isLandscapeUI ? 3 : 5)
-                        }
                         .overlay(alignment: .trailing) {
-                            if hasActiveSession {
-                                Button {
-                                    showEndSessionConfirmation = true
-                                } label: {
-                                    Group {
-                                        if isLandscapeUI {
-                                            VStack(spacing: 0) {
-                                                Text("End")
-                                                Text("Session")
-                                            }
-                                            .font(.system(size: 14, weight: .semibold))
-                                            .multilineTextAlignment(.center)
-                                        } else {
-                                            Text("End Session")
-                                                .font(.system(size: 16, weight: .semibold))
+                            Button {
+                                presentSessionActionsSheet()
+                            } label: {
+                                Group {
+                                    if isLandscapeUI {
+                                        VStack(spacing: 0) {
+                                            Text("End")
+                                            Text("Session")
                                         }
+                                        .font(.system(size: 14, weight: .semibold))
+                                        .multilineTextAlignment(.center)
+                                    } else {
+                                        Text("End Session")
+                                            .font(.system(size: 16, weight: .semibold))
                                     }
-                                    .foregroundColor(.red.opacity(0.95))
-                                    .shadow(color: .black.opacity(0.45), radius: 2, x: 0, y: 1)
-                                    .rotationEffect(isLandscapeUI ? bottomGlyphRotationAngle : .zero)
                                 }
-                                .buttonStyle(.plain)
-                                .padding(.trailing, rowPadding)
+                                .foregroundColor(.red.opacity(0.95))
+                                .shadow(color: .black.opacity(0.45), radius: 2, x: 0, y: 1)
+                                .rotationEffect(isLandscapeUI ? bottomGlyphRotationAngle : .zero)
                             }
+                            .buttonStyle(.plain)
+                            .padding(.trailing, rowPadding)
                         }
                 }
 
                 if !(lastValidDeviceOrientation == .landscapeLeft || lastValidDeviceOrientation == .landscapeRight) {
-                HStack(spacing: gap) {
+                    HStack(spacing: gap) {
+                        Button {
+                            showLandscapeElevationMenu = false
+                            showLandscapeDetailMenu = false
+                            showLandscapeBuildingMenu.toggle()
+                        } label: {
+                            HStack(spacing: 6) {
+                                Text(selectedBuilding)
+                                    .font(.system(size: 15, weight: .medium))
+                                    .foregroundColor(.white.opacity(0.95))
+                                    .lineLimit(1)
+                                    .minimumScaleFactor(0.85)
+                                Image(systemName: "chevron.down")
+                                    .font(.system(size: 12, weight: .medium))
+                                    .foregroundColor(.white.opacity(0.90))
+                            }
+                            .padding(.horizontal, 12)
+                            .frame(height: controlH, alignment: .center)
+                            .background(
+                                ZStack {
+                                    Color.black.opacity(0.55)
+                                    Color.white.opacity(0.08)
+                                }
+                            )
+                            .clipShape(RoundedRectangle(cornerRadius: 18))
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 18)
+                                    .stroke(Color.white.opacity(0.12), lineWidth: 1)
+                            )
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(isCaptureTargetArmed)
+                        .fixedSize(horizontal: true, vertical: false)
+
                         Button {
                             showLandscapeBuildingMenu = false
                             if locationMode == .interior {
@@ -2941,7 +3300,7 @@ struct ContentView: View {
                             showLandscapeDetailMenu = false
                             showLandscapeElevationMenu.toggle()
                         } label: {
-                            let elevationLabel = (locationMode == .interior) ? "Interior" : elevation
+                            let elevationLabel = elevationPillLabel()
 
                             HStack(spacing: 8) {
                                 Text(elevationLabel)
@@ -2957,7 +3316,7 @@ struct ContentView: View {
                                     .foregroundColor(.white.opacity(0.90))
                             }
                             .padding(.horizontal, 14)
-                            .frame(width: controlW, height: controlH, alignment: .center)
+                            .frame(height: controlH, alignment: .center)
                             .background(
                                 ZStack {
                                     Color.black.opacity(0.55)
@@ -2971,7 +3330,8 @@ struct ContentView: View {
                             )
                         }
                         .buttonStyle(.plain)
-                        .disabled(locationMode == .interior)
+                        .disabled(locationMode == .interior || isCaptureTargetArmed)
+                        .fixedSize(horizontal: true, vertical: false)
 
                         Button {
                             showLandscapeBuildingMenu = false
@@ -2992,7 +3352,7 @@ struct ContentView: View {
                                     .foregroundColor(.white.opacity(0.90))
                             }
                             .padding(.horizontal, 14)
-                            .frame(width: controlW, height: controlH, alignment: .center)
+                            .frame(maxWidth: .infinity, minHeight: controlH, maxHeight: controlH, alignment: .center)
                             .background(
                                 ZStack {
                                     Color.black.opacity(0.55)
@@ -3006,6 +3366,7 @@ struct ContentView: View {
                             )
                         }
                         .buttonStyle(.plain)
+                        .disabled(isCaptureTargetArmed)
                     }
                     .padding(.horizontal, rowPadding)
                 }
@@ -3016,7 +3377,7 @@ struct ContentView: View {
             .padding(.horizontal, 10)
             .offset(y: topContentLift)
         }
-        .frame(height: topBarH)
+        .frame(height: topBarH + (isLandscapeUI ? 0 : 6))
     }
 
     private func previewAreaView(w: CGFloat, previewH: CGFloat, baseToastTop: CGFloat) -> some View {
@@ -3038,12 +3399,10 @@ struct ContentView: View {
             )
             .cameraCaptureButtons(
                 onPressBegan: {
-                    guard hasActiveSession else { return }
                     shutterHaptic.impactOccurred()
                     shutterHaptic.prepare()
                 },
                 onCapture: {
-                    guard hasActiveSession else { return }
                     capture()
                 }
             )
@@ -3056,11 +3415,25 @@ struct ContentView: View {
                 tx.animation = nil
             }
 
-            if showGrid {
-                GridOverlay()
-                    .stroke(Color.white.opacity(0.22), lineWidth: 1)
-                    .allowsHitTesting(false)
-                    .zIndex(5)
+            if shouldShowStartingCameraOverlay {
+                VStack(spacing: 10) {
+                    ProgressView()
+                        .progressViewStyle(.circular)
+                        .tint(.white)
+                    Text("Starting camera...")
+                        .font(.system(size: 14, weight: .medium))
+                        .foregroundColor(.white.opacity(0.95))
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 12)
+                .background(Color.black.opacity(0.70))
+                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .stroke(Color.white.opacity(0.18), lineWidth: 1)
+                )
+                .transition(.opacity)
+                .zIndex(40)
             }
 
             if showLevel {
@@ -3084,21 +3457,33 @@ struct ContentView: View {
                 .padding(.trailing, lastValidDeviceOrientation == .landscapeRight ? 14 : 0)
                 .zIndex(12)
 
-            if showGuidedAlignmentOverlay && armedGuidedShotID != nil {
-                ZStack {
-                    RoundedRectangle(cornerRadius: 8)
-                        .stroke(Color.white.opacity(0.55), style: StrokeStyle(lineWidth: 1.2, dash: [8, 6]))
-                    Rectangle()
-                        .fill(Color.white.opacity(0.35))
-                        .frame(width: 1.0)
-                    Rectangle()
-                        .fill(Color.white.opacity(0.35))
-                        .frame(height: 1.0)
+            if showGuidedAlignmentOverlay && isCaptureTargetArmed {
+                if let reference = guidedReferenceThumbnail {
+                    Image(uiImage: reference)
+                        .resizable()
+                        .scaledToFill()
+                        .frame(width: w, height: previewH)
+                        .clipped()
+                        .opacity(referenceOverlayOpacity)
+                        .allowsHitTesting(false)
+                        .zIndex(10)
+                } else {
+                    Text("No reference available")
+                        .font(.system(size: 14, weight: .medium))
+                        .foregroundColor(.white)
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 10)
+                        .background(Color.black.opacity(0.62))
+                        .clipShape(RoundedRectangle(cornerRadius: 12))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 12)
+                                .stroke(Color.white.opacity(0.18), lineWidth: 1)
+                        )
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+                        .rotationEffect(bottomGlyphRotationAngle)
+                        .allowsHitTesting(false)
+                        .zIndex(11)
                 }
-                .padding(.horizontal, 18)
-                .padding(.vertical, 12)
-                .allowsHitTesting(false)
-                .zIndex(11)
             }
 
             if showCameraSwapBlackout {
@@ -3166,7 +3551,11 @@ struct ContentView: View {
                     .zIndex(26)
             }
 
-            if hasDetailNote {
+            if hasDetailNote &&
+                armedUpdateObservationID == nil &&
+                !showFlaggedActionPrimaryChoice &&
+                !showFlaggedUpdateCommentChoice &&
+                !showFlaggedUpdatedObservationInput {
                 let isLandscape = (lastValidDeviceOrientation == .landscapeLeft || lastValidDeviceOrientation == .landscapeRight)
 
                 if isLandscape {
@@ -3194,6 +3583,34 @@ struct ContentView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
                 .padding(.bottom, 18)
                 .zIndex(20)
+
+            if showGuidedAlignmentOverlay && isCaptureTargetArmed && guidedReferenceThumbnail != nil {
+                VStack(spacing: 8) {
+                    HStack(spacing: 10) {
+                        Image(systemName: "circle.lefthalf.filled")
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundColor(.white.opacity(0.88))
+                        Slider(value: $referenceOverlayOpacity, in: 0.1...0.9)
+                            .tint(.blue)
+                        Image(systemName: "circle")
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundColor(.white.opacity(0.88))
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 10)
+                    .background(Color.black.opacity(0.55))
+                    .clipShape(RoundedRectangle(cornerRadius: 12))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 12)
+                            .stroke(Color.white.opacity(0.18), lineWidth: 1)
+                    )
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+                .padding(.horizontal, 26)
+                .padding(.bottom, 74)
+                .rotationEffect(bottomGlyphRotationAngle)
+                .zIndex(21)
+            }
 
             if showFocusRing, let fp = focusPoint {
                 Circle()
@@ -3262,8 +3679,8 @@ struct ContentView: View {
                     .zIndex(25)
             }
 
-            if showIssueUpdateArmedToast {
-                Text("Issue update armed. Capture next photo to relink.")
+            if showFlaggedActionToast {
+                Text(flaggedActionToastText)
                     .font(.system(size: 14, weight: .medium))
                     .foregroundColor(.white)
                     .padding(.horizontal, 16)
@@ -3279,6 +3696,32 @@ struct ContentView: View {
                     .rotationEffect(bottomGlyphRotationAngle)
                     .allowsHitTesting(false)
                     .zIndex(25)
+            }
+
+            if armedUpdateObservationID != nil &&
+                !showFlaggedActionPrimaryChoice &&
+                !showFlaggedUpdateCommentChoice &&
+                !showFlaggedUpdatedObservationInput {
+                let isLandscape = (lastValidDeviceOrientation == .landscapeLeft || lastValidDeviceOrientation == .landscapeRight)
+                if isLandscape {
+                    toastPill(text: armedIssueNoteText.isEmpty ? "Flagged issue armed" : armedIssueNoteText)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+                        .padding(.bottom, 96)
+                        .padding(.horizontal, 18)
+                        .rotationEffect(bottomGlyphRotationAngle)
+                        .transaction { transaction in
+                            transaction.animation = nil
+                        }
+                        .allowsHitTesting(false)
+                        .zIndex(26)
+                } else {
+                    toastPill(text: armedIssueNoteText.isEmpty ? "Flagged issue armed" : armedIssueNoteText)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                        .padding(.top, baseToastTop)
+                        .padding(.horizontal, 18)
+                        .allowsHitTesting(false)
+                        .zIndex(26)
+                }
             }
 
             if showResolutionModeToast {
@@ -3298,6 +3741,204 @@ struct ContentView: View {
                     .rotationEffect(bottomGlyphRotationAngle)
                     .allowsHitTesting(false)
                     .zIndex(25)
+            }
+
+            if showFlaggedActionPrimaryChoice {
+                Color.black.opacity(0.62)
+                    .frame(width: w, height: previewH)
+                    .zIndex(96)
+
+                VStack(spacing: 12) {
+                    Text("Flagged Capture")
+                        .font(.system(size: 18, weight: .semibold))
+                        .foregroundColor(.white)
+
+                    Text("Apply this capture as an update or resolve this issue?")
+                        .font(.system(size: 14, weight: .medium))
+                        .foregroundColor(.white.opacity(0.9))
+                        .multilineTextAlignment(.center)
+
+                    VStack(spacing: 10) {
+                        Button("Update") {
+                            selectFlaggedPrimaryUpdate()
+                        }
+                        .font(.system(size: 18, weight: .semibold))
+                        .foregroundColor(.white)
+                        .frame(maxWidth: .infinity, minHeight: 50)
+                        .background(Color.blue)
+                        .clipShape(RoundedRectangle(cornerRadius: 14))
+
+                        Button("Resolve") {
+                            selectFlaggedPrimaryResolve()
+                        }
+                        .font(.system(size: 18, weight: .semibold))
+                        .foregroundColor(.white)
+                        .frame(maxWidth: .infinity, minHeight: 50)
+                        .background(Color.white.opacity(0.10))
+                        .clipShape(RoundedRectangle(cornerRadius: 14))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 14)
+                                .stroke(Color.white.opacity(0.16), lineWidth: 1)
+                        )
+                    }
+                }
+                .padding(.horizontal, 20)
+                .padding(.vertical, 18)
+                .background(Color.black.opacity(0.76))
+                .clipShape(RoundedRectangle(cornerRadius: 16))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 16)
+                        .stroke(Color.white.opacity(0.18), lineWidth: 1)
+                )
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+                .rotationEffect(bottomGlyphRotationAngle)
+                .zIndex(97)
+            }
+
+            if showFlaggedUpdateCommentChoice {
+                Color.black.opacity(0.62)
+                    .frame(width: w, height: previewH)
+                    .zIndex(96)
+
+                VStack(spacing: 12) {
+                    Text("Update Observation")
+                        .font(.system(size: 18, weight: .semibold))
+                        .foregroundColor(.white)
+
+                    Text("Choose how to handle the observation text for this update.")
+                        .font(.system(size: 14, weight: .medium))
+                        .foregroundColor(.white.opacity(0.9))
+                        .multilineTextAlignment(.center)
+
+                    if let original = flaggedActionTargetObservationTextForPopup {
+                        Text(original)
+                            .font(.system(size: 14, weight: .semibold))
+                            .foregroundColor(.white.opacity(0.95))
+                            .lineLimit(3)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 8)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .background(Color.white.opacity(0.08))
+                            .clipShape(RoundedRectangle(cornerRadius: 10))
+                    }
+
+                    VStack(spacing: 10) {
+                        Button("Leave Observation Unchanged") {
+                            selectFlaggedUpdateLeaveUnchanged()
+                        }
+                        .font(.system(size: 16, weight: .semibold))
+                        .foregroundColor(.white)
+                        .frame(maxWidth: .infinity, minHeight: 50)
+                        .background(Color.blue)
+                        .clipShape(RoundedRectangle(cornerRadius: 14))
+
+                        Button("Revise Observation") {
+                            selectFlaggedUpdateRevise()
+                        }
+                        .font(.system(size: 16, weight: .semibold))
+                        .foregroundColor(.white)
+                        .frame(maxWidth: .infinity, minHeight: 50)
+                        .background(Color.white.opacity(0.10))
+                        .clipShape(RoundedRectangle(cornerRadius: 14))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 14)
+                                .stroke(Color.white.opacity(0.16), lineWidth: 1)
+                        )
+                    }
+                }
+                .padding(.horizontal, 20)
+                .padding(.vertical, 18)
+                .background(Color.black.opacity(0.76))
+                .clipShape(RoundedRectangle(cornerRadius: 16))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 16)
+                        .stroke(Color.white.opacity(0.18), lineWidth: 1)
+                )
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+                .rotationEffect(bottomGlyphRotationAngle)
+                .zIndex(97)
+            }
+
+            if showFlaggedUpdatedObservationInput {
+                Color.black.opacity(0.62)
+                    .frame(width: w, height: previewH)
+                    .zIndex(96)
+
+                VStack(spacing: 12) {
+                    Text("Updated Observation")
+                        .font(.system(size: 18, weight: .semibold))
+                        .foregroundColor(.white)
+
+                    Text("Describe visible condition only. No measurements or structural conclusions.")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundColor(.white.opacity(0.88))
+                        .multilineTextAlignment(.center)
+
+                    if let original = flaggedActionTargetObservationTextForPopup {
+                        Text(original)
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundColor(.white.opacity(0.94))
+                            .lineLimit(3)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 8)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .background(Color.white.opacity(0.08))
+                            .clipShape(RoundedRectangle(cornerRadius: 10))
+                    }
+
+                    TextField("Updated Observation", text: $draftUpdatedObservation, axis: .vertical)
+                        .lineLimit(2...4)
+                        .textInputAutocapitalization(.sentences)
+                        .autocorrectionDisabled(false)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 10)
+                        .background(Color(uiColor: .secondarySystemGroupedBackground))
+                        .clipShape(RoundedRectangle(cornerRadius: 12))
+                        .foregroundColor(.primary)
+
+                    VStack(spacing: 10) {
+                        Button("Save and Capture") {
+                            commitFlaggedUpdatedObservationAndArm()
+                        }
+                        .font(.system(size: 16, weight: .semibold))
+                        .foregroundColor(.white)
+                        .frame(maxWidth: .infinity, minHeight: 50)
+                        .background(draftUpdatedObservation.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? Color.blue.opacity(0.35) : Color.blue)
+                        .clipShape(RoundedRectangle(cornerRadius: 14))
+                        .disabled(draftUpdatedObservation.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+
+                        Button("Back") {
+                            showFlaggedUpdatedObservationInput = false
+                            showFlaggedUpdateCommentChoice = true
+                        }
+                        .font(.system(size: 16, weight: .semibold))
+                        .foregroundColor(.white)
+                        .frame(maxWidth: .infinity, minHeight: 50)
+                        .background(Color.white.opacity(0.10))
+                        .clipShape(RoundedRectangle(cornerRadius: 14))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 14)
+                                .stroke(Color.white.opacity(0.16), lineWidth: 1)
+                        )
+                    }
+                }
+                .padding(.horizontal, 20)
+                .padding(.vertical, 18)
+                .background(Color.black.opacity(0.76))
+                .clipShape(RoundedRectangle(cornerRadius: 16))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 16)
+                        .stroke(Color.white.opacity(0.18), lineWidth: 1)
+                )
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+                .rotationEffect(bottomGlyphRotationAngle)
+                .zIndex(97)
+            }
+
+            if showArmedReferenceMenu && isCaptureTargetArmed {
+                armedReferenceActionOverlay()
+                    .frame(width: w, height: previewH)
+                    .zIndex(98)
             }
 
             if let freezeFrame = resolutionCapturedImage {
@@ -3345,74 +3986,6 @@ struct ContentView: View {
                 .zIndex(102)
             }
 
-            if !hasActiveSession {
-                VStack(spacing: 12) {
-                    Text("No Active Session")
-                        .font(.system(size: 18, weight: .semibold))
-                        .foregroundColor(.white)
-
-                    Button("Start Session") {
-                        _ = appState.startSession()
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .tint(.blue)
-                    .foregroundStyle(.white)
-                }
-                .padding(.horizontal, 22)
-                .padding(.vertical, 18)
-                .background(Color.black.opacity(0.5))
-                .clipShape(RoundedRectangle(cornerRadius: 16))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 16)
-                        .stroke(Color.white.opacity(0.18), lineWidth: 1)
-                )
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
-                .rotationEffect(bottomGlyphRotationAngle)
-                .zIndex(90)
-            }
-
-            if showEndSessionConfirmation {
-                Color.black.opacity(0.48)
-                    .frame(width: w, height: previewH)
-                    .zIndex(105)
-
-                VStack(spacing: 14) {
-                    Text("Finish Session?")
-                        .font(.system(size: 20, weight: .semibold))
-                        .foregroundColor(.white)
-
-                    Text("This will end the current session.")
-                        .font(.system(size: 14, weight: .medium))
-                        .foregroundColor(.white.opacity(0.9))
-                        .multilineTextAlignment(.center)
-
-                    HStack(spacing: 10) {
-                        Button("Cancel") {
-                            showEndSessionConfirmation = false
-                        }
-                        .buttonStyle(.bordered)
-                        .tint(.white)
-
-                        Button("End Session") {
-                            appState.finishSession()
-                            showEndSessionConfirmation = false
-                        }
-                        .buttonStyle(.borderedProminent)
-                        .tint(.red)
-                    }
-                }
-                .padding(.horizontal, 20)
-                .padding(.vertical, 18)
-                .background(Color.black.opacity(0.7))
-                .clipShape(RoundedRectangle(cornerRadius: 16))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 16)
-                        .stroke(Color.white.opacity(0.18), lineWidth: 1)
-                )
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
-                .rotationEffect(bottomGlyphRotationAngle)
-                .zIndex(110)
-            }
         }
         .clipped()
         .frame(height: previewH)
@@ -3426,7 +3999,7 @@ struct ContentView: View {
         }
     }
 
-    private func bottomMaskView(bottomBarH: CGFloat) -> some View {
+    private func bottomMaskView(bottomBarH: CGFloat, containerWidth: CGFloat) -> some View {
         ZStack {
             Color.black
 
@@ -3435,7 +4008,6 @@ struct ContentView: View {
                     Spacer(minLength: 0)
 
                     Button(action: {
-                        guard hasActiveSession else { return }
                         shutterHaptic.impactOccurred()
                         shutterHaptic.prepare()
                         capture()
@@ -3458,26 +4030,64 @@ struct ContentView: View {
                                 .frame(width: 74, height: 74)
                         }
                     }
-                    .disabled(camera.isCapturing || !hasActiveSession)
+                    .disabled(camera.isCapturing)
                     .buttonStyle(.plain)
                     .offset(y: -13)
                     .overlay(alignment: .center) {
+                        let hdOffsetX: CGFloat = -94
+                        let leftEdgeX: CGFloat = -(containerWidth * 0.5)
+                        let cancelOffsetX: CGFloat = (leftEdgeX + hdOffsetX) * 0.5
+
                         ZStack {
+                            if isCaptureTargetArmed {
+                                Button {
+                                    fireQuickButtonHaptic()
+                                    resetSelectionForSwitch()
+                                } label: {
+                                    ZStack {
+                                        Circle()
+                                            .fill(Color.red.opacity(0.95))
+                                            .frame(width: 44, height: 44)
+                                        Image(systemName: "xmark")
+                                            .font(.system(size: 16, weight: .bold))
+                                            .foregroundColor(.white)
+                                    }
+                                }
+                                .buttonStyle(.plain)
+                                .rotationEffect(bottomGlyphRotationAngle)
+                                .offset(x: cancelOffsetX, y: -12)
+                            }
+
                             hdQuickButton(size: 44)
                                 .rotationEffect(bottomGlyphRotationAngle)
-                                .offset(x: -94, y: -12)
-                                .disabled(!hasActiveSession)
+                                .offset(x: hdOffsetX, y: -12)
 
                             detailNoteQuickButton(size: 44)
                                 .rotationEffect(bottomGlyphRotationAngle)
                                 .offset(x: 94, y: -12)
-                                .disabled(!hasActiveSession)
 
-                            if armedGuidedShotID != nil {
-                                guidedReferenceCard(size: 88)
-                                    .rotationEffect(bottomGlyphRotationAngle)
-                                    .offset(x: 170, y: -12)
-                                    .disabled(!hasActiveSession)
+                            if isCaptureTargetArmed {
+                                ZStack(alignment: .topTrailing) {
+                                    guidedReferenceCard(size: 88)
+                                        .rotationEffect(bottomGlyphRotationAngle)
+
+                                    Button {
+                                        fireQuickButtonHaptic()
+                                        showArmedReferenceMenu = true
+                                    } label: {
+                                        Image(systemName: "ellipsis.circle.fill")
+                                            .font(.system(size: 18, weight: .semibold))
+                                            .foregroundColor(.white.opacity(0.90))
+                                            .background(
+                                                Circle()
+                                                    .fill(Color.black.opacity(0.45))
+                                                    .frame(width: 18, height: 18)
+                                            )
+                                    }
+                                    .buttonStyle(.plain)
+                                    .offset(x: 6, y: -6)
+                                }
+                                .offset(x: 170, y: -12)
                             }
                         }
                     }
@@ -3502,14 +4112,12 @@ struct ContentView: View {
 
                     locationModeSlider()
                         .frame(height: 44)
-                        .disabled(!hasActiveSession)
 
                     Spacer(minLength: 0)
 
                     topRightEllipsisCircle()
                         .frame(width: 44, height: 44)
                         .rotationEffect(bottomGlyphRotationAngle)
-                        .disabled(!hasActiveSession)
                 }
                 .padding(.horizontal, 22)
             }
@@ -3611,7 +4219,7 @@ extension ContentView {
         let controlH: CGFloat = 36
         let controlW: CGFloat = 190
         
-        let elevationLabel = (locationMode == .interior) ? "Interior" : elevation
+        let elevationLabel = elevationPillLabel()
         let detailLabel = currentDetailType.isEmpty ? "Select" : currentDetailType
         
         VStack(alignment: .leading, spacing: 10) {
@@ -3654,7 +4262,7 @@ extension ContentView {
                 )
             }
             .buttonStyle(.plain)
-            .disabled(locationMode == .interior)
+            .disabled(locationMode == .interior || isCaptureTargetArmed)
             
             // Detail type dropdown (compact) - custom (opens centered overlay)
             Button {
@@ -3690,6 +4298,7 @@ extension ContentView {
                 )
             }
             .buttonStyle(.plain)
+            .disabled(isCaptureTargetArmed)
         }
         .transaction { tx in
             tx.animation = nil
@@ -3746,14 +4355,21 @@ extension ContentView {
 
             VStack(spacing: 0) {
                 ForEach(buildingOptions, id: \.self) { option in
-                    centeredMenuRow(title: buildingDisplayName(for: option), isSelected: selectedBuilding == option) {
-                        selectedBuilding = option
+                    let optionCode = buildingCode(from: option)
+                    centeredMenuRow(title: buildingDisplayName(for: option), isSelected: selectedBuilding == optionCode) {
+                        selectedBuilding = optionCode
                         dismissLandscapeMenus()
                     }
 
                     if option != buildingOptions.last {
                         centeredMenuDivider()
                     }
+                }
+
+                centeredMenuDivider()
+                centeredMenuRow(title: "Manage...", isSelected: false) {
+                    dismissLandscapeMenus()
+                    showManageBuildingsSheet = true
                 }
             }
             .padding(.vertical, 6)
@@ -3777,23 +4393,23 @@ extension ContentView {
                 centeredMenuHeader(title: "Elevation")
                 
                 VStack(spacing: 0) {
-                    centeredMenuRow(title: "North Elevation", isSelected: elevation == "North Elevation") {
-                        elevation = "North Elevation"
+                    centeredMenuRow(title: "North", isSelected: elevation == "North") {
+                        elevation = "North"
                         dismissLandscapeMenus()
                     }
                     centeredMenuDivider()
-                    centeredMenuRow(title: "South Elevation", isSelected: elevation == "South Elevation") {
-                        elevation = "South Elevation"
+                    centeredMenuRow(title: "South", isSelected: elevation == "South") {
+                        elevation = "South"
                         dismissLandscapeMenus()
                     }
                     centeredMenuDivider()
-                    centeredMenuRow(title: "East Elevation", isSelected: elevation == "East Elevation") {
-                        elevation = "East Elevation"
+                    centeredMenuRow(title: "East", isSelected: elevation == "East") {
+                        elevation = "East"
                         dismissLandscapeMenus()
                     }
                     centeredMenuDivider()
-                    centeredMenuRow(title: "West Elevation", isSelected: elevation == "West Elevation") {
-                        elevation = "West Elevation"
+                    centeredMenuRow(title: "West", isSelected: elevation == "West") {
+                        elevation = "West"
                         dismissLandscapeMenus()
                     }
                 }
@@ -3886,7 +4502,7 @@ extension ContentView {
                 if isSelected {
                     Image(systemName: "checkmark")
                         .font(.system(size: 14, weight: .medium))
-                        .foregroundColor(.yellow)
+                        .foregroundColor(.white)
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -4086,6 +4702,7 @@ extension ContentView {
                 fireQuickButtonHaptic()
             },
             onTap: {
+                guard !isArmedIssueDetailNoteReadOnly else { return }
                 draftDetailNote = detailNote
                 showDetailOverlay = true
             }
@@ -4124,31 +4741,156 @@ extension ContentView {
         .frame(width: size, height: size)
     }
 
+    @ViewBuilder
+    private func armedReferenceActionOverlay() -> some View {
+        let items = [
+            SharedActionMenuItem(
+                title: "Retake",
+                isEnabled: true,
+                action: {
+                    showArmedReferenceMenu = false
+                    performArmedReferenceRetake()
+                }
+            ),
+            SharedActionMenuItem(
+                title: "View Reference Image",
+                isEnabled: armedReferenceImageLocalIdentifier(isCaptured: false) != nil,
+                action: {
+                    showArmedReferenceMenu = false
+                    showArmedReferenceImage(isCaptured: false)
+                }
+            ),
+            SharedActionMenuItem(
+                title: "View Captured Image",
+                isEnabled: armedReferenceImageLocalIdentifier(isCaptured: true) != nil,
+                action: {
+                    showArmedReferenceMenu = false
+                    showArmedReferenceImage(isCaptured: true)
+                }
+            )
+        ]
+
+        SharedActionMenuOverlay(
+            rotation: bottomGlyphRotationAngle,
+            items: items,
+            onDismiss: { showArmedReferenceMenu = false }
+        )
+    }
+
+    private func armedReferenceImageLocalIdentifier(isCaptured: Bool) -> String? {
+        if let guidedID = armedGuidedShotID,
+           let guided = guidedShots.first(where: { $0.id == guidedID }) {
+            let raw = isCaptured
+                ? guided.shot?.imageLocalIdentifier
+                : guided.referenceImageLocalIdentifier
+            let trimmed = (raw ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            if isCaptured {
+                guard isShotCapturedInCurrentSession(guided.shot) else { return nil }
+                return trimmed.isEmpty ? nil : trimmed
+            }
+            return trimmed.isEmpty ? nil : trimmed
+        }
+
+        guard let flaggedID = armedUpdateObservationID,
+              let propertyID = appState.selectedPropertyID,
+              let observations = try? localStore.fetchObservations(propertyID: propertyID),
+              let observation = observations.first(where: { $0.id == flaggedID }) else {
+            return nil
+        }
+
+        let sorted = observation.shots.sorted { $0.capturedAt < $1.capturedAt }
+        let raw = isCaptured
+            ? capturedImageLocalIdentifierForCurrentSession(observation)
+            : sorted.first?.imageLocalIdentifier
+        let trimmed = (raw ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    private func armedReferenceDetailLabel() -> String {
+        if let guidedID = armedGuidedShotID,
+           let guided = guidedShots.first(where: { $0.id == guidedID }) {
+            return Self.conciseContextLabel(
+                building: guided.building,
+                elevation: guided.targetElevation,
+                detailType: guided.detailType
+            )
+        }
+        if let flaggedID = armedUpdateObservationID,
+           let propertyID = appState.selectedPropertyID,
+           let observations = try? localStore.fetchObservations(propertyID: propertyID),
+           let observation = observations.first(where: { $0.id == flaggedID }) {
+            return Self.conciseContextLabel(
+                building: observation.building,
+                elevation: observation.targetElevation,
+                detailType: observation.detailType
+            )
+        }
+        return ""
+    }
+
+    private func showArmedReferenceImage(isCaptured: Bool) {
+        guard let localID = armedReferenceImageLocalIdentifier(isCaptured: isCaptured) else { return }
+        armedReferenceViewerState = ArmedReferenceViewerState(
+            title: isCaptured ? "Captured Image" : "Reference Image",
+            detailId: armedReferenceDetailLabel(),
+            localIdentifier: localID
+        )
+    }
+
+    @discardableResult
+    private func showIssueImagePreview(_ observation: Observation, isCaptured: Bool) -> Bool {
+        let localID: String? = {
+            if isCaptured {
+                return capturedImageLocalIdentifierForCurrentSession(observation)
+            }
+            let sorted = observation.shots.sorted { $0.capturedAt < $1.capturedAt }
+            return sorted.first?.imageLocalIdentifier
+        }()
+        let trimmed = (localID ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return false }
+        armedReferenceViewerState = ArmedReferenceViewerState(
+            title: isCaptured ? "Captured Image" : "Reference Image",
+            detailId: Self.conciseContextLabel(
+                building: observation.building,
+                elevation: observation.targetElevation,
+                detailType: observation.detailType
+            ),
+            localIdentifier: trimmed
+        )
+        return true
+    }
+
+    private func performArmedReferenceRetake() {
+        if let guidedID = armedGuidedShotID,
+           let guided = guidedShots.first(where: { $0.id == guidedID }) {
+            armGuidedRetake(guided)
+            return
+        }
+        // Flagged captures are already armed for replacement; no extra mode switch needed.
+    }
+
     private func topLeftPreviewPlaceholders() -> some View {
         VStack(spacing: 2) {
             activeIssuesFlagButton()
-            .disabled(!hasActiveSession)
 
-            placeholderQuickButton(systemName: "safari") {
+            guidedCompassButton {
                 fireQuickButtonHaptic()
                 refreshGuidedShots()
                 showGuidedChecklist = true
             }
-            .disabled(!hasActiveSession)
         }
     }
 
     private func activeIssuesFlagButton() -> some View {
         let hitArea: CGFloat = 44
         let symbolSize: CGFloat = 22
-        let count = reportLibrary.activeIssueCount
+        let count = carryoverIssueBadgeCount
         let hasIssues = count > 0
 
         return Button(action: {
             fireQuickButtonHaptic()
-            guard hasActiveSession else { return }
             refreshActiveIssues()
-            if reportLibrary.activeIssueCount > 0 {
+            if !activeObservations.isEmpty {
                 showActiveIssuesSheet = true
             } else {
                 showNoFlaggedIssuesToast = true
@@ -4160,7 +4902,7 @@ extension ContentView {
             ZStack(alignment: .topTrailing) {
                 Image(systemName: "flag.fill")
                     .font(.system(size: symbolSize, weight: .medium))
-                    .foregroundColor(hasIssues ? .red : .white.opacity(0.75))
+                    .foregroundColor(hasIssues ? .red : .white)
                     .rotationEffect(bottomGlyphRotationAngle)
 
                 if hasIssues {
@@ -4191,6 +4933,35 @@ extension ContentView {
                 .font(.system(size: symbolSize, weight: .medium))
                 .foregroundColor(.white.opacity(0.75))
                 .rotationEffect(bottomGlyphRotationAngle)
+            .frame(width: hitArea, height: hitArea)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .frame(width: hitArea, height: hitArea)
+    }
+
+    private func guidedCompassButton(action: @escaping () -> Void) -> some View {
+        let hitArea: CGFloat = 44
+        let symbolSize: CGFloat = 22
+        let compassColor: Color = shouldShowGuidedCompassBadge ? .blue : .white
+
+        return Button(action: action) {
+            ZStack(alignment: .topTrailing) {
+                Image(systemName: "safari")
+                    .font(.system(size: symbolSize, weight: .medium))
+                    .foregroundStyle(compassColor)
+
+                if shouldShowGuidedCompassBadge {
+                    Text("\(guidedRemainingForCompass)")
+                        .font(.system(size: 11, weight: .bold))
+                        .foregroundColor(.black)
+                        .frame(minWidth: 18, minHeight: 18)
+                        .background(Color.white)
+                        .clipShape(Circle())
+                        .offset(x: 6, y: -6)
+                }
+            }
+            .rotationEffect(bottomGlyphRotationAngle)
             .frame(width: hitArea, height: hitArea)
             .contentShape(Rectangle())
         }
@@ -4584,12 +5355,18 @@ extension ContentView {
                             imageLocalIdentifier: photoRef,
                             note: noteAtCapture.isEmpty ? nil : noteAtCapture
                         )
-                        let didApplyGuidedShot = applyArmedGuidedShotIfNeeded(with: shot)
-                        let didApplyIssueUpdate = applyArmedIssueUpdateIfNeeded(with: shot)
+                        let referenceImagePath = writeGuidedReferenceImage(data: data, guidedShotID: captureShotID)
+                        let didApplyGuidedShot = applyArmedGuidedShotIfNeeded(with: shot, referenceImagePath: referenceImagePath)
+                        let didApplyIssueUpdate = applyArmedIssueCaptureIfNeeded(with: shot)
                         let didQueueResolution = queueResolutionCaptureIfNeeded(with: shot, data: data)
                         if !didApplyGuidedShot && !didApplyIssueUpdate && !didQueueResolution {
-                            createObservationFromCapturedDetailNote(noteAtCapture, shot: shot)
+                            if noteAtCapture.isEmpty {
+                                createGuidedAngleFromCaptureIfNeeded(with: shot, referenceImagePath: referenceImagePath)
+                            } else {
+                                createObservationFromCapturedDetailNote(noteAtCapture, shot: shot)
+                            }
                         }
+                        refreshSessionActionsSummaryIfVisible()
                         successHaptic.notificationOccurred(.success)
                         showSavedToast = true
                         DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
@@ -4616,30 +5393,24 @@ extension ContentView {
             statement: noteText,
             status: .active,
             linkedShotID: shot.id,
+            building: selectedBuilding,
+            targetElevation: elevation,
+            detailType: currentDetailType,
             note: noteText,
             shots: [shot]
         )
 
         do {
             _ = try localStore.createObservation(observation)
-            reportLibrary.incrementActiveIssueCount()
             refreshActiveIssues()
+            detailNote = ""
+            isArmedIssueDetailNoteReadOnly = false
+            if camera.manualHDEnabled {
+                camera.manualHDEnabled = false
+            }
         } catch {
             // Keep capture UX resilient if local observation persistence fails.
         }
-    }
-
-    private func guidedChecklistTemplate() -> [GuidedShot] {
-        [
-            GuidedShot(title: "Front Elevation", building: "B1", targetElevation: "North Elevation"),
-            GuidedShot(title: "Rear Elevation", building: "B1", targetElevation: "South Elevation"),
-            GuidedShot(title: "Left Side Elevation", building: "B1", targetElevation: "West Elevation"),
-            GuidedShot(title: "Right Side Elevation", building: "B1", targetElevation: "East Elevation"),
-            GuidedShot(title: "Main Entry", building: "B1", targetElevation: "North Elevation"),
-            GuidedShot(title: "Service Panel", building: "B1"),
-            GuidedShot(title: "Water Heater", building: "B1"),
-            GuidedShot(title: "Mechanical Equipment", building: "B1")
-        ]
     }
 
     private func refreshGuidedShots() {
@@ -4650,22 +5421,17 @@ extension ContentView {
             guidedReferenceAssetLocalID = nil
             guidedReferenceThumbnail = nil
             showGuidedAlignmentOverlay = false
+            showArmedReferenceMenu = false
             return
         }
 
         do {
-            let existing = try localStore.fetchGuidedShots(propertyID: propertyID)
-            if existing.isEmpty {
-                let seeded = guidedChecklistTemplate()
-                try localStore.saveGuidedShots(seeded, propertyID: propertyID)
-                guidedShots = seeded
-            } else {
-                guidedShots = existing
-            }
+            guidedShots = try localStore.fetchGuidedShots(propertyID: propertyID)
 
             if let armedID = armedGuidedShotID, guidedShots.contains(where: { $0.id == armedID }) == false {
                 armedGuidedShotID = nil
                 armedGuidedRetakeShotID = nil
+                showArmedReferenceMenu = false
             }
         } catch {
             guidedShots = []
@@ -4674,20 +5440,26 @@ extension ContentView {
             guidedReferenceAssetLocalID = nil
             guidedReferenceThumbnail = nil
             showGuidedAlignmentOverlay = false
+            showArmedReferenceMenu = false
         }
     }
 
     private func armGuidedShot(_ guidedShot: GuidedShot) {
-        guard guidedShot.isCompleted == false, guidedShot.skipReason == nil else { return }
+        guard !isShotCapturedInCurrentSession(guidedShot.shot) else { return }
+        resetSelectionForSwitch()
         if let building = guidedShot.building, !building.isEmpty {
-            selectedBuilding = building
+            selectedBuilding = buildingCode(from: building)
         }
         if let targetElevation = guidedShot.targetElevation, !targetElevation.isEmpty {
             elevation = targetElevation
         } else if let inferredElevation = inferElevation(from: guidedShot.title) {
             elevation = inferredElevation
         }
-        loadGuidedReferenceThumbnail(for: guidedShot.referenceImageLocalIdentifier ?? guidedShot.shot?.imageLocalIdentifier)
+        let detail = guidedShot.detailType?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !detail.isEmpty {
+            detailTypesModel.setSelected(detail, for: locationMode)
+        }
+        loadGuidedReferenceThumbnail(referencePath: guidedShot.referenceImagePath, localIdentifier: guidedShot.referenceImageLocalIdentifier)
         showGuidedAlignmentOverlay = false
         armedGuidedRetakeShotID = nil
         armedGuidedShotID = guidedShot.id
@@ -4695,16 +5467,21 @@ extension ContentView {
     }
 
     private func armGuidedRetake(_ guidedShot: GuidedShot) {
-        guard guidedShot.isCompleted, let existingShot = guidedShot.shot else { return }
+        guard isShotCapturedInCurrentSession(guidedShot.shot), let existingShot = guidedShot.shot else { return }
+        resetSelectionForSwitch()
         if let building = guidedShot.building, !building.isEmpty {
-            selectedBuilding = building
+            selectedBuilding = buildingCode(from: building)
         }
         if let targetElevation = guidedShot.targetElevation, !targetElevation.isEmpty {
             elevation = targetElevation
         } else if let inferredElevation = inferElevation(from: guidedShot.title) {
             elevation = inferredElevation
         }
-        loadGuidedReferenceThumbnail(for: guidedShot.referenceImageLocalIdentifier ?? existingShot.imageLocalIdentifier)
+        let detail = guidedShot.detailType?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !detail.isEmpty {
+            detailTypesModel.setSelected(detail, for: locationMode)
+        }
+        loadGuidedReferenceThumbnail(referencePath: guidedShot.referenceImagePath, localIdentifier: guidedShot.referenceImageLocalIdentifier)
         showGuidedAlignmentOverlay = false
         armedGuidedRetakeShotID = existingShot.id
         armedGuidedShotID = guidedShot.id
@@ -4713,7 +5490,7 @@ extension ContentView {
 
     private func markGuidedShotSkipped(_ guidedShot: GuidedShot, reason: SkipReason, otherNote: String?) {
         guard let propertyID = appState.selectedPropertyID else { return }
-        guard guidedShot.isCompleted == false else { return }
+        guard !isShotCapturedInCurrentSession(guidedShot.shot) else { return }
 
         do {
             var allGuidedShots = try localStore.fetchGuidedShots(propertyID: propertyID)
@@ -4721,11 +5498,13 @@ extension ContentView {
 
             allGuidedShots[idx].skipReason = reason
             allGuidedShots[idx].skipReasonNote = reason == .other ? otherNote?.trimmingCharacters(in: .whitespacesAndNewlines) : nil
+            allGuidedShots[idx].skipSessionID = appState.currentSession?.id
             allGuidedShots[idx].isCompleted = false
             allGuidedShots[idx].shot = nil
 
             try localStore.saveGuidedShots(allGuidedShots, propertyID: propertyID)
             guidedShots = allGuidedShots
+            refreshSessionActionsSummaryIfVisible()
 
             if armedGuidedShotID == guidedShot.id {
                 armedGuidedShotID = nil
@@ -4739,7 +5518,23 @@ extension ContentView {
         }
     }
 
-    private func applyArmedGuidedShotIfNeeded(with shot: Shot) -> Bool {
+    private func undoGuidedShotSkip(_ guidedShot: GuidedShot) {
+        guard let propertyID = appState.selectedPropertyID else { return }
+        do {
+            var allGuidedShots = try localStore.fetchGuidedShots(propertyID: propertyID)
+            guard let idx = allGuidedShots.firstIndex(where: { $0.id == guidedShot.id }) else { return }
+            allGuidedShots[idx].skipReason = nil
+            allGuidedShots[idx].skipReasonNote = nil
+            allGuidedShots[idx].skipSessionID = nil
+            try localStore.saveGuidedShots(allGuidedShots, propertyID: propertyID)
+            guidedShots = allGuidedShots
+            refreshSessionActionsSummaryIfVisible()
+        } catch {
+            print("Failed to undo guided skip: \(error)")
+        }
+    }
+
+    private func applyArmedGuidedShotIfNeeded(with shot: Shot, referenceImagePath: String?) -> Bool {
         guard let armedID = armedGuidedShotID else { return false }
         guard let propertyID = appState.selectedPropertyID else {
             armedGuidedShotID = nil
@@ -4757,13 +5552,12 @@ extension ContentView {
 
             let isRetake = armedGuidedRetakeShotID != nil
             if isRetake {
-                guard allGuidedShots[idx].isCompleted,
-                      allGuidedShots[idx].shot?.id == armedGuidedRetakeShotID else {
+                guard allGuidedShots[idx].shot?.id == armedGuidedRetakeShotID else {
                     armedGuidedShotID = nil
                     armedGuidedRetakeShotID = nil
                     return false
                 }
-            } else if allGuidedShots[idx].isCompleted || allGuidedShots[idx].skipReason != nil {
+            } else if isShotCapturedInCurrentSession(allGuidedShots[idx].shot) {
                 armedGuidedShotID = nil
                 armedGuidedRetakeShotID = nil
                 return false
@@ -4773,8 +5567,18 @@ extension ContentView {
             allGuidedShots[idx].isCompleted = true
             allGuidedShots[idx].skipReason = nil
             allGuidedShots[idx].skipReasonNote = nil
+            allGuidedShots[idx].skipSessionID = nil
+            if allGuidedShots[idx].angleIndex == nil || allGuidedShots[idx].angleIndex == 0 {
+                let inferredAngle = max(1, allGuidedShots.filter {
+                    normalizeGuidedPart($0.building) == normalizeGuidedPart(allGuidedShots[idx].building) &&
+                    normalizeGuidedPart($0.targetElevation) == normalizeGuidedPart(allGuidedShots[idx].targetElevation) &&
+                    normalizeGuidedPart($0.detailType) == normalizeGuidedPart(allGuidedShots[idx].detailType)
+                }.count)
+                allGuidedShots[idx].angleIndex = inferredAngle
+            }
             try localStore.saveGuidedShots(allGuidedShots, propertyID: propertyID)
             guidedShots = allGuidedShots
+            refreshSessionActionsSummaryIfVisible()
 
             if isRetake {
                 refreshLinkedIssuePhotos(for: shot, propertyID: propertyID)
@@ -4793,6 +5597,80 @@ extension ContentView {
             guidedReferenceThumbnail = nil
             showGuidedAlignmentOverlay = false
             return false
+        }
+    }
+
+    private func createGuidedAngleFromCaptureIfNeeded(with shot: Shot, referenceImagePath: String?) {
+        guard let propertyID = appState.selectedPropertyID else { return }
+
+        let building = selectedBuilding.trimmingCharacters(in: .whitespacesAndNewlines)
+        let elevationValue = elevation.trimmingCharacters(in: .whitespacesAndNewlines)
+        let detailTypeValue = currentDetailType.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !building.isEmpty, !elevationValue.isEmpty, !detailTypeValue.isEmpty else { return }
+
+        do {
+            var allGuidedShots = try localStore.fetchGuidedShots(propertyID: propertyID)
+
+            let matching = allGuidedShots.filter {
+                normalizeGuidedPart($0.building) == normalizeGuidedPart(building) &&
+                normalizeGuidedPart($0.targetElevation) == normalizeGuidedPart(elevationValue) &&
+                normalizeGuidedPart($0.detailType) == normalizeGuidedPart(detailTypeValue)
+            }
+
+            let nextAngle = (matching.map { max(1, $0.angleIndex ?? 1) }.max() ?? 0) + 1
+            let contextTitle = guidedContextLabel(building: building, elevation: elevationValue, detailType: detailTypeValue)
+
+            let guided = GuidedShot(
+                title: contextTitle,
+                building: building,
+                targetElevation: elevationValue,
+                detailType: detailTypeValue,
+                angleIndex: nextAngle,
+                referenceImageLocalIdentifier: nil,
+                referenceImagePath: nil,
+                shot: shot,
+                isCompleted: true
+            )
+            allGuidedShots.append(guided)
+            try localStore.saveGuidedShots(allGuidedShots, propertyID: propertyID)
+            guidedShots = allGuidedShots
+        } catch {
+            // Keep capture resilient if guided persistence fails.
+        }
+    }
+
+    private func guidedContextLabel(building: String, elevation: String, detailType: String) -> String {
+        Self.conciseContextLabel(
+            building: building,
+            elevation: elevation,
+            detailType: detailType
+        )
+    }
+
+    private func normalizeGuidedPart(_ value: String?) -> String {
+        value?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
+    }
+
+    private func writeGuidedReferenceImage(data: Data, guidedShotID: UUID) -> String? {
+        guard let image = UIImage(data: data) else { return nil }
+        guard let jpeg = image.jpegData(compressionQuality: 0.60) else { return nil }
+
+        let fileManager = FileManager.default
+        guard let appSupport = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else {
+            return nil
+        }
+        let base = appSupport.appendingPathComponent("ScoutCapture", isDirectory: true)
+        let referencesDir = base.appendingPathComponent("guided-references", isDirectory: true)
+        let fileURL = referencesDir.appendingPathComponent("\(guidedShotID.uuidString).jpg")
+
+        do {
+            if !fileManager.fileExists(atPath: referencesDir.path) {
+                try fileManager.createDirectory(at: referencesDir, withIntermediateDirectories: true)
+            }
+            try jpeg.write(to: fileURL, options: .atomic)
+            return fileURL.path
+        } catch {
+            return nil
         }
     }
 
@@ -4830,14 +5708,25 @@ extension ContentView {
 
     private func inferElevation(from title: String) -> String? {
         let lower = title.lowercased()
-        if lower.contains("front") { return "North Elevation" }
-        if lower.contains("rear") || lower.contains("back") { return "South Elevation" }
-        if lower.contains("left") { return "West Elevation" }
-        if lower.contains("right") { return "East Elevation" }
+        if lower.contains(" n ") || lower.hasSuffix(" n") || lower.hasPrefix("n ") { return "North" }
+        if lower.contains(" s ") || lower.hasSuffix(" s") || lower.hasPrefix("s ") { return "South" }
+        if lower.contains(" e ") || lower.hasSuffix(" e") || lower.hasPrefix("e ") { return "East" }
+        if lower.contains(" w ") || lower.hasSuffix(" w") || lower.hasPrefix("w ") { return "West" }
+        if lower.contains("front") { return "North" }
+        if lower.contains("rear") || lower.contains("back") { return "South" }
+        if lower.contains("left") { return "West" }
+        if lower.contains("right") { return "East" }
         return nil
     }
 
-    private func loadGuidedReferenceThumbnail(for localIdentifier: String?) {
+    private func loadGuidedReferenceThumbnail(referencePath: String?, localIdentifier: String?) {
+        let path = referencePath?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !path.isEmpty, let image = UIImage(contentsOfFile: path) {
+            guidedReferenceAssetLocalID = path
+            guidedReferenceThumbnail = image
+            return
+        }
+
         let id = localIdentifier?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         guard !id.isEmpty else {
             guidedReferenceAssetLocalID = nil
@@ -4858,31 +5747,694 @@ extension ContentView {
             }
         }
     }
+    
+    private func ensureCameraSessionPrecondition() {
+        guard hasValidCurrentSession else {
+            guard !didTriggerExitToHubForMissingSession else { return }
+            didTriggerExitToHubForMissingSession = true
+            DispatchQueue.main.async {
+                onExitToHub?()
+            }
+            return
+        }
+        didTriggerExitToHubForMissingSession = false
+    }
 
-    private func applyArmedIssueUpdateIfNeeded(with shot: Shot) -> Bool {
+    private func presentSessionActionsSheet() {
+        guard let propertyID = appState.selectedPropertyID else { return }
+        let observations = (try? localStore.fetchObservations(propertyID: propertyID)) ?? []
+        let guided = (try? localStore.fetchGuidedShots(propertyID: propertyID)) ?? []
+
+        let flaggedRemaining = carryoverFlaggedRemainingCount(observations: observations)
+        let guidedRemaining = guided.filter { !isGuidedShotHandledInCurrentSession($0) }.count
+        let hasBaseline = appState.propertyHasBaseline(propertyID)
+        let currentSessionCaptureCount = currentSessionPhotoCount(propertyID: propertyID)
+
+        sessionActionsSummary = SessionActionsSummary(
+            guidedRemainingCount: guidedRemaining,
+            flaggedRemainingCount: flaggedRemaining,
+            hasBaseline: hasBaseline,
+            currentSessionCaptureCount: currentSessionCaptureCount
+        )
+        showSessionActionsSheet = true
+    }
+
+    private func carryoverFlaggedRemainingCount(observations: [Observation]) -> Int {
+        guard let session = appState.currentSession else { return 0 }
+        let sessionID = session.id
+        return observations.filter { observation in
+            observation.status == .active &&
+            observation.createdAt < session.startedAt &&
+            observation.updatedInSessionID != sessionID
+        }.count
+    }
+
+    private func currentSessionPhotoCount(propertyID: UUID) -> Int {
+        let observations = (try? localStore.fetchObservations(propertyID: propertyID)) ?? []
+        let guided = (try? localStore.fetchGuidedShots(propertyID: propertyID)) ?? []
+
+        var shotIDs = Set<UUID>()
+        for shot in observations.flatMap(\.shots) where isShotCapturedInCurrentSession(shot) {
+            shotIDs.insert(shot.id)
+        }
+        for shot in guided.compactMap(\.shot) where isShotCapturedInCurrentSession(shot) {
+            shotIDs.insert(shot.id)
+        }
+        return shotIDs.count
+    }
+
+    private func isGuidedShotSkippedInCurrentSession(_ guidedShot: GuidedShot) -> Bool {
+        guard let sessionID = appState.currentSession?.id else { return false }
+        return guidedShot.skipReason != nil && guidedShot.skipSessionID == sessionID
+    }
+
+    private func isGuidedShotHandledInCurrentSession(_ guidedShot: GuidedShot) -> Bool {
+        isShotCapturedInCurrentSession(guidedShot.shot) || isGuidedShotSkippedInCurrentSession(guidedShot)
+    }
+
+    private func capturedImageLocalIdentifierForCurrentSession(_ observation: Observation) -> String? {
+        guard let currentSessionID = appState.currentSession?.id else { return nil }
+        let hasCurrentSessionCapture = observation.updatedInSessionID == currentSessionID || observation.resolvedInSessionID == currentSessionID
+        guard hasCurrentSessionCapture else { return nil }
+        guard let linkedID = observation.linkedShotID else { return nil }
+        let localID = observation.shots.first(where: { $0.id == linkedID })?.imageLocalIdentifier?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return localID.isEmpty ? nil : localID
+    }
+
+    private func refreshSessionActionsSummaryIfVisible() {
+        guard showSessionActionsSheet else { return }
+        presentSessionActionsSheet()
+    }
+
+    private func isShotCapturedInCurrentSession(_ shot: Shot?) -> Bool {
+        guard let shot else { return false }
+        guard let session = appState.currentSession else { return false }
+        if shot.capturedAt < session.startedAt {
+            return false
+        }
+        if let endedAt = session.endedAt, shot.capturedAt > endedAt {
+            return false
+        }
+        return true
+    }
+
+    private func startExportNowFlow() {
+        guard !isPreparingSessionExport else { return }
+        if let summary = sessionActionsSummary, !summary.isExportEnabled {
+            return
+        }
+        showSessionExportErrorPopup = false
+        sessionExportErrorMessage = nil
+        isPreparingSessionExport = true
+        sessionExportChecklist = ExportChecklistState()
+        prepareSessionExportReferences()
+        appState.completeCurrentSession(markExported: false)
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            do {
+                let url = try buildSessionExportArchive(progress: { step in
+                    DispatchQueue.main.async {
+                        switch step {
+                        case .originals:
+                            sessionExportChecklist.originalsComplete = true
+                        case .sessionData:
+                            sessionExportChecklist.sessionDataComplete = true
+                        case .stamped:
+                            sessionExportChecklist.stampedComplete = true
+                        case .zipReady:
+                            sessionExportChecklist.zipReady = true
+                        }
+                    }
+                })
+                DispatchQueue.main.async {
+                    isPreparingSessionExport = false
+                    showSessionActionsSheet = false
+                    sessionExportFile = SessionExportFile(url: url)
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    isPreparingSessionExport = false
+                    showSessionActionsSheet = false
+                    sessionExportErrorMessage = error.localizedDescription
+                    showSessionExportErrorPopup = true
+                }
+            }
+        }
+    }
+
+    private func handleSaveDraftAndExit(summary: SessionActionsSummary) {
+        _ = summary
+        resetSelectionForSwitch()
+        camera.updateDetailNoteActive(false)
+        appState.saveDraftCurrentSession()
+        appState.refreshProperties()
+        showSessionActionsSheet = false
+        onExitToHub?()
+    }
+
+    private func handleExportLaterAndExit(summary: SessionActionsSummary) {
+        guard summary.isExportLaterEnabled else { return }
+        appState.completeCurrentSession(markExported: false)
+        appState.refreshProperties()
+        showSessionActionsSheet = false
+        onExitToHub?()
+    }
+
+    private func finalizeBaselineIfNeededAfterSuccessfulExport() {
+        guard let propertyID = appState.selectedPropertyID else { return }
+        guard let sessionID = appState.currentSession?.id else { return }
+        guard !appState.propertyHasBaseline(propertyID) else { return }
+
+        ensureGuidedReferencePaths(propertyID: propertyID)
+        _ = appState.setPropertyBaselineSession(propertyID: propertyID, sessionID: sessionID)
+    }
+
+    private func ensureGuidedReferencePaths(propertyID: UUID) {
+        do {
+            var allGuidedShots = try localStore.fetchGuidedShots(propertyID: propertyID)
+            var didChange = false
+
+            for index in allGuidedShots.indices {
+                let existingPath = allGuidedShots[index].referenceImagePath?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                if !existingPath.isEmpty { continue }
+
+                let localID = (allGuidedShots[index].referenceImageLocalIdentifier ??
+                               allGuidedShots[index].shot?.imageLocalIdentifier)?
+                    .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                guard !localID.isEmpty else { continue }
+                guard let imageData = originalImageData(for: localID) else { continue }
+                guard let path = writeGuidedReferenceImage(data: imageData, guidedShotID: allGuidedShots[index].id) else { continue }
+
+                allGuidedShots[index].referenceImagePath = path
+                if allGuidedShots[index].referenceImageLocalIdentifier == nil {
+                    allGuidedShots[index].referenceImageLocalIdentifier = localID
+                }
+                didChange = true
+            }
+
+            if didChange {
+                try localStore.saveGuidedShots(allGuidedShots, propertyID: propertyID)
+                if appState.selectedPropertyID == propertyID {
+                    guidedShots = allGuidedShots
+                }
+            }
+        } catch {
+            // Keep export flow resilient if reference backfill fails.
+        }
+    }
+
+    private func originalImageData(for localIdentifier: String) -> Data? {
+        let fetch = PHAsset.fetchAssets(withLocalIdentifiers: [localIdentifier], options: nil)
+        guard let asset = fetch.firstObject else { return nil }
+
+        let options = PHImageRequestOptions()
+        options.isSynchronous = true
+        options.deliveryMode = .highQualityFormat
+        options.resizeMode = .none
+        options.isNetworkAccessAllowed = true
+
+        var outData: Data? = nil
+        PHImageManager.default().requestImageDataAndOrientation(for: asset, options: options) { data, _, _, _ in
+            outData = data
+        }
+        return outData
+    }
+
+    private func prepareSessionExportReferences() {
+        _ = reportLibrary.assets.count
+        guard let propertyID = appState.selectedPropertyID else { return }
+        _ = (try? localStore.fetchObservations(propertyID: propertyID)) ?? []
+        _ = (try? localStore.fetchGuidedShots(propertyID: propertyID)) ?? []
+    }
+
+    private enum ExportChecklistStep {
+        case originals
+        case sessionData
+        case stamped
+        case zipReady
+    }
+
+    private func buildSessionExportArchive(progress: ((ExportChecklistStep) -> Void)? = nil) throws -> URL {
+        struct SessionExportAssetEntry: Codable {
+            let localIdentifier: String
+            let creationDate: Date?
+            let pixelWidth: Int
+            let pixelHeight: Int
+            let originalFilename: String
+        }
+
+        struct SessionExportPayload: Codable {
+            let exportedAt: Date
+            let albumTitle: String
+            let albumLocalId: String
+            let property: Property?
+            let session: Session?
+            let activeIssueCount: Int
+            let assets: [SessionExportAssetEntry]
+            let observations: [Observation]
+            let guidedShots: [GuidedShot]
+        }
+
+        let fileManager = FileManager.default
+        let assets = reportLibrary.assets
+        let property = appState.selectedProperty
+        let propertyID = property?.id
+        let observations = propertyID.flatMap { try? localStore.fetchObservations(propertyID: $0) } ?? []
+        let guided = propertyID.flatMap { try? localStore.fetchGuidedShots(propertyID: $0) } ?? []
+
+        let entries = assets.enumerated().map { index, asset in
+            SessionExportAssetEntry(
+                localIdentifier: asset.localIdentifier,
+                creationDate: asset.creationDate,
+                pixelWidth: asset.pixelWidth,
+                pixelHeight: asset.pixelHeight,
+                originalFilename: sessionExportFilename(for: asset, index: index + 1)
+            )
+        }
+
+        let payload = SessionExportPayload(
+            exportedAt: Date(),
+            albumTitle: reportLibrary.albumTitle,
+            albumLocalId: reportLibrary.albumLocalId,
+            property: property,
+            session: appState.currentSession,
+            activeIssueCount: reportLibrary.activeIssueCount,
+            assets: entries,
+            observations: observations,
+            guidedShots: guided
+        )
+
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        encoder.dateEncodingStrategy = .iso8601
+        let sessionData = try encoder.encode(payload)
+
+        var zipEntries: [(path: String, data: Data)] = []
+        zipEntries.append(("Originals/", Data()))
+        zipEntries.append(("Stamped/", Data()))
+
+        var originalEntries: [(String, Data)] = []
+        var stampedEntries: [(String, Data)] = []
+        for (index, asset) in assets.enumerated() {
+            guard let data = requestSessionExportImageData(for: asset) else { continue }
+            let filename = sessionExportFilename(for: asset, index: index + 1)
+            originalEntries.append(("Originals/\(filename)", data))
+            stampedEntries.append(("Stamped/\(filename)", data))
+        }
+        zipEntries.append(contentsOf: originalEntries)
+        progress?(.originals)
+
+        zipEntries.append(("session.json", sessionData))
+        progress?(.sessionData)
+
+        zipEntries.append(contentsOf: stampedEntries)
+        progress?(.stamped)
+
+        let zipData = buildSessionExportZipData(entries: zipEntries)
+        let url = fileManager.temporaryDirectory.appendingPathComponent(sessionExportZipFilename())
+        if fileManager.fileExists(atPath: url.path) {
+            try fileManager.removeItem(at: url)
+        }
+        try zipData.write(to: url, options: .atomic)
+        progress?(.zipReady)
+        return url
+    }
+
+    private func requestSessionExportImageData(for asset: PHAsset) -> Data? {
+        let manager = PHImageManager.default()
+        let options = PHImageRequestOptions()
+        options.isSynchronous = true
+        options.deliveryMode = .highQualityFormat
+        options.resizeMode = .none
+        options.isNetworkAccessAllowed = true
+
+        var output: Data? = nil
+        manager.requestImageDataAndOrientation(for: asset, options: options) { data, _, _, _ in
+            output = data
+        }
+        return output
+    }
+
+    private func sessionExportFilename(for asset: PHAsset, index: Int) -> String {
+        let fallback = "photo-\(index).jpg"
+        guard let resource = PHAssetResource.assetResources(for: asset).first else {
+            return fallback
+        }
+        let original = resource.originalFilename.trimmingCharacters(in: .whitespacesAndNewlines)
+        let base = original.isEmpty ? fallback : Self.normalizedContextFilename(original)
+        let sanitized = base.replacingOccurrences(of: "/", with: "-")
+        return String(format: "%04d-%@", index, sanitized)
+    }
+
+    private func sessionExportZipFilename() -> String {
+        let trimmedAlbum = reportLibrary.albumTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        let safeAlbum = trimmedAlbum.isEmpty
+            ? "ScoutCapture-Export"
+            : trimmedAlbum.replacingOccurrences(of: "/", with: "-")
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyyMMdd-HHmmss"
+        let timestamp = formatter.string(from: Date())
+        return "\(safeAlbum)-\(timestamp).zip"
+    }
+
+    private func buildSessionExportZipData(entries: [(path: String, data: Data)]) -> Data {
+        struct CentralRecord {
+            let pathData: Data
+            let crc32: UInt32
+            let size: UInt32
+            let localHeaderOffset: UInt32
+        }
+
+        var zip = Data()
+        var centralRecords: [CentralRecord] = []
+        centralRecords.reserveCapacity(entries.count)
+
+        for entry in entries {
+            let pathData = Data(entry.path.utf8)
+            let crc = sessionExportCRC32(entry.data)
+            let size = UInt32(entry.data.count)
+            let localHeaderOffset = UInt32(zip.count)
+
+            appendUInt32LEForSessionExport(0x04034B50, to: &zip)
+            appendUInt16LEForSessionExport(20, to: &zip)
+            appendUInt16LEForSessionExport(0, to: &zip)
+            appendUInt16LEForSessionExport(0, to: &zip)
+            appendUInt16LEForSessionExport(0, to: &zip)
+            appendUInt16LEForSessionExport(0, to: &zip)
+            appendUInt32LEForSessionExport(crc, to: &zip)
+            appendUInt32LEForSessionExport(size, to: &zip)
+            appendUInt32LEForSessionExport(size, to: &zip)
+            appendUInt16LEForSessionExport(UInt16(pathData.count), to: &zip)
+            appendUInt16LEForSessionExport(0, to: &zip)
+            zip.append(pathData)
+            zip.append(entry.data)
+
+            centralRecords.append(
+                CentralRecord(
+                    pathData: pathData,
+                    crc32: crc,
+                    size: size,
+                    localHeaderOffset: localHeaderOffset
+                )
+            )
+        }
+
+        let centralDirectoryOffset = UInt32(zip.count)
+
+        for record in centralRecords {
+            appendUInt32LEForSessionExport(0x02014B50, to: &zip)
+            appendUInt16LEForSessionExport(20, to: &zip)
+            appendUInt16LEForSessionExport(20, to: &zip)
+            appendUInt16LEForSessionExport(0, to: &zip)
+            appendUInt16LEForSessionExport(0, to: &zip)
+            appendUInt16LEForSessionExport(0, to: &zip)
+            appendUInt16LEForSessionExport(0, to: &zip)
+            appendUInt32LEForSessionExport(record.crc32, to: &zip)
+            appendUInt32LEForSessionExport(record.size, to: &zip)
+            appendUInt32LEForSessionExport(record.size, to: &zip)
+            appendUInt16LEForSessionExport(UInt16(record.pathData.count), to: &zip)
+            appendUInt16LEForSessionExport(0, to: &zip)
+            appendUInt16LEForSessionExport(0, to: &zip)
+            appendUInt16LEForSessionExport(0, to: &zip)
+            appendUInt16LEForSessionExport(0, to: &zip)
+            appendUInt32LEForSessionExport(0, to: &zip)
+            appendUInt32LEForSessionExport(record.localHeaderOffset, to: &zip)
+            zip.append(record.pathData)
+        }
+
+        let centralDirectorySize = UInt32(zip.count) - centralDirectoryOffset
+        let count = UInt16(centralRecords.count)
+
+        appendUInt32LEForSessionExport(0x06054B50, to: &zip)
+        appendUInt16LEForSessionExport(0, to: &zip)
+        appendUInt16LEForSessionExport(0, to: &zip)
+        appendUInt16LEForSessionExport(count, to: &zip)
+        appendUInt16LEForSessionExport(count, to: &zip)
+        appendUInt32LEForSessionExport(centralDirectorySize, to: &zip)
+        appendUInt32LEForSessionExport(centralDirectoryOffset, to: &zip)
+        appendUInt16LEForSessionExport(0, to: &zip)
+
+        return zip
+    }
+
+    private func sessionExportCRC32(_ data: Data) -> UInt32 {
+        var crc: UInt32 = 0xFFFF_FFFF
+        for byte in data {
+            crc ^= UInt32(byte)
+            for _ in 0..<8 {
+                if (crc & 1) != 0 {
+                    crc = (crc >> 1) ^ 0xEDB8_8320
+                } else {
+                    crc >>= 1
+                }
+            }
+        }
+        return crc ^ 0xFFFF_FFFF
+    }
+
+    private func appendUInt16LEForSessionExport(_ value: UInt16, to data: inout Data) {
+        var little = value.littleEndian
+        withUnsafeBytes(of: &little) { bytes in
+            data.append(contentsOf: bytes)
+        }
+    }
+
+    private func appendUInt32LEForSessionExport(_ value: UInt32, to data: inout Data) {
+        var little = value.littleEndian
+        withUnsafeBytes(of: &little) { bytes in
+            data.append(contentsOf: bytes)
+        }
+    }
+
+    private func applyArmedIssueCaptureIfNeeded(with shot: Shot) -> Bool {
         guard let armedID = armedUpdateObservationID else { return false }
         guard let propertyID = appState.selectedPropertyID else {
-            armedUpdateObservationID = nil
+            cancelArmedIssueCapture()
             return false
         }
 
         do {
             let observations = try localStore.fetchObservations(propertyID: propertyID)
             guard let existing = observations.first(where: { $0.id == armedID }) else {
-                armedUpdateObservationID = nil
+                cancelArmedIssueCapture()
                 return false
+            }
+            flaggedActionTargetObservation = existing
+            pendingFlaggedDecisionShot = shot
+            pendingFlaggedDecisionPhotoRef = shot.imageLocalIdentifier
+            showFlaggedActionPrimaryChoice = true
+            showFlaggedUpdateCommentChoice = false
+            showFlaggedUpdatedObservationInput = false
+            draftUpdatedObservation = ""
+            return true
+        } catch {
+            cancelArmedIssueCapture()
+            return false
+        }
+    }
+
+    private func clearPendingFlaggedDecision() {
+        flaggedActionTargetObservation = nil
+        pendingFlaggedDecisionShot = nil
+        pendingFlaggedDecisionPhotoRef = nil
+        showFlaggedActionPrimaryChoice = false
+        showFlaggedUpdateCommentChoice = false
+        showFlaggedUpdatedObservationInput = false
+        draftUpdatedObservation = ""
+        showArmedReferenceMenu = false
+    }
+
+    private func clearArmedIssueState() {
+        armedUpdateObservationID = nil
+        armedIssueNoteText = ""
+        armedIssueRevisedObservationText = nil
+        guidedReferenceAssetLocalID = nil
+        guidedReferenceThumbnail = nil
+        showGuidedAlignmentOverlay = false
+    }
+
+    private func resetSelectionForSwitch() {
+        flaggedActionToastToken += 1
+        showFlaggedActionToast = false
+        showResolutionModeToast = false
+        showArmedReferenceMenu = false
+        armedReferenceViewerState = nil
+        resetResolutionCapturePreview()
+        resolutionTargetObservation = nil
+        clearPendingFlaggedDecision()
+        clearArmedIssueState()
+        armedGuidedShotID = nil
+        armedGuidedRetakeShotID = nil
+        isArmedIssueDetailNoteReadOnly = false
+        detailNote = ""
+        restoreArmedIssueHDIfNeeded()
+    }
+
+    private func restoreArmedIssueHDIfNeeded() {
+        guard let previous = armedIssuePreviousManualHD else { return }
+        camera.manualHDEnabled = previous
+        armedIssuePreviousManualHD = nil
+    }
+
+    private func cancelArmedIssueCapture() {
+        clearPendingFlaggedDecision()
+        clearArmedIssueState()
+        isArmedIssueDetailNoteReadOnly = false
+        detailNote = ""
+        restoreArmedIssueHDIfNeeded()
+    }
+
+    private func finalizeArmedIssueCaptureAfterDecision() {
+        clearPendingFlaggedDecision()
+        clearArmedIssueState()
+        isArmedIssueDetailNoteReadOnly = false
+        detailNote = ""
+        if let previous = armedIssuePreviousManualHD {
+            camera.manualHDEnabled = previous
+        } else {
+            camera.manualHDEnabled = false
+        }
+        armedIssuePreviousManualHD = nil
+    }
+
+    private func beginFlaggedIssueInteraction(_ observation: Observation) {
+        resetSelectionForSwitch()
+        armIssueUpdate(observation, revisedObservationText: nil)
+    }
+
+    private func selectFlaggedPrimaryResolve() {
+        applyPendingFlaggedResolve()
+    }
+
+    private func selectFlaggedPrimaryUpdate() {
+        showFlaggedActionPrimaryChoice = false
+        showFlaggedUpdateCommentChoice = true
+    }
+
+    private func selectFlaggedUpdateLeaveUnchanged() {
+        applyPendingFlaggedUpdate(revisedObservationText: nil)
+    }
+
+    private func selectFlaggedUpdateRevise() {
+        showFlaggedUpdateCommentChoice = false
+        showFlaggedUpdatedObservationInput = true
+        draftUpdatedObservation = ""
+    }
+
+    private func commitFlaggedUpdatedObservationAndArm() {
+        let revised = draftUpdatedObservation.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !revised.isEmpty else { return }
+
+        if containsMeasurementIndicator(in: revised) {
+            showFlaggedActionToastNow("Reminder: SCOUT records visual observations only.")
+        }
+
+        applyPendingFlaggedUpdate(revisedObservationText: revised)
+    }
+
+    private func applyPendingFlaggedResolve() {
+        guard let propertyID = appState.selectedPropertyID else { return }
+        guard let targetID = flaggedActionTargetObservation?.id else { return }
+        guard let shot = pendingFlaggedDecisionShot else { return }
+
+        do {
+            let observations = try localStore.fetchObservations(propertyID: propertyID)
+            guard let existing = observations.first(where: { $0.id == targetID }) else {
+                finalizeArmedIssueCaptureAfterDecision()
+                return
+            }
+
+            var updated = existing
+            updated.status = .resolved
+            updated.linkedShotID = shot.id
+            updated.shots.append(shot)
+            updated.resolutionPhotoRef = pendingFlaggedDecisionPhotoRef ?? shot.imageLocalIdentifier
+            updated.resolutionStatement = "Condition no longer visibly present at time of documentation."
+            updated.updatedInSessionID = appState.currentSession?.id
+            updated.resolvedInSessionID = appState.currentSession?.id
+
+            _ = try localStore.updateObservation(updated)
+            showFlaggedActionToastNow("Issue resolved")
+            finalizeArmedIssueCaptureAfterDecision()
+            refreshActiveIssues()
+        } catch {
+            finalizeArmedIssueCaptureAfterDecision()
+        }
+    }
+
+    private func applyPendingFlaggedUpdate(revisedObservationText: String?) {
+        guard let propertyID = appState.selectedPropertyID else { return }
+        guard let targetID = flaggedActionTargetObservation?.id else { return }
+        guard let shot = pendingFlaggedDecisionShot else { return }
+
+        do {
+            let observations = try localStore.fetchObservations(propertyID: propertyID)
+            guard let existing = observations.first(where: { $0.id == targetID }) else {
+                finalizeArmedIssueCaptureAfterDecision()
+                return
             }
 
             var updated = existing
             updated.linkedShotID = shot.id
             updated.shots.append(shot)
+            updated.updatedInSessionID = appState.currentSession?.id
+            if updated.building?.isEmpty ?? true {
+                updated.building = selectedBuilding
+            }
+            if updated.targetElevation?.isEmpty ?? true {
+                updated.targetElevation = elevation
+            }
+            if updated.detailType?.isEmpty ?? true {
+                updated.detailType = currentDetailType
+            }
+
+            let revisedText = revisedObservationText?.trimmingCharacters(in: .whitespacesAndNewlines)
+            if let revisedText, !revisedText.isEmpty {
+                updated.updateHistory.append(
+                    ObservationUpdateEntry(
+                        kind: .revisedObservation,
+                        text: revisedText,
+                        shotID: shot.id
+                    )
+                )
+            } else {
+                updated.updateHistory.append(
+                    ObservationUpdateEntry(
+                        kind: .followUpCapture,
+                        text: nil,
+                        shotID: shot.id
+                    )
+                )
+            }
+
             _ = try localStore.updateObservation(updated)
-            armedUpdateObservationID = nil
+            let note = (updated.note ?? updated.statement).trimmingCharacters(in: .whitespacesAndNewlines)
+            if note.isEmpty {
+                showFlaggedActionToastNow("Update captured")
+            } else {
+                let preview = String(note.prefix(36))
+                showFlaggedActionToastNow("Update captured: \(preview)")
+            }
+            finalizeArmedIssueCaptureAfterDecision()
             refreshActiveIssues()
-            return true
         } catch {
-            armedUpdateObservationID = nil
-            return false
+            finalizeArmedIssueCaptureAfterDecision()
+        }
+    }
+
+    private func containsMeasurementIndicator(in text: String) -> Bool {
+        let pattern = #"(?i)\b\d+(?:\.\d+)?\s?(ft|in|mm|cm|m|inch|inches|feet)\b"#
+        return text.range(of: pattern, options: .regularExpression) != nil
+    }
+
+    private func showFlaggedActionToastNow(_ text: String) {
+        flaggedActionToastToken += 1
+        let token = flaggedActionToastToken
+        flaggedActionToastText = text
+        showFlaggedActionToast = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.8) {
+            guard token == flaggedActionToastToken else { return }
+            showFlaggedActionToast = false
         }
     }
 
@@ -4897,31 +6449,77 @@ extension ContentView {
     private func refreshActiveIssues() {
         guard let propertyID = appState.selectedPropertyID else {
             activeObservations = []
+            carryoverIssueBadgeCount = 0
             reportLibrary.setActiveIssueCount(0)
             return
         }
 
         do {
             let observations = try localStore.fetchObservations(propertyID: propertyID)
+            let currentSessionID = appState.currentSession?.id
+            let currentSessionStart = appState.currentSession?.startedAt
+
             let active = observations.filter { $0.status == .active }
-                .sorted { $0.createdAt > $1.createdAt }
-            activeObservations = active
+            let resolvedThisSession = observations.filter { observation in
+                observation.status == .resolved && observation.resolvedInSessionID == currentSessionID
+            }
+
+            activeObservations = (active + resolvedThisSession)
+                .sorted { $0.updatedAt > $1.updatedAt }
+
+            if let currentSessionID, let currentSessionStart {
+                carryoverIssueBadgeCount = observations.filter { observation in
+                    observation.status == .active &&
+                    observation.createdAt < currentSessionStart &&
+                    observation.updatedInSessionID != currentSessionID
+                }.count
+            } else {
+                carryoverIssueBadgeCount = 0
+            }
+
             reportLibrary.setActiveIssueCount(active.count)
         } catch {
             activeObservations = []
+            carryoverIssueBadgeCount = 0
             reportLibrary.setActiveIssueCount(0)
         }
     }
 
-    private func armIssueUpdate(_ observation: Observation) {
+    private func armIssueUpdate(_ observation: Observation, revisedObservationText: String?) {
         showActiveIssuesSheet = false
         resolutionTargetObservation = nil
         resetResolutionCapturePreview()
-        armedUpdateObservationID = observation.id
-        showIssueUpdateArmedToast = true
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.8) {
-            showIssueUpdateArmedToast = false
+        armedIssueRevisedObservationText = revisedObservationText?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if armedIssuePreviousManualHD == nil {
+            armedIssuePreviousManualHD = camera.manualHDEnabled
         }
+        if camera.hdSupported && !camera.manualHDEnabled {
+            camera.manualHDEnabled = true
+            showHDToast("HD Enabled for Detail Capture")
+        }
+        let note = observation.note?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let statement = observation.statement.trimmingCharacters(in: .whitespacesAndNewlines)
+        armedIssueNoteText = !note.isEmpty ? note : statement
+        detailNote = armedIssueNoteText
+        isArmedIssueDetailNoteReadOnly = true
+        let sortedShots = observation.shots.sorted { $0.capturedAt < $1.capturedAt }
+        let referenceLocalID = sortedShots.first?.imageLocalIdentifier
+        loadGuidedReferenceThumbnail(referencePath: nil, localIdentifier: referenceLocalID)
+        showGuidedAlignmentOverlay = false
+        if let building = observation.building?.trimmingCharacters(in: .whitespacesAndNewlines), !building.isEmpty {
+            selectedBuilding = buildingCode(from: building)
+        }
+        if let targetElevation = observation.targetElevation?.trimmingCharacters(in: .whitespacesAndNewlines), !targetElevation.isEmpty {
+            elevation = targetElevation
+        }
+        if let detail = observation.detailType?.trimmingCharacters(in: .whitespacesAndNewlines), !detail.isEmpty {
+            detailTypesModel.setSelected(detail, for: locationMode)
+        }
+        armedUpdateObservationID = observation.id
+    }
+
+    private func armIssueUpdate(_ observation: Observation) {
+        armIssueUpdate(observation, revisedObservationText: nil)
     }
 
     private func enterResolutionMode(_ observation: Observation) {
@@ -4956,10 +6554,13 @@ extension ContentView {
             updated.shots.append(shot)
             updated.resolutionPhotoRef = resolutionCapturedPhotoRef
             updated.resolutionStatement = "Condition no longer visibly present at time of documentation."
+            updated.updatedInSessionID = appState.currentSession?.id
+            updated.resolvedInSessionID = appState.currentSession?.id
             _ = try localStore.updateObservation(updated)
 
             resolutionTargetObservation = nil
             resetResolutionCapturePreview()
+            showFlaggedActionToastNow("Issue resolved")
             refreshActiveIssues()
         } catch {
             // Keep UI responsive if persistence fails.
@@ -4970,6 +6571,389 @@ extension ContentView {
     
     
     
+    private struct SessionActionsSheet: View {
+        @Environment(\.colorScheme) private var colorScheme
+        let summary: SessionActionsSummary
+        let isPreparingExport: Bool
+        let onResume: () -> Void
+        let onSaveDraftAndExit: () -> Void
+        let onExportNow: () -> Void
+        let onExportLater: () -> Void
+
+        private var neutralFill: Color {
+            colorScheme == .light ? Color.white.opacity(0.90) : Color.black.opacity(0.65)
+        }
+
+        private var neutralStroke: Color {
+            colorScheme == .light ? Color.black.opacity(0.14) : Color.white.opacity(0.28)
+        }
+
+        private var neutralLabel: Color {
+            colorScheme == .light ? Color.black.opacity(0.88) : .white
+        }
+
+        var body: some View {
+            GeometryReader { geo in
+                let constrainedHeight = geo.size.height < 620
+
+                ZStack {
+                    Color.black.opacity(0.52)
+                        .ignoresSafeArea()
+                        .onTapGesture { }
+
+                    VStack {
+                        Spacer(minLength: 0)
+
+                        VStack(spacing: 14) {
+                            Text("Session Actions")
+                                .font(.system(size: 24, weight: .bold))
+                                .foregroundColor(.white)
+
+                            VStack(spacing: 8) {
+                                summaryRow(title: "Guided Remaining", value: summary.guidedRemainingCount)
+                                summaryRow(title: "Flagged Remaining", value: summary.flaggedRemainingCount)
+                            }
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 10)
+                            .background(Color.white.opacity(0.08))
+                            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                    .stroke(Color.white.opacity(0.16), lineWidth: 1)
+                            )
+
+                            if constrainedHeight {
+                                ScrollView(.vertical, showsIndicators: true) {
+                                    actionButtonsStack
+                                }
+                                .frame(maxHeight: geo.size.height * 0.38)
+                            } else {
+                                actionButtonsStack
+                            }
+                        }
+                        .padding(18)
+                        .frame(width: min(max(310, geo.size.width * 0.84), 470))
+                        .background(Color.black.opacity(0.82))
+                        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                                .stroke(Color.white.opacity(0.20), lineWidth: 1)
+                        )
+
+                        Spacer(minLength: 0)
+                    }
+                    .padding(.horizontal, 16)
+                }
+            }
+        }
+
+        @ViewBuilder
+        private func summaryRow(title: String, value: Int) -> some View {
+            HStack {
+                Text(title)
+                    .font(.system(size: 15, weight: .medium))
+                    .foregroundColor(.white.opacity(0.92))
+                Spacer(minLength: 0)
+                Text("\(value)")
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundColor(.white)
+            }
+        }
+
+        @ViewBuilder
+        private var actionButtonsStack: some View {
+            VStack(spacing: 10) {
+                actionButton(
+                    title: "Resume",
+                    role: .primary,
+                    isEnabled: !isPreparingExport,
+                    action: onResume
+                )
+                actionButton(
+                    title: isPreparingExport ? "Preparing Export..." : "Export",
+                    role: .secondary,
+                    isEnabled: !isPreparingExport && summary.isExportEnabled,
+                    action: onExportNow
+                )
+                actionButton(
+                    title: "Export Later",
+                    role: .tertiary,
+                    isEnabled: !isPreparingExport && summary.isExportLaterEnabled,
+                    action: onExportLater
+                )
+                actionButton(
+                    title: "Save Draft and Exit",
+                    role: .secondary,
+                    isEnabled: !isPreparingExport,
+                    action: onSaveDraftAndExit
+                )
+
+                if !summary.isExportEnabled || !summary.isExportLaterEnabled {
+                    Text(disabledHintText)
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundColor(.white.opacity(0.72))
+                        .multilineTextAlignment(.center)
+                        .padding(.top, 2)
+                }
+            }
+        }
+
+        private var disabledHintText: String {
+            if !summary.hasBaseline && summary.currentSessionCaptureCount == 0 {
+                return "Export is disabled until at least one photo is captured. Export Later remains disabled until baseline exists."
+            }
+            if !summary.hasBaseline {
+                return "Export Later is disabled until baseline exists."
+            }
+            return "Export and Export Later are disabled until all guided and flagged items are complete."
+        }
+
+        private enum ActionRole {
+            case primary
+            case secondary
+            case tertiary
+        }
+
+        @ViewBuilder
+        private func actionButton(
+            title: String,
+            role: ActionRole,
+            isEnabled: Bool,
+            action: @escaping () -> Void
+        ) -> some View {
+            let fill: Color = {
+                switch role {
+                case .primary:
+                    return .blue
+                case .secondary:
+                    return neutralFill
+                case .tertiary:
+                    return Color.white.opacity(0.06)
+                }
+            }()
+            let stroke: Color = {
+                switch role {
+                case .primary:
+                    return .blue.opacity(0.85)
+                case .secondary:
+                    return neutralStroke
+                case .tertiary:
+                    return Color.white.opacity(0.20)
+                }
+            }()
+            let label: Color = {
+                switch role {
+                case .primary:
+                    return .white
+                case .secondary:
+                    return neutralLabel
+                case .tertiary:
+                    return .white.opacity(0.94)
+                }
+            }()
+
+            Button(action: action) {
+                Text(title)
+                    .font(.system(size: 17, weight: .medium))
+                    .foregroundColor(isEnabled ? label : label.opacity(0.45))
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 46)
+                    .background(fill)
+                    .clipShape(Capsule())
+                    .overlay(
+                        Capsule()
+                            .stroke(stroke, lineWidth: 1)
+                    )
+            }
+            .buttonStyle(.plain)
+            .disabled(!isEnabled)
+        }
+    }
+
+    private struct ExportProgressOverlay: View {
+        let title: String
+
+        var body: some View {
+            GeometryReader { geo in
+                ZStack {
+                    Color.black.opacity(0.55)
+                        .ignoresSafeArea()
+                        .onTapGesture { }
+
+                    VStack(spacing: 14) {
+                        Text(title)
+                            .font(.system(size: 22, weight: .semibold))
+                            .foregroundColor(.white)
+
+                        ProgressView()
+                            .progressViewStyle(.circular)
+                            .tint(.white)
+                            .scaleEffect(1.15)
+                    }
+                    .padding(20)
+                    .frame(width: min(max(290, geo.size.width * 0.80), 430))
+                    .background(Color.black.opacity(0.82))
+                    .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 16, style: .continuous)
+                            .stroke(Color.white.opacity(0.20), lineWidth: 1)
+                    )
+                }
+            }
+        }
+    }
+
+    private struct SessionExportChecklistOverlay: View {
+        let checklist: ExportChecklistState
+
+        var body: some View {
+            GeometryReader { geo in
+                ZStack {
+                    Color.black.opacity(0.55)
+                        .ignoresSafeArea()
+                        .onTapGesture { }
+
+                    VStack(spacing: 14) {
+                        Text("Preparing Export")
+                            .font(.system(size: 22, weight: .semibold))
+                            .foregroundColor(.white)
+
+                        VStack(spacing: 10) {
+                            checklistRow(title: "Originals", isComplete: checklist.originalsComplete)
+                            checklistRow(title: "Session Data", isComplete: checklist.sessionDataComplete)
+                            checklistRow(title: "Stamped", isComplete: checklist.stampedComplete)
+                            checklistRow(title: "ZIP Ready", isComplete: checklist.zipReady)
+                        }
+                    }
+                    .padding(20)
+                    .frame(width: min(max(290, geo.size.width * 0.80), 430))
+                    .background(Color.black.opacity(0.82))
+                    .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 16, style: .continuous)
+                            .stroke(Color.white.opacity(0.20), lineWidth: 1)
+                    )
+                }
+            }
+        }
+
+        @ViewBuilder
+        private func checklistRow(title: String, isComplete: Bool) -> some View {
+            HStack(spacing: 10) {
+                Image(systemName: isComplete ? "checkmark.circle.fill" : "circle")
+                    .font(.system(size: 17, weight: .semibold))
+                    .foregroundColor(isComplete ? .white : .white.opacity(0.55))
+                Text(title)
+                    .font(.system(size: 16, weight: .medium))
+                    .foregroundColor(.white.opacity(0.94))
+                Spacer(minLength: 0)
+            }
+        }
+    }
+
+    private struct ExportErrorOverlay: View {
+        let title: String
+        let message: String
+        let retryTitle: String
+        let cancelTitle: String
+        let onRetry: () -> Void
+        let onCancel: () -> Void
+
+        var body: some View {
+            GeometryReader { geo in
+                ZStack {
+                    Color.black.opacity(0.55)
+                        .ignoresSafeArea()
+                        .onTapGesture { }
+
+                    VStack(spacing: 14) {
+                        Text(title)
+                            .font(.system(size: 22, weight: .semibold))
+                            .foregroundColor(.white)
+
+                        Text(message)
+                            .font(.system(size: 14, weight: .medium))
+                            .foregroundColor(.white.opacity(0.90))
+                            .multilineTextAlignment(.center)
+
+                        HStack(spacing: 10) {
+                            Button(action: onRetry) {
+                                Text(retryTitle)
+                                    .font(.system(size: 17, weight: .medium))
+                                    .foregroundColor(.white)
+                                    .frame(maxWidth: .infinity)
+                                    .frame(height: 44)
+                                    .background(Color.blue)
+                                    .clipShape(Capsule())
+                                    .overlay(
+                                        Capsule()
+                                            .stroke(Color.blue.opacity(0.85), lineWidth: 1)
+                                    )
+                            }
+                            .buttonStyle(.plain)
+
+                            Button(action: onCancel) {
+                                Text(cancelTitle)
+                                    .font(.system(size: 17, weight: .medium))
+                                    .foregroundColor(.white.opacity(0.95))
+                                    .frame(maxWidth: .infinity)
+                                    .frame(height: 44)
+                                    .background(Color.white.opacity(0.08))
+                                    .clipShape(Capsule())
+                                    .overlay(
+                                        Capsule()
+                                            .stroke(Color.white.opacity(0.25), lineWidth: 1)
+                                    )
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                    .padding(20)
+                    .frame(width: min(max(300, geo.size.width * 0.84), 460))
+                    .background(Color.black.opacity(0.82))
+                    .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 16, style: .continuous)
+                            .stroke(Color.white.opacity(0.20), lineWidth: 1)
+                    )
+                }
+            }
+        }
+    }
+
+    private struct SessionDocumentExportPicker: UIViewControllerRepresentable {
+        let fileURL: URL
+        let onComplete: (Bool) -> Void
+
+        func makeUIViewController(context: Context) -> UIDocumentPickerViewController {
+            let picker = UIDocumentPickerViewController(forExporting: [fileURL], asCopy: true)
+            picker.delegate = context.coordinator
+            return picker
+        }
+
+        func updateUIViewController(_ uiViewController: UIDocumentPickerViewController, context: Context) { }
+
+        func makeCoordinator() -> Coordinator {
+            Coordinator(onComplete: onComplete)
+        }
+
+        final class Coordinator: NSObject, UIDocumentPickerDelegate {
+            let onComplete: (Bool) -> Void
+
+            init(onComplete: @escaping (Bool) -> Void) {
+                self.onComplete = onComplete
+            }
+
+            func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
+                onComplete(!urls.isEmpty)
+            }
+
+            func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) {
+                onComplete(false)
+            }
+        }
+    }
+
     // MARK: - Report Library Fullscreen (Grid)
     
     private struct ReportLibraryFullscreen: View {
@@ -4977,6 +6961,7 @@ extension ContentView {
         @ObservedObject var reportLibrary: ReportLibraryModel
         @ObservedObject var cache: AssetImageCache
         @EnvironmentObject private var appState: AppState
+        private let localStore = LocalStore()
         
         @Environment(\.dismiss) private var dismiss
         @State private var orientationResetToken: Int = 0
@@ -5032,6 +7017,42 @@ extension ContentView {
             let id = UUID()
             let startIndex: Int
         }
+        
+        private struct ExportFile: Identifiable {
+            let id = UUID()
+            let url: URL
+        }
+        
+        private struct ExportAssetEntry: Codable {
+            let localIdentifier: String
+            let creationDate: Date?
+            let pixelWidth: Int
+            let pixelHeight: Int
+            let originalFilename: String
+        }
+        
+        private struct ExportSessionPayload: Codable {
+            let exportedAt: Date
+            let albumTitle: String
+            let albumLocalId: String
+            let property: Property?
+            let session: Session?
+            let activeIssueCount: Int
+            let assets: [ExportAssetEntry]
+            let observations: [Observation]
+            let guidedShots: [GuidedShot]
+        }
+
+        private enum ExportError: LocalizedError {
+            case zipCreationFailed
+
+            var errorDescription: String? {
+                switch self {
+                case .zipCreationFailed:
+                    return "Unable to create export ZIP."
+                }
+            }
+        }
 
         private enum DeleteScope {
             case albumOnly
@@ -5059,6 +7080,11 @@ extension ContentView {
         @State private var isPreparingShare: Bool = false
         @State private var showShareSheet: Bool = false
         @State private var shareItems: [Any] = []
+        @State private var isPreparingExport: Bool = false
+        @State private var exportFile: ExportFile? = nil
+        @State private var exportErrorMessage: String? = nil
+        @State private var showExportError: Bool = false
+        @State private var showHeaderOverflowMenu: Bool = false
         @State private var thumbnailFrames: [String: CGRect] = [:]
         @State private var isDragSelecting: Bool = false
         @State private var dragSelectionMode: DragSelectionMode? = nil
@@ -5160,6 +7186,11 @@ extension ContentView {
                         // Header overlay (Photos style): stays visible, content can scroll behind it.
                         headerOverlay()
                             .zIndex(50)
+                        
+                        if showHeaderOverflowMenu {
+                            headerOverflowActionOverlay()
+                                .zIndex(80)
+                        }
                     }
                     .overlay(alignment: .bottom) {
                         bottomSelectionActions(bottomInset: isLandscape ? 30 : 32)
@@ -5182,6 +7213,7 @@ extension ContentView {
                     handleSelectionDragEnded()
                     selectedAssetIds.removeAll()
                     isSelectionMode = false
+                    showHeaderOverflowMenu = false
                 }
             }
             .fullScreenCover(item: $viewerState) { state in
@@ -5213,6 +7245,38 @@ extension ContentView {
             }) {
                 ActivityShareSheet(activityItems: shareItems)
             }
+            .sheet(item: $exportFile) { file in
+                DocumentExportPicker(
+                    fileURL: file.url,
+                    onComplete: { didExport in
+                        if didExport {
+                            appState.markCurrentSessionExported()
+                        }
+                    }
+                )
+            }
+            .overlay {
+                if isPreparingExport {
+                    ExportProgressOverlay(title: "Preparing Export")
+                        .zIndex(920)
+                }
+                if showExportError {
+                    ExportErrorOverlay(
+                        title: "Export Failed",
+                        message: exportErrorMessage ?? "Unable to export report ZIP.",
+                        retryTitle: "Retry",
+                        cancelTitle: "Cancel",
+                        onRetry: {
+                            showExportError = false
+                            beginExport()
+                        },
+                        onCancel: {
+                            showExportError = false
+                        }
+                    )
+                    .zIndex(930)
+                }
+            }
         }
         
         @ViewBuilder
@@ -5233,7 +7297,25 @@ extension ContentView {
                     .ignoresSafeArea(edges: .top)
                     .allowsHitTesting(false)
                     
-                        HStack {
+                    HStack(spacing: 10) {
+                        HStack(spacing: 8) {
+                            Button {
+                                dismiss()
+                            } label: {
+                                Image(systemName: "chevron.left")
+                                    .font(.system(size: 18, weight: .semibold))
+                                    .foregroundColor(.white)
+                                    .frame(width: 36, height: 36)
+                                    .background(Color.black.opacity(0.55))
+                                    .clipShape(Circle())
+                                    .overlay(
+                                        Circle()
+                                            .stroke(Color.white.opacity(0.28), lineWidth: 1)
+                                    )
+                                    .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                            
                             VStack(alignment: .leading, spacing: 2) {
                             Text(headerPropertyName)
                                 .font(.system(size: 38, weight: .medium))
@@ -5244,54 +7326,21 @@ extension ContentView {
                                 .truncationMode(.tail)
                                 .layoutPriority(1)
                         }
+                        }
                         
                         Spacer(minLength: 0)
 
-                        if isSelectionMode {
-                            Button {
-                                withAnimation(.easeOut(duration: 0.18)) {
+                        Button {
+                            withAnimation(.easeOut(duration: 0.18)) {
+                                if isSelectionMode {
                                     isSelectionMode = false
                                     selectedAssetIds.removeAll()
-                                }
-                            } label: {
-                                Text("Cancel")
-                                    .font(.system(size: 17, weight: .medium))
-                                    .foregroundColor(.white)
-                                    .frame(minHeight: 42)
-                                    .padding(.horizontal, 14)
-                                    .background(Color.black.opacity(0.55))
-                                    .clipShape(Capsule())
-                                    .overlay(
-                                        Capsule()
-                                            .stroke(Color.white.opacity(0.28), lineWidth: 1)
-                                    )
-                            }
-                            .buttonStyle(.plain)
-                        } else {
-                            Button {
-                                withAnimation(.easeOut(duration: 0.18)) {
+                                } else {
                                     isSelectionMode = true
                                 }
-                            } label: {
-                                Text("Select")
-                                    .font(.system(size: 17, weight: .medium))
-                                    .foregroundColor(.white)
-                                    .frame(minHeight: 42)
-                                    .padding(.horizontal, 14)
-                                    .background(Color.black.opacity(0.55))
-                                    .clipShape(Capsule())
-                                    .overlay(
-                                        Capsule()
-                                            .stroke(Color.white.opacity(0.28), lineWidth: 1)
-                                    )
                             }
-                            .buttonStyle(.plain)
-                        }
-                        
-                        Button {
-                            dismiss()
                         } label: {
-                            Text("Done")
+                            Text(isSelectionMode ? "Cancel" : "Select")
                                 .font(.system(size: 17, weight: .medium))
                                 .foregroundColor(.white)
                                 .frame(minHeight: 42)
@@ -5300,6 +7349,22 @@ extension ContentView {
                                 .clipShape(Capsule())
                                 .overlay(
                                     Capsule()
+                                        .stroke(Color.white.opacity(0.28), lineWidth: 1)
+                                )
+                        }
+                        .buttonStyle(.plain)
+
+                        Button {
+                            showHeaderOverflowMenu = true
+                        } label: {
+                            Image(systemName: "ellipsis")
+                                .font(.system(size: 18, weight: .semibold))
+                                .foregroundColor(.white)
+                                .frame(width: 42, height: 42)
+                                .background(Color.black.opacity(0.55))
+                                .clipShape(Circle())
+                                .overlay(
+                                    Circle()
                                         .stroke(Color.white.opacity(0.28), lineWidth: 1)
                                 )
                         }
@@ -5315,6 +7380,81 @@ extension ContentView {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
             .allowsHitTesting(true)
+        }
+
+        @ViewBuilder
+        private func headerOverflowActionOverlay() -> some View {
+            ZStack {
+                Color.black.opacity(0.55)
+                    .ignoresSafeArea()
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        showHeaderOverflowMenu = false
+                    }
+
+                VStack(spacing: 0) {
+                    HStack {
+                        Text("Actions")
+                            .font(.system(size: 14, weight: .medium))
+                            .foregroundColor(.white.opacity(0.92))
+                        Spacer(minLength: 0)
+                        Button("Done") {
+                            showHeaderOverflowMenu = false
+                        }
+                        .font(.system(size: 14, weight: .medium))
+                        .foregroundColor(.white.opacity(0.92))
+                        .buttonStyle(.plain)
+                    }
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 12)
+                    .background(Color.black.opacity(0.20))
+
+                    VStack(spacing: 0) {
+                        actionMenuRow(title: "Export") {
+                            beginExport()
+                            showHeaderOverflowMenu = false
+                        }
+                        .opacity(isPreparingExport ? 0.45 : 1.0)
+                        .allowsHitTesting(!isPreparingExport)
+                    }
+                    .padding(.vertical, 6)
+                }
+                .background(.ultraThinMaterial)
+                .clipShape(RoundedRectangle(cornerRadius: 16))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 16)
+                        .stroke(Color.white.opacity(0.18), lineWidth: 1)
+                )
+                .shadow(color: Color.black.opacity(0.45), radius: 16, x: 0, y: 10)
+                .padding(.horizontal, 20)
+                .frame(maxWidth: 360)
+            }
+            .zIndex(999)
+        }
+
+        private func actionMenuRow(title: String, action: @escaping () -> Void) -> some View {
+            Button(action: action) {
+                HStack(spacing: 10) {
+                    Text(title)
+                        .font(.system(size: 16, weight: .medium))
+                        .foregroundColor(.white.opacity(0.95))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.78)
+                    Spacer(minLength: 0)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
+                .padding(.horizontal, 14)
+                .padding(.vertical, 12)
+            }
+            .buttonStyle(.plain)
+        }
+
+        private func actionMenuDivider() -> some View {
+            Rectangle()
+                .fill(Color.white.opacity(0.12))
+                .frame(height: 1)
+                .padding(.horizontal, 12)
         }
 
         @ViewBuilder
@@ -5597,6 +7737,244 @@ extension ContentView {
             }
         }
         
+        private func beginExport() {
+            guard !isPreparingExport else { return }
+            showExportError = false
+            exportErrorMessage = nil
+            isPreparingExport = true
+            
+            let assets = reportLibrary.assets
+            DispatchQueue.global(qos: .userInitiated).async {
+                do {
+                    let zipURL = try buildExportArchive(for: assets)
+                    DispatchQueue.main.async {
+                        isPreparingExport = false
+                        exportFile = ExportFile(url: zipURL)
+                    }
+                } catch {
+                    DispatchQueue.main.async {
+                        isPreparingExport = false
+                        exportErrorMessage = error.localizedDescription
+                        showExportError = true
+                    }
+                }
+            }
+        }
+        
+        private func buildExportArchive(for assets: [PHAsset]) throws -> URL {
+            let fileManager = FileManager.default
+            let payload = makeExportSessionPayload(from: assets)
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+            encoder.dateEncodingStrategy = .iso8601
+            let sessionData = try encoder.encode(payload)
+            
+            var entries: [(path: String, data: Data)] = []
+            entries.append(("Originals/", Data()))
+            entries.append(("Stamped/", Data()))
+            entries.append(("session.json", sessionData))
+            
+            for (index, asset) in assets.enumerated() {
+                guard let imageData = requestOriginalImageData(for: asset) else { continue }
+                let filename = makeArchiveFilename(for: asset, index: index + 1)
+                entries.append(("Originals/\(filename)", imageData))
+                entries.append(("Stamped/\(filename)", imageData))
+            }
+            
+            let zipData = buildZipData(entries: entries)
+            let zipURL = fileManager.temporaryDirectory.appendingPathComponent(exportZipFilename())
+            if fileManager.fileExists(atPath: zipURL.path) {
+                try fileManager.removeItem(at: zipURL)
+            }
+            try zipData.write(to: zipURL, options: .atomic)
+            
+            if !fileManager.fileExists(atPath: zipURL.path) {
+                throw ExportError.zipCreationFailed
+            }
+            return zipURL
+        }
+        
+        private func makeExportSessionPayload(from assets: [PHAsset]) -> ExportSessionPayload {
+            let entries = assets.enumerated().map { index, asset in
+                ExportAssetEntry(
+                    localIdentifier: asset.localIdentifier,
+                    creationDate: asset.creationDate,
+                    pixelWidth: asset.pixelWidth,
+                    pixelHeight: asset.pixelHeight,
+                    originalFilename: makeArchiveFilename(for: asset, index: index + 1)
+                )
+            }
+            
+            let property = appState.selectedProperty
+            let observations: [Observation]
+            let guidedShots: [GuidedShot]
+            if let propertyID = property?.id {
+                observations = (try? localStore.fetchObservations(propertyID: propertyID)) ?? []
+                guidedShots = (try? localStore.fetchGuidedShots(propertyID: propertyID)) ?? []
+            } else {
+                observations = []
+                guidedShots = []
+            }
+            
+            return ExportSessionPayload(
+                exportedAt: Date(),
+                albumTitle: reportLibrary.albumTitle,
+                albumLocalId: reportLibrary.albumLocalId,
+                property: property,
+                session: appState.currentSession,
+                activeIssueCount: reportLibrary.activeIssueCount,
+                assets: entries,
+                observations: observations,
+                guidedShots: guidedShots
+            )
+        }
+        
+        private func requestOriginalImageData(for asset: PHAsset) -> Data? {
+            let manager = PHImageManager.default()
+            let options = PHImageRequestOptions()
+            options.isSynchronous = true
+            options.deliveryMode = .highQualityFormat
+            options.resizeMode = .none
+            options.isNetworkAccessAllowed = true
+            
+            var outData: Data? = nil
+            manager.requestImageDataAndOrientation(for: asset, options: options) { data, _, _, _ in
+                outData = data
+            }
+            return outData
+        }
+        
+        private func makeArchiveFilename(for asset: PHAsset, index: Int) -> String {
+            let fallback = "photo-\(index).jpg"
+            guard let resource = PHAssetResource.assetResources(for: asset).first else {
+                return fallback
+            }
+            let original = resource.originalFilename.trimmingCharacters(in: .whitespacesAndNewlines)
+            let base = original.isEmpty ? fallback : ContentView.normalizedContextFilename(original)
+            let sanitized = base.replacingOccurrences(of: "/", with: "-")
+            return String(format: "%04d-%@", index, sanitized)
+        }
+        
+        private func exportZipFilename() -> String {
+            let trimmedAlbum = reportLibrary.albumTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+            let safeAlbum = trimmedAlbum.isEmpty
+                ? "ScoutCapture-Export"
+                : trimmedAlbum.replacingOccurrences(of: "/", with: "-")
+            let formatter = DateFormatter()
+            formatter.dateFormat = "yyyyMMdd-HHmmss"
+            let timestamp = formatter.string(from: Date())
+            return "\(safeAlbum)-\(timestamp).zip"
+        }
+        
+        private func buildZipData(entries: [(path: String, data: Data)]) -> Data {
+            struct CentralRecord {
+                let pathData: Data
+                let crc32: UInt32
+                let size: UInt32
+                let localHeaderOffset: UInt32
+            }
+            
+            var zip = Data()
+            var centralRecords: [CentralRecord] = []
+            centralRecords.reserveCapacity(entries.count)
+            
+            for entry in entries {
+                let pathData = Data(entry.path.utf8)
+                let crc = crc32(entry.data)
+                let size = UInt32(entry.data.count)
+                let localHeaderOffset = UInt32(zip.count)
+                
+                appendUInt32LE(0x04034B50, to: &zip)
+                appendUInt16LE(20, to: &zip)
+                appendUInt16LE(0, to: &zip)
+                appendUInt16LE(0, to: &zip)
+                appendUInt16LE(0, to: &zip)
+                appendUInt16LE(0, to: &zip)
+                appendUInt32LE(crc, to: &zip)
+                appendUInt32LE(size, to: &zip)
+                appendUInt32LE(size, to: &zip)
+                appendUInt16LE(UInt16(pathData.count), to: &zip)
+                appendUInt16LE(0, to: &zip)
+                zip.append(pathData)
+                zip.append(entry.data)
+                
+                centralRecords.append(
+                    CentralRecord(
+                        pathData: pathData,
+                        crc32: crc,
+                        size: size,
+                        localHeaderOffset: localHeaderOffset
+                    )
+                )
+            }
+            
+            let centralDirectoryOffset = UInt32(zip.count)
+            
+            for record in centralRecords {
+                appendUInt32LE(0x02014B50, to: &zip)
+                appendUInt16LE(20, to: &zip)
+                appendUInt16LE(20, to: &zip)
+                appendUInt16LE(0, to: &zip)
+                appendUInt16LE(0, to: &zip)
+                appendUInt16LE(0, to: &zip)
+                appendUInt16LE(0, to: &zip)
+                appendUInt32LE(record.crc32, to: &zip)
+                appendUInt32LE(record.size, to: &zip)
+                appendUInt32LE(record.size, to: &zip)
+                appendUInt16LE(UInt16(record.pathData.count), to: &zip)
+                appendUInt16LE(0, to: &zip)
+                appendUInt16LE(0, to: &zip)
+                appendUInt16LE(0, to: &zip)
+                appendUInt16LE(0, to: &zip)
+                appendUInt32LE(0, to: &zip)
+                appendUInt32LE(record.localHeaderOffset, to: &zip)
+                zip.append(record.pathData)
+            }
+            
+            let centralDirectorySize = UInt32(zip.count) - centralDirectoryOffset
+            let count = UInt16(centralRecords.count)
+            
+            appendUInt32LE(0x06054B50, to: &zip)
+            appendUInt16LE(0, to: &zip)
+            appendUInt16LE(0, to: &zip)
+            appendUInt16LE(count, to: &zip)
+            appendUInt16LE(count, to: &zip)
+            appendUInt32LE(centralDirectorySize, to: &zip)
+            appendUInt32LE(centralDirectoryOffset, to: &zip)
+            appendUInt16LE(0, to: &zip)
+            
+            return zip
+        }
+        
+        private func crc32(_ data: Data) -> UInt32 {
+            var crc: UInt32 = 0xFFFF_FFFF
+            for byte in data {
+                crc ^= UInt32(byte)
+                for _ in 0..<8 {
+                    if (crc & 1) == 1 {
+                        crc = (crc >> 1) ^ 0xEDB8_8320
+                    } else {
+                        crc >>= 1
+                    }
+                }
+            }
+            return crc ^ 0xFFFF_FFFF
+        }
+        
+        private func appendUInt16LE(_ value: UInt16, to data: inout Data) {
+            var v = value.littleEndian
+            withUnsafeBytes(of: &v) { rawBuffer in
+                data.append(contentsOf: rawBuffer)
+            }
+        }
+        
+        private func appendUInt32LE(_ value: UInt32, to data: inout Data) {
+            var v = value.littleEndian
+            withUnsafeBytes(of: &v) { rawBuffer in
+                data.append(contentsOf: rawBuffer)
+            }
+        }
+        
         private struct LibraryThumb: View {
             
             let asset: PHAsset
@@ -5668,10 +8046,41 @@ extension ContentView {
 
             func updateUIViewController(_ uiViewController: UIActivityViewController, context: Context) { }
         }
+        
+        private struct DocumentExportPicker: UIViewControllerRepresentable {
+            let fileURL: URL
+            let onComplete: (Bool) -> Void
+
+            func makeUIViewController(context: Context) -> UIDocumentPickerViewController {
+                let picker = UIDocumentPickerViewController(forExporting: [fileURL], asCopy: true)
+                picker.delegate = context.coordinator
+                return picker
+            }
+
+            func updateUIViewController(_ uiViewController: UIDocumentPickerViewController, context: Context) { }
+            
+            func makeCoordinator() -> Coordinator {
+                Coordinator(onComplete: onComplete)
+            }
+            
+            final class Coordinator: NSObject, UIDocumentPickerDelegate {
+                let onComplete: (Bool) -> Void
+                
+                init(onComplete: @escaping (Bool) -> Void) {
+                    self.onComplete = onComplete
+                }
+                
+                func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
+                    onComplete(!urls.isEmpty)
+                }
+                
+                func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) {
+                    onComplete(false)
+                }
+            }
+        }
     }
-    
-    
-    
+
     // MARK: - Detail Note Modal (rotates + landscape keyboard)
     
     
@@ -5839,6 +8248,88 @@ extension ContentView {
         }
     }
 
+    private struct SharedActionMenuItem: Identifiable {
+        let id = UUID()
+        let title: String
+        var isEnabled: Bool = true
+        let action: () -> Void
+    }
+
+    private struct SharedActionMenuOverlay: View {
+        let rotation: Angle
+        let items: [SharedActionMenuItem]
+        let onDismiss: () -> Void
+
+        var body: some View {
+            ZStack {
+                Color.black.opacity(0.55)
+                    .ignoresSafeArea()
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        onDismiss()
+                    }
+
+                VStack(spacing: 0) {
+                    HStack {
+                        Text("Actions")
+                            .font(.system(size: 14, weight: .medium))
+                            .foregroundColor(.white.opacity(0.92))
+                        Spacer(minLength: 0)
+                        Button("Done") {
+                            onDismiss()
+                        }
+                        .font(.system(size: 14, weight: .medium))
+                        .foregroundColor(.white.opacity(0.92))
+                        .buttonStyle(.plain)
+                    }
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 12)
+                    .background(Color.black.opacity(0.20))
+
+                    VStack(spacing: 0) {
+                        ForEach(Array(items.enumerated()), id: \.element.id) { index, item in
+                            Button(action: item.action) {
+                                HStack(spacing: 10) {
+                                    Text(item.title)
+                                        .font(.system(size: 16, weight: .medium))
+                                        .foregroundColor(.white.opacity(0.95))
+                                        .lineLimit(1)
+                                        .minimumScaleFactor(0.78)
+                                    Spacer(minLength: 0)
+                                }
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .contentShape(Rectangle())
+                                .padding(.horizontal, 14)
+                                .padding(.vertical, 12)
+                            }
+                            .buttonStyle(.plain)
+                            .disabled(!item.isEnabled)
+                            .opacity(item.isEnabled ? 1.0 : 0.45)
+
+                            if index != items.count - 1 {
+                                Rectangle()
+                                    .fill(Color.white.opacity(0.12))
+                                    .frame(height: 1)
+                                    .padding(.horizontal, 12)
+                            }
+                        }
+                    }
+                    .padding(.vertical, 6)
+                }
+                .background(.ultraThinMaterial)
+                .clipShape(RoundedRectangle(cornerRadius: 16))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 16)
+                        .stroke(Color.white.opacity(0.18), lineWidth: 1)
+                )
+                .shadow(color: Color.black.opacity(0.45), radius: 16, x: 0, y: 10)
+                .padding(.horizontal, 20)
+                .frame(maxWidth: 360)
+                .rotationEffect(rotation)
+            }
+        }
+    }
+
     private struct ManageDetailTypesView: View {
         
         let mode: ContentView.LocationMode
@@ -5998,6 +8489,9 @@ extension ContentView {
 
     private struct GuidedChecklistOverlay: View {
         let guidedShots: [GuidedShot]
+        let currentSessionID: UUID?
+        let currentSessionStartedAt: Date?
+        let currentSessionEndedAt: Date?
         @ObservedObject var cache: AssetImageCache
         @Environment(\.colorScheme) private var colorScheme
         private var theme: SheetControlTheme { .forScheme(colorScheme) }
@@ -6005,6 +8499,7 @@ extension ContentView {
         let onRefresh: () -> Void
         let onSelectPending: (GuidedShot) -> Void
         let onSkip: (GuidedShot, SkipReason, String?) -> Void
+        let onUndoSkip: (GuidedShot) -> Void
         let onRetake: (GuidedShot) -> Void
 
         @State private var skipTarget: GuidedShot? = nil
@@ -6016,6 +8511,8 @@ extension ContentView {
         @State private var guidedViewerState: GuidedViewerState? = nil
         @State private var overflowTargetShot: GuidedShot? = nil
         @State private var overflowTargetStatus: GuidedChecklistRow.RowStatus = .pending
+        @State private var inlineToastText: String? = nil
+        @State private var inlineToastToken: Int = 0
         @State private var lastValidOrientation: UIDeviceOrientation = .portrait
 
         private struct GuidedViewerState: Identifiable {
@@ -6050,47 +8547,55 @@ extension ContentView {
                 let contentH = isLandscape ? w : h
 
                 NavigationStack {
-                    List(guidedShots) { item in
-                        GuidedChecklistRow(
-                            guidedShot: item,
-                            cache: cache,
-                            onTapPending: {
-                                onSelectPending(item)
-                            },
-                            onTapSkip: {
-                                skipTarget = item
-                                showSkipReasonDialog = true
-                            },
-                            onTapRetake: {
-                                retakeTarget = item
-                                showRetakeConfirmation = true
-                            },
-                            onTapViewReferenceImage: {
-                            showImagePreview(
-                                localIdentifier: item.referenceImageLocalIdentifier,
-                                title: "Reference Image",
-                                detailId: item.title
+                    ZStack {
+                        Color(uiColor: .secondarySystemGroupedBackground)
+                            .ignoresSafeArea()
+
+                        List(guidedShots) { item in
+                            GuidedChecklistRow(
+                                guidedShot: item,
+                                currentSessionID: currentSessionID,
+                                isCapturedInCurrentSession: isCapturedInCurrentSession(item),
+                                cache: cache,
+                                onTapPending: {
+                                    onSelectPending(item)
+                                },
+                                onTapSkip: {
+                                    skipTarget = item
+                                    showSkipReasonDialog = true
+                                },
+                                onTapRetake: {
+                                    retakeTarget = item
+                                    showRetakeConfirmation = true
+                                },
+                                onTapUndoSkip: {
+                                    onUndoSkip(item)
+                                },
+                                onTapViewReferenceImage: {
+                                    showGuidedReferencePreview(for: item)
+                                },
+                                onTapViewCapturedImage: {
+                                    showGuidedCapturedPreview(for: item)
+                                },
+                                onTapPendingOverflow: {
+                                    overflowTargetShot = item
+                                    overflowTargetStatus = .pending
+                                },
+                                onTapCapturedOverflow: {
+                                    overflowTargetShot = item
+                                    overflowTargetStatus = .captured
+                                },
+                                onTapSkippedOverflow: {
+                                    overflowTargetShot = item
+                                    overflowTargetStatus = .skipped
+                                }
                             )
-                        },
-                        onTapViewCapturedImage: {
-                            showImagePreview(
-                                localIdentifier: item.shot?.imageLocalIdentifier,
-                                title: "Captured Image",
-                                detailId: item.title
-                            )
-                        },
-                            onTapPendingOverflow: {
-                                overflowTargetShot = item
-                                overflowTargetStatus = .pending
-                            },
-                            onTapCapturedOverflow: {
-                                overflowTargetShot = item
-                                overflowTargetStatus = .captured
-                            }
-                        )
+                        }
+                        .listStyle(.insetGrouped)
+                        .scrollIndicators(.hidden)
+                        .scrollContentBackground(.hidden)
+                        .background(Color.clear)
                     }
-                    .listStyle(.insetGrouped)
-                    .scrollIndicators(.hidden)
                     .toolbar(.hidden, for: .navigationBar)
                     .safeAreaInset(edge: .top, spacing: 0) {
                         HStack(spacing: 10) {
@@ -6220,6 +8725,23 @@ extension ContentView {
                             guidedOverflowActionOverlay(for: target, status: overflowTargetStatus)
                         }
                     }
+                    .overlay(alignment: .top) {
+                        if let inlineToastText {
+                            Text(inlineToastText)
+                                .font(.system(size: 13, weight: .medium))
+                                .foregroundColor(.white)
+                                .padding(.horizontal, 14)
+                                .padding(.vertical, 9)
+                                .background(Color.black.opacity(0.72))
+                                .clipShape(Capsule())
+                                .overlay(
+                                    Capsule()
+                                        .stroke(Color.white.opacity(0.15), lineWidth: 1)
+                                )
+                                .padding(.top, 64)
+                                .transition(.opacity)
+                        }
+                    }
                 }
                 .frame(width: contentW, height: contentH, alignment: .center)
                 .rotationEffect(.degrees(rotationDegrees))
@@ -6260,6 +8782,63 @@ extension ContentView {
             )
         }
 
+        private func showGuidedReferencePreview(for guidedShot: GuidedShot) {
+            let localIdentifier = guidedShot.referenceImageLocalIdentifier?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            if localIdentifier.isEmpty {
+                showInlineToast("No reference available")
+                return
+            }
+            showImagePreview(
+                localIdentifier: localIdentifier,
+                title: "Reference Image",
+                detailId: guidedDisplayLabel(for: guidedShot)
+            )
+        }
+
+        private func showGuidedCapturedPreview(for guidedShot: GuidedShot) {
+            guard isCapturedInCurrentSession(guidedShot) else {
+                showInlineToast("No captured image yet.")
+                return
+            }
+            showImagePreview(
+                localIdentifier: guidedShot.shot?.imageLocalIdentifier,
+                title: "Captured Image",
+                detailId: guidedDisplayLabel(for: guidedShot)
+            )
+        }
+
+        private func showInlineToast(_ text: String) {
+            inlineToastText = text
+            inlineToastToken += 1
+            let token = inlineToastToken
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
+                guard token == inlineToastToken else { return }
+                inlineToastText = nil
+            }
+        }
+
+        private func guidedDisplayLabel(for guidedShot: GuidedShot) -> String {
+            let concise = ContentView.conciseContextLabel(
+                building: guidedShot.building,
+                elevation: guidedShot.targetElevation,
+                detailType: guidedShot.detailType
+            )
+            if !concise.isEmpty { return concise }
+            return guidedShot.title.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+
+        private func isCapturedInCurrentSession(_ guidedShot: GuidedShot) -> Bool {
+            guard let shot = guidedShot.shot else { return false }
+            guard let startedAt = currentSessionStartedAt else { return false }
+            if shot.capturedAt < startedAt {
+                return false
+            }
+            if let endedAt = currentSessionEndedAt, shot.capturedAt > endedAt {
+                return false
+            }
+            return true
+        }
+
         @ViewBuilder
         private func guidedOverflowActionOverlay(for guidedShot: GuidedShot, status: GuidedChecklistRow.RowStatus) -> some View {
             ZStack {
@@ -6294,6 +8873,23 @@ extension ContentView {
                                 skipTarget = guidedShot
                                 showSkipReasonDialog = true
                             }
+                        } else if status == .skipped {
+                            actionMenuRow(title: "Undo Skip") {
+                                overflowTargetShot = nil
+                                onUndoSkip(guidedShot)
+                            }
+                            actionMenuDivider()
+                            let hasReference = (guidedShot.referenceImageLocalIdentifier?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false)
+                            actionMenuRow(title: "View Reference Image") {
+                                overflowTargetShot = nil
+                                if hasReference {
+                                    showGuidedReferencePreview(for: guidedShot)
+                                } else {
+                                    showInlineToast("No reference available")
+                                }
+                            }
+                            .opacity(hasReference ? 1.0 : 0.45)
+                            .allowsHitTesting(hasReference)
                         } else if status == .captured {
                             actionMenuRow(title: "Retake") {
                                 overflowTargetShot = nil
@@ -6302,29 +8898,31 @@ extension ContentView {
                             }
                             actionMenuDivider()
 
+                            let hasReference = (guidedShot.referenceImageLocalIdentifier?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false)
                             actionMenuRow(title: "View Reference Image") {
                                 overflowTargetShot = nil
-                                showImagePreview(
-                                    localIdentifier: guidedShot.referenceImageLocalIdentifier,
-                                    title: "Reference Image",
-                                    detailId: guidedShot.title
-                                )
+                                if hasReference {
+                                    showGuidedReferencePreview(for: guidedShot)
+                                } else {
+                                    showInlineToast("No reference available")
+                                }
                             }
-                            .opacity(((guidedShot.referenceImageLocalIdentifier ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty) ? 0.45 : 1.0)
-                            .allowsHitTesting((guidedShot.referenceImageLocalIdentifier ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false)
+                            .opacity(hasReference ? 1.0 : 0.45)
+                            .allowsHitTesting(hasReference)
 
                             actionMenuDivider()
 
+                            let hasCaptured = isCapturedInCurrentSession(guidedShot)
                             actionMenuRow(title: "View Captured Image") {
                                 overflowTargetShot = nil
-                                showImagePreview(
-                                    localIdentifier: guidedShot.shot?.imageLocalIdentifier,
-                                    title: "Captured Image",
-                                    detailId: guidedShot.title
-                                )
+                                if hasCaptured {
+                                    showGuidedCapturedPreview(for: guidedShot)
+                                } else {
+                                    showInlineToast("No captured image yet.")
+                                }
                             }
-                            .opacity(((guidedShot.shot?.imageLocalIdentifier ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty) ? 0.45 : 1.0)
-                            .allowsHitTesting((guidedShot.shot?.imageLocalIdentifier ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false)
+                            .opacity(hasCaptured ? 1.0 : 0.45)
+                            .allowsHitTesting(hasCaptured)
                         }
                     }
                     .padding(.vertical, 6)
@@ -6395,22 +8993,31 @@ extension ContentView {
         }
 
         let guidedShot: GuidedShot
+        let currentSessionID: UUID?
+        let isCapturedInCurrentSession: Bool
         @ObservedObject var cache: AssetImageCache
         let onTapPending: () -> Void
         let onTapSkip: () -> Void
         let onTapRetake: () -> Void
+        let onTapUndoSkip: () -> Void
         let onTapViewReferenceImage: () -> Void
         let onTapViewCapturedImage: () -> Void
         let onTapPendingOverflow: () -> Void
         let onTapCapturedOverflow: () -> Void
+        let onTapSkippedOverflow: () -> Void
 
         @State private var thumbnail: UIImage? = nil
         @State private var loadedID: String = ""
 
         private var status: RowStatus {
-            if guidedShot.skipReason != nil { return .skipped }
-            if guidedShot.isCompleted, guidedShot.shot != nil { return .captured }
+            if isSkippedInCurrentSession { return .skipped }
+            if isCapturedInCurrentSession { return .captured }
             return .pending
+        }
+
+        private var isSkippedInCurrentSession: Bool {
+            guard let sessionID = currentSessionID else { return false }
+            return guidedShot.skipReason != nil && guidedShot.skipSessionID == sessionID
         }
 
         private var statusLabel: String {
@@ -6430,34 +9037,25 @@ extension ContentView {
             }
         }
 
-        private var isPending: Bool {
-            status == .pending
+        private var fullContextLabel: String {
+            let composed = ContentView.conciseContextLabel(
+                building: guidedShot.building,
+                elevation: guidedShot.targetElevation,
+                detailType: guidedShot.detailType
+            )
+            if !composed.isEmpty { return composed }
+            let fallback = guidedShot.title.trimmingCharacters(in: .whitespacesAndNewlines)
+            return fallback.isEmpty ? "Guided Shot" : fallback
         }
 
-        private var isCaptured: Bool {
-            status == .captured
+        private var angleLabel: String {
+            "Angle \(max(1, guidedShot.angleIndex ?? 1))"
         }
 
         var body: some View {
-            HStack(spacing: 12) {
-                thumbnailView
-                textView
-                Spacer(minLength: 0)
-                trailingActions
-            }
-                .padding(.horizontal, 12)
-                .padding(.vertical, 10)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(Color.black.opacity(0.55))
-                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 14, style: .continuous)
-                        .stroke(Color.white.opacity(0.12), lineWidth: 1)
-                )
-                .opacity(status == .skipped ? 0.58 : 1.0)
-                .contentShape(Rectangle())
+            rowContent
             .onTapGesture {
-                guard isPending else { return }
+                guard status != .captured else { return }
                 onTapPending()
             }
             .listRowInsets(EdgeInsets(top: 6, leading: 12, bottom: 6, trailing: 12))
@@ -6471,6 +9069,28 @@ extension ContentView {
             .onChange(of: guidedShot.referenceImageLocalIdentifier ?? "") { _, _ in
                 loadThumbnailIfNeeded()
             }
+            .onChange(of: guidedShot.referenceImagePath ?? "") { _, _ in
+                loadThumbnailIfNeeded()
+            }
+        }
+
+        private var rowContent: some View {
+            HStack(spacing: 12) {
+                thumbnailView
+                textView
+                Spacer(minLength: 0)
+                trailingActions
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Color.black.opacity(0.55))
+            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .stroke(Color.white.opacity(0.12), lineWidth: 1)
+            )
+            .contentShape(Rectangle())
         }
 
         private var thumbnailView: some View {
@@ -6495,7 +9115,7 @@ extension ContentView {
                     .stroke(Color.white.opacity(0.12), lineWidth: 1)
             )
             .overlay(alignment: .topTrailing) {
-                if isCaptured {
+                if status == .captured {
                     Image(systemName: "checkmark.circle.fill")
                         .font(.system(size: 16, weight: .semibold))
                         .foregroundColor(.white)
@@ -6507,20 +9127,36 @@ extension ContentView {
 
         private var textView: some View {
             VStack(alignment: .leading, spacing: 4) {
-                Text(guidedShot.title)
+                Text(fullContextLabel)
                     .font(.system(size: 15, weight: .medium))
                     .foregroundColor(.primary)
                     .lineLimit(1)
 
+                Text(angleLabel)
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundColor(.white.opacity(0.86))
+
                 Text(statusLabel)
                     .font(.system(size: 12, weight: .medium))
                     .foregroundColor(statusColor)
+
+                if status == .skipped {
+                    Button {
+                        onTapUndoSkip()
+                    } label: {
+                        Text("Undo Skip")
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundColor(.blue)
+                    }
+                    .buttonStyle(.plain)
+                }
             }
         }
 
         @ViewBuilder
         private var trailingActions: some View {
-            if isPending {
+            switch status {
+            case .pending:
                 Button {
                     onTapPendingOverflow()
                 } label: {
@@ -6530,7 +9166,17 @@ extension ContentView {
                         .frame(width: 26, height: 26)
                 }
                 .buttonStyle(.plain)
-            } else if isCaptured {
+            case .skipped:
+                Button {
+                    onTapSkippedOverflow()
+                } label: {
+                    Image(systemName: "ellipsis.circle")
+                        .font(.system(size: 18, weight: .semibold))
+                        .foregroundColor(.white.opacity(0.82))
+                        .frame(width: 26, height: 26)
+                }
+                .buttonStyle(.plain)
+            case .captured:
                 Button {
                     onTapCapturedOverflow()
                 } label: {
@@ -6544,27 +9190,64 @@ extension ContentView {
         }
 
         private func loadThumbnailIfNeeded() {
-            let preferredID = guidedShot.referenceImageLocalIdentifier ?? guidedShot.shot?.imageLocalIdentifier
-            guard let localID = preferredID, !localID.isEmpty else {
-                thumbnail = nil
-                loadedID = ""
-                return
-            }
-            guard localID != loadedID || thumbnail == nil else { return }
-            loadedID = localID
+            let capturedID = isCapturedInCurrentSession
+                ? (guidedShot.shot?.imageLocalIdentifier?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "")
+                : ""
+            let referencePath = guidedShot.referenceImagePath?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let referenceID = guidedShot.referenceImageLocalIdentifier?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
 
-            let fetch = PHAsset.fetchAssets(withLocalIdentifiers: [localID], options: nil)
-            guard let asset = fetch.firstObject else {
-                thumbnail = nil
-                return
-            }
+            // Checklist progress thumbnail priority:
+            // current-session captured -> reference -> placeholder
+            if !capturedID.isEmpty {
+                let sourceID = "captured:\(capturedID)"
+                guard sourceID != loadedID || thumbnail == nil else { return }
+                loadedID = sourceID
 
-            let px = max(120, 56 * UIScreen.currentScale * 2.0)
-            cache.requestThumbnail(for: asset, pixelSize: px) { image in
-                DispatchQueue.main.async {
-                    self.thumbnail = image
+                let fetch = PHAsset.fetchAssets(withLocalIdentifiers: [capturedID], options: nil)
+                guard let asset = fetch.firstObject else {
+                    thumbnail = nil
+                    return
                 }
+
+                let px = max(120, 56 * UIScreen.currentScale * 2.0)
+                cache.requestThumbnail(for: asset, pixelSize: px) { image in
+                    DispatchQueue.main.async {
+                        self.thumbnail = image
+                    }
+                }
+                return
             }
+
+            if !referencePath.isEmpty {
+                let sourceID = "referencePath:\(referencePath)"
+                guard sourceID != loadedID || thumbnail == nil else { return }
+                loadedID = sourceID
+                thumbnail = UIImage(contentsOfFile: referencePath)
+                if thumbnail != nil { return }
+            }
+
+            if !referenceID.isEmpty {
+                let sourceID = "referenceID:\(referenceID)"
+                guard sourceID != loadedID || thumbnail == nil else { return }
+                loadedID = sourceID
+
+                let fetch = PHAsset.fetchAssets(withLocalIdentifiers: [referenceID], options: nil)
+                guard let asset = fetch.firstObject else {
+                    thumbnail = nil
+                    return
+                }
+
+                let px = max(120, 56 * UIScreen.currentScale * 2.0)
+                cache.requestThumbnail(for: asset, pixelSize: px) { image in
+                    DispatchQueue.main.async {
+                        self.thumbnail = image
+                    }
+                }
+                return
+            }
+
+            loadedID = ""
+            thumbnail = nil
         }
 
         private func skipReasonTitle(for reason: SkipReason) -> String {
@@ -6584,11 +9267,28 @@ extension ContentView {
 
     private struct ActiveIssuesSheet: View {
         @Environment(\.dismiss) private var dismiss
+        @Environment(\.colorScheme) private var colorScheme
         let observations: [Observation]
+        let currentSessionID: UUID?
+        let cache: AssetImageCache
         let onRefresh: () -> Void
-        let onUpdate: (Observation) -> Void
-        let onResolve: (Observation) -> Void
+        let onSelectIssue: (Observation) -> Void
+        let onRetakeIssue: (Observation) -> Void
         @State private var lastValidOrientation: UIDeviceOrientation = .portrait
+        @State private var overflowTargetObservation: Observation? = nil
+        @State private var flaggedViewerState: FlaggedViewerState? = nil
+        @State private var inlineToastText: String? = nil
+        @State private var inlineToastToken: Int = 0
+
+        private var theme: SheetControlTheme { .forScheme(colorScheme) }
+
+        private struct FlaggedViewerState: Identifiable {
+            let id = UUID()
+            let title: String
+            let detailId: String
+            let asset: PHAsset
+            let viewerToken: Int
+        }
 
         private var isLandscape: Bool {
             lastValidOrientation == .landscapeLeft || lastValidOrientation == .landscapeRight
@@ -6626,42 +9326,135 @@ extension ContentView {
                             .frame(maxWidth: .infinity, maxHeight: .infinity)
                         } else {
                             List(observations) { observation in
-                                VStack(alignment: .leading, spacing: 10) {
-                                    Text(observation.statement.isEmpty ? "Untitled issue" : observation.statement)
-                                        .font(.system(size: 16, weight: .medium))
-                                        .foregroundColor(.primary)
-
-                                    HStack(spacing: 10) {
-                                        Button("Update") {
-                                            onUpdate(observation)
-                                        }
-                                        .buttonStyle(.bordered)
-
-                                        Button("Resolve") {
-                                            onResolve(observation)
-                                        }
-                                        .buttonStyle(.borderedProminent)
-                                        .tint(.green)
+                                FlaggedIssueRow(
+                                    observation: observation,
+                                    currentSessionID: currentSessionID,
+                                    cache: cache,
+                                    onTapOverflow: {
+                                        overflowTargetObservation = observation
                                     }
+                                )
+                                .contentShape(Rectangle())
+                                .onTapGesture {
+                                    guard observation.status == .active else { return }
+                                    onSelectIssue(observation)
+                                    dismiss()
                                 }
-                                .padding(.vertical, 4)
                             }
                             .listStyle(.insetGrouped)
                             .scrollIndicators(.hidden)
+                            .scrollContentBackground(.hidden)
+                            .background(Color.clear)
                         }
                     }
-                    .navigationTitle("Active Issues")
-                    .navigationBarTitleDisplayMode(.inline)
-                    .toolbar {
-                        ToolbarItem(placement: .topBarLeading) {
+                    .background(
+                        Color(uiColor: .secondarySystemGroupedBackground)
+                            .ignoresSafeArea()
+                    )
+                    .toolbar(.hidden, for: .navigationBar)
+                    .safeAreaInset(edge: .top, spacing: 0) {
+                        HStack(spacing: 10) {
                             Button(action: onRefresh) {
                                 Image(systemName: "arrow.clockwise")
+                                    .font(.system(size: 19, weight: .medium))
+                                    .foregroundColor(theme.label)
+                                    .frame(width: 44, height: 42)
+                                    .background(theme.fill)
+                                    .clipShape(Capsule())
+                                    .overlay(
+                                        Capsule()
+                                            .stroke(theme.stroke, lineWidth: 1)
+                                    )
                             }
+                            .buttonStyle(.plain)
+
+                            Spacer(minLength: 0)
+
+                            Text("Active Issues")
+                                .font(.system(size: 18, weight: .medium))
+                                .foregroundColor(theme.label)
+                                .minimumScaleFactor(0.75)
+                                .lineLimit(1)
+
+                            Spacer(minLength: 0)
+
+                            Button(action: { dismiss() }) {
+                                Text("Done")
+                                    .font(.system(size: 18, weight: .medium))
+                                    .foregroundColor(theme.label)
+                                    .frame(width: 72, height: 42)
+                                    .background(theme.fill)
+                                    .clipShape(Capsule())
+                                    .overlay(
+                                        Capsule()
+                                            .stroke(theme.stroke, lineWidth: 1)
+                                    )
+                            }
+                            .buttonStyle(.plain)
                         }
-                        ToolbarItem(placement: .topBarTrailing) {
-                            Button("Done") {
-                                dismiss()
-                            }
+                        .padding(.horizontal, 14)
+                        .padding(.top, 14)
+                        .padding(.bottom, 4)
+                    }
+                    .overlay {
+                        if let target = overflowTargetObservation {
+                            let hasReference = referenceImageLocalID(for: target) != nil
+                            let hasCaptured = capturedImageLocalID(for: target) != nil
+                            let canRetake = target.status == .active
+                            SharedActionMenuOverlay(
+                                rotation: .degrees(0),
+                                items: [
+                                    SharedActionMenuItem(
+                                        title: "Retake",
+                                        isEnabled: canRetake,
+                                        action: {
+                                            overflowTargetObservation = nil
+                                            onRetakeIssue(target)
+                                            dismiss()
+                                        }
+                                    ),
+                                    SharedActionMenuItem(
+                                        title: "View Reference Image",
+                                        isEnabled: hasReference,
+                                        action: {
+                                            overflowTargetObservation = nil
+                                            showIssueImagePreview(target, isCaptured: false)
+                                        }
+                                    ),
+                                    SharedActionMenuItem(
+                                        title: "View Captured Image",
+                                        isEnabled: hasCaptured,
+                                        action: {
+                                            overflowTargetObservation = nil
+                                            if hasCaptured {
+                                                showIssueImagePreview(target, isCaptured: true)
+                                            } else {
+                                                showInlineToast("No captured image yet.")
+                                            }
+                                        }
+                                    )
+                                ],
+                                onDismiss: {
+                                    overflowTargetObservation = nil
+                                }
+                            )
+                        }
+                    }
+                    .overlay(alignment: .top) {
+                        if let inlineToastText {
+                            Text(inlineToastText)
+                                .font(.system(size: 13, weight: .medium))
+                                .foregroundColor(.white)
+                                .padding(.horizontal, 14)
+                                .padding(.vertical, 9)
+                                .background(Color.black.opacity(0.72))
+                                .clipShape(Capsule())
+                                .overlay(
+                                    Capsule()
+                                        .stroke(Color.white.opacity(0.15), lineWidth: 1)
+                                )
+                                .padding(.top, 64)
+                                .transition(.opacity)
                         }
                     }
                 }
@@ -6678,6 +9471,275 @@ extension ContentView {
                 }
                 .onDisappear {
                     UIDevice.current.endGeneratingDeviceOrientationNotifications()
+                }
+            }
+            .fullScreenCover(item: $flaggedViewerState) { state in
+                ReportPhotoViewer(
+                    title: state.title,
+                    assets: [state.asset],
+                    startIndex: 0,
+                    detailIdOverride: state.detailId,
+                    cache: cache,
+                    viewerToken: state.viewerToken
+                )
+            }
+        }
+
+        private func referenceImageLocalID(for observation: Observation) -> String? {
+            let sorted = observation.shots.sorted { $0.capturedAt < $1.capturedAt }
+            let id = sorted.first?.imageLocalIdentifier?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            return id.isEmpty ? nil : id
+        }
+
+        private func capturedImageLocalID(for observation: Observation) -> String? {
+            guard let currentSessionID else { return nil }
+            let hasCurrentSessionCapture = observation.updatedInSessionID == currentSessionID || observation.resolvedInSessionID == currentSessionID
+            guard hasCurrentSessionCapture else { return nil }
+            let id = observation.linkedShotID
+                .flatMap { linkedID in
+                    observation.shots.first(where: { $0.id == linkedID })?.imageLocalIdentifier
+                }?
+                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            return id.isEmpty ? nil : id
+        }
+
+        private func showIssueImagePreview(_ observation: Observation, isCaptured: Bool) {
+            let localID = (isCaptured ? capturedImageLocalID(for: observation) : referenceImageLocalID(for: observation)) ?? ""
+            let trimmed = localID.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else {
+                showInlineToast(isCaptured ? "No captured image yet." : "No reference available")
+                return
+            }
+
+            let fetch = PHAsset.fetchAssets(withLocalIdentifiers: [trimmed], options: nil)
+            guard let asset = fetch.firstObject else {
+                showInlineToast(isCaptured ? "No captured image yet." : "No reference available")
+                return
+            }
+
+            flaggedViewerState = FlaggedViewerState(
+                title: isCaptured ? "Captured Image" : "Reference Image",
+                detailId: ContentView.conciseContextLabel(
+                    building: observation.building,
+                    elevation: observation.targetElevation,
+                    detailType: observation.detailType
+                ),
+                asset: asset,
+                viewerToken: trimmed.hashValue
+            )
+        }
+
+        private func showInlineToast(_ text: String) {
+            inlineToastText = text
+            inlineToastToken += 1
+            let token = inlineToastToken
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
+                guard token == inlineToastToken else { return }
+                inlineToastText = nil
+            }
+        }
+
+        private struct FlaggedIssueRow: View {
+            let observation: Observation
+            let currentSessionID: UUID?
+            let cache: AssetImageCache
+            let onTapOverflow: () -> Void
+
+            @State private var thumbnail: UIImage? = nil
+            @State private var loadedID: String = ""
+
+            private var contextLabel: String {
+                let composed = ContentView.conciseContextLabel(
+                    building: observation.building,
+                    elevation: observation.targetElevation,
+                    detailType: observation.detailType
+                )
+                return composed.isEmpty ? "Flagged Issue" : composed
+            }
+
+            private var noteText: String {
+                let note = observation.note?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                if !note.isEmpty { return note }
+                let statement = observation.statement.trimmingCharacters(in: .whitespacesAndNewlines)
+                return statement.isEmpty ? "No note" : statement
+            }
+
+            private var chronologicalUpdates: [ObservationUpdateEntry] {
+                observation.updateHistory.sorted { $0.createdAt < $1.createdAt }
+            }
+
+            private var statusLabel: String {
+                if observation.resolvedInSessionID == currentSessionID {
+                    return "Resolved"
+                }
+                if observation.updatedInSessionID == currentSessionID {
+                    return "Active · Update Captured"
+                }
+                return "Active"
+            }
+
+            private var statusColor: Color {
+                if observation.resolvedInSessionID == currentSessionID {
+                    return .green
+                }
+                if observation.updatedInSessionID == currentSessionID {
+                    return .green
+                }
+                return .orange
+            }
+
+            var body: some View {
+                HStack(spacing: 12) {
+                    thumbnailView
+
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(contextLabel)
+                            .font(.system(size: 15, weight: .medium))
+                            .foregroundColor(observation.status == .resolved ? .secondary : .primary)
+                            .lineLimit(1)
+
+                        Text(noteText)
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundColor(.white.opacity(0.86))
+                            .lineLimit(2)
+
+                        Text(statusLabel)
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundColor(statusColor)
+
+                        if !chronologicalUpdates.isEmpty {
+                            VStack(alignment: .leading, spacing: 3) {
+                                ForEach(chronologicalUpdates) { entry in
+                                    HStack(alignment: .firstTextBaseline, spacing: 6) {
+                                        Text(historyTimestamp(for: entry.createdAt))
+                                            .font(.system(size: 10, weight: .medium))
+                                            .foregroundColor(.white.opacity(0.60))
+                                        Text(historyLabel(for: entry))
+                                            .font(.system(size: 11, weight: .regular))
+                                            .foregroundColor(.white.opacity(0.84))
+                                            .lineLimit(2)
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    Spacer(minLength: 0)
+
+                    Button {
+                        onTapOverflow()
+                    } label: {
+                        Image(systemName: "ellipsis.circle")
+                            .font(.system(size: 18, weight: .semibold))
+                            .foregroundColor(.white.opacity(0.82))
+                            .frame(width: 26, height: 26)
+                    }
+                    .buttonStyle(.plain)
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 10)
+                .background(Color.black.opacity(0.35))
+                .clipShape(RoundedRectangle(cornerRadius: 14))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 14)
+                        .stroke(Color.white.opacity(0.12), lineWidth: 1)
+                )
+                .opacity(observation.status == .resolved ? 0.70 : 1.0)
+                .listRowInsets(EdgeInsets(top: 6, leading: 12, bottom: 6, trailing: 12))
+                .listRowBackground(Color.clear)
+                .onAppear { loadThumbnailIfNeeded() }
+                .onChange(of: observation.linkedShotID) { _, _ in
+                    loadThumbnailIfNeeded()
+                }
+                .onChange(of: observation.updatedInSessionID) { _, _ in
+                    loadThumbnailIfNeeded()
+                }
+                .onChange(of: observation.resolvedInSessionID) { _, _ in
+                    loadThumbnailIfNeeded()
+                }
+                .onChange(of: observation.shots.count) { _, _ in
+                    loadThumbnailIfNeeded()
+                }
+            }
+
+            private func historyTimestamp(for date: Date) -> String {
+                let formatter = DateFormatter()
+                formatter.dateFormat = "M/d h:mm a"
+                return formatter.string(from: date)
+            }
+
+            private func historyLabel(for entry: ObservationUpdateEntry) -> String {
+                switch entry.kind {
+                case .followUpCapture:
+                    return "Follow-up captured"
+                case .revisedObservation:
+                    let text = entry.text?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                    return text.isEmpty ? "Observation revised" : text
+                }
+            }
+
+            private var thumbnailView: some View {
+                Group {
+                    if let thumbnail {
+                        Image(uiImage: thumbnail)
+                            .resizable()
+                            .scaledToFill()
+                    } else {
+                        ZStack {
+                            Color.white.opacity(0.08)
+                            Image(systemName: "photo")
+                                .font(.system(size: 14, weight: .medium))
+                                .foregroundColor(.secondary)
+                        }
+                    }
+                }
+                .frame(width: 56, height: 56)
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8)
+                        .stroke(Color.white.opacity(0.12), lineWidth: 1)
+                )
+            }
+
+            private func loadThumbnailIfNeeded() {
+                let currentCapturedID: String = {
+                    guard let currentSessionID else { return "" }
+                    let hasCurrentSessionCapture = observation.updatedInSessionID == currentSessionID || observation.resolvedInSessionID == currentSessionID
+                    guard hasCurrentSessionCapture else { return "" }
+                    return observation.linkedShotID
+                        .flatMap { id in
+                            observation.shots.first(where: { $0.id == id })?.imageLocalIdentifier
+                        }?
+                        .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                }()
+
+                let referenceID = observation.shots
+                    .sorted { $0.capturedAt < $1.capturedAt }
+                    .first?
+                    .imageLocalIdentifier?
+                    .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+
+                // Active issues tile thumbnail priority:
+                // current-session captured -> reference -> placeholder
+                let chosenID = !currentCapturedID.isEmpty ? currentCapturedID : referenceID
+                guard !chosenID.isEmpty else {
+                    thumbnail = nil
+                    loadedID = ""
+                    return
+                }
+                guard chosenID != loadedID || thumbnail == nil else { return }
+                loadedID = chosenID
+
+                let fetch = PHAsset.fetchAssets(withLocalIdentifiers: [chosenID], options: nil)
+                guard let asset = fetch.firstObject else {
+                    thumbnail = nil
+                    return
+                }
+                let px = max(120, 56 * UIScreen.currentScale * 2.0)
+                cache.requestThumbnail(for: asset, pixelSize: px) { image in
+                    DispatchQueue.main.async {
+                        self.thumbnail = image
+                    }
                 }
             }
         }
@@ -7199,12 +10261,12 @@ extension ContentView {
         
         // Current active camera (provided by ContentView)
         let isFrontCamera: Bool
+        let selectedBuildingLabel: String
         
         @Binding var isGridOn: Bool
         @Binding var isLevelOn: Bool
-        
-        let debugEnabled: Bool
-        let onToggleDebug: (Bool) -> Void
+
+        let onBuildingList: () -> Void
         let onInteriorList: () -> Void
         let onExteriorList: () -> Void
         let onFlash: () -> Void
@@ -7223,7 +10285,7 @@ extension ContentView {
                 
                 let rawBtnW = (contentW - (spacing * 2)) / 3.0
                 let btnW: CGFloat = rawBtnW.isFinite ? max(0, rawBtnW) : 0
-                let rawTopBtnW = (contentW - spacing) / 2.0
+                let rawTopBtnW = (contentW - (spacing * 2)) / 3.0
                 let topBtnW: CGFloat = rawTopBtnW.isFinite ? max(0, rawTopBtnW) : 0
                 
                 let bottomInset: CGFloat = (btnW / 2.0) + (spacing / 2.0)
@@ -7236,6 +10298,17 @@ extension ContentView {
                         VStack(spacing: 18) {
                             
                             HStack(spacing: spacing) {
+                                QuickMenuButton(
+                                    glyphRotationAngle: glyphRotationAngle,
+                                    icon: "building.2",
+                                    title: "BUILDINGS",
+                                    isSelected: false,
+                                    selectedStyle: false,
+                                    theme: theme,
+                                    action: onBuildingList
+                                )
+                                .frame(width: topBtnW)
+
                                 QuickMenuButton(
                                     glyphRotationAngle: glyphRotationAngle,
                                     icon: "list.bullet",
@@ -7256,7 +10329,7 @@ extension ContentView {
                                     theme: theme,
                                     action: onExteriorList
                                 )
-                                    .frame(width: topBtnW)
+                                .frame(width: topBtnW)
                             }
 
                             Rectangle()
@@ -7312,19 +10385,8 @@ extension ContentView {
                             }
                             .padding(.horizontal, bottomInset)
                             
-                            HStack(spacing: spacing) {
-                                QuickMenuButton(
-                                    glyphRotationAngle: glyphRotationAngle,
-                                    icon: "ladybug",
-                                    title: "DEBUG",
-                                    isSelected: debugEnabled,
-                                    selectedStyle: true,
-                                    theme: theme
-                                ) {
-                                    onToggleDebug(!debugEnabled)
-                                }
-                                .frame(width: btnW)
-                                
+                            HStack(spacing: 0) {
+                                Spacer(minLength: 0)
                                 QuickMenuButton(
                                     glyphRotationAngle: glyphRotationAngle,
                                     icon: "camera.rotate",
@@ -7334,7 +10396,8 @@ extension ContentView {
                                     theme: theme,
                                     action: onCameraSwap
                                 )
-                                    .frame(width: btnW)
+                                .frame(width: btnW)
+                                Spacer(minLength: 0)
                             }
                             .frame(maxWidth: .infinity, alignment: .center)
                             .padding(.top, 8)
@@ -7345,6 +10408,163 @@ extension ContentView {
                         .padding(.horizontal, 18)
                     }
                     .navigationBarTitleDisplayMode(.inline)
+                }
+            }
+        }
+    }
+
+    private struct ManageBuildingsSheet: View {
+        @Environment(\.colorScheme) private var colorScheme
+        private var theme: SheetControlTheme { .forScheme(colorScheme) }
+        @Environment(\.editMode) private var editMode
+
+        @Binding var options: [String]
+        @Binding var selectedBuilding: String
+        let buildingCodeForOption: (String) -> String
+        let buildingFullLabelForOption: (String) -> String
+        let onClose: () -> Void
+        @State private var editModeState: EditMode = .inactive
+        @FocusState private var focusedIndex: Int?
+
+        var body: some View {
+            NavigationStack {
+                List {
+                    ForEach(Array(options.indices), id: \.self) { index in
+                        if editModeState == .active {
+                            TextField("Building", text: Binding(
+                                get: {
+                                    guard options.indices.contains(index) else { return "" }
+                                    return options[index]
+                                },
+                                set: { newValue in
+                                    guard options.indices.contains(index) else { return }
+                                    options[index] = newValue
+                                }
+                            ))
+                            .focused($focusedIndex, equals: index)
+                            .submitLabel(.done)
+                        } else {
+                            let option = options[index]
+                            Button {
+                                selectedBuilding = buildingCodeForOption(option)
+                                onClose()
+                            } label: {
+                                HStack(spacing: 10) {
+                                    Text(buildingFullLabelForOption(option))
+                                        .font(.system(size: 16, weight: .medium))
+                                        .foregroundColor(.primary)
+                                        .lineLimit(1)
+                                        .minimumScaleFactor(0.8)
+
+                                    Spacer(minLength: 0)
+
+                                    if selectedBuilding == buildingCodeForOption(option) {
+                                        Image(systemName: "checkmark")
+                                            .font(.system(size: 14, weight: .medium))
+                                            .foregroundColor(.blue)
+                                    }
+                                }
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                    .onDelete { offsets in
+                        options.remove(atOffsets: offsets)
+                    }
+                    .onMove { source, destination in
+                        options.move(fromOffsets: source, toOffset: destination)
+                    }
+                }
+                .listStyle(.insetGrouped)
+                .environment(\.editMode, $editModeState)
+                .toolbar(.hidden, for: .navigationBar)
+                .safeAreaInset(edge: .top, spacing: 0) {
+                    HStack(spacing: 10) {
+                        Button(action: onClose) {
+                            Text("Done")
+                                .font(.system(size: 17, weight: .medium))
+                                .foregroundColor(theme.label)
+                                .frame(minHeight: 42)
+                                .padding(.horizontal, 14)
+                                .background(theme.fill)
+                                .clipShape(Capsule())
+                                .overlay(
+                                    Capsule()
+                                        .stroke(theme.stroke, lineWidth: 1)
+                                )
+                        }
+                        .buttonStyle(.plain)
+
+                        Spacer(minLength: 0)
+
+                        Text("Buildings")
+                            .font(.system(size: 18, weight: .medium))
+                            .foregroundColor(theme.label)
+                            .lineLimit(1)
+
+                        Spacer(minLength: 0)
+
+                        HStack(spacing: 0) {
+                            Button {
+                                if editModeState != .active { editModeState = .active }
+                                options.append("New Building")
+                                focusedIndex = max(0, options.count - 1)
+                            } label: {
+                                Image(systemName: "plus")
+                                    .font(.system(size: 17, weight: .medium))
+                                    .foregroundColor(theme.label)
+                                    .frame(width: 44, height: 42)
+                                    .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+
+                            Button {
+                                if editModeState == .active {
+                                    editModeState = .inactive
+                                    focusedIndex = nil
+                                } else {
+                                    editModeState = .active
+                                }
+                            } label: {
+                                Group {
+                                    if editModeState == .active {
+                                        Image(systemName: "checkmark.circle.fill")
+                                            .font(.system(size: 17, weight: .medium))
+                                    } else {
+                                        Text("Edit")
+                                            .font(.system(size: 17, weight: .medium))
+                                    }
+                                }
+                                .foregroundColor(theme.label)
+                                .frame(width: 72, height: 42)
+                                .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                        }
+                        .padding(.horizontal, 4)
+                        .padding(.vertical, 2)
+                        .background(theme.fill)
+                        .clipShape(Capsule())
+                        .overlay(
+                            Capsule()
+                                .stroke(theme.stroke, lineWidth: 1)
+                        )
+                    }
+                    .padding(.horizontal, 14)
+                    .padding(.top, 14)
+                    .padding(.bottom, 4)
+                }
+                .onDisappear {
+                    let cleaned = options
+                        .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                        .filter { !$0.isEmpty }
+                    options = cleaned.isEmpty ? ["B1", "B2", "B3", "B4", "B5", "Add"] : cleaned
+                    let selectedCode = buildingCodeForOption(selectedBuilding)
+                    if options.contains(where: { buildingCodeForOption($0) == selectedCode }) == false {
+                        selectedBuilding = buildingCodeForOption(options[0])
+                    } else {
+                        selectedBuilding = selectedCode
+                    }
                 }
             }
         }
