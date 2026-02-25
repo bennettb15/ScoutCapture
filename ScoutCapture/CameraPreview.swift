@@ -211,8 +211,16 @@ struct ZoomStep: Identifiable, Equatable {
 // MARK: - Camera Manager
 
 final class CameraManager: NSObject, ObservableObject {
+    static let shared = CameraManager()
+
+    static func prewarm() {
+        CameraManager.shared.prepareForPreviewAsync()
+    }
 
     let session = AVCaptureSession()
+    @Published private(set) var isReadyForPreview: Bool = false
+    @Published private(set) var isPreviewRunning: Bool = false
+    @Published private(set) var isStartingPreview: Bool = false
 
     @Published var isCapturing: Bool = false
     @Published private(set) var zoomSteps: [ZoomStep] = []
@@ -283,6 +291,8 @@ final class CameraManager: NSObject, ObservableObject {
 
     // All AVCaptureSession work must run on a dedicated queue.
     private let sessionQueue = DispatchQueue(label: "ScoutCapture.CameraSession")
+    private var isSessionConfigured = false
+    private var shouldResumeRunningOnActive = false
     private var videoDevice: AVCaptureDevice?
     private let photoOutput = AVCapturePhotoOutput()
 
@@ -309,9 +319,7 @@ final class CameraManager: NSObject, ObservableObject {
         super.init()
 
         // Configure capture session off the main thread.
-        sessionQueue.async { [weak self] in
-            self?.configureSession()
-        }
+        prepareForPreviewAsync()
 
         // Stop/start the session when the app backgrounds/foregrounds.
         NotificationCenter.default.addObserver(self, selector: #selector(appWillResignActive), name: UIApplication.willResignActiveNotification, object: nil)
@@ -334,21 +342,20 @@ final class CameraManager: NSObject, ObservableObject {
     @objc private func appWillResignActive() {
         sessionQueue.async { [weak self] in
             guard let self else { return }
+            self.shouldResumeRunningOnActive = self.session.isRunning
             if self.session.isRunning {
                 self.session.stopRunning()
+            }
+            DispatchQueue.main.async {
+                self.isPreviewRunning = false
+                self.isStartingPreview = false
             }
         }
     }
 
     @objc private func appDidBecomeActive() {
-        sessionQueue.async { [weak self] in
-            guard let self else { return }
-            let hasAnyDeviceInput = self.session.inputs.contains { $0 is AVCaptureDeviceInput }
-            guard hasAnyDeviceInput else { return }
-            if !self.session.isRunning {
-                self.session.startRunning()
-            }
-        }
+        guard shouldResumeRunningOnActive else { return }
+        ensurePreviewRunningAsync()
     }
     
     deinit {
@@ -728,7 +735,77 @@ final class CameraManager: NSObject, ObservableObject {
 
     // MARK: Session setup
 
+    func prepareForPreviewAsync() {
+        sessionQueue.async { [weak self] in
+            guard let self else { return }
+            guard !self.isSessionConfigured else {
+                DispatchQueue.main.async {
+                    self.isReadyForPreview = true
+                }
+                return
+            }
+            self.configureSession()
+        }
+    }
+
+    func ensurePreviewRunningAsync() {
+        sessionQueue.async { [weak self] in
+            guard let self else { return }
+
+            if !self.isSessionConfigured {
+                self.configureSession()
+            }
+
+            let auth = AVCaptureDevice.authorizationStatus(for: .video)
+            guard auth == .authorized else {
+                DispatchQueue.main.async {
+                    self.isStartingPreview = false
+                    self.isPreviewRunning = false
+                    self.isReadyForPreview = true
+                }
+                return
+            }
+
+            let hasAnyDeviceInput = self.session.inputs.contains { $0 is AVCaptureDeviceInput }
+            guard hasAnyDeviceInput else {
+                DispatchQueue.main.async {
+                    self.isStartingPreview = false
+                    self.isPreviewRunning = false
+                    self.isReadyForPreview = true
+                }
+                return
+            }
+
+            if self.session.isRunning {
+                DispatchQueue.main.async {
+                    self.isStartingPreview = false
+                    self.isPreviewRunning = true
+                    self.isReadyForPreview = true
+                }
+                return
+            }
+
+            DispatchQueue.main.async {
+                self.isStartingPreview = true
+                self.isReadyForPreview = true
+            }
+
+            self.session.startRunning()
+
+            DispatchQueue.main.async {
+                self.isPreviewRunning = self.session.isRunning
+                self.isStartingPreview = false
+            }
+        }
+    }
+
     private func configureSession() {
+        if isSessionConfigured {
+            DispatchQueue.main.async {
+                self.isReadyForPreview = true
+            }
+            return
+        }
 
         session.beginConfiguration()
         session.sessionPreset = .photo
@@ -738,8 +815,10 @@ final class CameraManager: NSObject, ObservableObject {
 
         guard let device = pickBestCameraDevice(for: currentPosition) else {
             session.commitConfiguration()
+            isSessionConfigured = true
             DispatchQueue.main.async {
                 self.hdSupported = false
+                self.isReadyForPreview = true
             }
             return
         }
@@ -776,14 +855,15 @@ final class CameraManager: NSObject, ObservableObject {
         }
 
         session.commitConfiguration()
-
-        let hasAnyDeviceInput = session.inputs.contains { $0 is AVCaptureDeviceInput }
-        if hasAnyDeviceInput, !session.isRunning {
-            session.startRunning()
-        }
+        isSessionConfigured = true
 
         if effectiveHDEnabled && currentPosition == .back {
             applyHDModeRouting(desiredUIZoom: currentUIZoom)
+        }
+
+        DispatchQueue.main.async {
+            self.isReadyForPreview = true
+            self.isPreviewRunning = self.session.isRunning
         }
     }
 
