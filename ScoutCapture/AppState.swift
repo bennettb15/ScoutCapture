@@ -110,11 +110,13 @@ final class AppState: ObservableObject {
     func createProperty(
         clientName: String,
         propertyName: String,
-        address: String
+        address: String,
+        clientPhone: String = ""
     ) -> Property? {
         let cleanedClientName = clientName.trimmingCharacters(in: .whitespacesAndNewlines)
         let cleanedName = propertyName.trimmingCharacters(in: .whitespacesAndNewlines)
         let cleanedAddress = address.trimmingCharacters(in: .whitespacesAndNewlines)
+        let cleanedPhone = clientPhone.filter(\.isNumber)
 
         guard !cleanedName.isEmpty else { return nil }
 
@@ -122,6 +124,7 @@ final class AppState: ObservableObject {
             let property = Property(
                 id: UUID(),
                 clientName: cleanedClientName.isEmpty ? nil : cleanedClientName,
+                clientPhone: cleanedPhone.isEmpty ? nil : cleanedPhone,
                 name: cleanedName,
                 address: cleanedAddress.isEmpty ? nil : cleanedAddress
             )
@@ -182,6 +185,39 @@ final class AppState: ObservableObject {
         }
     }
 
+    @discardableResult
+    func updatePropertyContact(
+        id: UUID,
+        propertyName: String?,
+        clientName: String?,
+        address: String?,
+        clientPhone: String?
+    ) -> Bool {
+        guard let index = properties.firstIndex(where: { $0.id == id }) else { return false }
+        var updated = properties[index]
+        let cleanedName = propertyName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let cleanedClient = clientName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let cleanedAddress = address?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let digitsOnlyPhone = (clientPhone ?? "").filter(\.isNumber)
+
+        if !cleanedName.isEmpty {
+            updated.name = cleanedName
+        }
+        updated.clientName = cleanedClient.isEmpty ? nil : cleanedClient
+        updated.address = cleanedAddress.isEmpty ? nil : cleanedAddress
+        updated.clientPhone = digitsOnlyPhone.isEmpty ? nil : digitsOnlyPhone
+
+        do {
+            let persisted = try localStore.updateProperty(updated)
+            properties[index] = persisted
+            let caches = makeHubCaches(for: properties)
+            applyHubCachePayload(properties: properties, caches: caches)
+            return true
+        } catch {
+            return false
+        }
+    }
+
     func propertyDataCounts(for propertyID: UUID) -> PropertyDataCounts {
         let sessions = (try? localStore.fetchSessions(propertyID: propertyID).count) ?? 0
         let guided = (try? localStore.fetchGuidedShots(propertyID: propertyID).count) ?? 0
@@ -229,11 +265,13 @@ final class AppState: ObservableObject {
     func startSession() -> Session? {
         guard let selectedPropertyID else { return nil }
         if let currentSession, currentSession.status == .draft, currentSession.propertyID == selectedPropertyID {
+            try? localStore.ensureSessionMetadata(for: currentSession)
             return currentSession
         }
         
         if let draft = try? localStore.latestDraftSession(propertyID: selectedPropertyID) {
             currentSession = draft
+            try? localStore.ensureSessionMetadata(for: draft)
             return draft
         }
 
@@ -341,6 +379,7 @@ final class AppState: ObservableObject {
         guard let draft = draftSession(for: propertyID) else { return nil }
         selectedPropertyID = propertyID
         currentSession = draft
+        try? localStore.ensureSessionMetadata(for: draft)
         return draft
     }
 
