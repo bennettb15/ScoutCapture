@@ -377,6 +377,7 @@ struct SessionHubView: View {
         let clientLine = propertyClientLine(property)
         let addressLine = propertyAddressLine(property)
         let hasMapsButton = mapsAddressQuery(for: property) != nil
+        let hasPhoneActions = hasValidPhoneNumber(property)
         let hasStatusRow = draft != nil || hasPendingExport || isEditMode
 
         HStack(alignment: .top, spacing: 10) {
@@ -418,95 +419,41 @@ struct SessionHubView: View {
                     }
                 }
 
-                if isEditMode || (!isEditMode && (hasMapsButton || hasValidPhoneNumber(property))) {
+                if isEditMode {
                     Spacer(minLength: 0)
                     HStack(spacing: 8) {
-                        if isEditMode {
-                            Menu {
-                                Button("Manage Sessions") {
-                                    manageSessionsProperty = property
-                                }
-                                Button("Edit Contact") {
-                                    editContactProperty = property
-                                }
-                                if property.isArchived {
-                                    Button("Unarchive Property") {
-                                        _ = appState.setPropertyArchived(id: property.id, archived: false)
-                                    }
-                                } else {
-                                    Button("Archive Property") {
-                                        propertyToArchive = property
-                                    }
-                                }
-                                Button("Delete Property", role: .destructive) {
-                                    requestDeleteProperty(property)
-                                }
-                            } label: {
-                                Image(systemName: "ellipsis")
-                                    .font(.system(size: 12, weight: .bold))
-                                    .foregroundColor(.white)
-                                    .frame(width: 26, height: 26)
-                                    .background(Color.white.opacity(0.16))
-                                    .clipShape(Circle())
-                                    .overlay(
-                                        Circle()
-                                            .stroke(Color.white.opacity(0.28), lineWidth: 1)
-                                    )
+                        Menu {
+                            Button("Manage Sessions") {
+                                manageSessionsProperty = property
                             }
-                            .buttonStyle(.plain)
-                        } else if hasValidPhoneNumber(property) {
-                            Button {
-                                triggerPhoneAction(.call, for: property)
-                            } label: {
-                                Image(systemName: "phone.fill")
-                                    .font(.system(size: 12, weight: .bold))
-                                    .foregroundColor(.white)
-                                    .frame(width: 26, height: 26)
-                                    .background(Color.green)
-                                    .clipShape(Circle())
-                                    .overlay(
-                                        Circle()
-                                            .stroke(Color.green.opacity(0.92), lineWidth: 1)
-                                    )
+                            Button("Edit Contact") {
+                                editContactProperty = property
                             }
-                            .buttonStyle(.plain)
-
-                            Button {
-                                triggerPhoneAction(.message, for: property)
-                            } label: {
-                                Image(systemName: "message.fill")
-                                    .font(.system(size: 12, weight: .bold))
-                                    .foregroundColor(.white)
-                                    .frame(width: 26, height: 26)
-                                    .background(Color.green)
-                                    .clipShape(Circle())
-                                    .overlay(
-                                        Circle()
-                                            .stroke(Color.green.opacity(0.92), lineWidth: 1)
-                                    )
+                            if property.isArchived {
+                                Button("Unarchive Property") {
+                                    _ = appState.setPropertyArchived(id: property.id, archived: false)
+                                }
+                            } else {
+                                Button("Archive Property") {
+                                    propertyToArchive = property
+                                }
                             }
-                            .buttonStyle(.plain)
+                            Button("Delete Property", role: .destructive) {
+                                requestDeleteProperty(property)
+                            }
+                        } label: {
+                            Image(systemName: "ellipsis")
+                                .font(.system(size: 12, weight: .bold))
+                                .foregroundColor(.white)
+                                .frame(width: 26, height: 26)
+                                .background(Color.white.opacity(0.16))
+                                .clipShape(Circle())
+                                .overlay(
+                                    Circle()
+                                        .stroke(Color.white.opacity(0.28), lineWidth: 1)
+                                )
                         }
-
-                        if !isEditMode && hasMapsButton {
-                            Button {
-                                openMaps(for: property)
-                            } label: {
-                                Image(systemName: "arrow.turn.up.right")
-                                    .font(.system(size: 12, weight: .bold))
-                                    .foregroundColor(.white)
-                                    .frame(width: 26, height: 26)
-                                    .background(Color.blue)
-                                    .clipShape(Circle())
-                                    .overlay(
-                                        Circle()
-                                            .stroke(Color.blue.opacity(0.92), lineWidth: 1)
-                                    )
-                            }
-                            .buttonStyle(.plain)
-                            .disabled(mapLookupPropertyID == property.id)
-                            .opacity(mapLookupPropertyID == property.id ? 0.6 : 1.0)
-                        }
+                        .buttonStyle(.plain)
                     }
                 }
             }
@@ -527,6 +474,34 @@ struct SessionHubView: View {
         .onTapGesture {
             guard !isEditMode else { return }
             handlePropertyTap(property)
+        }
+        .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+            if !isEditMode {
+                if hasMapsButton {
+                    Button {
+                        openMaps(for: property)
+                    } label: {
+                        Label("Maps", systemImage: "map.fill")
+                    }
+                    .tint(.blue)
+                }
+
+                if hasPhoneActions {
+                    Button {
+                        triggerPhoneAction(.message, for: property)
+                    } label: {
+                        Label("Message", systemImage: "message.fill")
+                    }
+                    .tint(.green)
+
+                    Button {
+                        triggerPhoneAction(.call, for: property)
+                    } label: {
+                        Label("Call", systemImage: "phone.fill")
+                    }
+                    .tint(.green)
+                }
+            }
         }
     }
 
@@ -681,6 +656,20 @@ struct SessionHubView: View {
         VStack(spacing: 12) {
             ZStack {
                 HStack {
+                    if isEditMode {
+#if DEBUG
+                        customCapsuleToolbarButton(
+                            title: "Debug",
+                            isEnabled: true,
+                            fill: .red.opacity(0.92),
+                            stroke: .red.opacity(0.95),
+                            label: .white
+                        ) {
+                            showDebugTools = true
+                        }
+#endif
+                    }
+
                     Spacer(minLength: 0)
                     customCapsuleToolbarButton(
                         title: isEditMode ? "Done" : "Edit",
@@ -693,12 +682,6 @@ struct SessionHubView: View {
                         if !isEditMode {
                             showArchivedProperties = false
                         }
-                    }
-                }
-
-                if isEditMode {
-                    customCapsuleToolbarButton(title: showArchivedProperties ? "Hide Archived" : "Show Archived", isEnabled: true) {
-                        showArchivedProperties.toggle()
                     }
                 }
             }
@@ -893,20 +876,16 @@ struct SessionHubView: View {
 
     @ViewBuilder
     private var debugToolsBottomBar: some View {
-#if DEBUG
         if isEditMode {
             VStack(spacing: 0) {
                 Divider()
                 HStack {
                     Spacer(minLength: 0)
                     customCapsuleToolbarButton(
-                        title: "Debug Tools",
-                        isEnabled: true,
-                        fill: .red.opacity(0.92),
-                        stroke: .red.opacity(0.95),
-                        label: .white
+                        title: showArchivedProperties ? "Hide Archived" : "Show Archived",
+                        isEnabled: true
                     ) {
-                        showDebugTools = true
+                        showArchivedProperties.toggle()
                     }
                     Spacer(minLength: 0)
                 }
@@ -915,7 +894,6 @@ struct SessionHubView: View {
                 .background(Color(uiColor: .systemBackground))
             }
         }
-#endif
     }
 
     @ViewBuilder

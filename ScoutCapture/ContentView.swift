@@ -2233,7 +2233,6 @@ struct ContentView: View {
     private let shutterHaptic = UIImpactFeedbackGenerator(style: .medium)
     private let quickButtonHaptic = UIImpactFeedbackGenerator(style: .light)
     private let hdButtonHaptic = UIImpactFeedbackGenerator(style: .soft)
-    private let successHaptic = UINotificationFeedbackGenerator()
     
     @StateObject private var camera: CameraManager
     @StateObject private var levelModel = LevelMotionModel()
@@ -2246,7 +2245,6 @@ struct ContentView: View {
     @State private var elevation: String = "North"
     
     @State private var detailNote: String = ""
-    @State private var showSavedToast: Bool = false
     @State private var showNotSavedToast: Bool = false
     @State private var showNoFlaggedIssuesToast: Bool = false
     @State private var showResolutionModeToast: Bool = false
@@ -2544,6 +2542,46 @@ struct ContentView: View {
     private func elevationPillLabel() -> String {
         if locationMode == .interior { return "Interior" }
         return CanonicalElevation.normalize(elevation) ?? elevation
+    }
+
+    private var shouldShowElevationAlignmentDot: Bool {
+        guard locationMode != .interior else { return false }
+        let normalized = CanonicalElevation.normalize(elevation) ?? elevation
+        switch normalized {
+        case "North", "South", "East", "West":
+            return true
+        default:
+            return false
+        }
+    }
+
+    private var isElevationHeadingAligned: Bool {
+        guard shouldShowElevationAlignmentDot else { return false }
+        guard let currentHeading = locationManager.headingDegrees else { return false }
+        guard let ideal = idealFacingHeading(for: CanonicalElevation.normalize(elevation) ?? elevation) else { return false }
+        return angularDifferenceDegrees(currentHeading, ideal) <= 30
+    }
+
+    private func idealFacingHeading(for normalizedElevation: String) -> Double? {
+        switch normalizedElevation {
+        case "North":
+            return 180
+        case "South":
+            return 0
+        case "East":
+            return 270
+        case "West":
+            return 90
+        default:
+            return nil
+        }
+    }
+
+    private func angularDifferenceDegrees(_ lhs: Double, _ rhs: Double) -> Double {
+        let a = lhs.truncatingRemainder(dividingBy: 360)
+        let b = rhs.truncatingRemainder(dividingBy: 360)
+        let diff = abs(a - b)
+        return min(diff, 360 - diff)
     }
 
     private func buildingCode(from option: String) -> String {
@@ -3350,6 +3388,13 @@ struct ContentView: View {
                                     .lineLimit(1)
                                     .minimumScaleFactor(0.78)
 
+                                if shouldShowElevationAlignmentDot {
+                                    Circle()
+                                        .fill(isElevationHeadingAligned ? Color.green : Color.white)
+                                        .frame(width: 8, height: 8)
+                                        .allowsHitTesting(false)
+                                }
+
                                 Spacer(minLength: 0)
 
                                 Image(systemName: "chevron.down")
@@ -3454,6 +3499,14 @@ struct ContentView: View {
             .compositingGroup()
             .transaction { tx in
                 tx.animation = nil
+            }
+
+            if showGrid {
+                GridOverlay()
+                    .stroke(Color.white.opacity(0.44), lineWidth: 1)
+                    .frame(width: w, height: previewH)
+                    .allowsHitTesting(false)
+                    .zIndex(8)
             }
 
             if shouldShowStartingCameraOverlay {
@@ -3661,25 +3714,6 @@ struct ContentView: View {
                     .transition(.opacity)
                     .allowsHitTesting(false)
                     .zIndex(30)
-            }
-
-            if showSavedToast {
-                Text("Saved to Photos")
-                    .font(.system(size: 14, weight: .medium))
-                    .foregroundColor(.white)
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 10)
-                    .background(Color.black.opacity(0.55))
-                    .clipShape(RoundedRectangle(cornerRadius: 12))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 12)
-                            .stroke(Color.white.opacity(0.18), lineWidth: 1)
-                    )
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
-                    .padding(.top, isLandscapeUI ? 44 : 0)
-                    .rotationEffect(bottomGlyphRotationAngle)
-                    .allowsHitTesting(false)
-                    .zIndex(25)
             }
 
             if showNotSavedToast {
@@ -4281,6 +4315,13 @@ extension ContentView {
                         .foregroundColor(.white.opacity(0.95))
                         .lineLimit(1)
                         .minimumScaleFactor(0.78)
+
+                    if shouldShowElevationAlignmentDot {
+                        Circle()
+                            .fill(isElevationHeadingAligned ? Color.green : Color.white)
+                            .frame(width: 8, height: 8)
+                            .allowsHitTesting(false)
+                    }
                     
                     Spacer(minLength: 0)
                     
@@ -5417,11 +5458,6 @@ extension ContentView {
                             issueIDHint: createdObservationID ?? flaggedActionTargetObservation?.id
                         )
                         refreshSessionActionsSummaryIfVisible()
-                        successHaptic.notificationOccurred(.success)
-                        showSavedToast = true
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-                            showSavedToast = false
-                        }
                     } else {
                         showNotSavedToast = true
                         DispatchQueue.main.asyncAfter(deadline: .now() + 1.1) {
@@ -6748,8 +6784,8 @@ extension ContentView {
                                 .foregroundColor(.white)
 
                             VStack(spacing: 8) {
-                                summaryRow(title: "Guided Remaining", value: summary.guidedRemainingCount)
                                 summaryRow(title: "Flagged Remaining", value: summary.flaggedRemainingCount)
+                                summaryRow(title: "Guided Remaining", value: summary.guidedRemainingCount)
                             }
                             .padding(.horizontal, 12)
                             .padding(.vertical, 10)
