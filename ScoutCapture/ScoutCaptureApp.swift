@@ -118,6 +118,7 @@ struct SessionHubView: View {
     @State private var searchQuery: String = ""
     @FocusState private var isSearchFieldFocused: Bool
     @State private var propertyListFilter: PropertyListFilter = .all
+    @State private var showCalendarComingSoonPopup: Bool = false
 #if DEBUG
     @State private var showDebugTools: Bool = false
 #endif
@@ -352,6 +353,50 @@ struct SessionHubView: View {
             .overlay {
                 if isPreparingPendingExport {
                     preparingExportOverlay
+                }
+            }
+            .overlay {
+                if showCalendarComingSoonPopup {
+                    ZStack {
+                        Color.black.opacity(0.45)
+                            .ignoresSafeArea()
+                            .contentShape(Rectangle())
+                            .onTapGesture {
+                                showCalendarComingSoonPopup = false
+                            }
+
+                        VStack(spacing: 14) {
+                            Text("Calendar")
+                                .font(.system(size: 26, weight: .bold))
+                                .foregroundColor(.white)
+
+                            Text("Calendar integration coming soon.")
+                                .font(.system(size: 15, weight: .medium))
+                                .foregroundColor(.white.opacity(0.92))
+                                .multilineTextAlignment(.center)
+
+                            customCapsuleToolbarButton(
+                                title: "OK",
+                                isEnabled: true,
+                                fill: .blue,
+                                stroke: .blue.opacity(0.9),
+                                label: .white
+                            ) {
+                                showCalendarComingSoonPopup = false
+                            }
+                        }
+                        .padding(.horizontal, 18)
+                        .padding(.vertical, 20)
+                        .frame(maxWidth: 430)
+                        .background(Color.black.opacity(0.82))
+                        .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                                .stroke(Color.white.opacity(0.22), lineWidth: 1)
+                        )
+                        .padding(.horizontal, 20)
+                    }
+                    .animation(.easeInOut(duration: 0.18), value: showCalendarComingSoonPopup)
                 }
             }
             .overlay(alignment: .top) {
@@ -656,6 +701,24 @@ struct SessionHubView: View {
         VStack(spacing: 12) {
             ZStack {
                 HStack {
+                    if !isEditMode {
+                        Button {
+                            showCalendarComingSoonPopup = true
+                        } label: {
+                            Image(systemName: "calendar")
+                                .font(.system(size: 18, weight: .semibold))
+                                .foregroundColor(buttonLabel)
+                                .frame(width: 42, height: 42)
+                                .background(buttonFill)
+                                .clipShape(Circle())
+                                .overlay(
+                                    Circle()
+                                        .stroke(buttonStroke, lineWidth: 1)
+                                )
+                        }
+                        .buttonStyle(.plain)
+                    }
+
                     if isEditMode {
 #if DEBUG
                         customCapsuleToolbarButton(
