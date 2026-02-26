@@ -1,4 +1,5 @@
 import Foundation
+import UIKit
 
 final class LocalStore {
     enum StoreError: Error {
@@ -16,6 +17,7 @@ final class LocalStore {
     private let observationsDirectoryURL: URL
     private let guidedShotsDirectoryURL: URL
     private let sessionsDirectoryURL: URL
+    private let sessionMetadataDirectoryURL: URL
 
     init(fileManager: FileManager = .default) {
         self.fileManager = fileManager
@@ -36,6 +38,7 @@ final class LocalStore {
         self.observationsDirectoryURL = baseDirectory.appendingPathComponent("observations", isDirectory: true)
         self.guidedShotsDirectoryURL = baseDirectory.appendingPathComponent("guided-shots", isDirectory: true)
         self.sessionsDirectoryURL = baseDirectory.appendingPathComponent("sessions", isDirectory: true)
+        self.sessionMetadataDirectoryURL = baseDirectory.appendingPathComponent("session-metadata", isDirectory: true)
 
         try? createStorageDirectories(baseDirectoryURL: baseDirectory)
     }
@@ -92,6 +95,11 @@ final class LocalStore {
         let propertySessionsURL = sessionsFileURL(for: id)
         if fileManager.fileExists(atPath: propertySessionsURL.path) {
             try fileManager.removeItem(at: propertySessionsURL)
+        }
+
+        let propertySessionMetadataURL = sessionMetadataDirectoryURL.appendingPathComponent(id.uuidString, isDirectory: true)
+        if fileManager.fileExists(atPath: propertySessionMetadataURL.path) {
+            try? fileManager.removeItem(at: propertySessionMetadataURL)
         }
     }
 
@@ -168,7 +176,38 @@ final class LocalStore {
         sessions.append(session)
         sessions.sort { $0.startedAt < $1.startedAt }
         try writeSessions(sessions, propertyID: session.propertyID)
+        try upsertSessionMetadataLifecycle(for: session)
         return session
+    }
+
+    func ensureSessionMetadata(for session: Session) throws {
+        try upsertSessionMetadataLifecycle(for: session)
+    }
+
+    func upsertShotMetadata(_ shot: ShotMetadata) throws {
+        var metadata = try readOrRecoverSessionMetadata(propertyID: shot.propertyID, sessionID: shot.sessionID)
+        metadata.schemaVersion = max(metadata.schemaVersion, 1)
+        metadata.propertyID = shot.propertyID
+        metadata.sessionID = shot.sessionID
+
+        if let index = metadata.shots.firstIndex(where: { $0.shotID == shot.shotID }) {
+            metadata.shots[index] = shot
+        } else if shot.isGuided,
+                  let index = metadata.shots.firstIndex(where: {
+                      $0.isGuided &&
+                      $0.propertyID == shot.propertyID &&
+                      $0.sessionID == shot.sessionID &&
+                      $0.building.caseInsensitiveCompare(shot.building) == .orderedSame &&
+                      CanonicalElevation.normalize($0.elevation) == CanonicalElevation.normalize(shot.elevation) &&
+                      $0.detailType.caseInsensitiveCompare(shot.detailType) == .orderedSame &&
+                      $0.angleIndex == shot.angleIndex
+                  }) {
+            metadata.shots[index] = shot
+        } else {
+            metadata.shots.append(shot)
+        }
+
+        try writeSessionMetadata(metadata)
     }
     
     func latestDraftSession(propertyID: UUID) throws -> Session? {
@@ -184,6 +223,10 @@ final class LocalStore {
         var sessions = try readSessions(propertyID: propertyID)
         sessions.removeAll { $0.id == id }
         try writeSessions(sessions, propertyID: propertyID)
+        let metadataFolder = sessionMetadataFolderURL(propertyID: propertyID, sessionID: id)
+        if fileManager.fileExists(atPath: metadataFolder.path) {
+            try? fileManager.removeItem(at: metadataFolder)
+        }
     }
 
     func deleteSessionCascade(id: UUID, propertyID: UUID) throws {
@@ -231,6 +274,10 @@ final class LocalStore {
         var updatedSessions = sessions
         updatedSessions.removeAll { $0.id == id }
         try writeSessions(updatedSessions, propertyID: propertyID)
+        let metadataFolder = sessionMetadataFolderURL(propertyID: propertyID, sessionID: id)
+        if fileManager.fileExists(atPath: metadataFolder.path) {
+            try? fileManager.removeItem(at: metadataFolder)
+        }
     }
 
     func wipeAllLocalData() throws {
@@ -257,6 +304,10 @@ final class LocalStore {
         
         if !fileManager.fileExists(atPath: sessionsDirectoryURL.path) {
             try fileManager.createDirectory(at: sessionsDirectoryURL, withIntermediateDirectories: true)
+        }
+
+        if !fileManager.fileExists(atPath: sessionMetadataDirectoryURL.path) {
+            try fileManager.createDirectory(at: sessionMetadataDirectoryURL, withIntermediateDirectories: true)
         }
     }
 
@@ -353,6 +404,121 @@ final class LocalStore {
                 try? fileManager.removeItem(atPath: path)
             }
         }
+    }
+
+    private func upsertSessionMetadataLifecycle(for session: Session) throws {
+        var metadata = try readOrRecoverSessionMetadata(propertyID: session.propertyID, sessionID: session.id)
+        metadata.schemaVersion = 1
+        metadata.propertyID = session.propertyID
+        metadata.sessionID = session.id
+        let propertyName = currentPropertyName(for: session.propertyID)
+        if (metadata.propertyNameAtCapture ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+           !propertyName.isEmpty {
+            metadata.propertyNameAtCapture = propertyName
+        }
+        if session.exportedAt != nil, !propertyName.isEmpty {
+            metadata.propertyNameAtExport = propertyName
+        }
+        metadata.startedAt = session.startedAt
+        metadata.endedAt = session.endedAt
+        metadata.status = session.status
+        metadata.exportedAt = session.exportedAt
+        metadata.appVersion = appVersionString()
+        metadata.deviceModel = deviceModelString()
+        try writeSessionMetadata(metadata)
+    }
+
+    private func readOrRecoverSessionMetadata(propertyID: UUID, sessionID: UUID) throws -> SessionMetadata {
+        let fileURL = sessionMetadataFileURL(propertyID: propertyID, sessionID: sessionID)
+        if !fileManager.fileExists(atPath: fileURL.path) {
+            return SessionMetadata(
+                schemaVersion: 1,
+                propertyID: propertyID,
+                sessionID: sessionID,
+                propertyNameAtCapture: nil,
+                propertyNameAtExport: nil,
+                startedAt: Date(),
+                endedAt: nil,
+                status: .draft,
+                exportedAt: nil,
+                appVersion: appVersionString(),
+                deviceModel: deviceModelString(),
+                shots: [],
+                issues: []
+            )
+        }
+
+        do {
+            let data = try Data(contentsOf: fileURL)
+            var metadata = try decoder.decode(SessionMetadata.self, from: data)
+            metadata.schemaVersion = max(metadata.schemaVersion, 1)
+            metadata.propertyID = propertyID
+            metadata.sessionID = sessionID
+            return metadata
+        } catch {
+            print("Recoverable session metadata decode failure for session \(sessionID): \(error)")
+            return SessionMetadata(
+                schemaVersion: 1,
+                propertyID: propertyID,
+                sessionID: sessionID,
+                propertyNameAtCapture: nil,
+                propertyNameAtExport: nil,
+                startedAt: Date(),
+                endedAt: nil,
+                status: .draft,
+                exportedAt: nil,
+                appVersion: appVersionString(),
+                deviceModel: deviceModelString(),
+                shots: [],
+                issues: []
+            )
+        }
+    }
+
+    private func writeSessionMetadata(_ metadata: SessionMetadata) throws {
+        let folder = sessionMetadataFolderURL(propertyID: metadata.propertyID, sessionID: metadata.sessionID)
+        if !fileManager.fileExists(atPath: folder.path) {
+            try fileManager.createDirectory(at: folder, withIntermediateDirectories: true)
+        }
+        let fileURL = sessionMetadataFileURL(propertyID: metadata.propertyID, sessionID: metadata.sessionID)
+        let data = try encoder.encode(metadata)
+        try data.write(to: fileURL, options: .atomic)
+    }
+
+    private func sessionMetadataFolderURL(propertyID: UUID, sessionID: UUID) -> URL {
+        sessionMetadataDirectoryURL
+            .appendingPathComponent(propertyID.uuidString, isDirectory: true)
+            .appendingPathComponent(sessionID.uuidString, isDirectory: true)
+    }
+
+    private func sessionMetadataFileURL(propertyID: UUID, sessionID: UUID) -> URL {
+        sessionMetadataFolderURL(propertyID: propertyID, sessionID: sessionID)
+            .appendingPathComponent("session.json")
+    }
+
+    private func appVersionString() -> String {
+        let short = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String
+        let build = Bundle.main.infoDictionary?["CFBundleVersion"] as? String
+        switch (short, build) {
+        case let (s?, b?) where !s.isEmpty && !b.isEmpty:
+            return "\(s) (\(b))"
+        case let (s?, _):
+            return s
+        case let (_, b?):
+            return b
+        default:
+            return "unknown"
+        }
+    }
+
+    private func deviceModelString() -> String {
+        UIDevice.current.model
+    }
+
+    private func currentPropertyName(for propertyID: UUID) -> String {
+        let properties = (try? readProperties()) ?? []
+        let value = properties.first(where: { $0.id == propertyID })?.name ?? ""
+        return value.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private func hasLegacyElevationValues(in fileURL: URL) throws -> Bool {

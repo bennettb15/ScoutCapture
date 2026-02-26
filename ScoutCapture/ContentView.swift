@@ -3231,29 +3231,70 @@ struct ContentView: View {
                         .lineLimit(1)
                         .minimumScaleFactor(0.72)
                         .frame(maxWidth: .infinity, alignment: .center)
-                        .overlay(alignment: .trailing) {
-                            Button {
-                                presentSessionActionsSheet()
-                            } label: {
-                                Group {
-                                    if isLandscapeUI {
-                                        VStack(spacing: 0) {
-                                            Text("End")
-                                            Text("Session")
+                        .overlay {
+                            HStack(spacing: 0) {
+                                if isLandscapeUI {
+                                    Button {
+                                        showLandscapeElevationMenu = false
+                                        showLandscapeDetailMenu = false
+                                        showLandscapeBuildingMenu.toggle()
+                                    } label: {
+                                        HStack(spacing: 6) {
+                                            Text(selectedBuilding)
+                                                .font(.system(size: 15, weight: .medium))
+                                                .foregroundColor(.white.opacity(0.95))
+                                                .lineLimit(1)
+                                                .minimumScaleFactor(0.85)
+                                            Image(systemName: "chevron.down")
+                                                .font(.system(size: 12, weight: .medium))
+                                                .foregroundColor(.white.opacity(0.90))
                                         }
-                                        .font(.system(size: 14, weight: .semibold))
-                                        .multilineTextAlignment(.center)
-                                    } else {
-                                        Text("End Session")
-                                            .font(.system(size: 16, weight: .semibold))
+                                        .padding(.horizontal, 12)
+                                        .frame(height: controlH, alignment: .center)
+                                        .background(
+                                            ZStack {
+                                                Color.black.opacity(0.55)
+                                                Color.white.opacity(0.08)
+                                            }
+                                        )
+                                        .clipShape(RoundedRectangle(cornerRadius: 18))
+                                        .overlay(
+                                            RoundedRectangle(cornerRadius: 18)
+                                                .stroke(Color.white.opacity(0.12), lineWidth: 1)
+                                        )
+                                        .rotationEffect(bottomGlyphRotationAngle)
                                     }
+                                    .buttonStyle(.plain)
+                                    .disabled(isCaptureTargetArmed)
+                                    .fixedSize(horizontal: true, vertical: false)
+                                    .padding(.leading, rowPadding)
                                 }
-                                .foregroundColor(.red.opacity(0.95))
-                                .shadow(color: .black.opacity(0.45), radius: 2, x: 0, y: 1)
-                                .rotationEffect(isLandscapeUI ? bottomGlyphRotationAngle : .zero)
+
+                                Spacer(minLength: 0)
+
+                                Button {
+                                    presentSessionActionsSheet()
+                                } label: {
+                                    Group {
+                                        if isLandscapeUI {
+                                            VStack(spacing: 0) {
+                                                Text("End")
+                                                Text("Session")
+                                            }
+                                            .font(.system(size: 14, weight: .semibold))
+                                            .multilineTextAlignment(.center)
+                                        } else {
+                                            Text("End Session")
+                                                .font(.system(size: 16, weight: .semibold))
+                                        }
+                                    }
+                                    .foregroundColor(.red.opacity(0.95))
+                                    .shadow(color: .black.opacity(0.45), radius: 2, x: 0, y: 1)
+                                    .rotationEffect(isLandscapeUI ? bottomGlyphRotationAngle : .zero)
+                                }
+                                .buttonStyle(.plain)
+                                .padding(.trailing, rowPadding)
                             }
-                            .buttonStyle(.plain)
-                            .padding(.trailing, rowPadding)
                         }
                 }
 
@@ -5359,13 +5400,22 @@ extension ContentView {
                         let didApplyGuidedShot = applyArmedGuidedShotIfNeeded(with: shot, referenceImagePath: referenceImagePath)
                         let didApplyIssueUpdate = applyArmedIssueCaptureIfNeeded(with: shot)
                         let didQueueResolution = queueResolutionCaptureIfNeeded(with: shot, data: data)
+                        var createdObservationID: UUID? = nil
                         if !didApplyGuidedShot && !didApplyIssueUpdate && !didQueueResolution {
                             if noteAtCapture.isEmpty {
                                 createGuidedAngleFromCaptureIfNeeded(with: shot, referenceImagePath: referenceImagePath)
                             } else {
-                                createObservationFromCapturedDetailNote(noteAtCapture, shot: shot)
+                                createdObservationID = createObservationFromCapturedDetailNote(noteAtCapture, shot: shot)
                             }
                         }
+                        persistSessionMetadataForCapturedShot(
+                            shot: shot,
+                            imageData: data,
+                            noteText: noteAtCapture,
+                            isGuidedHint: didApplyGuidedShot || noteAtCapture.isEmpty,
+                            isFlaggedHint: didApplyIssueUpdate || didQueueResolution || createdObservationID != nil,
+                            issueIDHint: createdObservationID ?? flaggedActionTargetObservation?.id
+                        )
                         refreshSessionActionsSummaryIfVisible()
                         successHaptic.notificationOccurred(.success)
                         showSavedToast = true
@@ -5383,9 +5433,9 @@ extension ContentView {
         }
     }
 
-    private func createObservationFromCapturedDetailNote(_ noteText: String, shot: Shot) {
-        guard !noteText.isEmpty else { return }
-        guard let propertyID = appState.selectedPropertyID else { return }
+    private func createObservationFromCapturedDetailNote(_ noteText: String, shot: Shot) -> UUID? {
+        guard !noteText.isEmpty else { return nil }
+        guard let propertyID = appState.selectedPropertyID else { return nil }
 
         let observation = Observation(
             propertyID: propertyID,
@@ -5401,15 +5451,99 @@ extension ContentView {
         )
 
         do {
-            _ = try localStore.createObservation(observation)
+            let created = try localStore.createObservation(observation)
             refreshActiveIssues()
             detailNote = ""
             isArmedIssueDetailNoteReadOnly = false
             if camera.manualHDEnabled {
                 camera.manualHDEnabled = false
             }
+            return created.id
         } catch {
             // Keep capture UX resilient if local observation persistence fails.
+            return nil
+        }
+    }
+
+    private func persistSessionMetadataForCapturedShot(
+        shot: Shot,
+        imageData: Data,
+        noteText: String,
+        isGuidedHint: Bool,
+        isFlaggedHint: Bool,
+        issueIDHint: UUID?
+    ) {
+        guard let propertyID = appState.selectedPropertyID else { return }
+        guard let session = appState.currentSession else { return }
+
+        let imageSize = UIImage(data: imageData)?.size
+        let width = imageSize.map { Int($0.width) }
+        let height = imageSize.map { Int($0.height) }
+
+        var buildingValue = selectedBuilding.trimmingCharacters(in: .whitespacesAndNewlines)
+        var elevationValue = CanonicalElevation.normalize(elevation) ?? elevation
+        var detailTypeValue = currentDetailType.trimmingCharacters(in: .whitespacesAndNewlines)
+        var angleIndexValue = 1
+        var isGuided = isGuidedHint
+        var isFlagged = isFlaggedHint
+        var issueID = issueIDHint
+        var noteValue = noteText.isEmpty ? nil : noteText
+
+        if let guided = guidedShots.first(where: { $0.shot?.id == shot.id }) {
+            let guidedBuilding = guided.building?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let guidedElevation = CanonicalElevation.normalize(guided.targetElevation) ?? ""
+            let guidedDetail = guided.detailType?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            if !guidedBuilding.isEmpty { buildingValue = guidedBuilding }
+            if !guidedElevation.isEmpty { elevationValue = guidedElevation }
+            if !guidedDetail.isEmpty { detailTypeValue = guidedDetail }
+            angleIndexValue = max(1, guided.angleIndex ?? 1)
+            isGuided = true
+        }
+
+        if let propertyObservations = try? localStore.fetchObservations(propertyID: propertyID),
+           let observation = propertyObservations.first(where: { obs in
+               obs.linkedShotID == shot.id || obs.shots.contains(where: { $0.id == shot.id })
+           }) {
+            isFlagged = true
+            issueID = observation.id
+            let obsBuilding = observation.building?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let obsElevation = CanonicalElevation.normalize(observation.targetElevation) ?? ""
+            let obsDetail = observation.detailType?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            if !obsBuilding.isEmpty { buildingValue = obsBuilding }
+            if !obsElevation.isEmpty { elevationValue = obsElevation }
+            if !obsDetail.isEmpty { detailTypeValue = obsDetail }
+            if noteValue == nil || noteValue?.isEmpty == true {
+                let obsNote = observation.note?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                noteValue = obsNote.isEmpty ? nil : obsNote
+            }
+        }
+
+        let localIdentifier = shot.imageLocalIdentifier?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let originalFilename = localIdentifier.isEmpty ? "\(shot.id.uuidString).jpg" : localIdentifier
+
+        let metadata = ShotMetadata(
+            shotID: shot.id,
+            propertyID: propertyID,
+            sessionID: session.id,
+            createdAt: shot.capturedAt,
+            building: buildingValue,
+            elevation: elevationValue,
+            detailType: detailTypeValue,
+            angleIndex: max(1, angleIndexValue),
+            isGuided: isGuided,
+            isFlagged: isFlagged,
+            issueID: issueID,
+            noteText: noteValue,
+            originalFilename: originalFilename,
+            stampedFilename: nil,
+            imageWidth: width,
+            imageHeight: height
+        )
+
+        do {
+            try localStore.upsertShotMetadata(metadata)
+        } catch {
+            print("Recoverable shot metadata persistence failure: \(error)")
         }
     }
 
@@ -6087,14 +6221,18 @@ extension ContentView {
     }
 
     private func sessionExportZipFilename() -> String {
-        let trimmedAlbum = reportLibrary.albumTitle.trimmingCharacters(in: .whitespacesAndNewlines)
-        let safeAlbum = trimmedAlbum.isEmpty
+        let propertyName = appState.selectedProperty?.name ?? reportLibrary.albumTitle
+        let trimmedName = propertyName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let safeName = trimmedName.isEmpty
             ? "ScoutCapture-Export"
-            : trimmedAlbum.replacingOccurrences(of: "/", with: "-")
-        let formatter = DateFormatter()
-        formatter.dateFormat = "yyyyMMdd-HHmmss"
-        let timestamp = formatter.string(from: Date())
-        return "\(safeAlbum)-\(timestamp).zip"
+            : trimmedName
+                .replacingOccurrences(of: "/", with: "-")
+                .replacingOccurrences(of: ":", with: "-")
+                .replacingOccurrences(of: "\n", with: " ")
+                .replacingOccurrences(of: "\t", with: " ")
+        let propertyPrefix = String((appState.selectedProperty?.id.uuidString ?? "unknown").prefix(8))
+        let sessionPrefix = String((appState.currentSession?.id.uuidString ?? UUID().uuidString).prefix(8))
+        return "\(safeName)_\(propertyPrefix)_\(sessionPrefix).zip"
     }
 
     private func buildSessionExportZipData(entries: [(path: String, data: Data)]) -> Data {
@@ -7856,14 +7994,18 @@ extension ContentView {
         }
         
         private func exportZipFilename() -> String {
-            let trimmedAlbum = reportLibrary.albumTitle.trimmingCharacters(in: .whitespacesAndNewlines)
-            let safeAlbum = trimmedAlbum.isEmpty
+            let propertyName = appState.selectedProperty?.name ?? reportLibrary.albumTitle
+            let trimmedName = propertyName.trimmingCharacters(in: .whitespacesAndNewlines)
+            let safeName = trimmedName.isEmpty
                 ? "ScoutCapture-Export"
-                : trimmedAlbum.replacingOccurrences(of: "/", with: "-")
-            let formatter = DateFormatter()
-            formatter.dateFormat = "yyyyMMdd-HHmmss"
-            let timestamp = formatter.string(from: Date())
-            return "\(safeAlbum)-\(timestamp).zip"
+                : trimmedName
+                    .replacingOccurrences(of: "/", with: "-")
+                    .replacingOccurrences(of: ":", with: "-")
+                    .replacingOccurrences(of: "\n", with: " ")
+                    .replacingOccurrences(of: "\t", with: " ")
+            let propertyPrefix = String((appState.selectedProperty?.id.uuidString ?? "unknown").prefix(8))
+            let sessionPrefix = String((appState.currentSession?.id.uuidString ?? UUID().uuidString).prefix(8))
+            return "\(safeName)_\(propertyPrefix)_\(sessionPrefix).zip"
         }
         
         private func buildZipData(entries: [(path: String, data: Data)]) -> Data {

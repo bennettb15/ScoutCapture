@@ -15,9 +15,55 @@ enum CanonicalElevation {
     }
 }
 
+struct SessionMetadata: Codable {
+    var schemaVersion: Int
+    var propertyID: UUID
+    var sessionID: UUID
+    var propertyNameAtCapture: String?
+    var propertyNameAtExport: String?
+    var startedAt: Date
+    var endedAt: Date?
+    var status: Session.Status
+    var exportedAt: Date?
+    var appVersion: String
+    var deviceModel: String
+    var shots: [ShotMetadata]
+    var issues: [IssueMetadata]
+}
+
+struct ShotMetadata: Codable, Identifiable, Equatable {
+    let shotID: UUID
+    let propertyID: UUID
+    let sessionID: UUID
+    let createdAt: Date
+    var building: String
+    var elevation: String
+    var detailType: String
+    var angleIndex: Int
+    var isGuided: Bool
+    var isFlagged: Bool
+    var issueID: UUID?
+    var noteText: String?
+    var originalFilename: String
+    var stampedFilename: String?
+    var imageWidth: Int?
+    var imageHeight: Int?
+
+    var id: UUID { shotID }
+}
+
+struct IssueMetadata: Codable, Identifiable, Equatable {
+    let issueID: UUID
+    var status: Observation.Status
+    var statement: String
+
+    var id: UUID { issueID }
+}
+
 struct Property: Codable, Identifiable, Equatable {
     let id: UUID
     var clientName: String?
+    var clientPhone: String?
     var name: String
     var address: String?
     var baselineSessionID: UUID?
@@ -28,6 +74,7 @@ struct Property: Codable, Identifiable, Equatable {
     init(
         id: UUID = UUID(),
         clientName: String? = nil,
+        clientPhone: String? = nil,
         name: String,
         address: String? = nil,
         baselineSessionID: UUID? = nil,
@@ -37,6 +84,7 @@ struct Property: Codable, Identifiable, Equatable {
     ) {
         self.id = id
         self.clientName = clientName
+        self.clientPhone = clientPhone
         self.name = name
         self.address = address
         self.baselineSessionID = baselineSessionID
@@ -48,6 +96,7 @@ struct Property: Codable, Identifiable, Equatable {
     private enum CodingKeys: String, CodingKey {
         case id
         case clientName
+        case clientPhone
         case name
         case address
         case baselineSessionID
@@ -60,6 +109,7 @@ struct Property: Codable, Identifiable, Equatable {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         id = try c.decode(UUID.self, forKey: .id)
         clientName = try c.decodeIfPresent(String.self, forKey: .clientName)
+        clientPhone = try c.decodeIfPresent(String.self, forKey: .clientPhone)
         name = try c.decode(String.self, forKey: .name)
         address = try c.decodeIfPresent(String.self, forKey: .address)
         baselineSessionID = try c.decodeIfPresent(UUID.self, forKey: .baselineSessionID)
@@ -72,6 +122,7 @@ struct Property: Codable, Identifiable, Equatable {
         var c = encoder.container(keyedBy: CodingKeys.self)
         try c.encode(id, forKey: .id)
         try c.encodeIfPresent(clientName, forKey: .clientName)
+        try c.encodeIfPresent(clientPhone, forKey: .clientPhone)
         try c.encode(name, forKey: .name)
         try c.encodeIfPresent(address, forKey: .address)
         try c.encodeIfPresent(baselineSessionID, forKey: .baselineSessionID)

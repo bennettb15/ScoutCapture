@@ -100,6 +100,7 @@ struct SessionHubView: View {
     @State private var showArchivedProperties: Bool = false
     @State private var propertyToArchive: Property? = nil
     @State private var propertyToDelete: Property? = nil
+    @State private var editContactProperty: Property? = nil
     @State private var manageSessionsProperty: Property? = nil
     @State private var pendingExportPromptSession: Session? = nil
     @State private var pendingExportPromptProperty: Property? = nil
@@ -111,9 +112,12 @@ struct SessionHubView: View {
     @State private var mapLookupPropertyID: UUID? = nil
     @State private var showMapsErrorToast: Bool = false
     @State private var mapsErrorToastToken: Int = 0
+    @State private var showPhoneNumberErrorToast: Bool = false
+    @State private var phoneErrorToastToken: Int = 0
     @State private var isSearchExpanded: Bool = false
     @State private var searchQuery: String = ""
     @FocusState private var isSearchFieldFocused: Bool
+    @State private var propertyListFilter: PropertyListFilter = .all
 #if DEBUG
     @State private var showDebugTools: Bool = false
 #endif
@@ -122,6 +126,12 @@ struct SessionHubView: View {
 
     private enum HubRoute: Hashable {
         case propertySession(propertyID: UUID, resumeDraft: Bool)
+    }
+
+    private enum PropertyListFilter {
+        case all
+        case drafts
+        case pendingExport
     }
 
     private struct PendingExportFile: Identifiable {
@@ -182,11 +192,15 @@ struct SessionHubView: View {
     }
 
     private var filteredActiveProperties: [Property] {
-        activeProperties.filter(matchesSearch(_:))
+        activeProperties
+            .filter(matchesSearch(_:))
+            .filter(matchesPropertyFilter(_:))
     }
 
     private var filteredArchivedProperties: [Property] {
-        archivedProperties.filter(matchesSearch(_:))
+        archivedProperties
+            .filter(matchesSearch(_:))
+            .filter(matchesPropertyFilter(_:))
     }
 
     private var isCompactSearchMode: Bool {
@@ -257,6 +271,10 @@ struct SessionHubView: View {
             }
             .sheet(item: $manageSessionsProperty) { property in
                 PropertySessionsManagerView(property: property)
+                    .environmentObject(appState)
+            }
+            .sheet(item: $editContactProperty) { property in
+                EditContactSheet(property: property)
                     .environmentObject(appState)
             }
             .sheet(item: $pendingExportFile) { file in
@@ -337,20 +355,13 @@ struct SessionHubView: View {
                 }
             }
             .overlay(alignment: .top) {
-                if showMapsErrorToast {
-                    Text("Unable to open Maps for this address.")
-                        .font(.system(size: 14, weight: .medium))
-                        .foregroundColor(.white)
-                        .padding(.horizontal, 14)
-                        .padding(.vertical, 10)
-                        .background(Color.black.opacity(0.78))
-                        .clipShape(Capsule())
-                        .overlay(
-                            Capsule()
-                                .stroke(Color.white.opacity(0.18), lineWidth: 1)
-                        )
-                        .padding(.top, 10)
-                        .transition(.opacity)
+                VStack(spacing: 8) {
+                    if showMapsErrorToast {
+                        toastCapsule("Unable to open Maps for this address.")
+                    }
+                    if showPhoneNumberErrorToast {
+                        toastCapsule("No phone number on file")
+                    }
                 }
             }
         }
@@ -404,11 +415,19 @@ struct SessionHubView: View {
                         if hasPendingExport {
                             chipLabel("Pending Export", tint: .blue)
                         }
+                    }
+                }
 
+                if isEditMode || (!isEditMode && (hasMapsButton || hasValidPhoneNumber(property))) {
+                    Spacer(minLength: 0)
+                    HStack(spacing: 8) {
                         if isEditMode {
                             Menu {
                                 Button("Manage Sessions") {
                                     manageSessionsProperty = property
+                                }
+                                Button("Edit Contact") {
+                                    editContactProperty = property
                                 }
                                 if property.isArchived {
                                     Button("Unarchive Property") {
@@ -423,35 +442,72 @@ struct SessionHubView: View {
                                     requestDeleteProperty(property)
                                 }
                             } label: {
-                                Image(systemName: "ellipsis.circle")
-                                    .font(.system(size: 18, weight: .semibold))
-                                    .foregroundColor(.white.opacity(0.82))
-                                    .frame(width: 28, height: 28)
+                                Image(systemName: "ellipsis")
+                                    .font(.system(size: 12, weight: .bold))
+                                    .foregroundColor(.white)
+                                    .frame(width: 26, height: 26)
+                                    .background(Color.white.opacity(0.16))
+                                    .clipShape(Circle())
+                                    .overlay(
+                                        Circle()
+                                            .stroke(Color.white.opacity(0.28), lineWidth: 1)
+                                    )
+                            }
+                            .buttonStyle(.plain)
+                        } else if hasValidPhoneNumber(property) {
+                            Button {
+                                triggerPhoneAction(.call, for: property)
+                            } label: {
+                                Image(systemName: "phone.fill")
+                                    .font(.system(size: 12, weight: .bold))
+                                    .foregroundColor(.white)
+                                    .frame(width: 26, height: 26)
+                                    .background(Color.green)
+                                    .clipShape(Circle())
+                                    .overlay(
+                                        Circle()
+                                            .stroke(Color.green.opacity(0.92), lineWidth: 1)
+                                    )
+                            }
+                            .buttonStyle(.plain)
+
+                            Button {
+                                triggerPhoneAction(.message, for: property)
+                            } label: {
+                                Image(systemName: "message.fill")
+                                    .font(.system(size: 12, weight: .bold))
+                                    .foregroundColor(.white)
+                                    .frame(width: 26, height: 26)
+                                    .background(Color.green)
+                                    .clipShape(Circle())
+                                    .overlay(
+                                        Circle()
+                                            .stroke(Color.green.opacity(0.92), lineWidth: 1)
+                                    )
                             }
                             .buttonStyle(.plain)
                         }
-                    }
-                }
 
-                if hasMapsButton {
-                    Spacer(minLength: 0)
-                    Button {
-                        openMaps(for: property)
-                    } label: {
-                        Image(systemName: "arrow.turn.up.right")
-                            .font(.system(size: 12, weight: .bold))
-                            .foregroundColor(.white)
-                            .frame(width: 26, height: 26)
-                            .background(Color.blue)
-                            .clipShape(Circle())
-                            .overlay(
-                                Circle()
-                                    .stroke(Color.blue.opacity(0.92), lineWidth: 1)
-                            )
+                        if !isEditMode && hasMapsButton {
+                            Button {
+                                openMaps(for: property)
+                            } label: {
+                                Image(systemName: "arrow.turn.up.right")
+                                    .font(.system(size: 12, weight: .bold))
+                                    .foregroundColor(.white)
+                                    .frame(width: 26, height: 26)
+                                    .background(Color.blue)
+                                    .clipShape(Circle())
+                                    .overlay(
+                                        Circle()
+                                            .stroke(Color.blue.opacity(0.92), lineWidth: 1)
+                                    )
+                            }
+                            .buttonStyle(.plain)
+                            .disabled(mapLookupPropertyID == property.id)
+                            .opacity(mapLookupPropertyID == property.id ? 0.6 : 1.0)
+                        }
                     }
-                    .buttonStyle(.plain)
-                    .disabled(mapLookupPropertyID == property.id)
-                    .opacity(mapLookupPropertyID == property.id ? 0.6 : 1.0)
                 }
             }
             .frame(minHeight: (addressLine != nil ? (clientLine != nil ? 58 : 40) : 24), alignment: .top)
@@ -488,6 +544,11 @@ struct SessionHubView: View {
             .replacingOccurrences(of: ", United States", with: "", options: [.caseInsensitive, .anchored, .backwards], range: nil)
             .trimmingCharacters(in: .whitespacesAndNewlines)
         return cleaned.isEmpty ? nil : cleaned
+    }
+
+    private func hasValidPhoneNumber(_ property: Property) -> Bool {
+        let digits = (property.clientPhone ?? "").filter(\.isNumber)
+        return digits.count >= 7
     }
 
     private func openMaps(for property: Property) {
@@ -548,6 +609,59 @@ struct SessionHubView: View {
         }
     }
 
+    private enum PhoneQuickAction {
+        case call
+        case message
+    }
+
+    private func triggerPhoneAction(_ action: PhoneQuickAction, for property: Property) {
+        let digits = (property.clientPhone ?? "").filter(\.isNumber)
+        guard digits.count >= 7 else {
+            showPhoneNumberErrorToastNow()
+            return
+        }
+
+        let scheme: String
+        switch action {
+        case .call:
+            scheme = "tel://\(digits)"
+        case .message:
+            scheme = "sms://\(digits)"
+        }
+        guard let url = URL(string: scheme), UIApplication.shared.canOpenURL(url) else {
+            showPhoneNumberErrorToastNow()
+            return
+        }
+        UIApplication.shared.open(url)
+    }
+
+    private func showPhoneNumberErrorToastNow() {
+        phoneErrorToastToken += 1
+        let token = phoneErrorToastToken
+        showPhoneNumberErrorToast = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.8) {
+            guard token == phoneErrorToastToken else { return }
+            showPhoneNumberErrorToast = false
+        }
+    }
+
+    @ViewBuilder
+    private func toastCapsule(_ text: String) -> some View {
+        Text(text)
+            .font(.system(size: 14, weight: .medium))
+            .foregroundColor(.white)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 10)
+            .background(Color.black.opacity(0.78))
+            .clipShape(Capsule())
+            .overlay(
+                Capsule()
+                    .stroke(Color.white.opacity(0.18), lineWidth: 1)
+            )
+            .padding(.top, 10)
+            .transition(.opacity)
+    }
+
     @ViewBuilder
     private func chipLabel(_ text: String, tint: Color) -> some View {
         Text(text)
@@ -567,15 +681,18 @@ struct SessionHubView: View {
         VStack(spacing: 12) {
             ZStack {
                 HStack {
-                    customCapsuleToolbarButton(title: isEditMode ? "Done" : "Edit", isEnabled: true) {
+                    Spacer(minLength: 0)
+                    customCapsuleToolbarButton(
+                        title: isEditMode ? "Done" : "Edit",
+                        isEnabled: true,
+                        fill: isEditMode ? .blue : nil,
+                        stroke: isEditMode ? .blue.opacity(0.9) : nil,
+                        label: isEditMode ? .white : nil
+                    ) {
                         isEditMode.toggle()
                         if !isEditMode {
                             showArchivedProperties = false
                         }
-                    }
-                    Spacer(minLength: 8)
-                    customCapsuleToolbarButton(title: "Add", isEnabled: true) {
-                        showAddProperty = true
                     }
                 }
 
@@ -598,8 +715,22 @@ struct SessionHubView: View {
                     .foregroundColor(.primary)
 
                 HStack(spacing: 12) {
-                    counterCard(title: "Drafts", value: draftCount, tint: .orange)
-                    counterCard(title: "Pending Export", value: pendingExportCount, tint: .blue)
+                    counterCard(
+                        title: "Drafts",
+                        value: draftCount,
+                        tint: .orange,
+                        isActive: propertyListFilter == .drafts
+                    ) {
+                        togglePropertyFilter(.drafts)
+                    }
+                    counterCard(
+                        title: "Pending Export",
+                        value: pendingExportCount,
+                        tint: .blue,
+                        isActive: propertyListFilter == .pendingExport
+                    ) {
+                        togglePropertyFilter(.pendingExport)
+                    }
                 }
                 
                 HStack(spacing: 8) {
@@ -676,6 +807,8 @@ struct SessionHubView: View {
                 }
                 .font(.system(size: 14, weight: .medium))
                 .foregroundColor(.secondary)
+
+                addCircleButton
             } else {
                 Button {
                     withAnimation(.easeInOut(duration: 0.18)) {
@@ -698,8 +831,29 @@ struct SessionHubView: View {
                 }
                 .buttonStyle(.plain)
                 .transition(.scale.combined(with: .opacity))
+
+                addCircleButton
             }
         }
+    }
+
+    @ViewBuilder
+    private var addCircleButton: some View {
+        Button {
+            showAddProperty = true
+        } label: {
+            Image(systemName: "plus")
+                .font(.system(size: 14, weight: .bold))
+                .foregroundColor(buttonLabel)
+                .frame(width: 34, height: 34)
+                .background(buttonFill)
+                .clipShape(Circle())
+                .overlay(
+                    Circle()
+                        .stroke(buttonStroke, lineWidth: 1)
+                )
+        }
+        .buttonStyle(.plain)
     }
 
     private func collapseSearch() {
@@ -708,6 +862,33 @@ struct SessionHubView: View {
             searchQuery = ""
         }
         isSearchFieldFocused = false
+    }
+
+    private func togglePropertyFilter(_ filter: PropertyListFilter) {
+        if propertyListFilter == filter {
+            propertyListFilter = .all
+        } else {
+            propertyListFilter = filter
+        }
+    }
+
+    private func propertyHasDraft(_ property: Property) -> Bool {
+        appState.draftSession(for: property.id) != nil
+    }
+
+    private func propertyHasPendingExport(_ property: Property) -> Bool {
+        appState.sessions(for: property.id).contains(where: { $0.status == .completed && $0.exportedAt == nil })
+    }
+
+    private func matchesPropertyFilter(_ property: Property) -> Bool {
+        switch propertyListFilter {
+        case .all:
+            return true
+        case .drafts:
+            return propertyHasDraft(property)
+        case .pendingExport:
+            return propertyHasPendingExport(property)
+        }
     }
 
     @ViewBuilder
@@ -738,20 +919,33 @@ struct SessionHubView: View {
     }
 
     @ViewBuilder
-    private func counterCard(title: String, value: Int, tint: Color) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text(title)
-                .font(.system(size: 13, weight: .medium))
-                .foregroundColor(headerPrimaryLabel)
-            Text("\(value)")
-                .font(.system(size: 24, weight: .bold))
-                .foregroundColor(tint)
+    private func counterCard(
+        title: String,
+        value: Int,
+        tint: Color,
+        isActive: Bool,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(title)
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundColor(isActive ? .white : headerPrimaryLabel)
+                Text("\(value)")
+                    .font(.system(size: 24, weight: .bold))
+                    .foregroundColor(isActive ? .white : tint)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
+            .background(isActive ? tint.opacity(0.86) : Color(uiColor: .secondarySystemBackground))
+            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .stroke(isActive ? tint : Color.clear, lineWidth: 1)
+            )
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.horizontal, 12)
-        .padding(.vertical, 10)
-        .background(Color(uiColor: .secondarySystemBackground))
-        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .buttonStyle(.plain)
     }
 
     @ViewBuilder
@@ -1109,13 +1303,21 @@ struct SessionHubView: View {
     }
 
     private func exportZipFilename(for property: Property, session: Session) -> String {
-        let safeProperty = property.name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let safeProperty = sanitizedExportName(property.name, fallback: "ScoutCapture-Export")
+        let propertyPrefix = String(property.id.uuidString.prefix(8))
+        let sessionPrefix = String(session.id.uuidString.prefix(8))
+        return "\(safeProperty)_\(propertyPrefix)_\(sessionPrefix).zip"
+    }
+
+    private func sanitizedExportName(_ raw: String, fallback: String) -> String {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        let cleaned = trimmed
             .replacingOccurrences(of: "/", with: "-")
-        let fallbackProperty = safeProperty.isEmpty ? "ScoutCapture-Export" : safeProperty
-        let formatter = DateFormatter()
-        formatter.dateFormat = "yyyyMMdd-HHmmss"
-        let timestamp = formatter.string(from: session.startedAt)
-        return "\(fallbackProperty)-\(timestamp).zip"
+            .replacingOccurrences(of: ":", with: "-")
+            .replacingOccurrences(of: "\n", with: " ")
+            .replacingOccurrences(of: "\t", with: " ")
+        let compact = cleaned.replacingOccurrences(of: "  ", with: " ")
+        return compact.isEmpty ? fallback : compact
     }
 
     private func buildZipData(entries: [(path: String, data: Data)]) -> Data {
@@ -1296,6 +1498,7 @@ private struct HubAddPropertySheet: View {
     @Environment(\.colorScheme) private var colorScheme
     
     @State private var clientName: String = ""
+    @State private var clientPhone: String = ""
     @State private var propertyName: String = ""
     @State private var streetAddress: String = ""
     @State private var city: String = ""
@@ -1385,6 +1588,16 @@ private struct HubAddPropertySheet: View {
                         .submitLabel(.next)
                         .onSubmit {
                             focusedField = .propertyName
+                        }
+
+                    TextField("Phone (optional)", text: $clientPhone)
+                        .keyboardType(.phonePad)
+                        .onChange(of: clientPhone) { _, newValue in
+                            let filtered = newValue.filter(\.isNumber)
+                            let limited = String(filtered.prefix(15))
+                            if limited != clientPhone {
+                                clientPhone = limited
+                            }
                         }
                 }
 
@@ -1552,7 +1765,8 @@ private struct HubAddPropertySheet: View {
         let created = appState.createProperty(
             clientName: clientName,
             propertyName: propertyName,
-            address: addressForStorage
+            address: addressForStorage,
+            clientPhone: clientPhone
         )
         if let created {
             appState.selectProperty(id: created.id)
@@ -1637,6 +1851,252 @@ private struct HubAddPropertySheet: View {
             .joined(separator: ", ")
     }
     
+    @ViewBuilder
+    private func customCapsuleButton(
+        title: String,
+        isEnabled: Bool,
+        fill: Color? = nil,
+        stroke: Color? = nil,
+        label: Color? = nil,
+        action: @escaping () -> Void
+    ) -> some View {
+        let resolvedFill = fill ?? buttonFill
+        let resolvedStroke = stroke ?? buttonStroke
+        let resolvedLabel = label ?? buttonLabel
+
+        Button(action: action) {
+            Text(title)
+                .font(.system(size: 17, weight: .medium))
+                .foregroundColor(isEnabled ? resolvedLabel : resolvedLabel.opacity(0.45))
+                .frame(minHeight: 42)
+                .padding(.horizontal, 14)
+                .background(resolvedFill)
+                .clipShape(Capsule())
+                .overlay(
+                    Capsule()
+                        .stroke(resolvedStroke, lineWidth: 1)
+                )
+        }
+        .buttonStyle(.plain)
+        .disabled(!isEnabled)
+    }
+}
+
+private struct EditContactSheet: View {
+    @EnvironmentObject private var appState: AppState
+    @Environment(\.dismiss) private var dismiss
+    @Environment(\.colorScheme) private var colorScheme
+
+    let property: Property
+
+    @State private var propertyName: String = ""
+    @State private var clientName: String = ""
+    @State private var streetAddress: String = ""
+    @State private var city: String = ""
+    @State private var state: String = ""
+    @State private var zipCode: String = ""
+    @State private var phoneInput: String = ""
+    @State private var showPendingExportRenameConfirm: Bool = false
+
+    private var buttonFill: Color {
+        colorScheme == .light ? Color.white.opacity(0.90) : Color.black.opacity(0.55)
+    }
+
+    private var buttonStroke: Color {
+        colorScheme == .light ? Color.black.opacity(0.14) : Color.white.opacity(0.28)
+    }
+
+    private var buttonLabel: Color {
+        colorScheme == .light ? Color.black.opacity(0.88) : .white
+    }
+
+    private var primaryButtonFill: Color { .blue }
+    private var primaryButtonStroke: Color { .blue.opacity(0.85) }
+    private var primaryButtonLabel: Color { .white }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 10) {
+                customCapsuleButton(title: "Cancel", isEnabled: true) {
+                    dismiss()
+                }
+
+                Spacer(minLength: 0)
+
+                Text("Edit Contact")
+                    .font(.system(size: 18, weight: .semibold))
+                    .foregroundColor(buttonLabel)
+
+                Spacer(minLength: 0)
+
+                customCapsuleButton(
+                    title: "Save",
+                    isEnabled: true,
+                    fill: primaryButtonFill,
+                    stroke: primaryButtonStroke,
+                    label: primaryButtonLabel
+                ) {
+                    saveChanges()
+                }
+            }
+            .padding(.horizontal, 14)
+            .padding(.top, 10)
+            .padding(.bottom, 8)
+            .background(Color(uiColor: .systemBackground))
+
+            Form {
+                Section("Client") {
+                    TextField("Client name", text: $clientName)
+                        .textInputAutocapitalization(.words)
+
+                    TextField("Phone (optional)", text: $phoneInput)
+                        .keyboardType(.phonePad)
+                        .onChange(of: phoneInput) { _, newValue in
+                            let digits = newValue.filter(\.isNumber)
+                            let limited = String(digits.prefix(15))
+                            let formatted = formatPhoneDisplay(limited)
+                            if formatted != phoneInput {
+                                phoneInput = formatted
+                            }
+                        }
+                }
+
+                Section("Property") {
+                    TextField("Property name", text: $propertyName)
+                        .textInputAutocapitalization(.words)
+
+                    TextField("Address", text: $streetAddress)
+                        .textInputAutocapitalization(.words)
+
+                    TextField("City", text: $city)
+                        .textInputAutocapitalization(.words)
+
+                    TextField("State", text: $state)
+                        .textInputAutocapitalization(.characters)
+                        .onChange(of: state) { _, newValue in
+                            let filtered = newValue.uppercased().filter(\.isLetter)
+                            let limited = String(filtered.prefix(2))
+                            if limited != state {
+                                state = limited
+                            }
+                        }
+
+                    TextField("Zip Code", text: $zipCode)
+                        .keyboardType(.numberPad)
+                        .onChange(of: zipCode) { _, newValue in
+                            let filtered = newValue.filter(\.isNumber)
+                            let limited = String(filtered.prefix(5))
+                            if limited != zipCode {
+                                zipCode = limited
+                            }
+                        }
+                }
+            }
+            .scrollContentBackground(.hidden)
+            .background(Color(uiColor: .systemBackground))
+        }
+        .ignoresSafeArea(edges: .bottom)
+        .onAppear {
+            loadFromProperty()
+        }
+        .alert("Rename Pending Export Property?", isPresented: $showPendingExportRenameConfirm) {
+            Button("Continue") {
+                persistChanges()
+            }
+            Button("Cancel", role: .cancel) { }
+        } message: {
+            Text("This property has pending exports. Export filenames will use the updated property name.")
+        }
+    }
+
+    private var composedAddress: String {
+        let trimmedStreet = streetAddress.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedCity = city.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedState = state.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+        let trimmedZip = zipCode.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        let stateZip = [trimmedState, trimmedZip]
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
+
+        return [trimmedStreet, trimmedCity, stateZip]
+            .filter { !$0.isEmpty }
+            .joined(separator: ", ")
+    }
+
+    private func saveChanges() {
+        if shouldConfirmPendingExportRename() {
+            showPendingExportRenameConfirm = true
+            return
+        }
+        persistChanges()
+    }
+
+    private func persistChanges() {
+        let digits = phoneInput.filter(\.isNumber)
+        _ = appState.updatePropertyContact(
+            id: property.id,
+            propertyName: propertyName,
+            clientName: clientName,
+            address: composedAddress,
+            clientPhone: digits
+        )
+        dismiss()
+    }
+
+    private func shouldConfirmPendingExportRename() -> Bool {
+        let trimmedOriginal = property.name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedUpdated = propertyName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedUpdated.isEmpty, trimmedUpdated != trimmedOriginal else { return false }
+        return appState.sessions(for: property.id).contains(where: { $0.status == .completed && $0.exportedAt == nil })
+    }
+
+    private func loadFromProperty() {
+        propertyName = property.name
+        clientName = property.clientName ?? ""
+        let parsed = parseAddress(property.address)
+        streetAddress = parsed.street
+        city = parsed.city
+        state = parsed.state
+        zipCode = parsed.zip
+        phoneInput = formatPhoneDisplay((property.clientPhone ?? "").filter(\.isNumber))
+    }
+
+    private func parseAddress(_ raw: String?) -> (street: String, city: String, state: String, zip: String) {
+        let cleaned = (raw ?? "")
+            .replacingOccurrences(of: ", United States", with: "", options: [.caseInsensitive, .anchored, .backwards], range: nil)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleaned.isEmpty else { return ("", "", "", "") }
+
+        let parts = cleaned
+            .split(separator: ",")
+            .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
+
+        let street = parts.first ?? ""
+        let city = parts.count > 1 ? parts[1] : ""
+        let stateZip = parts.count > 2 ? parts[2] : ""
+        let tokens = stateZip.split(separator: " ").map(String.init)
+        let state = tokens.first.map { String($0.uppercased().prefix(2)) } ?? ""
+        let zip = tokens.dropFirst().joined(separator: "").filter(\.isNumber)
+        return (street, city, state, String(zip.prefix(5)))
+    }
+
+    private func formatPhoneDisplay(_ digits: String) -> String {
+        if digits.count <= 3 { return digits }
+        if digits.count <= 6 {
+            let area = digits.prefix(3)
+            let rest = digits.dropFirst(3)
+            return "(\(area)) \(rest)"
+        }
+        if digits.count <= 10 {
+            let area = digits.prefix(3)
+            let mid = digits.dropFirst(3).prefix(3)
+            let end = digits.dropFirst(6)
+            return "(\(area)) \(mid)-\(end)"
+        }
+        return digits
+    }
+
     @ViewBuilder
     private func customCapsuleButton(
         title: String,
@@ -1783,17 +2243,20 @@ private struct AddressAutocompleteComponents {
             .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
 
-        let streetCandidate = lines.first ?? fallbackParts.first ?? Self.completionSafeText(mapItem.name)
+        let streetCandidate = Self.extractStreet(from: rawAddress, lines: lines, fallbackParts: fallbackParts, mapItemName: mapItem.name)
         street = streetCandidate
 
-        let contextLine = lines.dropFirst().first ?? mapItem.addressRepresentations?.cityWithContext ?? ""
+        let contextLine = lines.dropFirst().first
+            ?? mapItem.addressRepresentations?.cityWithContext
+            ?? (fallbackParts.count > 1 ? fallbackParts[1] : "")
         let parsedCityState = Self.parseCityState(from: contextLine)
-        let cityFromLine = parsedCityState.city
+        let cityFromLine = parsedCityState.city.isEmpty && fallbackParts.count > 1 ? fallbackParts[1] : parsedCityState.city
         let stateFromLine = parsedCityState.state
         city = cityFromLine
 
         state = String(stateFromLine.uppercased().filter(\.isLetter).prefix(2))
-        let extractedZip = Self.extractZip(from: rawAddress)
+        let postalCodeHint: String? = nil
+        let extractedZip = Self.extractZip(from: rawAddress, postalCodeHint: postalCodeHint)
         zip = String(extractedZip.filter(\.isNumber).prefix(5))
 
         let stateZip = [state, zip]
@@ -1820,12 +2283,59 @@ private struct AddressAutocompleteComponents {
         return (city, state)
     }
 
-    private static func extractZip(from text: String) -> String {
+    private static func extractStreet(
+        from rawAddress: String,
+        lines: [String],
+        fallbackParts: [String],
+        mapItemName: String?
+    ) -> String {
+        let singleLine = lines.first ?? fallbackParts.first ?? rawAddress
+        let trimmed = singleLine.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty {
+            return completionSafeText(mapItemName)
+        }
+
+        if let firstComma = trimmed.firstIndex(of: ",") {
+            let candidate = String(trimmed[..<firstComma]).trimmingCharacters(in: .whitespacesAndNewlines)
+            if !candidate.isEmpty {
+                return candidate
+            }
+        }
+
+        if let regex = try? NSRegularExpression(pattern: #"^(.+?),\s*[^,]+,\s*[A-Z]{2}\s+\d{5}(?:-\d{4})?(?:,\s*.*)?$"#) {
+            let range = NSRange(trimmed.startIndex..<trimmed.endIndex, in: trimmed)
+            if let match = regex.firstMatch(in: trimmed, options: [], range: range),
+               match.numberOfRanges > 1,
+               let streetRange = Range(match.range(at: 1), in: trimmed) {
+                return String(trimmed[streetRange]).trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+        }
+
+        return trimmed
+    }
+
+    private static func extractZip(from text: String, postalCodeHint: String?) -> String {
+        let hinted = (postalCodeHint ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        if !hinted.isEmpty {
+            return hinted
+        }
+
+        if let stateZipRegex = try? NSRegularExpression(pattern: #"\b[A-Z]{2}\s+(\d{5}(?:-\d{4})?)\b"#) {
+            let uppercaseText = text.uppercased()
+            let range = NSRange(uppercaseText.startIndex..<uppercaseText.endIndex, in: uppercaseText)
+            if let match = stateZipRegex.firstMatch(in: uppercaseText, options: [], range: range),
+               match.numberOfRanges > 1,
+               let zipRange = Range(match.range(at: 1), in: uppercaseText) {
+                return String(uppercaseText[zipRange])
+            }
+        }
+
         guard let regex = try? NSRegularExpression(pattern: #"\b\d{5}(?:-\d{4})?\b"#) else {
             return ""
         }
         let range = NSRange(text.startIndex..<text.endIndex, in: text)
-        guard let match = regex.firstMatch(in: text, options: [], range: range),
+        let matches = regex.matches(in: text, options: [], range: range)
+        guard let match = matches.last,
               let zipRange = Range(match.range, in: text) else {
             return ""
         }
