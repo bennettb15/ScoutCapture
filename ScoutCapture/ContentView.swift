@@ -3832,15 +3832,19 @@ struct ContentView: View {
             let rowPadding: CGFloat = 16
             let controlH: CGFloat = 44
             let gap: CGFloat = 8
+            let titleFontSize: CGFloat = isLandscapeUI ? 25 : 30
+            let titleSideInset: CGFloat = isLandscapeUI ? 98 : 108
 
             VStack(spacing: 10) {
                 VStack(spacing: 2) {
                     Text(headerPropertyName)
-                        .font(.system(size: 30, weight: .medium))
+                        .font(.system(size: titleFontSize, weight: .medium))
                         .tracking(0.4)
                         .foregroundColor(.white)
                         .lineLimit(1)
-                        .minimumScaleFactor(0.72)
+                        .minimumScaleFactor(0.54)
+                        .truncationMode(.tail)
+                        .padding(.horizontal, titleSideInset)
                         .frame(maxWidth: .infinity, alignment: .center)
                         .overlay {
                             HStack(spacing: 0) {

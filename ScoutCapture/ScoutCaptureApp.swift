@@ -2102,6 +2102,7 @@ private struct HubAddPropertySheet: View {
             Form {
                 Section("Client") {
                     TextField("Client name", text: $clientName)
+                        .textInputAutocapitalization(.words)
                         .focused($focusedField, equals: .clientName)
                         .submitLabel(.next)
                         .onSubmit {
