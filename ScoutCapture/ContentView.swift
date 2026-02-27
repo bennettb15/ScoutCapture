@@ -2449,6 +2449,7 @@ struct ContentView: View {
     @State private var showGuidedChecklist: Bool = false
     @State private var guidedShots: [GuidedShot] = []
     @State private var guidedResolvedThumbnailPathByID: [UUID: String] = [:]
+    @State private var flaggedResolvedThumbnailPathByID: [UUID: String] = [:]
     @State private var guidedThumbnailRefreshToken: UUID = UUID()
     @State private var gridThumbnailRefreshToken: UUID = UUID()
     @State private var armedGuidedShotID: UUID? = nil
@@ -2633,6 +2634,115 @@ struct ContentView: View {
         }
         cache[sessionID] = loaded
         return loaded
+    }
+
+    private func shotMetadataMatchKind(
+        _ shot: ShotMetadata,
+        observation: Observation,
+        observationShotIDs: Set<UUID>
+    ) -> String? {
+        if let issueID = shot.issueID, issueID == observation.id {
+            return "issueID"
+        }
+        if observationShotIDs.contains(shot.shotID) {
+            return "shotID"
+        }
+        return nil
+    }
+
+    private func resolveFlaggedThumbnailForDisplay(
+        propertyID: UUID,
+        currentSession: Session?,
+        baselineSessionID: UUID?,
+        observation: Observation,
+        currentSessionMetadata: SessionMetadata?,
+        orderedSessions: [Session],
+        metadataCache: inout [UUID: SessionMetadata]
+    ) -> GuidedSessionThumbnailResolution {
+        let currentSessionID = currentSession?.id
+        let target = observation.id.uuidString
+        let observationShotIDs = Set(observation.shots.map(\.id))
+
+        func mostRecentMatchingShot(
+            in metadata: SessionMetadata?
+        ) -> (shot: ShotMetadata, matchBy: String)? {
+            guard let metadata else { return nil }
+            return metadata.shots
+                .compactMap { shot -> (ShotMetadata, String)? in
+                    guard let matchBy = shotMetadataMatchKind(shot, observation: observation, observationShotIDs: observationShotIDs) else {
+                        return nil
+                    }
+                    return (shot, matchBy)
+                }
+                .sorted { lhs, rhs in
+                    lhs.0.updatedAt > rhs.0.updatedAt
+                }
+                .first
+        }
+
+        if let currentSessionID,
+           let currentMatch = mostRecentMatchingShot(in: currentSessionMetadata) {
+            let resolved = resolvedSessionImagePath(
+                for: currentMatch.shot,
+                propertyID: propertyID,
+                sessionID: currentSessionID
+            )
+            if let path = resolved.absolutePath {
+                print("[FlagThumbResolve] matchBy=\(currentMatch.matchBy) target=\(target) chosenShotID=\(currentMatch.shot.shotID.uuidString) chosenSession=\(currentSessionID.uuidString) reason=matched source=\(resolved.source) pathExists=true")
+                return GuidedSessionThumbnailResolution(source: .current, sessionID: currentSessionID, path: path, exists: true)
+            }
+        }
+
+        let priorSessions: [Session] = {
+            guard let currentSession else { return [] }
+            return orderedSessions
+                .filter { $0.id != currentSession.id && $0.startedAt < currentSession.startedAt }
+                .sorted { $0.startedAt > $1.startedAt }
+        }()
+
+        for prior in priorSessions where prior.id != baselineSessionID {
+            guard let priorMeta = metadataForSession(propertyID: propertyID, sessionID: prior.id, cache: &metadataCache),
+                  let priorMatch = mostRecentMatchingShot(in: priorMeta) else {
+                continue
+            }
+            let resolved = resolvedSessionImagePath(
+                for: priorMatch.shot,
+                propertyID: propertyID,
+                sessionID: prior.id
+            )
+            if let path = resolved.absolutePath {
+                print("[FlagThumbResolve] matchBy=\(priorMatch.matchBy) target=\(target) chosenShotID=\(priorMatch.shot.shotID.uuidString) chosenSession=\(prior.id.uuidString) reason=matched source=\(resolved.source) pathExists=true")
+                return GuidedSessionThumbnailResolution(source: .prior, sessionID: prior.id, path: path, exists: true)
+            }
+        }
+
+        if let baselineSessionID,
+           baselineSessionID != currentSessionID,
+           let baselineMeta = metadataForSession(propertyID: propertyID, sessionID: baselineSessionID, cache: &metadataCache),
+           let baselineMatch = mostRecentMatchingShot(in: baselineMeta) {
+            let resolved = resolvedSessionImagePath(
+                for: baselineMatch.shot,
+                propertyID: propertyID,
+                sessionID: baselineSessionID
+            )
+            if let path = resolved.absolutePath {
+                print("[FlagThumbResolve] matchBy=\(baselineMatch.matchBy) target=\(target) chosenShotID=\(baselineMatch.shot.shotID.uuidString) chosenSession=\(baselineSessionID.uuidString) reason=matched source=\(resolved.source) pathExists=true")
+                return GuidedSessionThumbnailResolution(source: .baseline, sessionID: baselineSessionID, path: path, exists: true)
+            }
+        }
+
+        let fallbackReference = observation.shots
+            .sorted { $0.capturedAt < $1.capturedAt }
+            .first?
+            .imageLocalIdentifier?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !fallbackReference.isEmpty, FileManager.default.fileExists(atPath: fallbackReference) {
+            print("[FlagThumbResolve] matchBy=none target=\(target) chosenShotID=NONE chosenSession=NONE reason=referenceFallback source=reference pathExists=true")
+            return GuidedSessionThumbnailResolution(source: .reference, sessionID: nil, path: fallbackReference, exists: true)
+        }
+
+        print("[FlagThumbResolve] matchBy=none target=\(target) chosenShotID=NONE chosenSession=NONE reason=noMatch source=none pathExists=false")
+        return GuidedSessionThumbnailResolution(source: .none, sessionID: nil, path: nil, exists: false)
     }
 
     private func resolveGuidedThumbnailForDisplay(
@@ -3716,6 +3826,7 @@ struct ContentView: View {
                 observations: activeObservations,
                 currentSessionID: appState.currentSession?.id,
                 sessionShotIDs: activeSessionShotIDs,
+                resolvedThumbnailPathByID: flaggedResolvedThumbnailPathByID,
                 allowReferenceFallback: shouldAllowChecklistReferenceFallback,
                 cache: imageCache,
                 onRefresh: {
@@ -5461,7 +5572,7 @@ extension ContentView {
         let sorted = observation.shots.sorted { $0.capturedAt < $1.capturedAt }
         let raw = isCaptured
             ? capturedImageLocalIdentifierForCurrentSession(observation)
-            : sorted.first?.imageLocalIdentifier
+            : (flaggedResolvedThumbnailPathByID[observation.id] ?? sorted.first?.imageLocalIdentifier)
         let trimmed = (raw ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? nil : trimmed
     }
@@ -5502,6 +5613,9 @@ extension ContentView {
         let localID: String? = {
             if isCaptured {
                 return capturedImageLocalIdentifierForCurrentSession(observation)
+            }
+            if let resolved = flaggedResolvedThumbnailPathByID[observation.id] {
+                return resolved
             }
             let sorted = observation.shots.sorted { $0.capturedAt < $1.capturedAt }
             return sorted.first?.imageLocalIdentifier
@@ -6081,14 +6195,21 @@ extension ContentView {
                                 createdObservationID = createObservationFromCapturedDetailNote(noteAtCapture, shot: shot)
                             }
                         }
+                        let captureIsGuided = didApplyGuidedShot || noteAtCapture.isEmpty
+                        let captureIsFlagged = didApplyIssueUpdate || didQueueResolution || createdObservationID != nil
+                        print(
+                            "[CaptureComplete] newShotID=\(shot.id.uuidString) " +
+                            "isGuided=\(captureIsGuided) " +
+                            "isFlagged=\(captureIsFlagged)"
+                        )
                         persistSessionMetadataForCapturedShot(
                             shot: shot,
                             imageData: data,
                             noteText: noteAtCapture,
                             isGuidedRetakeCapture: wasGuidedRetakeCapture,
                             retakeContext: activeRetakeContext,
-                            isGuidedHint: didApplyGuidedShot || noteAtCapture.isEmpty,
-                            isFlaggedHint: didApplyIssueUpdate || didQueueResolution || createdObservationID != nil,
+                            isGuidedHint: captureIsGuided,
+                            isFlaggedHint: captureIsFlagged,
                             issueIDHint: createdObservationID ?? flaggedActionTargetObservation?.id
                         )
                         refreshActiveIssues()
@@ -8224,6 +8345,7 @@ extension ContentView {
         guard let propertyID = appState.selectedPropertyID else {
             activeObservations = []
             activeSessionShotIDs = []
+            flaggedResolvedThumbnailPathByID = [:]
             carryoverIssueBadgeCount = 0
             reportLibrary.setActiveIssueCount(0)
             print("[FlaggedData] using sessionID=\(appState.currentSession?.id.uuidString ?? "NONE") flaggedCount=0 sessionShotsCount=0")
@@ -8246,6 +8368,31 @@ extension ContentView {
             activeObservations = (active + resolvedThisSession)
                 .sorted { $0.updatedAt > $1.updatedAt }
 
+            let baselineState = persistedBaselineState(propertyID: propertyID)
+            let orderedSessions = ((try? localStore.fetchSessions(propertyID: propertyID)) ?? []).sorted { $0.startedAt < $1.startedAt }
+            let currentSession = orderedSessions.first(where: { $0.id == activeSessionID }) ?? appState.currentSession
+            let currentSessionMetadata = sessionMetadataForActiveSession(propertyID: propertyID, sessionID: activeSessionID)
+            var metadataCache: [UUID: SessionMetadata] = [:]
+            if let currentSessionMetadata, let activeSessionID {
+                metadataCache[activeSessionID] = currentSessionMetadata
+            }
+            var resolvedMap: [UUID: String] = [:]
+            for observation in activeObservations {
+                let resolved = resolveFlaggedThumbnailForDisplay(
+                    propertyID: propertyID,
+                    currentSession: currentSession,
+                    baselineSessionID: baselineState.baselineSessionID,
+                    observation: observation,
+                    currentSessionMetadata: currentSessionMetadata,
+                    orderedSessions: orderedSessions,
+                    metadataCache: &metadataCache
+                )
+                if let path = resolved.path, resolved.exists {
+                    resolvedMap[observation.id] = path
+                }
+            }
+            flaggedResolvedThumbnailPathByID = resolvedMap
+
             if let currentSessionID, let currentSessionStart {
                 carryoverIssueBadgeCount = observations.filter { observation in
                     observation.status == .active &&
@@ -8264,6 +8411,7 @@ extension ContentView {
             )
         } catch {
             activeObservations = []
+            flaggedResolvedThumbnailPathByID = [:]
             carryoverIssueBadgeCount = 0
             reportLibrary.setActiveIssueCount(0)
             print(
@@ -8290,9 +8438,14 @@ extension ContentView {
         armedIssueNoteText = !note.isEmpty ? note : statement
         detailNote = armedIssueNoteText
         isArmedIssueDetailNoteReadOnly = true
-        let sortedShots = observation.shots.sorted { $0.capturedAt < $1.capturedAt }
-        let referenceLocalID = sortedShots.first?.imageLocalIdentifier
-        loadGuidedReferenceThumbnail(referencePath: nil, localIdentifier: referenceLocalID)
+        if let resolvedFlaggedPath = flaggedResolvedThumbnailPathByID[observation.id],
+           !resolvedFlaggedPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            loadGuidedReferenceThumbnail(referencePath: resolvedFlaggedPath, localIdentifier: nil)
+        } else {
+            let sortedShots = observation.shots.sorted { $0.capturedAt < $1.capturedAt }
+            let referenceLocalID = sortedShots.first?.imageLocalIdentifier
+            loadGuidedReferenceThumbnail(referencePath: nil, localIdentifier: referenceLocalID)
+        }
         showGuidedAlignmentOverlay = false
         if let building = observation.building?.trimmingCharacters(in: .whitespacesAndNewlines), !building.isEmpty {
             selectedBuilding = buildingCode(from: building)
@@ -8878,6 +9031,7 @@ extension ContentView {
         @State private var dragCurrentAssetIndex: Int? = nil
         @State private var dragAutoScrollDirection: Int = 0
         @State private var dragAutoScrollWorkItem: DispatchWorkItem? = nil
+        @State private var viewingCurrentSession: Bool = true
         
         var body: some View {
             GeometryReader { geo in
@@ -8981,6 +9135,9 @@ extension ContentView {
                     .overlay(alignment: .bottom) {
                         bottomSelectionActions(bottomInset: isLandscape ? 30 : 32)
                     }
+                    .overlay(alignment: .bottomTrailing) {
+                        sessionSourceToggle(bottomInset: isLandscape ? 26 : 22)
+                    }
                     .frame(width: contentW, height: contentH, alignment: .center)
                     .rotationEffect(.degrees(rotationDegrees))
                     .position(x: w * 0.5, y: h * 0.5)
@@ -8990,9 +9147,18 @@ extension ContentView {
                 .onAppear {
                     UIDevice.current.beginGeneratingDeviceOrientationNotifications()
                     refreshOrientation()
+                    resetToCurrentSessionSource()
                 }
                 .onReceive(NotificationCenter.default.publisher(for: UIDevice.orientationDidChangeNotification)) { _ in
                     refreshOrientation()
+                }
+                .onChange(of: isSelectionMode) { _, newValue in
+                    if newValue {
+                        forceCurrentSessionSource(reason: "selectMode")
+                    }
+                }
+                .onChange(of: appState.currentSession?.id) { _, _ in
+                    forceCurrentSessionSource(reason: "sessionChanged")
                 }
                 .onDisappear {
                     UIDevice.current.endGeneratingDeviceOrientationNotifications()
@@ -9000,6 +9166,8 @@ extension ContentView {
                     selectedAssetIds.removeAll()
                     isSelectionMode = false
                     showHeaderOverflowMenu = false
+                    resetToCurrentSessionSource()
+                    print("[PhotoGrid] exit reset viewingCurrent=true")
                 }
             }
             .fullScreenCover(item: $viewerState) { state in
@@ -9114,6 +9282,7 @@ extension ContentView {
                         Spacer(minLength: 0)
 
                         Button {
+                            guard viewingCurrentSession else { return }
                             withAnimation(.easeOut(duration: 0.18)) {
                                 if isSelectionMode {
                                     isSelectionMode = false
@@ -9136,8 +9305,11 @@ extension ContentView {
                                 )
                         }
                         .buttonStyle(.plain)
+                        .opacity(viewingCurrentSession ? 1.0 : 0.45)
+                        .allowsHitTesting(viewingCurrentSession)
 
                         Button {
+                            guard viewingCurrentSession else { return }
                             showHeaderOverflowMenu = true
                         } label: {
                             Image(systemName: "ellipsis")
@@ -9152,6 +9324,8 @@ extension ContentView {
                                 )
                         }
                         .buttonStyle(.plain)
+                        .opacity(viewingCurrentSession ? 1.0 : 0.45)
+                        .allowsHitTesting(viewingCurrentSession)
                     }
                     .padding(.horizontal, 14)
                     .padding(.top, isLandscape ? 8 : 6)
@@ -9298,6 +9472,33 @@ extension ContentView {
         }
 
         @ViewBuilder
+        private func sessionSourceToggle(bottomInset: CGFloat) -> some View {
+            if !isSelectionMode, let currentSessionID = appState.currentSession?.id {
+                let previousID = previousSessionID(currentSessionID: currentSessionID)
+                if previousID != nil {
+                    Button {
+                        toggleSessionSource(currentSessionID: currentSessionID, previousSessionID: previousID)
+                    } label: {
+                        Text(viewingCurrentSession ? "Current" : "Previous")
+                            .font(.system(size: 17, weight: .medium))
+                            .foregroundColor(.white)
+                            .padding(.horizontal, 14)
+                            .frame(minHeight: 42)
+                            .background(viewingCurrentSession ? Color.black.opacity(0.58) : Color.blue.opacity(0.85))
+                            .clipShape(Capsule())
+                            .overlay(
+                                Capsule()
+                                    .stroke(Color.white.opacity(0.25), lineWidth: 1)
+                            )
+                    }
+                    .buttonStyle(.plain)
+                    .padding(.trailing, isLandscape ? 20 : 16)
+                    .padding(.bottom, bottomInset)
+                }
+            }
+        }
+
+        @ViewBuilder
         private func circularActionButton(
             systemName: String,
             isEnabled: Bool,
@@ -9335,6 +9536,68 @@ extension ContentView {
 
         private func selectedAssetsInDisplayOrder() -> [ReportAsset] {
             reportLibrary.assets.filter { selectedAssetIds.contains($0.localIdentifier) }
+        }
+
+        private func previousSessionID(currentSessionID: UUID) -> UUID? {
+            guard let propertyID = appState.selectedPropertyID else { return nil }
+            let sessions = (try? localStore.fetchSessions(propertyID: propertyID)) ?? []
+            let currentStart = appState.currentSession?.startedAt ?? .distantFuture
+            let previous = sessions
+                .filter {
+                    $0.id != currentSessionID &&
+                    $0.status == .completed &&
+                    $0.startedAt < currentStart
+                }
+                .sorted { lhs, rhs in
+                    let l = lhs.endedAt ?? lhs.startedAt
+                    let r = rhs.endedAt ?? rhs.startedAt
+                    return l > r
+                }
+                .first
+            return previous?.id
+        }
+
+        private func toggleSessionSource(currentSessionID: UUID, previousSessionID: UUID?) {
+            guard let propertyID = appState.selectedPropertyID else { return }
+            guard let previousSessionID else {
+                viewingCurrentSession = true
+                print("[PhotoGrid] previousSession unavailable propertyID=\(propertyID.uuidString) currentSessionID=\(currentSessionID.uuidString)")
+                return
+            }
+            viewingCurrentSession.toggle()
+            let displayedSessionID = viewingCurrentSession ? currentSessionID : previousSessionID
+            reportLibrary.reloadSessionAssets(propertyID: propertyID, sessionID: displayedSessionID)
+            print(
+                "[PhotoGridToggle] propertyID=\(propertyID.uuidString) " +
+                "currentSessionID=\(currentSessionID.uuidString) " +
+                "previousSessionID=\(previousSessionID.uuidString) " +
+                "displayingSessionID=\(displayedSessionID.uuidString)"
+            )
+        }
+
+        private func forceCurrentSessionSource(reason: String) {
+            guard let propertyID = appState.selectedPropertyID,
+                  let currentSessionID = appState.currentSession?.id else {
+                viewingCurrentSession = true
+                return
+            }
+            if !viewingCurrentSession || reason == "sessionChanged" {
+                viewingCurrentSession = true
+                reportLibrary.reloadSessionAssets(propertyID: propertyID, sessionID: currentSessionID)
+            }
+        }
+
+        private func resetToCurrentSessionSource() {
+            guard let propertyID = appState.selectedPropertyID,
+                  let currentSessionID = appState.currentSession?.id else {
+                viewingCurrentSession = true
+                return
+            }
+            viewingCurrentSession = true
+            if previousSessionID(currentSessionID: currentSessionID) == nil {
+                print("[PhotoGrid] previousSession unavailable propertyID=\(propertyID.uuidString) currentSessionID=\(currentSessionID.uuidString)")
+            }
+            reportLibrary.reloadSessionAssets(propertyID: propertyID, sessionID: currentSessionID)
         }
 
         private func shareSelectedAssets() {
@@ -11273,6 +11536,7 @@ extension ContentView {
         let observations: [Observation]
         let currentSessionID: UUID?
         let sessionShotIDs: Set<UUID>
+        let resolvedThumbnailPathByID: [UUID: String]
         let allowReferenceFallback: Bool
         let cache: AssetImageCache
         let onRefresh: () -> Void
@@ -11333,8 +11597,7 @@ extension ContentView {
                                 FlaggedIssueRow(
                                     observation: observation,
                                     currentSessionID: currentSessionID,
-                                    sessionShotIDs: sessionShotIDs,
-                                    allowReferenceFallback: allowReferenceFallback,
+                                    resolvedThumbnailPath: resolvedThumbnailPathByID[observation.id],
                                     cache: cache,
                                     onTapOverflow: {
                                         overflowTargetObservation = observation
@@ -11493,8 +11756,7 @@ extension ContentView {
 
         private func referenceImageLocalID(for observation: Observation) -> String? {
             guard allowReferenceFallback else { return nil }
-            let sorted = observation.shots.sorted { $0.capturedAt < $1.capturedAt }
-            let id = sorted.first?.imageLocalIdentifier?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let id = resolvedThumbnailPathByID[observation.id]?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             return id.isEmpty ? nil : id
         }
 
@@ -11546,8 +11808,7 @@ extension ContentView {
         private struct FlaggedIssueRow: View {
             let observation: Observation
             let currentSessionID: UUID?
-            let sessionShotIDs: Set<UUID>
-            let allowReferenceFallback: Bool
+            let resolvedThumbnailPath: String?
             let cache: AssetImageCache
             let onTapOverflow: () -> Void
 
@@ -11672,6 +11933,11 @@ extension ContentView {
                 .onChange(of: observation.shots.count) { _, _ in
                     loadThumbnailIfNeeded()
                 }
+                .onChange(of: resolvedThumbnailPath ?? "") { _, _ in
+                    loadedID = ""
+                    thumbnail = nil
+                    loadThumbnailIfNeeded()
+                }
             }
 
             private func historyTimestamp(for date: Date) -> String {
@@ -11714,27 +11980,15 @@ extension ContentView {
             }
 
             private func loadThumbnailIfNeeded() {
-                let currentCapturedID: String = {
-                    guard let currentSessionID else { return "" }
-                    let hasCurrentSessionCapture = observation.updatedInSessionID == currentSessionID || observation.resolvedInSessionID == currentSessionID
-                    guard hasCurrentSessionCapture else { return "" }
-                    guard let linkedID = observation.linkedShotID, sessionShotIDs.contains(linkedID) else { return "" }
-                    return observation.shots.first(where: { $0.id == linkedID })?.imageLocalIdentifier?
-                        .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-                }()
-
-                let referenceID: String = {
-                    guard allowReferenceFallback else { return "" }
-                    return observation.shots
-                        .sorted { $0.capturedAt < $1.capturedAt }
-                        .first?
-                        .imageLocalIdentifier?
-                        .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-                }()
-
-                // Active issues tile thumbnail priority:
-                // current-session captured -> reference -> placeholder
-                let chosenID = !currentCapturedID.isEmpty ? currentCapturedID : referenceID
+                let shotKey = ShotMetadata.makeShotKey(
+                    building: observation.building ?? "",
+                    elevation: observation.targetElevation ?? "",
+                    detailType: observation.detailType ?? "",
+                    angleIndex: 1
+                )
+                let linkedIDText = observation.linkedShotID?.uuidString ?? "NONE"
+                print("[FlagRow] rowID=\(observation.id.uuidString) issueID=\(observation.id.uuidString) shotID=\(linkedIDText) shotKey=\(shotKey)")
+                let chosenID = resolvedThumbnailPath?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
                 guard !chosenID.isEmpty else {
                     thumbnail = nil
                     loadedID = ""
