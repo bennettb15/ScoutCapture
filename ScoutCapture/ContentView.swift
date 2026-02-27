@@ -586,6 +586,11 @@ final class ReportLibraryModel: ObservableObject {
                             ofItemAtPath: output.path
                         )
                         self.debugLogSaveStage("stage=setAttributes success")
+                        if let attrs = try? self.fileManager.attributesOfItem(atPath: output.path) {
+                            let created = attrs[.creationDate] as? Date
+                            let modified = attrs[.modificationDate] as? Date
+                            self.debugLogSaveStage("stage=setAttributes readback creation=\(String(describing: created)) modification=\(String(describing: modified))")
+                        }
                     } catch {
                         self.debugLogSaveStage("stage=setAttributes ERROR \(error)")
                     }
@@ -624,7 +629,7 @@ final class ReportLibraryModel: ObservableObject {
             do {
                 let outputPath: String = try self.localStore.performFileIOSync {
                     try self.localStore.ensureSessionFolders(propertyID: propertyID, sessionID: sessionID)
-                    let filename = "\(shotID.uuidString)_S.jpg"
+                    let filename = "\(shotID.uuidString).jpg"
                     let output = self.localStore
                         .sessionFolderURL(propertyID: propertyID, sessionID: sessionID)
                         .appendingPathComponent("Stamped", isDirectory: true)
@@ -638,11 +643,6 @@ final class ReportLibraryModel: ObservableObject {
                     guard parentExists else {
                         throw SavePhotoError.directoryMissing(parentDir.path)
                     }
-                    let existingCreationDate: Date? = {
-                        guard self.fileManager.fileExists(atPath: output.path),
-                              let attrs = try? self.fileManager.attributesOfItem(atPath: output.path) else { return nil }
-                        return attrs[.creationDate] as? Date
-                    }()
                     if self.fileManager.fileExists(atPath: output.path) {
                         try? self.fileManager.removeItem(at: output)
                     }
@@ -675,15 +675,19 @@ final class ReportLibraryModel: ObservableObject {
                             )
                         )
                     }
-                    let creationDate = existingCreationDate ?? captureDate
                     do {
                         try self.fileManager.setAttributes(
                             [
-                                .creationDate: creationDate,
+                                .creationDate: captureDate,
                                 .modificationDate: captureDate
                             ],
                             ofItemAtPath: output.path
                         )
+                        if let attrs = try? self.fileManager.attributesOfItem(atPath: output.path) {
+                            let created = attrs[.creationDate] as? Date
+                            let modified = attrs[.modificationDate] as? Date
+                            self.debugLogSaveStage("save stamped setAttributes readback creation=\(String(describing: created)) modification=\(String(describing: modified)) type=\(UTType.jpeg.identifier)")
+                        }
                     } catch {
                         throw SavePhotoError.setAttributesFailed(error)
                     }
@@ -721,8 +725,14 @@ final class ReportLibraryModel: ObservableObject {
         var exif = (mergedProps[kCGImagePropertyExifDictionary] as? [CFString: Any]) ?? [:]
         var tiff = (mergedProps[kCGImagePropertyTIFFDictionary] as? [CFString: Any]) ?? [:]
         let exifTimestamp = Self.exifTimestampFormatter.string(from: captureDate)
+        let exifSubsec = Self.exifSubsecFormatter.string(from: captureDate)
+        let exifOffset = Self.exifOffsetString(for: captureDate)
         exif[kCGImagePropertyExifDateTimeOriginal] = exifTimestamp
         exif[kCGImagePropertyExifDateTimeDigitized] = exifTimestamp
+        exif[kCGImagePropertyExifSubsecTimeOriginal] = exifSubsec
+        exif[kCGImagePropertyExifSubsecTimeDigitized] = exifSubsec
+        exif[kCGImagePropertyExifOffsetTimeOriginal] = exifOffset
+        exif[kCGImagePropertyExifOffsetTimeDigitized] = exifOffset
         tiff[kCGImagePropertyTIFFDateTime] = exifTimestamp
         mergedProps[kCGImagePropertyExifDictionary] = exif
         mergedProps[kCGImagePropertyTIFFDictionary] = tiff
@@ -754,6 +764,24 @@ final class ReportLibraryModel: ObservableObject {
         formatter.dateFormat = "yyyy:MM:dd HH:mm:ss"
         return formatter
     }()
+
+    private static let exifSubsecFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone.current
+        formatter.dateFormat = "SSS"
+        return formatter
+    }()
+
+    private static func exifOffsetString(for date: Date) -> String {
+        let seconds = TimeZone.current.secondsFromGMT(for: date)
+        let sign = seconds >= 0 ? "+" : "-"
+        let absolute = abs(seconds)
+        let hours = absolute / 3600
+        let minutes = (absolute % 3600) / 60
+        return String(format: "%@%02d:%02d", sign, hours, minutes)
+    }
 
     private func debugLogSaveStage(_ message: String) {
 #if DEBUG
@@ -5889,6 +5917,7 @@ extension ContentView {
         let localIdentifier = shot.imageLocalIdentifier?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         let fileNameFromIdentifier = URL(fileURLWithPath: localIdentifier).lastPathComponent
         let originalFilename = fileNameFromIdentifier.isEmpty ? "\(shot.id.uuidString).heic" : fileNameFromIdentifier
+        let stampedFilename = "\(shot.id.uuidString).jpg"
         let normalizedElevation = CanonicalElevation.normalize(elevationValue) ?? elevationValue
         let shotKey = ShotMetadata.makeShotKey(
             building: buildingValue,
@@ -5926,8 +5955,8 @@ extension ContentView {
             originalFilename: originalFilename,
             originalRelativePath: "Originals/\(originalFilename)",
             originalByteSize: imageData.count,
-            stampedFilename: nil,
-            stampedRelativePath: nil,
+            stampedFilename: stampedFilename,
+            stampedRelativePath: "Stamped/\(stampedFilename)",
             captureMode: camera.effectiveHDEnabled ? "hd" : "normal",
             lens: camera.selectedZoomId,
             orientation: orientationLabel,
@@ -6615,17 +6644,33 @@ extension ContentView {
         let assets = reportLibrary.assets
         let sessionData = try persistedSessionJSONDataForExport()
 
-        var zipEntries: [(path: String, data: Data)] = []
-        zipEntries.append(("Originals/", Data()))
-        zipEntries.append(("Stamped/", Data()))
+        var zipEntries: [(path: String, data: Data, modifiedAt: Date?)] = []
+        zipEntries.append(("Originals/", Data(), nil))
+        zipEntries.append(("Stamped/", Data(), nil))
 
-        var originalEntries: [(String, Data)] = []
-        var stampedEntries: [(String, Data)] = []
+        var originalEntries: [(String, Data, Date?)] = []
+        var stampedEntries: [(String, Data, Date?)] = []
+        var stampedByOriginalFilename: [String: URL] = [:]
+        if let propertyID = appState.selectedPropertyID,
+           let sessionID = appState.currentSession?.id {
+            stampedByOriginalFilename = try ensureSessionStampedJPEGs(
+                propertyID: propertyID,
+                sessionID: sessionID,
+                assets: assets
+            )
+        }
         for (index, asset) in assets.enumerated() {
             guard let data = requestSessionExportImageData(for: asset) else { continue }
             let filename = sessionExportFilename(for: asset, index: index + 1)
-            originalEntries.append(("Originals/\(filename)", data))
-            stampedEntries.append(("Stamped/\(filename)", data))
+            let attrs = try? fileManager.attributesOfItem(atPath: asset.fileURL.path)
+            let modifiedAt = (attrs?[.modificationDate] as? Date) ?? (attrs?[.creationDate] as? Date)
+            originalEntries.append(("Originals/\(filename)", data, modifiedAt))
+            if let stampedURL = stampedByOriginalFilename[asset.originalFilename],
+               let stampedData = try? Data(contentsOf: stampedURL) {
+                let stampedAttrs = try? fileManager.attributesOfItem(atPath: stampedURL.path)
+                let stampedModified = (stampedAttrs?[.modificationDate] as? Date) ?? (stampedAttrs?[.creationDate] as? Date)
+                stampedEntries.append(("Stamped/\(stampedURL.lastPathComponent)", stampedData, stampedModified))
+            }
         }
         zipEntries.append(contentsOf: originalEntries)
         progress?(.originals)
@@ -6650,23 +6695,62 @@ extension ContentView {
            let first = decoded.shots.first {
             print("Export first shot shotKey: \(first.shotKey)")
             print("Export first shot originalRelativePath: \(first.originalRelativePath)")
+            print("Export first shot stampedRelativePath: \(first.stampedRelativePath ?? "nil")")
         }
 #endif
 
-        zipEntries.append(("session.json", sessionData))
+        zipEntries.append(("session.json", sessionData, Date()))
         progress?(.sessionData)
 
         zipEntries.append(contentsOf: stampedEntries)
         progress?(.stamped)
 
         let zipData = buildSessionExportZipData(entries: zipEntries)
-        let url = fileManager.temporaryDirectory.appendingPathComponent(sessionExportZipFilename())
-        if fileManager.fileExists(atPath: url.path) {
-            try fileManager.removeItem(at: url)
+        let finalURL = fileManager.temporaryDirectory.appendingPathComponent(sessionExportZipFilename())
+        let tempURL = fileManager.temporaryDirectory.appendingPathComponent("\(UUID().uuidString).tmp.zip")
+#if DEBUG
+        print("Export ZIP temp path: \(tempURL.path)")
+        print("Export ZIP final path: \(finalURL.path)")
+#endif
+        if fileManager.fileExists(atPath: tempURL.path) {
+            try fileManager.removeItem(at: tempURL)
         }
-        try zipData.write(to: url, options: .atomic)
+        if fileManager.fileExists(atPath: finalURL.path) {
+            try fileManager.removeItem(at: finalURL)
+        }
+        try zipData.write(to: tempURL, options: [.atomic])
+        let tempExists = fileManager.fileExists(atPath: tempURL.path)
+        let tempSize = ((try? fileManager.attributesOfItem(atPath: tempURL.path)[.size] as? NSNumber) ?? nil)?.intValue ?? 0
+#if DEBUG
+        print("Export ZIP temp exists: \(tempExists ? "YES" : "NO"), bytes: \(tempSize)")
+#endif
+        guard tempExists, tempSize > 0 else {
+            throw NSError(domain: "ScoutCapture.Export", code: 5, userInfo: [NSLocalizedDescriptionKey: "Temporary ZIP write failed."])
+        }
+
+        try fileManager.moveItem(at: tempURL, to: finalURL)
+        let finalExists = fileManager.fileExists(atPath: finalURL.path)
+        let finalSize = ((try? fileManager.attributesOfItem(atPath: finalURL.path)[.size] as? NSNumber) ?? nil)?.intValue ?? 0
+#if DEBUG
+        print("Export ZIP final exists: \(finalExists ? "YES" : "NO"), bytes: \(finalSize)")
+#endif
+        guard finalExists, finalSize > 0 else {
+            throw NSError(domain: "ScoutCapture.Export", code: 6, userInfo: [NSLocalizedDescriptionKey: "Final ZIP write failed."])
+        }
+
+        let listedEntries = try listSessionExportZipEntryPaths(at: finalURL)
+#if DEBUG
+        let preview = Array(listedEntries.prefix(12))
+        print("Export ZIP entries count: \(listedEntries.count)")
+        print("Export ZIP entries preview: \(preview)")
+#endif
+        let expectedPaths = Set(originalEntries.map { $0.0 } + stampedEntries.map { $0.0 } + ["session.json", "Originals/", "Stamped/"])
+        let actualPaths = Set(listedEntries)
+        guard expectedPaths.isSubset(of: actualPaths) else {
+            throw NSError(domain: "ScoutCapture.Export", code: 7, userInfo: [NSLocalizedDescriptionKey: "ZIP integrity check failed."])
+        }
         progress?(.zipReady)
-        return url
+        return finalURL
     }
 
     private func persistedSessionJSONDataForExport() throws -> Data {
@@ -6681,6 +6765,171 @@ extension ContentView {
 
     private func requestSessionExportImageData(for asset: ReportAsset) -> Data? {
         try? Data(contentsOf: asset.fileURL)
+    }
+
+    private func ensureSessionStampedJPEGs(
+        propertyID: UUID,
+        sessionID: UUID,
+        assets: [ReportAsset]
+    ) throws -> [String: URL] {
+        let fileManager = FileManager.default
+        let originalsByName = Dictionary(uniqueKeysWithValues: assets.map { ($0.originalFilename, $0) })
+        var metadata = try localStore.loadSessionMetadata(propertyID: propertyID, sessionID: sessionID)
+        var didUpdateMetadata = false
+        var output: [String: URL] = [:]
+
+        for index in metadata.shots.indices {
+            let shot = metadata.shots[index]
+            let originalName = shot.originalFilename
+            guard let asset = originalsByName[originalName] else { continue }
+
+            let canonicalStampedName = "\(shot.shotID.uuidString).jpg"
+            if metadata.shots[index].stampedFilename != canonicalStampedName {
+                metadata.shots[index].stampedFilename = canonicalStampedName
+                didUpdateMetadata = true
+            }
+            let canonicalStampedRelative = "Stamped/\(canonicalStampedName)"
+            if metadata.shots[index].stampedRelativePath != canonicalStampedRelative {
+                metadata.shots[index].stampedRelativePath = canonicalStampedRelative
+                didUpdateMetadata = true
+            }
+
+            let stampedURL = localStore.stampedDirectoryURL(propertyID: propertyID, sessionID: sessionID)
+                .appendingPathComponent(canonicalStampedName, isDirectory: false)
+            let captureDate = metadata.shots[index].updatedAt
+            try createStampedJPEGIfMissing(
+                sourceURL: asset.fileURL,
+                destinationURL: stampedURL,
+                captureDate: captureDate,
+                fileManager: fileManager
+            )
+            output[originalName] = stampedURL
+        }
+
+        if didUpdateMetadata {
+            try localStore.saveSessionMetadataAtomically(
+                propertyID: propertyID,
+                sessionID: sessionID,
+                metadata: metadata
+            )
+#if DEBUG
+            if let firstStamped = metadata.shots.first?.stampedRelativePath {
+                print("[Stamp] metadata stampedRelativePath sample=\(firstStamped)")
+            }
+#endif
+        }
+
+        return output
+    }
+
+    private func createStampedJPEGIfMissing(
+        sourceURL: URL,
+        destinationURL: URL,
+        captureDate: Date,
+        fileManager: FileManager
+    ) throws {
+        if fileManager.fileExists(atPath: destinationURL.path),
+           ((try? fileManager.attributesOfItem(atPath: destinationURL.path)[.size] as? NSNumber) ?? nil)?.intValue ?? 0 > 0 {
+            return
+        }
+
+        let parentDir = destinationURL.deletingLastPathComponent()
+        try fileManager.createDirectory(at: parentDir, withIntermediateDirectories: true)
+        let sourceData = try Data(contentsOf: sourceURL)
+        let stampedData = try encodeStampedJPEGForExport(from: sourceData, captureDate: captureDate)
+        try stampedData.write(to: destinationURL, options: [.atomic])
+
+        let exists = fileManager.fileExists(atPath: destinationURL.path)
+        let size = ((try? fileManager.attributesOfItem(atPath: destinationURL.path)[.size] as? NSNumber) ?? nil)?.intValue ?? 0
+#if DEBUG
+        print("[Stamp] destination=\(destinationURL.path) utType=\(UTType.jpeg.identifier) bytes=\(size)")
+#endif
+        guard exists, size > 0 else {
+            throw NSError(domain: "ScoutCapture.Stamp", code: 1, userInfo: [NSLocalizedDescriptionKey: "Stamped JPEG write failed"])
+        }
+
+        try fileManager.setAttributes(
+            [
+                .creationDate: captureDate,
+                .modificationDate: captureDate
+            ],
+            ofItemAtPath: destinationURL.path
+        )
+#if DEBUG
+        if let attrs = try? fileManager.attributesOfItem(atPath: destinationURL.path) {
+            let created = attrs[.creationDate] as? Date
+            let modified = attrs[.modificationDate] as? Date
+            print("[Stamp] readback creation=\(String(describing: created)) modification=\(String(describing: modified))")
+        }
+#endif
+    }
+
+    private func encodeStampedJPEGForExport(from sourceData: Data, captureDate: Date) throws -> Data {
+        guard let source = CGImageSourceCreateWithData(sourceData as CFData, nil),
+              let image = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
+            throw NSError(domain: "ScoutCapture.Stamp", code: 2, userInfo: [NSLocalizedDescriptionKey: "Missing source image for stamped export"])
+        }
+
+        let sourceProps = (CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any]) ?? [:]
+        var mergedProps = sourceProps
+        var exif = (mergedProps[kCGImagePropertyExifDictionary] as? [CFString: Any]) ?? [:]
+        var tiff = (mergedProps[kCGImagePropertyTIFFDictionary] as? [CFString: Any]) ?? [:]
+
+        let exifTimestamp = Self.exportExifTimestampFormatter.string(from: captureDate)
+        let exifSubsec = Self.exportExifSubsecFormatter.string(from: captureDate)
+        let exifOffset = Self.exportExifOffsetString(for: captureDate)
+        exif[kCGImagePropertyExifDateTimeOriginal] = exifTimestamp
+        exif[kCGImagePropertyExifDateTimeDigitized] = exifTimestamp
+        exif[kCGImagePropertyExifSubsecTimeOriginal] = exifSubsec
+        exif[kCGImagePropertyExifSubsecTimeDigitized] = exifSubsec
+        exif[kCGImagePropertyExifOffsetTimeOriginal] = exifOffset
+        exif[kCGImagePropertyExifOffsetTimeDigitized] = exifOffset
+        tiff[kCGImagePropertyTIFFDateTime] = exifTimestamp
+        mergedProps[kCGImagePropertyExifDictionary] = exif
+        mergedProps[kCGImagePropertyTIFFDictionary] = tiff
+        mergedProps[kCGImageDestinationLossyCompressionQuality] = 0.90
+
+        let destinationData = NSMutableData()
+        guard let destination = CGImageDestinationCreateWithData(
+            destinationData,
+            UTType.jpeg.identifier as CFString,
+            1,
+            nil
+        ) else {
+            throw NSError(domain: "ScoutCapture.Stamp", code: 3, userInfo: [NSLocalizedDescriptionKey: "Unable to create JPEG destination"])
+        }
+        CGImageDestinationAddImage(destination, image, mergedProps as CFDictionary)
+        guard CGImageDestinationFinalize(destination) else {
+            throw NSError(domain: "ScoutCapture.Stamp", code: 4, userInfo: [NSLocalizedDescriptionKey: "Unable to finalize JPEG destination"])
+        }
+        return destinationData as Data
+    }
+
+    private static let exportExifTimestampFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone.current
+        formatter.dateFormat = "yyyy:MM:dd HH:mm:ss"
+        return formatter
+    }()
+
+    private static let exportExifSubsecFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone.current
+        formatter.dateFormat = "SSS"
+        return formatter
+    }()
+
+    private static func exportExifOffsetString(for date: Date) -> String {
+        let seconds = TimeZone.current.secondsFromGMT(for: date)
+        let sign = seconds >= 0 ? "+" : "-"
+        let absolute = abs(seconds)
+        let hours = absolute / 3600
+        let minutes = (absolute % 3600) / 60
+        return String(format: "%@%02d:%02d", sign, hours, minutes)
     }
 
     private func sessionExportFilename(for asset: ReportAsset, index: Int) -> String {
@@ -6706,12 +6955,14 @@ extension ContentView {
         return "\(safeName)_\(propertyPrefix)_\(sessionPrefix).zip"
     }
 
-    private func buildSessionExportZipData(entries: [(path: String, data: Data)]) -> Data {
+    private func buildSessionExportZipData(entries: [(path: String, data: Data, modifiedAt: Date?)]) -> Data {
         struct CentralRecord {
             let pathData: Data
             let crc32: UInt32
             let size: UInt32
             let localHeaderOffset: UInt32
+            let dosTime: UInt16
+            let dosDate: UInt16
         }
 
         var zip = Data()
@@ -6723,13 +6974,14 @@ extension ContentView {
             let crc = sessionExportCRC32(entry.data)
             let size = UInt32(entry.data.count)
             let localHeaderOffset = UInt32(zip.count)
+            let (dosTime, dosDate) = dosDateTimeForSessionExport(entry.modifiedAt ?? Date())
 
             appendUInt32LEForSessionExport(0x04034B50, to: &zip)
             appendUInt16LEForSessionExport(20, to: &zip)
             appendUInt16LEForSessionExport(0, to: &zip)
             appendUInt16LEForSessionExport(0, to: &zip)
-            appendUInt16LEForSessionExport(0, to: &zip)
-            appendUInt16LEForSessionExport(0, to: &zip)
+            appendUInt16LEForSessionExport(dosTime, to: &zip)
+            appendUInt16LEForSessionExport(dosDate, to: &zip)
             appendUInt32LEForSessionExport(crc, to: &zip)
             appendUInt32LEForSessionExport(size, to: &zip)
             appendUInt32LEForSessionExport(size, to: &zip)
@@ -6743,7 +6995,9 @@ extension ContentView {
                     pathData: pathData,
                     crc32: crc,
                     size: size,
-                    localHeaderOffset: localHeaderOffset
+                    localHeaderOffset: localHeaderOffset,
+                    dosTime: dosTime,
+                    dosDate: dosDate
                 )
             )
         }
@@ -6756,8 +7010,8 @@ extension ContentView {
             appendUInt16LEForSessionExport(20, to: &zip)
             appendUInt16LEForSessionExport(0, to: &zip)
             appendUInt16LEForSessionExport(0, to: &zip)
-            appendUInt16LEForSessionExport(0, to: &zip)
-            appendUInt16LEForSessionExport(0, to: &zip)
+            appendUInt16LEForSessionExport(record.dosTime, to: &zip)
+            appendUInt16LEForSessionExport(record.dosDate, to: &zip)
             appendUInt32LEForSessionExport(record.crc32, to: &zip)
             appendUInt32LEForSessionExport(record.size, to: &zip)
             appendUInt32LEForSessionExport(record.size, to: &zip)
@@ -6784,6 +7038,77 @@ extension ContentView {
         appendUInt16LEForSessionExport(0, to: &zip)
 
         return zip
+    }
+
+    private func dosDateTimeForSessionExport(_ date: Date) -> (UInt16, UInt16) {
+        let calendar = Calendar(identifier: .gregorian)
+        let comps = calendar.dateComponents(in: TimeZone.current, from: date)
+        let year = min(max(comps.year ?? 1980, 1980), 2107)
+        let month = min(max(comps.month ?? 1, 1), 12)
+        let day = min(max(comps.day ?? 1, 1), 31)
+        let hour = min(max(comps.hour ?? 0, 0), 23)
+        let minute = min(max(comps.minute ?? 0, 0), 59)
+        let second = min(max(comps.second ?? 0, 0), 59)
+
+        let dosTime = UInt16((hour << 11) | (minute << 5) | (second / 2))
+        let dosDate = UInt16(((year - 1980) << 9) | (month << 5) | day)
+        return (dosTime, dosDate)
+    }
+
+    private func listSessionExportZipEntryPaths(at url: URL) throws -> [String] {
+        let data = try Data(contentsOf: url)
+        let bytes = [UInt8](data)
+        let eocdSignature: [UInt8] = [0x50, 0x4B, 0x05, 0x06]
+        guard let eocdIndex = bytes.lastIndex(of: eocdSignature[0]).flatMap({ idx -> Int? in
+            var i = idx
+            while i >= 0 {
+                if i + 3 < bytes.count && bytes[i...i+3].elementsEqual(eocdSignature) { return i }
+                if i == 0 { break }
+                i -= 1
+            }
+            return nil
+        }) else {
+            throw NSError(domain: "ScoutCapture.Export", code: 8, userInfo: [NSLocalizedDescriptionKey: "EOCD not found."])
+        }
+
+        func u16(_ offset: Int) -> Int {
+            Int(bytes[offset]) | (Int(bytes[offset + 1]) << 8)
+        }
+        func u32(_ offset: Int) -> Int {
+            Int(bytes[offset]) |
+            (Int(bytes[offset + 1]) << 8) |
+            (Int(bytes[offset + 2]) << 16) |
+            (Int(bytes[offset + 3]) << 24)
+        }
+
+        guard eocdIndex + 22 <= bytes.count else {
+            throw NSError(domain: "ScoutCapture.Export", code: 9, userInfo: [NSLocalizedDescriptionKey: "EOCD truncated."])
+        }
+
+        let totalEntries = u16(eocdIndex + 10)
+        let centralOffset = u32(eocdIndex + 16)
+        var cursor = centralOffset
+        var paths: [String] = []
+        paths.reserveCapacity(totalEntries)
+
+        while paths.count < totalEntries, cursor + 46 <= bytes.count {
+            guard cursor + 3 < bytes.count,
+                  bytes[cursor] == 0x50, bytes[cursor + 1] == 0x4B, bytes[cursor + 2] == 0x01, bytes[cursor + 3] == 0x02 else {
+                break
+            }
+            let nameLength = u16(cursor + 28)
+            let extraLength = u16(cursor + 30)
+            let commentLength = u16(cursor + 32)
+            let nameStart = cursor + 46
+            let nameEnd = nameStart + nameLength
+            guard nameEnd <= bytes.count else { break }
+            let nameBytes = Array(bytes[nameStart..<nameEnd])
+            let name = String(bytes: nameBytes, encoding: .utf8) ?? ""
+            paths.append(name)
+            cursor = nameEnd + extraLength + commentLength
+        }
+
+        return paths
     }
 
     private func sessionExportCRC32(_ data: Data) -> UInt32 {
