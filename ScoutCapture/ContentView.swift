@@ -1072,6 +1072,8 @@ private struct ReportPhotoViewer: View {
     let assets: [ReportAsset]
     let startIndex: Int
     let detailIdOverride: String?
+    let metadataPropertyID: UUID?
+    let metadataSessionID: UUID?
     @ObservedObject var cache: AssetImageCache
     let viewerToken: Int
 
@@ -1160,6 +1162,7 @@ private struct ReportPhotoViewer: View {
     // Forces the zoom container to re-fit on device rotation
     @State private var orientationResetToken: Int = 0
     @State private var shotMetadataByKey: [String: ShotMetadata] = [:]
+    @State private var shotMetadataByShotID: [UUID: ShotMetadata] = [:]
 
     // Per-page zoom reset tokens.
     // When you swipe away from a page, we increment that page's token so returning to it is back at fit.
@@ -1170,6 +1173,8 @@ private struct ReportPhotoViewer: View {
         assets: [ReportAsset],
         startIndex: Int,
         detailIdOverride: String? = nil,
+        metadataPropertyID: UUID? = nil,
+        metadataSessionID: UUID? = nil,
         cache: AssetImageCache,
         viewerToken: Int
     ) {
@@ -1177,6 +1182,8 @@ private struct ReportPhotoViewer: View {
         self.assets = assets
         self.startIndex = startIndex
         self.detailIdOverride = detailIdOverride
+        self.metadataPropertyID = metadataPropertyID
+        self.metadataSessionID = metadataSessionID
         self.cache = cache
         self.viewerToken = viewerToken
         _index = State(initialValue: min(max(0, startIndex), max(0, assets.count - 1)))
@@ -1322,6 +1329,12 @@ private struct ReportPhotoViewer: View {
         let photoCount: String
     }
 
+    private var isPreviousMetadataMode: Bool {
+        guard let metadataSessionID else { return false }
+        guard let currentSessionID = appState.currentSession?.id else { return false }
+        return metadataSessionID != currentSessionID
+    }
+
     private func headerMeta(for asset: ReportAsset, index: Int) -> HeaderMeta {
         let propertyName = (appState.selectedProperty?.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false)
             ? (appState.selectedProperty?.name.trimmingCharacters(in: .whitespacesAndNewlines) ?? "")
@@ -1329,6 +1342,18 @@ private struct ReportPhotoViewer: View {
 
         let metadata = metadataForAsset(asset)
         let shotLabel: String = {
+            if isPreviousMetadataMode, let metadata {
+                let building = metadata.building.trimmingCharacters(in: .whitespacesAndNewlines)
+                let elevation = CanonicalElevation.normalize(metadata.elevation)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? metadata.elevation
+                let detailType = metadata.detailType.trimmingCharacters(in: .whitespacesAndNewlines)
+                let angle = max(1, metadata.angleIndex)
+                var parts: [String] = []
+                if !building.isEmpty { parts.append(building) }
+                if !elevation.isEmpty { parts.append(elevation) }
+                if !detailType.isEmpty { parts.append(detailType) }
+                parts.append("Angle \(angle)")
+                return parts.joined(separator: " | ")
+            }
             var parts: [String] = []
             let building = metadata?.building.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             let elevation = CanonicalElevation.normalize(metadata?.elevation)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
@@ -1430,15 +1455,18 @@ private struct ReportPhotoViewer: View {
     }
 
     private func loadShotMetadataCache() {
-        guard let propertyID = appState.selectedPropertyID,
-              let sessionID = appState.currentSession?.id else {
+        guard let propertyID = metadataPropertyID ?? appState.selectedPropertyID,
+              let sessionID = metadataSessionID ?? appState.currentSession?.id else {
             shotMetadataByKey = [:]
+            shotMetadataByShotID = [:]
             return
         }
 
         let entries = (try? localStore.fetchShotMetadata(propertyID: propertyID, sessionID: sessionID)) ?? []
         var map: [String: ShotMetadata] = [:]
+        var idMap: [UUID: ShotMetadata] = [:]
         for entry in entries {
+            idMap[entry.shotID] = entry
             let raw = entry.originalFilename.trimmingCharacters(in: .whitespacesAndNewlines)
             if raw.isEmpty { continue }
             map[raw.lowercased()] = entry
@@ -1449,11 +1477,37 @@ private struct ReportPhotoViewer: View {
 
             let stem = url.deletingPathExtension().lastPathComponent.lowercased()
             if !stem.isEmpty { map[stem] = entry }
+
+            let originalRelative = entry.originalRelativePath.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            if !originalRelative.isEmpty { map[originalRelative] = entry }
+            let stampedRelative = entry.stampedRelativePath?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
+            if !stampedRelative.isEmpty { map[stampedRelative] = entry }
         }
         shotMetadataByKey = map
+        shotMetadataByShotID = idMap
+        if isPreviousMetadataMode {
+            print("[PrevHeader] loaded previous shots count=\(entries.count)")
+        }
+    }
+
+    private func shotIDFromAsset(_ asset: ReportAsset) -> UUID? {
+        let pathStem = URL(fileURLWithPath: asset.localIdentifier).deletingPathExtension().lastPathComponent
+        if let id = UUID(uuidString: pathStem) { return id }
+        let filenameStem = URL(fileURLWithPath: asset.originalFilename).deletingPathExtension().lastPathComponent
+        if let id = UUID(uuidString: filenameStem) { return id }
+        return nil
     }
 
     private func metadataForAsset(_ asset: ReportAsset) -> ShotMetadata? {
+        let itemKey = URL(fileURLWithPath: asset.localIdentifier).lastPathComponent
+        if let shotID = shotIDFromAsset(asset), let entry = shotMetadataByShotID[shotID] {
+            if isPreviousMetadataMode {
+                let elevation = CanonicalElevation.normalize(entry.elevation) ?? entry.elevation
+                print("[PrevHeader] itemKey=\(itemKey) matched=true shotID=\(entry.shotID.uuidString) building=\(entry.building) elevation=\(elevation) detailType=\(entry.detailType) angle=\(entry.angleIndex)")
+            }
+            return entry
+        }
+
         let rawID = asset.localIdentifier.trimmingCharacters(in: .whitespacesAndNewlines)
         let rawFilename = asset.originalFilename.trimmingCharacters(in: .whitespacesAndNewlines)
         let candidates = [
@@ -1462,13 +1516,21 @@ private struct ReportPhotoViewer: View {
             URL(fileURLWithPath: rawID).deletingPathExtension().lastPathComponent.lowercased(),
             rawFilename.lowercased(),
             URL(fileURLWithPath: rawFilename).lastPathComponent.lowercased(),
-            URL(fileURLWithPath: rawFilename).deletingPathExtension().lastPathComponent.lowercased()
+            URL(fileURLWithPath: rawFilename).deletingPathExtension().lastPathComponent.lowercased(),
+            "originals/\(URL(fileURLWithPath: rawFilename).lastPathComponent.lowercased())"
         ].filter { !$0.isEmpty }
 
         for key in candidates {
             if let entry = shotMetadataByKey[key] {
+                if isPreviousMetadataMode {
+                    let elevation = CanonicalElevation.normalize(entry.elevation) ?? entry.elevation
+                    print("[PrevHeader] itemKey=\(itemKey) matched=true shotID=\(entry.shotID.uuidString) building=\(entry.building) elevation=\(elevation) detailType=\(entry.detailType) angle=\(entry.angleIndex)")
+                }
                 return entry
             }
+        }
+        if isPreviousMetadataMode {
+            print("[PrevHeader] itemKey=\(itemKey) matched=false fallbackUsed=true")
         }
         return nil
     }
@@ -9171,10 +9233,13 @@ extension ContentView {
                 }
             }
             .fullScreenCover(item: $viewerState) { state in
+                let metadataSessionID = displayedGridSessionID()
                 ReportPhotoViewer(
                     title: reportLibrary.albumTitle,
                     assets: reportLibrary.assets,
                     startIndex: state.startIndex,
+                    metadataPropertyID: appState.selectedPropertyID,
+                    metadataSessionID: metadataSessionID,
                     cache: cache,
                     viewerToken: state.startIndex
                 )
@@ -9536,6 +9601,14 @@ extension ContentView {
 
         private func selectedAssetsInDisplayOrder() -> [ReportAsset] {
             reportLibrary.assets.filter { selectedAssetIds.contains($0.localIdentifier) }
+        }
+
+        private func displayedGridSessionID() -> UUID? {
+            guard let currentSessionID = appState.currentSession?.id else { return nil }
+            if viewingCurrentSession {
+                return currentSessionID
+            }
+            return previousSessionID(currentSessionID: currentSessionID) ?? currentSessionID
         }
 
         private func previousSessionID(currentSessionID: UUID) -> UUID? {
