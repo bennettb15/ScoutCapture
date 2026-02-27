@@ -3068,9 +3068,28 @@ struct ContentView: View {
 
     private var isElevationHeadingAligned: Bool {
         guard shouldShowElevationAlignmentDot else { return false }
-        guard let currentHeading = locationManager.headingDegrees else { return false }
+        guard let rawHeading = locationManager.headingDegrees else { return false }
+        let currentHeading = normalizedHeadingForAlignment(rawHeading)
         guard let ideal = idealFacingHeading(for: CanonicalElevation.normalize(elevation) ?? elevation) else { return false }
         return angularDifferenceDegrees(currentHeading, ideal) <= 30
+    }
+
+    private func normalizedHeadingForAlignment(_ heading: Double) -> Double {
+        // CLLocation heading is based on the device top edge. In landscape UI, compensate
+        // so alignment represents the same camera-facing direction as portrait.
+        let adjusted: Double
+        switch lastValidDeviceOrientation {
+        case .landscapeLeft:
+            adjusted = heading + 90
+        case .landscapeRight:
+            adjusted = heading - 90
+        case .portraitUpsideDown:
+            adjusted = heading + 180
+        default:
+            adjusted = heading
+        }
+        let wrapped = adjusted.truncatingRemainder(dividingBy: 360)
+        return wrapped >= 0 ? wrapped : wrapped + 360
     }
 
     private func idealFacingHeading(for normalizedElevation: String) -> Double? {
@@ -5546,7 +5565,6 @@ extension ContentView {
                 Image(systemName: "flag.fill")
                     .font(.system(size: symbolSize, weight: .medium))
                     .foregroundColor(hasIssues ? .red : .white)
-                    .rotationEffect(bottomGlyphRotationAngle)
 
                 if hasIssues {
                     Text("\(count)")
@@ -5558,6 +5576,7 @@ extension ContentView {
                         .offset(x: 6, y: -6)
                 }
             }
+            .rotationEffect(bottomGlyphRotationAngle)
             .frame(width: hitArea, height: hitArea)
             .contentShape(Rectangle())
         }
