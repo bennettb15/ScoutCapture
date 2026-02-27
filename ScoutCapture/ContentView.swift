@@ -2873,6 +2873,66 @@ struct ContentView: View {
         return GuidedSessionThumbnailResolution(source: .none, sessionID: nil, path: nil, exists: false)
     }
 
+    private func resolveGuidedRetakeReferenceForDisplay(
+        propertyID: UUID,
+        currentSession: Session?,
+        baselineSessionID: UUID?,
+        guidedShot: GuidedShot,
+        orderedSessions: [Session],
+        metadataCache: inout [UUID: SessionMetadata]
+    ) -> GuidedSessionThumbnailResolution {
+        let currentSessionID = currentSession?.id
+        let key = guidedKey(for: guidedShot)
+
+        let priorSessions: [Session] = {
+            guard let currentSession else { return [] }
+            return orderedSessions
+                .filter { $0.id != currentSession.id && $0.startedAt < currentSession.startedAt }
+                .sorted { $0.startedAt > $1.startedAt }
+        }()
+
+        for prior in priorSessions where prior.id != baselineSessionID {
+            guard let priorMeta = metadataForSession(propertyID: propertyID, sessionID: prior.id, cache: &metadataCache),
+                  let priorShot = priorMeta.shots.first(where: { shotMetadata($0, matches: guidedShot, guidedKey: key) }) else {
+                continue
+            }
+            let resolved = resolvedSessionImagePath(
+                for: priorShot,
+                propertyID: propertyID,
+                sessionID: prior.id
+            )
+            if let path = resolved.absolutePath {
+                return GuidedSessionThumbnailResolution(source: .prior, sessionID: prior.id, path: path, exists: true)
+            }
+        }
+
+        if let baselineSessionID,
+           baselineSessionID != currentSessionID,
+           let baselineMeta = metadataForSession(propertyID: propertyID, sessionID: baselineSessionID, cache: &metadataCache),
+           let baselineShot = baselineMeta.shots.first(where: { shotMetadata($0, matches: guidedShot, guidedKey: key) }) {
+            let resolved = resolvedSessionImagePath(
+                for: baselineShot,
+                propertyID: propertyID,
+                sessionID: baselineSessionID
+            )
+            if let path = resolved.absolutePath {
+                return GuidedSessionThumbnailResolution(source: .baseline, sessionID: baselineSessionID, path: path, exists: true)
+            }
+        }
+
+        let fallbackReference = [
+            guidedShot.referenceImagePath?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "",
+            guidedShot.referenceImageLocalIdentifier?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        ]
+        .first(where: { !$0.isEmpty && FileManager.default.fileExists(atPath: $0) })
+
+        if let fallbackReference {
+            return GuidedSessionThumbnailResolution(source: .reference, sessionID: nil, path: fallbackReference, exists: true)
+        }
+
+        return GuidedSessionThumbnailResolution(source: .none, sessionID: nil, path: nil, exists: false)
+    }
+
     private struct ArmedReferenceViewerState: Identifiable {
         let id = UUID()
         let title: String
@@ -3113,20 +3173,58 @@ struct ContentView: View {
         let flaggedRemainingCount: Int
         let hasBaseline: Bool
         let currentSessionCaptureCount: Int
+        let isSessionSealed: Bool
+        let firstDeliveredAt: Date?
+        let reExportExpiresAt: Date?
+        let reExportEligibleNow: Bool
 
         var isCompletionEligible: Bool {
             hasBaseline && guidedRemainingCount == 0 && flaggedRemainingCount == 0
         }
 
-        var isExportEnabled: Bool {
-            if hasBaseline {
-                return isCompletionEligible
-            }
+        var canSealNow: Bool {
+            if hasBaseline { return isCompletionEligible }
             return currentSessionCaptureCount > 0
         }
 
+        var isSealedNotDelivered: Bool {
+            isSessionSealed && firstDeliveredAt == nil
+        }
+
+        var exportActionTitle: String {
+            if isSealedNotDelivered { return "Deliver" }
+            if isSessionSealed && firstDeliveredAt != nil {
+                return reExportEligibleNow ? "Re-export" : "Re-export Window Expired"
+            }
+            return "Export"
+        }
+
+        var isExportActionEnabled: Bool {
+            if isSealedNotDelivered { return true }
+            if isSessionSealed && firstDeliveredAt != nil {
+                return reExportEligibleNow
+            }
+            return canSealNow
+        }
+
         var isExportLaterEnabled: Bool {
-            hasBaseline && isCompletionEligible
+            !isSessionSealed && canSealNow
+        }
+
+        var exportDisabledReason: String? {
+            if isSessionSealed && firstDeliveredAt != nil && !reExportEligibleNow {
+                return "Re export window expired."
+            }
+            if canSealNow {
+                return nil
+            }
+            if !hasBaseline && currentSessionCaptureCount == 0 {
+                return "Export is disabled until at least one photo is captured."
+            }
+            if !hasBaseline {
+                return "Export is disabled until at least one photo is captured."
+            }
+            return "Export is disabled until all guided and flagged items are complete."
         }
     }
 
@@ -6832,7 +6930,37 @@ extension ContentView {
         if !detail.isEmpty {
             detailTypesModel.setSelected(detail, for: locationMode)
         }
-        loadGuidedArmedThumbnail(for: guidedShot)
+        var retakeReferencePath: String? = nil
+        var retakeReferenceSource = "none"
+        if let propertyID = appState.selectedPropertyID {
+            let baselineState = persistedBaselineState(propertyID: propertyID)
+            let orderedSessions = ((try? localStore.fetchSessions(propertyID: propertyID)) ?? []).sorted { $0.startedAt < $1.startedAt }
+            let currentSession = orderedSessions.first(where: { $0.id == appState.currentSession?.id }) ?? appState.currentSession
+            var metadataCache: [UUID: SessionMetadata] = [:]
+            let resolved = resolveGuidedRetakeReferenceForDisplay(
+                propertyID: propertyID,
+                currentSession: currentSession,
+                baselineSessionID: baselineState.baselineSessionID,
+                guidedShot: guidedShot,
+                orderedSessions: orderedSessions,
+                metadataCache: &metadataCache
+            )
+            if let path = resolved.path, resolved.exists {
+                retakeReferencePath = path
+            }
+            switch resolved.source {
+            case .prior:
+                retakeReferenceSource = "priorSession"
+            case .baseline:
+                retakeReferenceSource = "baseline"
+            case .reference:
+                retakeReferenceSource = "baseline"
+            default:
+                retakeReferenceSource = "none"
+            }
+        }
+        print("[RetakeRef] session=\(appState.currentSession?.id.uuidString ?? "NONE") guidedKey=\(guidedKey(for: guidedShot)) chosenSource=\(retakeReferenceSource) chosenPath=\(retakeReferencePath ?? "NONE") exists=\(retakeReferencePath != nil)")
+        loadGuidedArmedThumbnail(for: guidedShot, forcedPath: retakeReferencePath)
         showGuidedAlignmentOverlay = false
         let rawPath = existingShot.imageLocalIdentifier?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         let existingFilename = rawPath.isEmpty ? nil : URL(fileURLWithPath: rawPath).lastPathComponent
@@ -6849,13 +6977,14 @@ extension ContentView {
         showGuidedChecklist = false
     }
 
-    private func loadGuidedArmedThumbnail(for guidedShot: GuidedShot) {
+    private func loadGuidedArmedThumbnail(for guidedShot: GuidedShot, forcedPath: String? = nil) {
         let sessionIDText = appState.currentSession?.id.uuidString ?? "NONE"
-        let chosenPath = guidedResolvedThumbnailPathByID[guidedShot.id]?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let chosenPath = (forcedPath ?? guidedResolvedThumbnailPathByID[guidedShot.id])?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         let chosenExists = !chosenPath.isEmpty && FileManager.default.fileExists(atPath: chosenPath)
+        let chosenSource = forcedPath == nil ? "resolved" : "retakeReference"
         print(
             "[SelectedThumbResolve] session=\(sessionIDText) guidedID=\(guidedShot.id.uuidString) " +
-            "chosenSource=\(chosenPath.isEmpty ? "none" : "resolved") chosenPath=\(chosenPath.isEmpty ? "NONE" : chosenPath) exists=\(chosenExists)"
+            "chosenSource=\(chosenPath.isEmpty ? "none" : chosenSource) chosenPath=\(chosenPath.isEmpty ? "NONE" : chosenPath) exists=\(chosenExists)"
         )
 
         guard !chosenPath.isEmpty, chosenExists, let image = UIImage(contentsOfFile: chosenPath) else {
@@ -7167,6 +7296,8 @@ extension ContentView {
         let guidedRemaining = persisted.remaining
         let hasBaseline = appState.propertyHasBaseline(propertyID)
         let currentSessionCaptureCount = currentSessionPhotoCount(propertyID: propertyID)
+        let reExportEligibleNow = appState.isReExportEligible(currentSession)
+        let isPendingDelivery = appState.isPendingDelivery(currentSession)
 
         print(
             "[EndSession] sessionID=\(currentSession.id.uuidString) " +
@@ -7179,8 +7310,18 @@ extension ContentView {
             guidedRemainingCount: guidedRemaining,
             flaggedRemainingCount: flaggedRemaining,
             hasBaseline: hasBaseline,
-            currentSessionCaptureCount: currentSessionCaptureCount
+            currentSessionCaptureCount: currentSessionCaptureCount,
+            isSessionSealed: currentSession.isSealed,
+            firstDeliveredAt: currentSession.firstDeliveredAt,
+            reExportExpiresAt: currentSession.reExportExpiresAt,
+            reExportEligibleNow: reExportEligibleNow
         )
+        if let reason = sessionActionsSummary?.exportDisabledReason {
+            print("[ExportEligibility] sessionID=\(currentSession.id.uuidString) enabled=false reason=\(reason)")
+        } else {
+            print("[ExportEligibility] sessionID=\(currentSession.id.uuidString) enabled=true")
+        }
+        print("[ExportUI] sessionID=\(currentSession.id.uuidString) isPendingDelivery=\(isPendingDelivery) isReExportEligible=\(reExportEligibleNow)")
         showSessionActionsSheet = true
         let liveGuidedCountAfter = guidedSessionCountSnapshot().remaining
         print("[Badge] afterOpen guidedCount=\(liveGuidedCountAfter) flaggedCount=\(carryoverIssueBadgeCount)")
@@ -7321,7 +7462,7 @@ extension ContentView {
 
     private func startExportNowFlow() {
         guard !isPreparingSessionExport else { return }
-        if let summary = sessionActionsSummary, !summary.isExportEnabled {
+        if let summary = sessionActionsSummary, !summary.isExportActionEnabled {
             return
         }
         showSessionExportErrorPopup = false
@@ -7329,7 +7470,7 @@ extension ContentView {
         isPreparingSessionExport = true
         sessionExportChecklist = ExportChecklistState()
         prepareSessionExportReferences()
-        appState.completeCurrentSession(markExported: false)
+        appState.sealCurrentSessionForExportNow()
 
         DispatchQueue.global(qos: .userInitiated).async {
             do {
@@ -7376,7 +7517,7 @@ extension ContentView {
 
     private func handleExportLaterAndExit(summary: SessionActionsSummary) {
         guard summary.isExportLaterEnabled else { return }
-        appState.completeCurrentSession(markExported: false)
+        appState.sealCurrentSessionForExportLater()
         appState.refreshProperties()
         showSessionActionsSheet = false
         onExitToHub?()
@@ -8673,9 +8814,9 @@ extension ContentView {
                     action: onResume
                 )
                 actionButton(
-                    title: isPreparingExport ? "Preparing Export..." : "Export",
+                    title: isPreparingExport ? "Preparing Export..." : summary.exportActionTitle,
                     role: .secondary,
-                    isEnabled: !isPreparingExport && summary.isExportEnabled,
+                    isEnabled: !isPreparingExport && summary.isExportActionEnabled,
                     action: onExportNow
                 )
                 actionButton(
@@ -8691,7 +8832,7 @@ extension ContentView {
                     action: onSaveDraftAndExit
                 )
 
-                if !summary.isExportEnabled || !summary.isExportLaterEnabled {
+                if !summary.isExportActionEnabled || !summary.isExportLaterEnabled {
                     Text(disabledHintText)
                         .font(.system(size: 12, weight: .medium))
                         .foregroundColor(.white.opacity(0.72))
@@ -8702,11 +8843,14 @@ extension ContentView {
         }
 
         private var disabledHintText: String {
-            if !summary.hasBaseline && summary.currentSessionCaptureCount == 0 {
-                return "Export is disabled until at least one photo is captured. Export Later remains disabled until baseline exists."
+            if summary.isSessionSealed && summary.firstDeliveredAt == nil {
+                return "Session sealed. Use Deliver to complete first delivery."
             }
-            if !summary.hasBaseline {
-                return "Export Later is disabled until baseline exists."
+            if summary.isSessionSealed && summary.firstDeliveredAt != nil && !summary.reExportEligibleNow {
+                return "Re export window expired."
+            }
+            if !summary.hasBaseline && summary.currentSessionCaptureCount == 0 {
+                return "Export is disabled until at least one photo is captured."
             }
             return "Export and Export Later are disabled until all guided and flagged items are complete."
         }

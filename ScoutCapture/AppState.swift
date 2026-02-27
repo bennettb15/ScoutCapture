@@ -53,6 +53,7 @@ final class AppState: ObservableObject {
     private let localStore: LocalStore
     private let userDefaults: UserDefaults
     private let selectedPropertyDefaultsKey = "scoutcapture.selectedPropertyID"
+    private let reExportWindowDays = 7
     private var didLoad = false
 
     init(
@@ -274,7 +275,11 @@ final class AppState: ObservableObject {
     @discardableResult
     func startSession() -> Session? {
         guard let selectedPropertyID else { return nil }
+        let sessionsForProperty = sessions(for: selectedPropertyID)
+        let pendingDeliveryExists = sessionsForProperty.contains(where: { isPendingDelivery($0) })
+        let reExportEligibleExists = sessionsForProperty.contains(where: { isReExportEligible($0) })
         if let currentSession, currentSession.status == .draft, currentSession.propertyID == selectedPropertyID {
+            print("[StartSession] propertyID=\(selectedPropertyID.uuidString) blockedReason=none pendingDeliveryExists=\(pendingDeliveryExists) reExportEligibleExists=\(reExportEligibleExists)")
             logActiveSession(currentSession)
             try? localStore.ensureSessionMetadata(for: currentSession)
             return currentSession
@@ -282,12 +287,14 @@ final class AppState: ObservableObject {
         
         if let draft = try? localStore.latestDraftSession(propertyID: selectedPropertyID) {
             currentSession = draft
+            print("[StartSession] propertyID=\(selectedPropertyID.uuidString) blockedReason=none pendingDeliveryExists=\(pendingDeliveryExists) reExportEligibleExists=\(reExportEligibleExists)")
             try? localStore.ensureSessionMetadata(for: draft)
             return draft
         }
 
         let session = Session(propertyID: selectedPropertyID, startedAt: Date(), status: .draft, endedAt: nil, exportedAt: nil)
         currentSession = session
+        print("[StartSession] propertyID=\(selectedPropertyID.uuidString) blockedReason=none pendingDeliveryExists=\(pendingDeliveryExists) reExportEligibleExists=\(reExportEligibleExists)")
         _ = try? localStore.upsertSession(session)
         reloadSessionCache(for: selectedPropertyID)
         return session
@@ -298,6 +305,9 @@ final class AppState: ObservableObject {
         session.status = .draft
         session.endedAt = nil
         session.exportedAt = nil
+        if session.firstDeliveredAt == nil {
+            session.isSealed = false
+        }
         currentSession = session
         _ = try? localStore.upsertSession(session)
         reloadSessionCache(for: session.propertyID)
@@ -309,8 +319,10 @@ final class AppState: ObservableObject {
         if session.endedAt == nil {
             session.endedAt = Date()
         }
+        session.isSealed = true
         if markExported {
-            session.exportedAt = Date()
+            let now = Date()
+            applyDeliverySuccess(to: &session, deliveredAt: now)
         } else {
             if session.exportedAt != nil {
                 session.exportedAt = nil
@@ -349,7 +361,7 @@ final class AppState: ObservableObject {
             return cached
         }
         return sessions(for: propertyID)
-            .filter { $0.status == .completed && $0.exportedAt == nil }
+            .filter { isPendingDelivery($0) }
             .sorted { $0.startedAt > $1.startedAt }
             .first
     }
@@ -360,7 +372,7 @@ final class AppState: ObservableObject {
         }
         var pendingSessionIDs = Set<UUID>()
         for property in properties {
-            for session in sessions(for: property.id) where session.status == .completed && session.exportedAt == nil {
+            for session in sessions(for: property.id) where isPendingDelivery(session) {
                 pendingSessionIDs.insert(session.id)
             }
         }
@@ -380,7 +392,39 @@ final class AppState: ObservableObject {
         if session.endedAt == nil {
             session.endedAt = Date()
         }
-        session.exportedAt = Date()
+        let now = Date()
+        if session.firstDeliveredAt != nil, !isReExportEligible(session, now: now) {
+            print("[ExportEligibility] sessionID=\(session.id.uuidString) enabled=false reason=Re export window expired")
+            return
+        }
+        applyDeliverySuccess(to: &session, deliveredAt: now)
+        currentSession = session
+        _ = try? localStore.upsertSession(session)
+        reloadSessionCache(for: session.propertyID)
+    }
+
+    func sealCurrentSessionForExportLater() {
+        guard var session = currentSession else { return }
+        session.status = .completed
+        if session.endedAt == nil {
+            session.endedAt = Date()
+        }
+        session.exportedAt = nil
+        session.isSealed = true
+        print("[ExportSeal] action=export_later sessionID=\(session.id.uuidString) isSealed=true firstDeliveredAt=nil reExportExpiresAt=nil")
+        currentSession = session
+        _ = try? localStore.upsertSession(session)
+        reloadSessionCache(for: session.propertyID)
+    }
+
+    func sealCurrentSessionForExportNow() {
+        guard var session = currentSession else { return }
+        session.status = .completed
+        if session.endedAt == nil {
+            session.endedAt = Date()
+        }
+        session.isSealed = true
+        print("[ExportSeal] action=export_now sessionID=\(session.id.uuidString) isSealed=true")
         currentSession = session
         _ = try? localStore.upsertSession(session)
         reloadSessionCache(for: session.propertyID)
@@ -402,7 +446,12 @@ final class AppState: ObservableObject {
         if session.endedAt == nil {
             session.endedAt = Date()
         }
-        session.exportedAt = Date()
+        let now = Date()
+        if session.firstDeliveredAt != nil, !isReExportEligible(session, now: now) {
+            print("[ExportEligibility] sessionID=\(session.id.uuidString) enabled=false reason=Re export window expired")
+            return false
+        }
+        applyDeliverySuccess(to: &session, deliveredAt: now)
         if currentSession?.id == sessionID {
             currentSession = session
         }
@@ -510,7 +559,7 @@ final class AppState: ObservableObject {
             }
 
             if let pendingSession = sessions
-                .filter({ $0.status == .completed && $0.exportedAt == nil })
+                .filter({ isPendingDelivery($0) })
                 .sorted(by: { $0.startedAt > $1.startedAt })
                 .first {
                 pending[property.id] = pendingSession
@@ -562,9 +611,52 @@ final class AppState: ObservableObject {
             .first
 
         pendingExportSessionByProperty[propertyID] = sessions
-            .filter { $0.status == .completed && $0.exportedAt == nil }
+            .filter { isPendingDelivery($0) }
             .sorted { $0.startedAt > $1.startedAt }
             .first
+    }
+
+    func isPendingDelivery(_ session: Session) -> Bool {
+        session.isSealed && session.firstDeliveredAt == nil
+    }
+
+    func isReExportEligible(_ session: Session, now: Date = Date()) -> Bool {
+        guard session.firstDeliveredAt != nil else { return false }
+        guard let expiresAt = session.reExportExpiresAt else { return false }
+        return now < expiresAt
+    }
+
+    func sessionNeedsDeliveryOrReExport(_ session: Session, now: Date = Date()) -> Bool {
+        isPendingDelivery(session) || isReExportEligible(session, now: now)
+    }
+
+    func sessionReExportWindowExpired(_ session: Session, now: Date = Date()) -> Bool {
+        guard session.status == .completed else { return false }
+        guard session.isSealed else { return false }
+        guard session.firstDeliveredAt != nil else { return false }
+        guard let expiresAt = session.reExportExpiresAt else { return false }
+        return now >= expiresAt
+    }
+
+    private func applyDeliverySuccess(to session: inout Session, deliveredAt: Date) {
+        session.isSealed = true
+        session.exportedAt = deliveredAt
+        if session.firstDeliveredAt == nil {
+            session.firstDeliveredAt = deliveredAt
+            print("[ExportDelivery] sessionID=\(session.id.uuidString) firstDeliveredAt=\(deliveredAt)")
+        }
+        if session.reExportExpiresAt == nil, let first = session.firstDeliveredAt {
+            session.reExportExpiresAt = Calendar.current.date(byAdding: .day, value: reExportWindowDays, to: first)
+            if let expiresAt = session.reExportExpiresAt {
+                print("[ExportDelivery] sessionID=\(session.id.uuidString) reExportExpiresAt=\(expiresAt)")
+            }
+        }
+        if let first = session.firstDeliveredAt, let expiresAt = session.reExportExpiresAt {
+            let isPendingDelivery = self.isPendingDelivery(session)
+            let isReExportEligible = deliveredAt < expiresAt
+            print("[ExportEligibility] sessionID=\(session.id.uuidString) now=\(deliveredAt) firstDeliveredAt=\(first) reExportExpiresAt=\(expiresAt) eligible=\(isReExportEligible)")
+            print("[DeliveryState] sessionID=\(session.id.uuidString) sealed=\(session.isSealed) firstDeliveredAt=\(String(describing: session.firstDeliveredAt)) reExportExpiresAt=\(String(describing: session.reExportExpiresAt)) exportedAt=\(String(describing: session.exportedAt)) isPendingDelivery=\(isPendingDelivery) isReExportEligible=\(isReExportEligible)")
+        }
     }
 
     private func logActiveSession(_ session: Session?) {

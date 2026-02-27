@@ -2,7 +2,7 @@ import Foundation
 import UIKit
 
 final class LocalStore {
-    private let currentSessionSchemaVersion = 3
+    private let currentSessionSchemaVersion = 4
     private let fileIOQueue = DispatchQueue(label: "ScoutCapture.LocalStore.fileIO")
     private let fileIOQueueKey = DispatchSpecificKey<UInt8>()
     private let fileIOQueueValue: UInt8 = 1
@@ -656,6 +656,9 @@ final class LocalStore {
         metadata.status = session.status
         metadata.isBaselineSession = isBaselineSession(sessionID: session.id, propertyID: session.propertyID)
         metadata.exportedAt = session.exportedAt
+        metadata.isSealed = session.isSealed
+        metadata.firstDeliveredAt = session.firstDeliveredAt
+        metadata.reExportExpiresAt = session.reExportExpiresAt
         metadata.appVersion = appVersionString()
         metadata.deviceModel = deviceModelString()
         metadata.osVersion = osVersionString()
@@ -676,6 +679,9 @@ final class LocalStore {
                 status: .draft,
                 isBaselineSession: false,
                 exportedAt: nil,
+                isSealed: false,
+                firstDeliveredAt: nil,
+                reExportExpiresAt: nil,
                 appVersion: appVersionString(),
                 deviceModel: deviceModelString(),
                 osVersion: osVersionString(),
@@ -716,6 +722,9 @@ final class LocalStore {
                 status: .draft,
                 isBaselineSession: false,
                 exportedAt: nil,
+                isSealed: false,
+                firstDeliveredAt: nil,
+                reExportExpiresAt: nil,
                 appVersion: appVersionString(),
                 deviceModel: deviceModelString(),
                 osVersion: osVersionString(),
@@ -866,7 +875,7 @@ final class LocalStore {
 extension LocalStore {
     func printSessionSchema() {
         let sampleSession = SessionMetadata(
-            schemaVersion: 3,
+            schemaVersion: 4,
             propertyID: UUID(),
             sessionID: UUID(),
             propertyNameAtCapture: nil,
