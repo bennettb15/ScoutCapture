@@ -1,4 +1,5 @@
 import Foundation
+import UIKit
 
 enum CanonicalElevation {
     static func normalize(_ value: String?) -> String? {
@@ -24,11 +25,103 @@ struct SessionMetadata: Codable {
     var startedAt: Date
     var endedAt: Date?
     var status: Session.Status
+    var isBaselineSession: Bool
     var exportedAt: Date?
     var appVersion: String
     var deviceModel: String
+    var osVersion: String
     var shots: [ShotMetadata]
     var issues: [IssueMetadata]
+
+    private enum CodingKeys: String, CodingKey {
+        case schemaVersion
+        case propertyID
+        case sessionID
+        case propertyNameAtCapture
+        case propertyNameAtExport
+        case startedAt
+        case endedAt
+        case status
+        case isBaselineSession
+        case exportedAt
+        case appVersion
+        case deviceModel
+        case osVersion
+        case shots
+        case issues
+    }
+
+    init(
+        schemaVersion: Int,
+        propertyID: UUID,
+        sessionID: UUID,
+        propertyNameAtCapture: String?,
+        propertyNameAtExport: String?,
+        startedAt: Date,
+        endedAt: Date?,
+        status: Session.Status,
+        isBaselineSession: Bool,
+        exportedAt: Date?,
+        appVersion: String,
+        deviceModel: String,
+        osVersion: String,
+        shots: [ShotMetadata],
+        issues: [IssueMetadata]
+    ) {
+        self.schemaVersion = schemaVersion
+        self.propertyID = propertyID
+        self.sessionID = sessionID
+        self.propertyNameAtCapture = propertyNameAtCapture
+        self.propertyNameAtExport = propertyNameAtExport
+        self.startedAt = startedAt
+        self.endedAt = endedAt
+        self.status = status
+        self.isBaselineSession = isBaselineSession
+        self.exportedAt = exportedAt
+        self.appVersion = appVersion
+        self.deviceModel = deviceModel
+        self.osVersion = osVersion
+        self.shots = shots
+        self.issues = issues
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        schemaVersion = try c.decodeIfPresent(Int.self, forKey: .schemaVersion) ?? 1
+        propertyID = try c.decode(UUID.self, forKey: .propertyID)
+        sessionID = try c.decode(UUID.self, forKey: .sessionID)
+        propertyNameAtCapture = try c.decodeIfPresent(String.self, forKey: .propertyNameAtCapture)
+        propertyNameAtExport = try c.decodeIfPresent(String.self, forKey: .propertyNameAtExport)
+        startedAt = try c.decodeIfPresent(Date.self, forKey: .startedAt) ?? Date()
+        endedAt = try c.decodeIfPresent(Date.self, forKey: .endedAt)
+        status = try c.decodeIfPresent(Session.Status.self, forKey: .status) ?? .draft
+        isBaselineSession = try c.decodeIfPresent(Bool.self, forKey: .isBaselineSession) ?? false
+        exportedAt = try c.decodeIfPresent(Date.self, forKey: .exportedAt)
+        appVersion = try c.decodeIfPresent(String.self, forKey: .appVersion) ?? "unknown"
+        deviceModel = try c.decodeIfPresent(String.self, forKey: .deviceModel) ?? "unknown"
+        osVersion = try c.decodeIfPresent(String.self, forKey: .osVersion) ?? "unknown"
+        shots = try c.decodeIfPresent([ShotMetadata].self, forKey: .shots) ?? []
+        issues = try c.decodeIfPresent([IssueMetadata].self, forKey: .issues) ?? []
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(schemaVersion, forKey: .schemaVersion)
+        try c.encode(propertyID, forKey: .propertyID)
+        try c.encode(sessionID, forKey: .sessionID)
+        try c.encodeIfPresent(propertyNameAtCapture, forKey: .propertyNameAtCapture)
+        try c.encodeIfPresent(propertyNameAtExport, forKey: .propertyNameAtExport)
+        try c.encode(startedAt, forKey: .startedAt)
+        try c.encodeIfPresent(endedAt, forKey: .endedAt)
+        try c.encode(status, forKey: .status)
+        try c.encode(isBaselineSession, forKey: .isBaselineSession)
+        try c.encodeIfPresent(exportedAt, forKey: .exportedAt)
+        try c.encode(appVersion, forKey: .appVersion)
+        try c.encode(deviceModel, forKey: .deviceModel)
+        try c.encode(osVersion, forKey: .osVersion)
+        try c.encode(shots, forKey: .shots)
+        try c.encode(issues, forKey: .issues)
+    }
 }
 
 struct ShotMetadata: Codable, Identifiable, Equatable {
@@ -36,20 +129,226 @@ struct ShotMetadata: Codable, Identifiable, Equatable {
     let propertyID: UUID
     let sessionID: UUID
     let createdAt: Date
+    var updatedAt: Date
     var building: String
     var elevation: String
     var detailType: String
     var angleIndex: Int
+    var shotKey: String
     var isGuided: Bool
     var isFlagged: Bool
     var issueID: UUID?
+    var issueStatus: String?
     var noteText: String?
+    var noteCategory: String?
     var originalFilename: String
+    var originalRelativePath: String
+    var originalByteSize: Int?
     var stampedFilename: String?
+    var stampedRelativePath: String?
+    var captureMode: String?
+    var lens: String?
+    var orientation: String?
+    var latitude: Double?
+    var longitude: Double?
+    var accuracyMeters: Double?
     var imageWidth: Int?
     var imageHeight: Int?
 
     var id: UUID { shotID }
+
+    private enum CodingKeys: String, CodingKey {
+        case shotID
+        case propertyID
+        case sessionID
+        case createdAt
+        case updatedAt
+        case building
+        case elevation
+        case detailType
+        case angleIndex
+        case shotKey
+        case isGuided
+        case isFlagged
+        case issueID
+        case issueStatus
+        case noteText
+        case noteCategory
+        case originalFilename
+        case originalRelativePath
+        case originalByteSize
+        case stampedFilename
+        case stampedRelativePath
+        case captureMode
+        case lens
+        case orientation
+        case latitude
+        case longitude
+        case accuracyMeters
+        case imageWidth
+        case imageHeight
+    }
+
+    init(
+        shotID: UUID,
+        propertyID: UUID,
+        sessionID: UUID,
+        createdAt: Date,
+        updatedAt: Date,
+        building: String,
+        elevation: String,
+        detailType: String,
+        angleIndex: Int,
+        shotKey: String,
+        isGuided: Bool,
+        isFlagged: Bool,
+        issueID: UUID?,
+        issueStatus: String?,
+        noteText: String?,
+        noteCategory: String?,
+        originalFilename: String,
+        originalRelativePath: String,
+        originalByteSize: Int?,
+        stampedFilename: String?,
+        stampedRelativePath: String?,
+        captureMode: String?,
+        lens: String?,
+        orientation: String?,
+        latitude: Double?,
+        longitude: Double?,
+        accuracyMeters: Double?,
+        imageWidth: Int?,
+        imageHeight: Int?
+    ) {
+        self.shotID = shotID
+        self.propertyID = propertyID
+        self.sessionID = sessionID
+        self.createdAt = createdAt
+        self.updatedAt = updatedAt
+        self.building = building
+        self.elevation = elevation
+        self.detailType = detailType
+        self.angleIndex = angleIndex
+        self.shotKey = shotKey
+        self.isGuided = isGuided
+        self.isFlagged = isFlagged
+        self.issueID = issueID
+        self.issueStatus = issueStatus
+        self.noteText = noteText
+        self.noteCategory = noteCategory
+        self.originalFilename = originalFilename
+        self.originalRelativePath = originalRelativePath
+        self.originalByteSize = originalByteSize
+        self.stampedFilename = stampedFilename
+        self.stampedRelativePath = stampedRelativePath
+        self.captureMode = captureMode
+        self.lens = lens
+        self.orientation = orientation
+        self.latitude = latitude
+        self.longitude = longitude
+        self.accuracyMeters = accuracyMeters
+        self.imageWidth = imageWidth
+        self.imageHeight = imageHeight
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        shotID = try c.decode(UUID.self, forKey: .shotID)
+        propertyID = try c.decode(UUID.self, forKey: .propertyID)
+        sessionID = try c.decode(UUID.self, forKey: .sessionID)
+        createdAt = try c.decodeIfPresent(Date.self, forKey: .createdAt) ?? Date()
+        updatedAt = try c.decodeIfPresent(Date.self, forKey: .updatedAt) ?? createdAt
+        building = try c.decodeIfPresent(String.self, forKey: .building) ?? ""
+        elevation = CanonicalElevation.normalize(try c.decodeIfPresent(String.self, forKey: .elevation)) ?? ""
+        detailType = try c.decodeIfPresent(String.self, forKey: .detailType) ?? ""
+        angleIndex = max(1, try c.decodeIfPresent(Int.self, forKey: .angleIndex) ?? 1)
+        let decodedShotKey = try c.decodeIfPresent(String.self, forKey: .shotKey)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        shotKey = decodedShotKey.isEmpty
+            ? ShotMetadata.makeShotKey(building: building, elevation: elevation, detailType: detailType, angleIndex: angleIndex)
+            : decodedShotKey
+        isGuided = try c.decodeIfPresent(Bool.self, forKey: .isGuided) ?? false
+        isFlagged = try c.decodeIfPresent(Bool.self, forKey: .isFlagged) ?? false
+        issueID = try c.decodeIfPresent(UUID.self, forKey: .issueID)
+        issueStatus = try c.decodeIfPresent(String.self, forKey: .issueStatus)
+        noteText = try c.decodeIfPresent(String.self, forKey: .noteText)
+        noteCategory = try c.decodeIfPresent(String.self, forKey: .noteCategory)
+        originalFilename = try c.decodeIfPresent(String.self, forKey: .originalFilename) ?? ""
+        let decodedRelative = try c.decodeIfPresent(String.self, forKey: .originalRelativePath)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if decodedRelative.isEmpty {
+            let fallbackName = URL(fileURLWithPath: originalFilename).lastPathComponent
+            originalRelativePath = fallbackName.isEmpty ? "" : "Originals/\(fallbackName)"
+        } else {
+            originalRelativePath = decodedRelative
+        }
+        originalByteSize = try c.decodeIfPresent(Int.self, forKey: .originalByteSize)
+        stampedFilename = try c.decodeIfPresent(String.self, forKey: .stampedFilename)
+        let decodedStampedRelative = try c.decodeIfPresent(String.self, forKey: .stampedRelativePath)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if decodedStampedRelative.isEmpty, let stampedFilename {
+            let fallbackName = URL(fileURLWithPath: stampedFilename).lastPathComponent
+            stampedRelativePath = fallbackName.isEmpty ? nil : "Stamped/\(fallbackName)"
+        } else {
+            stampedRelativePath = decodedStampedRelative.isEmpty ? nil : decodedStampedRelative
+        }
+        captureMode = try c.decodeIfPresent(String.self, forKey: .captureMode)
+        lens = try c.decodeIfPresent(String.self, forKey: .lens)
+        orientation = try c.decodeIfPresent(String.self, forKey: .orientation)
+        latitude = try c.decodeIfPresent(Double.self, forKey: .latitude)
+        longitude = try c.decodeIfPresent(Double.self, forKey: .longitude)
+        accuracyMeters = try c.decodeIfPresent(Double.self, forKey: .accuracyMeters)
+        imageWidth = try c.decodeIfPresent(Int.self, forKey: .imageWidth)
+        imageHeight = try c.decodeIfPresent(Int.self, forKey: .imageHeight)
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(shotID, forKey: .shotID)
+        try c.encode(propertyID, forKey: .propertyID)
+        try c.encode(sessionID, forKey: .sessionID)
+        try c.encode(createdAt, forKey: .createdAt)
+        try c.encode(updatedAt, forKey: .updatedAt)
+        try c.encode(building, forKey: .building)
+        try c.encode(CanonicalElevation.normalize(elevation) ?? elevation, forKey: .elevation)
+        try c.encode(detailType, forKey: .detailType)
+        try c.encode(max(1, angleIndex), forKey: .angleIndex)
+        let encodedKey = shotKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        try c.encode(encodedKey.isEmpty ? ShotMetadata.makeShotKey(building: building, elevation: elevation, detailType: detailType, angleIndex: angleIndex) : encodedKey, forKey: .shotKey)
+        try c.encode(isGuided, forKey: .isGuided)
+        try c.encode(isFlagged, forKey: .isFlagged)
+        try c.encodeIfPresent(issueID, forKey: .issueID)
+        try c.encodeIfPresent(issueStatus, forKey: .issueStatus)
+        try c.encodeIfPresent(noteText, forKey: .noteText)
+        try c.encodeIfPresent(noteCategory, forKey: .noteCategory)
+        try c.encode(originalFilename, forKey: .originalFilename)
+        try c.encode(originalRelativePath, forKey: .originalRelativePath)
+        try c.encodeIfPresent(originalByteSize, forKey: .originalByteSize)
+        try c.encodeIfPresent(stampedFilename, forKey: .stampedFilename)
+        try c.encodeIfPresent(stampedRelativePath, forKey: .stampedRelativePath)
+        try c.encodeIfPresent(captureMode, forKey: .captureMode)
+        try c.encodeIfPresent(lens, forKey: .lens)
+        try c.encodeIfPresent(orientation, forKey: .orientation)
+        try c.encodeIfPresent(latitude, forKey: .latitude)
+        try c.encodeIfPresent(longitude, forKey: .longitude)
+        try c.encodeIfPresent(accuracyMeters, forKey: .accuracyMeters)
+        try c.encodeIfPresent(imageWidth, forKey: .imageWidth)
+        try c.encodeIfPresent(imageHeight, forKey: .imageHeight)
+    }
+
+    static func makeShotKey(building: String, elevation: String, detailType: String, angleIndex: Int) -> String {
+        let normalizedBuilding = normalizeKeyPart(building)
+        let normalizedElevation = normalizeKeyPart(CanonicalElevation.normalize(elevation) ?? elevation)
+        let normalizedDetailType = normalizeKeyPart(detailType)
+        let normalizedAngle = String(max(1, angleIndex))
+        return "\(normalizedBuilding)|\(normalizedElevation)|\(normalizedDetailType)|\(normalizedAngle)"
+    }
+
+    private static func normalizeKeyPart(_ value: String) -> String {
+        value
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+    }
 }
 
 struct IssueMetadata: Codable, Identifiable, Equatable {
@@ -493,4 +792,15 @@ struct ObservationUpdateEntry: Codable, Identifiable, Equatable {
         self.text = text
         self.shotID = shotID
     }
+}
+
+struct ReportAsset: Identifiable, Equatable {
+    let localIdentifier: String
+    let fileURL: URL
+    let creationDate: Date?
+    let pixelWidth: Int
+    let pixelHeight: Int
+    let originalFilename: String
+
+    var id: String { localIdentifier }
 }

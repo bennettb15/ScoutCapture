@@ -1,6 +1,12 @@
 import Foundation
 import Combine
 
+extension Notification.Name {
+    static let scoutClearLocalUICache = Notification.Name("scout.clearLocalUICache")
+    static let scoutVerifySessionJSONSource = Notification.Name("scout.verifySessionJSONSource")
+    static let scoutVerifyExportSessionJSONSource = Notification.Name("scout.verifyExportSessionJSONSource")
+}
+
 final class AppState: ObservableObject {
     struct HubPropertyMeta {
         let clientLine: String?
@@ -419,7 +425,11 @@ final class AppState: ObservableObject {
     }
 
     func resetLocalSessionUIIndex() {
-        clearCurrentSession()
+        clearLocalCacheOnly()
+    }
+
+    func clearLocalCacheOnly() {
+        NotificationCenter.default.post(name: .scoutClearLocalUICache, object: nil)
         refreshProperties()
     }
 
@@ -429,14 +439,30 @@ final class AppState: ObservableObject {
         } catch {
             // Keep UI stable even when cleanup fails.
         }
+        clearAllUserDefaults()
         selectedPropertyID = nil
         clearCurrentSession()
+        properties = []
+        sessionIndexByProperty = [:]
+        draftSessionByProperty = [:]
+        pendingExportSessionByProperty = [:]
+        hubMetaByProperty = [:]
         refreshProperties()
+        NotificationCenter.default.post(name: .scoutClearLocalUICache, object: nil)
     }
 
     private func persistSelectedPropertyID() {
         if let selectedPropertyID {
             userDefaults.set(selectedPropertyID.uuidString, forKey: selectedPropertyDefaultsKey)
+        } else {
+            userDefaults.removeObject(forKey: selectedPropertyDefaultsKey)
+        }
+    }
+
+    private func clearAllUserDefaults() {
+        if let bundleID = Bundle.main.bundleIdentifier {
+            userDefaults.removePersistentDomain(forName: bundleID)
+            userDefaults.synchronize()
         } else {
             userDefaults.removeObject(forKey: selectedPropertyDefaultsKey)
         }
