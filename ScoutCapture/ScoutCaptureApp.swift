@@ -283,8 +283,14 @@ struct SessionHubView: View {
                 HubSessionDocumentExportPicker(
                     fileURL: file.url,
                     onComplete: { didExport in
+                        print("[DeliverResult] sessionID=\(file.sessionID.uuidString) success=\(didExport)")
                         if didExport {
                             _ = appState.markSessionExported(propertyID: file.propertyID, sessionID: file.sessionID)
+                            if let updated = appState.sessions(for: file.propertyID).first(where: { $0.id == file.sessionID }) {
+                                let pending = appState.isPendingDelivery(updated)
+                                let reExportEligible = appState.isReExportEligible(updated)
+                                print("[DeliveryState] sessionID=\(updated.id.uuidString) firstDeliveredAt=\(String(describing: updated.firstDeliveredAt)) reExportExpiresAt=\(String(describing: updated.reExportExpiresAt)) pending=\(pending) reExportEligible=\(reExportEligible)")
+                            }
                         }
                         pendingExportFile = nil
                         isPreparingPendingExport = false
@@ -414,21 +420,34 @@ struct SessionHubView: View {
     private func propertyRow(_ property: Property) -> some View {
         let isPressed = pressedPropertyID == property.id
         let draft = appState.draftSession(for: property.id)
-        let hasPendingExport = appState
-            .sessions(for: property.id)
-            .contains(where: { $0.status == .completed && $0.exportedAt == nil })
+        let sessionsForProperty = appState.sessions(for: property.id).sorted { $0.startedAt > $1.startedAt }
+        let hasPendingExport = sessionsForProperty.contains(where: { appState.isPendingDelivery($0) })
+        let latestReExportSession = reExportCandidateSession(for: property.id)
+        let hasReExportGlyph = latestReExportSession != nil
         let clientLine = propertyClientLine(property)
         let addressLine = propertyAddressLine(property)
         let hasMapsButton = mapsAddressQuery(for: property) != nil
         let hasPhoneActions = hasValidPhoneNumber(property)
-        let hasStatusRow = draft != nil || hasPendingExport || isEditMode
+        let hasStatusRow = draft != nil || hasPendingExport || hasReExportGlyph || isEditMode
+        let _ = {
+            let firstDelivered = latestReExportSession?.firstDeliveredAt
+            let expiresAt = latestReExportSession?.reExportExpiresAt
+            print("[ReExportEligibility] propertyID=\(property.id.uuidString) firstDeliveredAt=\(String(describing: firstDelivered)) reExportExpiresAt=\(String(describing: expiresAt)) eligible=\(hasReExportGlyph)")
+        }()
 
         HStack(alignment: .top, spacing: 10) {
             VStack(alignment: .leading, spacing: 4) {
-                Text(property.name)
-                    .font(.system(size: 18, weight: .semibold))
-                    .foregroundColor(.primary)
-                    .lineLimit(1)
+                HStack(alignment: .firstTextBaseline, spacing: 6) {
+                    if hasReExportGlyph {
+                        Image(systemName: "arrow.clockwise.circle")
+                            .font(.system(size: 18, weight: .semibold))
+                            .foregroundColor(Color.green.opacity(0.92))
+                    }
+                    Text(property.name)
+                        .font(.system(size: 18, weight: .semibold))
+                        .foregroundColor(.primary)
+                        .lineLimit(1)
+                }
 
                 if let clientLine {
                     Text(clientLine)
@@ -451,14 +470,17 @@ struct SessionHubView: View {
 
             VStack(alignment: .trailing, spacing: 6) {
                 if hasStatusRow {
-                    HStack(spacing: 8) {
-                        if draft != nil {
-                            chipLabel("Draft", tint: .orange)
+                    VStack(alignment: .trailing, spacing: 4) {
+                        HStack(spacing: 8) {
+                            if draft != nil {
+                                chipLabel("Draft", tint: .orange)
+                            }
+
+                            if hasPendingExport {
+                                chipLabel("Pending Export", tint: .blue)
+                            }
                         }
 
-                        if hasPendingExport {
-                            chipLabel("Pending Export", tint: .blue)
-                        }
                     }
                 }
 
@@ -544,6 +566,18 @@ struct SessionHubView: View {
                     }
                     .tint(.green)
                 }
+
+            }
+        }
+        .swipeActions(edge: .leading, allowsFullSwipe: false) {
+            if !isEditMode, hasReExportGlyph, let reExportSession = latestReExportSession {
+                Button {
+                    print("[ReExportInvoke] propertyID=\(property.id.uuidString) sessionID=\(reExportSession.id.uuidString) source=leadingSwipe")
+                    beginPendingExport(for: property, session: reExportSession)
+                } label: {
+                    Label("Re-export", systemImage: "clock.arrow.circlepath")
+                }
+                .tint(.green)
             }
         }
     }
@@ -681,18 +715,24 @@ struct SessionHubView: View {
     }
 
     @ViewBuilder
-    private func chipLabel(_ text: String, tint: Color) -> some View {
-        Text(text)
-            .font(.system(size: 12, weight: .semibold))
-            .foregroundColor(tint)
-            .padding(.horizontal, 10)
-            .padding(.vertical, 6)
-            .background(tint.opacity(0.15))
-            .clipShape(Capsule())
-            .overlay(
-                Capsule()
-                    .stroke(tint.opacity(0.35), lineWidth: 1)
-            )
+    private func chipLabel(_ text: String, tint: Color, systemImage: String? = nil) -> some View {
+        HStack(spacing: 5) {
+            if let systemImage {
+                Image(systemName: systemImage)
+                    .font(.system(size: 10, weight: .semibold))
+            }
+            Text(text)
+                .font(.system(size: 12, weight: .semibold))
+        }
+        .foregroundColor(tint)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .background(tint.opacity(0.15))
+        .clipShape(Capsule())
+        .overlay(
+            Capsule()
+                .stroke(tint.opacity(0.35), lineWidth: 1)
+        )
     }
 
     private var countersHeader: some View {
@@ -921,7 +961,18 @@ struct SessionHubView: View {
     }
 
     private func propertyHasPendingExport(_ property: Property) -> Bool {
-        appState.sessions(for: property.id).contains(where: { $0.status == .completed && $0.exportedAt == nil })
+        appState.sessions(for: property.id).contains(where: { appState.isPendingDelivery($0) })
+    }
+
+    private func reExportCandidateSession(for propertyID: UUID) -> Session? {
+        appState.sessions(for: propertyID)
+            .filter { appState.isReExportEligible($0) }
+            .sorted { lhs, rhs in
+                let l = lhs.firstDeliveredAt ?? .distantPast
+                let r = rhs.firstDeliveredAt ?? .distantPast
+                return l > r
+            }
+            .first
     }
 
     private func matchesPropertyFilter(_ property: Property) -> Bool {
@@ -989,32 +1040,39 @@ struct SessionHubView: View {
 
     @ViewBuilder
     private var pendingExportPromptOverlay: some View {
+        let actionTitle = "Deliver Now"
+        let titleText = "Delivery required"
+        let messageText = "This property has a completed session waiting to be delivered. Deliver it now to start a new session."
         ZStack {
             Color.black.opacity(0.45)
                 .ignoresSafeArea()
 
             VStack(spacing: 14) {
-                Text("Export Now?")
+                Text(titleText)
                     .font(.system(size: 26, weight: .bold))
                     .foregroundColor(.white)
 
-                Text("This session is pending export. Export now to continue.")
+                Text(messageText)
                     .font(.system(size: 15, weight: .medium))
                     .foregroundColor(.white.opacity(0.92))
                     .multilineTextAlignment(.center)
 
                 HStack(spacing: 10) {
                     customCapsuleToolbarButton(title: "Cancel", isEnabled: true) {
+                        if let session = pendingExportPromptSession {
+                            print("[DeliverPrompt] sessionID=\(session.id.uuidString) userAction=cancel")
+                        }
                         dismissPendingExportPrompt()
                     }
                     customCapsuleToolbarButton(
-                        title: "Export Now",
+                        title: actionTitle,
                         isEnabled: true,
                         fill: .blue,
                         stroke: .blue.opacity(0.9),
                         label: .white
                     ) {
                         guard let property = pendingExportPromptProperty, let session = pendingExportPromptSession else { return }
+                        print("[DeliverPrompt] sessionID=\(session.id.uuidString) userAction=deliver")
                         beginPendingExport(for: property, session: session)
                     }
                 }
@@ -1107,12 +1165,22 @@ struct SessionHubView: View {
         selectionHaptic.impactOccurred()
         pressedPropertyID = property.id
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) {
-            if let pending = appState.latestPendingExportSession(for: property.id) {
+            let sessions = appState.sessions(for: property.id).sorted { $0.startedAt > $1.startedAt }
+            let latest = sessions.first
+            let pendingSession = appState.latestPendingExportSession(for: property.id)
+            let pending = pendingSession != nil
+            let latestID = latest?.id.uuidString ?? "NONE"
+            let isBaseline = latest.map { property.baselineSessionID == $0.id } ?? false
+            let sealed = latest?.isSealed ?? false
+            let firstDelivered = latest?.firstDeliveredAt.map { "\($0)" } ?? "nil"
+            let action = pending ? "promptDeliver" : "openCamera"
+            print("[PropertyTap] propertyID=\(property.id.uuidString) latestSessionID=\(latestID) isBaseline=\(isBaseline) sealed=\(sealed) firstDeliveredAt=\(firstDelivered) pending=\(pending) action=\(action)")
+            if let pendingSession {
                 pendingExportPromptProperty = property
-                pendingExportPromptSession = pending
-            } else {
-                openProperty(property)
+                pendingExportPromptSession = pendingSession
+                return
             }
+            openProperty(property)
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.18) {
             if pressedPropertyID == property.id {
@@ -2572,7 +2640,7 @@ private struct EditContactSheet: View {
         let trimmedOriginal = property.name.trimmingCharacters(in: .whitespacesAndNewlines)
         let trimmedUpdated = propertyName.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedUpdated.isEmpty, trimmedUpdated != trimmedOriginal else { return false }
-        return appState.sessions(for: property.id).contains(where: { $0.status == .completed && $0.exportedAt == nil })
+        return appState.sessions(for: property.id).contains(where: { appState.isPendingDelivery($0) })
     }
 
     private func loadFromProperty() {
@@ -2944,7 +3012,7 @@ private struct PropertySessionsManagerView: View {
                             Text("Started \(session.startedAt.formatted(date: .abbreviated, time: .shortened))")
                                 .font(.system(size: 13, weight: .medium))
                                 .foregroundColor(.secondary)
-                            if session.status == .completed && session.exportedAt == nil {
+                            if appState.isPendingDelivery(session) {
                                 Text("Pending Export")
                                     .font(.system(size: 12, weight: .semibold))
                                     .foregroundColor(.orange)
@@ -3006,7 +3074,7 @@ private struct PropertySessionsManagerView: View {
         if target.status == .draft {
             return "This will permanently delete this draft session and its local records. This cannot be undone or recovered."
         }
-        if target.exportedAt == nil {
+        if appState.isPendingDelivery(target) {
             return "This session is pending export. Deleting it will permanently remove this session, its local records, and pending export state. This cannot be undone or recovered."
         }
         return "This will permanently delete this completed session and its local records. This cannot be undone or recovered."
@@ -3018,7 +3086,7 @@ private struct PropertySessionsManagerView: View {
 
     private func handleDeleteTap(_ session: Session) {
         deleteTarget = session
-        if session.status == .completed && session.exportedAt == nil {
+        if appState.isPendingDelivery(session) {
             showPendingExportWarning = true
             return
         }

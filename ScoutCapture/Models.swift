@@ -27,6 +27,9 @@ struct SessionMetadata: Codable {
     var status: Session.Status
     var isBaselineSession: Bool
     var exportedAt: Date?
+    var isSealed: Bool
+    var firstDeliveredAt: Date?
+    var reExportExpiresAt: Date?
     var appVersion: String
     var deviceModel: String
     var osVersion: String
@@ -44,6 +47,9 @@ struct SessionMetadata: Codable {
         case status
         case isBaselineSession
         case exportedAt
+        case isSealed
+        case firstDeliveredAt
+        case reExportExpiresAt
         case appVersion
         case deviceModel
         case osVersion
@@ -62,6 +68,9 @@ struct SessionMetadata: Codable {
         status: Session.Status,
         isBaselineSession: Bool,
         exportedAt: Date?,
+        isSealed: Bool = false,
+        firstDeliveredAt: Date? = nil,
+        reExportExpiresAt: Date? = nil,
         appVersion: String,
         deviceModel: String,
         osVersion: String,
@@ -78,6 +87,9 @@ struct SessionMetadata: Codable {
         self.status = status
         self.isBaselineSession = isBaselineSession
         self.exportedAt = exportedAt
+        self.isSealed = isSealed
+        self.firstDeliveredAt = firstDeliveredAt
+        self.reExportExpiresAt = reExportExpiresAt
         self.appVersion = appVersion
         self.deviceModel = deviceModel
         self.osVersion = osVersion
@@ -97,6 +109,16 @@ struct SessionMetadata: Codable {
         status = try c.decodeIfPresent(Session.Status.self, forKey: .status) ?? .draft
         isBaselineSession = try c.decodeIfPresent(Bool.self, forKey: .isBaselineSession) ?? false
         exportedAt = try c.decodeIfPresent(Date.self, forKey: .exportedAt)
+        let decodedIsSealed = try c.decodeIfPresent(Bool.self, forKey: .isSealed)
+        isSealed = decodedIsSealed ?? (status == .completed)
+        firstDeliveredAt = try c.decodeIfPresent(Date.self, forKey: .firstDeliveredAt) ?? exportedAt
+        if let explicitExpiry = try c.decodeIfPresent(Date.self, forKey: .reExportExpiresAt) {
+            reExportExpiresAt = explicitExpiry
+        } else if let deliveredAt = firstDeliveredAt {
+            reExportExpiresAt = Calendar.current.date(byAdding: .day, value: 7, to: deliveredAt)
+        } else {
+            reExportExpiresAt = nil
+        }
         appVersion = try c.decodeIfPresent(String.self, forKey: .appVersion) ?? "unknown"
         deviceModel = try c.decodeIfPresent(String.self, forKey: .deviceModel) ?? "unknown"
         osVersion = try c.decodeIfPresent(String.self, forKey: .osVersion) ?? "unknown"
@@ -116,6 +138,9 @@ struct SessionMetadata: Codable {
         try c.encode(status, forKey: .status)
         try c.encode(isBaselineSession, forKey: .isBaselineSession)
         try c.encodeIfPresent(exportedAt, forKey: .exportedAt)
+        try c.encode(isSealed, forKey: .isSealed)
+        try c.encodeIfPresent(firstDeliveredAt, forKey: .firstDeliveredAt)
+        try c.encodeIfPresent(reExportExpiresAt, forKey: .reExportExpiresAt)
         try c.encode(appVersion, forKey: .appVersion)
         try c.encode(deviceModel, forKey: .deviceModel)
         try c.encode(osVersion, forKey: .osVersion)
@@ -443,6 +468,9 @@ struct Session: Codable, Identifiable, Equatable {
     var status: Status
     var endedAt: Date?
     var exportedAt: Date?
+    var isSealed: Bool
+    var firstDeliveredAt: Date?
+    var reExportExpiresAt: Date?
     var notes: String?
 
     init(
@@ -452,6 +480,9 @@ struct Session: Codable, Identifiable, Equatable {
         status: Status = .draft,
         endedAt: Date? = nil,
         exportedAt: Date? = nil,
+        isSealed: Bool = false,
+        firstDeliveredAt: Date? = nil,
+        reExportExpiresAt: Date? = nil,
         notes: String? = nil
     ) {
         self.id = id
@@ -460,6 +491,9 @@ struct Session: Codable, Identifiable, Equatable {
         self.status = status
         self.endedAt = endedAt
         self.exportedAt = exportedAt
+        self.isSealed = isSealed
+        self.firstDeliveredAt = firstDeliveredAt
+        self.reExportExpiresAt = reExportExpiresAt
         self.notes = notes
     }
 
@@ -470,6 +504,9 @@ struct Session: Codable, Identifiable, Equatable {
         case status
         case endedAt
         case exportedAt
+        case isSealed
+        case firstDeliveredAt
+        case reExportExpiresAt
         case notes
     }
 
@@ -480,6 +517,15 @@ struct Session: Codable, Identifiable, Equatable {
         startedAt = try c.decode(Date.self, forKey: .startedAt)
         endedAt = try c.decodeIfPresent(Date.self, forKey: .endedAt)
         exportedAt = try c.decodeIfPresent(Date.self, forKey: .exportedAt)
+        let decodedIsSealed = try c.decodeIfPresent(Bool.self, forKey: .isSealed)
+        firstDeliveredAt = try c.decodeIfPresent(Date.self, forKey: .firstDeliveredAt) ?? exportedAt
+        if let explicitExpiry = try c.decodeIfPresent(Date.self, forKey: .reExportExpiresAt) {
+            reExportExpiresAt = explicitExpiry
+        } else if let deliveredAt = firstDeliveredAt {
+            reExportExpiresAt = Calendar.current.date(byAdding: .day, value: 7, to: deliveredAt)
+        } else {
+            reExportExpiresAt = nil
+        }
         notes = try c.decodeIfPresent(String.self, forKey: .notes)
         if let decodedStatus = try c.decodeIfPresent(Status.self, forKey: .status) {
             status = decodedStatus
@@ -487,6 +533,7 @@ struct Session: Codable, Identifiable, Equatable {
             // Legacy migration for existing sessions persisted before explicit status existed.
             status = (endedAt == nil) ? .draft : .completed
         }
+        isSealed = decodedIsSealed ?? (status == .completed)
     }
 
     func encode(to encoder: Encoder) throws {
@@ -497,6 +544,9 @@ struct Session: Codable, Identifiable, Equatable {
         try c.encode(status, forKey: .status)
         try c.encodeIfPresent(endedAt, forKey: .endedAt)
         try c.encodeIfPresent(exportedAt, forKey: .exportedAt)
+        try c.encode(isSealed, forKey: .isSealed)
+        try c.encodeIfPresent(firstDeliveredAt, forKey: .firstDeliveredAt)
+        try c.encodeIfPresent(reExportExpiresAt, forKey: .reExportExpiresAt)
         try c.encodeIfPresent(notes, forKey: .notes)
     }
 }
