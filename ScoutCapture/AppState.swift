@@ -39,7 +39,11 @@ final class AppState: ObservableObject {
         }
     }
 
-    @Published var currentSession: Session?
+    @Published var currentSession: Session? {
+        didSet {
+            logActiveSession(currentSession)
+        }
+    }
 
     var selectedProperty: Property? {
         guard let selectedPropertyID else { return nil }
@@ -271,6 +275,7 @@ final class AppState: ObservableObject {
     func startSession() -> Session? {
         guard let selectedPropertyID else { return nil }
         if let currentSession, currentSession.status == .draft, currentSession.propertyID == selectedPropertyID {
+            logActiveSession(currentSession)
             try? localStore.ensureSessionMetadata(for: currentSession)
             return currentSession
         }
@@ -560,5 +565,20 @@ final class AppState: ObservableObject {
             .filter { $0.status == .completed && $0.exportedAt == nil }
             .sorted { $0.startedAt > $1.startedAt }
             .first
+    }
+
+    private func logActiveSession(_ session: Session?) {
+        guard let session else {
+            print("[ActiveSession] NONE")
+            return
+        }
+        let isBaseline = properties.first(where: { $0.id == session.propertyID })?.baselineSessionID == session.id
+        print(
+            "[ActiveSession] propertyID=\(session.propertyID.uuidString) " +
+            "sessionID=\(session.id.uuidString) " +
+            "isBaseline=\(isBaseline) " +
+            "startedAt=\(session.startedAt) " +
+            "status=\(session.status.rawValue)"
+        )
     }
 }
