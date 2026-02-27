@@ -285,9 +285,6 @@ struct SessionHubView: View {
                     onComplete: { didExport in
                         if didExport {
                             _ = appState.markSessionExported(propertyID: file.propertyID, sessionID: file.sessionID)
-                            if !appState.propertyHasBaseline(file.propertyID) {
-                                _ = appState.setPropertyBaselineSession(propertyID: file.propertyID, sessionID: file.sessionID)
-                            }
                         }
                         pendingExportFile = nil
                         isPreparingPendingExport = false
@@ -1257,6 +1254,7 @@ struct SessionHubView: View {
         let stampedByOriginalFilename = try ensurePendingStampedJPEGs(
             propertyID: property.id,
             sessionID: session.id,
+            propertyName: property.name,
             sessionMetadata: sessionMetadata
         )
 
@@ -1369,26 +1367,70 @@ struct SessionHubView: View {
     private func ensurePendingStampedJPEGs(
         propertyID: UUID,
         sessionID: UUID,
+        propertyName: String,
         sessionMetadata: SessionMetadata
     ) throws -> [String: URL] {
         let fileManager = FileManager.default
+        var metadata = sessionMetadata
+        var didUpdateMetadata = false
         var output: [String: URL] = [:]
+        var reservedNames = Set(
+            ((try? fileManager.contentsOfDirectory(atPath: localStore.stampedDirectoryURL(propertyID: propertyID, sessionID: sessionID).path)) ?? [])
+                .map { $0.lowercased() }
+        )
 
-        for shot in sessionMetadata.shots {
+        for index in metadata.shots.indices {
+            let shot = metadata.shots[index]
             let originalURL = localStore.originalsDirectoryURL(propertyID: propertyID, sessionID: sessionID)
                 .appendingPathComponent(shot.originalFilename, isDirectory: false)
             guard fileManager.fileExists(atPath: originalURL.path) else { continue }
 
-            let stampedName = "\(shot.shotID.uuidString).jpg"
+            let stampedName = nextReadablePendingStampedFilename(shot: shot, reservedNames: &reservedNames)
+            if metadata.shots[index].stampedFilename != stampedName {
+                metadata.shots[index].stampedFilename = stampedName
+                didUpdateMetadata = true
+            }
+            let stampedRelative = "Stamped/\(stampedName)"
+            if metadata.shots[index].stampedRelativePath != stampedRelative {
+                metadata.shots[index].stampedRelativePath = stampedRelative
+                didUpdateMetadata = true
+            }
+            if (metadata.shots[index].imageWidth ?? 0) <= 0 || (metadata.shots[index].imageHeight ?? 0) <= 0 {
+                let sourceImage = UIImage(contentsOfFile: originalURL.path)
+                if let sourceImage {
+                    metadata.shots[index].imageWidth = max(1, Int(sourceImage.size.width))
+                    metadata.shots[index].imageHeight = max(1, Int(sourceImage.size.height))
+                    didUpdateMetadata = true
+                }
+            }
+
             let stampedURL = localStore.stampedDirectoryURL(propertyID: propertyID, sessionID: sessionID)
                 .appendingPathComponent(stampedName, isDirectory: false)
             try createPendingStampedJPEGIfMissing(
                 sourceURL: originalURL,
                 destinationURL: stampedURL,
                 captureDate: shot.updatedAt,
+                overlayLines: pendingStampOverlayLines(
+                    propertyName: propertyName,
+                    shot: shot,
+                    isBaselineSession: metadata.isBaselineSession
+                ),
                 fileManager: fileManager
             )
             output[shot.originalFilename] = stampedURL
+        }
+
+        if didUpdateMetadata {
+            try localStore.saveSessionMetadataAtomically(
+                propertyID: propertyID,
+                sessionID: sessionID,
+                metadata: metadata
+            )
+#if DEBUG
+            if let firstStamped = metadata.shots.first?.stampedRelativePath {
+                print("[Stamp] metadata stampedRelativePath sample=\(firstStamped)")
+            }
+#endif
         }
 
         return output
@@ -1398,6 +1440,7 @@ struct SessionHubView: View {
         sourceURL: URL,
         destinationURL: URL,
         captureDate: Date,
+        overlayLines: [String],
         fileManager: FileManager
     ) throws {
         if fileManager.fileExists(atPath: destinationURL.path),
@@ -1408,7 +1451,11 @@ struct SessionHubView: View {
         let parentDir = destinationURL.deletingLastPathComponent()
         try fileManager.createDirectory(at: parentDir, withIntermediateDirectories: true)
         let sourceData = try Data(contentsOf: sourceURL)
-        let stampedData = try encodePendingStampedJPEG(from: sourceData, captureDate: captureDate)
+        let stampedData = try encodePendingStampedJPEG(
+            from: sourceData,
+            captureDate: captureDate,
+            overlayLines: overlayLines
+        )
         try stampedData.write(to: destinationURL, options: [.atomic])
 
         let size = ((try? fileManager.attributesOfItem(atPath: destinationURL.path)[.size] as? NSNumber) ?? nil)?.intValue ?? 0
@@ -1435,9 +1482,18 @@ struct SessionHubView: View {
 #endif
     }
 
-    private func encodePendingStampedJPEG(from sourceData: Data, captureDate: Date) throws -> Data {
-        guard let source = CGImageSourceCreateWithData(sourceData as CFData, nil),
-              let image = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
+    private func encodePendingStampedJPEG(
+        from sourceData: Data,
+        captureDate: Date,
+        overlayLines: [String]
+    ) throws -> Data {
+        guard let source = CGImageSourceCreateWithData(sourceData as CFData, nil) else {
+            throw NSError(domain: "ScoutCapture.PendingStamp", code: 2, userInfo: [NSLocalizedDescriptionKey: "Missing source image for pending stamped export"])
+        }
+
+        let image = normalizedPendingUprightCGImage(from: sourceData)
+            ?? CGImageSourceCreateImageAtIndex(source, 0, nil)
+        guard let image else {
             throw NSError(domain: "ScoutCapture.PendingStamp", code: 2, userInfo: [NSLocalizedDescriptionKey: "Missing source image for pending stamped export"])
         }
 
@@ -1458,7 +1514,10 @@ struct SessionHubView: View {
         tiff[kCGImagePropertyTIFFDateTime] = exifTimestamp
         mergedProps[kCGImagePropertyExifDictionary] = exif
         mergedProps[kCGImagePropertyTIFFDictionary] = tiff
+        mergedProps[kCGImagePropertyOrientation] = 1
         mergedProps[kCGImageDestinationLossyCompressionQuality] = 0.90
+
+        let stampedCGImage = drawPendingStampOverlay(on: image, lines: overlayLines) ?? image
 
         let destinationData = NSMutableData()
         guard let destination = CGImageDestinationCreateWithData(
@@ -1469,11 +1528,95 @@ struct SessionHubView: View {
         ) else {
             throw NSError(domain: "ScoutCapture.PendingStamp", code: 3, userInfo: [NSLocalizedDescriptionKey: "Unable to create JPEG destination"])
         }
-        CGImageDestinationAddImage(destination, image, mergedProps as CFDictionary)
+        CGImageDestinationAddImage(destination, stampedCGImage, mergedProps as CFDictionary)
         guard CGImageDestinationFinalize(destination) else {
             throw NSError(domain: "ScoutCapture.PendingStamp", code: 4, userInfo: [NSLocalizedDescriptionKey: "Unable to finalize JPEG destination"])
         }
         return destinationData as Data
+    }
+
+    private func normalizedPendingUprightCGImage(from sourceData: Data) -> CGImage? {
+        guard let uiImage = UIImage(data: sourceData) else { return nil }
+        let size = uiImage.size
+        guard size.width > 0, size.height > 0 else { return nil }
+
+        let format = UIGraphicsImageRendererFormat.default()
+        format.opaque = true
+        format.scale = 1
+        let rendered = UIGraphicsImageRenderer(size: size, format: format).image { _ in
+            uiImage.draw(in: CGRect(origin: .zero, size: size))
+        }
+        return rendered.cgImage
+    }
+
+    private func drawPendingStampOverlay(on image: CGImage, lines: [String]) -> CGImage? {
+        guard !lines.isEmpty else { return image }
+        let width = image.width
+        let height = image.height
+        guard width > 0, height > 0 else { return image }
+
+        let format = UIGraphicsImageRendererFormat.default()
+        format.opaque = true
+        format.scale = 1
+        let size = CGSize(width: width, height: height)
+        let rendered = UIGraphicsImageRenderer(size: size, format: format).image { _ in
+            UIImage(cgImage: image).draw(in: CGRect(origin: .zero, size: size))
+
+            let shortEdge = CGFloat(min(width, height))
+            let sideInset = max(16, shortEdge * 0.025)
+            let bottomInset = max(16, shortEdge * 0.025)
+            let lineSpacing = max(2, shortEdge * 0.004)
+            let cornerRadius = max(8, shortEdge * 0.016)
+            let primarySize = max(14, shortEdge * 0.030)
+            let secondarySize = max(12, shortEdge * 0.024)
+
+            let styled: [NSAttributedString] = lines.enumerated().map { idx, line in
+                NSAttributedString(
+                    string: line,
+                    attributes: [
+                        .font: idx == 0
+                            ? UIFont.systemFont(ofSize: primarySize, weight: .semibold)
+                            : UIFont.systemFont(ofSize: secondarySize, weight: .regular),
+                        .foregroundColor: UIColor.white
+                    ]
+                )
+            }
+            let maxTextWidth = size.width - (sideInset * 3)
+            let lineSizes = styled.map { text in
+                text.boundingRect(
+                    with: CGSize(width: maxTextWidth, height: .greatestFiniteMagnitude),
+                    options: [.usesLineFragmentOrigin, .usesFontLeading],
+                    context: nil
+                ).integral.size
+            }
+            let textHeight = lineSizes.reduce(0) { $0 + $1.height } + CGFloat(max(0, lineSizes.count - 1)) * lineSpacing
+            let textWidth = min(maxTextWidth, lineSizes.map(\.width).max() ?? maxTextWidth)
+            let padX = max(8, shortEdge * 0.013)
+            let padY = max(5, shortEdge * 0.009)
+            let panelRect = CGRect(
+                x: sideInset,
+                y: size.height - bottomInset - (textHeight + padY * 2),
+                width: textWidth + (padX * 2),
+                height: textHeight + (padY * 2)
+            )
+
+            let panelPath = UIBezierPath(roundedRect: panelRect, cornerRadius: cornerRadius)
+            UIColor.black.withAlphaComponent(0.58).setFill()
+            panelPath.fill()
+
+            var y = panelRect.minY + padY
+            for (idx, text) in styled.enumerated() {
+                let drawRect = CGRect(
+                    x: panelRect.minX + padX,
+                    y: y,
+                    width: textWidth,
+                    height: lineSizes[idx].height
+                )
+                text.draw(with: drawRect, options: [.usesLineFragmentOrigin, .usesFontLeading], context: nil)
+                y += lineSizes[idx].height + lineSpacing
+            }
+        }
+        return rendered.cgImage
     }
 
     private static let pendingExportExifTimestampFormatter: DateFormatter = {
@@ -1502,6 +1645,79 @@ struct SessionHubView: View {
         let minutes = (absolute % 3600) / 60
         return String(format: "%@%02d:%02d", sign, hours, minutes)
     }
+
+    private func pendingStampOverlayLines(propertyName: String, shot: ShotMetadata, isBaselineSession: Bool) -> [String] {
+        let line1 = propertyName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let line2 = [
+            shot.building,
+            shot.elevation,
+            shot.detailType,
+            "Angle \(max(1, shot.angleIndex))"
+        ]
+        .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+        .filter { !$0.isEmpty }
+        .joined(separator: " | ")
+        let line3 = Self.pendingOverlayDateFormatter.string(from: shot.updatedAt)
+        let noteLine = (shot.noteText ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let line4 = (shot.isFlagged && !noteLine.isEmpty) ? noteLine : ""
+        _ = isBaselineSession
+        return [line1, line2, line3, line4].filter { !$0.isEmpty }
+    }
+
+    private func nextReadablePendingStampedFilename(shot: ShotMetadata, reservedNames: inout Set<String>) -> String {
+        let base = readablePendingStampedBaseName(for: shot)
+        var candidate = "\(base).jpg"
+        var counter = 1
+        while reservedNames.contains(candidate.lowercased()) {
+            candidate = "\(base)_\(String(format: "%02d", counter)).jpg"
+            counter += 1
+        }
+        reservedNames.insert(candidate.lowercased())
+        return candidate
+    }
+
+    private func readablePendingStampedBaseName(for shot: ShotMetadata) -> String {
+        let datePart = Self.pendingFilenameDateFormatter.string(from: shot.updatedAt)
+        let parts = [
+            sanitizePendingStampFilenamePart(shot.building),
+            sanitizePendingStampFilenamePart(shot.elevation),
+            sanitizePendingStampFilenamePart(shot.detailType),
+            "A\(max(1, shot.angleIndex))",
+            datePart
+        ].filter { !$0.isEmpty }
+        let base = parts.joined(separator: "_")
+        return base.isEmpty ? shot.shotID.uuidString : base
+    }
+
+    private func sanitizePendingStampFilenamePart(_ raw: String) -> String {
+        let normalized = raw
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: " ", with: "_")
+        let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "_-"))
+        let scalars = normalized.unicodeScalars.map { allowed.contains($0) ? Character($0) : "_" }
+        let collapsed = String(scalars)
+            .replacingOccurrences(of: "__", with: "_")
+            .trimmingCharacters(in: CharacterSet(charactersIn: "_-"))
+        return String(collapsed.prefix(40))
+    }
+
+    private static let pendingFilenameDateFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone.current
+        formatter.dateFormat = "yyyyMMdd_HHmmss"
+        return formatter
+    }()
+
+    private static let pendingOverlayDateFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone.current
+        formatter.dateFormat = "MM-dd-yyyy h:mm:ss a"
+        return formatter
+    }()
 
     private func exportFilename(for fileURL: URL, index: Int) -> String {
         let fallback = "photo-\(index).jpg"
