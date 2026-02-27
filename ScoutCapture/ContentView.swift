@@ -4,13 +4,14 @@
 //
 
 import SwiftUI
-import Photos
 import CoreLocation
 import CoreMotion
 import Combine
 import UIKit
 import AVKit
 import AVFoundation
+import ImageIO
+import UniformTypeIdentifiers
 
 private func proportionalCircleGlyphSize(for diameter: CGFloat) -> CGFloat {
     min(30, max(18, (diameter * 0.5).rounded()))
@@ -211,104 +212,117 @@ private extension View {
 // MARK: - Asset Image Cache
 
 final class AssetImageCache: ObservableObject {
-
-    private let manager = PHCachingImageManager()
     private let cache = NSCache<NSString, UIImage>()
 
-    func requestThumbnail(for asset: PHAsset, pixelSize: CGFloat, completion: @escaping (UIImage?) -> Void) {
+    func requestThumbnail(for asset: ReportAsset, pixelSize: CGFloat, completion: @escaping (UIImage?) -> Void) {
 
         let key = "\(asset.localIdentifier)-\(Int(pixelSize))" as NSString
         if let cached = cache.object(forKey: key) {
             completion(cached)
             return
         }
-
-        let options = PHImageRequestOptions()
-        options.deliveryMode = .opportunistic
-        options.resizeMode = .fast
-        options.isNetworkAccessAllowed = true
-
-        let target = CGSize(width: pixelSize, height: pixelSize)
-
-        manager.requestImage(
-            for: asset,
-            targetSize: target,
-            contentMode: .aspectFill,
-            options: options
-        ) { [weak self] image, _ in
-            if let image {
-                self?.cache.setObject(image, forKey: key)
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let data = try? Data(contentsOf: asset.fileURL),
+                  let image = UIImage(data: data) else {
+                DispatchQueue.main.async { completion(nil) }
+                return
             }
-            completion(image)
+            let target = CGSize(width: pixelSize, height: pixelSize)
+            let renderer = UIGraphicsImageRenderer(size: target)
+            let thumb = renderer.image { _ in
+                let src = image.size
+                guard src.width > 0, src.height > 0 else { return }
+                let scale = max(target.width / src.width, target.height / src.height)
+                let drawSize = CGSize(width: src.width * scale, height: src.height * scale)
+                let origin = CGPoint(
+                    x: (target.width - drawSize.width) * 0.5,
+                    y: (target.height - drawSize.height) * 0.5
+                )
+                image.draw(in: CGRect(origin: origin, size: drawSize))
+            }
+            self?.cache.setObject(thumb, forKey: key)
+            DispatchQueue.main.async {
+                completion(thumb)
+            }
         }
     }
 
-    func requestFull(for asset: PHAsset, completion: @escaping (UIImage?) -> Void) {
+    func requestFull(for asset: ReportAsset, completion: @escaping (UIImage?) -> Void) {
 
         let key = "\(asset.localIdentifier)-full" as NSString
         if let cached = cache.object(forKey: key) {
             completion(cached)
             return
         }
-
-        let options = PHImageRequestOptions()
-        options.deliveryMode = .highQualityFormat
-        options.resizeMode = .none
-        options.isNetworkAccessAllowed = true
-
-        let target = CGSize(width: asset.pixelWidth, height: asset.pixelHeight)
-
-        manager.requestImage(
-            for: asset,
-            targetSize: target,
-            contentMode: .aspectFit,
-            options: options
-        ) { [weak self] image, _ in
-            if let image {
-                self?.cache.setObject(image, forKey: key)
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let data = try? Data(contentsOf: asset.fileURL),
+                  let image = UIImage(data: data) else {
+                DispatchQueue.main.async { completion(nil) }
+                return
             }
-            completion(image)
+            self?.cache.setObject(image, forKey: key)
+            DispatchQueue.main.async {
+                completion(image)
+            }
         }
+    }
+
+    func invalidate(localIdentifier: String) {
+        let trimmed = localIdentifier.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        let fullKey = "\(trimmed)-full" as NSString
+        cache.removeObject(forKey: fullKey)
+    }
+
+    func clearAll() {
+        cache.removeAllObjects()
     }
 }
 
-// MARK: - Report Library Model (album per job + in app list)
+// MARK: - Report Library Model (SCOUT file storage per property/session)
 
 final class ReportLibraryModel: ObservableObject {
+    enum SavePhotoError: Error {
+        case missingCGImage
+        case imageDestinationCreateFailed
+        case imageDestinationFinalizeFailed
+        case directoryMissing(String)
+        case writeFailed(Error)
+        case setAttributesFailed(Error)
 
-    @Published private(set) var assets: [PHAsset] = []
+        var shortReason: String {
+            switch self {
+            case .missingCGImage:
+                return "Missing image"
+            case .imageDestinationCreateFailed:
+                return "Destination create"
+            case .imageDestinationFinalizeFailed:
+                return "Finalize"
+            case .directoryMissing:
+                return "Directory missing"
+            case .writeFailed:
+                return "Write"
+            case .setAttributesFailed:
+                return "Set attributes"
+            }
+        }
+    }
+
+    @Published private(set) var assets: [ReportAsset] = []
     @Published private(set) var albumTitle: String = ""
     @Published private(set) var albumLocalId: String = ""
     @Published private(set) var activeIssueCount: Int = 0
 
-    private let activeAlbumIdKey = "scout.activeReport.albumLocalId.v1"
     private let activeAlbumTitleKey = "scout.activeReport.albumTitle.v1"
     private let activeIssueCountsKey = "scout.activeReport.activeIssueCountsByTitle.v1"
-    private var pendingRetrySaves: [(data: Data, location: CLLocation?, completion: (Bool, String?) -> Void)] = []
-    private var didBecomeActiveObserver: NSObjectProtocol?
-    private static let reportAlbumRegex = try? NSRegularExpression(
-        pattern: #"^([A-Za-z0-9]+)(?:-(\d{4}))?-(\d{3,5})$"#,
-        options: []
-    )
+    private let localStore = LocalStore()
+    private let fileManager = FileManager.default
+    private var propertyID: UUID?
+    private var sessionID: UUID?
 
     init() {
         albumTitle = UserDefaults.standard.string(forKey: activeAlbumTitleKey) ?? ""
-        albumLocalId = UserDefaults.standard.string(forKey: activeAlbumIdKey) ?? ""
         activeIssueCount = loadActiveIssueCount(for: albumTitle)
-
-        didBecomeActiveObserver = NotificationCenter.default.addObserver(
-            forName: UIApplication.didBecomeActiveNotification,
-            object: nil,
-            queue: .main
-        ) { [weak self] _ in
-            self?.flushPendingRetrySaves()
-        }
-    }
-
-    deinit {
-        if let didBecomeActiveObserver {
-            NotificationCenter.default.removeObserver(didBecomeActiveObserver)
-        }
     }
 
     func setActiveReportTitle(_ title: String) {
@@ -316,10 +330,8 @@ final class ReportLibraryModel: ObservableObject {
 
         if t != albumTitle {
             albumTitle = t
-            albumLocalId = ""
             activeIssueCount = loadActiveIssueCount(for: t)
             UserDefaults.standard.set(t, forKey: activeAlbumTitleKey)
-            UserDefaults.standard.set("", forKey: activeAlbumIdKey)
         } else {
             albumTitle = t
             activeIssueCount = loadActiveIssueCount(for: t)
@@ -347,62 +359,47 @@ final class ReportLibraryModel: ObservableObject {
     }
 
     func fetchMatchingReportAlbums(completion: @escaping ([String]) -> Void) {
-        requestPhotosAuth { authorized in
-            guard authorized else {
-                DispatchQueue.main.async { completion([]) }
-                return
-            }
-
-            let albums = PHAssetCollection.fetchAssetCollections(with: .album, subtype: .albumRegular, options: nil)
-            var parsed: [ParsedReportAlbum] = []
-            albums.enumerateObjects { collection, _, _ in
-                guard let title = collection.localizedTitle else { return }
-                guard let report = Self.parseReportAlbumTitle(title) else { return }
-                parsed.append(report)
-            }
-
-            let sortedTitles = parsed
-                .sorted { lhs, rhs in
-                    if lhs.yearSortValue != rhs.yearSortValue {
-                        return lhs.yearSortValue > rhs.yearSortValue
-                    }
-                    if lhs.sequence != rhs.sequence {
-                        return lhs.sequence > rhs.sequence
-                    }
-                    if lhs.prefix != rhs.prefix {
-                        return lhs.prefix < rhs.prefix
-                    }
-                    return lhs.title < rhs.title
-                }
-                .map(\.title)
-
-            DispatchQueue.main.async {
-                completion(sortedTitles)
-            }
+        DispatchQueue.main.async {
+            completion([])
         }
     }
 
+    func setSessionContext(propertyID: UUID?, sessionID: UUID?) {
+        self.propertyID = propertyID
+        self.sessionID = sessionID
+        reloadAssets()
+    }
+
     func reloadAssets() {
-        guard !albumLocalId.isEmpty else {
+        guard let propertyID, let sessionID else {
             assets = []
             return
         }
-
-        let fetch = PHAssetCollection.fetchAssetCollections(withLocalIdentifiers: [albumLocalId], options: nil)
-        guard let album = fetch.firstObject else {
+        let originals = localStore.originalsDirectoryURL(propertyID: propertyID, sessionID: sessionID)
+        guard fileManager.fileExists(atPath: originals.path) else {
             assets = []
             return
         }
-
-        let opts = PHFetchOptions()
-        opts.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: true)]
-
-        let result = PHAsset.fetchAssets(in: album, options: opts)
-        var out: [PHAsset] = []
-        out.reserveCapacity(result.count)
-
-        result.enumerateObjects { asset, _, _ in
-            out.append(asset)
+        let urls = (try? fileManager.contentsOfDirectory(at: originals, includingPropertiesForKeys: [.creationDateKey, .contentModificationDateKey], options: [.skipsHiddenFiles])) ?? []
+        let out: [ReportAsset] = urls.compactMap { url in
+            guard let attrs = try? fileManager.attributesOfItem(atPath: url.path) else { return nil }
+            let created = (attrs[.creationDate] as? Date) ?? (attrs[.modificationDate] as? Date)
+            let data = try? Data(contentsOf: url)
+            let image = data.flatMap(UIImage.init)
+            let width = image.map { Int($0.size.width) } ?? 0
+            let height = image.map { Int($0.size.height) } ?? 0
+            let localId = url.path
+            return ReportAsset(
+                localIdentifier: localId,
+                fileURL: url,
+                creationDate: created,
+                pixelWidth: width,
+                pixelHeight: height,
+                originalFilename: url.lastPathComponent
+            )
+        }
+        .sorted { lhs, rhs in
+            (lhs.creationDate ?? .distantPast) < (rhs.creationDate ?? .distantPast)
         }
 
         DispatchQueue.main.async {
@@ -410,301 +407,413 @@ final class ReportLibraryModel: ObservableObject {
         }
     }
 
-    private func requestPhotosAuth(completion: @escaping (Bool) -> Void) {
-        if #available(iOS 14, *) {
-            let current = PHPhotoLibrary.authorizationStatus(for: .readWrite)
-            switch current {
-            case .authorized, .limited:
-                completion(true)
-            case .denied, .restricted:
-                completion(false)
-            case .notDetermined:
-                PHPhotoLibrary.requestAuthorization(for: .readWrite) { status in
-                    completion(status == .authorized || status == .limited)
-                }
-            @unknown default:
-                completion(false)
-            }
-        } else {
-            let current = PHPhotoLibrary.authorizationStatus()
-            switch current {
-            case .authorized:
-                completion(true)
-            case .limited:
-                completion(true)
-            case .denied, .restricted:
-                completion(false)
-            case .notDetermined:
-                PHPhotoLibrary.requestAuthorization { status in
-                    completion(status == .authorized)
-                }
-            @unknown default:
-                completion(false)
-            }
-        }
+    func reloadSessionAssets(propertyID: UUID, sessionID: UUID) {
+        setSessionContext(propertyID: propertyID, sessionID: sessionID)
+        reloadAssets()
     }
 
     func warmUpAlbumIfAuthorized() {
-        if #available(iOS 14, *) {
-            let status = PHPhotoLibrary.authorizationStatus(for: .readWrite)
-            guard status == .authorized || status == .limited else { return }
-        } else {
-            let status = PHPhotoLibrary.authorizationStatus()
-            guard status == .authorized else { return }
-        }
-
-        ensureAlbumExists { ok, _ in
-            guard ok else { return }
-            DispatchQueue.main.async {
-                self.reloadAssets()
-            }
-        }
+        reloadAssets()
     }
 
-    private func updateAlbumLocalId(_ newId: String) {
-        if Thread.isMainThread {
-            albumLocalId = newId
-            UserDefaults.standard.set(newId, forKey: activeAlbumIdKey)
-        } else {
-            DispatchQueue.main.sync {
-                albumLocalId = newId
-                UserDefaults.standard.set(newId, forKey: activeAlbumIdKey)
-            }
-        }
-    }
-
-    func ensureAlbumExists(completion: @escaping (Bool, String) -> Void) {
-
-        guard !albumTitle.isEmpty else {
-            completion(false, "")
-            return
-        }
-
-        requestPhotosAuth { authorized in
-            guard authorized else {
-                completion(false, "")
-                return
-            }
-
-            if !self.albumLocalId.isEmpty {
-                let verify = PHAssetCollection.fetchAssetCollections(withLocalIdentifiers: [self.albumLocalId], options: nil)
-                if verify.firstObject != nil {
-                    completion(true, self.albumLocalId)
-                    return
-                } else {
-                    self.updateAlbumLocalId("")
-                }
-            }
-
-            let titleFetch = PHAssetCollection.fetchAssetCollections(with: .album, subtype: .albumRegular, options: nil)
-            var found: PHAssetCollection? = nil
-            titleFetch.enumerateObjects { c, _, stop in
-                if c.localizedTitle == self.albumTitle {
-                    found = c
-                    stop.pointee = true
-                }
-            }
-
-            if let found {
-                self.updateAlbumLocalId(found.localIdentifier)
-                completion(true, found.localIdentifier)
-                return
-            }
-
-            var createdLocalId = ""
-
-            PHPhotoLibrary.shared().performChanges({
-                let create = PHAssetCollectionChangeRequest.creationRequestForAssetCollection(withTitle: self.albumTitle)
-                createdLocalId = create.placeholderForCreatedAssetCollection.localIdentifier
-            }, completionHandler: { success, _ in
-                if success, !createdLocalId.isEmpty {
-                    self.updateAlbumLocalId(createdLocalId)
-                    completion(true, createdLocalId)
-                } else {
-                    completion(false, "")
-                }
-            })
-        }
-    }
-
-    func savePhotoDataToAlbum(data: Data, location: CLLocation?, completion: @escaping (Bool, String?) -> Void) {
-        savePhotoDataToAlbum(data: data, location: location, retryIfInterrupted: true, completion: completion)
-    }
-
-    private func savePhotoDataToAlbum(data: Data, location: CLLocation?, retryIfInterrupted: Bool, completion: @escaping (Bool, String?) -> Void) {
-        ensureAlbumExists { ok, albumId in
-            guard ok, !albumId.isEmpty else {
-                DispatchQueue.main.async { completion(false, nil) }
-                return
-            }
-
-            let fetch = PHAssetCollection.fetchAssetCollections(withLocalIdentifiers: [albumId], options: nil)
-            guard let album = fetch.firstObject else {
-                DispatchQueue.main.async { completion(false, nil) }
-                return
-            }
-
-            var createdAssetId: String = ""
-
-            PHPhotoLibrary.shared().performChanges({
-
-                let assetRequest = PHAssetCreationRequest.forAsset()
-                assetRequest.location = location
-                assetRequest.addResource(with: .photo, data: data, options: nil)
-
-                if let placeholder = assetRequest.placeholderForCreatedAsset {
-                    createdAssetId = placeholder.localIdentifier
-                    if let change = PHAssetCollectionChangeRequest(for: album) {
-                        change.addAssets([placeholder] as NSArray)
+    func savePhotoDataToSession(
+        data: Data,
+        propertyID: UUID,
+        sessionID: UUID,
+        shotID: UUID,
+        captureDate: Date,
+        preferredFilename: String? = nil,
+        completion: @escaping (Bool, String?, String?) -> Void
+    ) {
+        DispatchQueue.global(qos: .userInitiated).async {
+            do {
+                let savedPath: String = try self.localStore.performFileIOSync {
+                    try self.localStore.ensureSessionFolders(propertyID: propertyID, sessionID: sessionID)
+                    let preferred = preferredFilename?
+                        .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                    let preferredName = URL(fileURLWithPath: preferred).lastPathComponent
+                    let filename: String
+                    if preferred.isEmpty {
+                        filename = "\(shotID.uuidString).heic"
+                    } else {
+                        let sanitized = preferredName.replacingOccurrences(of: "/", with: "-")
+                        let stem = URL(fileURLWithPath: sanitized).deletingPathExtension().lastPathComponent
+                        filename = stem.isEmpty ? "\(shotID.uuidString).heic" : "\(stem).heic"
                     }
-                }
-
-            }, completionHandler: { success, error in
-                if success {
-                    DispatchQueue.main.async {
-                        self.reloadAssets()
+                    let output = self.localStore
+                        .sessionFolderURL(propertyID: propertyID, sessionID: sessionID)
+                        .appendingPathComponent("Originals", isDirectory: true)
+                        .appendingPathComponent(filename, isDirectory: false)
+                    let parentDir = output.deletingLastPathComponent()
+                    var isDir = ObjCBool(false)
+                    var exists = self.fileManager.fileExists(atPath: parentDir.path, isDirectory: &isDir)
+                    self.debugLogSaveStage("parentDir exists=\(exists) isDirectory=\(isDir.boolValue) path=\(parentDir.path)")
+                    if !exists || !isDir.boolValue {
+                        try self.fileManager.createDirectory(at: parentDir, withIntermediateDirectories: true)
+                        isDir = ObjCBool(false)
+                        exists = self.fileManager.fileExists(atPath: parentDir.path, isDirectory: &isDir)
+                        self.debugLogSaveStage("parentDir recheck exists=\(exists) isDirectory=\(isDir.boolValue) path=\(parentDir.path)")
+                        guard exists, isDir.boolValue else {
+                            throw SavePhotoError.writeFailed(
+                                NSError(
+                                    domain: "ScoutCapture.Storage",
+                                    code: 1005,
+                                    userInfo: [NSLocalizedDescriptionKey: "Parent directory unavailable: \(parentDir.path)"]
+                                )
+                            )
+                        }
                     }
-                }
+                    let preEncodeItems = (try? self.fileManager.contentsOfDirectory(atPath: parentDir.path)) ?? []
+                    self.debugLogSaveStage(
+                        "dirList BEFORE encode count=\(preEncodeItems.count) items=\(preEncodeItems.sorted())"
+                    )
+                    let existingCreationDate: Date? = {
+                        guard self.fileManager.fileExists(atPath: output.path),
+                              let attrs = try? self.fileManager.attributesOfItem(atPath: output.path) else { return nil }
+                        return attrs[.creationDate] as? Date
+                    }()
+                    self.debugLogSaveStage(
+                        "save original start path=\(output.path) ext=\(output.pathExtension.lowercased()) type=\(UTType.heic.identifier)"
+                    )
+                    let heicData = try self.encodeImageData(
+                        from: data,
+                        outputType: .heic,
+                        captureDate: captureDate,
+                        compressionQuality: 0.98
+                    )
+                    self.debugLogSaveStage("encodedBytes=\(heicData.count)")
+                    let data = heicData as Data
 
-                let didSave = success && !createdAssetId.isEmpty
-                if !didSave, retryIfInterrupted, UIApplication.shared.applicationState != .active {
-                    DispatchQueue.main.async {
-                        self.pendingRetrySaves.append((data: data, location: location, completion: completion))
+                    let dirItemsBeforeRemove = (try? self.fileManager.contentsOfDirectory(atPath: parentDir.path)) ?? []
+                    self.debugLogSaveStage(
+                        "dirList BEFORE remove count=\(dirItemsBeforeRemove.count) items=\(dirItemsBeforeRemove.sorted())"
+                    )
+
+                    let existedBefore = self.fileManager.fileExists(atPath: output.path)
+                    self.debugLogSaveStage("stage=remove existedBefore=\(existedBefore)")
+                    if existedBefore {
+                        try? self.fileManager.removeItem(at: output)
                     }
-                    return
-                }
+                    let dirItemsAfterRemove = (try? self.fileManager.contentsOfDirectory(atPath: parentDir.path)) ?? []
+                    self.debugLogSaveStage(
+                        "dirList AFTER remove count=\(dirItemsAfterRemove.count) items=\(dirItemsAfterRemove.sorted())"
+                    )
+                    self.debugLogSaveStage("stage=remove done")
 
+                    self.debugLogSaveStage("stage=write begin bytes=\(data.count)")
+                    self.debugLogSaveStage("dest hasDirectoryPath=\(output.hasDirectoryPath) dest=\(output.path)")
+                    if output.hasDirectoryPath {
+                        throw SavePhotoError.writeFailed(
+                            NSError(
+                                domain: "SavePhoto",
+                                code: 99,
+                                userInfo: [NSLocalizedDescriptionKey: "destinationURL is directory path"]
+                            )
+                        )
+                    }
+
+                    // Ensure parent exists every time using the exact parent path.
+                    try self.fileManager.createDirectory(at: parentDir, withIntermediateDirectories: true)
+                    isDir = ObjCBool(false)
+                    let parentExistsAfterMkdir = self.fileManager.fileExists(atPath: parentDir.path, isDirectory: &isDir)
+                    self.debugLogSaveStage("parentExistsAfterMkdir=\(parentExistsAfterMkdir) isDir=\(isDir.boolValue)")
+                    guard parentExistsAfterMkdir, isDir.boolValue else {
+                        throw SavePhotoError.writeFailed(
+                            NSError(
+                                domain: "SavePhoto",
+                                code: 97,
+                                userInfo: [NSLocalizedDescriptionKey: "Parent directory unavailable after createDirectory"]
+                            )
+                        )
+                    }
+
+                    do {
+                        try data.write(to: output, options: [.atomic])
+                        self.debugLogSaveStage("stage=write success")
+                    } catch {
+                        self.debugLogSaveStage("stage=write ERROR \(error)")
+                        throw SavePhotoError.writeFailed(error)
+                    }
+
+                    var finalIsDir = ObjCBool(false)
+                    let existsAfter = self.fileManager.fileExists(atPath: output.path, isDirectory: &finalIsDir)
+                    self.debugLogSaveStage("stage=verify existsAfter=\(existsAfter)")
+                    if existsAfter {
+                        let attrs = try self.fileManager.attributesOfItem(atPath: output.path)
+                        let size = (attrs[.size] as? NSNumber)?.intValue ?? 0
+                        self.debugLogSaveStage("stage=verify size=\(size)")
+                        if finalIsDir.boolValue || size <= 0 {
+                            throw SavePhotoError.writeFailed(
+                                NSError(
+                                    domain: "SavePhoto",
+                                    code: 2,
+                                    userInfo: [NSLocalizedDescriptionKey: "final write verify failed"]
+                                )
+                            )
+                        }
+                        self.debugLogSaveStage("wrote=\(output.lastPathComponent) size=\(size)")
+                        let dirItemsAfterWrite = (try? self.fileManager.contentsOfDirectory(atPath: parentDir.path)) ?? []
+                        self.debugLogSaveStage(
+                            "dirList AFTER write count=\(dirItemsAfterWrite.count) items=\(dirItemsAfterWrite.sorted())"
+                        )
+                        let heics = dirItemsAfterWrite.filter {
+                            let lower = $0.lowercased()
+                            return lower.hasSuffix(".heic") || lower.hasSuffix(".heif")
+                        }
+                        self.debugLogSaveStage(
+                            "dirList count=\(dirItemsAfterWrite.count) heicCount=\(heics.count) items=\(dirItemsAfterWrite.sorted())"
+                        )
+                    } else {
+                        let items = (try? self.fileManager.contentsOfDirectory(atPath: parentDir.path)) ?? []
+                        self.debugLogSaveStage("stage=verify MISSING. parentDirItems=\(items)")
+                        throw SavePhotoError.writeFailed(
+                            NSError(
+                                domain: "SavePhoto",
+                                code: 3,
+                                userInfo: [NSLocalizedDescriptionKey: "missing after write"]
+                            )
+                        )
+                    }
+
+                    self.debugLogSaveStage("stage=setAttributes begin")
+                    do {
+                        let creationDate = existingCreationDate ?? captureDate
+                        try self.fileManager.setAttributes(
+                            [
+                                .creationDate: creationDate,
+                                .modificationDate: captureDate
+                            ],
+                            ofItemAtPath: output.path
+                        )
+                        self.debugLogSaveStage("stage=setAttributes success")
+                    } catch {
+                        self.debugLogSaveStage("stage=setAttributes ERROR \(error)")
+                    }
+                    return output.path
+                }
                 DispatchQueue.main.async {
-                    completion(didSave, didSave ? createdAssetId : nil)
+                    self.reloadAssets()
+                    completion(true, savedPath, nil)
                 }
-            })
+            } catch {
+                DispatchQueue.main.async {
+                    let typed = (error as? SavePhotoError) ?? .writeFailed(error)
+                    if case let .directoryMissing(path) = typed {
+                        self.debugLogSaveStage("save original failed directory missing path=\(path)")
+                    }
+                    self.debugLogSaveStage("save original failed stage=\(typed.shortReason) error=\(error)")
+                    if case .writeFailed = typed {
+                        completion(false, nil, "Write \(error.localizedDescription)")
+                    } else {
+                        completion(false, nil, typed.shortReason)
+                    }
+                }
+            }
         }
     }
 
-    private func flushPendingRetrySaves() {
-        guard !pendingRetrySaves.isEmpty else { return }
-        let queued = pendingRetrySaves
-        pendingRetrySaves.removeAll()
-        for item in queued {
-            savePhotoDataToAlbum(data: item.data, location: item.location, retryIfInterrupted: false, completion: item.completion)
+    func saveStampedPhotoDataToSession(
+        data: Data,
+        propertyID: UUID,
+        sessionID: UUID,
+        shotID: UUID,
+        captureDate: Date,
+        completion: @escaping (Bool, String?, String?) -> Void
+    ) {
+        DispatchQueue.global(qos: .userInitiated).async {
+            do {
+                let outputPath: String = try self.localStore.performFileIOSync {
+                    try self.localStore.ensureSessionFolders(propertyID: propertyID, sessionID: sessionID)
+                    let filename = "\(shotID.uuidString)_S.jpg"
+                    let output = self.localStore
+                        .sessionFolderURL(propertyID: propertyID, sessionID: sessionID)
+                        .appendingPathComponent("Stamped", isDirectory: true)
+                        .appendingPathComponent(filename, isDirectory: false)
+                    let parentDir = output.deletingLastPathComponent()
+                    try self.fileManager.createDirectory(at: parentDir, withIntermediateDirectories: true)
+                    let parentExists = self.fileManager.fileExists(atPath: parentDir.path)
+#if DEBUG
+                    self.debugLogSaveStage("save stamped parentDir=\(parentDir.path) existsAfterCreate=\(parentExists ? "YES" : "NO")")
+#endif
+                    guard parentExists else {
+                        throw SavePhotoError.directoryMissing(parentDir.path)
+                    }
+                    let existingCreationDate: Date? = {
+                        guard self.fileManager.fileExists(atPath: output.path),
+                              let attrs = try? self.fileManager.attributesOfItem(atPath: output.path) else { return nil }
+                        return attrs[.creationDate] as? Date
+                    }()
+                    if self.fileManager.fileExists(atPath: output.path) {
+                        try? self.fileManager.removeItem(at: output)
+                    }
+                    self.debugLogSaveStage(
+                        "save stamped start path=\(output.path) ext=\(output.pathExtension.lowercased()) type=\(UTType.jpeg.identifier)"
+                    )
+                    let jpgData = try self.encodeImageData(
+                        from: data,
+                        outputType: .jpeg,
+                        captureDate: captureDate,
+                        compressionQuality: 0.90
+                    )
+                    let encodedBytes = jpgData.count
+                    do {
+                        try jpgData.write(to: output, options: .atomic)
+                    } catch {
+                        throw SavePhotoError.writeFailed(error)
+                    }
+                    let exists = self.fileManager.fileExists(atPath: output.path)
+                    let sizeBytes = self.fileSizeBytes(at: output)
+                    let wroteBytes = sizeBytes
+                    self.debugLogSaveStage("encodedBytes=\(encodedBytes) wroteBytes=\(wroteBytes) exists=\(exists ? "YES" : "NO") size=\(sizeBytes)")
+                    self.debugLogSaveStage("save stamped wrote exists=\(exists ? "YES" : "NO") bytes=\(sizeBytes)")
+                    if !exists || sizeBytes <= 0 {
+                        throw SavePhotoError.writeFailed(
+                            NSError(
+                                domain: "ScoutCapture.Storage",
+                                code: 1004,
+                                userInfo: [NSLocalizedDescriptionKey: "Stamped file missing or zero bytes after write."]
+                            )
+                        )
+                    }
+                    let creationDate = existingCreationDate ?? captureDate
+                    do {
+                        try self.fileManager.setAttributes(
+                            [
+                                .creationDate: creationDate,
+                                .modificationDate: captureDate
+                            ],
+                            ofItemAtPath: output.path
+                        )
+                    } catch {
+                        throw SavePhotoError.setAttributesFailed(error)
+                    }
+                    return output.path
+                }
+                DispatchQueue.main.async {
+                    completion(true, outputPath, nil)
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    let typed = (error as? SavePhotoError) ?? .writeFailed(error)
+                    if case let .directoryMissing(path) = typed {
+                        self.debugLogSaveStage("save stamped failed directory missing path=\(path)")
+                    }
+                    self.debugLogSaveStage("save stamped failed stage=\(typed.shortReason) error=\(error)")
+                    completion(false, nil, typed.shortReason)
+                }
+            }
         }
+    }
+
+    private func encodeImageData(
+        from sourceData: Data,
+        outputType: UTType,
+        captureDate: Date,
+        compressionQuality: CGFloat
+    ) throws -> Data {
+        guard let source = CGImageSourceCreateWithData(sourceData as CFData, nil),
+              let image = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
+            throw SavePhotoError.missingCGImage
+        }
+        debugLogSaveStage("encode source cgImage width=\(image.width) height=\(image.height)")
+        let sourceProps = (CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any]) ?? [:]
+        var mergedProps = sourceProps
+        var exif = (mergedProps[kCGImagePropertyExifDictionary] as? [CFString: Any]) ?? [:]
+        var tiff = (mergedProps[kCGImagePropertyTIFFDictionary] as? [CFString: Any]) ?? [:]
+        let exifTimestamp = Self.exifTimestampFormatter.string(from: captureDate)
+        exif[kCGImagePropertyExifDateTimeOriginal] = exifTimestamp
+        exif[kCGImagePropertyExifDateTimeDigitized] = exifTimestamp
+        tiff[kCGImagePropertyTIFFDateTime] = exifTimestamp
+        mergedProps[kCGImagePropertyExifDictionary] = exif
+        mergedProps[kCGImagePropertyTIFFDictionary] = tiff
+        mergedProps[kCGImageDestinationLossyCompressionQuality] = compressionQuality
+
+        debugLogMetadataKeys(mergedProps)
+
+        let destinationData = NSMutableData()
+        guard let destination = CGImageDestinationCreateWithData(
+            destinationData,
+            outputType.identifier as CFString,
+            1,
+            nil
+        ) else {
+            throw SavePhotoError.imageDestinationCreateFailed
+        }
+        CGImageDestinationAddImage(destination, image, mergedProps as CFDictionary)
+        guard CGImageDestinationFinalize(destination) else {
+            throw SavePhotoError.imageDestinationFinalizeFailed
+        }
+        return destinationData as Data
+    }
+
+    private static let exifTimestampFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone.current
+        formatter.dateFormat = "yyyy:MM:dd HH:mm:ss"
+        return formatter
+    }()
+
+    private func debugLogSaveStage(_ message: String) {
+#if DEBUG
+        print("[SavePhoto] \(message)")
+#endif
+    }
+
+    private func debugLogMetadataKeys(_ metadata: [CFString: Any]) {
+#if DEBUG
+        let topKeys = metadata.keys.map { $0 as String }.sorted()
+        let exifKeys = ((metadata[kCGImagePropertyExifDictionary] as? [CFString: Any]) ?? [:]).keys.map { $0 as String }.sorted()
+        let tiffKeys = ((metadata[kCGImagePropertyTIFFDictionary] as? [CFString: Any]) ?? [:]).keys.map { $0 as String }.sorted()
+        print("[SavePhoto] metadata top-level keys: \(topKeys)")
+        print("[SavePhoto] metadata EXIF keys: \(exifKeys)")
+        print("[SavePhoto] metadata TIFF keys: \(tiffKeys)")
+#endif
+    }
+
+    private func fileSizeBytes(at url: URL) -> Int {
+        guard let attrs = try? fileManager.attributesOfItem(atPath: url.path),
+              let size = attrs[.size] as? NSNumber else {
+            return 0
+        }
+        return size.intValue
     }
 
     func deleteAssetsFromAlbum(localIdentifiers: [String], completion: @escaping (Bool) -> Void) {
-        let ids = Array(Set(localIdentifiers))
-        guard !ids.isEmpty else {
-            completion(true)
-            return
-        }
-
-        ensureAlbumExists { ok, albumId in
-            guard ok, !albumId.isEmpty else {
-                DispatchQueue.main.async { completion(false) }
-                return
-            }
-
-            let albumFetch = PHAssetCollection.fetchAssetCollections(withLocalIdentifiers: [albumId], options: nil)
-            guard let album = albumFetch.firstObject else {
-                DispatchQueue.main.async { completion(false) }
-                return
-            }
-
-            let assetsToRemove = PHAsset.fetchAssets(withLocalIdentifiers: ids, options: nil)
-            guard assetsToRemove.count > 0 else {
-                DispatchQueue.main.async {
-                    self.reloadAssets()
-                    completion(true)
-                }
-                return
-            }
-
-            PHPhotoLibrary.shared().performChanges({
-                if let change = PHAssetCollectionChangeRequest(for: album) {
-                    change.removeAssets(assetsToRemove)
-                }
-            }, completionHandler: { success, _ in
-                if success {
-                    DispatchQueue.main.async {
-                        self.reloadAssets()
-                    }
-                }
-                DispatchQueue.main.async {
-                    completion(success)
-                }
-            })
-        }
+        deleteFiles(localIdentifiers: localIdentifiers, completion: completion)
     }
 
     func deleteAssetsFromLibrary(localIdentifiers: [String], completion: @escaping (Bool) -> Void) {
+        deleteFiles(localIdentifiers: localIdentifiers, completion: completion)
+    }
+
+    private func deleteFiles(localIdentifiers: [String], completion: @escaping (Bool) -> Void) {
         let ids = Array(Set(localIdentifiers))
         guard !ids.isEmpty else {
             completion(true)
             return
         }
-
-        requestPhotosAuth { authorized in
-            guard authorized else {
-                DispatchQueue.main.async { completion(false) }
-                return
-            }
-
-            let assetsToDelete = PHAsset.fetchAssets(withLocalIdentifiers: ids, options: nil)
-            guard assetsToDelete.count > 0 else {
-                DispatchQueue.main.async {
-                    self.reloadAssets()
-                    completion(true)
-                }
-                return
-            }
-
-            PHPhotoLibrary.shared().performChanges({
-                PHAssetChangeRequest.deleteAssets(assetsToDelete)
-            }, completionHandler: { success, _ in
-                if success {
-                    DispatchQueue.main.async {
-                        self.reloadAssets()
+        DispatchQueue.global(qos: .userInitiated).async {
+            var success = true
+            self.localStore.performFileIOSync {
+                for id in ids {
+                    let path = id.trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard !path.isEmpty else { continue }
+                    if self.fileManager.fileExists(atPath: path) {
+                        do {
+                            try self.fileManager.removeItem(atPath: path)
+                        } catch {
+                            success = false
+                        }
                     }
                 }
-                DispatchQueue.main.async {
-                    completion(success)
-                }
-            })
+            }
+            DispatchQueue.main.async {
+                self.reloadAssets()
+                completion(success)
+            }
         }
-    }
-
-    private struct ParsedReportAlbum {
-        let title: String
-        let prefix: String
-        let year: Int?
-        let sequence: Int
-
-        var yearSortValue: Int {
-            year ?? -1
-        }
-    }
-
-    private static func parseReportAlbumTitle(_ rawTitle: String) -> ParsedReportAlbum? {
-        let title = rawTitle.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !title.isEmpty, let regex = reportAlbumRegex else { return nil }
-
-        let ns = title as NSString
-        let fullRange = NSRange(location: 0, length: ns.length)
-        guard let match = regex.firstMatch(in: title, options: [], range: fullRange) else { return nil }
-        guard match.numberOfRanges == 4 else { return nil }
-
-        let prefix = ns.substring(with: match.range(at: 1))
-
-        let year: Int? = {
-            let range = match.range(at: 2)
-            guard range.location != NSNotFound else { return nil }
-            return Int(ns.substring(with: range))
-        }()
-
-        let sequenceRange = match.range(at: 3)
-        guard sequenceRange.location != NSNotFound else { return nil }
-        guard let sequence = Int(ns.substring(with: sequenceRange)) else { return nil }
-
-        return ParsedReportAlbum(title: title, prefix: prefix, year: year, sequence: sequence)
     }
 
     private func loadActiveIssueCount(for reportTitle: String) -> Int {
@@ -844,11 +953,12 @@ private extension View {
 
 private struct RecentAlbumPreviewCircleButton: View {
 
-    let lastAsset: PHAsset?
+    let lastAsset: ReportAsset?
     let size: CGFloat
     let action: () -> Void
 
     @ObservedObject var cache: AssetImageCache
+    let refreshToken: UUID
 
     @State private var thumb: UIImage? = nil
     @State private var lastId: String = ""
@@ -884,6 +994,9 @@ private struct RecentAlbumPreviewCircleButton: View {
         .onChange(of: lastAsset?.localIdentifier ?? "") { _, _ in
             loadThumbIfNeeded()
         }
+        .onChange(of: refreshToken) { _, _ in
+            loadThumbIfNeeded(force: true)
+        }
         .onChange(of: thumb != nil) { _, newValue in
             guard newValue else { return }
             popOnce()
@@ -898,13 +1011,17 @@ private struct RecentAlbumPreviewCircleButton: View {
         }
     }
 
-    private func loadThumbIfNeeded() {
+    private func loadThumbIfNeeded(force: Bool = false) {
         guard let asset = lastAsset else {
             thumb = nil
             lastId = ""
             return
         }
 
+        if force {
+            thumb = nil
+            lastId = ""
+        }
         if asset.localIdentifier == lastId, thumb != nil { return }
         lastId = asset.localIdentifier
 
@@ -924,13 +1041,15 @@ private struct RecentAlbumPreviewCircleButton: View {
 private struct ReportPhotoViewer: View {
 
     let title: String
-    let assets: [PHAsset]
+    let assets: [ReportAsset]
     let startIndex: Int
     let detailIdOverride: String?
     @ObservedObject var cache: AssetImageCache
     let viewerToken: Int
 
     @Environment(\.dismiss) private var dismiss
+    @EnvironmentObject private var appState: AppState
+    private let localStore = LocalStore()
 
     // Physical device orientation (UI is portrait locked, we rotate the content ourselves)
     @State private var lastValidOrientation: UIDeviceOrientation = .portrait
@@ -1012,6 +1131,7 @@ private struct ReportPhotoViewer: View {
 
     // Forces the zoom container to re-fit on device rotation
     @State private var orientationResetToken: Int = 0
+    @State private var shotMetadataByKey: [String: ShotMetadata] = [:]
 
     // Per-page zoom reset tokens.
     // When you swipe away from a page, we increment that page's token so returning to it is back at fit.
@@ -1019,7 +1139,7 @@ private struct ReportPhotoViewer: View {
 
     init(
         title: String,
-        assets: [PHAsset],
+        assets: [ReportAsset],
         startIndex: Int,
         detailIdOverride: String? = nil,
         cache: AssetImageCache,
@@ -1132,6 +1252,7 @@ private struct ReportPhotoViewer: View {
 
                 let v = min(max(0, startIndex), max(0, assets.count - 1))
                 index = v
+                loadShotMetadataCache()
             }
             .onReceive(NotificationCenter.default.publisher(for: UIDevice.orientationDidChangeNotification)) { _ in
                 refreshOrientation()
@@ -1151,6 +1272,9 @@ private struct ReportPhotoViewer: View {
             let v = min(max(0, newValue), max(0, assets.count - 1))
             index = v
         }
+        .onChange(of: viewerToken) { _, _ in
+            loadShotMetadataCache()
+        }
     }
 
     private func filmStrip() -> some View {
@@ -1164,67 +1288,46 @@ private struct ReportPhotoViewer: View {
     }
 
     private struct HeaderMeta {
-        let elevation: String
-        let detailId: String
-        let detailNote: String?
+        let propertyName: String
+        let shotLabel: String
+        let flaggedNote: String
+        let photoCount: String
     }
 
-    private func headerMeta(for asset: PHAsset, index: Int) -> HeaderMeta {
-        // If you do not have metadata yet, we try to parse from filename.
-        // You can standardize later and only adjust parsing here.
-        let filename = PHAssetResource.assetResources(for: asset).first?.originalFilename ?? ""
+    private func headerMeta(for asset: ReportAsset, index: Int) -> HeaderMeta {
+        let propertyName = (appState.selectedProperty?.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false)
+            ? (appState.selectedProperty?.name.trimmingCharacters(in: .whitespacesAndNewlines) ?? "")
+            : title
 
-        // Expected optional tokens anywhere in filename (case insensitive):
-        // "elev=Front" or "elev-Front" or "elev_Front"
-        // "detail=DT-01" or "detail-DT-01" or "detail_DT-01"
-        // "note=Something here" or "note-Something here" or "note_Something here"
-        func extractToken(_ key: String) -> String? {
-            let lower = filename.lowercased()
-            guard let r = lower.range(of: key.lowercased()) else { return nil }
+        let metadata = metadataForAsset(asset)
+        let shotLabel: String = {
+            var parts: [String] = []
+            let building = metadata?.building.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let elevation = CanonicalElevation.normalize(metadata?.elevation)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let detailType = metadata?.detailType.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            if !building.isEmpty { parts.append(building) }
+            if !elevation.isEmpty { parts.append(elevation) }
+            if !detailType.isEmpty { parts.append(detailType) }
+            if !parts.isEmpty { return parts.joined(separator: "-") }
+            let fallback = detailIdOverride?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            return fallback.isEmpty ? "Shot" : fallback
+        }()
 
-            // Start right after the key
-            var i = filename.index(r.upperBound, offsetBy: 0)
+        let flaggedNote: String = {
+            guard let metadata, metadata.isFlagged else { return "" }
+            let note = metadata.noteText?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            return note
+        }()
 
-            // Allow separators after key
-            if i < filename.endIndex {
-                let c = filename[i]
-                if c == "=" || c == "-" || c == "_" || c == " " {
-                    i = filename.index(after: i)
-                }
-            }
+        let photoCount = "Photo \(index + 1) of \(max(assets.count, 1))"
 
-            // Read until we hit a delimiter
-            var j = i
-            while j < filename.endIndex {
-                let c = filename[j]
-                if c == "_" || c == "-" || c == "." {
-                    break
-                }
-                j = filename.index(after: j)
-            }
-
-            let raw = String(filename[i..<j]).trimmingCharacters(in: .whitespacesAndNewlines)
-            return raw.isEmpty ? nil : raw
-        }
-
-        let elev = extractToken("elev") ?? extractToken("elevation")
-        let detail = extractToken("detail") ?? extractToken("detailid") ?? extractToken("id")
-        let note = extractToken("note")
-
-        let elevationText = elev ?? title
-        let detailIdText = detail ?? detailIdOverride ?? "Photo \(index + 1) of \(max(assets.count, 1))"
-
-        return HeaderMeta(
-            elevation: elevationText,
-            detailId: detailIdText,
-            detailNote: note
-        )
+        return HeaderMeta(propertyName: propertyName, shotLabel: shotLabel, flaggedNote: flaggedNote, photoCount: photoCount)
     }
 
     @ViewBuilder
     private func headerOverlay() -> some View {
         let safeIndex = min(max(0, index), max(0, assets.count - 1))
-        let meta = assets.isEmpty ? HeaderMeta(elevation: title, detailId: "", detailNote: nil)
+        let meta = assets.isEmpty ? HeaderMeta(propertyName: title, shotLabel: "Shot", flaggedNote: "", photoCount: "Photo 0 of 0")
                                 : headerMeta(for: assets[safeIndex], index: safeIndex)
 
         ZStack(alignment: .top) {
@@ -1244,28 +1347,30 @@ private struct ReportPhotoViewer: View {
 
             HStack(alignment: .top, spacing: 10) {
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(meta.elevation)
+                    Text(meta.propertyName)
                         .font(.system(size: 19, weight: .medium))
                         .foregroundColor(.white)
                         .lineLimit(1)
                         .minimumScaleFactor(0.75)
 
-                    if !meta.detailId.isEmpty {
-                        Text(meta.detailId)
-                            .font(.system(size: 15, weight: .medium))
-                            .foregroundColor(.white.opacity(0.92))
-                            .lineLimit(1)
-                            .minimumScaleFactor(0.75)
-                    }
+                    Text(meta.shotLabel)
+                        .font(.system(size: 15, weight: .medium))
+                        .foregroundColor(.white.opacity(0.92))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.75)
 
-                    if let note = meta.detailNote, !note.isEmpty {
-                        Text(note)
-                            .font(.system(size: 13, weight: .regular))
-                            .italic()
-                            .foregroundColor(.white.opacity(0.82))
-                            .lineLimit(1)
-                            .minimumScaleFactor(0.75)
-                    }
+                    Text(meta.flaggedNote)
+                        .font(.system(size: 15, weight: .medium))
+                        .foregroundColor(.red)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.75)
+                        .frame(height: 18, alignment: .leading)
+
+                    Text(meta.photoCount)
+                        .font(.system(size: 12, weight: .regular))
+                        .foregroundColor(.white.opacity(0.78))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.75)
                 }
 
                 Spacer(minLength: 0)
@@ -1296,9 +1401,53 @@ private struct ReportPhotoViewer: View {
         .frame(height: 96, alignment: .top)
     }
 
+    private func loadShotMetadataCache() {
+        guard let propertyID = appState.selectedPropertyID,
+              let sessionID = appState.currentSession?.id else {
+            shotMetadataByKey = [:]
+            return
+        }
+
+        let entries = (try? localStore.fetchShotMetadata(propertyID: propertyID, sessionID: sessionID)) ?? []
+        var map: [String: ShotMetadata] = [:]
+        for entry in entries {
+            let raw = entry.originalFilename.trimmingCharacters(in: .whitespacesAndNewlines)
+            if raw.isEmpty { continue }
+            map[raw.lowercased()] = entry
+
+            let url = URL(fileURLWithPath: raw)
+            let filename = url.lastPathComponent.lowercased()
+            if !filename.isEmpty { map[filename] = entry }
+
+            let stem = url.deletingPathExtension().lastPathComponent.lowercased()
+            if !stem.isEmpty { map[stem] = entry }
+        }
+        shotMetadataByKey = map
+    }
+
+    private func metadataForAsset(_ asset: ReportAsset) -> ShotMetadata? {
+        let rawID = asset.localIdentifier.trimmingCharacters(in: .whitespacesAndNewlines)
+        let rawFilename = asset.originalFilename.trimmingCharacters(in: .whitespacesAndNewlines)
+        let candidates = [
+            rawID.lowercased(),
+            URL(fileURLWithPath: rawID).lastPathComponent.lowercased(),
+            URL(fileURLWithPath: rawID).deletingPathExtension().lastPathComponent.lowercased(),
+            rawFilename.lowercased(),
+            URL(fileURLWithPath: rawFilename).lastPathComponent.lowercased(),
+            URL(fileURLWithPath: rawFilename).deletingPathExtension().lastPathComponent.lowercased()
+        ].filter { !$0.isEmpty }
+
+        for key in candidates {
+            if let entry = shotMetadataByKey[key] {
+                return entry
+            }
+        }
+        return nil
+    }
+
     private struct FilmStrip: View {
 
-        let assets: [PHAsset]
+        let assets: [ReportAsset]
         @Binding var selectedIndex: Int
         @Binding var isPagingDrag: Bool
         @ObservedObject var cache: AssetImageCache
@@ -1522,7 +1671,7 @@ private struct ReportPhotoViewer: View {
 
         private struct FilmThumb: View {
 
-            let asset: PHAsset
+            let asset: ReportAsset
             let isSelected: Bool
             @ObservedObject var cache: AssetImageCache
             let side: CGFloat
@@ -1561,7 +1710,7 @@ private struct ReportPhotoViewer: View {
     }
 private struct FullImage: View {
 
-    let asset: PHAsset
+    let asset: ReportAsset
     let assetId: String
     @ObservedObject var cache: AssetImageCache
     let resetToken: Int
@@ -2246,6 +2395,7 @@ struct ContentView: View {
     
     @State private var detailNote: String = ""
     @State private var showNotSavedToast: Bool = false
+    @State private var notSavedToastReason: String = "Write"
     @State private var showNoFlaggedIssuesToast: Bool = false
     @State private var showResolutionModeToast: Bool = false
     @State private var showFlaggedActionToast: Bool = false
@@ -2269,8 +2419,11 @@ struct ContentView: View {
     @State private var carryoverIssueBadgeCount: Int = 0
     @State private var showGuidedChecklist: Bool = false
     @State private var guidedShots: [GuidedShot] = []
+    @State private var guidedThumbnailRefreshToken: UUID = UUID()
+    @State private var gridThumbnailRefreshToken: UUID = UUID()
     @State private var armedGuidedShotID: UUID? = nil
     @State private var armedGuidedRetakeShotID: UUID? = nil
+    @State private var retakeContext: RetakeContext? = nil
     @State private var guidedReferenceAssetLocalID: String? = nil
     @State private var guidedReferenceThumbnail: UIImage? = nil
     @State private var showGuidedAlignmentOverlay: Bool = false
@@ -2334,6 +2487,7 @@ struct ContentView: View {
     @State private var isPreparingSessionExport: Bool = false
     @State private var sessionExportChecklist = ExportChecklistState()
     @State private var sessionExportFile: SessionExportFile? = nil
+    @State private var awaitingSessionExportDismiss: Bool = false
     @State private var showSessionExportErrorPopup: Bool = false
     @State private var sessionExportErrorMessage: String? = nil
     @State private var didTriggerExitToHubForMissingSession: Bool = false
@@ -2375,6 +2529,15 @@ struct ContentView: View {
         let title: String
         let detailId: String
         let localIdentifier: String
+    }
+
+    private struct RetakeContext {
+        let building: String
+        let elevation: String
+        let detailType: String
+        let angleIndex: Int
+        let existingShotID: UUID?
+        let existingOriginalFilename: String?
     }
 
     private var flaggedActionTargetObservationTextForPopup: String? {
@@ -2423,6 +2586,74 @@ struct ContentView: View {
         output = output.replacingOccurrences(of: "__", with: "_")
         output = output.replacingOccurrences(of: "  ", with: " ")
         return output.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func reportAsset(from localIdentifier: String?) -> ReportAsset? {
+        let trimmed = localIdentifier?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !trimmed.isEmpty else { return nil }
+        if let byPath = reportAsset(fromPath: trimmed) {
+            return byPath
+        }
+        if let resolvedPath = resolveLegacyAssetPath(for: trimmed) {
+            return reportAsset(fromPath: resolvedPath)
+        }
+        return nil
+    }
+
+    private static func reportAsset(fromPath path: String) -> ReportAsset? {
+        let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        let url = URL(fileURLWithPath: trimmed)
+        guard FileManager.default.fileExists(atPath: url.path) else { return nil }
+        let attrs = try? FileManager.default.attributesOfItem(atPath: url.path)
+        let created = (attrs?[.creationDate] as? Date) ?? (attrs?[.modificationDate] as? Date)
+        let data = try? Data(contentsOf: url)
+        let image = data.flatMap(UIImage.init)
+        return ReportAsset(
+            localIdentifier: url.path,
+            fileURL: url,
+            creationDate: created,
+            pixelWidth: image.map { Int($0.size.width) } ?? 0,
+            pixelHeight: image.map { Int($0.size.height) } ?? 0,
+            originalFilename: url.lastPathComponent
+        )
+    }
+
+    private static func resolveLegacyAssetPath(for identifier: String) -> String? {
+        let fm = FileManager.default
+        guard let appSupport = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else { return nil }
+        let scoutRoot = appSupport
+            .appendingPathComponent("ScoutCapture", isDirectory: true)
+            .appendingPathComponent("SCOUT", isDirectory: true)
+        let propertiesRoot = scoutRoot.appendingPathComponent("Properties", isDirectory: true)
+        guard let propertyDirs = try? fm.contentsOfDirectory(at: propertiesRoot, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]) else {
+            return nil
+        }
+
+        let needle = identifier.trimmingCharacters(in: .whitespacesAndNewlines)
+        let needleStem = URL(fileURLWithPath: needle).deletingPathExtension().lastPathComponent
+        guard !needleStem.isEmpty else { return nil }
+
+        for propertyDir in propertyDirs {
+            let sessionsDir = propertyDir.appendingPathComponent("Sessions", isDirectory: true)
+            guard let sessionDirs = try? fm.contentsOfDirectory(at: sessionsDir, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]) else {
+                continue
+            }
+            for sessionDir in sessionDirs {
+                let originals = sessionDir.appendingPathComponent("Originals", isDirectory: true)
+                guard let files = try? fm.contentsOfDirectory(at: originals, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]) else {
+                    continue
+                }
+                if let match = files.first(where: { file in
+                    let name = file.lastPathComponent
+                    let stem = file.deletingPathExtension().lastPathComponent
+                    return name == needle || stem == needle || stem == needleStem
+                }) {
+                    return match.path
+                }
+            }
+        }
+        return nil
     }
 
     private struct SessionActionsSummary {
@@ -2991,6 +3222,10 @@ struct ContentView: View {
                 }
 
                 reportLibrary.warmUpAlbumIfAuthorized()
+                reportLibrary.setSessionContext(
+                    propertyID: appState.selectedPropertyID,
+                    sessionID: appState.currentSession?.id
+                )
                 loadBuildingOptions()
                 refreshActiveIssues()
                 refreshGuidedShots()
@@ -3009,11 +3244,19 @@ struct ContentView: View {
                 UIDevice.current.endGeneratingDeviceOrientationNotifications()
             }
             .onChange(of: appState.selectedPropertyID) { _, _ in
+                reportLibrary.setSessionContext(
+                    propertyID: appState.selectedPropertyID,
+                    sessionID: appState.currentSession?.id
+                )
                 resetSelectionForSwitch()
                 refreshActiveIssues()
                 refreshGuidedShots()
             }
             .onChange(of: appState.currentSession?.id) { _, _ in
+                reportLibrary.setSessionContext(
+                    propertyID: appState.selectedPropertyID,
+                    sessionID: appState.currentSession?.id
+                )
                 ensureCameraSessionPrecondition()
                 if hasValidCurrentSession {
                     camera.ensurePreviewRunningAsync()
@@ -3143,7 +3386,15 @@ struct ContentView: View {
         }
         // Album fullscreen
         .fullScreenCover(isPresented: $showLibraryFullscreen) {
-            ReportLibraryFullscreen(reportLibrary: reportLibrary, cache: imageCache)
+            ReportLibraryFullscreen(
+                reportLibrary: reportLibrary,
+                cache: imageCache,
+                thumbnailRefreshToken: gridThumbnailRefreshToken,
+                onAfterDelete: {
+                    refreshActiveIssues()
+                    refreshGuidedShots()
+                }
+            )
         }
         // Manage (from dropdown or quick menu)
         .sheet(item: $manageContext) { ctx in
@@ -3171,6 +3422,7 @@ struct ContentView: View {
                 currentSessionID: appState.currentSession?.id,
                 currentSessionStartedAt: appState.currentSession?.startedAt,
                 currentSessionEndedAt: appState.currentSession?.endedAt,
+                refreshToken: guidedThumbnailRefreshToken,
                 cache: imageCache,
                 onClose: {
                     showGuidedChecklist = false
@@ -3201,14 +3453,17 @@ struct ContentView: View {
                         appState.markCurrentSessionExported()
                     }
                     sessionExportFile = nil
-                    appState.refreshProperties()
-                    onExitToHub?()
                 }
             )
         }
+        .onChange(of: sessionExportFile?.id) { oldValue, newValue in
+            guard oldValue != nil, newValue == nil, awaitingSessionExportDismiss else { return }
+            awaitingSessionExportDismiss = false
+            appState.refreshProperties()
+            onExitToHub?()
+        }
         .fullScreenCover(item: $armedReferenceViewerState) { state in
-            let fetch = PHAsset.fetchAssets(withLocalIdentifiers: [state.localIdentifier], options: nil)
-            let assets = fetch.firstObject.map { [$0] } ?? []
+            let assets = Self.reportAsset(from: state.localIdentifier).map { [$0] } ?? []
             ReportPhotoViewer(
                 title: state.title,
                 assets: assets,
@@ -3217,6 +3472,9 @@ struct ContentView: View {
                 cache: imageCache,
                 viewerToken: state.localIdentifier.hashValue
             )
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .scoutClearLocalUICache)) { _ in
+            handleLocalCacheClearSignal()
         }
     }
 
@@ -3717,7 +3975,7 @@ struct ContentView: View {
             }
 
             if showNotSavedToast {
-                Text("Photos access needed")
+                Text("Save failed: \(notSavedToastReason)")
                     .font(.system(size: 14, weight: .medium))
                     .foregroundColor(.white)
                     .padding(.horizontal, 16)
@@ -4178,7 +4436,8 @@ struct ContentView: View {
                             fireQuickButtonHaptic()
                             showLibraryFullscreen = true
                         },
-                        cache: imageCache
+                        cache: imageCache,
+                        refreshToken: gridThumbnailRefreshToken
                     )
                     .frame(width: 44, height: 44)
                     .rotationEffect(bottomGlyphRotationAngle)
@@ -5406,7 +5665,8 @@ extension ContentView {
                 lastAsset: lastAsset,
                 size: 52,
                 action: { showLibraryFullscreen = true },
-                cache: imageCache
+                cache: imageCache,
+                refreshToken: gridThumbnailRefreshToken
             )
             .offset(x: xOffset, y: 0)
         }
@@ -5424,16 +5684,43 @@ extension ContentView {
     
     private func capture() {
         let noteAtCapture = detailNote.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let propertyID = appState.selectedPropertyID,
+              let sessionID = appState.currentSession?.id else { return }
+        let activeRetakeContext: RetakeContext? = {
+            guard let context = retakeContext else { return nil }
+            guard let armedGuidedID = armedGuidedShotID,
+                  let armedRetakeShotID = armedGuidedRetakeShotID else { return nil }
+            guard guidedShots.contains(where: { $0.id == armedGuidedID && $0.shot?.id == armedRetakeShotID }) else {
+                return nil
+            }
+            return context
+        }()
+        if activeRetakeContext == nil {
+            // Defensive cleanup for stale retake state so normal captures always mint a new shot ID.
+            armedGuidedRetakeShotID = nil
+            retakeContext = nil
+        }
+        let captureShotID = activeRetakeContext?.existingShotID ?? UUID()
+        let preferredRetakeFilename = activeRetakeContext?.existingOriginalFilename
         camera.capturePhoto { data in
             guard let data else { return }
+            let captureDate = Date()
             
-            reportLibrary.savePhotoDataToAlbum(data: data, location: locationManager.lastLocation) { success, photoRef in
+            reportLibrary.savePhotoDataToSession(
+                data: data,
+                propertyID: propertyID,
+                sessionID: sessionID,
+                shotID: captureShotID,
+                captureDate: captureDate,
+                preferredFilename: preferredRetakeFilename
+            ) { success, photoRef, failureReason in
                 DispatchQueue.main.async {
                     if success {
-                        let captureShotID = armedGuidedRetakeShotID ?? UUID()
+                        let wasGuidedRetakeCapture = (activeRetakeContext != nil)
+                        let retakeExistingFilename = activeRetakeContext?.existingOriginalFilename
                         let shot = Shot(
                             id: captureShotID,
-                            capturedAt: Date(),
+                            capturedAt: captureDate,
                             imageLocalIdentifier: photoRef,
                             note: noteAtCapture.isEmpty ? nil : noteAtCapture
                         )
@@ -5453,12 +5740,23 @@ extension ContentView {
                             shot: shot,
                             imageData: data,
                             noteText: noteAtCapture,
+                            isGuidedRetakeCapture: wasGuidedRetakeCapture,
+                            retakeContext: activeRetakeContext,
                             isGuidedHint: didApplyGuidedShot || noteAtCapture.isEmpty,
                             isFlaggedHint: didApplyIssueUpdate || didQueueResolution || createdObservationID != nil,
                             issueIDHint: createdObservationID ?? flaggedActionTargetObservation?.id
                         )
+                        if wasGuidedRetakeCapture {
+                            refreshUIAfterRetakeSuccess(
+                                existingFilename: retakeExistingFilename,
+                                newLocalIdentifier: photoRef
+                            )
+                        }
                         refreshSessionActionsSummaryIfVisible()
                     } else {
+                        notSavedToastReason = (failureReason?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false)
+                            ? (failureReason ?? "Write")
+                            : "Write"
                         showNotSavedToast = true
                         DispatchQueue.main.asyncAfter(deadline: .now() + 1.1) {
                             showNotSavedToast = false
@@ -5505,6 +5803,8 @@ extension ContentView {
         shot: Shot,
         imageData: Data,
         noteText: String,
+        isGuidedRetakeCapture: Bool,
+        retakeContext: RetakeContext?,
         isGuidedHint: Bool,
         isFlaggedHint: Bool,
         issueIDHint: UUID?
@@ -5523,7 +5823,16 @@ extension ContentView {
         var isGuided = isGuidedHint
         var isFlagged = isFlaggedHint
         var issueID = issueIDHint
+        var issueStatus: String?
         var noteValue = noteText.isEmpty ? nil : noteText
+
+        if let retakeContext {
+            buildingValue = retakeContext.building
+            elevationValue = retakeContext.elevation
+            detailTypeValue = retakeContext.detailType
+            angleIndexValue = max(1, retakeContext.angleIndex)
+            isGuided = true
+        }
 
         if let guided = guidedShots.first(where: { $0.shot?.id == shot.id }) {
             let guidedBuilding = guided.building?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
@@ -5542,6 +5851,13 @@ extension ContentView {
            }) {
             isFlagged = true
             issueID = observation.id
+            if observation.status == .resolved || observation.resolvedInSessionID == session.id {
+                issueStatus = "resolvedCaptured"
+            } else if observation.updatedInSessionID == session.id {
+                issueStatus = "updateCaptured"
+            } else {
+                issueStatus = "active"
+            }
             let obsBuilding = observation.building?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             let obsElevation = CanonicalElevation.normalize(observation.targetElevation) ?? ""
             let obsDetail = observation.detailType?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
@@ -5554,32 +5870,127 @@ extension ContentView {
             }
         }
 
+        if !appState.propertyHasBaseline(propertyID),
+           retakeContext == nil,
+           angleIndexValue <= 1 {
+            angleIndexValue = max(
+                1,
+                nextSessionAngleIndexForBaselineCapture(
+                    propertyID: propertyID,
+                    sessionID: session.id,
+                    building: buildingValue,
+                    elevation: elevationValue,
+                    detailType: detailTypeValue,
+                    excludingShotID: shot.id
+                )
+            )
+        }
+
         let localIdentifier = shot.imageLocalIdentifier?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        let originalFilename = localIdentifier.isEmpty ? "\(shot.id.uuidString).jpg" : localIdentifier
+        let fileNameFromIdentifier = URL(fileURLWithPath: localIdentifier).lastPathComponent
+        let originalFilename = fileNameFromIdentifier.isEmpty ? "\(shot.id.uuidString).heic" : fileNameFromIdentifier
+        let normalizedElevation = CanonicalElevation.normalize(elevationValue) ?? elevationValue
+        let shotKey = ShotMetadata.makeShotKey(
+            building: buildingValue,
+            elevation: normalizedElevation,
+            detailType: detailTypeValue,
+            angleIndex: max(1, angleIndexValue)
+        )
+        let orientationLabel: String = {
+            switch lastValidDeviceOrientation {
+            case .landscapeLeft: return "landscapeLeft"
+            case .landscapeRight: return "landscapeRight"
+            case .portraitUpsideDown: return "portraitUpsideDown"
+            default: return "portrait"
+            }
+        }()
+        let location = locationManager.lastLocation
 
         let metadata = ShotMetadata(
             shotID: shot.id,
             propertyID: propertyID,
             sessionID: session.id,
             createdAt: shot.capturedAt,
+            updatedAt: shot.capturedAt,
             building: buildingValue,
-            elevation: elevationValue,
+            elevation: normalizedElevation,
             detailType: detailTypeValue,
             angleIndex: max(1, angleIndexValue),
+            shotKey: shotKey,
             isGuided: isGuided,
             isFlagged: isFlagged,
             issueID: issueID,
+            issueStatus: issueStatus,
             noteText: noteValue,
+            noteCategory: nil,
             originalFilename: originalFilename,
+            originalRelativePath: "Originals/\(originalFilename)",
+            originalByteSize: imageData.count,
             stampedFilename: nil,
+            stampedRelativePath: nil,
+            captureMode: camera.effectiveHDEnabled ? "hd" : "normal",
+            lens: camera.selectedZoomId,
+            orientation: orientationLabel,
+            latitude: location?.coordinate.latitude,
+            longitude: location?.coordinate.longitude,
+            accuracyMeters: location?.horizontalAccuracy,
             imageWidth: width,
             imageHeight: height
         )
 
         do {
-            try localStore.upsertShotMetadata(metadata)
+            let matchMode: LocalStore.ShotUpsertMatchMode = (isGuidedRetakeCapture && isGuided)
+                ? .replaceGuidedKey
+                : .append
+            try localStore.upsertShot(
+                propertyID: propertyID,
+                sessionID: session.id,
+                shot: metadata,
+                matchMode: matchMode
+            )
+            let updated = try localStore.loadSessionMetadata(propertyID: propertyID, sessionID: session.id)
+            let originalsURL = localStore.originalsDirectoryURL(propertyID: propertyID, sessionID: session.id)
+            let originalsItems = (try? FileManager.default.contentsOfDirectory(
+                at: originalsURL,
+                includingPropertiesForKeys: nil,
+                options: [.skipsHiddenFiles]
+            )) ?? []
+            let originalsCount = originalsItems.filter {
+                let lower = $0.lastPathComponent.lowercased()
+                return lower.hasSuffix(".heic") || lower.hasSuffix(".heif")
+            }.count
+#if DEBUG
+            print("[Session] shotsCount=\(updated.shots.count) originalsCount=\(originalsCount)")
+#endif
         } catch {
             print("Recoverable shot metadata persistence failure: \(error)")
+        }
+    }
+
+    private func nextSessionAngleIndexForBaselineCapture(
+        propertyID: UUID,
+        sessionID: UUID,
+        building: String,
+        elevation: String,
+        detailType: String,
+        excludingShotID: UUID
+    ) -> Int {
+        do {
+            let metadata = try localStore.loadSessionMetadata(propertyID: propertyID, sessionID: sessionID)
+            let normalizedElevation = CanonicalElevation.normalize(elevation) ?? elevation
+            let normalizedBuilding = building.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            let normalizedDetailType = detailType.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+
+            let matchingAngles = metadata.shots.compactMap { existing -> Int? in
+                guard existing.shotID != excludingShotID else { return nil }
+                guard existing.building.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == normalizedBuilding else { return nil }
+                guard (CanonicalElevation.normalize(existing.elevation) ?? existing.elevation) == normalizedElevation else { return nil }
+                guard existing.detailType.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == normalizedDetailType else { return nil }
+                return max(1, existing.angleIndex)
+            }
+            return (matchingAngles.max() ?? 0) + 1
+        } catch {
+            return 1
         }
     }
 
@@ -5614,9 +6025,52 @@ extension ContentView {
         }
     }
 
+    private func refreshUIAfterRetakeSuccess(existingFilename: String?, newLocalIdentifier: String?) {
+        if let newLocalIdentifier {
+            imageCache.invalidate(localIdentifier: newLocalIdentifier)
+        }
+
+        if let propertyID = appState.selectedPropertyID,
+           let sessionID = appState.currentSession?.id {
+            if let existingFilename {
+                let trimmed = existingFilename.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !trimmed.isEmpty {
+                    let existingPath = localStore
+                        .originalsDirectoryURL(propertyID: propertyID, sessionID: sessionID)
+                        .appendingPathComponent(trimmed)
+                        .path
+                    imageCache.invalidate(localIdentifier: existingPath)
+                }
+            }
+            // Retake reuses the same identifier; clear cache to guarantee immediate thumbnail refresh.
+            imageCache.clearAll()
+            reportLibrary.reloadSessionAssets(propertyID: propertyID, sessionID: sessionID)
+        }
+
+        refreshGuidedShots()
+        refreshActiveIssues()
+        gridThumbnailRefreshToken = UUID()
+        guidedThumbnailRefreshToken = UUID()
+    }
+
+    private func handleLocalCacheClearSignal() {
+        imageCache.clearAll()
+        if let propertyID = appState.selectedPropertyID,
+           let sessionID = appState.currentSession?.id {
+            reportLibrary.reloadSessionAssets(propertyID: propertyID, sessionID: sessionID)
+        } else {
+            reportLibrary.reloadAssets()
+        }
+        refreshGuidedShots()
+        refreshActiveIssues()
+        gridThumbnailRefreshToken = UUID()
+        guidedThumbnailRefreshToken = UUID()
+    }
+
     private func armGuidedShot(_ guidedShot: GuidedShot) {
         guard !isShotCapturedInCurrentSession(guidedShot.shot) else { return }
         resetSelectionForSwitch()
+        retakeContext = nil
         if let building = guidedShot.building, !building.isEmpty {
             selectedBuilding = buildingCode(from: building)
         }
@@ -5653,6 +6107,16 @@ extension ContentView {
         }
         loadGuidedReferenceThumbnail(referencePath: guidedShot.referenceImagePath, localIdentifier: guidedShot.referenceImageLocalIdentifier)
         showGuidedAlignmentOverlay = false
+        let rawPath = existingShot.imageLocalIdentifier?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let existingFilename = rawPath.isEmpty ? nil : URL(fileURLWithPath: rawPath).lastPathComponent
+        retakeContext = RetakeContext(
+            building: (guidedShot.building ?? selectedBuilding).trimmingCharacters(in: .whitespacesAndNewlines),
+            elevation: (CanonicalElevation.normalize(guidedShot.targetElevation) ?? elevation).trimmingCharacters(in: .whitespacesAndNewlines),
+            detailType: (guidedShot.detailType ?? currentDetailType).trimmingCharacters(in: .whitespacesAndNewlines),
+            angleIndex: max(1, guidedShot.angleIndex ?? 1),
+            existingShotID: existingShot.id,
+            existingOriginalFilename: existingFilename
+        )
         armedGuidedRetakeShotID = existingShot.id
         armedGuidedShotID = guidedShot.id
         showGuidedChecklist = false
@@ -5679,6 +6143,7 @@ extension ContentView {
             if armedGuidedShotID == guidedShot.id {
                 armedGuidedShotID = nil
                 armedGuidedRetakeShotID = nil
+                retakeContext = nil
                 guidedReferenceAssetLocalID = nil
                 guidedReferenceThumbnail = nil
                 showGuidedAlignmentOverlay = false
@@ -5709,6 +6174,7 @@ extension ContentView {
         guard let propertyID = appState.selectedPropertyID else {
             armedGuidedShotID = nil
             armedGuidedRetakeShotID = nil
+            retakeContext = nil
             return false
         }
 
@@ -5717,6 +6183,7 @@ extension ContentView {
             guard let idx = allGuidedShots.firstIndex(where: { $0.id == armedID }) else {
                 armedGuidedShotID = nil
                 armedGuidedRetakeShotID = nil
+                retakeContext = nil
                 return false
             }
 
@@ -5725,11 +6192,13 @@ extension ContentView {
                 guard allGuidedShots[idx].shot?.id == armedGuidedRetakeShotID else {
                     armedGuidedShotID = nil
                     armedGuidedRetakeShotID = nil
+                    retakeContext = nil
                     return false
                 }
             } else if isShotCapturedInCurrentSession(allGuidedShots[idx].shot) {
                 armedGuidedShotID = nil
                 armedGuidedRetakeShotID = nil
+                retakeContext = nil
                 return false
             }
 
@@ -5756,6 +6225,7 @@ extension ContentView {
 
             armedGuidedShotID = nil
             armedGuidedRetakeShotID = nil
+            retakeContext = nil
             guidedReferenceAssetLocalID = nil
             guidedReferenceThumbnail = nil
             showGuidedAlignmentOverlay = false
@@ -5763,6 +6233,7 @@ extension ContentView {
         } catch {
             armedGuidedShotID = nil
             armedGuidedRetakeShotID = nil
+            retakeContext = nil
             guidedReferenceAssetLocalID = nil
             guidedReferenceThumbnail = nil
             showGuidedAlignmentOverlay = false
@@ -5829,7 +6300,9 @@ extension ContentView {
         guard let appSupport = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else {
             return nil
         }
-        let base = appSupport.appendingPathComponent("ScoutCapture", isDirectory: true)
+        let base = appSupport
+            .appendingPathComponent("ScoutCapture", isDirectory: true)
+            .appendingPathComponent("SCOUT", isDirectory: true)
         let referencesDir = base.appendingPathComponent("guided-references", isDirectory: true)
         let fileURL = referencesDir.appendingPathComponent("\(guidedShotID.uuidString).jpg")
 
@@ -5904,8 +6377,7 @@ extension ContentView {
             return
         }
         guidedReferenceAssetLocalID = id
-        let fetch = PHAsset.fetchAssets(withLocalIdentifiers: [id], options: nil)
-        guard let asset = fetch.firstObject else {
+        guard let asset = Self.reportAsset(from: id) else {
             guidedReferenceThumbnail = nil
             return
         }
@@ -6005,6 +6477,10 @@ extension ContentView {
         if let endedAt = session.endedAt, shot.capturedAt > endedAt {
             return false
         }
+        let path = shot.imageLocalIdentifier?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !path.isEmpty, Self.reportAsset(from: path) != nil else {
+            return false
+        }
         return true
     }
 
@@ -6039,6 +6515,7 @@ extension ContentView {
                 DispatchQueue.main.async {
                     isPreparingSessionExport = false
                     showSessionActionsSheet = false
+                    awaitingSessionExportDismiss = true
                     sessionExportFile = SessionExportFile(url: url)
                 }
             } catch {
@@ -6114,20 +6591,9 @@ extension ContentView {
     }
 
     private func originalImageData(for localIdentifier: String) -> Data? {
-        let fetch = PHAsset.fetchAssets(withLocalIdentifiers: [localIdentifier], options: nil)
-        guard let asset = fetch.firstObject else { return nil }
-
-        let options = PHImageRequestOptions()
-        options.isSynchronous = true
-        options.deliveryMode = .highQualityFormat
-        options.resizeMode = .none
-        options.isNetworkAccessAllowed = true
-
-        var outData: Data? = nil
-        PHImageManager.default().requestImageDataAndOrientation(for: asset, options: options) { data, _, _, _ in
-            outData = data
-        }
-        return outData
+        let trimmed = localIdentifier.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        return try? Data(contentsOf: URL(fileURLWithPath: trimmed))
     }
 
     private func prepareSessionExportReferences() {
@@ -6145,59 +6611,9 @@ extension ContentView {
     }
 
     private func buildSessionExportArchive(progress: ((ExportChecklistStep) -> Void)? = nil) throws -> URL {
-        struct SessionExportAssetEntry: Codable {
-            let localIdentifier: String
-            let creationDate: Date?
-            let pixelWidth: Int
-            let pixelHeight: Int
-            let originalFilename: String
-        }
-
-        struct SessionExportPayload: Codable {
-            let exportedAt: Date
-            let albumTitle: String
-            let albumLocalId: String
-            let property: Property?
-            let session: Session?
-            let activeIssueCount: Int
-            let assets: [SessionExportAssetEntry]
-            let observations: [Observation]
-            let guidedShots: [GuidedShot]
-        }
-
         let fileManager = FileManager.default
         let assets = reportLibrary.assets
-        let property = appState.selectedProperty
-        let propertyID = property?.id
-        let observations = propertyID.flatMap { try? localStore.fetchObservations(propertyID: $0) } ?? []
-        let guided = propertyID.flatMap { try? localStore.fetchGuidedShots(propertyID: $0) } ?? []
-
-        let entries = assets.enumerated().map { index, asset in
-            SessionExportAssetEntry(
-                localIdentifier: asset.localIdentifier,
-                creationDate: asset.creationDate,
-                pixelWidth: asset.pixelWidth,
-                pixelHeight: asset.pixelHeight,
-                originalFilename: sessionExportFilename(for: asset, index: index + 1)
-            )
-        }
-
-        let payload = SessionExportPayload(
-            exportedAt: Date(),
-            albumTitle: reportLibrary.albumTitle,
-            albumLocalId: reportLibrary.albumLocalId,
-            property: property,
-            session: appState.currentSession,
-            activeIssueCount: reportLibrary.activeIssueCount,
-            assets: entries,
-            observations: observations,
-            guidedShots: guided
-        )
-
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        encoder.dateEncodingStrategy = .iso8601
-        let sessionData = try encoder.encode(payload)
+        let sessionData = try persistedSessionJSONDataForExport()
 
         var zipEntries: [(path: String, data: Data)] = []
         zipEntries.append(("Originals/", Data()))
@@ -6213,6 +6629,29 @@ extension ContentView {
         }
         zipEntries.append(contentsOf: originalEntries)
         progress?(.originals)
+
+#if DEBUG
+        if let propertyID = appState.selectedPropertyID,
+           let sessionID = appState.currentSession?.id {
+            let sourceURL = localStore.sessionJSONURL(propertyID: propertyID, sessionID: sessionID)
+            let exists = FileManager.default.fileExists(atPath: sourceURL.path)
+            let sizeBytes = ((try? FileManager.default.attributesOfItem(atPath: sourceURL.path)[.size] as? NSNumber) ?? nil)?.intValue ?? 0
+            print("Export session.json path source: \(sourceURL.path)")
+            print("Export source exists: \(exists ? "YES" : "NO"), bytes: \(sizeBytes)")
+        } else {
+            print("Export session.json path source: missing property/session context")
+        }
+        let raw = String(data: sessionData, encoding: .utf8) ?? ""
+        print("Export sessionData contains \"shotKey\": \(raw.contains("\"shotKey\"") ? "YES" : "NO")")
+        print("Export sessionData contains \"originalRelativePath\": \(raw.contains("\"originalRelativePath\"") ? "YES" : "NO")")
+        let debugDecoder = JSONDecoder()
+        debugDecoder.dateDecodingStrategy = .iso8601
+        if let decoded = try? debugDecoder.decode(SessionMetadata.self, from: sessionData),
+           let first = decoded.shots.first {
+            print("Export first shot shotKey: \(first.shotKey)")
+            print("Export first shot originalRelativePath: \(first.originalRelativePath)")
+        }
+#endif
 
         zipEntries.append(("session.json", sessionData))
         progress?(.sessionData)
@@ -6230,30 +6669,26 @@ extension ContentView {
         return url
     }
 
-    private func requestSessionExportImageData(for asset: PHAsset) -> Data? {
-        let manager = PHImageManager.default()
-        let options = PHImageRequestOptions()
-        options.isSynchronous = true
-        options.deliveryMode = .highQualityFormat
-        options.resizeMode = .none
-        options.isNetworkAccessAllowed = true
-
-        var output: Data? = nil
-        manager.requestImageDataAndOrientation(for: asset, options: options) { data, _, _, _ in
-            output = data
+    private func persistedSessionJSONDataForExport() throws -> Data {
+        guard let propertyID = appState.selectedPropertyID,
+              let session = appState.currentSession else {
+            throw NSError(domain: "ScoutCapture.Export", code: 1, userInfo: [NSLocalizedDescriptionKey: "No active session for export."])
         }
-        return output
+        try localStore.ensureSessionMetadata(for: session)
+        let sessionURL = localStore.sessionJSONURL(propertyID: propertyID, sessionID: session.id)
+        return try Data(contentsOf: sessionURL)
     }
 
-    private func sessionExportFilename(for asset: PHAsset, index: Int) -> String {
-        let fallback = "photo-\(index).jpg"
-        guard let resource = PHAssetResource.assetResources(for: asset).first else {
-            return fallback
-        }
-        let original = resource.originalFilename.trimmingCharacters(in: .whitespacesAndNewlines)
-        let base = original.isEmpty ? fallback : Self.normalizedContextFilename(original)
-        let sanitized = base.replacingOccurrences(of: "/", with: "-")
-        return String(format: "%04d-%@", index, sanitized)
+    private func requestSessionExportImageData(for asset: ReportAsset) -> Data? {
+        try? Data(contentsOf: asset.fileURL)
+    }
+
+    private func sessionExportFilename(for asset: ReportAsset, index: Int) -> String {
+        let fallback = "photo-\(index).heic"
+        let original = asset.originalFilename.trimmingCharacters(in: .whitespacesAndNewlines)
+        let baseName = URL(fileURLWithPath: original).lastPathComponent
+        let resolved = baseName.isEmpty ? fallback : baseName
+        return resolved.replacingOccurrences(of: "/", with: "-")
     }
 
     private func sessionExportZipFilename() -> String {
@@ -6439,6 +6874,7 @@ extension ContentView {
         clearArmedIssueState()
         armedGuidedShotID = nil
         armedGuidedRetakeShotID = nil
+        retakeContext = nil
         isArmedIssueDetailNoteReadOnly = false
         detailNote = ""
         restoreArmedIssueHDIfNeeded()
@@ -7134,6 +7570,8 @@ extension ContentView {
         
         @ObservedObject var reportLibrary: ReportLibraryModel
         @ObservedObject var cache: AssetImageCache
+        let thumbnailRefreshToken: UUID
+        let onAfterDelete: () -> Void
         @EnvironmentObject private var appState: AppState
         private let localStore = LocalStore()
         
@@ -7228,11 +7666,6 @@ extension ContentView {
             }
         }
 
-        private enum DeleteScope {
-            case albumOnly
-            case library
-        }
-
         private enum DragSelectionMode {
             case add
             case remove
@@ -7308,6 +7741,7 @@ extension ContentView {
                                             asset: asset,
                                             cache: cache,
                                             side: side,
+                                            refreshToken: thumbnailRefreshToken,
                                             isSelectionMode: isSelectionMode,
                                             isSelected: selectedAssetIds.contains(asset.localIdentifier)
                                         )
@@ -7400,19 +7834,16 @@ extension ContentView {
                 )
             }
             .confirmationDialog(
-                "Delete Selected Photos",
+                "Delete Selected Files",
                 isPresented: $showDeleteDialog,
                 titleVisibility: .visible
             ) {
-                Button("Remove from Album", role: .destructive) {
-                    deleteSelectedAssets(scope: .albumOnly)
-                }
-                Button("Delete from Photos", role: .destructive) {
-                    deleteSelectedAssets(scope: .library)
+                Button("Delete", role: .destructive) {
+                    deleteSelectedAssets()
                 }
                 Button("Cancel", role: .cancel) { }
             } message: {
-                Text("You selected \(selectedAssetIds.count) photo\(selectedAssetIds.count == 1 ? "" : "s"). \"Remove from Album\" keeps photos in Photos. \"Delete from Photos\" permanently deletes them from your library.")
+                Text("You selected \(selectedAssetIds.count) file\(selectedAssetIds.count == 1 ? "" : "s"). This permanently deletes local SCOUT files.")
             }
             .sheet(isPresented: $showShareSheet, onDismiss: {
                 shareItems = []
@@ -7724,7 +8155,7 @@ extension ContentView {
             .disabled(!isEnabled)
         }
 
-        private func selectedAssetsInDisplayOrder() -> [PHAsset] {
+        private func selectedAssetsInDisplayOrder() -> [ReportAsset] {
             reportLibrary.assets.filter { selectedAssetIds.contains($0.localIdentifier) }
         }
 
@@ -7734,25 +8165,13 @@ extension ContentView {
             isPreparingShare = true
 
             DispatchQueue.global(qos: .userInitiated).async {
-                let manager = PHImageManager.default()
-                let opts = PHImageRequestOptions()
-                opts.isSynchronous = true
-                opts.deliveryMode = .highQualityFormat
-                opts.resizeMode = .none
-                opts.isNetworkAccessAllowed = true
-
                 var images: [UIImage] = []
                 images.reserveCapacity(selectedAssets.count)
 
                 for asset in selectedAssets {
-                    var outImage: UIImage? = nil
-                    manager.requestImageDataAndOrientation(for: asset, options: opts) { data, _, _, _ in
-                        if let data, let image = UIImage(data: data) {
-                            outImage = image
-                        }
-                    }
-                    if let outImage {
-                        images.append(outImage)
+                    if let data = try? Data(contentsOf: asset.fileURL),
+                       let image = UIImage(data: data) {
+                        images.append(image)
                     }
                 }
 
@@ -7892,23 +8311,233 @@ extension ContentView {
             dragAutoScrollWorkItem = nil
         }
 
-        private func deleteSelectedAssets(scope: DeleteScope) {
+        private func deleteSelectedAssets() {
             let ids = Array(selectedAssetIds)
             guard !ids.isEmpty else { return }
+            let propertyID = appState.selectedPropertyID
+            let sessionID = appState.currentSession?.id
             isDeletingSelection = true
             let completion: (Bool) -> Void = { success in
                 isDeletingSelection = false
                 if success {
+                    if let propertyID, let sessionID {
+                        try? localStore.removeShotMetadata(
+                            propertyID: propertyID,
+                            sessionID: sessionID,
+                            originalFileIdentifiers: ids
+                        )
+                        cleanupLocalLinkedRecords(
+                            propertyID: propertyID,
+                            localIdentifiers: ids
+                        )
+                        onAfterDelete()
+                    }
                     selectedAssetIds.removeAll()
                     isSelectionMode = false
                 }
             }
-            switch scope {
-            case .albumOnly:
-                reportLibrary.deleteAssetsFromAlbum(localIdentifiers: ids, completion: completion)
-            case .library:
-                reportLibrary.deleteAssetsFromLibrary(localIdentifiers: ids, completion: completion)
+            reportLibrary.deleteAssetsFromAlbum(localIdentifiers: ids, completion: completion)
+        }
+
+        private func cleanupLocalLinkedRecords(propertyID: UUID, localIdentifiers: [String]) {
+            let normalized = Set(localIdentifiers.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty })
+            guard !normalized.isEmpty else { return }
+            let deletedShotIDs = Set(normalized.compactMap { path -> UUID? in
+                let stem = URL(fileURLWithPath: path).deletingPathExtension().lastPathComponent
+                return UUID(uuidString: stem)
+            })
+            let isBaselineSession = !appState.propertyHasBaseline(propertyID)
+            let currentSessionID = appState.currentSession?.id
+            let baselineGuidedKeys = baselineGuidedTemplateKeys(propertyID: propertyID)
+            let baselineFlaggedKeys = baselineFlaggedTemplateKeys(propertyID: propertyID)
+
+            if var guided = try? localStore.fetchGuidedShots(propertyID: propertyID) {
+                var didChangeGuided = false
+                if isBaselineSession {
+                    let before = guided.count
+                    guided.removeAll { shot in
+                        let imageID = shot.shot?.imageLocalIdentifier?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                        let shotID = shot.shot?.id
+                        if normalized.contains(imageID) { return true }
+                        if let shotID, deletedShotIDs.contains(shotID) { return true }
+                        return false
+                    }
+                    didChangeGuided = guided.count != before
+                } else {
+                    var toRemoveIDs = Set<UUID>()
+                    for index in guided.indices {
+                        let imageID = guided[index].shot?.imageLocalIdentifier?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                        let shotID = guided[index].shot?.id
+                        let matchesDeletedCapture = normalized.contains(imageID) || (shotID.map { deletedShotIDs.contains($0) } ?? false)
+                        guard matchesDeletedCapture else { continue }
+                        let key = checklistKey(
+                            building: guided[index].building,
+                            elevation: guided[index].targetElevation,
+                            detailType: guided[index].detailType,
+                            angleIndex: guided[index].angleIndex
+                        )
+                        let isExistingTemplateItem = key.map { baselineGuidedKeys.contains($0) } ?? false
+                        if isExistingTemplateItem {
+                            guided[index].shot = nil
+                            guided[index].isCompleted = false
+                            didChangeGuided = true
+                        } else {
+                            toRemoveIDs.insert(guided[index].id)
+                            didChangeGuided = true
+                        }
+                    }
+                    if !toRemoveIDs.isEmpty {
+                        guided.removeAll { toRemoveIDs.contains($0.id) }
+                    }
+                }
+                if didChangeGuided {
+                    try? localStore.saveGuidedShots(guided, propertyID: propertyID)
+                }
             }
+
+            if var observations = try? localStore.fetchObservations(propertyID: propertyID) {
+                var didChangeObservations = false
+                var deletedObservationIDs = Set<UUID>()
+                if isBaselineSession {
+                    observations.removeAll { observation in
+                        guard observation.sessionID == currentSessionID else { return false }
+                        let shouldDelete = observation.shots.contains(where: { shot in
+                            let id = shot.imageLocalIdentifier?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                            if normalized.contains(id) { return true }
+                            return deletedShotIDs.contains(shot.id)
+                        })
+                        if shouldDelete {
+                            deletedObservationIDs.insert(observation.id)
+                        }
+                        return shouldDelete
+                    }
+                    didChangeObservations = !deletedObservationIDs.isEmpty
+                } else {
+                    var toRemoveObservationIDs = Set<UUID>()
+                    for idx in observations.indices {
+                        let removedShotIDsForObservation = Set(observations[idx].shots.compactMap { shot -> UUID? in
+                            let id = shot.imageLocalIdentifier?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                            let matchedDeleted = normalized.contains(id) || deletedShotIDs.contains(shot.id)
+                            return matchedDeleted ? shot.id : nil
+                        })
+                        let removedAnyForObservation = observations[idx].shots.contains(where: { shot in
+                            let id = shot.imageLocalIdentifier?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                            return normalized.contains(id) || deletedShotIDs.contains(shot.id)
+                        })
+                        guard removedAnyForObservation else { continue }
+                        let removedLinked = observations[idx].shots.contains(where: { shot in
+                            let id = shot.imageLocalIdentifier?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                            let matchedDeleted = normalized.contains(id) || deletedShotIDs.contains(shot.id)
+                            return matchedDeleted && observations[idx].linkedShotID == shot.id
+                        })
+                        let beforeCount = observations[idx].shots.count
+                        observations[idx].shots.removeAll { shot in
+                            let id = shot.imageLocalIdentifier?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                            return normalized.contains(id) || deletedShotIDs.contains(shot.id)
+                        }
+                        if observations[idx].shots.count != beforeCount {
+                            if !removedShotIDsForObservation.isEmpty {
+                                observations[idx].updateHistory.removeAll { entry in
+                                    guard let shotID = entry.shotID else { return false }
+                                    return removedShotIDsForObservation.contains(shotID)
+                                }
+                            }
+                            didChangeObservations = true
+                            if let linked = observations[idx].linkedShotID,
+                               !observations[idx].shots.contains(where: { $0.id == linked }) {
+                                observations[idx].linkedShotID = observations[idx].shots.last?.id
+                            }
+                            let wasCurrentSessionFlagUpdate = observations[idx].updatedInSessionID == currentSessionID || observations[idx].resolvedInSessionID == currentSessionID
+                            let key = checklistKey(
+                                building: observations[idx].building,
+                                elevation: observations[idx].targetElevation,
+                                detailType: observations[idx].detailType,
+                                angleIndex: 1
+                            )
+                            let isExistingTemplateItem = key.map { baselineFlaggedKeys.contains($0) || baselineGuidedKeys.contains($0) } ?? false
+                            let isNewThisSessionItem = observations[idx].sessionID == currentSessionID && !isExistingTemplateItem
+                            if isNewThisSessionItem {
+                                toRemoveObservationIDs.insert(observations[idx].id)
+                                continue
+                            }
+                            if removedLinked || wasCurrentSessionFlagUpdate {
+                                observations[idx].status = .active
+                                observations[idx].resolvedInSessionID = nil
+                                observations[idx].updatedInSessionID = nil
+                                observations[idx].resolutionPhotoRef = nil
+                                observations[idx].resolutionStatement = nil
+                            }
+                        }
+                    }
+                    if !toRemoveObservationIDs.isEmpty {
+                        deletedObservationIDs.formUnion(toRemoveObservationIDs)
+                        observations.removeAll { toRemoveObservationIDs.contains($0.id) }
+                    }
+                }
+                if didChangeObservations {
+                    for id in deletedObservationIDs {
+                        try? localStore.deleteObservation(id: id, propertyID: propertyID)
+                    }
+                    for obs in observations {
+                        _ = try? localStore.updateObservation(obs)
+                    }
+                }
+            }
+        }
+
+        private func checklistKey(
+            building: String?,
+            elevation: String?,
+            detailType: String?,
+            angleIndex: Int?
+        ) -> String? {
+            let b = building?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
+            let e = CanonicalElevation.normalize(elevation)?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
+            let d = detailType?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
+            let a = max(1, angleIndex ?? 1)
+            guard !b.isEmpty, !e.isEmpty, !d.isEmpty else { return nil }
+            return "\(b)|\(e)|\(d)|\(a)"
+        }
+
+        private func baselineGuidedTemplateKeys(propertyID: UUID) -> Set<String> {
+            guard let baselineSessionID = appState.selectedProperty?.baselineSessionID else { return [] }
+            let sessions = (try? localStore.fetchSessions(propertyID: propertyID)) ?? []
+            let baselineSession = sessions.first(where: { $0.id == baselineSessionID })
+            let start = baselineSession?.startedAt ?? .distantPast
+            let end = baselineSession?.endedAt ?? .distantFuture
+            let guided = (try? localStore.fetchGuidedShots(propertyID: propertyID)) ?? []
+            var keys = Set<String>()
+            for item in guided {
+                guard let key = checklistKey(
+                    building: item.building,
+                    elevation: item.targetElevation,
+                    detailType: item.detailType,
+                    angleIndex: item.angleIndex
+                ) else { continue }
+                let hasReference = !(item.referenceImagePath?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
+                    || !(item.referenceImageLocalIdentifier?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
+                let capturedInBaseline = (item.shot?.capturedAt ?? .distantPast) >= start && (item.shot?.capturedAt ?? .distantPast) <= end
+                if hasReference || capturedInBaseline {
+                    keys.insert(key)
+                }
+            }
+            return keys
+        }
+
+        private func baselineFlaggedTemplateKeys(propertyID: UUID) -> Set<String> {
+            guard let baselineSessionID = appState.selectedProperty?.baselineSessionID else { return [] }
+            let observations = (try? localStore.fetchObservations(propertyID: propertyID)) ?? []
+            var keys = Set<String>()
+            for observation in observations where observation.sessionID == baselineSessionID {
+                guard let key = checklistKey(
+                    building: observation.building,
+                    elevation: observation.targetElevation,
+                    detailType: observation.detailType,
+                    angleIndex: 1
+                ) else { continue }
+                keys.insert(key)
+            }
+            return keys
         }
         
         private func beginExport() {
@@ -7935,17 +8564,37 @@ extension ContentView {
             }
         }
         
-        private func buildExportArchive(for assets: [PHAsset]) throws -> URL {
+        private func buildExportArchive(for assets: [ReportAsset]) throws -> URL {
             let fileManager = FileManager.default
-            let payload = makeExportSessionPayload(from: assets)
-            let encoder = JSONEncoder()
-            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-            encoder.dateEncodingStrategy = .iso8601
-            let sessionData = try encoder.encode(payload)
+            let sessionData = try persistedSessionJSONDataForExport()
             
             var entries: [(path: String, data: Data)] = []
             entries.append(("Originals/", Data()))
             entries.append(("Stamped/", Data()))
+
+#if DEBUG
+            if let propertyID = appState.selectedPropertyID,
+               let sessionID = appState.currentSession?.id {
+                let sourceURL = localStore.sessionJSONURL(propertyID: propertyID, sessionID: sessionID)
+                let exists = FileManager.default.fileExists(atPath: sourceURL.path)
+                let sizeBytes = ((try? FileManager.default.attributesOfItem(atPath: sourceURL.path)[.size] as? NSNumber) ?? nil)?.intValue ?? 0
+                print("Export session.json path source: \(sourceURL.path)")
+                print("Export source exists: \(exists ? "YES" : "NO"), bytes: \(sizeBytes)")
+            } else {
+                print("Export session.json path source: missing property/session context")
+            }
+            let raw = String(data: sessionData, encoding: .utf8) ?? ""
+            print("Export sessionData contains \"shotKey\": \(raw.contains("\"shotKey\"") ? "YES" : "NO")")
+            print("Export sessionData contains \"originalRelativePath\": \(raw.contains("\"originalRelativePath\"") ? "YES" : "NO")")
+            let debugDecoder = JSONDecoder()
+            debugDecoder.dateDecodingStrategy = .iso8601
+            if let decoded = try? debugDecoder.decode(SessionMetadata.self, from: sessionData),
+               let first = decoded.shots.first {
+                print("Export first shot shotKey: \(first.shotKey)")
+                print("Export first shot originalRelativePath: \(first.originalRelativePath)")
+            }
+#endif
+
             entries.append(("session.json", sessionData))
             
             for (index, asset) in assets.enumerated() {
@@ -7967,8 +8616,18 @@ extension ContentView {
             }
             return zipURL
         }
+
+        private func persistedSessionJSONDataForExport() throws -> Data {
+            guard let propertyID = appState.selectedPropertyID,
+                  let session = appState.currentSession else {
+                throw ExportError.zipCreationFailed
+            }
+            try localStore.ensureSessionMetadata(for: session)
+            let sessionURL = localStore.sessionJSONURL(propertyID: propertyID, sessionID: session.id)
+            return try Data(contentsOf: sessionURL)
+        }
         
-        private func makeExportSessionPayload(from assets: [PHAsset]) -> ExportSessionPayload {
+        private func makeExportSessionPayload(from assets: [ReportAsset]) -> ExportSessionPayload {
             let entries = assets.enumerated().map { index, asset in
                 ExportAssetEntry(
                     localIdentifier: asset.localIdentifier,
@@ -8003,30 +8662,16 @@ extension ContentView {
             )
         }
         
-        private func requestOriginalImageData(for asset: PHAsset) -> Data? {
-            let manager = PHImageManager.default()
-            let options = PHImageRequestOptions()
-            options.isSynchronous = true
-            options.deliveryMode = .highQualityFormat
-            options.resizeMode = .none
-            options.isNetworkAccessAllowed = true
-            
-            var outData: Data? = nil
-            manager.requestImageDataAndOrientation(for: asset, options: options) { data, _, _, _ in
-                outData = data
-            }
-            return outData
+        private func requestOriginalImageData(for asset: ReportAsset) -> Data? {
+            try? Data(contentsOf: asset.fileURL)
         }
         
-        private func makeArchiveFilename(for asset: PHAsset, index: Int) -> String {
-            let fallback = "photo-\(index).jpg"
-            guard let resource = PHAssetResource.assetResources(for: asset).first else {
-                return fallback
-            }
-            let original = resource.originalFilename.trimmingCharacters(in: .whitespacesAndNewlines)
-            let base = original.isEmpty ? fallback : ContentView.normalizedContextFilename(original)
-            let sanitized = base.replacingOccurrences(of: "/", with: "-")
-            return String(format: "%04d-%@", index, sanitized)
+        private func makeArchiveFilename(for asset: ReportAsset, index: Int) -> String {
+            let fallback = "photo-\(index).heic"
+            let original = asset.originalFilename.trimmingCharacters(in: .whitespacesAndNewlines)
+            let baseName = URL(fileURLWithPath: original).lastPathComponent
+            let resolved = baseName.isEmpty ? fallback : baseName
+            return resolved.replacingOccurrences(of: "/", with: "-")
         }
         
         private func exportZipFilename() -> String {
@@ -8155,9 +8800,10 @@ extension ContentView {
         
         private struct LibraryThumb: View {
             
-            let asset: PHAsset
+            let asset: ReportAsset
             @ObservedObject var cache: AssetImageCache
             let side: CGFloat
+            let refreshToken: UUID
             let isSelectionMode: Bool
             let isSelected: Bool
             
@@ -8204,6 +8850,15 @@ extension ContentView {
                 .clipped()
                 .onAppear {
                     if img != nil { return }
+                    let scale = UIScreen.currentScale
+                    let px = max(300, side * 3) * scale
+                    cache.requestThumbnail(for: asset, pixelSize: px) { im in
+                        DispatchQueue.main.async {
+                            self.img = im
+                        }
+                    }
+                }
+                .onChange(of: refreshToken) { _, _ in
                     let scale = UIScreen.currentScale
                     let px = max(300, side * 3) * scale
                     cache.requestThumbnail(for: asset, pixelSize: px) { im in
@@ -8670,6 +9325,7 @@ extension ContentView {
         let currentSessionID: UUID?
         let currentSessionStartedAt: Date?
         let currentSessionEndedAt: Date?
+        let refreshToken: UUID
         @ObservedObject var cache: AssetImageCache
         @Environment(\.colorScheme) private var colorScheme
         private var theme: SheetControlTheme { .forScheme(colorScheme) }
@@ -8697,7 +9353,7 @@ extension ContentView {
             let id = UUID()
             let title: String
             let detailId: String
-            let assets: [PHAsset]
+            let assets: [ReportAsset]
             let startIndex: Int
             let viewerToken: Int
         }
@@ -8734,6 +9390,7 @@ extension ContentView {
                                 guidedShot: item,
                                 currentSessionID: currentSessionID,
                                 isCapturedInCurrentSession: isCapturedInCurrentSession(item),
+                                refreshToken: refreshToken,
                                 cache: cache,
                                 onTapPending: {
                                     onSelectPending(item)
@@ -8949,8 +9606,7 @@ extension ContentView {
             let trimmed = localIdentifier?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             guard !trimmed.isEmpty else { return }
 
-            let fetch = PHAsset.fetchAssets(withLocalIdentifiers: [trimmed], options: nil)
-            guard let asset = fetch.firstObject else { return }
+            guard let asset = ContentView.reportAsset(from: trimmed) else { return }
             guidedViewerState = GuidedViewerState(
                 title: title,
                 detailId: detailId,
@@ -8961,13 +9617,15 @@ extension ContentView {
         }
 
         private func showGuidedReferencePreview(for guidedShot: GuidedShot) {
+            let referencePath = guidedShot.referenceImagePath?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             let localIdentifier = guidedShot.referenceImageLocalIdentifier?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            if localIdentifier.isEmpty {
+            let source = !referencePath.isEmpty ? referencePath : localIdentifier
+            if source.isEmpty {
                 showInlineToast("No reference available")
                 return
             }
             showImagePreview(
-                localIdentifier: localIdentifier,
+                localIdentifier: source,
                 title: "Reference Image",
                 detailId: guidedDisplayLabel(for: guidedShot)
             )
@@ -9012,6 +9670,10 @@ extension ContentView {
                 return false
             }
             if let endedAt = currentSessionEndedAt, shot.capturedAt > endedAt {
+                return false
+            }
+            let path = shot.imageLocalIdentifier?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            guard !path.isEmpty, ContentView.reportAsset(from: path) != nil else {
                 return false
             }
             return true
@@ -9173,6 +9835,7 @@ extension ContentView {
         let guidedShot: GuidedShot
         let currentSessionID: UUID?
         let isCapturedInCurrentSession: Bool
+        let refreshToken: UUID
         @ObservedObject var cache: AssetImageCache
         let onTapPending: () -> Void
         let onTapSkip: () -> Void
@@ -9248,6 +9911,11 @@ extension ContentView {
                 loadThumbnailIfNeeded()
             }
             .onChange(of: guidedShot.referenceImagePath ?? "") { _, _ in
+                loadThumbnailIfNeeded()
+            }
+            .onChange(of: refreshToken) { _, _ in
+                loadedID = ""
+                thumbnail = nil
                 loadThumbnailIfNeeded()
             }
         }
@@ -9381,8 +10049,7 @@ extension ContentView {
                 guard sourceID != loadedID || thumbnail == nil else { return }
                 loadedID = sourceID
 
-                let fetch = PHAsset.fetchAssets(withLocalIdentifiers: [capturedID], options: nil)
-                guard let asset = fetch.firstObject else {
+                guard let asset = ContentView.reportAsset(from: capturedID) else {
                     thumbnail = nil
                     return
                 }
@@ -9409,8 +10076,7 @@ extension ContentView {
                 guard sourceID != loadedID || thumbnail == nil else { return }
                 loadedID = sourceID
 
-                let fetch = PHAsset.fetchAssets(withLocalIdentifiers: [referenceID], options: nil)
-                guard let asset = fetch.firstObject else {
+                guard let asset = ContentView.reportAsset(from: referenceID) else {
                     thumbnail = nil
                     return
                 }
@@ -9464,7 +10130,7 @@ extension ContentView {
             let id = UUID()
             let title: String
             let detailId: String
-            let asset: PHAsset
+            let asset: ReportAsset
             let viewerToken: Int
         }
 
@@ -9689,8 +10355,7 @@ extension ContentView {
                 return
             }
 
-            let fetch = PHAsset.fetchAssets(withLocalIdentifiers: [trimmed], options: nil)
-            guard let asset = fetch.firstObject else {
+            guard let asset = ContentView.reportAsset(from: trimmed) else {
                 showInlineToast(isCaptured ? "No captured image yet." : "No reference available")
                 return
             }
@@ -9743,7 +10408,13 @@ extension ContentView {
             }
 
             private var chronologicalUpdates: [ObservationUpdateEntry] {
-                observation.updateHistory.sorted { $0.createdAt < $1.createdAt }
+                let validShotIDs = Set(observation.shots.map(\.id))
+                return observation.updateHistory
+                    .filter { entry in
+                        guard let shotID = entry.shotID else { return true }
+                        return validShotIDs.contains(shotID)
+                    }
+                    .sorted { $0.createdAt < $1.createdAt }
             }
 
             private var statusLabel: String {
@@ -9908,8 +10579,7 @@ extension ContentView {
                 guard chosenID != loadedID || thumbnail == nil else { return }
                 loadedID = chosenID
 
-                let fetch = PHAsset.fetchAssets(withLocalIdentifiers: [chosenID], options: nil)
-                guard let asset = fetch.firstObject else {
+                guard let asset = ContentView.reportAsset(from: chosenID) else {
                     thumbnail = nil
                     return
                 }

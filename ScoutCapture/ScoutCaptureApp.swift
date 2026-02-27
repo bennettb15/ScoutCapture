@@ -9,7 +9,6 @@ import SwiftUI
 import UIKit
 import MapKit
 import Combine
-import Photos
 
 final class AppDelegate: NSObject, UIApplicationDelegate {
 
@@ -1254,15 +1253,20 @@ struct SessionHubView: View {
         var stampedEntries: [(String, Data)] = []
 
         for (index, localID) in orderedIDs.enumerated() {
-            guard let asset = PHAsset.fetchAssets(withLocalIdentifiers: [localID], options: nil).firstObject else { continue }
-            guard let data = requestImageData(for: asset) else { continue }
-            let filename = exportFilename(for: asset, index: index + 1)
+            let trimmed = localID.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { continue }
+            let fileURL = URL(fileURLWithPath: trimmed)
+            guard FileManager.default.fileExists(atPath: fileURL.path) else { continue }
+            guard let data = requestImageData(for: fileURL) else { continue }
+            let filename = exportFilename(for: fileURL, index: index + 1)
+            let image = UIImage(data: data)
+            let attrs = try? FileManager.default.attributesOfItem(atPath: fileURL.path)
             assetEntries.append(
                 SessionExportAssetEntry(
-                    localIdentifier: asset.localIdentifier,
-                    creationDate: asset.creationDate,
-                    pixelWidth: asset.pixelWidth,
-                    pixelHeight: asset.pixelHeight,
+                    localIdentifier: trimmed,
+                    creationDate: attrs?[.creationDate] as? Date,
+                    pixelWidth: image.map { Int($0.size.width) } ?? 0,
+                    pixelHeight: image.map { Int($0.size.height) } ?? 0,
                     originalFilename: filename
                 )
             )
@@ -1304,24 +1308,13 @@ struct SessionHubView: View {
         return url
     }
 
-    private func requestImageData(for asset: PHAsset) -> Data? {
-        let options = PHImageRequestOptions()
-        options.isSynchronous = true
-        options.deliveryMode = .highQualityFormat
-        options.resizeMode = .none
-        options.isNetworkAccessAllowed = true
-
-        var output: Data?
-        PHImageManager.default().requestImageDataAndOrientation(for: asset, options: options) { data, _, _, _ in
-            output = data
-        }
-        return output
+    private func requestImageData(for fileURL: URL) -> Data? {
+        try? Data(contentsOf: fileURL)
     }
 
-    private func exportFilename(for asset: PHAsset, index: Int) -> String {
+    private func exportFilename(for fileURL: URL, index: Int) -> String {
         let fallback = "photo-\(index).jpg"
-        guard let resource = PHAssetResource.assetResources(for: asset).first else { return fallback }
-        let original = resource.originalFilename.trimmingCharacters(in: .whitespacesAndNewlines)
+        let original = fileURL.lastPathComponent.trimmingCharacters(in: .whitespacesAndNewlines)
         let base = original.isEmpty ? fallback : normalizedContextFilename(original)
         return String(format: "%04d-%@", index, base.replacingOccurrences(of: "/", with: "-"))
     }
@@ -1553,6 +1546,7 @@ private struct HubAddPropertySheet: View {
 
     private enum Field: Int, CaseIterable {
         case clientName
+        case clientPhone
         case propertyName
         case streetAddress
         case city
@@ -1628,10 +1622,15 @@ private struct HubAddPropertySheet: View {
                         .focused($focusedField, equals: .clientName)
                         .submitLabel(.next)
                         .onSubmit {
-                            focusedField = .propertyName
+                            focusedField = .clientPhone
                         }
 
                     TextField("Phone (optional)", text: $clientPhone)
+                        .focused($focusedField, equals: .clientPhone)
+                        .submitLabel(.next)
+                        .onSubmit {
+                            focusedField = .propertyName
+                        }
                         .keyboardType(.phonePad)
                         .onChange(of: clientPhone) { _, newValue in
                             let filtered = newValue.filter(\.isNumber)
@@ -2587,6 +2586,7 @@ private struct DebugToolsView: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.colorScheme) private var colorScheme
 
+    private let localStore = LocalStore()
     @State private var showNuclearConfirm: Bool = false
     @State private var showClearCacheConfirm: Bool = false
 
@@ -2632,10 +2632,37 @@ private struct DebugToolsView: View {
 
                     debugActionCard(
                         title: "Clear Local Index / UI Cache (Local Only)",
-                        detail: "Resets local derived UI/index state and reloads from local store. Does NOT modify iCloud Drive library data.",
+                        detail: "Clears in-memory image/UI caches and reloads thumbnails from local SCOUT files. Does NOT delete Originals, Stamped, session.json, or iCloud Drive data.",
                         role: .normal
                     ) {
                         showClearCacheConfirm = true
+                    }
+
+                    debugActionCard(
+                        title: "Print Metadata Schema",
+                        detail: "Prints SessionMetadata and ShotMetadata field names to the Xcode console.",
+                        role: .normal,
+                        buttonTitle: "Print Metadata Schema"
+                    ) {
+                        localStore.printSessionSchema()
+                    }
+
+                    debugActionCard(
+                        title: "Verify session.json source",
+                        detail: "Prints on-disk session.json path, existence, size, schemaVersion, shot count, and shotKey/originalRelativePath presence.",
+                        role: .normal,
+                        buttonTitle: "Verify session.json source"
+                    ) {
+                        verifySessionJSONSource()
+                    }
+
+                    debugActionCard(
+                        title: "Verify export session.json source",
+                        detail: "Prints export session.json source path and key presence checks used by export.",
+                        role: .normal,
+                        buttonTitle: "Verify export source"
+                    ) {
+                        verifyExportSessionJSONSource()
                     }
                 }
                 .padding(14)
@@ -2652,12 +2679,12 @@ private struct DebugToolsView: View {
         }
         .alert("Clear Local Index / UI Cache?", isPresented: $showClearCacheConfirm) {
             Button("Clear") {
-                appState.resetLocalSessionUIIndex()
+                appState.clearLocalCacheOnly()
                 dismiss()
             }
             Button("Cancel", role: .cancel) { }
         } message: {
-            Text("This clears local cache/index state only and reloads local records. iCloud Drive library data will not be touched.")
+            Text("This clears local UI/image cache only and reloads from local SCOUT storage. It does not delete Originals, Stamped, session.json, or iCloud Drive data.")
         }
     }
 
@@ -2671,11 +2698,13 @@ private struct DebugToolsView: View {
         title: String,
         detail: String,
         role: DebugRole,
+        buttonTitle: String? = nil,
         action: @escaping () -> Void
     ) -> some View {
         let fill = role == .destructive ? Color.red.opacity(0.86) : buttonFill
         let stroke = role == .destructive ? Color.red.opacity(0.90) : buttonStroke
         let label = role == .destructive ? Color.white : buttonLabel
+        let resolvedButtonTitle = buttonTitle ?? (role == .destructive ? "Run Nuclear Reset" : "Clear Cache")
 
         VStack(alignment: .leading, spacing: 10) {
             Text(title)
@@ -2685,7 +2714,7 @@ private struct DebugToolsView: View {
                 .font(.system(size: 13, weight: .medium))
                 .foregroundColor(.secondary)
             customCapsuleButton(
-                title: role == .destructive ? "Run Nuclear Reset" : "Clear Cache",
+                title: resolvedButtonTitle,
                 isEnabled: true,
                 fill: fill,
                 stroke: stroke,
@@ -2726,6 +2755,91 @@ private struct DebugToolsView: View {
         }
         .buttonStyle(.plain)
         .disabled(!isEnabled)
+    }
+
+    private func verifySessionJSONSource() {
+        guard let propertyID = appState.selectedPropertyID,
+              let sessionID = appState.currentSession?.id else {
+            print("Verify session.json source: missing selected property or current session.")
+            return
+        }
+
+        let url = localStore.sessionJSONURL(propertyID: propertyID, sessionID: sessionID)
+        let fm = FileManager.default
+        let exists = fm.fileExists(atPath: url.path)
+        let sizeBytes: Int = {
+            guard exists,
+                  let attrs = try? fm.attributesOfItem(atPath: url.path),
+                  let size = attrs[.size] as? NSNumber else { return 0 }
+            return size.intValue
+        }()
+
+        print("Expected session.json path: \(url.path)")
+        print("File exists: \(exists ? "YES" : "NO")")
+        print("File size bytes: \(sizeBytes)")
+
+        guard exists, let data = try? Data(contentsOf: url) else {
+            print("Unable to read session.json data.")
+            return
+        }
+
+        let raw = String(data: data, encoding: .utf8) ?? ""
+        print("Raw contains \"\\\"shotKey\\\"\": \(raw.contains("\"shotKey\"") ? "YES" : "NO")")
+        print("Raw contains \"\\\"originalRelativePath\\\"\": \(raw.contains("\"originalRelativePath\"") ? "YES" : "NO")")
+
+        do {
+            let metadata = try localStore.loadSessionMetadata(propertyID: propertyID, sessionID: sessionID)
+            print("schemaVersion: \(metadata.schemaVersion)")
+            print("shots count: \(metadata.shots.count)")
+            if let first = metadata.shots.first {
+                print("first shot shotKey: \(first.shotKey)")
+                print("first shot originalRelativePath: \(first.originalRelativePath)")
+            }
+        } catch {
+            print("Decode failed: \(error)")
+        }
+    }
+
+    private func verifyExportSessionJSONSource() {
+        guard let propertyID = appState.selectedPropertyID,
+              let sessionID = appState.currentSession?.id else {
+            print("Verify export session.json source: missing selected property or current session.")
+            return
+        }
+
+        let url = localStore.sessionJSONURL(propertyID: propertyID, sessionID: sessionID)
+        let fm = FileManager.default
+        let exists = fm.fileExists(atPath: url.path)
+        let sizeBytes: Int = {
+            guard exists,
+                  let attrs = try? fm.attributesOfItem(atPath: url.path),
+                  let size = attrs[.size] as? NSNumber else { return 0 }
+            return size.intValue
+        }()
+        print("Export session.json path source: \(url.path)")
+        print("Export source exists: \(exists ? "YES" : "NO")")
+        print("Export source size bytes: \(sizeBytes)")
+
+        guard exists, let data = try? Data(contentsOf: url) else {
+            print("Export source read failed.")
+            return
+        }
+
+        let raw = String(data: data, encoding: .utf8) ?? ""
+        print("Export raw contains \"shotKey\": \(raw.contains("\"shotKey\"") ? "YES" : "NO")")
+        print("Export raw contains \"originalRelativePath\": \(raw.contains("\"originalRelativePath\"") ? "YES" : "NO")")
+
+        do {
+            let metadata = try localStore.loadSessionMetadata(propertyID: propertyID, sessionID: sessionID)
+            if let first = metadata.shots.first {
+                print("Export first shot shotKey: \(first.shotKey)")
+                print("Export first shot originalRelativePath: \(first.originalRelativePath)")
+            } else {
+                print("Export first shot: none")
+            }
+        } catch {
+            print("Export source decode failed: \(error)")
+        }
     }
 }
 #endif

@@ -2,6 +2,16 @@ import Foundation
 import UIKit
 
 final class LocalStore {
+    private let currentSessionSchemaVersion = 3
+    private let fileIOQueue = DispatchQueue(label: "ScoutCapture.LocalStore.fileIO")
+    private let fileIOQueueKey = DispatchSpecificKey<UInt8>()
+    private let fileIOQueueValue: UInt8 = 1
+
+    enum ShotUpsertMatchMode {
+        case append
+        case replaceGuidedKey
+    }
+
     enum StoreError: Error {
         case propertyNotFound(UUID)
         case observationNotFound(UUID)
@@ -12,12 +22,12 @@ final class LocalStore {
     private let encoder: JSONEncoder
     private let decoder: JSONDecoder
 
-    private let baseDirectoryURL: URL
+    private let scoutRootURL: URL
     private let propertiesURL: URL
+    private let propertyFoldersURL: URL
     private let observationsDirectoryURL: URL
     private let guidedShotsDirectoryURL: URL
     private let sessionsDirectoryURL: URL
-    private let sessionMetadataDirectoryURL: URL
 
     init(fileManager: FileManager = .default) {
         self.fileManager = fileManager
@@ -32,15 +42,26 @@ final class LocalStore {
         self.decoder = decoder
 
         let appSupport = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-        let baseDirectory = appSupport.appendingPathComponent("ScoutCapture", isDirectory: true)
-        self.baseDirectoryURL = baseDirectory
-        self.propertiesURL = baseDirectory.appendingPathComponent("properties.json")
-        self.observationsDirectoryURL = baseDirectory.appendingPathComponent("observations", isDirectory: true)
-        self.guidedShotsDirectoryURL = baseDirectory.appendingPathComponent("guided-shots", isDirectory: true)
-        self.sessionsDirectoryURL = baseDirectory.appendingPathComponent("sessions", isDirectory: true)
-        self.sessionMetadataDirectoryURL = baseDirectory.appendingPathComponent("session-metadata", isDirectory: true)
+        let appRoot = appSupport.appendingPathComponent("ScoutCapture", isDirectory: true)
+        let scoutRoot = appRoot.appendingPathComponent("SCOUT", isDirectory: true)
+        self.scoutRootURL = scoutRoot
+        self.propertiesURL = scoutRoot.appendingPathComponent("properties.json")
+        self.propertyFoldersURL = scoutRoot.appendingPathComponent("Properties", isDirectory: true)
+        self.observationsDirectoryURL = scoutRoot.appendingPathComponent("observations", isDirectory: true)
+        self.guidedShotsDirectoryURL = scoutRoot.appendingPathComponent("guided-shots", isDirectory: true)
+        self.sessionsDirectoryURL = scoutRoot.appendingPathComponent("sessions", isDirectory: true)
+        self.fileIOQueue.setSpecific(key: fileIOQueueKey, value: fileIOQueueValue)
 
-        try? createStorageDirectories(baseDirectoryURL: baseDirectory)
+        try? createStorageDirectories(baseDirectoryURL: scoutRoot)
+    }
+
+    func performFileIOSync<T>(_ work: () throws -> T) rethrows -> T {
+        if DispatchQueue.getSpecific(key: fileIOQueueKey) == fileIOQueueValue {
+            return try work()
+        }
+        return try fileIOQueue.sync {
+            try work()
+        }
     }
 
     // MARK: - Properties CRUD
@@ -72,34 +93,36 @@ final class LocalStore {
     }
 
     func deleteProperty(id: UUID) throws {
-        let guided = try readGuidedShots(propertyID: id)
-        let observations = try readObservations(propertyID: id)
-        try cleanupReferenceFilesForGuidedShots(guided)
-        let observationGuidedRefs = observations.flatMap { $0.guidedShots.compactMap(\.referenceImagePath) }
-        try cleanupReferenceFiles(paths: observationGuidedRefs)
+        try performFileIOSync {
+            let guided = try readGuidedShots(propertyID: id)
+            let observations = try readObservations(propertyID: id)
+            try cleanupReferenceFilesForGuidedShots(guided)
+            let observationGuidedRefs = observations.flatMap { $0.guidedShots.compactMap(\.referenceImagePath) }
+            try cleanupReferenceFiles(paths: observationGuidedRefs)
 
-        var properties = try readProperties()
-        properties.removeAll { $0.id == id }
-        try writeProperties(properties)
+            var properties = try readProperties()
+            properties.removeAll { $0.id == id }
+            try writeProperties(properties)
 
-        let propertyObservationURL = observationsFileURL(for: id)
-        if fileManager.fileExists(atPath: propertyObservationURL.path) {
-            try fileManager.removeItem(at: propertyObservationURL)
-        }
+            let propertyObservationURL = observationsFileURL(for: id)
+            if fileManager.fileExists(atPath: propertyObservationURL.path) {
+                try fileManager.removeItem(at: propertyObservationURL)
+            }
 
-        let propertyGuidedShotsURL = guidedShotsFileURL(for: id)
-        if fileManager.fileExists(atPath: propertyGuidedShotsURL.path) {
-            try fileManager.removeItem(at: propertyGuidedShotsURL)
-        }
+            let propertyGuidedShotsURL = guidedShotsFileURL(for: id)
+            if fileManager.fileExists(atPath: propertyGuidedShotsURL.path) {
+                try fileManager.removeItem(at: propertyGuidedShotsURL)
+            }
 
-        let propertySessionsURL = sessionsFileURL(for: id)
-        if fileManager.fileExists(atPath: propertySessionsURL.path) {
-            try fileManager.removeItem(at: propertySessionsURL)
-        }
+            let propertySessionsURL = sessionsFileURL(for: id)
+            if fileManager.fileExists(atPath: propertySessionsURL.path) {
+                try fileManager.removeItem(at: propertySessionsURL)
+            }
 
-        let propertySessionMetadataURL = sessionMetadataDirectoryURL.appendingPathComponent(id.uuidString, isDirectory: true)
-        if fileManager.fileExists(atPath: propertySessionMetadataURL.path) {
-            try? fileManager.removeItem(at: propertySessionMetadataURL)
+            let propertyFolder = propertyFolderURL(propertyID: id)
+            if fileManager.fileExists(atPath: propertyFolder.path) {
+                try? fileManager.removeItem(at: propertyFolder)
+            }
         }
     }
 
@@ -185,29 +208,159 @@ final class LocalStore {
     }
 
     func upsertShotMetadata(_ shot: ShotMetadata) throws {
-        var metadata = try readOrRecoverSessionMetadata(propertyID: shot.propertyID, sessionID: shot.sessionID)
-        metadata.schemaVersion = max(metadata.schemaVersion, 1)
-        metadata.propertyID = shot.propertyID
-        metadata.sessionID = shot.sessionID
+        try upsertShot(
+            propertyID: shot.propertyID,
+            sessionID: shot.sessionID,
+            shot: shot,
+            matchMode: .replaceGuidedKey
+        )
+    }
+
+    func loadSessionMetadata(propertyID: UUID, sessionID: UUID) throws -> SessionMetadata {
+        try readOrRecoverSessionMetadata(propertyID: propertyID, sessionID: sessionID)
+    }
+
+    func saveSessionMetadataAtomically(propertyID: UUID, sessionID: UUID, metadata: SessionMetadata) throws {
+        var updated = metadata
+        updated.schemaVersion = max(updated.schemaVersion, currentSessionSchemaVersion)
+        updated.propertyID = propertyID
+        updated.sessionID = sessionID
+        updated.appVersion = appVersionString()
+        updated.deviceModel = deviceModelString()
+        updated.osVersion = osVersionString()
+        try writeSessionMetadata(updated)
+    }
+
+    func upsertShot(
+        propertyID: UUID,
+        sessionID: UUID,
+        shot: ShotMetadata,
+        matchMode: ShotUpsertMatchMode
+    ) throws {
+        var metadata = try loadSessionMetadata(propertyID: propertyID, sessionID: sessionID)
+        metadata.schemaVersion = max(metadata.schemaVersion, currentSessionSchemaVersion)
+        metadata.propertyID = propertyID
+        metadata.sessionID = sessionID
 
         if let index = metadata.shots.firstIndex(where: { $0.shotID == shot.shotID }) {
-            metadata.shots[index] = shot
-        } else if shot.isGuided,
+            let existing = metadata.shots[index]
+            var replacement = shot
+            replacement = ShotMetadata(
+                shotID: existing.shotID,
+                propertyID: shot.propertyID,
+                sessionID: shot.sessionID,
+                createdAt: existing.createdAt,
+                updatedAt: shot.updatedAt,
+                building: shot.building,
+                elevation: shot.elevation,
+                detailType: shot.detailType,
+                angleIndex: shot.angleIndex,
+                shotKey: shot.shotKey,
+                isGuided: shot.isGuided,
+                isFlagged: shot.isFlagged,
+                issueID: shot.issueID,
+                issueStatus: shot.issueStatus,
+                noteText: shot.noteText,
+                noteCategory: shot.noteCategory,
+                originalFilename: shot.originalFilename,
+                originalRelativePath: shot.originalRelativePath,
+                originalByteSize: shot.originalByteSize,
+                stampedFilename: shot.stampedFilename,
+                stampedRelativePath: shot.stampedRelativePath,
+                captureMode: shot.captureMode,
+                lens: shot.lens,
+                orientation: shot.orientation,
+                latitude: shot.latitude,
+                longitude: shot.longitude,
+                accuracyMeters: shot.accuracyMeters,
+                imageWidth: shot.imageWidth,
+                imageHeight: shot.imageHeight
+            )
+            metadata.shots[index] = replacement
+        } else if matchMode == .replaceGuidedKey,
+                  shot.isGuided,
                   let index = metadata.shots.firstIndex(where: {
                       $0.isGuided &&
                       $0.propertyID == shot.propertyID &&
                       $0.sessionID == shot.sessionID &&
-                      $0.building.caseInsensitiveCompare(shot.building) == .orderedSame &&
-                      CanonicalElevation.normalize($0.elevation) == CanonicalElevation.normalize(shot.elevation) &&
-                      $0.detailType.caseInsensitiveCompare(shot.detailType) == .orderedSame &&
-                      $0.angleIndex == shot.angleIndex
+                      (
+                        $0.shotKey.caseInsensitiveCompare(shot.shotKey) == .orderedSame ||
+                        (
+                            $0.building.caseInsensitiveCompare(shot.building) == .orderedSame &&
+                            CanonicalElevation.normalize($0.elevation) == CanonicalElevation.normalize(shot.elevation) &&
+                            $0.detailType.caseInsensitiveCompare(shot.detailType) == .orderedSame &&
+                            $0.angleIndex == shot.angleIndex
+                        )
+                      )
                   }) {
-            metadata.shots[index] = shot
+            let existing = metadata.shots[index]
+            let replacement = ShotMetadata(
+                shotID: existing.shotID,
+                propertyID: shot.propertyID,
+                sessionID: shot.sessionID,
+                createdAt: existing.createdAt,
+                updatedAt: shot.updatedAt,
+                building: shot.building,
+                elevation: shot.elevation,
+                detailType: shot.detailType,
+                angleIndex: shot.angleIndex,
+                shotKey: shot.shotKey,
+                isGuided: shot.isGuided,
+                isFlagged: shot.isFlagged,
+                issueID: shot.issueID,
+                issueStatus: shot.issueStatus,
+                noteText: shot.noteText,
+                noteCategory: shot.noteCategory,
+                originalFilename: shot.originalFilename,
+                originalRelativePath: shot.originalRelativePath,
+                originalByteSize: shot.originalByteSize,
+                stampedFilename: shot.stampedFilename,
+                stampedRelativePath: shot.stampedRelativePath,
+                captureMode: shot.captureMode,
+                lens: shot.lens,
+                orientation: shot.orientation,
+                latitude: shot.latitude,
+                longitude: shot.longitude,
+                accuracyMeters: shot.accuracyMeters,
+                imageWidth: shot.imageWidth,
+                imageHeight: shot.imageHeight
+            )
+            metadata.shots[index] = replacement
         } else {
+            if matchMode == .replaceGuidedKey {
+                print("Retake upsert fallback append: guided key match not found for session \(sessionID)")
+            }
             metadata.shots.append(shot)
         }
 
-        try writeSessionMetadata(metadata)
+        try saveSessionMetadataAtomically(propertyID: propertyID, sessionID: sessionID, metadata: metadata)
+    }
+
+    func removeShotMetadata(
+        propertyID: UUID,
+        sessionID: UUID,
+        originalFileIdentifiers: [String]
+    ) throws {
+        try performFileIOSync {
+            guard !originalFileIdentifiers.isEmpty else { return }
+            var metadata = try readOrRecoverSessionMetadata(propertyID: propertyID, sessionID: sessionID)
+            let targets = Set(originalFileIdentifiers.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty })
+            guard !targets.isEmpty else { return }
+            metadata.shots.removeAll { shot in
+                let original = shot.originalFilename.trimmingCharacters(in: .whitespacesAndNewlines)
+                let stem = URL(fileURLWithPath: original).deletingPathExtension().lastPathComponent
+                return targets.contains(original)
+                    || targets.contains(stem)
+                    || targets.contains("/\(stem).jpg")
+                    || targets.contains("/\(stem).heic")
+            }
+            try writeSessionMetadata(metadata)
+        }
+    }
+
+    func fetchShotMetadata(propertyID: UUID, sessionID: UUID) throws -> [ShotMetadata] {
+        let metadata = try readOrRecoverSessionMetadata(propertyID: propertyID, sessionID: sessionID)
+        return metadata.shots
     }
     
     func latestDraftSession(propertyID: UUID) throws -> Session? {
@@ -219,72 +372,151 @@ final class LocalStore {
     }
 
     func deleteSession(id: UUID, propertyID: UUID) throws {
-        try ensurePropertyExists(propertyID)
-        var sessions = try readSessions(propertyID: propertyID)
-        sessions.removeAll { $0.id == id }
-        try writeSessions(sessions, propertyID: propertyID)
-        let metadataFolder = sessionMetadataFolderURL(propertyID: propertyID, sessionID: id)
-        if fileManager.fileExists(atPath: metadataFolder.path) {
-            try? fileManager.removeItem(at: metadataFolder)
+        try performFileIOSync {
+            try ensurePropertyExists(propertyID)
+            var sessions = try readSessions(propertyID: propertyID)
+            sessions.removeAll { $0.id == id }
+            try writeSessions(sessions, propertyID: propertyID)
+            let metadataFolder = sessionMetadataFolderURL(propertyID: propertyID, sessionID: id)
+            if fileManager.fileExists(atPath: metadataFolder.path) {
+                try? fileManager.removeItem(at: metadataFolder)
+            }
         }
     }
 
     func deleteSessionCascade(id: UUID, propertyID: UUID) throws {
-        try ensurePropertyExists(propertyID)
-        let sessions = try readSessions(propertyID: propertyID)
-        guard let target = sessions.first(where: { $0.id == id }) else {
-            throw StoreError.sessionNotFound(id)
-        }
-
-        let start = target.startedAt
-        let end = target.endedAt ?? Date.distantFuture
-
-        var observations = try readObservations(propertyID: propertyID)
-        let sessionMatched = observations.filter { $0.sessionID == target.id }
-        let timeMatched = observations.filter { $0.sessionID == nil && $0.createdAt >= start && $0.createdAt <= end }
-        let matchedObservationIDs = Set((sessionMatched + timeMatched).map(\.id))
-        let matchedObservations = observations.filter { matchedObservationIDs.contains($0.id) }
-        let matchedShotIDs = Set(matchedObservations.flatMap { obs in
-            var ids = obs.shots.map(\.id)
-            if let linked = obs.linkedShotID {
-                ids.append(linked)
+        try performFileIOSync {
+            try ensurePropertyExists(propertyID)
+            let sessions = try readSessions(propertyID: propertyID)
+            guard let target = sessions.first(where: { $0.id == id }) else {
+                throw StoreError.sessionNotFound(id)
             }
-            return ids
-        })
 
-        let observationGuidedRefs = matchedObservations.flatMap { $0.guidedShots.compactMap(\.referenceImagePath) }
-        try cleanupReferenceFiles(paths: observationGuidedRefs)
-        observations.removeAll { matchedObservationIDs.contains($0.id) }
-        try writeObservations(observations, propertyID: propertyID)
+            let start = target.startedAt
+            let end = target.endedAt ?? Date.distantFuture
 
-        var guided = try readGuidedShots(propertyID: propertyID)
-        let guidedToDelete = guided.filter { shot in
-            if let shotID = shot.shot?.id, matchedShotIDs.contains(shotID) {
-                return true
+            var observations = try readObservations(propertyID: propertyID)
+            let sessionMatched = observations.filter { $0.sessionID == target.id }
+            let timeMatched = observations.filter { $0.sessionID == nil && $0.createdAt >= start && $0.createdAt <= end }
+            let matchedObservationIDs = Set((sessionMatched + timeMatched).map(\.id))
+            let matchedObservations = observations.filter { matchedObservationIDs.contains($0.id) }
+            let matchedShotIDs = Set(matchedObservations.flatMap { obs in
+                var ids = obs.shots.map(\.id)
+                if let linked = obs.linkedShotID {
+                    ids.append(linked)
+                }
+                return ids
+            })
+
+            let observationGuidedRefs = matchedObservations.flatMap { $0.guidedShots.compactMap(\.referenceImagePath) }
+            try cleanupReferenceFiles(paths: observationGuidedRefs)
+            observations.removeAll { matchedObservationIDs.contains($0.id) }
+            try writeObservations(observations, propertyID: propertyID)
+
+            var guided = try readGuidedShots(propertyID: propertyID)
+            let guidedToDelete = guided.filter { shot in
+                if let shotID = shot.shot?.id, matchedShotIDs.contains(shotID) {
+                    return true
+                }
+                if let capturedAt = shot.shot?.capturedAt, capturedAt >= start && capturedAt <= end {
+                    return true
+                }
+                return false
             }
-            if let capturedAt = shot.shot?.capturedAt, capturedAt >= start && capturedAt <= end {
-                return true
-            }
-            return false
-        }
-        try cleanupReferenceFilesForGuidedShots(guidedToDelete)
-        guided.removeAll { item in guidedToDelete.contains(where: { $0.id == item.id }) }
-        try writeGuidedShots(guided, propertyID: propertyID)
+            try cleanupReferenceFilesForGuidedShots(guidedToDelete)
+            guided.removeAll { item in guidedToDelete.contains(where: { $0.id == item.id }) }
+            try writeGuidedShots(guided, propertyID: propertyID)
 
-        var updatedSessions = sessions
-        updatedSessions.removeAll { $0.id == id }
-        try writeSessions(updatedSessions, propertyID: propertyID)
-        let metadataFolder = sessionMetadataFolderURL(propertyID: propertyID, sessionID: id)
-        if fileManager.fileExists(atPath: metadataFolder.path) {
-            try? fileManager.removeItem(at: metadataFolder)
+            var updatedSessions = sessions
+            updatedSessions.removeAll { $0.id == id }
+            try writeSessions(updatedSessions, propertyID: propertyID)
+            let metadataFolder = sessionMetadataFolderURL(propertyID: propertyID, sessionID: id)
+            if fileManager.fileExists(atPath: metadataFolder.path) {
+                try? fileManager.removeItem(at: metadataFolder)
+            }
         }
     }
 
-    func wipeAllLocalData() throws {
-        if fileManager.fileExists(atPath: baseDirectoryURL.path) {
-            try fileManager.removeItem(at: baseDirectoryURL)
+    func ensureSessionFolders(propertyID: UUID, sessionID: UUID) throws {
+        let propertyFolder = propertyFolderURL(propertyID: propertyID)
+        if !fileManager.fileExists(atPath: propertyFolder.path) {
+            try fileManager.createDirectory(at: propertyFolder, withIntermediateDirectories: true)
         }
-        try createStorageDirectories(baseDirectoryURL: baseDirectoryURL)
+
+        let sessionsFolder = sessionsFolderURL(propertyID: propertyID)
+        if !fileManager.fileExists(atPath: sessionsFolder.path) {
+            try fileManager.createDirectory(at: sessionsFolder, withIntermediateDirectories: true)
+        }
+
+        let sessionFolder = sessionFolderURL(propertyID: propertyID, sessionID: sessionID)
+        if !fileManager.fileExists(atPath: sessionFolder.path) {
+            try fileManager.createDirectory(at: sessionFolder, withIntermediateDirectories: true)
+        }
+
+        let originals = originalsFolderURL(propertyID: propertyID, sessionID: sessionID)
+        if !fileManager.fileExists(atPath: originals.path) {
+            try fileManager.createDirectory(at: originals, withIntermediateDirectories: true)
+        }
+
+        let stamped = stampedFolderURL(propertyID: propertyID, sessionID: sessionID)
+        if !fileManager.fileExists(atPath: stamped.path) {
+            try fileManager.createDirectory(at: stamped, withIntermediateDirectories: true)
+        }
+    }
+
+    func ensureSessionFileStorage(propertyID: UUID, sessionID: UUID) throws {
+        try ensureSessionFolders(propertyID: propertyID, sessionID: sessionID)
+    }
+
+    func rootURL() -> URL {
+        scoutRootURL
+    }
+
+    func propertyFolderURL(propertyID: UUID) -> URL {
+        propertyFoldersURL.appendingPathComponent(propertyID.uuidString, isDirectory: true)
+    }
+
+    func sessionsFolderURL(propertyID: UUID) -> URL {
+        propertyFolderURL(propertyID: propertyID)
+            .appendingPathComponent("Sessions", isDirectory: true)
+    }
+
+    func sessionFolderURL(propertyID: UUID, sessionID: UUID) -> URL {
+        sessionsFolderURL(propertyID: propertyID)
+            .appendingPathComponent(sessionID.uuidString, isDirectory: true)
+    }
+
+    func originalsFolderURL(propertyID: UUID, sessionID: UUID) -> URL {
+        sessionFolderURL(propertyID: propertyID, sessionID: sessionID)
+            .appendingPathComponent("Originals", isDirectory: true)
+    }
+
+    func stampedFolderURL(propertyID: UUID, sessionID: UUID) -> URL {
+        sessionFolderURL(propertyID: propertyID, sessionID: sessionID)
+            .appendingPathComponent("Stamped", isDirectory: true)
+    }
+
+    func sessionJSONURL(propertyID: UUID, sessionID: UUID) -> URL {
+        sessionFolderURL(propertyID: propertyID, sessionID: sessionID)
+            .appendingPathComponent("session.json")
+    }
+
+    // Backward-compatible wrappers used by existing call sites.
+    func originalsDirectoryURL(propertyID: UUID, sessionID: UUID) -> URL {
+        originalsFolderURL(propertyID: propertyID, sessionID: sessionID)
+    }
+
+    func stampedDirectoryURL(propertyID: UUID, sessionID: UUID) -> URL {
+        stampedFolderURL(propertyID: propertyID, sessionID: sessionID)
+    }
+
+    func wipeAllLocalData() throws {
+        try performFileIOSync {
+            if fileManager.fileExists(atPath: scoutRootURL.path) {
+                try fileManager.removeItem(at: scoutRootURL)
+            }
+            try createStorageDirectories(baseDirectoryURL: scoutRootURL)
+        }
     }
 
     // MARK: - Private Helpers
@@ -306,8 +538,8 @@ final class LocalStore {
             try fileManager.createDirectory(at: sessionsDirectoryURL, withIntermediateDirectories: true)
         }
 
-        if !fileManager.fileExists(atPath: sessionMetadataDirectoryURL.path) {
-            try fileManager.createDirectory(at: sessionMetadataDirectoryURL, withIntermediateDirectories: true)
+        if !fileManager.fileExists(atPath: propertyFoldersURL.path) {
+            try fileManager.createDirectory(at: propertyFoldersURL, withIntermediateDirectories: true)
         }
     }
 
@@ -408,7 +640,7 @@ final class LocalStore {
 
     private func upsertSessionMetadataLifecycle(for session: Session) throws {
         var metadata = try readOrRecoverSessionMetadata(propertyID: session.propertyID, sessionID: session.id)
-        metadata.schemaVersion = 1
+        metadata.schemaVersion = max(metadata.schemaVersion, currentSessionSchemaVersion)
         metadata.propertyID = session.propertyID
         metadata.sessionID = session.id
         let propertyName = currentPropertyName(for: session.propertyID)
@@ -422,9 +654,11 @@ final class LocalStore {
         metadata.startedAt = session.startedAt
         metadata.endedAt = session.endedAt
         metadata.status = session.status
+        metadata.isBaselineSession = isBaselineSession(sessionID: session.id, propertyID: session.propertyID)
         metadata.exportedAt = session.exportedAt
         metadata.appVersion = appVersionString()
         metadata.deviceModel = deviceModelString()
+        metadata.osVersion = osVersionString()
         try writeSessionMetadata(metadata)
     }
 
@@ -432,7 +666,7 @@ final class LocalStore {
         let fileURL = sessionMetadataFileURL(propertyID: propertyID, sessionID: sessionID)
         if !fileManager.fileExists(atPath: fileURL.path) {
             return SessionMetadata(
-                schemaVersion: 1,
+                schemaVersion: currentSessionSchemaVersion,
                 propertyID: propertyID,
                 sessionID: sessionID,
                 propertyNameAtCapture: nil,
@@ -440,9 +674,11 @@ final class LocalStore {
                 startedAt: Date(),
                 endedAt: nil,
                 status: .draft,
+                isBaselineSession: false,
                 exportedAt: nil,
                 appVersion: appVersionString(),
                 deviceModel: deviceModelString(),
+                osVersion: osVersionString(),
                 shots: [],
                 issues: []
             )
@@ -451,14 +687,26 @@ final class LocalStore {
         do {
             let data = try Data(contentsOf: fileURL)
             var metadata = try decoder.decode(SessionMetadata.self, from: data)
-            metadata.schemaVersion = max(metadata.schemaVersion, 1)
+            metadata.schemaVersion = max(metadata.schemaVersion, currentSessionSchemaVersion)
             metadata.propertyID = propertyID
             metadata.sessionID = sessionID
+            metadata.appVersion = metadata.appVersion.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                ? appVersionString()
+                : metadata.appVersion
+            metadata.deviceModel = metadata.deviceModel.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                ? deviceModelString()
+                : metadata.deviceModel
+            metadata.osVersion = metadata.osVersion.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                ? osVersionString()
+                : metadata.osVersion
+            metadata.shots = metadata.shots.map { shot in
+                normalizeShotMetadata(shot, propertyID: propertyID, sessionID: sessionID)
+            }
             return metadata
         } catch {
             print("Recoverable session metadata decode failure for session \(sessionID): \(error)")
             return SessionMetadata(
-                schemaVersion: 1,
+                schemaVersion: currentSessionSchemaVersion,
                 propertyID: propertyID,
                 sessionID: sessionID,
                 propertyNameAtCapture: nil,
@@ -466,9 +714,11 @@ final class LocalStore {
                 startedAt: Date(),
                 endedAt: nil,
                 status: .draft,
+                isBaselineSession: false,
                 exportedAt: nil,
                 appVersion: appVersionString(),
                 deviceModel: deviceModelString(),
+                osVersion: osVersionString(),
                 shots: [],
                 issues: []
             )
@@ -476,24 +726,38 @@ final class LocalStore {
     }
 
     private func writeSessionMetadata(_ metadata: SessionMetadata) throws {
-        let folder = sessionMetadataFolderURL(propertyID: metadata.propertyID, sessionID: metadata.sessionID)
+        let propertyID = metadata.propertyID
+        let sessionID = metadata.sessionID
+        let folder = sessionMetadataFolderURL(propertyID: propertyID, sessionID: sessionID)
         if !fileManager.fileExists(atPath: folder.path) {
             try fileManager.createDirectory(at: folder, withIntermediateDirectories: true)
         }
-        let fileURL = sessionMetadataFileURL(propertyID: metadata.propertyID, sessionID: metadata.sessionID)
+        try ensureSessionFileStorage(propertyID: propertyID, sessionID: sessionID)
+        let fileURL = sessionMetadataFileURL(propertyID: propertyID, sessionID: sessionID)
+        let tempURL = folder.appendingPathComponent("session-\(UUID().uuidString).tmp")
         let data = try encoder.encode(metadata)
-        try data.write(to: fileURL, options: .atomic)
+        try data.write(to: tempURL, options: .atomic)
+
+        do {
+            if fileManager.fileExists(atPath: fileURL.path) {
+                _ = try fileManager.replaceItemAt(fileURL, withItemAt: tempURL, backupItemName: nil, options: [.usingNewMetadataOnly])
+            } else {
+                try fileManager.moveItem(at: tempURL, to: fileURL)
+            }
+        } catch {
+            if fileManager.fileExists(atPath: tempURL.path) {
+                try? fileManager.removeItem(at: tempURL)
+            }
+            throw error
+        }
     }
 
     private func sessionMetadataFolderURL(propertyID: UUID, sessionID: UUID) -> URL {
-        sessionMetadataDirectoryURL
-            .appendingPathComponent(propertyID.uuidString, isDirectory: true)
-            .appendingPathComponent(sessionID.uuidString, isDirectory: true)
+        sessionFolderURL(propertyID: propertyID, sessionID: sessionID)
     }
 
     private func sessionMetadataFileURL(propertyID: UUID, sessionID: UUID) -> URL {
-        sessionMetadataFolderURL(propertyID: propertyID, sessionID: sessionID)
-            .appendingPathComponent("session.json")
+        sessionJSONURL(propertyID: propertyID, sessionID: sessionID)
     }
 
     private func appVersionString() -> String {
@@ -515,10 +779,75 @@ final class LocalStore {
         UIDevice.current.model
     }
 
+    private func osVersionString() -> String {
+        UIDevice.current.systemVersion
+    }
+
+    private func isBaselineSession(sessionID: UUID, propertyID: UUID) -> Bool {
+        let properties = (try? readProperties()) ?? []
+        return properties.first(where: { $0.id == propertyID })?.baselineSessionID == sessionID
+    }
+
     private func currentPropertyName(for propertyID: UUID) -> String {
         let properties = (try? readProperties()) ?? []
         let value = properties.first(where: { $0.id == propertyID })?.name ?? ""
         return value.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func normalizeShotMetadata(_ shot: ShotMetadata, propertyID: UUID, sessionID: UUID) -> ShotMetadata {
+        let fileName = URL(fileURLWithPath: shot.originalFilename).lastPathComponent
+        let normalizedFilename = fileName.isEmpty ? shot.originalFilename : fileName
+        let normalizedRelativePath = shot.originalRelativePath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? "Originals/\(normalizedFilename)"
+            : shot.originalRelativePath
+        let normalizedShotKey = shot.shotKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? ShotMetadata.makeShotKey(
+                building: shot.building,
+                elevation: shot.elevation,
+                detailType: shot.detailType,
+                angleIndex: shot.angleIndex
+            )
+            : shot.shotKey
+        let normalizedStampedFilename = shot.stampedFilename.map { URL(fileURLWithPath: $0).lastPathComponent }
+        let normalizedStampedPath: String?
+        if let stamped = shot.stampedRelativePath?.trimmingCharacters(in: .whitespacesAndNewlines), !stamped.isEmpty {
+            normalizedStampedPath = stamped
+        } else if let stampedName = normalizedStampedFilename, !stampedName.isEmpty {
+            normalizedStampedPath = "Stamped/\(stampedName)"
+        } else {
+            normalizedStampedPath = nil
+        }
+        return ShotMetadata(
+            shotID: shot.shotID,
+            propertyID: propertyID,
+            sessionID: sessionID,
+            createdAt: shot.createdAt,
+            updatedAt: shot.updatedAt,
+            building: shot.building,
+            elevation: CanonicalElevation.normalize(shot.elevation) ?? shot.elevation,
+            detailType: shot.detailType,
+            angleIndex: max(1, shot.angleIndex),
+            shotKey: normalizedShotKey,
+            isGuided: shot.isGuided,
+            isFlagged: shot.isFlagged,
+            issueID: shot.issueID,
+            issueStatus: shot.issueStatus,
+            noteText: shot.noteText,
+            noteCategory: shot.noteCategory,
+            originalFilename: normalizedFilename,
+            originalRelativePath: normalizedRelativePath,
+            originalByteSize: shot.originalByteSize,
+            stampedFilename: normalizedStampedFilename,
+            stampedRelativePath: normalizedStampedPath,
+            captureMode: shot.captureMode,
+            lens: shot.lens,
+            orientation: shot.orientation,
+            latitude: shot.latitude,
+            longitude: shot.longitude,
+            accuracyMeters: shot.accuracyMeters,
+            imageWidth: shot.imageWidth,
+            imageHeight: shot.imageHeight
+        )
     }
 
     private func hasLegacyElevationValues(in fileURL: URL) throws -> Bool {
@@ -532,3 +861,74 @@ final class LocalStore {
         ) != nil
     }
 }
+
+#if DEBUG
+extension LocalStore {
+    func printSessionSchema() {
+        let sampleSession = SessionMetadata(
+            schemaVersion: 3,
+            propertyID: UUID(),
+            sessionID: UUID(),
+            propertyNameAtCapture: nil,
+            propertyNameAtExport: nil,
+            startedAt: Date(),
+            endedAt: nil,
+            status: .draft,
+            isBaselineSession: false,
+            exportedAt: nil,
+            appVersion: "debug",
+            deviceModel: "debug",
+            osVersion: "debug",
+            shots: [],
+            issues: []
+        )
+
+        let sampleShot = ShotMetadata(
+            shotID: UUID(),
+            propertyID: UUID(),
+            sessionID: UUID(),
+            createdAt: Date(),
+            updatedAt: Date(),
+            building: "",
+            elevation: "",
+            detailType: "",
+            angleIndex: 1,
+            shotKey: "",
+            isGuided: false,
+            isFlagged: false,
+            issueID: nil,
+            issueStatus: nil,
+            noteText: nil,
+            noteCategory: nil,
+            originalFilename: "",
+            originalRelativePath: "",
+            originalByteSize: nil,
+            stampedFilename: nil,
+            stampedRelativePath: nil,
+            captureMode: nil,
+            lens: nil,
+            orientation: nil,
+            latitude: nil,
+            longitude: nil,
+            accuracyMeters: nil,
+            imageWidth: nil,
+            imageHeight: nil
+        )
+
+        print("---- SessionMetadata Fields ----")
+        for child in Mirror(reflecting: sampleSession).children {
+            if let label = child.label {
+                print(label)
+            }
+        }
+
+        print("")
+        print("---- ShotMetadata Fields ----")
+        for child in Mirror(reflecting: sampleShot).children {
+            if let label = child.label {
+                print(label)
+            }
+        }
+    }
+}
+#endif
