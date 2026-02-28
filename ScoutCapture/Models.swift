@@ -22,8 +22,15 @@ struct SessionMetadata: Codable {
     var sessionID: UUID
     var propertyNameAtCapture: String?
     var propertyNameAtExport: String?
+    var propertyAddressAtCapture: String?
+    var propertyPhoneAtCapture: String?
+    var timeZoneIdentifierAtCapture: String
+    var timeZoneOffsetAtCapture: String
+    var timeZoneOffsetMinutesAtCapture: Int?
     var startedAt: Date
+    var sessionStartedAtLocal: String
     var endedAt: Date?
+    var sessionEndedAtLocal: String?
     var status: Session.Status
     var isBaselineSession: Bool
     var exportedAt: Date?
@@ -42,8 +49,15 @@ struct SessionMetadata: Codable {
         case sessionID
         case propertyNameAtCapture
         case propertyNameAtExport
+        case propertyAddressAtCapture
+        case propertyPhoneAtCapture
+        case timeZoneIdentifierAtCapture
+        case timeZoneOffsetAtCapture
+        case timeZoneOffsetMinutesAtCapture
         case startedAt
+        case sessionStartedAtLocal
         case endedAt
+        case sessionEndedAtLocal
         case status
         case isBaselineSession
         case exportedAt
@@ -63,8 +77,15 @@ struct SessionMetadata: Codable {
         sessionID: UUID,
         propertyNameAtCapture: String?,
         propertyNameAtExport: String?,
+        propertyAddressAtCapture: String? = nil,
+        propertyPhoneAtCapture: String? = nil,
+        timeZoneIdentifierAtCapture: String = TimeZone.current.identifier,
+        timeZoneOffsetAtCapture: String = "+00:00",
+        timeZoneOffsetMinutesAtCapture: Int? = nil,
         startedAt: Date,
+        sessionStartedAtLocal: String = "",
         endedAt: Date?,
+        sessionEndedAtLocal: String? = nil,
         status: Session.Status,
         isBaselineSession: Bool,
         exportedAt: Date?,
@@ -82,8 +103,15 @@ struct SessionMetadata: Codable {
         self.sessionID = sessionID
         self.propertyNameAtCapture = propertyNameAtCapture
         self.propertyNameAtExport = propertyNameAtExport
+        self.propertyAddressAtCapture = SessionMetadata.trimmedNonEmpty(propertyAddressAtCapture)
+        self.propertyPhoneAtCapture = SessionMetadata.trimmedNonEmpty(propertyPhoneAtCapture)
+        self.timeZoneIdentifierAtCapture = timeZoneIdentifierAtCapture.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.timeZoneOffsetAtCapture = timeZoneOffsetAtCapture.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.timeZoneOffsetMinutesAtCapture = timeZoneOffsetMinutesAtCapture
         self.startedAt = startedAt
+        self.sessionStartedAtLocal = sessionStartedAtLocal.trimmingCharacters(in: .whitespacesAndNewlines)
         self.endedAt = endedAt
+        self.sessionEndedAtLocal = SessionMetadata.trimmedNonEmpty(sessionEndedAtLocal)
         self.status = status
         self.isBaselineSession = isBaselineSession
         self.exportedAt = exportedAt
@@ -104,8 +132,20 @@ struct SessionMetadata: Codable {
         sessionID = try c.decode(UUID.self, forKey: .sessionID)
         propertyNameAtCapture = try c.decodeIfPresent(String.self, forKey: .propertyNameAtCapture)
         propertyNameAtExport = try c.decodeIfPresent(String.self, forKey: .propertyNameAtExport)
+        propertyAddressAtCapture = SessionMetadata.trimmedNonEmpty(
+            try c.decodeIfPresent(String.self, forKey: .propertyAddressAtCapture)
+        )
+        propertyPhoneAtCapture = SessionMetadata.trimmedNonEmpty(try c.decodeIfPresent(String.self, forKey: .propertyPhoneAtCapture))
+        timeZoneIdentifierAtCapture = try c.decodeIfPresent(String.self, forKey: .timeZoneIdentifierAtCapture)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? TimeZone.current.identifier
+        timeZoneOffsetAtCapture = try c.decodeIfPresent(String.self, forKey: .timeZoneOffsetAtCapture)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? "+00:00"
+        timeZoneOffsetMinutesAtCapture = try c.decodeIfPresent(Int.self, forKey: .timeZoneOffsetMinutesAtCapture)
         startedAt = try c.decodeIfPresent(Date.self, forKey: .startedAt) ?? Date()
+        sessionStartedAtLocal = try c.decodeIfPresent(String.self, forKey: .sessionStartedAtLocal)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         endedAt = try c.decodeIfPresent(Date.self, forKey: .endedAt)
+        sessionEndedAtLocal = SessionMetadata.trimmedNonEmpty(try c.decodeIfPresent(String.self, forKey: .sessionEndedAtLocal))
         status = try c.decodeIfPresent(Session.Status.self, forKey: .status) ?? .draft
         isBaselineSession = try c.decodeIfPresent(Bool.self, forKey: .isBaselineSession) ?? false
         exportedAt = try c.decodeIfPresent(Date.self, forKey: .exportedAt)
@@ -133,8 +173,15 @@ struct SessionMetadata: Codable {
         try c.encode(sessionID, forKey: .sessionID)
         try c.encodeIfPresent(propertyNameAtCapture, forKey: .propertyNameAtCapture)
         try c.encodeIfPresent(propertyNameAtExport, forKey: .propertyNameAtExport)
+        try c.encodeIfPresent(SessionMetadata.trimmedNonEmpty(propertyAddressAtCapture), forKey: .propertyAddressAtCapture)
+        try c.encodeIfPresent(SessionMetadata.trimmedNonEmpty(propertyPhoneAtCapture), forKey: .propertyPhoneAtCapture)
+        try c.encode(timeZoneIdentifierAtCapture.trimmingCharacters(in: .whitespacesAndNewlines), forKey: .timeZoneIdentifierAtCapture)
+        try c.encode(timeZoneOffsetAtCapture.trimmingCharacters(in: .whitespacesAndNewlines), forKey: .timeZoneOffsetAtCapture)
+        try c.encodeIfPresent(timeZoneOffsetMinutesAtCapture, forKey: .timeZoneOffsetMinutesAtCapture)
         try c.encode(startedAt, forKey: .startedAt)
+        try c.encode(sessionStartedAtLocal.trimmingCharacters(in: .whitespacesAndNewlines), forKey: .sessionStartedAtLocal)
         try c.encodeIfPresent(endedAt, forKey: .endedAt)
+        try c.encodeIfPresent(SessionMetadata.trimmedNonEmpty(sessionEndedAtLocal), forKey: .sessionEndedAtLocal)
         try c.encode(status, forKey: .status)
         try c.encode(isBaselineSession, forKey: .isBaselineSession)
         try c.encodeIfPresent(exportedAt, forKey: .exportedAt)
@@ -147,13 +194,22 @@ struct SessionMetadata: Codable {
         try c.encode(shots, forKey: .shots)
         try c.encode(issues, forKey: .issues)
     }
+
+    private static func trimmedNonEmpty(_ value: String?) -> String? {
+        guard let value else { return nil }
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
 }
 
 struct ShotMetadata: Codable, Identifiable, Equatable {
     let shotID: UUID
+    // Deprecated duplication kept for backwards compatibility with existing readers.
     let propertyID: UUID
+    // Deprecated duplication kept for backwards compatibility with existing readers.
     let sessionID: UUID
     let createdAt: Date
+    var capturedAtLocal: String?
     var updatedAt: Date
     var building: String
     var elevation: String
@@ -173,6 +229,8 @@ struct ShotMetadata: Codable, Identifiable, Equatable {
     var stampedRelativePath: String?
     var captureMode: String?
     var lens: String?
+    var exifOrientation: Int?
+    // Legacy orientation string retained only for backwards decode compatibility.
     var orientation: String?
     var latitude: Double?
     var longitude: Double?
@@ -187,7 +245,10 @@ struct ShotMetadata: Codable, Identifiable, Equatable {
         case propertyID
         case sessionID
         case createdAt
+        case capturedAtLocal
+        case shotCreatedAtLocal // legacy
         case updatedAt
+        case shotUpdatedAtLocal // legacy
         case building
         case elevation
         case detailType
@@ -206,7 +267,8 @@ struct ShotMetadata: Codable, Identifiable, Equatable {
         case stampedRelativePath
         case captureMode
         case lens
-        case orientation
+        case exifOrientation
+        case orientation // legacy
         case latitude
         case longitude
         case accuracyMeters
@@ -219,6 +281,7 @@ struct ShotMetadata: Codable, Identifiable, Equatable {
         propertyID: UUID,
         sessionID: UUID,
         createdAt: Date,
+        capturedAtLocal: String? = nil,
         updatedAt: Date,
         building: String,
         elevation: String,
@@ -238,7 +301,8 @@ struct ShotMetadata: Codable, Identifiable, Equatable {
         stampedRelativePath: String?,
         captureMode: String?,
         lens: String?,
-        orientation: String?,
+        exifOrientation: Int?,
+        orientation: String? = nil,
         latitude: Double?,
         longitude: Double?,
         accuracyMeters: Double?,
@@ -249,6 +313,7 @@ struct ShotMetadata: Codable, Identifiable, Equatable {
         self.propertyID = propertyID
         self.sessionID = sessionID
         self.createdAt = createdAt
+        self.capturedAtLocal = ShotMetadata.trimmedNonEmpty(capturedAtLocal)
         self.updatedAt = updatedAt
         self.building = building
         self.elevation = elevation
@@ -268,6 +333,7 @@ struct ShotMetadata: Codable, Identifiable, Equatable {
         self.stampedRelativePath = stampedRelativePath
         self.captureMode = captureMode
         self.lens = lens
+        self.exifOrientation = ShotMetadata.validExifOrientation(exifOrientation)
         self.orientation = orientation
         self.latitude = latitude
         self.longitude = longitude
@@ -279,9 +345,13 @@ struct ShotMetadata: Codable, Identifiable, Equatable {
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         shotID = try c.decode(UUID.self, forKey: .shotID)
-        propertyID = try c.decode(UUID.self, forKey: .propertyID)
-        sessionID = try c.decode(UUID.self, forKey: .sessionID)
+        propertyID = try c.decodeIfPresent(UUID.self, forKey: .propertyID) ?? UUID()
+        sessionID = try c.decodeIfPresent(UUID.self, forKey: .sessionID) ?? UUID()
         createdAt = try c.decodeIfPresent(Date.self, forKey: .createdAt) ?? Date()
+        let explicitCapturedLocal = ShotMetadata.trimmedNonEmpty(try c.decodeIfPresent(String.self, forKey: .capturedAtLocal))
+        let legacyCreatedLocal = ShotMetadata.trimmedNonEmpty(try c.decodeIfPresent(String.self, forKey: .shotCreatedAtLocal))
+        let legacyUpdatedLocal = ShotMetadata.trimmedNonEmpty(try c.decodeIfPresent(String.self, forKey: .shotUpdatedAtLocal))
+        capturedAtLocal = explicitCapturedLocal ?? legacyUpdatedLocal ?? legacyCreatedLocal
         updatedAt = try c.decodeIfPresent(Date.self, forKey: .updatedAt) ?? createdAt
         building = try c.decodeIfPresent(String.self, forKey: .building) ?? ""
         elevation = CanonicalElevation.normalize(try c.decodeIfPresent(String.self, forKey: .elevation)) ?? ""
@@ -320,6 +390,8 @@ struct ShotMetadata: Codable, Identifiable, Equatable {
         captureMode = try c.decodeIfPresent(String.self, forKey: .captureMode)
         lens = try c.decodeIfPresent(String.self, forKey: .lens)
         orientation = try c.decodeIfPresent(String.self, forKey: .orientation)
+        let explicitExifOrientation = try c.decodeIfPresent(Int.self, forKey: .exifOrientation)
+        exifOrientation = ShotMetadata.validExifOrientation(explicitExifOrientation) ?? ShotMetadata.parseLegacyExifOrientation(orientation)
         latitude = try c.decodeIfPresent(Double.self, forKey: .latitude)
         longitude = try c.decodeIfPresent(Double.self, forKey: .longitude)
         accuracyMeters = try c.decodeIfPresent(Double.self, forKey: .accuracyMeters)
@@ -330,9 +402,9 @@ struct ShotMetadata: Codable, Identifiable, Equatable {
     func encode(to encoder: Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
         try c.encode(shotID, forKey: .shotID)
-        try c.encode(propertyID, forKey: .propertyID)
-        try c.encode(sessionID, forKey: .sessionID)
+        // Legacy fields propertyID/sessionID are intentionally omitted from new schema output.
         try c.encode(createdAt, forKey: .createdAt)
+        try c.encodeIfPresent(ShotMetadata.trimmedNonEmpty(capturedAtLocal), forKey: .capturedAtLocal)
         try c.encode(updatedAt, forKey: .updatedAt)
         try c.encode(building, forKey: .building)
         try c.encode(CanonicalElevation.normalize(elevation) ?? elevation, forKey: .elevation)
@@ -353,7 +425,7 @@ struct ShotMetadata: Codable, Identifiable, Equatable {
         try c.encodeIfPresent(stampedRelativePath, forKey: .stampedRelativePath)
         try c.encodeIfPresent(captureMode, forKey: .captureMode)
         try c.encodeIfPresent(lens, forKey: .lens)
-        try c.encodeIfPresent(orientation, forKey: .orientation)
+        try c.encodeIfPresent(ShotMetadata.validExifOrientation(exifOrientation), forKey: .exifOrientation)
         try c.encodeIfPresent(latitude, forKey: .latitude)
         try c.encodeIfPresent(longitude, forKey: .longitude)
         try c.encodeIfPresent(accuracyMeters, forKey: .accuracyMeters)
@@ -374,14 +446,137 @@ struct ShotMetadata: Codable, Identifiable, Equatable {
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .lowercased()
     }
+
+    private static func trimmedNonEmpty(_ value: String?) -> String? {
+        guard let value else { return nil }
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    private static func validExifOrientation(_ value: Int?) -> Int? {
+        guard let value, (1...8).contains(value) else { return nil }
+        return value
+    }
+
+    private static func parseLegacyExifOrientation(_ orientation: String?) -> Int? {
+        let trimmed = orientation?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !trimmed.isEmpty else { return nil }
+        if let direct = Int(trimmed), (1...8).contains(direct) {
+            return direct
+        }
+        let prefix = "exif:"
+        if trimmed.lowercased().hasPrefix(prefix),
+           let parsed = Int(trimmed.dropFirst(prefix.count)),
+           (1...8).contains(parsed) {
+            return parsed
+        }
+        return nil
+    }
 }
 
 struct IssueMetadata: Codable, Identifiable, Equatable {
     let issueID: UUID
-    var status: Observation.Status
-    var statement: String
+    var issueStatus: String
+    var firstSeenAt: Date?
+    var firstSeenAtLocal: String?
+    var lastSeenAt: Date?
+    var lastSeenAtLocal: String?
+    var resolvedAt: Date?
+    var resolvedAtLocal: String?
+    var detailNote: String?
+    var shotKey: String?
 
     var id: UUID { issueID }
+
+    private enum CodingKeys: String, CodingKey {
+        case issueID
+        case issueStatus
+        case firstSeenAt
+        case firstSeenAtLocal
+        case lastSeenAt
+        case lastSeenAtLocal
+        case resolvedAt
+        case resolvedAtLocal
+        case detailNote
+        case shotKey
+        case status
+        case statement
+    }
+
+    init(
+        issueID: UUID,
+        issueStatus: String = "active",
+        firstSeenAt: Date? = nil,
+        firstSeenAtLocal: String? = nil,
+        lastSeenAt: Date? = nil,
+        lastSeenAtLocal: String? = nil,
+        resolvedAt: Date? = nil,
+        resolvedAtLocal: String? = nil,
+        detailNote: String? = nil,
+        shotKey: String? = nil
+    ) {
+        self.issueID = issueID
+        self.issueStatus = IssueMetadata.normalizedStatus(issueStatus)
+        self.firstSeenAt = firstSeenAt
+        self.firstSeenAtLocal = IssueMetadata.trimmedNonEmpty(firstSeenAtLocal)
+        self.lastSeenAt = lastSeenAt
+        self.lastSeenAtLocal = IssueMetadata.trimmedNonEmpty(lastSeenAtLocal)
+        self.resolvedAt = resolvedAt
+        self.resolvedAtLocal = IssueMetadata.trimmedNonEmpty(resolvedAtLocal)
+        self.detailNote = IssueMetadata.trimmedNonEmpty(detailNote)
+        self.shotKey = IssueMetadata.trimmedNonEmpty(shotKey)
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        issueID = try c.decode(UUID.self, forKey: .issueID)
+
+        if let raw = try c.decodeIfPresent(String.self, forKey: .issueStatus) {
+            issueStatus = IssueMetadata.normalizedStatus(raw)
+        } else if let legacyStatus = try c.decodeIfPresent(Observation.Status.self, forKey: .status) {
+            issueStatus = legacyStatus == .resolved ? "resolved" : "active"
+        } else {
+            issueStatus = "active"
+        }
+
+        firstSeenAt = try c.decodeIfPresent(Date.self, forKey: .firstSeenAt)
+        firstSeenAtLocal = IssueMetadata.trimmedNonEmpty(try c.decodeIfPresent(String.self, forKey: .firstSeenAtLocal))
+        lastSeenAt = try c.decodeIfPresent(Date.self, forKey: .lastSeenAt)
+        lastSeenAtLocal = IssueMetadata.trimmedNonEmpty(try c.decodeIfPresent(String.self, forKey: .lastSeenAtLocal))
+        resolvedAt = try c.decodeIfPresent(Date.self, forKey: .resolvedAt)
+        resolvedAtLocal = IssueMetadata.trimmedNonEmpty(try c.decodeIfPresent(String.self, forKey: .resolvedAtLocal))
+        if let note = try c.decodeIfPresent(String.self, forKey: .detailNote) {
+            detailNote = IssueMetadata.trimmedNonEmpty(note)
+        } else {
+            detailNote = IssueMetadata.trimmedNonEmpty(try c.decodeIfPresent(String.self, forKey: .statement))
+        }
+        shotKey = IssueMetadata.trimmedNonEmpty(try c.decodeIfPresent(String.self, forKey: .shotKey))
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(issueID, forKey: .issueID)
+        try c.encode(IssueMetadata.normalizedStatus(issueStatus), forKey: .issueStatus)
+        try c.encodeIfPresent(firstSeenAt, forKey: .firstSeenAt)
+        try c.encodeIfPresent(IssueMetadata.trimmedNonEmpty(firstSeenAtLocal), forKey: .firstSeenAtLocal)
+        try c.encodeIfPresent(lastSeenAt, forKey: .lastSeenAt)
+        try c.encodeIfPresent(IssueMetadata.trimmedNonEmpty(lastSeenAtLocal), forKey: .lastSeenAtLocal)
+        try c.encodeIfPresent(resolvedAt, forKey: .resolvedAt)
+        try c.encodeIfPresent(IssueMetadata.trimmedNonEmpty(resolvedAtLocal), forKey: .resolvedAtLocal)
+        try c.encodeIfPresent(IssueMetadata.trimmedNonEmpty(detailNote), forKey: .detailNote)
+        try c.encodeIfPresent(IssueMetadata.trimmedNonEmpty(shotKey), forKey: .shotKey)
+    }
+
+    private static func trimmedNonEmpty(_ value: String?) -> String? {
+        guard let value else { return nil }
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    private static func normalizedStatus(_ value: String) -> String {
+        let lowered = value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return lowered == "resolved" ? "resolved" : "active"
+    }
 }
 
 struct Property: Codable, Identifiable, Equatable {
