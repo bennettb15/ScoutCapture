@@ -22,6 +22,7 @@ final class LocalStore {
     private let encoder: JSONEncoder
     private let decoder: JSONDecoder
 
+    private let activeRootURL: URL
     private let scoutRootURL: URL
     private let propertiesURL: URL
     private let propertyFoldersURL: URL
@@ -41,9 +42,9 @@ final class LocalStore {
         decoder.dateDecodingStrategy = .iso8601
         self.decoder = decoder
 
-        let appSupport = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-        let appRoot = appSupport.appendingPathComponent("ScoutCapture", isDirectory: true)
+        let appRoot = StorageRoot.prepareStorage()
         let scoutRoot = appRoot.appendingPathComponent("SCOUT", isDirectory: true)
+        self.activeRootURL = appRoot
         self.scoutRootURL = scoutRoot
         self.propertiesURL = scoutRoot.appendingPathComponent("properties.json")
         self.propertyFoldersURL = scoutRoot.appendingPathComponent("Properties", isDirectory: true)
@@ -475,6 +476,10 @@ final class LocalStore {
 
     func rootURL() -> URL {
         scoutRootURL
+    }
+
+    func storageRootURL() -> URL {
+        activeRootURL
     }
 
     func propertyFolderURL(propertyID: UUID) -> URL {

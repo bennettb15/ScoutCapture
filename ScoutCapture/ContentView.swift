@@ -520,6 +520,9 @@ final class ReportLibraryModel: ObservableObject {
                         .sessionFolderURL(propertyID: propertyID, sessionID: sessionID)
                         .appendingPathComponent("Originals", isDirectory: true)
                         .appendingPathComponent(filename, isDirectory: false)
+                    let sessionFolder = self.localStore.sessionFolderURL(propertyID: propertyID, sessionID: sessionID)
+                    print("[iCloud] activeRoot=\(self.localStore.storageRootURL().path)")
+                    print("[iCloud] sessionSaveFolder=\(sessionFolder.path)")
                     let parentDir = output.deletingLastPathComponent()
                     var isDir = ObjCBool(false)
                     var exists = self.fileManager.fileExists(atPath: parentDir.path, isDirectory: &isDir)
@@ -713,6 +716,9 @@ final class ReportLibraryModel: ObservableObject {
                         .sessionFolderURL(propertyID: propertyID, sessionID: sessionID)
                         .appendingPathComponent("Stamped", isDirectory: true)
                         .appendingPathComponent(filename, isDirectory: false)
+                    let sessionFolder = self.localStore.sessionFolderURL(propertyID: propertyID, sessionID: sessionID)
+                    print("[iCloud] activeRoot=\(self.localStore.storageRootURL().path)")
+                    print("[iCloud] sessionSaveFolder=\(sessionFolder.path)")
                     let parentDir = output.deletingLastPathComponent()
                     try self.fileManager.createDirectory(at: parentDir, withIntermediateDirectories: true)
                     let parentExists = self.fileManager.fileExists(atPath: parentDir.path)
@@ -3703,35 +3709,33 @@ struct ContentView: View {
 
     private static func resolveLegacyAssetPath(for identifier: String) -> String? {
         let fm = FileManager.default
-        guard let appSupport = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else { return nil }
-        let scoutRoot = appSupport
-            .appendingPathComponent("ScoutCapture", isDirectory: true)
-            .appendingPathComponent("SCOUT", isDirectory: true)
-        let propertiesRoot = scoutRoot.appendingPathComponent("Properties", isDirectory: true)
-        guard let propertyDirs = try? fm.contentsOfDirectory(at: propertiesRoot, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]) else {
-            return nil
-        }
-
         let needle = identifier.trimmingCharacters(in: .whitespacesAndNewlines)
         let needleStem = URL(fileURLWithPath: needle).deletingPathExtension().lastPathComponent
         guard !needleStem.isEmpty else { return nil }
 
-        for propertyDir in propertyDirs {
-            let sessionsDir = propertyDir.appendingPathComponent("Sessions", isDirectory: true)
-            guard let sessionDirs = try? fm.contentsOfDirectory(at: sessionsDir, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]) else {
+        for scoutRoot in StorageRoot.scoutRootCandidates() {
+            let propertiesRoot = scoutRoot.appendingPathComponent("Properties", isDirectory: true)
+            guard let propertyDirs = try? fm.contentsOfDirectory(at: propertiesRoot, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]) else {
                 continue
             }
-            for sessionDir in sessionDirs {
-                let originals = sessionDir.appendingPathComponent("Originals", isDirectory: true)
-                guard let files = try? fm.contentsOfDirectory(at: originals, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]) else {
+
+            for propertyDir in propertyDirs {
+                let sessionsDir = propertyDir.appendingPathComponent("Sessions", isDirectory: true)
+                guard let sessionDirs = try? fm.contentsOfDirectory(at: sessionsDir, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]) else {
                     continue
                 }
-                if let match = files.first(where: { file in
-                    let name = file.lastPathComponent
-                    let stem = file.deletingPathExtension().lastPathComponent
-                    return name == needle || stem == needle || stem == needleStem
-                }) {
-                    return match.path
+                for sessionDir in sessionDirs {
+                    let originals = sessionDir.appendingPathComponent("Originals", isDirectory: true)
+                    guard let files = try? fm.contentsOfDirectory(at: originals, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]) else {
+                        continue
+                    }
+                    if let match = files.first(where: { file in
+                        let name = file.lastPathComponent
+                        let stem = file.deletingPathExtension().lastPathComponent
+                        return name == needle || stem == needle || stem == needleStem
+                    }) {
+                        return match.path
+                    }
                 }
             }
         }
@@ -4498,7 +4502,7 @@ struct ContentView: View {
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
                         showLandscapeElevationMenu = false
                         showLandscapeDetailMenu = false
-                        showLandscapeBuildingMenu = true
+                        showManageBuildingsSheet = true
                     }
                 },
                 onInteriorList: {
@@ -7922,12 +7926,7 @@ extension ContentView {
         guard let jpeg = image.jpegData(compressionQuality: 0.60) else { return nil }
 
         let fileManager = FileManager.default
-        guard let appSupport = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else {
-            return nil
-        }
-        let base = appSupport
-            .appendingPathComponent("ScoutCapture", isDirectory: true)
-            .appendingPathComponent("SCOUT", isDirectory: true)
+        let base = localStore.rootURL()
         let referencesDir = base.appendingPathComponent("guided-references", isDirectory: true)
         let fileURL = referencesDir.appendingPathComponent("\(guidedShotID.uuidString).jpg")
 

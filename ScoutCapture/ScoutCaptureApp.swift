@@ -64,6 +64,8 @@ private struct AppRootView: View {
             guard !didStartWarmup else { return }
             didStartWarmup = true
 
+            _ = StorageRoot.prepareStorage()
+
             async let minDelay: Void = {
                 try? await Task.sleep(nanoseconds: 500_000_000)
                 await MainActor.run {
