@@ -2,7 +2,7 @@ import Foundation
 import UIKit
 
 final class LocalStore {
-    private let currentSessionSchemaVersion = 4
+    private let currentSessionSchemaVersion = 6
     private let fileIOQueue = DispatchQueue(label: "ScoutCapture.LocalStore.fileIO")
     private let fileIOQueueKey = DispatchSpecificKey<UInt8>()
     private let fileIOQueueValue: UInt8 = 1
@@ -228,6 +228,7 @@ final class LocalStore {
         updated.appVersion = appVersionString()
         updated.deviceModel = deviceModelString()
         updated.osVersion = osVersionString()
+        updated = normalizeSessionMetadata(updated, propertyID: propertyID, sessionID: sessionID)
         try writeSessionMetadata(updated)
     }
 
@@ -250,6 +251,7 @@ final class LocalStore {
                 propertyID: shot.propertyID,
                 sessionID: shot.sessionID,
                 createdAt: existing.createdAt,
+                capturedAtLocal: existing.capturedAtLocal ?? shot.capturedAtLocal,
                 updatedAt: shot.updatedAt,
                 building: shot.building,
                 elevation: shot.elevation,
@@ -269,6 +271,7 @@ final class LocalStore {
                 stampedRelativePath: shot.stampedRelativePath,
                 captureMode: shot.captureMode,
                 lens: shot.lens,
+                exifOrientation: shot.exifOrientation,
                 orientation: shot.orientation,
                 latitude: shot.latitude,
                 longitude: shot.longitude,
@@ -299,6 +302,7 @@ final class LocalStore {
                 propertyID: shot.propertyID,
                 sessionID: shot.sessionID,
                 createdAt: existing.createdAt,
+                capturedAtLocal: existing.capturedAtLocal ?? shot.capturedAtLocal,
                 updatedAt: shot.updatedAt,
                 building: shot.building,
                 elevation: shot.elevation,
@@ -318,6 +322,7 @@ final class LocalStore {
                 stampedRelativePath: shot.stampedRelativePath,
                 captureMode: shot.captureMode,
                 lens: shot.lens,
+                exifOrientation: shot.exifOrientation,
                 orientation: shot.orientation,
                 latitude: shot.latitude,
                 longitude: shot.longitude,
@@ -643,7 +648,8 @@ final class LocalStore {
         metadata.schemaVersion = max(metadata.schemaVersion, currentSessionSchemaVersion)
         metadata.propertyID = session.propertyID
         metadata.sessionID = session.id
-        let propertyName = currentPropertyName(for: session.propertyID)
+        let currentProperty = currentProperty(for: session.propertyID)
+        let propertyName = currentProperty?.name.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         if (metadata.propertyNameAtCapture ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
            !propertyName.isEmpty {
             metadata.propertyNameAtCapture = propertyName
@@ -651,8 +657,22 @@ final class LocalStore {
         if session.exportedAt != nil, !propertyName.isEmpty {
             metadata.propertyNameAtExport = propertyName
         }
+        if metadata.propertyAddressAtCapture?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true {
+            metadata.propertyAddressAtCapture = normalizedPropertyAddress(currentProperty?.address)
+        }
+        if metadata.propertyPhoneAtCapture?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true {
+            metadata.propertyPhoneAtCapture = normalizedPropertyPhone(currentProperty?.clientPhone)
+        }
+        let captureTimeZone = captureTimeZoneContext(for: session.startedAt)
+        if metadata.timeZoneIdentifierAtCapture.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            metadata.timeZoneIdentifierAtCapture = captureTimeZone.identifier
+        }
+        metadata.timeZoneOffsetAtCapture = captureTimeZone.offsetString
+        metadata.timeZoneOffsetMinutesAtCapture = captureTimeZone.offsetMinutes
         metadata.startedAt = session.startedAt
+        metadata.sessionStartedAtLocal = localISO8601String(for: session.startedAt, timeZone: captureTimeZone.timeZone)
         metadata.endedAt = session.endedAt
+        metadata.sessionEndedAtLocal = session.endedAt.map { localISO8601String(for: $0, timeZone: captureTimeZone.timeZone) }
         metadata.status = session.status
         metadata.isBaselineSession = isBaselineSession(sessionID: session.id, propertyID: session.propertyID)
         metadata.exportedAt = session.exportedAt
@@ -662,20 +682,31 @@ final class LocalStore {
         metadata.appVersion = appVersionString()
         metadata.deviceModel = deviceModelString()
         metadata.osVersion = osVersionString()
-        try writeSessionMetadata(metadata)
+        let normalized = normalizeSessionMetadata(metadata, propertyID: session.propertyID, sessionID: session.id)
+        try writeSessionMetadata(normalized)
     }
 
     private func readOrRecoverSessionMetadata(propertyID: UUID, sessionID: UUID) throws -> SessionMetadata {
         let fileURL = sessionMetadataFileURL(propertyID: propertyID, sessionID: sessionID)
         if !fileManager.fileExists(atPath: fileURL.path) {
+            let now = Date()
+            let captureTimeZone = captureTimeZoneContext(for: now)
+            let property = currentProperty(for: propertyID)
             return SessionMetadata(
                 schemaVersion: currentSessionSchemaVersion,
                 propertyID: propertyID,
                 sessionID: sessionID,
                 propertyNameAtCapture: nil,
                 propertyNameAtExport: nil,
-                startedAt: Date(),
+                propertyAddressAtCapture: normalizedPropertyAddress(property?.address),
+                propertyPhoneAtCapture: normalizedPropertyPhone(property?.clientPhone),
+                timeZoneIdentifierAtCapture: captureTimeZone.identifier,
+                timeZoneOffsetAtCapture: captureTimeZone.offsetString,
+                timeZoneOffsetMinutesAtCapture: captureTimeZone.offsetMinutes,
+                startedAt: now,
+                sessionStartedAtLocal: localISO8601String(for: now, timeZone: captureTimeZone.timeZone),
                 endedAt: nil,
+                sessionEndedAtLocal: nil,
                 status: .draft,
                 isBaselineSession: false,
                 exportedAt: nil,
@@ -705,20 +736,27 @@ final class LocalStore {
             metadata.osVersion = metadata.osVersion.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                 ? osVersionString()
                 : metadata.osVersion
-            metadata.shots = metadata.shots.map { shot in
-                normalizeShotMetadata(shot, propertyID: propertyID, sessionID: sessionID)
-            }
-            return metadata
+            return normalizeSessionMetadata(metadata, propertyID: propertyID, sessionID: sessionID)
         } catch {
             print("Recoverable session metadata decode failure for session \(sessionID): \(error)")
+            let now = Date()
+            let captureTimeZone = captureTimeZoneContext(for: now)
+            let property = currentProperty(for: propertyID)
             return SessionMetadata(
                 schemaVersion: currentSessionSchemaVersion,
                 propertyID: propertyID,
                 sessionID: sessionID,
                 propertyNameAtCapture: nil,
                 propertyNameAtExport: nil,
-                startedAt: Date(),
+                propertyAddressAtCapture: normalizedPropertyAddress(property?.address),
+                propertyPhoneAtCapture: normalizedPropertyPhone(property?.clientPhone),
+                timeZoneIdentifierAtCapture: captureTimeZone.identifier,
+                timeZoneOffsetAtCapture: captureTimeZone.offsetString,
+                timeZoneOffsetMinutesAtCapture: captureTimeZone.offsetMinutes,
+                startedAt: now,
+                sessionStartedAtLocal: localISO8601String(for: now, timeZone: captureTimeZone.timeZone),
                 endedAt: nil,
+                sessionEndedAtLocal: nil,
                 status: .draft,
                 isBaselineSession: false,
                 exportedAt: nil,
@@ -735,8 +773,9 @@ final class LocalStore {
     }
 
     private func writeSessionMetadata(_ metadata: SessionMetadata) throws {
-        let propertyID = metadata.propertyID
-        let sessionID = metadata.sessionID
+        let normalized = normalizeSessionMetadata(metadata, propertyID: metadata.propertyID, sessionID: metadata.sessionID)
+        let propertyID = normalized.propertyID
+        let sessionID = normalized.sessionID
         let folder = sessionMetadataFolderURL(propertyID: propertyID, sessionID: sessionID)
         if !fileManager.fileExists(atPath: folder.path) {
             try fileManager.createDirectory(at: folder, withIntermediateDirectories: true)
@@ -744,7 +783,7 @@ final class LocalStore {
         try ensureSessionFileStorage(propertyID: propertyID, sessionID: sessionID)
         let fileURL = sessionMetadataFileURL(propertyID: propertyID, sessionID: sessionID)
         let tempURL = folder.appendingPathComponent("session-\(UUID().uuidString).tmp")
-        let data = try encoder.encode(metadata)
+        let data = try encoder.encode(normalized)
         try data.write(to: tempURL, options: .atomic)
 
         do {
@@ -758,6 +797,14 @@ final class LocalStore {
                 try? fileManager.removeItem(at: tempURL)
             }
             throw error
+        }
+        let hasAddressSnapshot = !(normalized.propertyAddressAtCapture?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
+        let hasTimeZoneOffset = !normalized.timeZoneOffsetAtCapture.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        print("[SessionJSON] schemaVersion=\(normalized.schemaVersion) sessionID=\(sessionID.uuidString) shotsCount=\(normalized.shots.count) issuesCount=\(normalized.issues.count) hasAddressSnapshot=\(hasAddressSnapshot) hasTimeZoneOffset=\(hasTimeZoneOffset)")
+        if let firstShot = normalized.shots.first {
+            print("[SessionJSONTime] startedAt=\(normalized.startedAt) sessionStartedAtLocal=\(normalized.sessionStartedAtLocal) timeZoneIdentifierAtCapture=\(normalized.timeZoneIdentifierAtCapture) timeZoneOffsetAtCapture=\(normalized.timeZoneOffsetAtCapture) firstShotCreatedAt=\(firstShot.createdAt) firstShotCapturedAtLocal=\(firstShot.capturedAtLocal ?? "nil") firstShotExifOrientation=\(firstShot.exifOrientation ?? 0)")
+        } else {
+            print("[SessionJSONTime] startedAt=\(normalized.startedAt) sessionStartedAtLocal=\(normalized.sessionStartedAtLocal) timeZoneIdentifierAtCapture=\(normalized.timeZoneIdentifierAtCapture) timeZoneOffsetAtCapture=\(normalized.timeZoneOffsetAtCapture) firstShotCreatedAt=nil firstShotCapturedAtLocal=nil firstShotExifOrientation=0")
         }
     }
 
@@ -798,12 +845,79 @@ final class LocalStore {
     }
 
     private func currentPropertyName(for propertyID: UUID) -> String {
-        let properties = (try? readProperties()) ?? []
-        let value = properties.first(where: { $0.id == propertyID })?.name ?? ""
+        let value = currentProperty(for: propertyID)?.name ?? ""
         return value.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    private func normalizeShotMetadata(_ shot: ShotMetadata, propertyID: UUID, sessionID: UUID) -> ShotMetadata {
+    private func currentProperty(for propertyID: UUID) -> Property? {
+        let properties = (try? readProperties()) ?? []
+        return properties.first(where: { $0.id == propertyID })
+    }
+
+    private func normalizeSessionMetadata(_ metadata: SessionMetadata, propertyID: UUID, sessionID: UUID) -> SessionMetadata {
+        let property = currentProperty(for: propertyID)
+        let propertyName = property?.name.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let captureTimeZone = captureTimeZoneContext(
+            identifier: metadata.timeZoneIdentifierAtCapture,
+            offsetString: metadata.timeZoneOffsetAtCapture,
+            offsetMinutes: metadata.timeZoneOffsetMinutesAtCapture,
+            for: metadata.startedAt
+        )
+        let resolvedAddress = (metadata.propertyAddressAtCapture?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
+            ? normalizedPropertyAddress(property?.address)
+            : metadata.propertyAddressAtCapture?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let resolvedPhone = normalizedPropertyPhone(
+            metadata.propertyPhoneAtCapture ?? property?.clientPhone
+        )
+
+        let normalizedShots = metadata.shots
+            .map { normalizeShotMetadata($0, propertyID: propertyID, sessionID: sessionID, captureTimeZone: captureTimeZone) }
+            .sorted { $0.createdAt < $1.createdAt }
+        let normalizedIssues = metadata.issues
+            .map { normalizeIssueMetadata($0, captureTimeZone: captureTimeZone) }
+        let mergedIssues = mergeIssuesWithShotMetadata(
+            existingIssues: normalizedIssues,
+            shots: normalizedShots,
+            captureTimeZone: captureTimeZone
+        )
+
+        return SessionMetadata(
+            schemaVersion: max(metadata.schemaVersion, currentSessionSchemaVersion),
+            propertyID: propertyID,
+            sessionID: sessionID,
+            propertyNameAtCapture: trimmedNonEmpty(metadata.propertyNameAtCapture) ?? (propertyName.isEmpty ? nil : propertyName),
+            propertyNameAtExport: trimmedNonEmpty(metadata.propertyNameAtExport),
+            propertyAddressAtCapture: resolvedAddress,
+            propertyPhoneAtCapture: resolvedPhone,
+            timeZoneIdentifierAtCapture: captureTimeZone.identifier,
+            timeZoneOffsetAtCapture: captureTimeZone.offsetString,
+            timeZoneOffsetMinutesAtCapture: captureTimeZone.offsetMinutes,
+            startedAt: metadata.startedAt,
+            sessionStartedAtLocal: localISO8601String(for: metadata.startedAt, timeZone: captureTimeZone.timeZone),
+            endedAt: metadata.endedAt,
+            sessionEndedAtLocal: metadata.endedAt.map { end in
+                localISO8601String(for: end, timeZone: captureTimeZone.timeZone)
+            },
+            status: metadata.status,
+            isBaselineSession: metadata.isBaselineSession,
+            exportedAt: metadata.exportedAt,
+            isSealed: metadata.isSealed,
+            firstDeliveredAt: metadata.firstDeliveredAt,
+            reExportExpiresAt: metadata.reExportExpiresAt,
+            appVersion: metadata.appVersion,
+            deviceModel: metadata.deviceModel,
+            osVersion: metadata.osVersion,
+            shots: normalizedShots,
+            issues: mergedIssues
+        )
+    }
+
+    private func normalizeShotMetadata(
+        _ shot: ShotMetadata,
+        propertyID: UUID,
+        sessionID: UUID,
+        captureTimeZone: CaptureTimeZoneContext
+    ) -> ShotMetadata {
         let fileName = URL(fileURLWithPath: shot.originalFilename).lastPathComponent
         let normalizedFilename = fileName.isEmpty ? shot.originalFilename : fileName
         let normalizedRelativePath = shot.originalRelativePath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -831,6 +945,7 @@ final class LocalStore {
             propertyID: propertyID,
             sessionID: sessionID,
             createdAt: shot.createdAt,
+            capturedAtLocal: localISO8601String(for: shot.createdAt, timeZone: captureTimeZone.timeZone),
             updatedAt: shot.updatedAt,
             building: shot.building,
             elevation: CanonicalElevation.normalize(shot.elevation) ?? shot.elevation,
@@ -850,6 +965,7 @@ final class LocalStore {
             stampedRelativePath: normalizedStampedPath,
             captureMode: shot.captureMode,
             lens: shot.lens,
+            exifOrientation: normalizeExifOrientation(rawValue: shot.exifOrientation, legacy: shot.orientation),
             orientation: shot.orientation,
             latitude: shot.latitude,
             longitude: shot.longitude,
@@ -857,6 +973,249 @@ final class LocalStore {
             imageWidth: shot.imageWidth,
             imageHeight: shot.imageHeight
         )
+    }
+
+    private func normalizeIssueMetadata(_ issue: IssueMetadata, captureTimeZone: CaptureTimeZoneContext) -> IssueMetadata {
+        let firstSeenAt = issue.firstSeenAt
+        let lastSeenAt = issue.lastSeenAt ?? issue.firstSeenAt
+        let resolvedAt = issue.resolvedAt
+        return IssueMetadata(
+            issueID: issue.issueID,
+            issueStatus: issue.issueStatus,
+            firstSeenAt: firstSeenAt,
+            firstSeenAtLocal: firstSeenAt.map {
+                localISO8601String(for: $0, timeZone: captureTimeZone.timeZone)
+            } ?? trimmedNonEmpty(issue.firstSeenAtLocal),
+            lastSeenAt: lastSeenAt,
+            lastSeenAtLocal: lastSeenAt.map {
+                localISO8601String(for: $0, timeZone: captureTimeZone.timeZone)
+            } ?? trimmedNonEmpty(issue.lastSeenAtLocal),
+            resolvedAt: resolvedAt,
+            resolvedAtLocal: resolvedAt.map {
+                localISO8601String(for: $0, timeZone: captureTimeZone.timeZone)
+            } ?? trimmedNonEmpty(issue.resolvedAtLocal),
+            detailNote: trimmedNonEmpty(issue.detailNote),
+            shotKey: trimmedNonEmpty(issue.shotKey)
+        )
+    }
+
+    private func mergeIssuesWithShotMetadata(
+        existingIssues: [IssueMetadata],
+        shots: [ShotMetadata],
+        captureTimeZone: CaptureTimeZoneContext
+    ) -> [IssueMetadata] {
+        struct IssueAccumulator {
+            var issue: IssueMetadata
+            var firstSeenAt: Date?
+            var lastSeenAt: Date?
+            var resolvedAt: Date?
+            var detailNote: String?
+            var shotKey: String?
+            var hasActive: Bool
+            var hasResolved: Bool
+        }
+
+        var byID: [UUID: IssueAccumulator] = [:]
+        for existing in existingIssues {
+            byID[existing.issueID] = IssueAccumulator(
+                issue: existing,
+                firstSeenAt: existing.firstSeenAt,
+                lastSeenAt: existing.lastSeenAt,
+                resolvedAt: existing.resolvedAt,
+                detailNote: trimmedNonEmpty(existing.detailNote),
+                shotKey: trimmedNonEmpty(existing.shotKey),
+                hasActive: existing.issueStatus == "active",
+                hasResolved: existing.issueStatus == "resolved"
+            )
+        }
+
+        for shot in shots {
+            guard let issueID = shot.issueID else { continue }
+            let shotStatus = normalizedIssueStatus(from: shot.issueStatus)
+            let note = trimmedNonEmpty(shot.noteText)
+            var accumulator = byID[issueID] ?? IssueAccumulator(
+                issue: IssueMetadata(issueID: issueID),
+                firstSeenAt: nil,
+                lastSeenAt: nil,
+                resolvedAt: nil,
+                detailNote: nil,
+                shotKey: nil,
+                hasActive: false,
+                hasResolved: false
+            )
+            if let first = accumulator.firstSeenAt {
+                accumulator.firstSeenAt = min(first, shot.createdAt)
+            } else {
+                accumulator.firstSeenAt = shot.createdAt
+            }
+            if let last = accumulator.lastSeenAt {
+                accumulator.lastSeenAt = max(last, shot.updatedAt)
+            } else {
+                accumulator.lastSeenAt = shot.updatedAt
+            }
+            if shotStatus == "resolved" {
+                accumulator.hasResolved = true
+                if let resolvedAt = accumulator.resolvedAt {
+                    accumulator.resolvedAt = max(resolvedAt, shot.updatedAt)
+                } else {
+                    accumulator.resolvedAt = shot.updatedAt
+                }
+            } else {
+                accumulator.hasActive = true
+            }
+            if let note {
+                accumulator.detailNote = note
+            }
+            accumulator.shotKey = trimmedNonEmpty(shot.shotKey) ?? accumulator.shotKey
+            byID[issueID] = accumulator
+        }
+
+        return byID.values.map { entry in
+            let status = entry.hasResolved && !entry.hasActive ? "resolved" : "active"
+            return normalizeIssueMetadata(
+                IssueMetadata(
+                    issueID: entry.issue.issueID,
+                    issueStatus: status,
+                    firstSeenAt: entry.firstSeenAt ?? entry.issue.firstSeenAt,
+                    firstSeenAtLocal: entry.issue.firstSeenAtLocal,
+                    lastSeenAt: entry.lastSeenAt ?? entry.issue.lastSeenAt,
+                    lastSeenAtLocal: entry.issue.lastSeenAtLocal,
+                    resolvedAt: status == "resolved" ? (entry.resolvedAt ?? entry.issue.resolvedAt) : nil,
+                    resolvedAtLocal: entry.issue.resolvedAtLocal,
+                    detailNote: entry.detailNote ?? entry.issue.detailNote,
+                    shotKey: entry.shotKey ?? entry.issue.shotKey
+                ),
+                captureTimeZone: captureTimeZone
+            )
+        }
+        .sorted(by: issueSortAscending)
+    }
+
+    private func normalizedIssueStatus(from shotStatus: String?) -> String {
+        let lowered = shotStatus?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
+        return lowered.contains("resolved") ? "resolved" : "active"
+    }
+
+    private func issueSortAscending(_ lhs: IssueMetadata, _ rhs: IssueMetadata) -> Bool {
+        let lhsDate = lhs.firstSeenAt ?? lhs.lastSeenAt ?? lhs.resolvedAt ?? Date.distantPast
+        let rhsDate = rhs.firstSeenAt ?? rhs.lastSeenAt ?? rhs.resolvedAt ?? Date.distantPast
+        if lhsDate == rhsDate {
+            return lhs.issueID.uuidString < rhs.issueID.uuidString
+        }
+        return lhsDate < rhsDate
+    }
+
+    private func normalizedPropertyAddress(_ value: String?) -> String? {
+        trimmedNonEmpty(value)
+    }
+
+    private func normalizedPropertyPhone(_ value: String?) -> String? {
+        trimmedNonEmpty(value)
+    }
+
+    private func trimmedNonEmpty(_ value: String?) -> String? {
+        guard let value else { return nil }
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    private func timeZoneOffsetString(secondsFromGMT: Int) -> String {
+        let sign = secondsFromGMT >= 0 ? "+" : "-"
+        let absolute = abs(secondsFromGMT)
+        let hours = absolute / 3600
+        let minutes = (absolute % 3600) / 60
+        return String(format: "%@%02d:%02d", sign, hours, minutes)
+    }
+
+    private func timeZoneFromOffsetString(_ offset: String) -> TimeZone? {
+        let trimmed = offset.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.count == 6 else { return nil }
+        let chars = Array(trimmed)
+        guard (chars[0] == "+" || chars[0] == "-"), chars[3] == ":" else { return nil }
+        let hourString = String(chars[1...2])
+        let minuteString = String(chars[4...5])
+        guard let hours = Int(hourString), let minutes = Int(minuteString) else { return nil }
+        let multiplier = chars[0] == "-" ? -1 : 1
+        let seconds = multiplier * ((hours * 3600) + (minutes * 60))
+        return TimeZone(secondsFromGMT: seconds)
+    }
+
+    private struct CaptureTimeZoneContext {
+        let identifier: String
+        let timeZone: TimeZone
+        let offsetMinutes: Int
+        let offsetString: String
+    }
+
+    private func captureTimeZoneContext(for date: Date) -> CaptureTimeZoneContext {
+        let timeZone = TimeZone.current
+        let seconds = timeZone.secondsFromGMT(for: date)
+        return CaptureTimeZoneContext(
+            identifier: timeZone.identifier,
+            timeZone: timeZone,
+            offsetMinutes: seconds / 60,
+            offsetString: timeZoneOffsetString(secondsFromGMT: seconds)
+        )
+    }
+
+    private func captureTimeZoneContext(identifier: String, offsetString: String, offsetMinutes: Int?, for date: Date) -> CaptureTimeZoneContext {
+        let trimmedIdentifier = identifier.trimmingCharacters(in: .whitespacesAndNewlines)
+        let preferredTimeZone = TimeZone(identifier: trimmedIdentifier)
+        let resolvedTimeZone: TimeZone
+        let resolvedOffsetMinutes: Int
+
+        if let offsetMinutes {
+            resolvedOffsetMinutes = offsetMinutes
+            resolvedTimeZone = preferredTimeZone ?? TimeZone(secondsFromGMT: offsetMinutes * 60) ?? TimeZone.current
+        } else if let fromOffset = timeZoneFromOffsetString(offsetString) {
+            let seconds = fromOffset.secondsFromGMT()
+            resolvedOffsetMinutes = seconds / 60
+            resolvedTimeZone = preferredTimeZone ?? fromOffset
+        } else if let preferredTimeZone {
+            let seconds = preferredTimeZone.secondsFromGMT(for: date)
+            resolvedOffsetMinutes = seconds / 60
+            resolvedTimeZone = preferredTimeZone
+        } else {
+            let fallback = captureTimeZoneContext(for: date)
+            return fallback
+        }
+
+        return CaptureTimeZoneContext(
+            identifier: trimmedIdentifier.isEmpty ? resolvedTimeZone.identifier : trimmedIdentifier,
+            timeZone: resolvedTimeZone,
+            offsetMinutes: resolvedOffsetMinutes,
+            offsetString: timeZoneOffsetString(secondsFromGMT: resolvedOffsetMinutes * 60)
+        )
+    }
+
+    private func localISO8601String(for date: Date, timeZone: TimeZone) -> String {
+        let formatter = DateFormatter()
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = timeZone
+        formatter.dateFormat = "yyyy-MM-dd'T'HH:mm:ssXXXXX"
+        let rendered = formatter.string(from: date)
+        if rendered.hasSuffix("Z") {
+            return String(rendered.dropLast()) + "+00:00"
+        }
+        return rendered
+    }
+
+    private func normalizeExifOrientation(rawValue: Int?, legacy: String?) -> Int? {
+        if let rawValue, (1...8).contains(rawValue) {
+            return rawValue
+        }
+        let trimmed = legacy?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if let direct = Int(trimmed), (1...8).contains(direct) {
+            return direct
+        }
+        let prefix = "exif:"
+        if trimmed.lowercased().hasPrefix(prefix),
+           let parsed = Int(trimmed.dropFirst(prefix.count)),
+           (1...8).contains(parsed) {
+            return parsed
+        }
+        return nil
     }
 
     private func hasLegacyElevationValues(in fileURL: URL) throws -> Bool {
@@ -875,7 +1234,7 @@ final class LocalStore {
 extension LocalStore {
     func printSessionSchema() {
         let sampleSession = SessionMetadata(
-            schemaVersion: 4,
+            schemaVersion: 5,
             propertyID: UUID(),
             sessionID: UUID(),
             propertyNameAtCapture: nil,
@@ -916,6 +1275,7 @@ extension LocalStore {
             stampedRelativePath: nil,
             captureMode: nil,
             lens: nil,
+            exifOrientation: nil,
             orientation: nil,
             latitude: nil,
             longitude: nil,

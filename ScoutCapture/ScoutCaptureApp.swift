@@ -1319,10 +1319,25 @@ struct SessionHubView: View {
         var originalEntries: [(String, Data, Date?)] = []
         var stampedEntries: [(String, Data, Date?)] = []
         let sessionMetadata = try localStore.loadSessionMetadata(propertyID: property.id, sessionID: session.id)
+#if DEBUG
+        print("Pending export sessionStartedAt: \(sessionMetadata.startedAt)")
+        print("Pending export sessionStartedAtLocal: \(sessionMetadata.sessionStartedAtLocal)")
+        if let firstShot = sessionMetadata.shots.sorted(by: { $0.createdAt < $1.createdAt }).first {
+            print("Pending export first shot createdAt: \(firstShot.createdAt)")
+            print("Pending export first shot createdAtLocal: \(firstShot.capturedAtLocal ?? "nil")")
+        }
+        if let firstDeliveredAt = sessionMetadata.firstDeliveredAt {
+            print("Pending export firstDeliveredAt: \(firstDeliveredAt)")
+        }
+        if let reExportExpiresAt = sessionMetadata.reExportExpiresAt {
+            print("Pending export reExportExpiresAt: \(reExportExpiresAt)")
+        }
+#endif
         let stampedByOriginalFilename = try ensurePendingStampedJPEGs(
             propertyID: property.id,
             sessionID: session.id,
             propertyName: property.name,
+            propertyAddress: property.address,
             sessionMetadata: sessionMetadata
         )
 
@@ -1436,6 +1451,7 @@ struct SessionHubView: View {
         propertyID: UUID,
         sessionID: UUID,
         propertyName: String,
+        propertyAddress: String?,
         sessionMetadata: SessionMetadata
     ) throws -> [String: URL] {
         let fileManager = FileManager.default
@@ -1483,6 +1499,14 @@ struct SessionHubView: View {
                     shot: shot,
                     isBaselineSession: metadata.isBaselineSession
                 ),
+                metadataContext: pendingStampedMetadataContext(
+                    propertyID: propertyID,
+                    propertyName: propertyName,
+                    propertyAddress: propertyAddress,
+                    sessionID: sessionID,
+                    shot: shot,
+                    schemaVersion: metadata.schemaVersion
+                ),
                 fileManager: fileManager
             )
             output[shot.originalFilename] = stampedURL
@@ -1509,6 +1533,7 @@ struct SessionHubView: View {
         destinationURL: URL,
         captureDate: Date,
         overlayLines: [String],
+        metadataContext: ReportLibraryModel.EmbeddedMetadataContext,
         fileManager: FileManager
     ) throws {
         if fileManager.fileExists(atPath: destinationURL.path),
@@ -1522,7 +1547,8 @@ struct SessionHubView: View {
         let stampedData = try encodePendingStampedJPEG(
             from: sourceData,
             captureDate: captureDate,
-            overlayLines: overlayLines
+            overlayLines: overlayLines,
+            metadataContext: metadataContext
         )
         try stampedData.write(to: destinationURL, options: [.atomic])
 
@@ -1547,43 +1573,97 @@ struct SessionHubView: View {
             let modified = attrs[.modificationDate] as? Date
             print("[Stamp] readback creation=\(String(describing: created)) modification=\(String(describing: modified))")
         }
+        if let source = CGImageSourceCreateWithURL(destinationURL as CFURL, nil),
+           let props = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any] {
+            let width = (props[kCGImagePropertyPixelWidth] as? NSNumber)?.intValue ?? 0
+            let height = (props[kCGImagePropertyPixelHeight] as? NSNumber)?.intValue ?? 0
+            let orientation = (props[kCGImagePropertyOrientation] as? NSNumber)?.intValue ?? 0
+            print("[Stamp] readback pixelWidth=\(width) pixelHeight=\(height) orientation=\(orientation)")
+        }
 #endif
     }
 
     private func encodePendingStampedJPEG(
         from sourceData: Data,
         captureDate: Date,
-        overlayLines: [String]
+        overlayLines: [String],
+        metadataContext: ReportLibraryModel.EmbeddedMetadataContext
     ) throws -> Data {
         guard let source = CGImageSourceCreateWithData(sourceData as CFData, nil) else {
             throw NSError(domain: "ScoutCapture.PendingStamp", code: 2, userInfo: [NSLocalizedDescriptionKey: "Missing source image for pending stamped export"])
         }
 
+        let sourceCGImage = CGImageSourceCreateImageAtIndex(source, 0, nil)
+        let sourceProps = (CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any]) ?? [:]
+        let sourceOrientationRaw = (sourceProps[kCGImagePropertyOrientation] as? NSNumber)?.uint32Value
+        let capturedOrientationRaw = metadataContext.capturedExifOrientationRaw
+        let resolvedOrientationRaw = sourceOrientationRaw ?? capturedOrientationRaw ?? 1
+        print("[Stamp] orientation capturedRaw=\(capturedOrientationRaw.map(String.init) ?? "nil") sourceRaw=\(sourceOrientationRaw.map(String.init) ?? "nil") resolvedRaw=\(resolvedOrientationRaw)")
+        if let sourceCGImage {
+            print("[Stamp] before encode pixelWidth=\(sourceCGImage.width) pixelHeight=\(sourceCGImage.height)")
+        }
         let image = normalizedPendingUprightCGImage(from: sourceData)
-            ?? CGImageSourceCreateImageAtIndex(source, 0, nil)
+            ?? sourceCGImage
         guard let image else {
             throw NSError(domain: "ScoutCapture.PendingStamp", code: 2, userInfo: [NSLocalizedDescriptionKey: "Missing source image for pending stamped export"])
         }
-
-        let sourceProps = (CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any]) ?? [:]
+        print("[Stamp] after upright pixelWidth=\(image.width) pixelHeight=\(image.height)")
         var mergedProps = sourceProps
         var exif = (mergedProps[kCGImagePropertyExifDictionary] as? [CFString: Any]) ?? [:]
         var tiff = (mergedProps[kCGImagePropertyTIFFDictionary] as? [CFString: Any]) ?? [:]
 
-        let exifTimestamp = Self.pendingExportExifTimestampFormatter.string(from: captureDate)
-        let exifSubsec = Self.pendingExportExifSubsecFormatter.string(from: captureDate)
-        let exifOffset = Self.pendingExportExifOffsetString(for: captureDate)
-        exif[kCGImagePropertyExifDateTimeOriginal] = exifTimestamp
-        exif[kCGImagePropertyExifDateTimeDigitized] = exifTimestamp
-        exif[kCGImagePropertyExifSubsecTimeOriginal] = exifSubsec
-        exif[kCGImagePropertyExifSubsecTimeDigitized] = exifSubsec
-        exif[kCGImagePropertyExifOffsetTimeOriginal] = exifOffset
-        exif[kCGImagePropertyExifOffsetTimeDigitized] = exifOffset
-        tiff[kCGImagePropertyTIFFDateTime] = exifTimestamp
+        let captureTime = ReportLibraryModel.EmbeddedCaptureTime(captureDate: captureDate)
+        exif[kCGImagePropertyExifDateTimeOriginal] = captureTime.localDateTimeString
+        exif[kCGImagePropertyExifDateTimeDigitized] = captureTime.localDateTimeString
+        exif[kCGImagePropertyExifSubsecTimeOriginal] = captureTime.subsecString
+        exif[kCGImagePropertyExifSubsecTimeDigitized] = captureTime.subsecString
+        exif[kCGImagePropertyExifOffsetTimeOriginal] = captureTime.tzOffsetString
+        exif[kCGImagePropertyExifOffsetTimeDigitized] = captureTime.tzOffsetString
+        exif[kCGImagePropertyExifOffsetTime] = captureTime.tzOffsetString
+        exif[kCGImagePropertyExifUserComment] = pendingStructuredComment(
+            captureTime: captureTime,
+            metadataContext: metadataContext
+        )
+        tiff[kCGImagePropertyTIFFDateTime] = captureTime.localDateTimeString
         mergedProps[kCGImagePropertyExifDictionary] = exif
         mergedProps[kCGImagePropertyTIFFDictionary] = tiff
         mergedProps[kCGImagePropertyOrientation] = 1
+        tiff[kCGImagePropertyTIFFOrientation] = 1
+        mergedProps[kCGImagePropertyTIFFDictionary] = tiff
         mergedProps[kCGImageDestinationLossyCompressionQuality] = 0.90
+        print("[Stamp] orientation writeTag exif/tiff=1")
+        if let gps = makePendingGPSDictionary(
+            latitude: metadataContext.latitude,
+            longitude: metadataContext.longitude,
+            accuracyMeters: metadataContext.accuracyMeters,
+            captureDate: captureDate
+        ) {
+            mergedProps[kCGImagePropertyGPSDictionary] = gps
+        }
+        let caption = overlayLines.joined(separator: "\n")
+        if !caption.isEmpty {
+            tiff[kCGImagePropertyTIFFImageDescription] = caption
+            mergedProps[kCGImagePropertyTIFFDictionary] = tiff
+            var iptc = (mergedProps[kCGImagePropertyIPTCDictionary] as? [CFString: Any]) ?? [:]
+            iptc[kCGImagePropertyIPTCCaptionAbstract] = caption
+            iptc[kCGImagePropertyIPTCKeywords] = pendingKeywordList(metadataContext: metadataContext)
+            mergedProps[kCGImagePropertyIPTCDictionary] = iptc
+        }
+
+#if DEBUG
+        let topKeys = mergedProps.keys.map { $0 as String }.sorted()
+        let exifKeys = ((mergedProps[kCGImagePropertyExifDictionary] as? [CFString: Any]) ?? [:]).keys.map { $0 as String }.sorted()
+        let gpsKeys = ((mergedProps[kCGImagePropertyGPSDictionary] as? [CFString: Any]) ?? [:]).keys.map { $0 as String }.sorted()
+        let hasDateTimeOriginal = ((mergedProps[kCGImagePropertyExifDictionary] as? [CFString: Any]) ?? [:])[kCGImagePropertyExifDateTimeOriginal] != nil
+        let hasGpsAccuracy = ((mergedProps[kCGImagePropertyGPSDictionary] as? [CFString: Any]) ?? [:])[kCGImagePropertyGPSHPositioningError] != nil
+        print("[Stamp] captureDate=\(captureTime.captureDate) localDateTimeString=\(captureTime.localDateTimeString) tzOffset=\(captureTime.tzOffsetString) iso8601WithOffset=\(captureTime.iso8601WithOffset)")
+        let accuracyText = metadataContext.accuracyMeters.map { String(format: "%.3f", $0) } ?? "nil"
+        print("[Stamp] gps present=\(gpsKeys.isEmpty ? "NO" : "YES") accuracyMeters=\(accuracyText)")
+        print("[Stamp] metadata top-level keys: \(topKeys)")
+        print("[Stamp] metadata EXIF keys: \(exifKeys)")
+        print("[Stamp] metadata GPS keys: \(gpsKeys)")
+        print("[Stamp] metadata has DateTimeOriginal=\(hasDateTimeOriginal) has GPSHPositioningError=\(hasGpsAccuracy)")
+#endif
 
         let stampedCGImage = drawPendingStampOverlay(on: image, lines: overlayLines) ?? image
 
@@ -1596,11 +1676,222 @@ struct SessionHubView: View {
         ) else {
             throw NSError(domain: "ScoutCapture.PendingStamp", code: 3, userInfo: [NSLocalizedDescriptionKey: "Unable to create JPEG destination"])
         }
-        CGImageDestinationAddImage(destination, stampedCGImage, mergedProps as CFDictionary)
+        if let xmpMetadata = buildPendingXMPMetadata(
+            source: source,
+            captureTime: captureTime,
+            metadataContext: metadataContext
+        ) {
+            CGImageDestinationAddImageAndMetadata(
+                destination,
+                stampedCGImage,
+                xmpMetadata,
+                mergedProps as CFDictionary
+            )
+        } else {
+            CGImageDestinationAddImage(destination, stampedCGImage, mergedProps as CFDictionary)
+        }
         guard CGImageDestinationFinalize(destination) else {
             throw NSError(domain: "ScoutCapture.PendingStamp", code: 4, userInfo: [NSLocalizedDescriptionKey: "Unable to finalize JPEG destination"])
         }
         return destinationData as Data
+    }
+
+    private func pendingStampedMetadataContext(
+        propertyID: UUID,
+        propertyName: String,
+        propertyAddress: String?,
+        sessionID: UUID,
+        shot: ShotMetadata,
+        schemaVersion: Int
+    ) -> ReportLibraryModel.EmbeddedMetadataContext {
+        ReportLibraryModel.EmbeddedMetadataContext(
+            propertyID: propertyID,
+            propertyName: propertyName,
+            propertyAddress: propertyAddress,
+            sessionID: sessionID,
+            shotID: shot.shotID,
+            shotKey: shot.shotKey,
+            building: shot.building,
+            elevation: shot.elevation,
+            detailType: shot.detailType,
+            angleIndex: shot.angleIndex,
+            isGuided: shot.isGuided,
+            isFlagged: shot.isFlagged,
+            issueStatus: shot.issueStatus,
+            detailNote: shot.noteText,
+            captureMode: shot.captureMode,
+            lens: shot.lens,
+            orientation: shot.exifOrientation.map { "exif:\($0)" } ?? shot.orientation,
+            capturedExifOrientationRaw: shot.exifOrientation.flatMap(UInt32.init) ?? pendingParseExifOrientationRaw(from: shot.orientation),
+            latitude: shot.latitude,
+            longitude: shot.longitude,
+            accuracyMeters: shot.accuracyMeters,
+            appVersion: Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String,
+            osVersion: UIDevice.current.systemVersion,
+            deviceModel: UIDevice.current.model,
+            schemaVersion: schemaVersion
+        )
+    }
+
+    private func pendingParseExifOrientationRaw(from orientation: String?) -> UInt32? {
+        let trimmed = orientation?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !trimmed.isEmpty else { return nil }
+        if let direct = UInt32(trimmed), direct >= 1, direct <= 8 {
+            return direct
+        }
+        let prefix = "exif:"
+        if trimmed.lowercased().hasPrefix(prefix),
+           let value = UInt32(trimmed.dropFirst(prefix.count)),
+           value >= 1, value <= 8 {
+            return value
+        }
+        return nil
+    }
+
+    private func pendingStructuredComment(
+        captureTime: ReportLibraryModel.EmbeddedCaptureTime,
+        metadataContext: ReportLibraryModel.EmbeddedMetadataContext
+    ) -> String {
+        var pairs: [String] = []
+        func append(_ key: String, _ value: String?) {
+            let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            if !trimmed.isEmpty {
+                pairs.append("\(key)=\(trimmed)")
+            }
+        }
+        append("propertyID", metadataContext.propertyID?.uuidString)
+        append("propertyName", metadataContext.propertyName)
+        append("propertyAddress", metadataContext.propertyAddress)
+        append("sessionID", metadataContext.sessionID?.uuidString)
+        append("shotID", metadataContext.shotID?.uuidString)
+        append("shotKey", metadataContext.shotKey)
+        append("building", metadataContext.building)
+        append("elevation", metadataContext.elevation)
+        append("detailType", metadataContext.detailType)
+        append("angleIndex", metadataContext.angleIndex.map(String.init))
+        append("captureMode", metadataContext.captureMode)
+        append("lens", metadataContext.lens)
+        append("orientation", metadataContext.orientation)
+        append("captureDateLocal", captureTime.localDateTimeString)
+        append("captureDateISO8601", captureTime.iso8601WithOffset)
+        if let accuracy = metadataContext.accuracyMeters {
+            append("gpsAccuracyMeters", String(format: "%.3f", accuracy))
+        }
+        return pairs.joined(separator: ";")
+    }
+
+    private func pendingKeywordList(metadataContext: ReportLibraryModel.EmbeddedMetadataContext) -> [String] {
+        var keywords: [String] = ["SCOUT"]
+        let values = [
+            metadataContext.propertyName,
+            metadataContext.building,
+            metadataContext.elevation,
+            metadataContext.detailType
+        ]
+        for value in values {
+            let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            if !trimmed.isEmpty {
+                keywords.append(trimmed)
+            }
+        }
+        keywords.append(metadataContext.isGuided == true ? "Guided" : "Free")
+        if metadataContext.isFlagged == true {
+            keywords.append("Flagged")
+        }
+        if let angle = metadataContext.angleIndex {
+            keywords.append("Angle \(angle)")
+        }
+        return Array(NSOrderedSet(array: keywords)) as? [String] ?? keywords
+    }
+
+    private func makePendingGPSDictionary(
+        latitude: Double?,
+        longitude: Double?,
+        accuracyMeters: Double?,
+        captureDate: Date
+    ) -> [CFString: Any]? {
+        guard let latitude, let longitude else { return nil }
+        var gps: [CFString: Any] = [:]
+        gps[kCGImagePropertyGPSLatitude] = abs(latitude)
+        gps[kCGImagePropertyGPSLatitudeRef] = latitude >= 0 ? "N" : "S"
+        gps[kCGImagePropertyGPSLongitude] = abs(longitude)
+        gps[kCGImagePropertyGPSLongitudeRef] = longitude >= 0 ? "E" : "W"
+        gps[kCGImagePropertyGPSDateStamp] = Self.pendingExportGPSDateFormatter.string(from: captureDate)
+        gps[kCGImagePropertyGPSTimeStamp] = Self.pendingExportGPSTimeFormatter.string(from: captureDate)
+        if let accuracyMeters, accuracyMeters >= 0 {
+            gps[kCGImagePropertyGPSHPositioningError] = accuracyMeters
+        }
+        return gps
+    }
+
+    private func buildPendingXMPMetadata(
+        source: CGImageSource,
+        captureTime: ReportLibraryModel.EmbeddedCaptureTime,
+        metadataContext: ReportLibraryModel.EmbeddedMetadataContext
+    ) -> CGMutableImageMetadata? {
+        let baseMetadata = CGImageSourceCopyMetadataAtIndex(source, 0, nil)
+        let mutable = baseMetadata.flatMap(CGImageMetadataCreateMutableCopy) ?? CGImageMetadataCreateMutable()
+        var registrationError: Unmanaged<CFError>?
+        _ = CGImageMetadataRegisterNamespaceForPrefix(
+            mutable,
+            "https://scoutcapture.app/ns/1.0/" as CFString,
+            "scout" as CFString,
+            &registrationError
+        )
+        func setTag(_ path: String, _ value: String?) {
+            let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            guard !trimmed.isEmpty else { return }
+            let components = path.split(separator: ":", maxSplits: 1).map(String.init)
+            guard components.count == 2 else { return }
+            let prefix = components[0]
+            let name = components[1]
+            let namespace: String
+            switch prefix {
+            case "xmp":
+                namespace = "http://ns.adobe.com/xap/1.0/"
+            case "scout":
+                namespace = "https://scoutcapture.app/ns/1.0/"
+            default:
+                return
+            }
+            guard let tag = CGImageMetadataTagCreate(
+                namespace as CFString,
+                prefix as CFString,
+                name as CFString,
+                .string,
+                trimmed as CFString
+            ) else {
+                return
+            }
+            CGImageMetadataSetTagWithPath(mutable, nil, path as CFString, tag)
+        }
+        setTag("xmp:CreateDate", captureTime.iso8601WithOffset)
+        setTag("xmp:ModifyDate", captureTime.iso8601WithOffset)
+        setTag("scout:propertyID", metadataContext.propertyID?.uuidString)
+        setTag("scout:propertyName", metadataContext.propertyName)
+        setTag("scout:propertyAddress", metadataContext.propertyAddress)
+        setTag("scout:sessionID", metadataContext.sessionID?.uuidString)
+        setTag("scout:shotID", metadataContext.shotID?.uuidString)
+        setTag("scout:shotKey", metadataContext.shotKey)
+        setTag("scout:building", metadataContext.building)
+        setTag("scout:elevation", metadataContext.elevation)
+        setTag("scout:detailType", metadataContext.detailType)
+        setTag("scout:angleIndex", metadataContext.angleIndex.map(String.init))
+        setTag("scout:isGuided", metadataContext.isGuided.map { $0 ? "true" : "false" })
+        setTag("scout:isFlagged", metadataContext.isFlagged.map { $0 ? "true" : "false" })
+        setTag("scout:captureMode", metadataContext.captureMode)
+        setTag("scout:lens", metadataContext.lens)
+        setTag("scout:orientation", metadataContext.orientation)
+        setTag("scout:appVersion", metadataContext.appVersion)
+        setTag("scout:osVersion", metadataContext.osVersion)
+        setTag("scout:deviceModel", metadataContext.deviceModel)
+        setTag("scout:schemaVersion", metadataContext.schemaVersion.map(String.init))
+        setTag("scout:issueStatus", metadataContext.issueStatus)
+        setTag("scout:issueNote", metadataContext.detailNote)
+        if let accuracy = metadataContext.accuracyMeters {
+            setTag("scout:gpsAccuracyMeters", String(format: "%.3f", accuracy))
+        }
+        return mutable
     }
 
     private func normalizedPendingUprightCGImage(from sourceData: Data) -> CGImage? {
@@ -1702,6 +1993,24 @@ struct SessionHubView: View {
         formatter.locale = Locale(identifier: "en_US_POSIX")
         formatter.timeZone = TimeZone.current
         formatter.dateFormat = "SSS"
+        return formatter
+    }()
+
+    private static let pendingExportGPSDateFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(secondsFromGMT: 0)
+        formatter.dateFormat = "yyyy:MM:dd"
+        return formatter
+    }()
+
+    private static let pendingExportGPSTimeFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(secondsFromGMT: 0)
+        formatter.dateFormat = "HH:mm:ss"
         return formatter
     }()
 

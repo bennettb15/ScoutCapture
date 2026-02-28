@@ -159,6 +159,22 @@ private extension View {
     }
 }
 
+private extension UIImage.Orientation {
+    init(from orientation: CGImagePropertyOrientation) {
+        switch orientation {
+        case .up: self = .up
+        case .upMirrored: self = .upMirrored
+        case .down: self = .down
+        case .downMirrored: self = .downMirrored
+        case .left: self = .left
+        case .leftMirrored: self = .leftMirrored
+        case .right: self = .right
+        case .rightMirrored: self = .rightMirrored
+        @unknown default: self = .up
+        }
+    }
+}
+
 // MARK: - Physical shutter buttons (Camera Control + volume buttons)
 
 private struct CameraCaptureButtons: ViewModifier {
@@ -308,6 +324,65 @@ final class ReportLibraryModel: ObservableObject {
         }
     }
 
+    struct EmbeddedCaptureTime {
+        let captureDate: Date
+        let localDateTimeString: String
+        let subsecString: String
+        let tzOffsetString: String
+        let iso8601WithOffset: String
+
+        init(captureDate: Date) {
+            self.captureDate = captureDate
+            self.localDateTimeString = ReportLibraryModel.exifTimestampFormatter.string(from: captureDate)
+            self.subsecString = ReportLibraryModel.exifSubsecFormatter.string(from: captureDate)
+            self.tzOffsetString = ReportLibraryModel.exifOffsetString(for: captureDate)
+            self.iso8601WithOffset = ReportLibraryModel.iso8601WithOffsetString(for: captureDate)
+        }
+    }
+
+    struct EmbeddedMetadataContext {
+        var propertyID: UUID?
+        var propertyName: String?
+        var propertyAddress: String?
+        var sessionID: UUID?
+        var shotID: UUID?
+        var shotKey: String?
+        var building: String?
+        var elevation: String?
+        var detailType: String?
+        var angleIndex: Int?
+        var isGuided: Bool?
+        var isFlagged: Bool?
+        var issueStatus: String?
+        var detailNote: String?
+        var captureMode: String?
+        var lens: String?
+        var orientation: String?
+        var capturedExifOrientationRaw: UInt32?
+        var latitude: Double?
+        var longitude: Double?
+        var accuracyMeters: Double?
+        var appVersion: String?
+        var osVersion: String?
+        var deviceModel: String?
+        var schemaVersion: Int?
+    }
+
+    static func cgOrientationRawFromDevice(_ orientation: UIDeviceOrientation) -> UInt32 {
+        switch orientation {
+        case .portrait:
+            return CGImagePropertyOrientation.right.rawValue
+        case .portraitUpsideDown:
+            return CGImagePropertyOrientation.left.rawValue
+        case .landscapeLeft:
+            return CGImagePropertyOrientation.up.rawValue
+        case .landscapeRight:
+            return CGImagePropertyOrientation.down.rawValue
+        default:
+            return CGImagePropertyOrientation.right.rawValue
+        }
+    }
+
     @Published private(set) var assets: [ReportAsset] = []
     @Published private(set) var albumTitle: String = ""
     @Published private(set) var albumLocalId: String = ""
@@ -422,6 +497,7 @@ final class ReportLibraryModel: ObservableObject {
         sessionID: UUID,
         shotID: UUID,
         captureDate: Date,
+        metadataContext: EmbeddedMetadataContext? = nil,
         preferredFilename: String? = nil,
         completion: @escaping (Bool, String?, String?) -> Void
     ) {
@@ -478,7 +554,8 @@ final class ReportLibraryModel: ObservableObject {
                     let heicData = try self.encodeImageData(
                         from: data,
                         outputType: .heic,
-                        captureDate: captureDate,
+                        captureTime: EmbeddedCaptureTime(captureDate: captureDate),
+                        metadataContext: metadataContext,
                         compressionQuality: 0.98
                     )
                     self.debugLogSaveStage("encodedBytes=\(heicData.count)")
@@ -591,6 +668,7 @@ final class ReportLibraryModel: ObservableObject {
                             let modified = attrs[.modificationDate] as? Date
                             self.debugLogSaveStage("stage=setAttributes readback creation=\(String(describing: created)) modification=\(String(describing: modified))")
                         }
+                        self.debugLogWrittenImageProperties(at: output)
                     } catch {
                         self.debugLogSaveStage("stage=setAttributes ERROR \(error)")
                     }
@@ -623,6 +701,7 @@ final class ReportLibraryModel: ObservableObject {
         sessionID: UUID,
         shotID: UUID,
         captureDate: Date,
+        metadataContext: EmbeddedMetadataContext? = nil,
         completion: @escaping (Bool, String?, String?) -> Void
     ) {
         DispatchQueue.global(qos: .userInitiated).async {
@@ -652,7 +731,8 @@ final class ReportLibraryModel: ObservableObject {
                     let jpgData = try self.encodeImageData(
                         from: data,
                         outputType: .jpeg,
-                        captureDate: captureDate,
+                        captureTime: EmbeddedCaptureTime(captureDate: captureDate),
+                        metadataContext: metadataContext,
                         compressionQuality: 0.90
                     )
                     let encodedBytes = jpgData.count
@@ -688,6 +768,7 @@ final class ReportLibraryModel: ObservableObject {
                             let modified = attrs[.modificationDate] as? Date
                             self.debugLogSaveStage("save stamped setAttributes readback creation=\(String(describing: created)) modification=\(String(describing: modified)) type=\(UTType.jpeg.identifier)")
                         }
+                        self.debugLogWrittenImageProperties(at: output)
                     } catch {
                         throw SavePhotoError.setAttributesFailed(error)
                     }
@@ -712,33 +793,76 @@ final class ReportLibraryModel: ObservableObject {
     private func encodeImageData(
         from sourceData: Data,
         outputType: UTType,
-        captureDate: Date,
+        captureTime: EmbeddedCaptureTime,
+        metadataContext: EmbeddedMetadataContext?,
         compressionQuality: CGFloat
     ) throws -> Data {
         guard let source = CGImageSourceCreateWithData(sourceData as CFData, nil),
-              let image = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
+              let sourceCGImage = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
             throw SavePhotoError.missingCGImage
         }
-        debugLogSaveStage("encode source cgImage width=\(image.width) height=\(image.height)")
         let sourceProps = (CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any]) ?? [:]
+        let sourceOrientationRaw = (sourceProps[kCGImagePropertyOrientation] as? NSNumber)?.uint32Value
+        let capturedOrientationRaw = metadataContext?.capturedExifOrientationRaw
+        let resolvedOrientationRaw = sourceOrientationRaw ?? capturedOrientationRaw ?? 1
+        debugLogSaveStage(
+            "orientation capturedRaw=\(capturedOrientationRaw.map(String.init) ?? "nil") sourceRaw=\(sourceOrientationRaw.map(String.init) ?? "nil") resolvedRaw=\(resolvedOrientationRaw)"
+        )
+        debugLogSaveStage("encode source pixelWidth=\(sourceCGImage.width) pixelHeight=\(sourceCGImage.height)")
+        let image = normalizeToUprightPixels(sourceCGImage, orientationRaw: resolvedOrientationRaw)
+        debugLogSaveStage("encode upright pixelWidth=\(image.width) pixelHeight=\(image.height)")
         var mergedProps = sourceProps
         var exif = (mergedProps[kCGImagePropertyExifDictionary] as? [CFString: Any]) ?? [:]
         var tiff = (mergedProps[kCGImagePropertyTIFFDictionary] as? [CFString: Any]) ?? [:]
-        let exifTimestamp = Self.exifTimestampFormatter.string(from: captureDate)
-        let exifSubsec = Self.exifSubsecFormatter.string(from: captureDate)
-        let exifOffset = Self.exifOffsetString(for: captureDate)
-        exif[kCGImagePropertyExifDateTimeOriginal] = exifTimestamp
-        exif[kCGImagePropertyExifDateTimeDigitized] = exifTimestamp
-        exif[kCGImagePropertyExifSubsecTimeOriginal] = exifSubsec
-        exif[kCGImagePropertyExifSubsecTimeDigitized] = exifSubsec
-        exif[kCGImagePropertyExifOffsetTimeOriginal] = exifOffset
-        exif[kCGImagePropertyExifOffsetTimeDigitized] = exifOffset
-        tiff[kCGImagePropertyTIFFDateTime] = exifTimestamp
+        exif[kCGImagePropertyExifDateTimeOriginal] = captureTime.localDateTimeString
+        exif[kCGImagePropertyExifDateTimeDigitized] = captureTime.localDateTimeString
+        exif[kCGImagePropertyExifSubsecTimeOriginal] = captureTime.subsecString
+        exif[kCGImagePropertyExifSubsecTimeDigitized] = captureTime.subsecString
+        exif[kCGImagePropertyExifOffsetTimeOriginal] = captureTime.tzOffsetString
+        exif[kCGImagePropertyExifOffsetTimeDigitized] = captureTime.tzOffsetString
+        exif[kCGImagePropertyExifOffsetTime] = captureTime.tzOffsetString
+        tiff[kCGImagePropertyTIFFDateTime] = captureTime.localDateTimeString
+        if let userComment = scoutStructuredComment(
+            captureTime: captureTime,
+            metadataContext: metadataContext
+        ) {
+            exif[kCGImagePropertyExifUserComment] = userComment
+        }
         mergedProps[kCGImagePropertyExifDictionary] = exif
         mergedProps[kCGImagePropertyTIFFDictionary] = tiff
+        mergedProps[kCGImagePropertyOrientation] = 1
+        tiff[kCGImagePropertyTIFFOrientation] = 1
+        mergedProps[kCGImagePropertyTIFFDictionary] = tiff
+        debugLogSaveStage("orientation writeTag exif/tiff=1")
+
+        if let gps = makeGPSDictionary(
+            latitude: metadataContext?.latitude,
+            longitude: metadataContext?.longitude,
+            altitude: nil,
+            accuracyMeters: metadataContext?.accuracyMeters,
+            captureTime: captureTime
+        ) {
+            mergedProps[kCGImagePropertyGPSDictionary] = gps
+        }
+        let descriptionLines = makeHumanReadableDescriptionLines(
+            captureTime: captureTime,
+            metadataContext: metadataContext
+        )
+        let descriptionText = descriptionLines.joined(separator: "\n")
+        if !descriptionText.isEmpty {
+            tiff[kCGImagePropertyTIFFImageDescription] = descriptionText
+            mergedProps[kCGImagePropertyTIFFDictionary] = tiff
+            var iptc = (mergedProps[kCGImagePropertyIPTCDictionary] as? [CFString: Any]) ?? [:]
+            iptc[kCGImagePropertyIPTCCaptionAbstract] = descriptionText
+            let keywords = makeKeywordList(metadataContext: metadataContext)
+            if !keywords.isEmpty {
+                iptc[kCGImagePropertyIPTCKeywords] = keywords
+            }
+            mergedProps[kCGImagePropertyIPTCDictionary] = iptc
+        }
         mergedProps[kCGImageDestinationLossyCompressionQuality] = compressionQuality
 
-        debugLogMetadataKeys(mergedProps)
+        debugLogMetadataKeys(mergedProps, captureTime: captureTime, metadataContext: metadataContext)
 
         let destinationData = NSMutableData()
         guard let destination = CGImageDestinationCreateWithData(
@@ -749,11 +873,43 @@ final class ReportLibraryModel: ObservableObject {
         ) else {
             throw SavePhotoError.imageDestinationCreateFailed
         }
-        CGImageDestinationAddImage(destination, image, mergedProps as CFDictionary)
+
+        if let xmpMetadata = buildXMPMetadata(
+            from: source,
+            captureTime: captureTime,
+            metadataContext: metadataContext
+        ) {
+            CGImageDestinationAddImageAndMetadata(
+                destination,
+                image,
+                xmpMetadata,
+                mergedProps as CFDictionary
+            )
+        } else {
+            CGImageDestinationAddImage(destination, image, mergedProps as CFDictionary)
+        }
         guard CGImageDestinationFinalize(destination) else {
             throw SavePhotoError.imageDestinationFinalizeFailed
         }
         return destinationData as Data
+    }
+
+    private func normalizeToUprightPixels(_ image: CGImage, orientationRaw: UInt32) -> CGImage {
+        let orientation = CGImagePropertyOrientation(rawValue: orientationRaw) ?? .up
+        let uiOrientation = UIImage.Orientation(from: orientation)
+        if uiOrientation == .up {
+            return image
+        }
+        let uiImage = UIImage(cgImage: image, scale: 1.0, orientation: uiOrientation)
+        let size = uiImage.size
+        guard size.width > 0, size.height > 0 else { return image }
+        let format = UIGraphicsImageRendererFormat.default()
+        format.scale = 1
+        format.opaque = true
+        let rendered = UIGraphicsImageRenderer(size: size, format: format).image { _ in
+            uiImage.draw(in: CGRect(origin: .zero, size: size))
+        }
+        return rendered.cgImage ?? image
     }
 
     private static let exifTimestampFormatter: DateFormatter = {
@@ -783,20 +939,273 @@ final class ReportLibraryModel: ObservableObject {
         return String(format: "%@%02d:%02d", sign, hours, minutes)
     }
 
+    private static func iso8601WithOffsetString(for date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone.current
+        formatter.dateFormat = "yyyy-MM-dd'T'HH:mm:ssXXXXX"
+        return formatter.string(from: date)
+    }
+
+    private static let humanDescriptionDateFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone.current
+        formatter.dateFormat = "MM-dd-yyyy h:mm:ss a"
+        return formatter
+    }()
+
+    private func makeGPSDictionary(
+        latitude: Double?,
+        longitude: Double?,
+        altitude: Double?,
+        accuracyMeters: Double?,
+        captureTime: EmbeddedCaptureTime
+    ) -> [CFString: Any]? {
+        guard let latitude, let longitude else { return nil }
+        var gps: [CFString: Any] = [:]
+        gps[kCGImagePropertyGPSLatitude] = abs(latitude)
+        gps[kCGImagePropertyGPSLatitudeRef] = latitude >= 0 ? "N" : "S"
+        gps[kCGImagePropertyGPSLongitude] = abs(longitude)
+        gps[kCGImagePropertyGPSLongitudeRef] = longitude >= 0 ? "E" : "W"
+        if let altitude {
+            gps[kCGImagePropertyGPSAltitude] = abs(altitude)
+            gps[kCGImagePropertyGPSAltitudeRef] = altitude >= 0 ? 0 : 1
+        }
+        if let accuracyMeters, accuracyMeters >= 0 {
+            gps[kCGImagePropertyGPSHPositioningError] = accuracyMeters
+        }
+        gps[kCGImagePropertyGPSDateStamp] = Self.gpsDateFormatter.string(from: captureTime.captureDate)
+        gps[kCGImagePropertyGPSTimeStamp] = Self.gpsTimeFormatter.string(from: captureTime.captureDate)
+        return gps
+    }
+
+    private static let gpsDateFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(secondsFromGMT: 0)
+        formatter.dateFormat = "yyyy:MM:dd"
+        return formatter
+    }()
+
+    private static let gpsTimeFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(secondsFromGMT: 0)
+        formatter.dateFormat = "HH:mm:ss"
+        return formatter
+    }()
+
+    private func makeHumanReadableDescriptionLines(
+        captureTime: EmbeddedCaptureTime,
+        metadataContext: EmbeddedMetadataContext?
+    ) -> [String] {
+        guard let metadataContext else { return [] }
+        var lines: [String] = []
+        let propertyName = metadataContext.propertyName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !propertyName.isEmpty {
+            lines.append(propertyName)
+        }
+        let building = metadataContext.building?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let elevation = metadataContext.elevation?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let detailType = metadataContext.detailType?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let angle = metadataContext.angleIndex.map { "Angle \($0)" } ?? ""
+        let line2Parts = [building, elevation, detailType, angle].filter { !$0.isEmpty }
+        if !line2Parts.isEmpty {
+            lines.append(line2Parts.joined(separator: " | "))
+        }
+        lines.append(Self.humanDescriptionDateFormatter.string(from: captureTime.captureDate))
+        if metadataContext.isFlagged == true {
+            let note = metadataContext.detailNote?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            if !note.isEmpty {
+                lines.append(note)
+            }
+        }
+        return lines
+    }
+
+    private func makeKeywordList(metadataContext: EmbeddedMetadataContext?) -> [String] {
+        guard let metadataContext else { return [] }
+        var keywords: [String] = ["SCOUT"]
+        let maybeValues: [String?] = [
+            metadataContext.propertyName,
+            metadataContext.building,
+            metadataContext.elevation,
+            metadataContext.detailType
+        ]
+        for value in maybeValues {
+            let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            if !trimmed.isEmpty {
+                keywords.append(trimmed)
+            }
+        }
+        if let angle = metadataContext.angleIndex {
+            keywords.append("Angle \(angle)")
+        }
+        if metadataContext.isGuided == true {
+            keywords.append("Guided")
+        } else {
+            keywords.append("Free")
+        }
+        if metadataContext.isFlagged == true {
+            keywords.append("Flagged")
+        }
+        let issueStatus = metadataContext.issueStatus?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
+        if issueStatus.contains("resolved") {
+            keywords.append("IssueResolved")
+        } else if metadataContext.isFlagged == true {
+            keywords.append("IssueActive")
+        }
+        return Array(NSOrderedSet(array: keywords)) as? [String] ?? keywords
+    }
+
+    private func scoutStructuredComment(
+        captureTime: EmbeddedCaptureTime,
+        metadataContext: EmbeddedMetadataContext?
+    ) -> String? {
+        guard let metadataContext else { return nil }
+        var fields: [String: String] = [:]
+        func put(_ key: String, _ value: String?) {
+            let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            if !trimmed.isEmpty {
+                fields[key] = trimmed
+            }
+        }
+        put("propertyID", metadataContext.propertyID?.uuidString)
+        put("propertyName", metadataContext.propertyName)
+        put("propertyAddress", metadataContext.propertyAddress)
+        put("sessionID", metadataContext.sessionID?.uuidString)
+        put("shotID", metadataContext.shotID?.uuidString)
+        put("shotKey", metadataContext.shotKey)
+        put("building", metadataContext.building)
+        put("elevation", metadataContext.elevation)
+        put("detailType", metadataContext.detailType)
+        put("angleIndex", metadataContext.angleIndex.map(String.init))
+        put("isGuided", metadataContext.isGuided.map { $0 ? "true" : "false" })
+        put("isFlagged", metadataContext.isFlagged.map { $0 ? "true" : "false" })
+        put("captureMode", metadataContext.captureMode)
+        put("lens", metadataContext.lens)
+        put("orientation", metadataContext.orientation)
+        put("appVersion", metadataContext.appVersion)
+        put("osVersion", metadataContext.osVersion)
+        put("deviceModel", metadataContext.deviceModel)
+        put("schemaVersion", metadataContext.schemaVersion.map(String.init))
+        put("issueStatus", metadataContext.issueStatus)
+        put("issueNote", metadataContext.detailNote)
+        put("captureDateLocal", captureTime.localDateTimeString)
+        put("captureDateISO8601", captureTime.iso8601WithOffset)
+        if let accuracy = metadataContext.accuracyMeters {
+            put("gpsAccuracyMeters", String(format: "%.3f", accuracy))
+        }
+        guard !fields.isEmpty else { return nil }
+        let ordered = fields.keys.sorted().map { "\($0)=\(fields[$0] ?? "")" }
+        return ordered.joined(separator: ";")
+    }
+
+    private func buildXMPMetadata(
+        from source: CGImageSource?,
+        captureTime: EmbeddedCaptureTime,
+        metadataContext: EmbeddedMetadataContext?
+    ) -> CGMutableImageMetadata? {
+        guard let metadataContext else { return nil }
+        let baseMetadata = source.flatMap { CGImageSourceCopyMetadataAtIndex($0, 0, nil) }
+        let mutable = baseMetadata.flatMap(CGImageMetadataCreateMutableCopy) ?? CGImageMetadataCreateMutable()
+        var registrationError: Unmanaged<CFError>?
+        _ = CGImageMetadataRegisterNamespaceForPrefix(
+            mutable,
+            "https://scoutcapture.app/ns/1.0/" as CFString,
+            "scout" as CFString,
+            &registrationError
+        )
+        setXMPTag(mutable, path: "xmp:CreateDate", value: captureTime.iso8601WithOffset)
+        setXMPTag(mutable, path: "xmp:ModifyDate", value: captureTime.iso8601WithOffset)
+        setXMPTag(mutable, path: "scout:propertyID", value: metadataContext.propertyID?.uuidString)
+        setXMPTag(mutable, path: "scout:propertyName", value: metadataContext.propertyName)
+        setXMPTag(mutable, path: "scout:propertyAddress", value: metadataContext.propertyAddress)
+        setXMPTag(mutable, path: "scout:sessionID", value: metadataContext.sessionID?.uuidString)
+        setXMPTag(mutable, path: "scout:shotID", value: metadataContext.shotID?.uuidString)
+        setXMPTag(mutable, path: "scout:shotKey", value: metadataContext.shotKey)
+        setXMPTag(mutable, path: "scout:building", value: metadataContext.building)
+        setXMPTag(mutable, path: "scout:elevation", value: metadataContext.elevation)
+        setXMPTag(mutable, path: "scout:detailType", value: metadataContext.detailType)
+        setXMPTag(mutable, path: "scout:angleIndex", value: metadataContext.angleIndex.map(String.init))
+        setXMPTag(mutable, path: "scout:isGuided", value: metadataContext.isGuided.map { $0 ? "true" : "false" })
+        setXMPTag(mutable, path: "scout:isFlagged", value: metadataContext.isFlagged.map { $0 ? "true" : "false" })
+        setXMPTag(mutable, path: "scout:captureMode", value: metadataContext.captureMode)
+        setXMPTag(mutable, path: "scout:lens", value: metadataContext.lens)
+        setXMPTag(mutable, path: "scout:orientation", value: metadataContext.orientation)
+        setXMPTag(mutable, path: "scout:appVersion", value: metadataContext.appVersion)
+        setXMPTag(mutable, path: "scout:osVersion", value: metadataContext.osVersion)
+        setXMPTag(mutable, path: "scout:deviceModel", value: metadataContext.deviceModel)
+        setXMPTag(mutable, path: "scout:schemaVersion", value: metadataContext.schemaVersion.map(String.init))
+        setXMPTag(mutable, path: "scout:issueStatus", value: metadataContext.issueStatus)
+        setXMPTag(mutable, path: "scout:issueNote", value: metadataContext.detailNote)
+        if let accuracy = metadataContext.accuracyMeters {
+            setXMPTag(mutable, path: "scout:gpsAccuracyMeters", value: String(format: "%.3f", accuracy))
+        }
+        return mutable
+    }
+
+    private func setXMPTag(_ metadata: CGMutableImageMetadata, path: String, value: String?) {
+        let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !trimmed.isEmpty else { return }
+        let components = path.split(separator: ":", maxSplits: 1).map(String.init)
+        guard components.count == 2 else { return }
+        let prefix = components[0]
+        let name = components[1]
+        let namespace: String
+        switch prefix {
+        case "xmp":
+            namespace = "http://ns.adobe.com/xap/1.0/"
+        case "scout":
+            namespace = "https://scoutcapture.app/ns/1.0/"
+        default:
+            return
+        }
+        guard let tag = CGImageMetadataTagCreate(
+            namespace as CFString,
+            prefix as CFString,
+            name as CFString,
+            .string,
+            trimmed as CFString
+        ) else {
+            return
+        }
+        CGImageMetadataSetTagWithPath(metadata, nil, path as CFString, tag)
+    }
+
     private func debugLogSaveStage(_ message: String) {
 #if DEBUG
         print("[SavePhoto] \(message)")
 #endif
     }
 
-    private func debugLogMetadataKeys(_ metadata: [CFString: Any]) {
+    private func debugLogMetadataKeys(
+        _ metadata: [CFString: Any],
+        captureTime: EmbeddedCaptureTime,
+        metadataContext: EmbeddedMetadataContext?
+    ) {
 #if DEBUG
         let topKeys = metadata.keys.map { $0 as String }.sorted()
         let exifKeys = ((metadata[kCGImagePropertyExifDictionary] as? [CFString: Any]) ?? [:]).keys.map { $0 as String }.sorted()
         let tiffKeys = ((metadata[kCGImagePropertyTIFFDictionary] as? [CFString: Any]) ?? [:]).keys.map { $0 as String }.sorted()
+        let gpsKeys = ((metadata[kCGImagePropertyGPSDictionary] as? [CFString: Any]) ?? [:]).keys.map { $0 as String }.sorted()
+        let exifDict = (metadata[kCGImagePropertyExifDictionary] as? [CFString: Any]) ?? [:]
+        let hasDateTimeOriginal = exifDict[kCGImagePropertyExifDateTimeOriginal] != nil
+        let gpsDict = (metadata[kCGImagePropertyGPSDictionary] as? [CFString: Any]) ?? [:]
+        let hasGpsAccuracy = gpsDict[kCGImagePropertyGPSHPositioningError] != nil
+        print("[SavePhoto] captureDate=\(captureTime.captureDate) localDateTimeString=\(captureTime.localDateTimeString) tzOffset=\(captureTime.tzOffsetString) iso8601WithOffset=\(captureTime.iso8601WithOffset)")
+        let accuracyText = metadataContext?.accuracyMeters.map { String(format: "%.3f", $0) } ?? "nil"
+        print("[SavePhoto] gps present=\(gpsDict.isEmpty ? "NO" : "YES") accuracyMeters=\(accuracyText)")
         print("[SavePhoto] metadata top-level keys: \(topKeys)")
         print("[SavePhoto] metadata EXIF keys: \(exifKeys)")
         print("[SavePhoto] metadata TIFF keys: \(tiffKeys)")
+        print("[SavePhoto] metadata GPS keys: \(gpsKeys)")
+        print("[SavePhoto] metadata has DateTimeOriginal=\(hasDateTimeOriginal) has GPSHPositioningError=\(hasGpsAccuracy)")
 #endif
     }
 
@@ -806,6 +1215,20 @@ final class ReportLibraryModel: ObservableObject {
             return 0
         }
         return size.intValue
+    }
+
+    private func debugLogWrittenImageProperties(at url: URL) {
+#if DEBUG
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
+              let props = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any] else {
+            debugLogSaveStage("written image readback failed path=\(url.path)")
+            return
+        }
+        let pixelWidth = (props[kCGImagePropertyPixelWidth] as? NSNumber)?.intValue ?? 0
+        let pixelHeight = (props[kCGImagePropertyPixelHeight] as? NSNumber)?.intValue ?? 0
+        let orientation = (props[kCGImagePropertyOrientation] as? NSNumber)?.intValue ?? 0
+        debugLogSaveStage("written image props pixelWidth=\(pixelWidth) pixelHeight=\(pixelHeight) orientation=\(orientation)")
+#endif
     }
 
     func deleteAssetsFromAlbum(localIdentifiers: [String], completion: @escaping (Bool) -> Void) {
@@ -2508,6 +2931,11 @@ struct ContentView: View {
     @State private var activeObservations: [Observation] = []
     @State private var activeSessionShotIDs: Set<UUID> = []
     @State private var carryoverIssueBadgeCount: Int = 0
+    @State private var flaggedPendingCaptureCount: Int = 0
+    @State private var guidedReferenceKeys: Set<String> = []
+    @State private var flaggedReferenceIDs: Set<UUID> = []
+    @State private var guidedUpdatedKeysThisSession: Set<String> = []
+    @State private var flaggedUpdatedIDsThisSession: Set<UUID> = []
     @State private var showGuidedChecklist: Bool = false
     @State private var guidedShots: [GuidedShot] = []
     @State private var guidedResolvedThumbnailPathByID: [UUID: String] = [:]
@@ -2552,6 +2980,15 @@ struct ContentView: View {
     @State private var showLevel: Bool = false
 
     private let buildingOptionsDefaultsKey = "scout.capture.building.options.v1"
+
+    @State private var currentCaptureIntent: CaptureIntent = .free
+
+    private enum CaptureIntent {
+        case guided(UUID)
+        case flagged(UUID)
+        case retake(UUID)
+        case free
+    }
 
     init(cameraManager: CameraManager = .shared, onExitToHub: (() -> Void)? = nil) {
         _camera = StateObject(wrappedValue: cameraManager)
@@ -2623,7 +3060,9 @@ struct ContentView: View {
 
     private var guidedRemainingForCompass: Int {
         guard hasGuidedBaselineForSelectedProperty else { return 0 }
-        return guidedSessionCountSnapshot().remaining
+        guard !isCurrentSessionBaselineFromPersisted else { return 0 }
+        let remaining = max(0, guidedReferenceKeys.subtracting(guidedUpdatedKeysThisSession).count)
+        return remaining
     }
 
     private var shouldShowGuidedCompassBadge: Bool {
@@ -2660,6 +3099,23 @@ struct ContentView: View {
         return (total, captured, remaining)
     }
 
+    private var captureIntentDebugLabel: String {
+        switch currentCaptureIntent {
+        case .guided:
+            return "guided"
+        case .flagged:
+            return "flagged"
+        case .retake:
+            return "retake"
+        case .free:
+            return "free"
+        }
+    }
+
+    private var isDetailNoteEnabledForCapture: Bool {
+        !detailNote.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
     private func guidedKey(for guidedShot: GuidedShot) -> String {
         ShotMetadata.makeShotKey(
             building: guidedShot.building ?? "",
@@ -2669,7 +3125,98 @@ struct ContentView: View {
         )
     }
 
+    private func refreshReferenceSetsAndPendingCounts() {
+        guard let propertyID = appState.selectedPropertyID,
+              let currentSession = appState.currentSession else {
+            guidedReferenceKeys = []
+            flaggedReferenceIDs = []
+            guidedUpdatedKeysThisSession = []
+            flaggedUpdatedIDsThisSession = []
+            flaggedPendingCaptureCount = 0
+            print("[ReferenceSet] sessionID=NONE guidedRefCount=0 flaggedRefCount=0")
+            print("[PendingUpdate] intent=\(captureIntentDebugLabel) guidedUpdated=0 flaggedUpdated=0")
+            print("[BadgeCompute] guidedRemaining=0 flaggedRemaining=0")
+            return
+        }
+
+        if persistedBaselineState(propertyID: propertyID).baselineSessionID == currentSession.id {
+            guidedReferenceKeys = []
+            flaggedReferenceIDs = []
+            guidedUpdatedKeysThisSession = []
+            flaggedUpdatedIDsThisSession = []
+            flaggedPendingCaptureCount = 0
+            print("[ReferenceSet] sessionID=\(currentSession.id.uuidString) guidedRefCount=0 flaggedRefCount=0")
+            print("[PendingUpdate] intent=\(captureIntentDebugLabel) guidedUpdated=0 flaggedUpdated=0")
+            print("[BadgeCompute] guidedRemaining=0 flaggedRemaining=0")
+            return
+        }
+
+        let baselineState = persistedBaselineState(propertyID: propertyID)
+        let orderedSessions = ((try? localStore.fetchSessions(propertyID: propertyID)) ?? []).sorted { $0.startedAt < $1.startedAt }
+        let currentSessionMetadata = sessionMetadataForActiveSession(propertyID: propertyID, sessionID: currentSession.id)
+        var metadataCache: [UUID: SessionMetadata] = [:]
+        metadataCache[currentSession.id] = currentSessionMetadata
+
+        var newGuidedReferenceKeys: Set<String> = []
+        for guidedShot in guidedShots {
+            let resolved = resolveGuidedRetakeReferenceForDisplay(
+                propertyID: propertyID,
+                currentSession: currentSession,
+                baselineSessionID: baselineState.baselineSessionID,
+                guidedShot: guidedShot,
+                orderedSessions: orderedSessions,
+                metadataCache: &metadataCache
+            )
+            if resolved.exists {
+                newGuidedReferenceKeys.insert(guidedKey(for: guidedShot))
+            }
+        }
+
+        let newGuidedUpdatedKeys = Set(
+            guidedShots.compactMap { guidedShot -> String? in
+                let key = guidedKey(for: guidedShot)
+                guard newGuidedReferenceKeys.contains(key) else { return nil }
+                if isGuidedShotSkippedInCurrentSession(guidedShot) {
+                    return key
+                }
+                guard isShotCapturedInCurrentSession(guidedShot.shot) else { return nil }
+                return key
+            }
+        )
+
+        let allObservations = (try? localStore.fetchObservations(propertyID: propertyID)) ?? []
+        let newFlaggedReferenceIDs = Set(
+            allObservations.compactMap { observation -> UUID? in
+                guard observation.createdAt < currentSession.startedAt else { return nil }
+                if observation.status == .active || observation.updatedInSessionID == currentSession.id || observation.resolvedInSessionID == currentSession.id {
+                    return observation.id
+                }
+                return nil
+            }
+        )
+        let newFlaggedUpdatedIDs = Set(
+            allObservations.compactMap { observation -> UUID? in
+                guard newFlaggedReferenceIDs.contains(observation.id) else { return nil }
+                if observation.updatedInSessionID == currentSession.id || observation.resolvedInSessionID == currentSession.id {
+                    return observation.id
+                }
+                return nil
+            }
+        )
+
+        guidedReferenceKeys = newGuidedReferenceKeys
+        flaggedReferenceIDs = newFlaggedReferenceIDs
+        guidedUpdatedKeysThisSession = newGuidedUpdatedKeys
+        flaggedUpdatedIDsThisSession = newFlaggedUpdatedIDs
+        flaggedPendingCaptureCount = max(0, newFlaggedReferenceIDs.subtracting(newFlaggedUpdatedIDs).count)
+
+        print("[ReferenceSet] sessionID=\(currentSession.id.uuidString) guidedRefCount=\(guidedReferenceKeys.count) flaggedRefCount=\(flaggedReferenceIDs.count)")
+        print("[PendingUpdate] intent=\(captureIntentDebugLabel) guidedUpdated=\(guidedUpdatedKeysThisSession.count) flaggedUpdated=\(flaggedUpdatedIDsThisSession.count)")
+        print("[BadgeCompute] guidedRemaining=\(guidedRemainingForCompass) flaggedRemaining=\(flaggedPendingCaptureCount)")
+    }
+
     private func shotMetadata(_ shot: ShotMetadata, matches guidedShot: GuidedShot, guidedKey: String) -> Bool {
+        guard shot.isGuided else { return false }
         if shot.shotKey.caseInsensitiveCompare(guidedKey) == .orderedSame {
             return true
         }
@@ -2819,8 +3366,20 @@ struct ContentView: View {
         let currentSessionID = currentSession?.id
         let key = guidedKey(for: guidedShot)
 
-        if let currentSessionID, let currentSessionMetadata,
-           let currentShot = currentSessionMetadata.shots.first(where: { shotMetadata($0, matches: guidedShot, guidedKey: key) }) {
+        if let currentSessionID,
+           let currentShot = guidedShot.shot,
+           activeSessionShotIDs.contains(currentShot.id) {
+            let directPath = currentShot.imageLocalIdentifier?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            if !directPath.isEmpty, FileManager.default.fileExists(atPath: directPath) {
+                print("[GuidedThumbResolve] propertyID=\(propertyID.uuidString) currentSessionID=\(currentSessionID.uuidString) guidedKey=\(key) chosenSource=current chosenSessionID=\(currentSessionID.uuidString) chosenPath=\(directPath) exists=true")
+                return GuidedSessionThumbnailResolution(source: .current, sessionID: currentSessionID, path: directPath, exists: true)
+            }
+        }
+
+        if let currentSessionID,
+           let currentSessionMetadata,
+           let currentShotID = guidedShot.shot?.id,
+           let currentShot = currentSessionMetadata.shots.first(where: { $0.shotID == currentShotID && shotMetadata($0, matches: guidedShot, guidedKey: key) }) {
             let resolved = resolvedSessionImagePath(
                 for: currentShot,
                 propertyID: propertyID,
@@ -2853,6 +3412,17 @@ struct ContentView: View {
                 print("[GuidedThumbResolve] propertyID=\(propertyID.uuidString) currentSessionID=\(currentSessionID?.uuidString ?? "NONE") guidedKey=\(key) chosenSource=prior chosenSessionID=\(prior.id.uuidString) chosenPath=\(path) exists=true")
                 return GuidedSessionThumbnailResolution(source: .prior, sessionID: prior.id, path: path, exists: true)
             }
+        }
+
+        let fallbackReference = [
+            guidedShot.referenceImagePath?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "",
+            guidedShot.referenceImageLocalIdentifier?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        ]
+        .first(where: { !$0.isEmpty && FileManager.default.fileExists(atPath: $0) })
+
+        if let fallbackReference {
+            print("[GuidedThumbResolve] propertyID=\(propertyID.uuidString) currentSessionID=\(currentSessionID?.uuidString ?? "NONE") guidedKey=\(key) chosenSource=reference chosenSessionID=NONE chosenPath=\(fallbackReference) exists=true")
+            return GuidedSessionThumbnailResolution(source: .reference, sessionID: nil, path: fallbackReference, exists: true)
         }
 
         if let baselineSessionID,
@@ -5634,6 +6204,21 @@ extension ContentView {
             },
             onTap: {
                 guard !isArmedIssueDetailNoteReadOnly else { return }
+                if case .guided = currentCaptureIntent {
+                    clearGuidedAndRetakeArming()
+                    guidedReferenceAssetLocalID = nil
+                    guidedReferenceThumbnail = nil
+                    showGuidedAlignmentOverlay = false
+                    showArmedReferenceMenu = false
+                    setCaptureIntent(.free)
+                } else if case .retake = currentCaptureIntent {
+                    clearGuidedAndRetakeArming()
+                    guidedReferenceAssetLocalID = nil
+                    guidedReferenceThumbnail = nil
+                    showGuidedAlignmentOverlay = false
+                    showArmedReferenceMenu = false
+                    setCaptureIntent(.free)
+                }
                 draftDetailNote = detailNote
                 showDetailOverlay = true
             }
@@ -5812,11 +6397,11 @@ extension ContentView {
                 let snapshot = guidedSessionCountSnapshot()
                 let sessionIDText = appState.currentSession?.id.uuidString ?? "NONE"
                 print("[GuidedCount] session=\(sessionIDText) guidedTotal=\(snapshot.total) capturedForSession=\(snapshot.captured) remaining=\(snapshot.remaining)")
-                let liveGuidedCount = guidedSessionCountSnapshot().remaining
-                print("[Badge] beforeOpen guidedCount=\(liveGuidedCount) flaggedCount=\(carryoverIssueBadgeCount)")
+                let liveGuidedCount = guidedRemainingForCompass
+                print("[Badge] beforeOpen guidedCount=\(liveGuidedCount) flaggedCount=\(flaggedPendingCaptureCount)")
                 showGuidedChecklist = true
-                let liveGuidedCountAfter = guidedSessionCountSnapshot().remaining
-                print("[Badge] afterOpen guidedCount=\(liveGuidedCountAfter) flaggedCount=\(carryoverIssueBadgeCount)")
+                let liveGuidedCountAfter = guidedRemainingForCompass
+                print("[Badge] afterOpen guidedCount=\(liveGuidedCountAfter) flaggedCount=\(flaggedPendingCaptureCount)")
             }
         }
     }
@@ -5824,7 +6409,7 @@ extension ContentView {
     private func activeIssuesFlagButton() -> some View {
         let hitArea: CGFloat = 44
         let symbolSize: CGFloat = 22
-        let count = carryoverIssueBadgeCount
+        let count = flaggedPendingCaptureCount
         let hasIssues = count > 0
 
         return Button(action: {
@@ -6290,7 +6875,41 @@ extension ContentView {
         let noteAtCapture = detailNote.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let propertyID = appState.selectedPropertyID,
               let sessionID = appState.currentSession?.id else { return }
+        let captureIntent = currentCaptureIntent
+        let armedGuidedIDAtCapture: UUID? = {
+            switch captureIntent {
+            case .guided(let guidedID):
+                return guidedID
+            case .retake:
+                return armedGuidedShotID
+            default:
+                return nil
+            }
+        }()
+        let armedFlaggedIDAtCapture: UUID? = {
+            if case .flagged(let flaggedID) = captureIntent {
+                return flaggedID
+            }
+            return nil
+        }()
+        let armedRetakeShotIDAtCapture: UUID? = {
+            if case .retake(let shotID) = captureIntent {
+                return shotID
+            }
+            return nil
+        }()
+        print(
+            "[Shutter] intent=\(captureIntentDebugLabel) " +
+            "guidedID=\(armedGuidedIDAtCapture?.uuidString ?? "NONE") " +
+            "flaggedID=\(armedFlaggedIDAtCapture?.uuidString ?? "NONE") " +
+            "retakeShotID=\(armedRetakeShotIDAtCapture?.uuidString ?? "NONE") " +
+            "guidedArmedKey=\(armedGuidedIDAtCapture.flatMap { id in guidedShots.first(where: { $0.id == id }).map(guidedKey(for:)) } ?? "NONE") " +
+            "flagArmedID=\(armedFlaggedIDAtCapture?.uuidString ?? "NONE") " +
+            "detailNoteEnabled=\(isDetailNoteEnabledForCapture) " +
+            "sessionID=\(sessionID.uuidString)"
+        )
         let activeRetakeContext: RetakeContext? = {
+            guard case .retake = captureIntent else { return nil }
             guard let context = retakeContext else { return nil }
             guard let armedGuidedID = armedGuidedShotID,
                   let armedRetakeShotID = armedGuidedRetakeShotID else { return nil }
@@ -6303,6 +6922,9 @@ extension ContentView {
             // Defensive cleanup for stale retake state so normal captures always mint a new shot ID.
             armedGuidedRetakeShotID = nil
             retakeContext = nil
+            if case .retake = currentCaptureIntent {
+                currentCaptureIntent = .free
+            }
         }
         let captureShotID = activeRetakeContext?.existingShotID ?? UUID()
         let preferredRetakeFilename = activeRetakeContext?.existingOriginalFilename
@@ -6321,13 +6943,60 @@ extension ContentView {
                 return
             }
             let captureDate = Date()
+            let captureTime = ReportLibraryModel.EmbeddedCaptureTime(captureDate: captureDate)
+            let selectedProperty = appState.selectedProperty
+            let normalizedElevation = CanonicalElevation.normalize(elevation) ?? elevation
+            let captureDescriptionNote = noteAtCapture.isEmpty ? nil : noteAtCapture
+            let captureAngleIndex = max(
+                1,
+                activeRetakeContext?.angleIndex
+                    ?? armedGuidedIDAtCapture.flatMap { guidedID in guidedShots.first(where: { $0.id == guidedID })?.angleIndex }
+                    ?? 1
+            )
+            let captureShotKey = ShotMetadata.makeShotKey(
+                building: selectedBuilding,
+                elevation: normalizedElevation,
+                detailType: currentDetailType,
+                angleIndex: captureAngleIndex
+            )
+            let captureLocation = locationManager.lastLocation
+            let capturedExifOrientationRaw = ReportLibraryModel.cgOrientationRawFromDevice(lastValidDeviceOrientation)
+            print("[SavePhoto] capture orientation device=\(lastValidDeviceOrientation.rawValue) exifRaw=\(capturedExifOrientationRaw)")
+            let captureMetadataContext = ReportLibraryModel.EmbeddedMetadataContext(
+                propertyID: propertyID,
+                propertyName: selectedProperty?.name,
+                propertyAddress: selectedProperty?.address,
+                sessionID: sessionID,
+                shotID: captureShotID,
+                shotKey: captureShotKey,
+                building: selectedBuilding,
+                elevation: normalizedElevation,
+                detailType: currentDetailType,
+                angleIndex: captureAngleIndex,
+                isGuided: nil,
+                isFlagged: nil,
+                issueStatus: nil,
+                detailNote: captureDescriptionNote,
+                captureMode: camera.effectiveHDEnabled ? "hd" : "normal",
+                lens: camera.selectedZoomId,
+                orientation: "exif:\(capturedExifOrientationRaw)",
+                capturedExifOrientationRaw: capturedExifOrientationRaw,
+                latitude: captureLocation?.coordinate.latitude,
+                longitude: captureLocation?.coordinate.longitude,
+                accuracyMeters: captureLocation?.horizontalAccuracy,
+                appVersion: Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String,
+                osVersion: UIDevice.current.systemVersion,
+                deviceModel: UIDevice.current.model,
+                schemaVersion: 4
+            )
             
             reportLibrary.savePhotoDataToSession(
                 data: data,
                 propertyID: propertyID,
                 sessionID: sessionID,
                 shotID: captureShotID,
-                captureDate: captureDate,
+                captureDate: captureTime.captureDate,
+                metadataContext: captureMetadataContext,
                 preferredFilename: preferredRetakeFilename
             ) { success, photoRef, failureReason in
                 DispatchQueue.main.async {
@@ -6344,19 +7013,49 @@ extension ContentView {
                             note: noteAtCapture.isEmpty ? nil : noteAtCapture
                         )
                         let referenceImagePath = writeGuidedReferenceImage(data: data, guidedShotID: captureShotID)
-                        let didApplyGuidedShot = applyArmedGuidedShotIfNeeded(with: shot, referenceImagePath: referenceImagePath)
-                        let didApplyIssueUpdate = applyArmedIssueCaptureIfNeeded(with: shot)
-                        let didQueueResolution = queueResolutionCaptureIfNeeded(with: shot, data: data)
+                        let shouldApplyGuidedRoute: Bool = {
+                            switch captureIntent {
+                            case .guided, .retake:
+                                return true
+                            default:
+                                return false
+                            }
+                        }()
+                        let shouldApplyFlaggedRoute: Bool = {
+                            if case .flagged = captureIntent { return true }
+                            return false
+                        }()
+                        let didApplyGuidedShot = shouldApplyGuidedRoute
+                            ? applyArmedGuidedShotIfNeeded(with: shot, referenceImagePath: referenceImagePath)
+                            : false
+                        let didApplyIssueUpdate = shouldApplyFlaggedRoute
+                            ? applyArmedIssueCaptureIfNeeded(with: shot)
+                            : false
+                        let didQueueResolution = shouldApplyFlaggedRoute
+                            ? queueResolutionCaptureIfNeeded(with: shot, data: data)
+                            : false
                         var createdObservationID: UUID? = nil
                         if !didApplyGuidedShot && !didApplyIssueUpdate && !didQueueResolution {
-                            if noteAtCapture.isEmpty {
-                                createGuidedAngleFromCaptureIfNeeded(with: shot, referenceImagePath: referenceImagePath)
-                            } else {
-                                createdObservationID = createObservationFromCapturedDetailNote(noteAtCapture, shot: shot)
+                            if case .free = captureIntent {
+                                if noteAtCapture.isEmpty {
+                                    createGuidedAngleFromCaptureIfNeeded(with: shot, referenceImagePath: referenceImagePath)
+                                } else {
+                                    createdObservationID = createObservationFromCapturedDetailNote(noteAtCapture, shot: shot)
+                                }
                             }
                         }
-                        let captureIsGuided = didApplyGuidedShot || noteAtCapture.isEmpty
+                        let captureIsGuided = didApplyGuidedShot || (createdObservationID == nil && noteAtCapture.isEmpty && {
+                            if case .free = captureIntent { return true }
+                            return false
+                        }())
                         let captureIsFlagged = didApplyIssueUpdate || didQueueResolution || createdObservationID != nil
+                        print(
+                            "[CaptureRoute] writing shotKey=\(captureShotKey) " +
+                            "isGuided=\(captureIsGuided) " +
+                            "isFlagged=\(captureIsFlagged) " +
+                            "sessionID=\(sessionID.uuidString) " +
+                            "destination=\(shot.imageLocalIdentifier ?? "NONE")"
+                        )
                         print(
                             "[CaptureComplete] newShotID=\(shot.id.uuidString) " +
                             "isGuided=\(captureIsGuided) " +
@@ -6413,6 +7112,7 @@ extension ContentView {
             statement: noteText,
             status: .active,
             linkedShotID: shot.id,
+            updatedInSessionID: appState.currentSession?.id,
             building: selectedBuilding,
             targetElevation: elevation,
             detailType: currentDetailType,
@@ -6423,8 +7123,10 @@ extension ContentView {
         do {
             let created = try localStore.createObservation(observation)
             refreshActiveIssues()
+            refreshReferenceSetsAndPendingCounts()
             detailNote = ""
             isArmedIssueDetailNoteReadOnly = false
+            setCaptureIntent(.free)
             if camera.manualHDEnabled {
                 camera.manualHDEnabled = false
             }
@@ -6532,14 +7234,7 @@ extension ContentView {
             detailType: detailTypeValue,
             angleIndex: max(1, angleIndexValue)
         )
-        let orientationLabel: String = {
-            switch lastValidDeviceOrientation {
-            case .landscapeLeft: return "landscapeLeft"
-            case .landscapeRight: return "landscapeRight"
-            case .portraitUpsideDown: return "portraitUpsideDown"
-            default: return "portrait"
-            }
-        }()
+        let exifOrientation = Int(ReportLibraryModel.cgOrientationRawFromDevice(lastValidDeviceOrientation))
         let location = locationManager.lastLocation
 
         var metadata = ShotMetadata(
@@ -6566,7 +7261,7 @@ extension ContentView {
             stampedRelativePath: nil,
             captureMode: camera.effectiveHDEnabled ? "hd" : "normal",
             lens: camera.selectedZoomId,
-            orientation: orientationLabel,
+            exifOrientation: exifOrientation,
             latitude: location?.coordinate.latitude,
             longitude: location?.coordinate.longitude,
             accuracyMeters: location?.horizontalAccuracy,
@@ -6640,142 +7335,125 @@ extension ContentView {
             activeSessionShotIDs = []
             armedGuidedShotID = nil
             armedGuidedRetakeShotID = nil
+            currentCaptureIntent = .free
             guidedReferenceAssetLocalID = nil
             guidedReferenceThumbnail = nil
             showGuidedAlignmentOverlay = false
             showArmedReferenceMenu = false
+            refreshReferenceSetsAndPendingCounts()
             return
         }
 
         let activeSessionID = appState.currentSession?.id
-        do {
-            let baselineState = persistedBaselineState(propertyID: propertyID)
-            print(
-                "[BaselineState] propertyID=\(propertyID.uuidString) baselineSessionID=\(baselineState.baselineSessionID?.uuidString ?? "NONE") hasBaseline=\(baselineState.hasBaseline)"
-            )
-            let sessionMetadata = sessionMetadataForActiveSession(propertyID: propertyID, sessionID: activeSessionID)
-            let sessionShotIDs = Set((sessionMetadata?.shots ?? []).map(\.shotID))
-            activeSessionShotIDs = sessionShotIDs
-            let isBaselineSessionActive = baselineState.baselineSessionID == activeSessionID
-            let orderedSessions = ((try? localStore.fetchSessions(propertyID: propertyID)) ?? []).sorted { $0.startedAt < $1.startedAt }
-            let currentSession = orderedSessions.first(where: { $0.id == activeSessionID }) ?? appState.currentSession
-            var metadataCache: [UUID: SessionMetadata] = [:]
-            if let currentSessionMetadata = sessionMetadata, let activeSessionID {
-                metadataCache[activeSessionID] = currentSessionMetadata
-            }
+        let baselineState = persistedBaselineState(propertyID: propertyID)
+        print(
+            "[BaselineState] propertyID=\(propertyID.uuidString) baselineSessionID=\(baselineState.baselineSessionID?.uuidString ?? "NONE") hasBaseline=\(baselineState.hasBaseline)"
+        )
+        let sessionMetadata = sessionMetadataForActiveSession(propertyID: propertyID, sessionID: activeSessionID)
+        let sessionShotIDs = Set((sessionMetadata?.shots ?? []).map(\.shotID))
+        activeSessionShotIDs = sessionShotIDs
+        let isBaselineSessionActive = baselineState.baselineSessionID == activeSessionID
+        let orderedSessions = ((try? localStore.fetchSessions(propertyID: propertyID)) ?? []).sorted { $0.startedAt < $1.startedAt }
+        let currentSession = orderedSessions.first(where: { $0.id == activeSessionID }) ?? appState.currentSession
+        var metadataCache: [UUID: SessionMetadata] = [:]
+        if let currentSessionMetadata = sessionMetadata, let activeSessionID {
+            metadataCache[activeSessionID] = currentSessionMetadata
+        }
 
-            var fetchedGuidedShots = loadGuidedChecklistForSession(
-                propertyID: propertyID,
-                sessionID: activeSessionID,
-                baselineState: baselineState
+        var fetchedGuidedShots = loadGuidedChecklistForSession(
+            propertyID: propertyID,
+            sessionID: activeSessionID,
+            baselineState: baselineState
+        )
+        var resolvedMap: [UUID: String] = [:]
+        if !isBaselineSessionActive {
+            let currentGuidedMetadataByID = Dictionary(
+                uniqueKeysWithValues: (sessionMetadata?.shots ?? [])
+                    .filter(\.isGuided)
+                    .map { ($0.shotID, $0) }
             )
-            if !isBaselineSessionActive {
-                let shotsByKey: [String: ShotMetadata] = {
-                    var map: [String: ShotMetadata] = [:]
-                    for shot in sessionMetadata?.shots ?? [] {
-                        map[shot.shotKey] = shot
-                    }
-                    return map
-                }()
 
-                for index in fetchedGuidedShots.indices {
-                    let guided = fetchedGuidedShots[index]
-                    let angle = max(1, guided.angleIndex ?? 1)
-                    let shotKey = ShotMetadata.makeShotKey(
-                        building: guided.building ?? "",
-                        elevation: guided.targetElevation ?? "",
-                        detailType: guided.detailType ?? "",
-                        angleIndex: angle
+            for index in fetchedGuidedShots.indices {
+                let guided = fetchedGuidedShots[index]
+                if let existingShot = guided.shot,
+                   let metadataShot = currentGuidedMetadataByID[existingShot.id],
+                   let sessionID = activeSessionID {
+                    let resolved = resolvedSessionImagePath(
+                        for: metadataShot,
+                        propertyID: propertyID,
+                        sessionID: sessionID
                     )
-
-                    if let metadataShot = shotsByKey[shotKey],
-                       let sessionID = activeSessionID {
-                        let resolved = resolvedSessionImagePath(
-                            for: metadataShot,
-                            propertyID: propertyID,
-                            sessionID: sessionID
+                    if let localIdentifier = resolved.absolutePath {
+                        fetchedGuidedShots[index].shot = Shot(
+                            id: metadataShot.shotID,
+                            capturedAt: metadataShot.updatedAt,
+                            imageLocalIdentifier: localIdentifier,
+                            note: metadataShot.noteText
                         )
-                        if let localIdentifier = resolved.absolutePath {
-                            fetchedGuidedShots[index].shot = Shot(
-                                id: metadataShot.shotID,
-                                capturedAt: metadataShot.updatedAt,
-                                imageLocalIdentifier: localIdentifier,
-                                note: metadataShot.noteText
-                            )
-                            fetchedGuidedShots[index].isCompleted = true
-                        } else {
-                            fetchedGuidedShots[index].shot = nil
-                            fetchedGuidedShots[index].isCompleted = false
-                        }
-                    } else if let existingShot = guided.shot,
-                              sessionShotIDs.contains(existingShot.id) {
-                        // Keep existing current-session shot if it still belongs to active session.
                         fetchedGuidedShots[index].isCompleted = true
                     } else {
                         fetchedGuidedShots[index].shot = nil
                         fetchedGuidedShots[index].isCompleted = false
                     }
-                }
-            }
-
-            var resolvedMap: [UUID: String] = [:]
-            for index in fetchedGuidedShots.indices {
-                let guided = fetchedGuidedShots[index]
-                let resolved = resolveGuidedThumbnailForDisplay(
-                    propertyID: propertyID,
-                    currentSession: currentSession,
-                    baselineSessionID: baselineState.baselineSessionID,
-                    guidedShot: guided,
-                    currentSessionMetadata: sessionMetadata,
-                    orderedSessions: orderedSessions,
-                    metadataCache: &metadataCache
-                )
-                if let chosenPath = resolved.path, resolved.exists {
-                    resolvedMap[guided.id] = chosenPath
-                    if resolved.source != .current {
-                        fetchedGuidedShots[index].referenceImagePath = chosenPath
-                        fetchedGuidedShots[index].referenceImageLocalIdentifier = chosenPath
+                } else {
+                    if let existingShot = guided.shot {
+                        let priorPath = existingShot.imageLocalIdentifier?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                        if !priorPath.isEmpty, FileManager.default.fileExists(atPath: priorPath) {
+                            fetchedGuidedShots[index].referenceImagePath = priorPath
+                            fetchedGuidedShots[index].referenceImageLocalIdentifier = priorPath
+                            resolvedMap[guided.id] = priorPath
+                        }
                     }
+                    fetchedGuidedShots[index].shot = nil
+                    fetchedGuidedShots[index].isCompleted = false
                 }
             }
-            guidedShots = fetchedGuidedShots
-            guidedResolvedThumbnailPathByID = resolvedMap
+        }
 
-            if let armedID = armedGuidedShotID, guidedShots.contains(where: { $0.id == armedID }) == false {
-                armedGuidedShotID = nil
-                armedGuidedRetakeShotID = nil
-                showArmedReferenceMenu = false
+        for index in fetchedGuidedShots.indices {
+            let guided = fetchedGuidedShots[index]
+            if resolvedMap[guided.id] != nil {
+                continue
             }
+            let resolved = resolveGuidedThumbnailForDisplay(
+                propertyID: propertyID,
+                currentSession: currentSession,
+                baselineSessionID: baselineState.baselineSessionID,
+                guidedShot: guided,
+                currentSessionMetadata: sessionMetadata,
+                orderedSessions: orderedSessions,
+                metadataCache: &metadataCache
+            )
+            if let chosenPath = resolved.path, resolved.exists {
+                resolvedMap[guided.id] = chosenPath
+                if resolved.source != .current {
+                    fetchedGuidedShots[index].referenceImagePath = chosenPath
+                    fetchedGuidedShots[index].referenceImageLocalIdentifier = chosenPath
+                }
+            }
+        }
+        guidedShots = fetchedGuidedShots
+        guidedResolvedThumbnailPathByID = resolvedMap
 
-            print(
-                "[GuidedData] using sessionID=\(activeSessionID?.uuidString ?? "NONE") " +
-                "shotsCount=\(sessionShotIDs.count) " +
-                "flaggedCount=\(activeObservations.count) " +
-                "guidedCount=\(guidedShots.count)"
-            )
-            let snapshot = guidedSessionCountSnapshot()
-            print(
-                "[GuidedCount] session=\(activeSessionID?.uuidString ?? "NONE") " +
-                "guidedTotal=\(snapshot.total) capturedForSession=\(snapshot.captured) remaining=\(snapshot.remaining)"
-            )
-        } catch {
-            guidedShots = []
-            guidedResolvedThumbnailPathByID = [:]
-            activeSessionShotIDs = []
+        if let armedID = armedGuidedShotID, guidedShots.contains(where: { $0.id == armedID }) == false {
             armedGuidedShotID = nil
             armedGuidedRetakeShotID = nil
-            guidedReferenceAssetLocalID = nil
-            guidedReferenceThumbnail = nil
-            showGuidedAlignmentOverlay = false
+            currentCaptureIntent = .free
             showArmedReferenceMenu = false
-            print(
-                "[GuidedData] using sessionID=\(activeSessionID?.uuidString ?? "NONE") " +
-                "shotsCount=0 flaggedCount=\(activeObservations.count) guidedCount=0"
-            )
-            print(
-                "[GuidedCount] session=\(activeSessionID?.uuidString ?? "NONE") guidedTotal=0 capturedForSession=0 remaining=0"
-            )
         }
+
+        print(
+            "[GuidedData] using sessionID=\(activeSessionID?.uuidString ?? "NONE") " +
+            "shotsCount=\(sessionShotIDs.count) " +
+            "flaggedCount=\(activeObservations.count) " +
+            "guidedCount=\(guidedShots.count)"
+        )
+        let snapshot = guidedSessionCountSnapshot()
+        print(
+            "[GuidedCount] session=\(activeSessionID?.uuidString ?? "NONE") " +
+            "guidedTotal=\(snapshot.total) capturedForSession=\(snapshot.captured) remaining=\(snapshot.remaining)"
+        )
+        refreshReferenceSetsAndPendingCounts()
     }
 
     private func loadGuidedChecklistForSession(
@@ -6784,7 +7462,11 @@ extension ContentView {
         baselineState: (baselineSessionID: UUID?, hasBaseline: Bool)
     ) -> [GuidedShot] {
         if let existing = try? localStore.fetchGuidedShots(propertyID: propertyID), !existing.isEmpty {
-            return existing
+            let normalized = Self.normalizedGuidedShotsWithStableAngles(existing)
+            if normalized != existing {
+                try? localStore.saveGuidedShots(normalized, propertyID: propertyID)
+            }
+            return normalized
         }
 
         guard let sessionID else {
@@ -6804,7 +7486,13 @@ extension ContentView {
         var seeded: [GuidedShot] = []
         seeded.reserveCapacity(baselineMetadata.shots.count)
 
-        for shot in baselineMetadata.shots where (shot.isGuided || !shot.isFlagged) {
+        for shot in baselineMetadata.shots
+            .filter(\.isGuided)
+            .sorted(by: { lhs, rhs in
+                if lhs.createdAt != rhs.createdAt { return lhs.createdAt < rhs.createdAt }
+                if lhs.angleIndex != rhs.angleIndex { return lhs.angleIndex < rhs.angleIndex }
+                return lhs.shotID.uuidString < rhs.shotID.uuidString
+            }) {
             let stampedRelative = shot.stampedRelativePath?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             let originalRelative = shot.originalRelativePath.trimmingCharacters(in: .whitespacesAndNewlines)
 
@@ -6843,11 +7531,12 @@ extension ContentView {
             seeded.append(seededShot)
         }
 
-        if !seeded.isEmpty {
-            try? localStore.saveGuidedShots(seeded, propertyID: propertyID)
+        let normalizedSeeded = Self.normalizedGuidedShotsWithStableAngles(seeded)
+        if !normalizedSeeded.isEmpty {
+            try? localStore.saveGuidedShots(normalizedSeeded, propertyID: propertyID)
         }
-        print("[GuidedSeed] session=\(sessionID.uuidString) seededCount=\(seeded.count)")
-        return seeded
+        print("[GuidedSeed] session=\(sessionID.uuidString) seededCount=\(normalizedSeeded.count)")
+        return normalizedSeeded
     }
 
     private func refreshUIAfterRetakeSuccess(existingFilename: String?, newLocalIdentifier: String?) {
@@ -6912,6 +7601,7 @@ extension ContentView {
         showGuidedAlignmentOverlay = false
         armedGuidedRetakeShotID = nil
         armedGuidedShotID = guidedShot.id
+        setCaptureIntent(.guided(guidedShot.id))
         showGuidedChecklist = false
     }
 
@@ -6974,6 +7664,7 @@ extension ContentView {
         )
         armedGuidedRetakeShotID = existingShot.id
         armedGuidedShotID = guidedShot.id
+        setCaptureIntent(.retake(existingShot.id))
         showGuidedChecklist = false
     }
 
@@ -7010,18 +7701,20 @@ extension ContentView {
             allGuidedShots[idx].isCompleted = false
             allGuidedShots[idx].shot = nil
 
-            try localStore.saveGuidedShots(allGuidedShots, propertyID: propertyID)
-            guidedShots = allGuidedShots
-            refreshSessionActionsSummaryIfVisible()
-
             if armedGuidedShotID == guidedShot.id {
                 armedGuidedShotID = nil
                 armedGuidedRetakeShotID = nil
                 retakeContext = nil
+                currentCaptureIntent = .free
                 guidedReferenceAssetLocalID = nil
                 guidedReferenceThumbnail = nil
                 showGuidedAlignmentOverlay = false
             }
+
+            _ = try saveNormalizedGuidedShots(allGuidedShots, propertyID: propertyID)
+            refreshGuidedShots()
+            guidedThumbnailRefreshToken = UUID()
+            refreshSessionActionsSummaryIfVisible()
         } catch {
             print("Failed to mark guided shot skipped: \(error)")
         }
@@ -7035,8 +7728,9 @@ extension ContentView {
             allGuidedShots[idx].skipReason = nil
             allGuidedShots[idx].skipReasonNote = nil
             allGuidedShots[idx].skipSessionID = nil
-            try localStore.saveGuidedShots(allGuidedShots, propertyID: propertyID)
-            guidedShots = allGuidedShots
+            _ = try saveNormalizedGuidedShots(allGuidedShots, propertyID: propertyID)
+            refreshGuidedShots()
+            guidedThumbnailRefreshToken = UUID()
             refreshSessionActionsSummaryIfVisible()
         } catch {
             print("Failed to undo guided skip: \(error)")
@@ -7049,6 +7743,7 @@ extension ContentView {
             armedGuidedShotID = nil
             armedGuidedRetakeShotID = nil
             retakeContext = nil
+            currentCaptureIntent = .free
             return false
         }
 
@@ -7058,6 +7753,7 @@ extension ContentView {
                 armedGuidedShotID = nil
                 armedGuidedRetakeShotID = nil
                 retakeContext = nil
+                currentCaptureIntent = .free
                 return false
             }
 
@@ -7067,30 +7763,29 @@ extension ContentView {
                     armedGuidedShotID = nil
                     armedGuidedRetakeShotID = nil
                     retakeContext = nil
+                    currentCaptureIntent = .free
                     return false
                 }
             } else if isShotCapturedInCurrentSession(allGuidedShots[idx].shot) {
                 armedGuidedShotID = nil
                 armedGuidedRetakeShotID = nil
                 retakeContext = nil
+                currentCaptureIntent = .free
                 return false
             }
 
             allGuidedShots[idx].shot = shot
             allGuidedShots[idx].isCompleted = true
+            allGuidedShots[idx].referenceImageLocalIdentifier = shot.imageLocalIdentifier
+            allGuidedShots[idx].referenceImagePath = shot.imageLocalIdentifier
             allGuidedShots[idx].skipReason = nil
             allGuidedShots[idx].skipReasonNote = nil
             allGuidedShots[idx].skipSessionID = nil
             if allGuidedShots[idx].angleIndex == nil || allGuidedShots[idx].angleIndex == 0 {
-                let inferredAngle = max(1, allGuidedShots.filter {
-                    normalizeGuidedPart($0.building) == normalizeGuidedPart(allGuidedShots[idx].building) &&
-                    normalizeGuidedPart($0.targetElevation) == normalizeGuidedPart(allGuidedShots[idx].targetElevation) &&
-                    normalizeGuidedPart($0.detailType) == normalizeGuidedPart(allGuidedShots[idx].detailType)
-                }.count)
-                allGuidedShots[idx].angleIndex = inferredAngle
+                allGuidedShots[idx].angleIndex = 1
             }
-            try localStore.saveGuidedShots(allGuidedShots, propertyID: propertyID)
-            guidedShots = allGuidedShots
+            let normalizedGuidedShots = try saveNormalizedGuidedShots(allGuidedShots, propertyID: propertyID)
+            guidedShots = normalizedGuidedShots
             refreshSessionActionsSummaryIfVisible()
 
             if isRetake {
@@ -7100,6 +7795,7 @@ extension ContentView {
             armedGuidedShotID = nil
             armedGuidedRetakeShotID = nil
             retakeContext = nil
+            currentCaptureIntent = .free
             guidedReferenceAssetLocalID = nil
             guidedReferenceThumbnail = nil
             showGuidedAlignmentOverlay = false
@@ -7108,6 +7804,7 @@ extension ContentView {
             armedGuidedShotID = nil
             armedGuidedRetakeShotID = nil
             retakeContext = nil
+            currentCaptureIntent = .free
             guidedReferenceAssetLocalID = nil
             guidedReferenceThumbnail = nil
             showGuidedAlignmentOverlay = false
@@ -7127,9 +7824,9 @@ extension ContentView {
             var allGuidedShots = try localStore.fetchGuidedShots(propertyID: propertyID)
 
             let matching = allGuidedShots.filter {
-                normalizeGuidedPart($0.building) == normalizeGuidedPart(building) &&
-                normalizeGuidedPart($0.targetElevation) == normalizeGuidedPart(elevationValue) &&
-                normalizeGuidedPart($0.detailType) == normalizeGuidedPart(detailTypeValue)
+                Self.normalizeGuidedPart($0.building) == Self.normalizeGuidedPart(building) &&
+                Self.normalizeGuidedPart($0.targetElevation) == Self.normalizeGuidedPart(elevationValue) &&
+                Self.normalizeGuidedPart($0.detailType) == Self.normalizeGuidedPart(detailTypeValue)
             }
 
             let nextAngle = (matching.map { max(1, $0.angleIndex ?? 1) }.max() ?? 0) + 1
@@ -7141,14 +7838,14 @@ extension ContentView {
                 targetElevation: elevationValue,
                 detailType: detailTypeValue,
                 angleIndex: nextAngle,
-                referenceImageLocalIdentifier: nil,
-                referenceImagePath: nil,
+                referenceImageLocalIdentifier: shot.imageLocalIdentifier,
+                referenceImagePath: shot.imageLocalIdentifier,
                 shot: shot,
                 isCompleted: true
             )
             allGuidedShots.append(guided)
-            try localStore.saveGuidedShots(allGuidedShots, propertyID: propertyID)
-            guidedShots = allGuidedShots
+            let normalizedGuidedShots = try saveNormalizedGuidedShots(allGuidedShots, propertyID: propertyID)
+            guidedShots = normalizedGuidedShots
         } catch {
             // Keep capture resilient if guided persistence fails.
         }
@@ -7162,8 +7859,62 @@ extension ContentView {
         )
     }
 
-    private func normalizeGuidedPart(_ value: String?) -> String {
+    private static func normalizeGuidedPart(_ value: String?) -> String {
         value?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
+    }
+
+    private static func normalizedGuidedShotsWithStableAngles(_ guidedShots: [GuidedShot]) -> [GuidedShot] {
+        var normalized = guidedShots
+        let groupedIndices = Dictionary(grouping: normalized.indices) { index in
+            let item = normalized[index]
+            return [
+                Self.normalizeGuidedPart(item.building),
+                Self.normalizeGuidedPart(CanonicalElevation.normalize(item.targetElevation) ?? item.targetElevation),
+                Self.normalizeGuidedPart(item.detailType)
+            ].joined(separator: "|")
+        }
+
+        for indices in groupedIndices.values {
+            guard !indices.isEmpty else { continue }
+
+            let orderedIndices = indices.sorted { lhs, rhs in
+                let left = normalized[lhs]
+                let right = normalized[rhs]
+                let leftAngle = max(0, left.angleIndex ?? 0)
+                let rightAngle = max(0, right.angleIndex ?? 0)
+                if leftAngle != rightAngle { return leftAngle < rightAngle }
+                let leftCapturedAt = left.shot?.capturedAt ?? .distantPast
+                let rightCapturedAt = right.shot?.capturedAt ?? .distantPast
+                if leftCapturedAt != rightCapturedAt { return leftCapturedAt < rightCapturedAt }
+                return left.id.uuidString < right.id.uuidString
+            }
+
+            var usedAngles = Set<Int>()
+            var nextAngle = 1
+
+            for index in orderedIndices {
+                let currentAngle = normalized[index].angleIndex ?? 0
+                let assignedAngle: Int
+                if currentAngle > 0 && !usedAngles.contains(currentAngle) {
+                    assignedAngle = currentAngle
+                } else {
+                    while usedAngles.contains(nextAngle) {
+                        nextAngle += 1
+                    }
+                    assignedAngle = nextAngle
+                }
+                normalized[index].angleIndex = assignedAngle
+                usedAngles.insert(assignedAngle)
+            }
+        }
+
+        return normalized
+    }
+
+    private func saveNormalizedGuidedShots(_ guidedShots: [GuidedShot], propertyID: UUID) throws -> [GuidedShot] {
+        let normalized = Self.normalizedGuidedShotsWithStableAngles(guidedShots)
+        try localStore.saveGuidedShots(normalized, propertyID: propertyID)
+        return normalized
     }
 
     private func writeGuidedReferenceImage(data: Data, guidedShotID: UUID) -> String? {
@@ -7303,8 +8054,8 @@ extension ContentView {
             "[EndSession] sessionID=\(currentSession.id.uuidString) " +
             "metadataShots=\(persisted.metadataShotCount) guidedCount=\(guided.count) guidedRemaining=\(guidedRemaining)"
         )
-        let liveGuidedCount = guidedSessionCountSnapshot().remaining
-        print("[Badge] beforeOpen guidedCount=\(liveGuidedCount) flaggedCount=\(carryoverIssueBadgeCount)")
+        let liveGuidedCount = guidedRemainingForCompass
+        print("[Badge] beforeOpen guidedCount=\(liveGuidedCount) flaggedCount=\(flaggedPendingCaptureCount)")
 
         sessionActionsSummary = SessionActionsSummary(
             guidedRemainingCount: guidedRemaining,
@@ -7323,8 +8074,8 @@ extension ContentView {
         }
         print("[ExportUI] sessionID=\(currentSession.id.uuidString) isPendingDelivery=\(isPendingDelivery) isReExportEligible=\(reExportEligibleNow)")
         showSessionActionsSheet = true
-        let liveGuidedCountAfter = guidedSessionCountSnapshot().remaining
-        print("[Badge] afterOpen guidedCount=\(liveGuidedCountAfter) flaggedCount=\(carryoverIssueBadgeCount)")
+        let liveGuidedCountAfter = guidedRemainingForCompass
+        print("[Badge] afterOpen guidedCount=\(liveGuidedCountAfter) flaggedCount=\(flaggedPendingCaptureCount)")
     }
 
     private func carryoverFlaggedRemainingCount(observations: [Observation]) -> Int {
@@ -7547,9 +8298,9 @@ extension ContentView {
             }
 
             if didChange {
-                try localStore.saveGuidedShots(allGuidedShots, propertyID: propertyID)
+                let normalizedGuidedShots = try saveNormalizedGuidedShots(allGuidedShots, propertyID: propertyID)
                 if appState.selectedPropertyID == propertyID {
-                    guidedShots = allGuidedShots
+                    guidedShots = normalizedGuidedShots
                 }
             }
         } catch {
@@ -7594,6 +8345,7 @@ extension ContentView {
             stampedByOriginalFilename = try ensureSessionStampedJPEGs(
                 propertyID: propertyID,
                 sessionID: sessionID,
+                propertyAddress: appState.selectedProperty?.address,
                 assets: assets
             )
         }
@@ -7631,9 +8383,19 @@ extension ContentView {
         debugDecoder.dateDecodingStrategy = .iso8601
         if let decoded = try? debugDecoder.decode(SessionMetadata.self, from: sessionData),
            let first = decoded.shots.first {
+            print("Export sessionStartedAt: \(decoded.startedAt)")
+            print("Export sessionStartedAtLocal: \(decoded.sessionStartedAtLocal)")
             print("Export first shot shotKey: \(first.shotKey)")
+            print("Export first shot createdAt: \(first.createdAt)")
+            print("Export first shot createdAtLocal: \(first.capturedAtLocal ?? "nil")")
             print("Export first shot originalRelativePath: \(first.originalRelativePath)")
             print("Export first shot stampedRelativePath: \(first.stampedRelativePath ?? "nil")")
+            if let delivered = decoded.firstDeliveredAt {
+                print("Export firstDeliveredAt: \(delivered)")
+            }
+            if let expires = decoded.reExportExpiresAt {
+                print("Export reExportExpiresAt: \(expires)")
+            }
         }
 #endif
 
@@ -7708,6 +8470,7 @@ extension ContentView {
     private func ensureSessionStampedJPEGs(
         propertyID: UUID,
         sessionID: UUID,
+        propertyAddress: String?,
         assets: [ReportAsset]
     ) throws -> [String: URL] {
         let fileManager = FileManager.default
@@ -7775,6 +8538,14 @@ extension ContentView {
                     shot: metadata.shots[index],
                     isBaselineSession: metadata.isBaselineSession
                 ),
+                metadataContext: stampedMetadataContext(
+                    propertyID: propertyID,
+                    sessionID: sessionID,
+                    shot: metadata.shots[index],
+                    propertyName: propertyName,
+                    propertyAddress: propertyAddress,
+                    schemaVersion: metadata.schemaVersion
+                ),
                 fileManager: fileManager
             )
             let metadataRelative = metadata.shots[index].stampedRelativePath ?? "nil"
@@ -7808,6 +8579,7 @@ extension ContentView {
         destinationURL: URL,
         captureDate: Date,
         overlayLines: [String],
+        metadataContext: ReportLibraryModel.EmbeddedMetadataContext,
         fileManager: FileManager
     ) throws {
         if fileManager.fileExists(atPath: destinationURL.path),
@@ -7821,7 +8593,8 @@ extension ContentView {
         let stampedData = try encodeStampedJPEGForExport(
             from: sourceData,
             captureDate: captureDate,
-            overlayLines: overlayLines
+            overlayLines: overlayLines,
+            metadataContext: metadataContext
         )
         try stampedData.write(to: destinationURL, options: [.atomic])
 
@@ -7847,43 +8620,79 @@ extension ContentView {
             let modified = attrs[.modificationDate] as? Date
             print("[Stamp] readback creation=\(String(describing: created)) modification=\(String(describing: modified))")
         }
+        if let source = CGImageSourceCreateWithURL(destinationURL as CFURL, nil),
+           let props = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any] {
+            let width = (props[kCGImagePropertyPixelWidth] as? NSNumber)?.intValue ?? 0
+            let height = (props[kCGImagePropertyPixelHeight] as? NSNumber)?.intValue ?? 0
+            let orientation = (props[kCGImagePropertyOrientation] as? NSNumber)?.intValue ?? 0
+            print("[Stamp] readback pixelWidth=\(width) pixelHeight=\(height) orientation=\(orientation)")
+        }
 #endif
     }
 
     private func encodeStampedJPEGForExport(
         from sourceData: Data,
         captureDate: Date,
-        overlayLines: [String]
+        overlayLines: [String],
+        metadataContext: ReportLibraryModel.EmbeddedMetadataContext
     ) throws -> Data {
         guard let source = CGImageSourceCreateWithData(sourceData as CFData, nil) else {
             throw NSError(domain: "ScoutCapture.Stamp", code: 2, userInfo: [NSLocalizedDescriptionKey: "Missing source image for stamped export"])
         }
 
+        let sourceCGImage = CGImageSourceCreateImageAtIndex(source, 0, nil)
+        let sourceProps = (CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any]) ?? [:]
+        let sourceOrientationRaw = (sourceProps[kCGImagePropertyOrientation] as? NSNumber)?.uint32Value
+        let capturedOrientationRaw = metadataContext.capturedExifOrientationRaw
+        let resolvedOrientationRaw = sourceOrientationRaw ?? capturedOrientationRaw ?? 1
+        print("[Stamp] orientation capturedRaw=\(capturedOrientationRaw.map(String.init) ?? "nil") sourceRaw=\(sourceOrientationRaw.map(String.init) ?? "nil") resolvedRaw=\(resolvedOrientationRaw)")
+        if let sourceCGImage {
+            print("[Stamp] before encode pixelWidth=\(sourceCGImage.width) pixelHeight=\(sourceCGImage.height)")
+        }
         let image = normalizedUprightCGImage(from: sourceData)
-            ?? CGImageSourceCreateImageAtIndex(source, 0, nil)
+            ?? sourceCGImage
         guard let image else {
             throw NSError(domain: "ScoutCapture.Stamp", code: 2, userInfo: [NSLocalizedDescriptionKey: "Missing source image for stamped export"])
         }
-
-        let sourceProps = (CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any]) ?? [:]
+        print("[Stamp] after upright pixelWidth=\(image.width) pixelHeight=\(image.height)")
         var mergedProps = sourceProps
         var exif = (mergedProps[kCGImagePropertyExifDictionary] as? [CFString: Any]) ?? [:]
         var tiff = (mergedProps[kCGImagePropertyTIFFDictionary] as? [CFString: Any]) ?? [:]
 
-        let exifTimestamp = Self.exportExifTimestampFormatter.string(from: captureDate)
-        let exifSubsec = Self.exportExifSubsecFormatter.string(from: captureDate)
-        let exifOffset = Self.exportExifOffsetString(for: captureDate)
-        exif[kCGImagePropertyExifDateTimeOriginal] = exifTimestamp
-        exif[kCGImagePropertyExifDateTimeDigitized] = exifTimestamp
-        exif[kCGImagePropertyExifSubsecTimeOriginal] = exifSubsec
-        exif[kCGImagePropertyExifSubsecTimeDigitized] = exifSubsec
-        exif[kCGImagePropertyExifOffsetTimeOriginal] = exifOffset
-        exif[kCGImagePropertyExifOffsetTimeDigitized] = exifOffset
-        tiff[kCGImagePropertyTIFFDateTime] = exifTimestamp
+        let captureTime = ReportLibraryModel.EmbeddedCaptureTime(captureDate: captureDate)
+        exif[kCGImagePropertyExifDateTimeOriginal] = captureTime.localDateTimeString
+        exif[kCGImagePropertyExifDateTimeDigitized] = captureTime.localDateTimeString
+        exif[kCGImagePropertyExifSubsecTimeOriginal] = captureTime.subsecString
+        exif[kCGImagePropertyExifSubsecTimeDigitized] = captureTime.subsecString
+        exif[kCGImagePropertyExifOffsetTimeOriginal] = captureTime.tzOffsetString
+        exif[kCGImagePropertyExifOffsetTimeDigitized] = captureTime.tzOffsetString
+        exif[kCGImagePropertyExifOffsetTime] = captureTime.tzOffsetString
+        exif[kCGImagePropertyExifUserComment] = scoutStructuredStampComment(captureTime: captureTime, metadataContext: metadataContext)
+        tiff[kCGImagePropertyTIFFDateTime] = captureTime.localDateTimeString
         mergedProps[kCGImagePropertyExifDictionary] = exif
         mergedProps[kCGImagePropertyTIFFDictionary] = tiff
         mergedProps[kCGImagePropertyOrientation] = 1
+        tiff[kCGImagePropertyTIFFOrientation] = 1
+        mergedProps[kCGImagePropertyTIFFDictionary] = tiff
         mergedProps[kCGImageDestinationLossyCompressionQuality] = 0.90
+        print("[Stamp] orientation writeTag exif/tiff=1")
+        if let gps = makeStampedGPSDictionary(
+            latitude: metadataContext.latitude,
+            longitude: metadataContext.longitude,
+            accuracyMeters: metadataContext.accuracyMeters,
+            captureDate: captureDate
+        ) {
+            mergedProps[kCGImagePropertyGPSDictionary] = gps
+        }
+        let caption = overlayLines.joined(separator: "\n")
+        if !caption.isEmpty {
+            tiff[kCGImagePropertyTIFFImageDescription] = caption
+            mergedProps[kCGImagePropertyTIFFDictionary] = tiff
+            var iptc = (mergedProps[kCGImagePropertyIPTCDictionary] as? [CFString: Any]) ?? [:]
+            iptc[kCGImagePropertyIPTCCaptionAbstract] = caption
+            iptc[kCGImagePropertyIPTCKeywords] = stampedKeywordList(metadataContext: metadataContext)
+            mergedProps[kCGImagePropertyIPTCDictionary] = iptc
+        }
 
         let stampedCGImage = drawStampOverlay(
             on: image,
@@ -7899,12 +8708,241 @@ extension ContentView {
         ) else {
             throw NSError(domain: "ScoutCapture.Stamp", code: 3, userInfo: [NSLocalizedDescriptionKey: "Unable to create JPEG destination"])
         }
-        CGImageDestinationAddImage(destination, stampedCGImage, mergedProps as CFDictionary)
+        if let xmpMetadata = buildStampedXMPMetadata(
+            source: source,
+            captureTime: captureTime,
+            metadataContext: metadataContext
+        ) {
+            CGImageDestinationAddImageAndMetadata(
+                destination,
+                stampedCGImage,
+                xmpMetadata,
+                mergedProps as CFDictionary
+            )
+        } else {
+            CGImageDestinationAddImage(destination, stampedCGImage, mergedProps as CFDictionary)
+        }
         guard CGImageDestinationFinalize(destination) else {
             throw NSError(domain: "ScoutCapture.Stamp", code: 4, userInfo: [NSLocalizedDescriptionKey: "Unable to finalize JPEG destination"])
         }
         return destinationData as Data
     }
+
+    private func stampedMetadataContext(
+        propertyID: UUID,
+        sessionID: UUID,
+        shot: ShotMetadata,
+        propertyName: String,
+        propertyAddress: String?,
+        schemaVersion: Int
+    ) -> ReportLibraryModel.EmbeddedMetadataContext {
+        ReportLibraryModel.EmbeddedMetadataContext(
+            propertyID: propertyID,
+            propertyName: propertyName,
+            propertyAddress: propertyAddress,
+            sessionID: sessionID,
+            shotID: shot.shotID,
+            shotKey: shot.shotKey,
+            building: shot.building,
+            elevation: shot.elevation,
+            detailType: shot.detailType,
+            angleIndex: shot.angleIndex,
+            isGuided: shot.isGuided,
+            isFlagged: shot.isFlagged,
+            issueStatus: shot.issueStatus,
+            detailNote: shot.noteText,
+            captureMode: shot.captureMode,
+            lens: shot.lens,
+            orientation: shot.exifOrientation.map { "exif:\($0)" } ?? shot.orientation,
+            capturedExifOrientationRaw: shot.exifOrientation.flatMap(UInt32.init) ?? parseExifOrientationRaw(from: shot.orientation),
+            latitude: shot.latitude,
+            longitude: shot.longitude,
+            accuracyMeters: shot.accuracyMeters,
+            appVersion: Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String,
+            osVersion: UIDevice.current.systemVersion,
+            deviceModel: UIDevice.current.model,
+            schemaVersion: schemaVersion
+        )
+    }
+
+    private func parseExifOrientationRaw(from orientation: String?) -> UInt32? {
+        let trimmed = orientation?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !trimmed.isEmpty else { return nil }
+        if let direct = UInt32(trimmed), direct >= 1, direct <= 8 {
+            return direct
+        }
+        let prefix = "exif:"
+        if trimmed.lowercased().hasPrefix(prefix),
+           let value = UInt32(trimmed.dropFirst(prefix.count)),
+           value >= 1, value <= 8 {
+            return value
+        }
+        return nil
+    }
+
+    private func scoutStructuredStampComment(
+        captureTime: ReportLibraryModel.EmbeddedCaptureTime,
+        metadataContext: ReportLibraryModel.EmbeddedMetadataContext
+    ) -> String {
+        var pairs: [String] = []
+        func append(_ key: String, _ value: String?) {
+            let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            if !trimmed.isEmpty {
+                pairs.append("\(key)=\(trimmed)")
+            }
+        }
+        append("propertyID", metadataContext.propertyID?.uuidString)
+        append("propertyName", metadataContext.propertyName)
+        append("propertyAddress", metadataContext.propertyAddress)
+        append("sessionID", metadataContext.sessionID?.uuidString)
+        append("shotID", metadataContext.shotID?.uuidString)
+        append("shotKey", metadataContext.shotKey)
+        append("building", metadataContext.building)
+        append("elevation", metadataContext.elevation)
+        append("detailType", metadataContext.detailType)
+        append("angleIndex", metadataContext.angleIndex.map(String.init))
+        append("captureMode", metadataContext.captureMode)
+        append("lens", metadataContext.lens)
+        append("orientation", metadataContext.orientation)
+        append("captureDateLocal", captureTime.localDateTimeString)
+        append("captureDateISO8601", captureTime.iso8601WithOffset)
+        if let accuracy = metadataContext.accuracyMeters {
+            append("gpsAccuracyMeters", String(format: "%.3f", accuracy))
+        }
+        return pairs.joined(separator: ";")
+    }
+
+    private func stampedKeywordList(metadataContext: ReportLibraryModel.EmbeddedMetadataContext) -> [String] {
+        var keywords: [String] = ["SCOUT"]
+        let values = [
+            metadataContext.propertyName,
+            metadataContext.building,
+            metadataContext.elevation,
+            metadataContext.detailType
+        ]
+        for value in values {
+            let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            if !trimmed.isEmpty {
+                keywords.append(trimmed)
+            }
+        }
+        keywords.append(metadataContext.isGuided == true ? "Guided" : "Free")
+        if metadataContext.isFlagged == true {
+            keywords.append("Flagged")
+        }
+        if let angle = metadataContext.angleIndex {
+            keywords.append("Angle \(angle)")
+        }
+        return Array(NSOrderedSet(array: keywords)) as? [String] ?? keywords
+    }
+
+    private func makeStampedGPSDictionary(
+        latitude: Double?,
+        longitude: Double?,
+        accuracyMeters: Double?,
+        captureDate: Date
+    ) -> [CFString: Any]? {
+        guard let latitude, let longitude else { return nil }
+        var gps: [CFString: Any] = [:]
+        gps[kCGImagePropertyGPSLatitude] = abs(latitude)
+        gps[kCGImagePropertyGPSLatitudeRef] = latitude >= 0 ? "N" : "S"
+        gps[kCGImagePropertyGPSLongitude] = abs(longitude)
+        gps[kCGImagePropertyGPSLongitudeRef] = longitude >= 0 ? "E" : "W"
+        gps[kCGImagePropertyGPSDateStamp] = Self.exportGPSDateFormatter.string(from: captureDate)
+        gps[kCGImagePropertyGPSTimeStamp] = Self.exportGPSTimeFormatter.string(from: captureDate)
+        if let accuracyMeters, accuracyMeters >= 0 {
+            gps[kCGImagePropertyGPSHPositioningError] = accuracyMeters
+        }
+        return gps
+    }
+
+    private func buildStampedXMPMetadata(
+        source: CGImageSource,
+        captureTime: ReportLibraryModel.EmbeddedCaptureTime,
+        metadataContext: ReportLibraryModel.EmbeddedMetadataContext
+    ) -> CGMutableImageMetadata? {
+        let baseMetadata = CGImageSourceCopyMetadataAtIndex(source, 0, nil)
+        let mutable = baseMetadata.flatMap(CGImageMetadataCreateMutableCopy) ?? CGImageMetadataCreateMutable()
+        var registrationError: Unmanaged<CFError>?
+        _ = CGImageMetadataRegisterNamespaceForPrefix(
+            mutable,
+            "https://scoutcapture.app/ns/1.0/" as CFString,
+            "scout" as CFString,
+            &registrationError
+        )
+        func setTag(_ path: String, _ value: String?) {
+            let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            guard !trimmed.isEmpty else { return }
+            let components = path.split(separator: ":", maxSplits: 1).map(String.init)
+            guard components.count == 2 else { return }
+            let prefix = components[0]
+            let name = components[1]
+            let namespace: String
+            switch prefix {
+            case "xmp":
+                namespace = "http://ns.adobe.com/xap/1.0/"
+            case "scout":
+                namespace = "https://scoutcapture.app/ns/1.0/"
+            default:
+                return
+            }
+            guard let tag = CGImageMetadataTagCreate(
+                namespace as CFString,
+                prefix as CFString,
+                name as CFString,
+                .string,
+                trimmed as CFString
+            ) else {
+                return
+            }
+            CGImageMetadataSetTagWithPath(mutable, nil, path as CFString, tag)
+        }
+        setTag("xmp:CreateDate", captureTime.iso8601WithOffset)
+        setTag("xmp:ModifyDate", captureTime.iso8601WithOffset)
+        setTag("scout:propertyID", metadataContext.propertyID?.uuidString)
+        setTag("scout:propertyName", metadataContext.propertyName)
+        setTag("scout:propertyAddress", metadataContext.propertyAddress)
+        setTag("scout:sessionID", metadataContext.sessionID?.uuidString)
+        setTag("scout:shotID", metadataContext.shotID?.uuidString)
+        setTag("scout:shotKey", metadataContext.shotKey)
+        setTag("scout:building", metadataContext.building)
+        setTag("scout:elevation", metadataContext.elevation)
+        setTag("scout:detailType", metadataContext.detailType)
+        setTag("scout:angleIndex", metadataContext.angleIndex.map(String.init))
+        setTag("scout:isGuided", metadataContext.isGuided.map { $0 ? "true" : "false" })
+        setTag("scout:isFlagged", metadataContext.isFlagged.map { $0 ? "true" : "false" })
+        setTag("scout:captureMode", metadataContext.captureMode)
+        setTag("scout:lens", metadataContext.lens)
+        setTag("scout:orientation", metadataContext.orientation)
+        setTag("scout:appVersion", metadataContext.appVersion)
+        setTag("scout:osVersion", metadataContext.osVersion)
+        setTag("scout:deviceModel", metadataContext.deviceModel)
+        setTag("scout:schemaVersion", metadataContext.schemaVersion.map(String.init))
+        setTag("scout:issueStatus", metadataContext.issueStatus)
+        setTag("scout:issueNote", metadataContext.detailNote)
+        if let accuracy = metadataContext.accuracyMeters {
+            setTag("scout:gpsAccuracyMeters", String(format: "%.3f", accuracy))
+        }
+        return mutable
+    }
+
+    private static let exportGPSDateFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(secondsFromGMT: 0)
+        formatter.dateFormat = "yyyy:MM:dd"
+        return formatter
+    }()
+
+    private static let exportGPSTimeFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(secondsFromGMT: 0)
+        formatter.dateFormat = "HH:mm:ss"
+        return formatter
+    }()
 
     private func normalizedUprightCGImage(from sourceData: Data) -> CGImage? {
         guard let uiImage = UIImage(data: sourceData) else { return nil }
@@ -8350,6 +9388,26 @@ extension ContentView {
         showGuidedAlignmentOverlay = false
     }
 
+    private func setCaptureIntent(_ intent: CaptureIntent) {
+        currentCaptureIntent = intent
+    }
+
+    private func clearGuidedAndRetakeArming() {
+        armedGuidedShotID = nil
+        armedGuidedRetakeShotID = nil
+        retakeContext = nil
+    }
+
+    private func clearFlaggedArming() {
+        clearPendingFlaggedDecision()
+        clearArmedIssueState()
+        resolutionTargetObservation = nil
+        resetResolutionCapturePreview()
+        isArmedIssueDetailNoteReadOnly = false
+        detailNote = ""
+        restoreArmedIssueHDIfNeeded()
+    }
+
     private func resetSelectionForSwitch() {
         flaggedActionToastToken += 1
         showFlaggedActionToast = false
@@ -8363,6 +9421,7 @@ extension ContentView {
         armedGuidedShotID = nil
         armedGuidedRetakeShotID = nil
         retakeContext = nil
+        currentCaptureIntent = .free
         isArmedIssueDetailNoteReadOnly = false
         detailNote = ""
         restoreArmedIssueHDIfNeeded()
@@ -8377,6 +9436,7 @@ extension ContentView {
     private func cancelArmedIssueCapture() {
         clearPendingFlaggedDecision()
         clearArmedIssueState()
+        currentCaptureIntent = .free
         isArmedIssueDetailNoteReadOnly = false
         detailNote = ""
         restoreArmedIssueHDIfNeeded()
@@ -8385,6 +9445,7 @@ extension ContentView {
     private func finalizeArmedIssueCaptureAfterDecision() {
         clearPendingFlaggedDecision()
         clearArmedIssueState()
+        currentCaptureIntent = .free
         isArmedIssueDetailNoteReadOnly = false
         detailNote = ""
         if let previous = armedIssuePreviousManualHD {
@@ -8550,8 +9611,11 @@ extension ContentView {
             activeSessionShotIDs = []
             flaggedResolvedThumbnailPathByID = [:]
             carryoverIssueBadgeCount = 0
+            flaggedPendingCaptureCount = 0
             reportLibrary.setActiveIssueCount(0)
             print("[FlaggedData] using sessionID=\(appState.currentSession?.id.uuidString ?? "NONE") flaggedCount=0 sessionShotsCount=0")
+            refreshReferenceSetsAndPendingCounts()
+            print("[BadgeCounts] sessionID=\(appState.currentSession?.id.uuidString ?? "NONE") guidedPending=\(guidedRemainingForCompass) flaggedPending=\(flaggedPendingCaptureCount) carryoverIssues=0")
             return
         }
 
@@ -8612,20 +9676,34 @@ extension ContentView {
                 "flaggedCount=\(activeObservations.count) " +
                 "sessionShotsCount=\(sessionShotIDs.count)"
             )
+            refreshReferenceSetsAndPendingCounts()
+            print(
+                "[BadgeCounts] sessionID=\(activeSessionID?.uuidString ?? "NONE") " +
+                "guidedPending=\(guidedRemainingForCompass) flaggedPending=\(flaggedPendingCaptureCount) carryoverIssues=\(carryoverIssueBadgeCount)"
+            )
         } catch {
             activeObservations = []
             flaggedResolvedThumbnailPathByID = [:]
             carryoverIssueBadgeCount = 0
+            flaggedPendingCaptureCount = 0
             reportLibrary.setActiveIssueCount(0)
             print(
                 "[FlaggedData] using sessionID=\(activeSessionID?.uuidString ?? "NONE") " +
                 "flaggedCount=0 sessionShotsCount=0"
+            )
+            refreshReferenceSetsAndPendingCounts()
+            print(
+                "[BadgeCounts] sessionID=\(activeSessionID?.uuidString ?? "NONE") " +
+                "guidedPending=\(guidedRemainingForCompass) flaggedPending=\(flaggedPendingCaptureCount) carryoverIssues=0"
             )
         }
     }
 
     private func armIssueUpdate(_ observation: Observation, revisedObservationText: String?) {
         showActiveIssuesSheet = false
+        armedGuidedShotID = nil
+        armedGuidedRetakeShotID = nil
+        retakeContext = nil
         resolutionTargetObservation = nil
         resetResolutionCapturePreview()
         armedIssueRevisedObservationText = revisedObservationText?.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -8660,6 +9738,7 @@ extension ContentView {
             detailTypesModel.setSelected(detail, for: locationMode)
         }
         armedUpdateObservationID = observation.id
+        setCaptureIntent(.flagged(observation.id))
     }
 
     private func armIssueUpdate(_ observation: Observation) {
@@ -8670,6 +9749,7 @@ extension ContentView {
         showActiveIssuesSheet = false
         armedUpdateObservationID = nil
         resolutionTargetObservation = observation
+        setCaptureIntent(.flagged(observation.id))
         resetResolutionCapturePreview()
         showResolutionModeToast = true
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.8) {
@@ -10049,7 +11129,8 @@ extension ContentView {
                     }
                 }
                 if didChangeGuided {
-                    try? localStore.saveGuidedShots(guided, propertyID: propertyID)
+                    let normalizedGuided = normalizedGuidedShotsWithStableAngles(guided)
+                    try? localStore.saveGuidedShots(normalizedGuided, propertyID: propertyID)
                 }
             }
 
@@ -10248,8 +11329,18 @@ extension ContentView {
             debugDecoder.dateDecodingStrategy = .iso8601
             if let decoded = try? debugDecoder.decode(SessionMetadata.self, from: sessionData),
                let first = decoded.shots.first {
+                print("Export sessionStartedAt: \(decoded.startedAt)")
+                print("Export sessionStartedAtLocal: \(decoded.sessionStartedAtLocal)")
                 print("Export first shot shotKey: \(first.shotKey)")
+                print("Export first shot createdAt: \(first.createdAt)")
+                print("Export first shot createdAtLocal: \(first.capturedAtLocal ?? "nil")")
                 print("Export first shot originalRelativePath: \(first.originalRelativePath)")
+                if let delivered = decoded.firstDeliveredAt {
+                    print("Export firstDeliveredAt: \(delivered)")
+                }
+                if let expires = decoded.reExportExpiresAt {
+                    print("Export reExportExpiresAt: \(expires)")
+                }
             }
 #endif
 
@@ -12063,7 +13154,10 @@ extension ContentView {
                     return "Resolved"
                 }
                 if observation.updatedInSessionID == currentSessionID {
-                    return "Active · Update Captured"
+                    if observation.sessionID == currentSessionID {
+                        return "Active - Captured"
+                    }
+                    return "Active - Update Captured"
                 }
                 return "Active"
             }
