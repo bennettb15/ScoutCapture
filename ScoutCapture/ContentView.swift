@@ -2957,7 +2957,6 @@ struct ContentView: View {
     @State private var referenceOverlayOpacity: Double = 0.45
     @State private var armedUpdateObservationID: UUID? = nil
     @State private var armedIssueNoteText: String = ""
-    @State private var armedIssuePreviousManualHD: Bool? = nil
     @State private var armedIssueRevisedObservationText: String? = nil
     @State private var showArmedReferenceMenu: Bool = false
     @State private var armedReferenceViewerState: ArmedReferenceViewerState? = nil
@@ -3810,7 +3809,6 @@ struct ContentView: View {
     private struct ExportChecklistState {
         var originalsComplete: Bool = false
         var sessionDataComplete: Bool = false
-        var stampedComplete: Bool = false
         var zipReady: Bool = false
     }
     
@@ -3915,7 +3913,8 @@ struct ContentView: View {
         guard let rawHeading = locationManager.headingDegrees else { return false }
         let currentHeading = normalizedHeadingForAlignment(rawHeading)
         guard let ideal = idealFacingHeading(for: CanonicalElevation.normalize(elevation) ?? elevation) else { return false }
-        return angularDifferenceDegrees(currentHeading, ideal) <= 30
+        // Use contiguous 90-degree sectors so adjacent elevations meet without dead zones.
+        return angularDifferenceDegrees(currentHeading, ideal) <= 45
     }
 
     private func normalizedHeadingForAlignment(_ heading: Double) -> Double {
@@ -4360,9 +4359,6 @@ struct ContentView: View {
                 camera.ensurePreviewRunningAsync()
 
                 locationManager.start()
-                if armedUpdateObservationID == nil && pendingFlaggedDecisionShot == nil {
-                    restoreArmedIssueHDIfNeeded()
-                }
 
                 reportLibrary.warmUpAlbumIfAuthorized()
                 reportLibrary.setSessionContext(
@@ -4428,15 +4424,7 @@ struct ContentView: View {
                 refreshActiveIssues()
             }
             .onChange(of: detailNote) { _, _ in
-                let wasOn = camera.effectiveHDEnabled
-                let wasManual = camera.manualHDEnabled
-
                 camera.updateDetailNoteActive(hasDetailNote)
-
-                // If the note just became active and HD was previously off, show toast
-                if hasDetailNote && camera.hdSupported && !wasOn && !wasManual {
-                    showHDToast("HD Enabled for Detail Capture")
-                }
             }
             .onAppear {
                 ensureCameraSessionPrecondition()
@@ -4975,14 +4963,26 @@ struct ContentView: View {
 
             if showGuidedAlignmentOverlay && isCaptureTargetArmed {
                 if let reference = guidedReferenceThumbnail {
-                    Image(uiImage: reference)
-                        .resizable()
-                        .scaledToFill()
-                        .frame(width: w, height: previewH)
-                        .clipped()
-                        .opacity(referenceOverlayOpacity)
-                        .allowsHitTesting(false)
-                        .zIndex(10)
+                    Group {
+                        if isLandscapeUI {
+                            Image(uiImage: reference)
+                                .resizable()
+                                .scaledToFill()
+                                .frame(width: previewH, height: w)
+                                .rotationEffect(bottomGlyphRotationAngle)
+                                .frame(width: w, height: previewH)
+                                .clipped()
+                        } else {
+                            Image(uiImage: reference)
+                                .resizable()
+                                .scaledToFill()
+                                .frame(width: w, height: previewH)
+                                .clipped()
+                        }
+                    }
+                    .opacity(referenceOverlayOpacity)
+                    .allowsHitTesting(false)
+                    .zIndex(10)
                 } else {
                     Text("No reference available")
                         .font(.system(size: 14, weight: .medium))
@@ -6040,11 +6040,9 @@ extension ContentView {
     }
     private struct HDQuickButton: View {
         let size: CGFloat
-        let hasDetailNote: Bool
         let isEnabled: Bool
         let isOn: Bool
         let onToggle: () -> Void
-        let onForcedTap: () -> Void
         let onHaptic: () -> Void
         
         @State private var isPressed: Bool = false
@@ -6065,15 +6063,6 @@ extension ContentView {
             Button(action: {
                 guard isEnabled else { return }
                 onHaptic()
-                
-                // If detail note exists, HD cannot be turned off.
-                // Still provide pop feedback.
-                if hasDetailNote {
-                    triggerPop()
-                    onForcedTap()
-                    return
-                }
-                
                 triggerPop()
                 onToggle()
             }) {
@@ -6122,7 +6111,6 @@ extension ContentView {
     private func hdQuickButton(size: CGFloat = 44) -> some View {
         HDQuickButton(
             size: size,
-            hasDetailNote: hasDetailNote,
             isEnabled: camera.hdSupported,
             isOn: camera.effectiveHDEnabled,
             onToggle: {
@@ -6132,9 +6120,6 @@ extension ContentView {
                 if !wasOn && isOnNow {
                     showHDToast("HD Enabled for Detail Capture")
                 }
-            },
-            onForcedTap: {
-                showHDToast("HD Enabled for Detail Capture")
             },
             onHaptic: {
                 fireHDButtonHaptic()
@@ -7131,9 +7116,6 @@ extension ContentView {
             detailNote = ""
             isArmedIssueDetailNoteReadOnly = false
             setCaptureIntent(.free)
-            if camera.manualHDEnabled {
-                camera.manualHDEnabled = false
-            }
             return created.id
         } catch {
             // Keep capture UX resilient if local observation persistence fails.
@@ -8231,8 +8213,6 @@ extension ContentView {
                             sessionExportChecklist.originalsComplete = true
                         case .sessionData:
                             sessionExportChecklist.sessionDataComplete = true
-                        case .stamped:
-                            sessionExportChecklist.stampedComplete = true
                         case .zipReady:
                             sessionExportChecklist.zipReady = true
                         }
@@ -8323,7 +8303,6 @@ extension ContentView {
     private enum ExportChecklistStep {
         case originals
         case sessionData
-        case stamped
         case zipReady
     }
 
@@ -8334,32 +8313,13 @@ extension ContentView {
 
         var zipEntries: [(path: String, data: Data, modifiedAt: Date?)] = []
         zipEntries.append(("Originals/", Data(), nil))
-        zipEntries.append(("Stamped/", Data(), nil))
-
         var originalEntries: [(String, Data, Date?)] = []
-        var stampedEntries: [(String, Data, Date?)] = []
-        var stampedByOriginalFilename: [String: URL] = [:]
-        if let propertyID = appState.selectedPropertyID,
-           let sessionID = appState.currentSession?.id {
-            stampedByOriginalFilename = try ensureSessionStampedJPEGs(
-                propertyID: propertyID,
-                sessionID: sessionID,
-                propertyAddress: appState.selectedProperty?.address,
-                assets: assets
-            )
-        }
         for (index, asset) in assets.enumerated() {
             guard let data = requestSessionExportImageData(for: asset) else { continue }
             let filename = sessionExportFilename(for: asset, index: index + 1)
             let attrs = try? fileManager.attributesOfItem(atPath: asset.fileURL.path)
             let modifiedAt = (attrs?[.modificationDate] as? Date) ?? (attrs?[.creationDate] as? Date)
             originalEntries.append(("Originals/\(filename)", data, modifiedAt))
-            if let stampedURL = stampedByOriginalFilename[asset.originalFilename],
-               let stampedData = try? Data(contentsOf: stampedURL) {
-                let stampedAttrs = try? fileManager.attributesOfItem(atPath: stampedURL.path)
-                let stampedModified = (stampedAttrs?[.modificationDate] as? Date) ?? (stampedAttrs?[.creationDate] as? Date)
-                stampedEntries.append(("Stamped/\(stampedURL.lastPathComponent)", stampedData, stampedModified))
-            }
         }
         zipEntries.append(contentsOf: originalEntries)
         progress?(.originals)
@@ -8388,7 +8348,6 @@ extension ContentView {
             print("Export first shot createdAt: \(first.createdAt)")
             print("Export first shot createdAtLocal: \(first.capturedAtLocal ?? "nil")")
             print("Export first shot originalRelativePath: \(first.originalRelativePath)")
-            print("Export first shot stampedRelativePath: \(first.stampedRelativePath ?? "nil")")
             if let delivered = decoded.firstDeliveredAt {
                 print("Export firstDeliveredAt: \(delivered)")
             }
@@ -8400,9 +8359,6 @@ extension ContentView {
 
         zipEntries.append(("session.json", sessionData, Date()))
         progress?(.sessionData)
-
-        zipEntries.append(contentsOf: stampedEntries)
-        progress?(.stamped)
 
         let zipData = buildSessionExportZipData(entries: zipEntries)
         let finalURL = fileManager.temporaryDirectory.appendingPathComponent(sessionExportZipFilename())
@@ -8443,7 +8399,7 @@ extension ContentView {
         print("Export ZIP entries count: \(listedEntries.count)")
         print("Export ZIP entries preview: \(preview)")
 #endif
-        let expectedPaths = Set(originalEntries.map { $0.0 } + stampedEntries.map { $0.0 } + ["session.json", "Originals/", "Stamped/"])
+        let expectedPaths = Set(originalEntries.map { $0.0 } + ["session.json", "Originals/"])
         let actualPaths = Set(listedEntries)
         guard expectedPaths.isSubset(of: actualPaths) else {
             throw NSError(domain: "ScoutCapture.Export", code: 7, userInfo: [NSLocalizedDescriptionKey: "ZIP integrity check failed."])
@@ -9404,7 +9360,6 @@ extension ContentView {
         resetResolutionCapturePreview()
         isArmedIssueDetailNoteReadOnly = false
         detailNote = ""
-        restoreArmedIssueHDIfNeeded()
     }
 
     private func resetSelectionForSwitch() {
@@ -9423,13 +9378,6 @@ extension ContentView {
         currentCaptureIntent = .free
         isArmedIssueDetailNoteReadOnly = false
         detailNote = ""
-        restoreArmedIssueHDIfNeeded()
-    }
-
-    private func restoreArmedIssueHDIfNeeded() {
-        guard let previous = armedIssuePreviousManualHD else { return }
-        camera.manualHDEnabled = previous
-        armedIssuePreviousManualHD = nil
     }
 
     private func cancelArmedIssueCapture() {
@@ -9438,7 +9386,6 @@ extension ContentView {
         currentCaptureIntent = .free
         isArmedIssueDetailNoteReadOnly = false
         detailNote = ""
-        restoreArmedIssueHDIfNeeded()
     }
 
     private func finalizeArmedIssueCaptureAfterDecision() {
@@ -9447,12 +9394,6 @@ extension ContentView {
         currentCaptureIntent = .free
         isArmedIssueDetailNoteReadOnly = false
         detailNote = ""
-        if let previous = armedIssuePreviousManualHD {
-            camera.manualHDEnabled = previous
-        } else {
-            camera.manualHDEnabled = false
-        }
-        armedIssuePreviousManualHD = nil
     }
 
     private func beginFlaggedIssueInteraction(_ observation: Observation) {
@@ -9706,13 +9647,6 @@ extension ContentView {
         resolutionTargetObservation = nil
         resetResolutionCapturePreview()
         armedIssueRevisedObservationText = revisedObservationText?.trimmingCharacters(in: .whitespacesAndNewlines)
-        if armedIssuePreviousManualHD == nil {
-            armedIssuePreviousManualHD = camera.manualHDEnabled
-        }
-        if camera.hdSupported && !camera.manualHDEnabled {
-            camera.manualHDEnabled = true
-            showHDToast("HD Enabled for Detail Capture")
-        }
         let note = observation.note?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         let statement = observation.statement.trimmingCharacters(in: .whitespacesAndNewlines)
         armedIssueNoteText = !note.isEmpty ? note : statement
@@ -10047,7 +9981,6 @@ extension ContentView {
                         VStack(spacing: 10) {
                             checklistRow(title: "Originals", isComplete: checklist.originalsComplete)
                             checklistRow(title: "Session Data", isComplete: checklist.sessionDataComplete)
-                            checklistRow(title: "Stamped", isComplete: checklist.stampedComplete)
                             checklistRow(title: "ZIP Ready", isComplete: checklist.zipReady)
                         }
                     }

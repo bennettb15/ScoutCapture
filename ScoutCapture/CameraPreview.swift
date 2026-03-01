@@ -278,14 +278,9 @@ final class CameraManager: NSObject, ObservableObject {
     // Whether the current device configuration supports HD capture
     @Published private(set) var hdSupported: Bool = true
 
-    // Internal mirror of Detail Note state (set from ContentView)
-    @Published private var detailNoteActive: Bool = false
-    private var hdForcedByDetail: Bool = false
-
     // Derived effective HD state
     var effectiveHDEnabled: Bool {
         if !hdSupported { return false }
-        if detailNoteActive { return true }
         return manualHDEnabled
     }
 
@@ -420,25 +415,7 @@ final class CameraManager: NSObject, ObservableObject {
     // MARK: Detail Note Bridge
 
     func updateDetailNoteActive(_ active: Bool) {
-        let wasActive = detailNoteActive
-        detailNoteActive = active
-
-        if active && !wasActive {
-            if !manualHDEnabled {
-                manualHDEnabled = true
-                hdForcedByDetail = true
-            }
-            refreshTargetMegapixelLabelForUIZoom(currentUIZoom)
-            return
-        }
-
-        if !active && wasActive {
-            if hdForcedByDetail {
-                manualHDEnabled = false
-                hdForcedByDetail = false
-            }
-        }
-
+        _ = active
         refreshTargetMegapixelLabelForUIZoom(currentUIZoom)
     }
 

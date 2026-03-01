@@ -148,14 +148,12 @@ struct SessionHubView: View {
     private struct ExportChecklistState {
         var originalsComplete: Bool = false
         var sessionDataComplete: Bool = false
-        var stampedComplete: Bool = false
         var zipReady: Bool = false
     }
 
     private enum ExportChecklistStep {
         case originals
         case sessionData
-        case stamped
         case zipReady
     }
     
@@ -1121,7 +1119,6 @@ struct SessionHubView: View {
                 VStack(spacing: 10) {
                     checklistRow(title: "Originals", isComplete: pendingExportChecklist.originalsComplete)
                     checklistRow(title: "Session Data", isComplete: pendingExportChecklist.sessionDataComplete)
-                    checklistRow(title: "Stamped", isComplete: pendingExportChecklist.stampedComplete)
                     checklistRow(title: "ZIP Ready", isComplete: pendingExportChecklist.zipReady)
                 }
             }
@@ -1216,8 +1213,6 @@ struct SessionHubView: View {
                                 pendingExportChecklist.originalsComplete = true
                             case .sessionData:
                                 pendingExportChecklist.sessionDataComplete = true
-                            case .stamped:
-                                pendingExportChecklist.stampedComplete = true
                             case .zipReady:
                                 pendingExportChecklist.zipReady = true
                             }
@@ -1317,9 +1312,7 @@ struct SessionHubView: View {
         var assetEntries: [SessionExportAssetEntry] = []
         var zipEntries: [(path: String, data: Data, modifiedAt: Date?)] = []
         zipEntries.append(("Originals/", Data(), nil))
-        zipEntries.append(("Stamped/", Data(), nil))
         var originalEntries: [(String, Data, Date?)] = []
-        var stampedEntries: [(String, Data, Date?)] = []
         let sessionMetadata = try localStore.loadSessionMetadata(propertyID: property.id, sessionID: session.id)
 #if DEBUG
         print("Pending export sessionStartedAt: \(sessionMetadata.startedAt)")
@@ -1335,14 +1328,6 @@ struct SessionHubView: View {
             print("Pending export reExportExpiresAt: \(reExportExpiresAt)")
         }
 #endif
-        let stampedByOriginalFilename = try ensurePendingStampedJPEGs(
-            propertyID: property.id,
-            sessionID: session.id,
-            propertyName: property.name,
-            propertyAddress: property.address,
-            sessionMetadata: sessionMetadata
-        )
-
         for (index, localID) in orderedIDs.enumerated() {
             let trimmed = localID.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !trimmed.isEmpty else { continue }
@@ -1363,13 +1348,6 @@ struct SessionHubView: View {
                 )
             )
             originalEntries.append(("Originals/\(filename)", data, modifiedAt))
-            let originalSourceName = fileURL.lastPathComponent
-            if let stampedURL = stampedByOriginalFilename[originalSourceName],
-               let stampedData = try? Data(contentsOf: stampedURL) {
-                let stampedAttrs = try? FileManager.default.attributesOfItem(atPath: stampedURL.path)
-                let stampedModified = (stampedAttrs?[.modificationDate] as? Date) ?? (stampedAttrs?[.creationDate] as? Date)
-                stampedEntries.append(("Stamped/\(stampedURL.lastPathComponent)", stampedData, stampedModified))
-            }
         }
         zipEntries.append(contentsOf: originalEntries)
         progress?(.originals)
@@ -1392,9 +1370,6 @@ struct SessionHubView: View {
         let sessionData = try encoder.encode(payload)
         zipEntries.append(("session.json", sessionData, Date()))
         progress?(.sessionData)
-
-        zipEntries.append(contentsOf: stampedEntries)
-        progress?(.stamped)
 
         let zipData = buildZipData(entries: zipEntries)
         let fileManager = FileManager.default
@@ -1436,7 +1411,7 @@ struct SessionHubView: View {
         print("Pending export ZIP entries count: \(listedEntries.count)")
         print("Pending export ZIP entries preview: \(preview)")
 #endif
-        let expectedPaths = Set(originalEntries.map { $0.0 } + stampedEntries.map { $0.0 } + ["session.json", "Originals/", "Stamped/"])
+        let expectedPaths = Set(originalEntries.map { $0.0 } + ["session.json", "Originals/"])
         let actualPaths = Set(listedEntries)
         guard expectedPaths.isSubset(of: actualPaths) else {
             throw NSError(domain: "ScoutCapture.PendingExport", code: 7, userInfo: [NSLocalizedDescriptionKey: "ZIP integrity check failed."])
