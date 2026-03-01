@@ -5123,7 +5123,7 @@ struct ContentView: View {
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
                 .padding(.horizontal, 26)
-                .padding(.bottom, 74)
+                .padding(.bottom, isLandscapeUI ? 94 : 74)
                 .rotationEffect(bottomGlyphRotationAngle)
                 .zIndex(21)
             }
