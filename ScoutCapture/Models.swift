@@ -42,6 +42,8 @@ struct SessionMetadata: Codable {
     var osVersion: String
     var shots: [ShotMetadata]
     var issues: [IssueMetadata]
+    var flaggedIssues: [IssueMetadata]
+    var guidedShots: [GuidedShot]
 
     private enum CodingKeys: String, CodingKey {
         case schemaVersion
@@ -69,6 +71,8 @@ struct SessionMetadata: Codable {
         case osVersion
         case shots
         case issues
+        case flaggedIssues
+        case guidedShots
     }
 
     init(
@@ -96,7 +100,9 @@ struct SessionMetadata: Codable {
         deviceModel: String,
         osVersion: String,
         shots: [ShotMetadata],
-        issues: [IssueMetadata]
+        issues: [IssueMetadata],
+        flaggedIssues: [IssueMetadata]? = nil,
+        guidedShots: [GuidedShot] = []
     ) {
         self.schemaVersion = schemaVersion
         self.propertyID = propertyID
@@ -123,6 +129,8 @@ struct SessionMetadata: Codable {
         self.osVersion = osVersion
         self.shots = shots
         self.issues = issues
+        self.flaggedIssues = flaggedIssues ?? issues
+        self.guidedShots = guidedShots
     }
 
     init(from decoder: Decoder) throws {
@@ -163,7 +171,10 @@ struct SessionMetadata: Codable {
         deviceModel = try c.decodeIfPresent(String.self, forKey: .deviceModel) ?? "unknown"
         osVersion = try c.decodeIfPresent(String.self, forKey: .osVersion) ?? "unknown"
         shots = try c.decodeIfPresent([ShotMetadata].self, forKey: .shots) ?? []
-        issues = try c.decodeIfPresent([IssueMetadata].self, forKey: .issues) ?? []
+        let decodedFlaggedIssues = try c.decodeIfPresent([IssueMetadata].self, forKey: .flaggedIssues)
+        issues = try c.decodeIfPresent([IssueMetadata].self, forKey: .issues) ?? decodedFlaggedIssues ?? []
+        flaggedIssues = decodedFlaggedIssues ?? issues
+        guidedShots = try c.decodeIfPresent([GuidedShot].self, forKey: .guidedShots) ?? []
     }
 
     func encode(to encoder: Encoder) throws {
@@ -193,6 +204,8 @@ struct SessionMetadata: Codable {
         try c.encode(osVersion, forKey: .osVersion)
         try c.encode(shots, forKey: .shots)
         try c.encode(issues, forKey: .issues)
+        try c.encode(flaggedIssues, forKey: .flaggedIssues)
+        try c.encode(guidedShots, forKey: .guidedShots)
     }
 
     private static func trimmedNonEmpty(_ value: String?) -> String? {
@@ -220,6 +233,7 @@ struct ShotMetadata: Codable, Identifiable, Equatable {
     var isFlagged: Bool
     var issueID: UUID?
     var issueStatus: String?
+    var captureKind: String?
     var noteText: String?
     var noteCategory: String?
     var originalFilename: String
@@ -258,6 +272,7 @@ struct ShotMetadata: Codable, Identifiable, Equatable {
         case isFlagged
         case issueID
         case issueStatus
+        case captureKind
         case noteText
         case noteCategory
         case originalFilename
@@ -292,6 +307,7 @@ struct ShotMetadata: Codable, Identifiable, Equatable {
         isFlagged: Bool,
         issueID: UUID?,
         issueStatus: String?,
+        captureKind: String? = nil,
         noteText: String?,
         noteCategory: String?,
         originalFilename: String,
@@ -324,6 +340,7 @@ struct ShotMetadata: Codable, Identifiable, Equatable {
         self.isFlagged = isFlagged
         self.issueID = issueID
         self.issueStatus = issueStatus
+        self.captureKind = ShotMetadata.trimmedNonEmpty(captureKind)
         self.noteText = noteText
         self.noteCategory = noteCategory
         self.originalFilename = originalFilename
@@ -366,6 +383,7 @@ struct ShotMetadata: Codable, Identifiable, Equatable {
         isFlagged = try c.decodeIfPresent(Bool.self, forKey: .isFlagged) ?? false
         issueID = try c.decodeIfPresent(UUID.self, forKey: .issueID)
         issueStatus = try c.decodeIfPresent(String.self, forKey: .issueStatus)
+        captureKind = ShotMetadata.trimmedNonEmpty(try c.decodeIfPresent(String.self, forKey: .captureKind))
         noteText = try c.decodeIfPresent(String.self, forKey: .noteText)
         noteCategory = try c.decodeIfPresent(String.self, forKey: .noteCategory)
         originalFilename = try c.decodeIfPresent(String.self, forKey: .originalFilename) ?? ""
@@ -415,7 +433,7 @@ struct ShotMetadata: Codable, Identifiable, Equatable {
         try c.encode(isGuided, forKey: .isGuided)
         try c.encode(isFlagged, forKey: .isFlagged)
         try c.encodeIfPresent(issueID, forKey: .issueID)
-        try c.encodeIfPresent(issueStatus, forKey: .issueStatus)
+        try c.encodeIfPresent(ShotMetadata.trimmedNonEmpty(captureKind), forKey: .captureKind)
         try c.encodeIfPresent(noteText, forKey: .noteText)
         try c.encodeIfPresent(noteCategory, forKey: .noteCategory)
         try c.encode(originalFilename, forKey: .originalFilename)
@@ -477,28 +495,36 @@ struct ShotMetadata: Codable, Identifiable, Equatable {
 struct IssueMetadata: Codable, Identifiable, Equatable {
     let issueID: UUID
     var issueStatus: String
+    var currentReason: String?
+    var previousReason: String?
     var firstSeenAt: Date?
     var firstSeenAtLocal: String?
     var lastSeenAt: Date?
     var lastSeenAtLocal: String?
     var resolvedAt: Date?
     var resolvedAtLocal: String?
+    var lastCaptureSessionId: UUID?
     var detailNote: String?
     var shotKey: String?
+    var historyEvents: [IssueHistoryEvent]
 
     var id: UUID { issueID }
 
     private enum CodingKeys: String, CodingKey {
         case issueID
         case issueStatus
+        case currentReason
+        case previousReason
         case firstSeenAt
         case firstSeenAtLocal
         case lastSeenAt
         case lastSeenAtLocal
         case resolvedAt
         case resolvedAtLocal
+        case lastCaptureSessionId
         case detailNote
         case shotKey
+        case historyEvents
         case status
         case statement
     }
@@ -506,25 +532,33 @@ struct IssueMetadata: Codable, Identifiable, Equatable {
     init(
         issueID: UUID,
         issueStatus: String = "active",
+        currentReason: String? = nil,
+        previousReason: String? = nil,
         firstSeenAt: Date? = nil,
         firstSeenAtLocal: String? = nil,
         lastSeenAt: Date? = nil,
         lastSeenAtLocal: String? = nil,
         resolvedAt: Date? = nil,
         resolvedAtLocal: String? = nil,
+        lastCaptureSessionId: UUID? = nil,
         detailNote: String? = nil,
-        shotKey: String? = nil
+        shotKey: String? = nil,
+        historyEvents: [IssueHistoryEvent] = []
     ) {
         self.issueID = issueID
         self.issueStatus = IssueMetadata.normalizedStatus(issueStatus)
+        self.currentReason = IssueMetadata.trimmedNonEmpty(currentReason)
+        self.previousReason = IssueMetadata.trimmedNonEmpty(previousReason)
         self.firstSeenAt = firstSeenAt
         self.firstSeenAtLocal = IssueMetadata.trimmedNonEmpty(firstSeenAtLocal)
         self.lastSeenAt = lastSeenAt
         self.lastSeenAtLocal = IssueMetadata.trimmedNonEmpty(lastSeenAtLocal)
         self.resolvedAt = resolvedAt
         self.resolvedAtLocal = IssueMetadata.trimmedNonEmpty(resolvedAtLocal)
+        self.lastCaptureSessionId = lastCaptureSessionId
         self.detailNote = IssueMetadata.trimmedNonEmpty(detailNote)
         self.shotKey = IssueMetadata.trimmedNonEmpty(shotKey)
+        self.historyEvents = historyEvents.sorted { $0.timestamp < $1.timestamp }
     }
 
     init(from decoder: Decoder) throws {
@@ -533,38 +567,52 @@ struct IssueMetadata: Codable, Identifiable, Equatable {
 
         if let raw = try c.decodeIfPresent(String.self, forKey: .issueStatus) {
             issueStatus = IssueMetadata.normalizedStatus(raw)
+        } else if let raw = try c.decodeIfPresent(String.self, forKey: .status) {
+            issueStatus = IssueMetadata.normalizedStatus(raw)
         } else if let legacyStatus = try c.decodeIfPresent(Observation.Status.self, forKey: .status) {
             issueStatus = legacyStatus == .resolved ? "resolved" : "active"
         } else {
             issueStatus = "active"
         }
 
+        currentReason = IssueMetadata.trimmedNonEmpty(try c.decodeIfPresent(String.self, forKey: .currentReason))
+        previousReason = IssueMetadata.trimmedNonEmpty(try c.decodeIfPresent(String.self, forKey: .previousReason))
         firstSeenAt = try c.decodeIfPresent(Date.self, forKey: .firstSeenAt)
         firstSeenAtLocal = IssueMetadata.trimmedNonEmpty(try c.decodeIfPresent(String.self, forKey: .firstSeenAtLocal))
         lastSeenAt = try c.decodeIfPresent(Date.self, forKey: .lastSeenAt)
         lastSeenAtLocal = IssueMetadata.trimmedNonEmpty(try c.decodeIfPresent(String.self, forKey: .lastSeenAtLocal))
         resolvedAt = try c.decodeIfPresent(Date.self, forKey: .resolvedAt)
         resolvedAtLocal = IssueMetadata.trimmedNonEmpty(try c.decodeIfPresent(String.self, forKey: .resolvedAtLocal))
+        lastCaptureSessionId = try c.decodeIfPresent(UUID.self, forKey: .lastCaptureSessionId)
         if let note = try c.decodeIfPresent(String.self, forKey: .detailNote) {
             detailNote = IssueMetadata.trimmedNonEmpty(note)
         } else {
             detailNote = IssueMetadata.trimmedNonEmpty(try c.decodeIfPresent(String.self, forKey: .statement))
         }
         shotKey = IssueMetadata.trimmedNonEmpty(try c.decodeIfPresent(String.self, forKey: .shotKey))
+        historyEvents = try c.decodeIfPresent([IssueHistoryEvent].self, forKey: .historyEvents) ?? []
+        if currentReason == nil {
+            currentReason = detailNote
+        }
     }
 
     func encode(to encoder: Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
         try c.encode(issueID, forKey: .issueID)
         try c.encode(IssueMetadata.normalizedStatus(issueStatus), forKey: .issueStatus)
+        try c.encode(IssueMetadata.normalizedStatus(issueStatus), forKey: .status)
+        try c.encodeIfPresent(IssueMetadata.trimmedNonEmpty(currentReason), forKey: .currentReason)
+        try c.encodeIfPresent(IssueMetadata.trimmedNonEmpty(previousReason), forKey: .previousReason)
         try c.encodeIfPresent(firstSeenAt, forKey: .firstSeenAt)
         try c.encodeIfPresent(IssueMetadata.trimmedNonEmpty(firstSeenAtLocal), forKey: .firstSeenAtLocal)
         try c.encodeIfPresent(lastSeenAt, forKey: .lastSeenAt)
         try c.encodeIfPresent(IssueMetadata.trimmedNonEmpty(lastSeenAtLocal), forKey: .lastSeenAtLocal)
         try c.encodeIfPresent(resolvedAt, forKey: .resolvedAt)
         try c.encodeIfPresent(IssueMetadata.trimmedNonEmpty(resolvedAtLocal), forKey: .resolvedAtLocal)
-        try c.encodeIfPresent(IssueMetadata.trimmedNonEmpty(detailNote), forKey: .detailNote)
+        try c.encodeIfPresent(lastCaptureSessionId, forKey: .lastCaptureSessionId)
+        try c.encodeIfPresent(IssueMetadata.trimmedNonEmpty(detailNote ?? currentReason), forKey: .detailNote)
         try c.encodeIfPresent(IssueMetadata.trimmedNonEmpty(shotKey), forKey: .shotKey)
+        try c.encode(historyEvents.sorted { $0.timestamp < $1.timestamp }, forKey: .historyEvents)
     }
 
     private static func trimmedNonEmpty(_ value: String?) -> String? {
@@ -760,6 +808,11 @@ enum SkipReason: String, Codable, CaseIterable {
     case notApplicable
 }
 
+enum GuidedCheckpointStatus: String, Codable {
+    case active
+    case retired
+}
+
 struct Shot: Codable, Identifiable, Equatable {
     let id: UUID
     var capturedAt: Date
@@ -781,6 +834,7 @@ struct Shot: Codable, Identifiable, Equatable {
 
 struct GuidedShot: Codable, Identifiable, Equatable {
     let id: UUID
+    var status: GuidedCheckpointStatus
     var title: String
     var building: String?
     var targetElevation: String?
@@ -793,9 +847,19 @@ struct GuidedShot: Codable, Identifiable, Equatable {
     var skipReason: SkipReason?
     var skipReasonNote: String?
     var skipSessionID: UUID?
+    var isRetired: Bool
+    var retiredAt: Date?
+    var retiredInSessionID: UUID?
+    var reassignedFromGuidedShotID: UUID?
+    var reassignedToGuidedShotID: UUID?
+    var reassignedAt: Date?
+    var reassignedInSessionID: UUID?
+    var labelEditedAt: Date?
+    var labelEditedInSessionID: UUID?
 
     init(
         id: UUID = UUID(),
+        status: GuidedCheckpointStatus = .active,
         title: String,
         building: String? = nil,
         targetElevation: String? = nil,
@@ -807,9 +871,19 @@ struct GuidedShot: Codable, Identifiable, Equatable {
         isCompleted: Bool = false,
         skipReason: SkipReason? = nil,
         skipReasonNote: String? = nil,
-        skipSessionID: UUID? = nil
+        skipSessionID: UUID? = nil,
+        isRetired: Bool = false,
+        retiredAt: Date? = nil,
+        retiredInSessionID: UUID? = nil,
+        reassignedFromGuidedShotID: UUID? = nil,
+        reassignedToGuidedShotID: UUID? = nil,
+        reassignedAt: Date? = nil,
+        reassignedInSessionID: UUID? = nil,
+        labelEditedAt: Date? = nil,
+        labelEditedInSessionID: UUID? = nil
     ) {
         self.id = id
+        self.status = status
         self.title = title
         self.building = building
         self.targetElevation = targetElevation
@@ -822,10 +896,20 @@ struct GuidedShot: Codable, Identifiable, Equatable {
         self.skipReason = skipReason
         self.skipReasonNote = skipReasonNote
         self.skipSessionID = skipSessionID
+        self.isRetired = isRetired
+        self.retiredAt = retiredAt
+        self.retiredInSessionID = retiredInSessionID
+        self.reassignedFromGuidedShotID = reassignedFromGuidedShotID
+        self.reassignedToGuidedShotID = reassignedToGuidedShotID
+        self.reassignedAt = reassignedAt
+        self.reassignedInSessionID = reassignedInSessionID
+        self.labelEditedAt = labelEditedAt
+        self.labelEditedInSessionID = labelEditedInSessionID
     }
 
     private enum CodingKeys: String, CodingKey {
         case id
+        case status
         case title
         case building
         case targetElevation
@@ -838,11 +922,21 @@ struct GuidedShot: Codable, Identifiable, Equatable {
         case skipReason
         case skipReasonNote
         case skipSessionID
+        case isRetired
+        case retiredAt
+        case retiredInSessionID
+        case reassignedFromGuidedShotID
+        case reassignedToGuidedShotID
+        case reassignedAt
+        case reassignedInSessionID
+        case labelEditedAt
+        case labelEditedInSessionID
     }
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         id = try c.decode(UUID.self, forKey: .id)
+        status = try c.decodeIfPresent(GuidedCheckpointStatus.self, forKey: .status) ?? .active
         title = try c.decode(String.self, forKey: .title)
         building = try c.decodeIfPresent(String.self, forKey: .building)
         targetElevation = CanonicalElevation.normalize(try c.decodeIfPresent(String.self, forKey: .targetElevation))
@@ -855,11 +949,24 @@ struct GuidedShot: Codable, Identifiable, Equatable {
         skipReason = try c.decodeIfPresent(SkipReason.self, forKey: .skipReason)
         skipReasonNote = try c.decodeIfPresent(String.self, forKey: .skipReasonNote)
         skipSessionID = try c.decodeIfPresent(UUID.self, forKey: .skipSessionID)
+        isRetired = try c.decodeIfPresent(Bool.self, forKey: .isRetired) ?? false
+        retiredAt = try c.decodeIfPresent(Date.self, forKey: .retiredAt)
+        retiredInSessionID = try c.decodeIfPresent(UUID.self, forKey: .retiredInSessionID)
+        reassignedFromGuidedShotID = try c.decodeIfPresent(UUID.self, forKey: .reassignedFromGuidedShotID)
+        reassignedToGuidedShotID = try c.decodeIfPresent(UUID.self, forKey: .reassignedToGuidedShotID)
+        reassignedAt = try c.decodeIfPresent(Date.self, forKey: .reassignedAt)
+        reassignedInSessionID = try c.decodeIfPresent(UUID.self, forKey: .reassignedInSessionID)
+        labelEditedAt = try c.decodeIfPresent(Date.self, forKey: .labelEditedAt)
+        labelEditedInSessionID = try c.decodeIfPresent(UUID.self, forKey: .labelEditedInSessionID)
+        if isRetired {
+            status = .retired
+        }
     }
 
     func encode(to encoder: Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
         try c.encode(id, forKey: .id)
+        try c.encode(status, forKey: .status)
         try c.encode(title, forKey: .title)
         try c.encodeIfPresent(building, forKey: .building)
         try c.encodeIfPresent(CanonicalElevation.normalize(targetElevation), forKey: .targetElevation)
@@ -872,6 +979,15 @@ struct GuidedShot: Codable, Identifiable, Equatable {
         try c.encodeIfPresent(skipReason, forKey: .skipReason)
         try c.encodeIfPresent(skipReasonNote, forKey: .skipReasonNote)
         try c.encodeIfPresent(skipSessionID, forKey: .skipSessionID)
+        try c.encode(isRetired, forKey: .isRetired)
+        try c.encodeIfPresent(retiredAt, forKey: .retiredAt)
+        try c.encodeIfPresent(retiredInSessionID, forKey: .retiredInSessionID)
+        try c.encodeIfPresent(reassignedFromGuidedShotID, forKey: .reassignedFromGuidedShotID)
+        try c.encodeIfPresent(reassignedToGuidedShotID, forKey: .reassignedToGuidedShotID)
+        try c.encodeIfPresent(reassignedAt, forKey: .reassignedAt)
+        try c.encodeIfPresent(reassignedInSessionID, forKey: .reassignedInSessionID)
+        try c.encodeIfPresent(labelEditedAt, forKey: .labelEditedAt)
+        try c.encodeIfPresent(labelEditedInSessionID, forKey: .labelEditedInSessionID)
     }
 }
 
@@ -896,6 +1012,9 @@ struct Observation: Codable, Identifiable, Equatable {
     var building: String?
     var targetElevation: String?
     var detailType: String?
+    var currentReason: String?
+    var previousReason: String?
+    var historyEvents: [ObservationHistoryEvent]
     var updateHistory: [ObservationUpdateEntry]
     var note: String?
     var shots: [Shot]
@@ -917,6 +1036,9 @@ struct Observation: Codable, Identifiable, Equatable {
         building: String? = nil,
         targetElevation: String? = nil,
         detailType: String? = nil,
+        currentReason: String? = nil,
+        previousReason: String? = nil,
+        historyEvents: [ObservationHistoryEvent] = [],
         updateHistory: [ObservationUpdateEntry] = [],
         note: String? = nil,
         shots: [Shot] = [],
@@ -937,8 +1059,11 @@ struct Observation: Codable, Identifiable, Equatable {
         self.building = building
         self.targetElevation = targetElevation
         self.detailType = detailType
+        self.currentReason = Observation.trimmedNonEmpty(currentReason)
+        self.previousReason = Observation.trimmedNonEmpty(previousReason)
+        self.historyEvents = historyEvents.sorted { $0.timestamp < $1.timestamp }
         self.updateHistory = updateHistory
-        self.note = note
+        self.note = Observation.trimmedNonEmpty(note)
         self.shots = shots
         self.guidedShots = guidedShots
     }
@@ -959,6 +1084,9 @@ struct Observation: Codable, Identifiable, Equatable {
         case building
         case targetElevation
         case detailType
+        case currentReason
+        case previousReason
+        case historyEvents
         case updateHistory
         case note
         case shots
@@ -982,8 +1110,20 @@ struct Observation: Codable, Identifiable, Equatable {
         building = try c.decodeIfPresent(String.self, forKey: .building)
         targetElevation = CanonicalElevation.normalize(try c.decodeIfPresent(String.self, forKey: .targetElevation))
         detailType = try c.decodeIfPresent(String.self, forKey: .detailType)
+        let decodedNote = try c.decodeIfPresent(String.self, forKey: .note)
+        currentReason = Observation.trimmedNonEmpty(
+            try c.decodeIfPresent(String.self, forKey: .currentReason)
+        ) ?? Observation.inferredCurrentReason(note: decodedNote, statement: statement)
+        previousReason = Observation.trimmedNonEmpty(try c.decodeIfPresent(String.self, forKey: .previousReason))
+        note = Observation.trimmedNonEmpty(decodedNote)
         updateHistory = try c.decodeIfPresent([ObservationUpdateEntry].self, forKey: .updateHistory) ?? []
-        note = try c.decodeIfPresent(String.self, forKey: .note)
+        historyEvents = try c.decodeIfPresent([ObservationHistoryEvent].self, forKey: .historyEvents)
+            ?? Observation.legacyHistoryEvents(
+                createdAt: createdAt,
+                sessionID: sessionID,
+                from: updateHistory,
+                currentReason: currentReason
+            )
         shots = try c.decodeIfPresent([Shot].self, forKey: .shots) ?? []
         guidedShots = try c.decodeIfPresent([GuidedShot].self, forKey: .guidedShots) ?? []
     }
@@ -1005,10 +1145,67 @@ struct Observation: Codable, Identifiable, Equatable {
         try c.encodeIfPresent(building, forKey: .building)
         try c.encodeIfPresent(CanonicalElevation.normalize(targetElevation), forKey: .targetElevation)
         try c.encodeIfPresent(detailType, forKey: .detailType)
+        try c.encodeIfPresent(Observation.trimmedNonEmpty(currentReason), forKey: .currentReason)
+        try c.encodeIfPresent(Observation.trimmedNonEmpty(previousReason), forKey: .previousReason)
+        try c.encode(historyEvents.sorted { $0.timestamp < $1.timestamp }, forKey: .historyEvents)
         try c.encode(updateHistory, forKey: .updateHistory)
         try c.encodeIfPresent(note, forKey: .note)
         try c.encode(shots, forKey: .shots)
         try c.encode(guidedShots, forKey: .guidedShots)
+    }
+
+    static func trimmedNonEmpty(_ value: String?) -> String? {
+        let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    static func inferredCurrentReason(note: String?, statement: String) -> String? {
+        trimmedNonEmpty(note) ?? trimmedNonEmpty(statement)
+    }
+
+    private static func legacyHistoryEvents(
+        createdAt: Date,
+        sessionID: UUID?,
+        from updateHistory: [ObservationUpdateEntry],
+        currentReason: String?
+    ) -> [ObservationHistoryEvent] {
+        var events: [ObservationHistoryEvent] = []
+        events.append(
+            ObservationHistoryEvent(
+                timestamp: createdAt,
+                sessionID: sessionID,
+                kind: .created,
+                afterValue: currentReason,
+                field: currentReason == nil ? nil : "reason",
+                shotID: nil
+            )
+        )
+        events.append(contentsOf: updateHistory.compactMap { entry in
+            switch entry.kind {
+            case .followUpCapture:
+                return ObservationHistoryEvent(
+                    timestamp: entry.createdAt,
+                    sessionID: nil,
+                    kind: .captured,
+                    beforeValue: nil,
+                    afterValue: nil,
+                    field: nil,
+                    shotID: entry.shotID
+                )
+            case .revisedObservation:
+                let revised = trimmedNonEmpty(entry.text)
+                return ObservationHistoryEvent(
+                    timestamp: entry.createdAt,
+                    sessionID: nil,
+                    kind: .reasonUpdated,
+                    beforeValue: nil,
+                    afterValue: revised ?? currentReason,
+                    field: "reason",
+                    shotID: entry.shotID
+                )
+            }
+        })
+        return events.sorted { $0.timestamp < $1.timestamp }
     }
 }
 
@@ -1036,6 +1233,70 @@ struct ObservationUpdateEntry: Codable, Identifiable, Equatable {
         self.kind = kind
         self.text = text
         self.shotID = shotID
+    }
+}
+
+struct ObservationHistoryEvent: Codable, Identifiable, Equatable {
+    enum Kind: String, Codable {
+        case created
+        case captured
+        case retake
+        case reclassified
+        case resolved
+        case reopened
+        case reasonUpdated = "reason_updated"
+        case titleUpdated = "title_updated"
+    }
+
+    let id: UUID
+    let timestamp: Date
+    var sessionID: UUID?
+    var kind: Kind
+    var beforeValue: String?
+    var afterValue: String?
+    var field: String?
+    var shotID: UUID?
+
+    init(
+        id: UUID = UUID(),
+        timestamp: Date = Date(),
+        sessionID: UUID? = nil,
+        kind: Kind,
+        beforeValue: String? = nil,
+        afterValue: String? = nil,
+        field: String? = nil,
+        shotID: UUID? = nil
+    ) {
+        self.id = id
+        self.timestamp = timestamp
+        self.sessionID = sessionID
+        self.kind = kind
+        self.beforeValue = Observation.trimmedNonEmpty(beforeValue)
+        self.afterValue = Observation.trimmedNonEmpty(afterValue)
+        self.field = Observation.trimmedNonEmpty(field)
+        self.shotID = shotID
+    }
+}
+
+struct IssueHistoryEvent: Codable, Identifiable, Equatable {
+    let id: UUID
+    let timestamp: Date
+    var sessionId: UUID?
+    var type: String
+    var details: [String: String]
+
+    init(
+        id: UUID = UUID(),
+        timestamp: Date,
+        sessionId: UUID?,
+        type: String,
+        details: [String: String] = [:]
+    ) {
+        self.id = id
+        self.timestamp = timestamp
+        self.sessionId = sessionId
+        self.type = type
+        self.details = details
     }
 }
 
