@@ -1,6 +1,12 @@
 import Foundation
 
 enum StorageRoot {
+    struct ExportZipEntry {
+        let path: String
+        let data: Data
+        let modifiedAt: Date?
+    }
+
     private struct Resolution {
         let cloudRoot: URL?
         let localRoot: URL
@@ -143,6 +149,64 @@ enum StorageRoot {
             }
         } catch {
             return (true, "failed(\(error.localizedDescription))")
+        }
+    }
+
+    static func makeSessionExportRootFolder(propertyID: UUID, sessionID: UUID) throws -> URL {
+        let root = fileManager.temporaryDirectory
+            .appendingPathComponent("ScoutCapture-Exports", isDirectory: true)
+            .appendingPathComponent("\(propertyID.uuidString)_\(sessionID.uuidString)", isDirectory: true)
+
+        if fileManager.fileExists(atPath: root.path) {
+            try fileManager.removeItem(at: root)
+        }
+        try fileManager.createDirectory(at: root, withIntermediateDirectories: true)
+        return root
+    }
+
+    static func zipEntriesForExportRoot(_ root: URL) throws -> [ExportZipEntry] {
+        var entries: [ExportZipEntry] = []
+        try appendZipEntries(in: root, relativeBase: "", to: &entries)
+        return entries.sorted { $0.path < $1.path }
+    }
+
+    static func exportRootFilenames(_ root: URL) throws -> [String] {
+        try fileManager.contentsOfDirectory(atPath: root.path).sorted()
+    }
+
+    private static func appendZipEntries(
+        in directory: URL,
+        relativeBase: String,
+        to entries: inout [ExportZipEntry]
+    ) throws {
+        let resourceKeys: Set<URLResourceKey> = [.isDirectoryKey, .contentModificationDateKey, .creationDateKey]
+        let children = try fileManager.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: Array(resourceKeys),
+            options: [.skipsHiddenFiles]
+        ).sorted { $0.lastPathComponent < $1.lastPathComponent }
+
+        for child in children {
+            let values = try child.resourceValues(forKeys: resourceKeys)
+            let relativePath = relativeBase.isEmpty ? child.lastPathComponent : "\(relativeBase)/\(child.lastPathComponent)"
+            if values.isDirectory == true {
+                entries.append(
+                    ExportZipEntry(
+                        path: "\(relativePath)/",
+                        data: Data(),
+                        modifiedAt: values.contentModificationDate ?? values.creationDate
+                    )
+                )
+                try appendZipEntries(in: child, relativeBase: relativePath, to: &entries)
+            } else {
+                entries.append(
+                    ExportZipEntry(
+                        path: relativePath,
+                        data: try Data(contentsOf: child),
+                        modifiedAt: values.contentModificationDate ?? values.creationDate
+                    )
+                )
+            }
         }
     }
 }
