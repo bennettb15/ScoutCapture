@@ -1264,6 +1264,7 @@ struct SessionHubView: View {
             let guidedShots: [GuidedShot]
         }
 
+        let validationArtifacts = try localStore.validatedSessionExportArtifacts(for: session)
         let observations = (try? localStore.fetchObservations(propertyID: property.id)) ?? []
         let guidedShots = (try? localStore.fetchGuidedShots(propertyID: property.id)) ?? []
 
@@ -1310,9 +1311,10 @@ struct SessionHubView: View {
         }
 
         var assetEntries: [SessionExportAssetEntry] = []
-        var zipEntries: [(path: String, data: Data, modifiedAt: Date?)] = []
-        zipEntries.append(("Originals/", Data(), nil))
-        var originalEntries: [(String, Data, Date?)] = []
+        let exportRoot = try StorageRoot.makeSessionExportRootFolder(propertyID: property.id, sessionID: session.id)
+        let originalsRoot = exportRoot.appendingPathComponent("Originals", isDirectory: true)
+        try FileManager.default.createDirectory(at: originalsRoot, withIntermediateDirectories: true)
+        var expectedPaths = Set(["session.json", "validation.txt", "Originals/"])
         let sessionMetadata = try localStore.loadSessionMetadata(propertyID: property.id, sessionID: session.id)
 #if DEBUG
         print("Pending export sessionStartedAt: \(sessionMetadata.startedAt)")
@@ -1347,9 +1349,13 @@ struct SessionHubView: View {
                     originalFilename: filename
                 )
             )
-            originalEntries.append(("Originals/\(filename)", data, modifiedAt))
+            let destinationURL = originalsRoot.appendingPathComponent(filename)
+            try data.write(to: destinationURL, options: .atomic)
+            if let modifiedAt {
+                try? FileManager.default.setAttributes([.modificationDate: modifiedAt], ofItemAtPath: destinationURL.path)
+            }
+            expectedPaths.insert("Originals/\(filename)")
         }
-        zipEntries.append(contentsOf: originalEntries)
         progress?(.originals)
 
         let payload = SessionExportPayload(
@@ -1368,9 +1374,15 @@ struct SessionHubView: View {
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         encoder.dateEncodingStrategy = .iso8601
         let sessionData = try encoder.encode(payload)
-        zipEntries.append(("session.json", sessionData, Date()))
+        try sessionData.write(to: exportRoot.appendingPathComponent("session.json"), options: .atomic)
+        try validationArtifacts.validationData.write(to: exportRoot.appendingPathComponent("validation.txt"), options: .atomic)
+#if DEBUG
+        print("EXPORT ROOT: \(exportRoot.path)")
+        print("EXPORT ROOT FILES: \((try? StorageRoot.exportRootFilenames(exportRoot)) ?? [])")
+#endif
         progress?(.sessionData)
 
+        let zipEntries = try StorageRoot.zipEntriesForExportRoot(exportRoot).map { ($0.path, $0.data, $0.modifiedAt) }
         let zipData = buildZipData(entries: zipEntries)
         let fileManager = FileManager.default
         let finalURL = fileManager.temporaryDirectory.appendingPathComponent(exportZipFilename(for: property, session: session))
@@ -1411,11 +1423,19 @@ struct SessionHubView: View {
         print("Pending export ZIP entries count: \(listedEntries.count)")
         print("Pending export ZIP entries preview: \(preview)")
 #endif
-        let expectedPaths = Set(originalEntries.map { $0.0 } + ["session.json", "Originals/"])
         let actualPaths = Set(listedEntries)
         guard expectedPaths.isSubset(of: actualPaths) else {
             throw NSError(domain: "ScoutCapture.PendingExport", code: 7, userInfo: [NSLocalizedDescriptionKey: "ZIP integrity check failed."])
         }
+#if DEBUG
+        guard actualPaths.contains("session.json"), actualPaths.contains("validation.txt") else {
+            assertionFailure("Pending export ZIP root missing session.json or validation.txt")
+            throw NSError(domain: "ScoutCapture.PendingExport", code: 10, userInfo: [NSLocalizedDescriptionKey: "ZIP root missing validation artifacts."])
+        }
+        if !validationArtifacts.prewritePassed || !validationArtifacts.postwritePassed {
+            assertionFailure(String(data: validationArtifacts.validationData, encoding: .utf8) ?? "Export validation failed")
+        }
+#endif
         progress?(.zipReady)
         return finalURL
     }

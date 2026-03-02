@@ -42,8 +42,13 @@ struct SessionMetadata: Codable {
     var osVersion: String
     var shots: [ShotMetadata]
     var issues: [IssueMetadata]
-    var flaggedIssues: [IssueMetadata]
     var guidedShots: [GuidedShot]
+
+    var flaggedIssues: [IssueMetadata] {
+        issues.filter {
+            SessionMetadata.trimmedNonEmpty($0.issueStatus)?.lowercased() == "active"
+        }
+    }
 
     private enum CodingKeys: String, CodingKey {
         case schemaVersion
@@ -101,7 +106,6 @@ struct SessionMetadata: Codable {
         osVersion: String,
         shots: [ShotMetadata],
         issues: [IssueMetadata],
-        flaggedIssues: [IssueMetadata]? = nil,
         guidedShots: [GuidedShot] = []
     ) {
         self.schemaVersion = schemaVersion
@@ -129,7 +133,6 @@ struct SessionMetadata: Codable {
         self.osVersion = osVersion
         self.shots = shots
         self.issues = issues
-        self.flaggedIssues = flaggedIssues ?? issues
         self.guidedShots = guidedShots
     }
 
@@ -173,7 +176,6 @@ struct SessionMetadata: Codable {
         shots = try c.decodeIfPresent([ShotMetadata].self, forKey: .shots) ?? []
         let decodedFlaggedIssues = try c.decodeIfPresent([IssueMetadata].self, forKey: .flaggedIssues)
         issues = try c.decodeIfPresent([IssueMetadata].self, forKey: .issues) ?? decodedFlaggedIssues ?? []
-        flaggedIssues = decodedFlaggedIssues ?? issues
         guidedShots = try c.decodeIfPresent([GuidedShot].self, forKey: .guidedShots) ?? []
     }
 
@@ -208,7 +210,7 @@ struct SessionMetadata: Codable {
         try c.encode(guidedShots, forKey: .guidedShots)
     }
 
-    private static func trimmedNonEmpty(_ value: String?) -> String? {
+    static func trimmedNonEmpty(_ value: String?) -> String? {
         guard let value else { return nil }
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? nil : trimmed
@@ -234,6 +236,7 @@ struct ShotMetadata: Codable, Identifiable, Equatable {
     var issueID: UUID?
     var issueStatus: String?
     var captureKind: String?
+    var firstCaptureKind: String?
     var noteText: String?
     var noteCategory: String?
     var originalFilename: String
@@ -273,6 +276,7 @@ struct ShotMetadata: Codable, Identifiable, Equatable {
         case issueID
         case issueStatus
         case captureKind
+        case firstCaptureKind
         case noteText
         case noteCategory
         case originalFilename
@@ -308,6 +312,7 @@ struct ShotMetadata: Codable, Identifiable, Equatable {
         issueID: UUID?,
         issueStatus: String?,
         captureKind: String? = nil,
+        firstCaptureKind: String? = nil,
         noteText: String?,
         noteCategory: String?,
         originalFilename: String,
@@ -341,6 +346,7 @@ struct ShotMetadata: Codable, Identifiable, Equatable {
         self.issueID = issueID
         self.issueStatus = issueStatus
         self.captureKind = ShotMetadata.trimmedNonEmpty(captureKind)
+        self.firstCaptureKind = ShotMetadata.trimmedNonEmpty(firstCaptureKind)
         self.noteText = noteText
         self.noteCategory = noteCategory
         self.originalFilename = originalFilename
@@ -384,6 +390,7 @@ struct ShotMetadata: Codable, Identifiable, Equatable {
         issueID = try c.decodeIfPresent(UUID.self, forKey: .issueID)
         issueStatus = try c.decodeIfPresent(String.self, forKey: .issueStatus)
         captureKind = ShotMetadata.trimmedNonEmpty(try c.decodeIfPresent(String.self, forKey: .captureKind))
+        firstCaptureKind = ShotMetadata.trimmedNonEmpty(try c.decodeIfPresent(String.self, forKey: .firstCaptureKind))
         noteText = try c.decodeIfPresent(String.self, forKey: .noteText)
         noteCategory = try c.decodeIfPresent(String.self, forKey: .noteCategory)
         originalFilename = try c.decodeIfPresent(String.self, forKey: .originalFilename) ?? ""
@@ -434,6 +441,7 @@ struct ShotMetadata: Codable, Identifiable, Equatable {
         try c.encode(isFlagged, forKey: .isFlagged)
         try c.encodeIfPresent(issueID, forKey: .issueID)
         try c.encodeIfPresent(ShotMetadata.trimmedNonEmpty(captureKind), forKey: .captureKind)
+        try c.encodeIfPresent(ShotMetadata.trimmedNonEmpty(firstCaptureKind), forKey: .firstCaptureKind)
         try c.encodeIfPresent(noteText, forKey: .noteText)
         try c.encodeIfPresent(noteCategory, forKey: .noteCategory)
         try c.encode(originalFilename, forKey: .originalFilename)

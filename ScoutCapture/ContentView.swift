@@ -7420,6 +7420,7 @@ extension ContentView {
         var issueID = issueIDHint
         var issueStatus: String?
         var captureKind: String?
+        var firstCaptureKind: String?
         var noteValue = noteText.isEmpty ? nil : noteText
 
         if let retakeContext {
@@ -7453,18 +7454,23 @@ extension ContentView {
             if observation.status == .resolved || observation.resolvedInSessionID == session.id {
                 issueStatus = "resolved"
                 captureKind = "resolved_capture"
+                firstCaptureKind = "captured"
             } else if isNewFlaggedIssueCapture {
                 issueStatus = "active"
                 captureKind = "captured"
+                firstCaptureKind = "captured"
             } else if retakeContext != nil {
                 issueStatus = "active"
                 captureKind = "retake"
+                firstCaptureKind = "captured"
             } else if observation.updatedInSessionID == session.id {
                 issueStatus = "active"
                 captureKind = "follow_up_capture"
+                firstCaptureKind = "captured"
             } else {
                 issueStatus = "active"
                 captureKind = "reference"
+                firstCaptureKind = "captured"
             }
             let obsBuilding = observation.building?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             let obsElevation = CanonicalElevation.normalize(observation.targetElevation) ?? ""
@@ -7523,6 +7529,7 @@ extension ContentView {
             issueID: issueID,
             issueStatus: issueStatus,
             captureKind: captureKind,
+            firstCaptureKind: firstCaptureKind,
             noteText: noteValue,
             noteCategory: nil,
             originalFilename: originalFilename,
@@ -8289,6 +8296,11 @@ extension ContentView {
             if let captureKind {
                 metadata.shots[idx].captureKind = captureKind
             }
+            if metadata.shots[idx].isFlagged,
+               metadata.shots[idx].captureKind == "retake",
+               metadata.shots[idx].firstCaptureKind?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true {
+                metadata.shots[idx].firstCaptureKind = "captured"
+            }
 
             try? localStore.saveSessionMetadataAtomically(
                 propertyID: propertyID,
@@ -8985,38 +8997,45 @@ extension ContentView {
     private func buildSessionExportArchive(progress: ((ExportChecklistStep) -> Void)? = nil) throws -> URL {
         let fileManager = FileManager.default
         let assets = reportLibrary.assets
-        let sessionData = try persistedSessionJSONDataForExport()
+        guard let propertyID = appState.selectedPropertyID,
+              let session = appState.currentSession else {
+            throw NSError(domain: "ScoutCapture.Export", code: 1, userInfo: [NSLocalizedDescriptionKey: "No active session for export."])
+        }
+        let sessionID = session.id
+        let exportArtifacts = try localStore.validatedSessionExportArtifacts(for: session)
+        let exportRoot = try StorageRoot.makeSessionExportRootFolder(propertyID: propertyID, sessionID: sessionID)
+        let originalsRoot = exportRoot.appendingPathComponent("Originals", isDirectory: true)
+        try fileManager.createDirectory(at: originalsRoot, withIntermediateDirectories: true)
 
-        var zipEntries: [(path: String, data: Data, modifiedAt: Date?)] = []
-        zipEntries.append(("Originals/", Data(), nil))
-        var originalEntries: [(String, Data, Date?)] = []
+        var expectedPaths = Set(["session.json", "validation.txt", "Originals/"])
         for (index, asset) in assets.enumerated() {
             guard let data = requestSessionExportImageData(for: asset) else { continue }
             let filename = sessionExportFilename(for: asset, index: index + 1)
             let attrs = try? fileManager.attributesOfItem(atPath: asset.fileURL.path)
             let modifiedAt = (attrs?[.modificationDate] as? Date) ?? (attrs?[.creationDate] as? Date)
-            originalEntries.append(("Originals/\(filename)", data, modifiedAt))
+            let destinationURL = originalsRoot.appendingPathComponent(filename)
+            try data.write(to: destinationURL, options: .atomic)
+            if let modifiedAt {
+                try? fileManager.setAttributes([.modificationDate: modifiedAt], ofItemAtPath: destinationURL.path)
+            }
+            expectedPaths.insert("Originals/\(filename)")
         }
-        zipEntries.append(contentsOf: originalEntries)
+        try exportArtifacts.sessionData.write(to: exportRoot.appendingPathComponent("session.json"), options: .atomic)
+        try exportArtifacts.validationData.write(to: exportRoot.appendingPathComponent("validation.txt"), options: .atomic)
         progress?(.originals)
 
 #if DEBUG
-        if let propertyID = appState.selectedPropertyID,
-           let sessionID = appState.currentSession?.id {
-            let sourceURL = localStore.sessionJSONURL(propertyID: propertyID, sessionID: sessionID)
-            let exists = FileManager.default.fileExists(atPath: sourceURL.path)
-            let sizeBytes = ((try? FileManager.default.attributesOfItem(atPath: sourceURL.path)[.size] as? NSNumber) ?? nil)?.intValue ?? 0
-            print("Export session.json path source: \(sourceURL.path)")
-            print("Export source exists: \(exists ? "YES" : "NO"), bytes: \(sizeBytes)")
-        } else {
-            print("Export session.json path source: missing property/session context")
-        }
-        let raw = String(data: sessionData, encoding: .utf8) ?? ""
+        let sourceURL = localStore.sessionJSONURL(propertyID: propertyID, sessionID: sessionID)
+        let exists = FileManager.default.fileExists(atPath: sourceURL.path)
+        let sizeBytes = ((try? FileManager.default.attributesOfItem(atPath: sourceURL.path)[.size] as? NSNumber) ?? nil)?.intValue ?? 0
+        print("Export session.json path source: \(sourceURL.path)")
+        print("Export source exists: \(exists ? "YES" : "NO"), bytes: \(sizeBytes)")
+        let raw = String(data: exportArtifacts.sessionData, encoding: .utf8) ?? ""
         print("Export sessionData contains \"shotKey\": \(raw.contains("\"shotKey\"") ? "YES" : "NO")")
         print("Export sessionData contains \"originalRelativePath\": \(raw.contains("\"originalRelativePath\"") ? "YES" : "NO")")
         let debugDecoder = JSONDecoder()
         debugDecoder.dateDecodingStrategy = .iso8601
-        if let decoded = try? debugDecoder.decode(SessionMetadata.self, from: sessionData),
+        if let decoded = try? debugDecoder.decode(SessionMetadata.self, from: exportArtifacts.sessionData),
            let first = decoded.shots.first {
             print("Export sessionStartedAt: \(decoded.startedAt)")
             print("Export sessionStartedAtLocal: \(decoded.sessionStartedAtLocal)")
@@ -9031,11 +9050,12 @@ extension ContentView {
                 print("Export reExportExpiresAt: \(expires)")
             }
         }
+        print("EXPORT ROOT: \(exportRoot.path)")
+        print("EXPORT ROOT FILES: \((try? StorageRoot.exportRootFilenames(exportRoot)) ?? [])")
 #endif
-
-        zipEntries.append(("session.json", sessionData, Date()))
         progress?(.sessionData)
 
+        let zipEntries = try StorageRoot.zipEntriesForExportRoot(exportRoot).map { ($0.path, $0.data, $0.modifiedAt) }
         let zipData = buildSessionExportZipData(entries: zipEntries)
         let finalURL = fileManager.temporaryDirectory.appendingPathComponent(sessionExportZipFilename())
         let tempURL = fileManager.temporaryDirectory.appendingPathComponent("\(UUID().uuidString).tmp.zip")
@@ -9075,23 +9095,21 @@ extension ContentView {
         print("Export ZIP entries count: \(listedEntries.count)")
         print("Export ZIP entries preview: \(preview)")
 #endif
-        let expectedPaths = Set(originalEntries.map { $0.0 } + ["session.json", "Originals/"])
         let actualPaths = Set(listedEntries)
         guard expectedPaths.isSubset(of: actualPaths) else {
             throw NSError(domain: "ScoutCapture.Export", code: 7, userInfo: [NSLocalizedDescriptionKey: "ZIP integrity check failed."])
         }
+#if DEBUG
+        guard actualPaths.contains("session.json"), actualPaths.contains("validation.txt") else {
+            assertionFailure("Export ZIP root missing session.json or validation.txt")
+            throw NSError(domain: "ScoutCapture.Export", code: 10, userInfo: [NSLocalizedDescriptionKey: "ZIP root missing validation artifacts."])
+        }
+        if !exportArtifacts.prewritePassed || !exportArtifacts.postwritePassed {
+            assertionFailure(String(data: exportArtifacts.validationData, encoding: .utf8) ?? "Export validation failed")
+        }
+#endif
         progress?(.zipReady)
         return finalURL
-    }
-
-    private func persistedSessionJSONDataForExport() throws -> Data {
-        guard let propertyID = appState.selectedPropertyID,
-              let session = appState.currentSession else {
-            throw NSError(domain: "ScoutCapture.Export", code: 1, userInfo: [NSLocalizedDescriptionKey: "No active session for export."])
-        }
-        try localStore.ensureSessionMetadata(for: session)
-        let sessionURL = localStore.sessionJSONURL(propertyID: propertyID, sessionID: session.id)
-        return try Data(contentsOf: sessionURL)
     }
 
     private func requestSessionExportImageData(for asset: ReportAsset) -> Data? {
@@ -12132,29 +12150,30 @@ extension ContentView {
         
         private func buildExportArchive(for assets: [ReportAsset]) throws -> URL {
             let fileManager = FileManager.default
-            let sessionData = try persistedSessionJSONDataForExport()
-            
-            var entries: [(path: String, data: Data)] = []
-            entries.append(("Originals/", Data()))
-            entries.append(("Stamped/", Data()))
+            guard let propertyID = appState.selectedPropertyID,
+                  let session = appState.currentSession else {
+                throw ExportError.zipCreationFailed
+            }
+            let sessionID = session.id
+            let exportArtifacts = try localStore.validatedSessionExportArtifacts(for: session)
+            let exportRoot = try StorageRoot.makeSessionExportRootFolder(propertyID: propertyID, sessionID: sessionID)
+            let originalsRoot = exportRoot.appendingPathComponent("Originals", isDirectory: true)
+            let stampedRoot = exportRoot.appendingPathComponent("Stamped", isDirectory: true)
+            try fileManager.createDirectory(at: originalsRoot, withIntermediateDirectories: true)
+            try fileManager.createDirectory(at: stampedRoot, withIntermediateDirectories: true)
 
 #if DEBUG
-            if let propertyID = appState.selectedPropertyID,
-               let sessionID = appState.currentSession?.id {
-                let sourceURL = localStore.sessionJSONURL(propertyID: propertyID, sessionID: sessionID)
-                let exists = FileManager.default.fileExists(atPath: sourceURL.path)
-                let sizeBytes = ((try? FileManager.default.attributesOfItem(atPath: sourceURL.path)[.size] as? NSNumber) ?? nil)?.intValue ?? 0
-                print("Export session.json path source: \(sourceURL.path)")
-                print("Export source exists: \(exists ? "YES" : "NO"), bytes: \(sizeBytes)")
-            } else {
-                print("Export session.json path source: missing property/session context")
-            }
-            let raw = String(data: sessionData, encoding: .utf8) ?? ""
+            let sourceURL = localStore.sessionJSONURL(propertyID: propertyID, sessionID: sessionID)
+            let exists = FileManager.default.fileExists(atPath: sourceURL.path)
+            let sizeBytes = ((try? FileManager.default.attributesOfItem(atPath: sourceURL.path)[.size] as? NSNumber) ?? nil)?.intValue ?? 0
+            print("Export session.json path source: \(sourceURL.path)")
+            print("Export source exists: \(exists ? "YES" : "NO"), bytes: \(sizeBytes)")
+            let raw = String(data: exportArtifacts.sessionData, encoding: .utf8) ?? ""
             print("Export sessionData contains \"shotKey\": \(raw.contains("\"shotKey\"") ? "YES" : "NO")")
             print("Export sessionData contains \"originalRelativePath\": \(raw.contains("\"originalRelativePath\"") ? "YES" : "NO")")
             let debugDecoder = JSONDecoder()
             debugDecoder.dateDecodingStrategy = .iso8601
-            if let decoded = try? debugDecoder.decode(SessionMetadata.self, from: sessionData),
+            if let decoded = try? debugDecoder.decode(SessionMetadata.self, from: exportArtifacts.sessionData),
                let first = decoded.shots.first {
                 print("Export sessionStartedAt: \(decoded.startedAt)")
                 print("Export sessionStartedAtLocal: \(decoded.sessionStartedAtLocal)")
@@ -12169,18 +12188,23 @@ extension ContentView {
                     print("Export reExportExpiresAt: \(expires)")
                 }
             }
+            print("EXPORT ROOT: \(exportRoot.path)")
 #endif
-
-            entries.append(("session.json", sessionData))
+            try exportArtifacts.sessionData.write(to: exportRoot.appendingPathComponent("session.json"), options: .atomic)
+            try exportArtifacts.validationData.write(to: exportRoot.appendingPathComponent("validation.txt"), options: .atomic)
             
             for (index, asset) in assets.enumerated() {
                 guard let imageData = requestOriginalImageData(for: asset) else { continue }
                 let filename = makeArchiveFilename(for: asset, index: index + 1)
-                entries.append(("Originals/\(filename)", imageData))
-                entries.append(("Stamped/\(filename)", imageData))
+                try imageData.write(to: originalsRoot.appendingPathComponent(filename), options: .atomic)
+                try imageData.write(to: stampedRoot.appendingPathComponent(filename), options: .atomic)
             }
+#if DEBUG
+            print("EXPORT ROOT FILES: \((try? StorageRoot.exportRootFilenames(exportRoot)) ?? [])")
+#endif
             
-            let zipData = buildZipData(entries: entries)
+            let zipEntries = try StorageRoot.zipEntriesForExportRoot(exportRoot).map { ($0.path, $0.data) }
+            let zipData = buildZipData(entries: zipEntries)
             let zipURL = fileManager.temporaryDirectory.appendingPathComponent(exportZipFilename())
             if fileManager.fileExists(atPath: zipURL.path) {
                 try fileManager.removeItem(at: zipURL)
@@ -12190,17 +12214,19 @@ extension ContentView {
             if !fileManager.fileExists(atPath: zipURL.path) {
                 throw ExportError.zipCreationFailed
             }
-            return zipURL
-        }
-
-        private func persistedSessionJSONDataForExport() throws -> Data {
-            guard let propertyID = appState.selectedPropertyID,
-                  let session = appState.currentSession else {
+#if DEBUG
+            let zipPaths = Set(try listZipEntryPaths(at: zipURL))
+            guard zipPaths.contains("session.json"), zipPaths.contains("validation.txt") else {
+                assertionFailure("Export ZIP root missing session.json or validation.txt")
                 throw ExportError.zipCreationFailed
             }
-            try localStore.ensureSessionMetadata(for: session)
-            let sessionURL = localStore.sessionJSONURL(propertyID: propertyID, sessionID: session.id)
-            return try Data(contentsOf: sessionURL)
+#endif
+#if DEBUG
+            if !exportArtifacts.prewritePassed || !exportArtifacts.postwritePassed {
+                assertionFailure(String(data: exportArtifacts.validationData, encoding: .utf8) ?? "Export validation failed")
+            }
+#endif
+            return zipURL
         }
         
         private func makeExportSessionPayload(from assets: [ReportAsset]) -> ExportSessionPayload {
@@ -12343,6 +12369,60 @@ extension ContentView {
             appendUInt16LE(0, to: &zip)
             
             return zip
+        }
+
+        private func listZipEntryPaths(at url: URL) throws -> [String] {
+            let data = try Data(contentsOf: url)
+            let bytes = [UInt8](data)
+            let eocdSignature: [UInt8] = [0x50, 0x4B, 0x05, 0x06]
+            guard let eocdIndex = bytes.lastIndex(of: eocdSignature[0]).flatMap({ idx -> Int? in
+                var i = idx
+                while i >= 0 {
+                    if i + 3 < bytes.count && bytes[i...i+3].elementsEqual(eocdSignature) { return i }
+                    if i == 0 { break }
+                    i -= 1
+                }
+                return nil
+            }) else {
+                throw ExportError.zipCreationFailed
+            }
+
+            func u16(_ offset: Int) -> Int {
+                Int(bytes[offset]) | (Int(bytes[offset + 1]) << 8)
+            }
+            func u32(_ offset: Int) -> Int {
+                Int(bytes[offset]) |
+                (Int(bytes[offset + 1]) << 8) |
+                (Int(bytes[offset + 2]) << 16) |
+                (Int(bytes[offset + 3]) << 24)
+            }
+
+            guard eocdIndex + 22 <= bytes.count else {
+                throw ExportError.zipCreationFailed
+            }
+
+            let totalEntries = u16(eocdIndex + 10)
+            let centralDirectoryOffset = u32(eocdIndex + 16)
+            var cursor = centralDirectoryOffset
+            var paths: [String] = []
+            paths.reserveCapacity(totalEntries)
+
+            for _ in 0..<totalEntries {
+                guard cursor + 46 <= bytes.count else { break }
+                let signature = u32(cursor)
+                guard signature == 0x02014B50 else { break }
+                let nameLength = u16(cursor + 28)
+                let extraLength = u16(cursor + 30)
+                let commentLength = u16(cursor + 32)
+                let nameStart = cursor + 46
+                let nameEnd = nameStart + nameLength
+                guard nameEnd <= bytes.count else { break }
+                let path = String(decoding: bytes[nameStart..<nameEnd], as: UTF8.self)
+                paths.append(path)
+                cursor = nameEnd + extraLength + commentLength
+            }
+
+            return paths
         }
         
         private func crc32(_ data: Data) -> UInt32 {

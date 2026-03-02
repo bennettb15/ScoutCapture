@@ -18,6 +18,20 @@ final class LocalStore {
         case sessionNotFound(UUID)
     }
 
+    struct ExportValidationReport {
+        let phase: String
+        let passed: Bool
+        let failureCount: Int
+        let reportText: String
+    }
+
+    struct ValidatedSessionExportArtifacts {
+        let sessionData: Data
+        let validationData: Data
+        let prewritePassed: Bool
+        let postwritePassed: Bool
+    }
+
     private let fileManager: FileManager
     private let encoder: JSONEncoder
     private let decoder: JSONDecoder
@@ -54,6 +68,168 @@ final class LocalStore {
         self.fileIOQueue.setSpecific(key: fileIOQueueKey, value: fileIOQueueValue)
 
         try? createStorageDirectories(baseDirectoryURL: scoutRoot)
+    }
+
+    func validateExport(_ metadata: SessionMetadata, phase: String) -> ExportValidationReport {
+        var failures: [String] = []
+        let canonicalIssues = metadata.issues
+        let activeIssues = canonicalIssues.filter {
+            SessionMetadata.trimmedNonEmpty($0.issueStatus)?.lowercased() == "active"
+        }
+        let resolvedIssues = canonicalIssues.filter {
+            SessionMetadata.trimmedNonEmpty($0.issueStatus)?.lowercased() == "resolved"
+        }
+        let derivedFlaggedIssues = metadata.flaggedIssues
+        let reasonUpdatedEventsCount = canonicalIssues.reduce(into: 0) { count, issue in
+            count += issue.historyEvents.filter { $0.type == "reason_updated" }.count
+        }
+        let shotsCount = metadata.shots.count
+        let flaggedShotsCount = metadata.shots.filter(\.isFlagged).count
+        let guidedShotsCount = metadata.shots.filter(\.isGuided).count
+        let retakeShotsCount = metadata.shots.filter {
+            SessionMetadata.trimmedNonEmpty($0.captureKind) == "retake"
+        }.count
+        let capturedShotsCount = metadata.shots.filter {
+            SessionMetadata.trimmedNonEmpty($0.captureKind) == "captured"
+        }.count
+        let guidedRowsCount = metadata.guidedShots.count
+        let guidedSkippedCount = metadata.guidedShots.filter { $0.skipReason != nil }.count
+        let guidedRetiredCount = metadata.guidedShots.filter { $0.status == .retired }.count
+
+        if derivedFlaggedIssues.count != activeIssues.count {
+            failures.append("flaggedIssues count \(derivedFlaggedIssues.count) does not match active issues count \(activeIssues.count)")
+        }
+
+        let canonicalByID = Dictionary(uniqueKeysWithValues: canonicalIssues.map { ($0.issueID, $0) })
+        for flaggedIssue in derivedFlaggedIssues {
+            guard let canonical = canonicalByID[flaggedIssue.issueID] else {
+                failures.append("flaggedIssues contains issueID \(flaggedIssue.issueID.uuidString) missing from issues[]")
+                continue
+            }
+
+            if SessionMetadata.trimmedNonEmpty(canonical.issueStatus)?.lowercased() != "active" {
+                failures.append("flaggedIssues issueID \(flaggedIssue.issueID.uuidString) is not active in issues[]")
+            }
+
+            if canonical.currentReason != flaggedIssue.currentReason ||
+                canonical.previousReason != flaggedIssue.previousReason ||
+                canonical.historyEvents != flaggedIssue.historyEvents {
+                failures.append("flaggedIssues issueID \(flaggedIssue.issueID.uuidString) does not match canonical issues[] record")
+            }
+        }
+
+        for issue in canonicalIssues {
+            let reasonEvents = issue.historyEvents.filter { $0.type == "reason_updated" }
+            if !reasonEvents.isEmpty {
+                if SessionMetadata.trimmedNonEmpty(issue.previousReason) == nil {
+                    failures.append("issueID \(issue.issueID.uuidString) has reason_updated history but missing previousReason")
+                } else if let latestOldReason = reasonEvents.last?.details["oldReason"],
+                          SessionMetadata.trimmedNonEmpty(issue.previousReason) != SessionMetadata.trimmedNonEmpty(latestOldReason) {
+                    failures.append("issueID \(issue.issueID.uuidString) previousReason does not match latest reason_updated.oldReason")
+                }
+            }
+
+            if SessionMetadata.trimmedNonEmpty(issue.currentReason) == nil {
+                failures.append("issueID \(issue.issueID.uuidString) missing currentReason")
+            }
+        }
+
+        for shot in metadata.shots where shot.isFlagged {
+            if SessionMetadata.trimmedNonEmpty(shot.firstCaptureKind) == nil {
+                failures.append("flagged shotID \(shot.shotID.uuidString) missing firstCaptureKind")
+            }
+            if SessionMetadata.trimmedNonEmpty(shot.captureKind) == "retake",
+               SessionMetadata.trimmedNonEmpty(shot.firstCaptureKind) != "captured" {
+                failures.append("flagged shotID \(shot.shotID.uuidString) has captureKind retake but firstCaptureKind is not captured")
+            }
+        }
+
+        let statusLine = failures.isEmpty ? "PASS" : "FAIL"
+        var lines: [String] = []
+        lines.append("EXPORT VALIDATION SUMMARY (\(phase))")
+        lines.append("Counts:")
+        lines.append("  shots: \(shotsCount)")
+        lines.append("  flaggedShots: \(flaggedShotsCount)")
+        lines.append("  guidedShots: \(guidedShotsCount)")
+        lines.append("  retakeShots: \(retakeShotsCount)")
+        lines.append("  capturedShots: \(capturedShotsCount)")
+        lines.append("")
+        lines.append("  issues: \(canonicalIssues.count)")
+        lines.append("  activeIssues: \(activeIssues.count)")
+        lines.append("  resolvedIssues: \(resolvedIssues.count)")
+        lines.append("  flaggedIssues: \(derivedFlaggedIssues.count)")
+        lines.append("  reasonUpdatedEvents: \(reasonUpdatedEventsCount)")
+        lines.append("")
+        lines.append("  guidedRows: \(guidedRowsCount)")
+        lines.append("  guidedSkipped: \(guidedSkippedCount)")
+        lines.append("  guidedRetired: \(guidedRetiredCount)")
+        lines.append("Result: \(statusLine)")
+        if !failures.isEmpty {
+            lines.append("Failures:")
+            lines.append(contentsOf: failures.map { "- \($0)" })
+        }
+
+        return ExportValidationReport(
+            phase: phase,
+            passed: failures.isEmpty,
+            failureCount: failures.count,
+            reportText: lines.joined(separator: "\n")
+        )
+    }
+
+    func validationText(
+        for metadata: SessionMetadata,
+        prewrite: ExportValidationReport,
+        postwrite: ExportValidationReport,
+        createdAt: Date = Date()
+    ) -> String {
+        let formatter = ISO8601DateFormatter()
+        let headerLines: [String] = [
+            "SCOUT Export Validation",
+            "schemaVersion: \(metadata.schemaVersion)",
+            "appVersion: \(metadata.appVersion)",
+            "sessionID: \(metadata.sessionID.uuidString)",
+            "propertyID: \(metadata.propertyID.uuidString)",
+            "isBaselineSession: \(metadata.isBaselineSession ? "true" : "false")",
+            "createdAt: \(formatter.string(from: createdAt))"
+        ]
+
+        let finalResult = (prewrite.passed && postwrite.passed) ? "PASS" : "FAIL"
+        return [
+            headerLines.joined(separator: "\n"),
+            prewrite.reportText,
+            postwrite.reportText,
+            "FINAL RESULT: \(finalResult)"
+        ].joined(separator: "\n\n")
+    }
+
+    func validatedSessionExportArtifacts(for session: Session) throws -> ValidatedSessionExportArtifacts {
+        try ensureSessionMetadata(for: session)
+        let exportObject = try loadSessionMetadata(propertyID: session.propertyID, sessionID: session.id)
+        let validationReportPre = validateExport(exportObject, phase: "prewrite")
+        try saveSessionMetadataAtomically(
+            propertyID: session.propertyID,
+            sessionID: session.id,
+            metadata: exportObject
+        )
+        let sessionURL = sessionJSONURL(propertyID: session.propertyID, sessionID: session.id)
+        let sessionData = try Data(contentsOf: sessionURL)
+        let exportObjectPost = try decoder.decode(SessionMetadata.self, from: sessionData)
+        let validationReportPost = validateExport(exportObjectPost, phase: "postwrite")
+        let validationData = Data(
+            validationText(
+                for: exportObjectPost,
+                prewrite: validationReportPre,
+                postwrite: validationReportPost
+            ).utf8
+        )
+
+        return ValidatedSessionExportArtifacts(
+            sessionData: sessionData,
+            validationData: validationData,
+            prewritePassed: validationReportPre.passed,
+            postwritePassed: validationReportPost.passed
+        )
     }
 
     func performFileIOSync<T>(_ work: () throws -> T) rethrows -> T {
@@ -274,6 +450,7 @@ final class LocalStore {
                 issueID: shot.issueID,
                 issueStatus: shot.issueStatus,
                 captureKind: shot.captureKind,
+                firstCaptureKind: existing.firstCaptureKind ?? shot.firstCaptureKind,
                 noteText: shot.noteText,
                 noteCategory: shot.noteCategory,
                 originalFilename: shot.originalFilename,
@@ -326,6 +503,7 @@ final class LocalStore {
                 issueID: shot.issueID,
                 issueStatus: shot.issueStatus,
                 captureKind: shot.captureKind,
+                firstCaptureKind: existing.firstCaptureKind ?? shot.firstCaptureKind,
                 noteText: shot.noteText,
                 noteCategory: shot.noteCategory,
                 originalFilename: shot.originalFilename,
@@ -892,7 +1070,7 @@ final class LocalStore {
         let normalizedShots = metadata.shots
             .map { normalizeShotMetadata($0, propertyID: propertyID, sessionID: sessionID, captureTimeZone: captureTimeZone) }
             .sorted { $0.createdAt < $1.createdAt }
-        let normalizedIssues = (metadata.flaggedIssues.isEmpty ? metadata.issues : metadata.flaggedIssues)
+        let normalizedIssues = metadata.issues
             .map { normalizeIssueMetadata($0, captureTimeZone: captureTimeZone) }
         let observations = (try? fetchObservations(propertyID: propertyID)) ?? []
         let mergedIssues = mergeIssuesWithCanonicalObservations(
@@ -931,7 +1109,6 @@ final class LocalStore {
             osVersion: metadata.osVersion,
             shots: normalizedShots,
             issues: mergedIssues,
-            flaggedIssues: mergedIssues,
             guidedShots: metadata.guidedShots
         )
     }
@@ -981,6 +1158,11 @@ final class LocalStore {
             issueID: shot.issueID,
             issueStatus: shot.issueStatus,
             captureKind: shot.captureKind,
+            firstCaptureKind: normalizedFirstCaptureKind(
+                shot.firstCaptureKind,
+                captureKind: shot.captureKind,
+                isFlagged: shot.isFlagged
+            ),
             noteText: shot.noteText,
             noteCategory: shot.noteCategory,
             originalFilename: normalizedFilename,
@@ -1030,6 +1212,19 @@ final class LocalStore {
             shotKey: trimmedNonEmpty(issue.shotKey),
             historyEvents: issue.historyEvents
         )
+    }
+
+    private func normalizedFirstCaptureKind(_ value: String?, captureKind: String?, isFlagged: Bool) -> String? {
+        let normalizedValue = trimmedNonEmpty(value)
+        guard isFlagged else { return normalizedValue }
+        let normalizedCaptureKind = trimmedNonEmpty(captureKind)
+        if normalizedCaptureKind == "retake" || normalizedCaptureKind == "captured" {
+            return normalizedValue ?? "captured"
+        }
+        if normalizedValue == nil {
+            return normalizedValue ?? "captured"
+        }
+        return normalizedValue
     }
 
     private func mergeIssuesWithCanonicalObservations(
