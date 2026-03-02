@@ -2,7 +2,7 @@ import Foundation
 import UIKit
 
 final class LocalStore {
-    private let currentSessionSchemaVersion = 6
+    private let currentSessionSchemaVersion = 8
     private let fileIOQueue = DispatchQueue(label: "ScoutCapture.LocalStore.fileIO")
     private let fileIOQueueKey = DispatchSpecificKey<UInt8>()
     private let fileIOQueueValue: UInt8 = 1
@@ -233,6 +233,16 @@ final class LocalStore {
         try writeSessionMetadata(updated)
     }
 
+    func syncGuidedShotsToSessionMetadata(
+        propertyID: UUID,
+        sessionID: UUID,
+        guidedShots: [GuidedShot]
+    ) throws {
+        var metadata = try loadSessionMetadata(propertyID: propertyID, sessionID: sessionID)
+        metadata.guidedShots = guidedShots
+        try saveSessionMetadataAtomically(propertyID: propertyID, sessionID: sessionID, metadata: metadata)
+    }
+
     func upsertShot(
         propertyID: UUID,
         sessionID: UUID,
@@ -263,6 +273,7 @@ final class LocalStore {
                 isFlagged: shot.isFlagged,
                 issueID: shot.issueID,
                 issueStatus: shot.issueStatus,
+                captureKind: shot.captureKind,
                 noteText: shot.noteText,
                 noteCategory: shot.noteCategory,
                 originalFilename: shot.originalFilename,
@@ -314,6 +325,7 @@ final class LocalStore {
                 isFlagged: shot.isFlagged,
                 issueID: shot.issueID,
                 issueStatus: shot.issueStatus,
+                captureKind: shot.captureKind,
                 noteText: shot.noteText,
                 noteCategory: shot.noteCategory,
                 originalFilename: shot.originalFilename,
@@ -722,7 +734,8 @@ final class LocalStore {
                 deviceModel: deviceModelString(),
                 osVersion: osVersionString(),
                 shots: [],
-                issues: []
+                issues: [],
+                guidedShots: []
             )
         }
 
@@ -772,7 +785,8 @@ final class LocalStore {
                 deviceModel: deviceModelString(),
                 osVersion: osVersionString(),
                 shots: [],
-                issues: []
+                issues: [],
+                guidedShots: []
             )
         }
     }
@@ -878,10 +892,13 @@ final class LocalStore {
         let normalizedShots = metadata.shots
             .map { normalizeShotMetadata($0, propertyID: propertyID, sessionID: sessionID, captureTimeZone: captureTimeZone) }
             .sorted { $0.createdAt < $1.createdAt }
-        let normalizedIssues = metadata.issues
+        let normalizedIssues = (metadata.flaggedIssues.isEmpty ? metadata.issues : metadata.flaggedIssues)
             .map { normalizeIssueMetadata($0, captureTimeZone: captureTimeZone) }
-        let mergedIssues = mergeIssuesWithShotMetadata(
+        let observations = (try? fetchObservations(propertyID: propertyID)) ?? []
+        let mergedIssues = mergeIssuesWithCanonicalObservations(
             existingIssues: normalizedIssues,
+            observations: observations,
+            sessionID: sessionID,
             shots: normalizedShots,
             captureTimeZone: captureTimeZone
         )
@@ -913,7 +930,9 @@ final class LocalStore {
             deviceModel: metadata.deviceModel,
             osVersion: metadata.osVersion,
             shots: normalizedShots,
-            issues: mergedIssues
+            issues: mergedIssues,
+            flaggedIssues: mergedIssues,
+            guidedShots: metadata.guidedShots
         )
     }
 
@@ -961,6 +980,7 @@ final class LocalStore {
             isFlagged: shot.isFlagged,
             issueID: shot.issueID,
             issueStatus: shot.issueStatus,
+            captureKind: shot.captureKind,
             noteText: shot.noteText,
             noteCategory: shot.noteCategory,
             originalFilename: normalizedFilename,
@@ -984,9 +1004,15 @@ final class LocalStore {
         let firstSeenAt = issue.firstSeenAt
         let lastSeenAt = issue.lastSeenAt ?? issue.firstSeenAt
         let resolvedAt = issue.resolvedAt
+        let previousReason = normalizedPreviousReason(
+            issue.previousReason,
+            from: issue.historyEvents
+        )
         return IssueMetadata(
             issueID: issue.issueID,
             issueStatus: issue.issueStatus,
+            currentReason: trimmedNonEmpty(issue.currentReason),
+            previousReason: previousReason,
             firstSeenAt: firstSeenAt,
             firstSeenAtLocal: firstSeenAt.map {
                 localISO8601String(for: $0, timeZone: captureTimeZone.timeZone)
@@ -999,106 +1025,146 @@ final class LocalStore {
             resolvedAtLocal: resolvedAt.map {
                 localISO8601String(for: $0, timeZone: captureTimeZone.timeZone)
             } ?? trimmedNonEmpty(issue.resolvedAtLocal),
+            lastCaptureSessionId: issue.lastCaptureSessionId,
             detailNote: trimmedNonEmpty(issue.detailNote),
-            shotKey: trimmedNonEmpty(issue.shotKey)
+            shotKey: trimmedNonEmpty(issue.shotKey),
+            historyEvents: issue.historyEvents
         )
     }
 
-    private func mergeIssuesWithShotMetadata(
+    private func mergeIssuesWithCanonicalObservations(
         existingIssues: [IssueMetadata],
+        observations: [Observation],
+        sessionID: UUID,
         shots: [ShotMetadata],
         captureTimeZone: CaptureTimeZoneContext
     ) -> [IssueMetadata] {
-        struct IssueAccumulator {
-            var issue: IssueMetadata
-            var firstSeenAt: Date?
-            var lastSeenAt: Date?
-            var resolvedAt: Date?
-            var detailNote: String?
-            var shotKey: String?
-            var hasActive: Bool
-            var hasResolved: Bool
-        }
-
-        var byID: [UUID: IssueAccumulator] = [:]
+        var byID: [UUID: IssueMetadata] = [:]
         for existing in existingIssues {
-            byID[existing.issueID] = IssueAccumulator(
-                issue: existing,
-                firstSeenAt: existing.firstSeenAt,
-                lastSeenAt: existing.lastSeenAt,
-                resolvedAt: existing.resolvedAt,
-                detailNote: trimmedNonEmpty(existing.detailNote),
-                shotKey: trimmedNonEmpty(existing.shotKey),
-                hasActive: existing.issueStatus == "active",
-                hasResolved: existing.issueStatus == "resolved"
-            )
+            byID[existing.issueID] = existing
         }
 
-        for shot in shots {
-            guard let issueID = shot.issueID else { continue }
-            let shotStatus = normalizedIssueStatus(from: shot.issueStatus)
-            let note = trimmedNonEmpty(shot.noteText)
-            var accumulator = byID[issueID] ?? IssueAccumulator(
-                issue: IssueMetadata(issueID: issueID),
-                firstSeenAt: nil,
-                lastSeenAt: nil,
-                resolvedAt: nil,
-                detailNote: nil,
-                shotKey: nil,
-                hasActive: false,
-                hasResolved: false
-            )
-            if let first = accumulator.firstSeenAt {
-                accumulator.firstSeenAt = min(first, shot.createdAt)
-            } else {
-                accumulator.firstSeenAt = shot.createdAt
-            }
-            if let last = accumulator.lastSeenAt {
-                accumulator.lastSeenAt = max(last, shot.updatedAt)
-            } else {
-                accumulator.lastSeenAt = shot.updatedAt
-            }
-            if shotStatus == "resolved" {
-                accumulator.hasResolved = true
-                if let resolvedAt = accumulator.resolvedAt {
-                    accumulator.resolvedAt = max(resolvedAt, shot.updatedAt)
-                } else {
-                    accumulator.resolvedAt = shot.updatedAt
-                }
-            } else {
-                accumulator.hasActive = true
-            }
-            if let note {
-                accumulator.detailNote = note
-            }
-            accumulator.shotKey = trimmedNonEmpty(shot.shotKey) ?? accumulator.shotKey
-            byID[issueID] = accumulator
+        let relevantShotIDs = Set(shots.compactMap(\.issueID))
+        let relevantObservations = observations.filter { observation in
+            relevantShotIDs.contains(observation.id) ||
+            observation.sessionID == sessionID ||
+            observation.updatedInSessionID == sessionID ||
+            observation.resolvedInSessionID == sessionID
         }
 
-        return byID.values.map { entry in
-            let status = entry.hasResolved && !entry.hasActive ? "resolved" : "active"
-            return normalizeIssueMetadata(
-                IssueMetadata(
-                    issueID: entry.issue.issueID,
-                    issueStatus: status,
-                    firstSeenAt: entry.firstSeenAt ?? entry.issue.firstSeenAt,
-                    firstSeenAtLocal: entry.issue.firstSeenAtLocal,
-                    lastSeenAt: entry.lastSeenAt ?? entry.issue.lastSeenAt,
-                    lastSeenAtLocal: entry.issue.lastSeenAtLocal,
-                    resolvedAt: status == "resolved" ? (entry.resolvedAt ?? entry.issue.resolvedAt) : nil,
-                    resolvedAtLocal: entry.issue.resolvedAtLocal,
-                    detailNote: entry.detailNote ?? entry.issue.detailNote,
-                    shotKey: entry.shotKey ?? entry.issue.shotKey
+        for observation in relevantObservations {
+            let linkedShotKey = shots
+                .filter { $0.issueID == observation.id }
+                .sorted { $0.updatedAt > $1.updatedAt }
+                .first?.shotKey
+                ?? byID[observation.id]?.shotKey
+
+            let lastCaptureSessionId = observation.resolvedInSessionID ?? observation.updatedInSessionID
+            let exportedHistoryEvents = observation.historyEvents.map { exportHistoryEvent($0, observation: observation) }
+            let issue = IssueMetadata(
+                issueID: observation.id,
+                issueStatus: observation.status == .resolved ? "resolved" : "active",
+                currentReason: Observation.inferredCurrentReason(
+                    note: observation.currentReason ?? observation.note,
+                    statement: observation.statement
                 ),
-                captureTimeZone: captureTimeZone
+                previousReason: normalizedPreviousReason(
+                    Observation.trimmedNonEmpty(observation.previousReason),
+                    from: exportedHistoryEvents
+                ) ?? latestPreviousReason(in: observation.historyEvents),
+                firstSeenAt: observation.createdAt,
+                firstSeenAtLocal: nil,
+                lastSeenAt: observation.updatedAt,
+                lastSeenAtLocal: nil,
+                resolvedAt: observation.status == .resolved ? observation.updatedAt : nil,
+                resolvedAtLocal: nil,
+                lastCaptureSessionId: lastCaptureSessionId,
+                detailNote: Observation.inferredCurrentReason(
+                    note: observation.currentReason ?? observation.note,
+                    statement: observation.statement
+                ),
+                shotKey: trimmedNonEmpty(linkedShotKey),
+                historyEvents: exportedHistoryEvents
             )
+            byID[observation.id] = issue
         }
+
+        return byID.values
+            .map { normalizeIssueMetadata($0, captureTimeZone: captureTimeZone) }
         .sorted(by: issueSortAscending)
     }
 
-    private func normalizedIssueStatus(from shotStatus: String?) -> String {
-        let lowered = shotStatus?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
-        return lowered.contains("resolved") ? "resolved" : "active"
+    private func exportHistoryEvent(_ event: ObservationHistoryEvent, observation: Observation) -> IssueHistoryEvent {
+        var type: String
+        switch event.kind {
+        case .created:
+            type = "created"
+        case .captured:
+            type = "captured"
+        case .retake:
+            type = "retake"
+        case .reclassified:
+            type = "reclassify"
+        case .resolved:
+            type = "resolve"
+        case .reopened:
+            type = "reopened"
+        case .reasonUpdated:
+            type = "reason_updated"
+        case .titleUpdated:
+            type = "title_updated"
+        }
+
+        var details: [String: String] = [:]
+        if let field = trimmedNonEmpty(event.field) {
+            details["field"] = field
+        }
+        if let before = trimmedNonEmpty(event.beforeValue) {
+            details[event.kind == .reasonUpdated ? "oldReason" : "beforeValue"] = before
+        }
+        if let after = trimmedNonEmpty(event.afterValue) {
+            details[event.kind == .reasonUpdated ? "newReason" : "afterValue"] = after
+        }
+        if let shotID = event.shotID?.uuidString {
+            details["shotId"] = shotID
+        }
+
+        return IssueHistoryEvent(
+            timestamp: event.timestamp,
+            sessionId: event.sessionID,
+            type: type,
+            details: details
+        )
+    }
+
+    private func normalizedPreviousReason(_ value: String?, from historyEvents: [IssueHistoryEvent]) -> String? {
+        trimmedNonEmpty(value) ?? latestPreviousReason(in: historyEvents)
+    }
+
+    private func latestPreviousReason(in historyEvents: [IssueHistoryEvent]) -> String? {
+        let latest = historyEvents
+            .filter { $0.type == "reason_updated" }
+            .sorted { lhs, rhs in
+                if lhs.timestamp == rhs.timestamp {
+                    return lhs.id.uuidString < rhs.id.uuidString
+                }
+                return lhs.timestamp < rhs.timestamp
+            }
+            .last
+        return trimmedNonEmpty(latest?.details["oldReason"])
+    }
+
+    private func latestPreviousReason(in historyEvents: [ObservationHistoryEvent]) -> String? {
+        let latest = historyEvents
+            .filter { $0.kind == .reasonUpdated }
+            .sorted { lhs, rhs in
+                if lhs.timestamp == rhs.timestamp {
+                    return lhs.id.uuidString < rhs.id.uuidString
+                }
+                return lhs.timestamp < rhs.timestamp
+            }
+            .last
+        return trimmedNonEmpty(latest?.beforeValue)
     }
 
     private func issueSortAscending(_ lhs: IssueMetadata, _ rhs: IssueMetadata) -> Bool {
