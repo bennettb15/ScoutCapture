@@ -35,6 +35,7 @@ struct SessionMetadata: Codable {
     var timeZoneIdentifierAtCapture: String
     var timeZoneOffsetAtCapture: String
     var timeZoneOffsetMinutesAtCapture: Int?
+    var captureProfile: String?
     var startedAt: Date
     var sessionStartedAtLocal: String
     var endedAt: Date?
@@ -89,6 +90,7 @@ struct SessionMetadata: Codable {
         case timeZoneIdentifierAtCapture
         case timeZoneOffsetAtCapture
         case timeZoneOffsetMinutesAtCapture
+        case capture_profile
         case startedAt
         case sessionStartedAtLocal
         case endedAt
@@ -127,6 +129,7 @@ struct SessionMetadata: Codable {
         timeZoneIdentifierAtCapture: String = TimeZone.current.identifier,
         timeZoneOffsetAtCapture: String = "+00:00",
         timeZoneOffsetMinutesAtCapture: Int? = nil,
+        captureProfile: String? = nil,
         startedAt: Date,
         sessionStartedAtLocal: String = "",
         endedAt: Date?,
@@ -162,6 +165,7 @@ struct SessionMetadata: Codable {
         self.timeZoneIdentifierAtCapture = timeZoneIdentifierAtCapture.trimmingCharacters(in: .whitespacesAndNewlines)
         self.timeZoneOffsetAtCapture = timeZoneOffsetAtCapture.trimmingCharacters(in: .whitespacesAndNewlines)
         self.timeZoneOffsetMinutesAtCapture = timeZoneOffsetMinutesAtCapture
+        self.captureProfile = SessionMetadata.trimmedNonEmpty(captureProfile)
         self.startedAt = startedAt
         self.sessionStartedAtLocal = sessionStartedAtLocal.trimmingCharacters(in: .whitespacesAndNewlines)
         self.endedAt = endedAt
@@ -232,6 +236,9 @@ struct SessionMetadata: Codable {
         timeZoneOffsetAtCapture = try c.decodeIfPresent(String.self, forKey: .timeZoneOffsetAtCapture)?
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? "+00:00"
         timeZoneOffsetMinutesAtCapture = try c.decodeIfPresent(Int.self, forKey: .timeZoneOffsetMinutesAtCapture)
+        captureProfile = SessionMetadata.trimmedNonEmpty(
+            try c.decodeIfPresent(String.self, forKey: .capture_profile)
+        )
         startedAt = try c.decodeIfPresent(Date.self, forKey: .startedAt) ?? Date()
         sessionStartedAtLocal = try c.decodeIfPresent(String.self, forKey: .sessionStartedAtLocal)?
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
@@ -291,6 +298,7 @@ struct SessionMetadata: Codable {
         try c.encode(timeZoneIdentifierAtCapture.trimmingCharacters(in: .whitespacesAndNewlines), forKey: .timeZoneIdentifierAtCapture)
         try c.encode(timeZoneOffsetAtCapture.trimmingCharacters(in: .whitespacesAndNewlines), forKey: .timeZoneOffsetAtCapture)
         try c.encodeIfPresent(timeZoneOffsetMinutesAtCapture, forKey: .timeZoneOffsetMinutesAtCapture)
+        try c.encodeIfPresent(SessionMetadata.trimmedNonEmpty(captureProfile), forKey: .capture_profile)
         try c.encode(startedAt, forKey: .startedAt)
         try c.encode(sessionStartedAtLocal.trimmingCharacters(in: .whitespacesAndNewlines), forKey: .sessionStartedAtLocal)
         try c.encodeIfPresent(endedAt, forKey: .endedAt)

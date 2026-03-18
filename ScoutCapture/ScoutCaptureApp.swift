@@ -1268,6 +1268,7 @@ struct SessionHubView: View {
             let propertyCity: String
             let propertyState: String
             let propertyZip: String
+            let capture_profile: String?
             let property: Property?
             let session: Session?
             let activeIssueCount: Int
@@ -1399,6 +1400,7 @@ struct SessionHubView: View {
             propertyCity: property.city ?? "",
             propertyState: property.state ?? "",
             propertyZip: property.zip ?? "",
+            capture_profile: sessionMetadata.captureProfile,
             property: property,
             session: session,
             activeIssueCount: sessionObservations.filter { $0.status == .active }.count,

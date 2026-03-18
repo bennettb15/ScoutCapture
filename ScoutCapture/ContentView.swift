@@ -2705,6 +2705,23 @@ private struct FullImage: View {
 
 // MARK: - Detail Types Model (persisted per mode)
 
+fileprivate enum CaptureProfile: String, CaseIterable {
+    case residential
+    case commercial
+
+    init?(storedValue: String?) {
+        guard let storedValue else { return nil }
+        self.init(rawValue: storedValue.trimmingCharacters(in: .whitespacesAndNewlines).lowercased())
+    }
+
+    var title: String {
+        switch self {
+        case .residential: "Residential"
+        case .commercial: "Commercial"
+        }
+    }
+}
+
 private final class DetailTypesModel: ObservableObject {
 
     struct DetailTypeItem: Identifiable, Codable, Equatable {
@@ -2712,25 +2729,116 @@ private final class DetailTypesModel: ObservableObject {
         var name: String
     }
 
-    @Published var interiorTypes: [DetailTypeItem] = []
-    @Published var exteriorTypes: [DetailTypeItem] = []
+    @Published var residentialInteriorTypes: [DetailTypeItem] = []
+    @Published var residentialExteriorTypes: [DetailTypeItem] = []
+    @Published var commercialInteriorTypes: [DetailTypeItem] = []
+    @Published var commercialExteriorTypes: [DetailTypeItem] = []
 
-    @Published var selectedInterior: String = ""
-    @Published var selectedExterior: String = ""
+    @Published var selectedResidentialInterior: String = ""
+    @Published var selectedResidentialExterior: String = ""
+    @Published var selectedCommercialInterior: String = ""
+    @Published var selectedCommercialExterior: String = ""
 
-    private let interiorTypesKey = "scout.detailTypes.interior.list.v3"
-    private let exteriorTypesKey = "scout.detailTypes.exterior.list.v3"
-    private let selectedInteriorKey = "scout.detailTypes.interior.selected.v3"
-    private let selectedExteriorKey = "scout.detailTypes.exterior.selected.v3"
+    private let residentialInteriorTypesKey = "scout.detailTypes.residential.interior.list.v1"
+    private let residentialExteriorTypesKey = "scout.detailTypes.residential.exterior.list.v1"
+    private let commercialInteriorTypesKey = "scout.detailTypes.commercial.interior.list.v1"
+    private let commercialExteriorTypesKey = "scout.detailTypes.commercial.exterior.list.v1"
+
+    private let selectedResidentialInteriorKey = "scout.detailTypes.residential.interior.selected.v1"
+    private let selectedResidentialExteriorKey = "scout.detailTypes.residential.exterior.selected.v1"
+    private let selectedCommercialInteriorKey = "scout.detailTypes.commercial.interior.selected.v1"
+    private let selectedCommercialExteriorKey = "scout.detailTypes.commercial.exterior.selected.v1"
+
+    private let legacyResidentialInteriorTypesKey = "scout.detailTypes.interior.list.v4"
+    private let legacyResidentialExteriorTypesKey = "scout.detailTypes.exterior.list.v4"
+    private let legacySelectedResidentialInteriorKey = "scout.detailTypes.interior.selected.v4"
+    private let legacySelectedResidentialExteriorKey = "scout.detailTypes.exterior.selected.v4"
 
     private let legacyInteriorTypesKey = "scout.detailTypes.interior.list.v2"
     private let legacyExteriorTypesKey = "scout.detailTypes.exterior.list.v2"
     private let legacySelectedInteriorKey = "scout.detailTypes.interior.selected.v2"
     private let legacySelectedExteriorKey = "scout.detailTypes.exterior.selected.v2"
 
-    private var pendingPersistInterior: DispatchWorkItem?
-    private var pendingPersistExterior: DispatchWorkItem?
+    private var pendingPersist: DispatchWorkItem?
     private let persistDebounceSeconds: Double = 0.22
+
+    private let defaultResidentialInteriorTypes: [String] = [
+        "Overview",
+        "Entry / Foyer",
+        "Living Room",
+        "Kitchen",
+        "Dining Area",
+        "Primary Bedroom",
+        "Bedroom 2",
+        "Bedroom 3",
+        "Bedroom 4",
+        "Bedroom 5",
+        "Bathroom",
+        "Hallway",
+        "Stairs",
+        "Laundry",
+        "Garage",
+        "Mechanical / HVAC",
+        "Storage"
+    ]
+
+    private let defaultResidentialExteriorTypes: [String] = [
+        "Overview",
+        "Elevation",
+        "Entry",
+        "Porch",
+        "Window",
+        "Roofline",
+        "Cladding / Siding",
+        "Driveway / Garage",
+        "Backyard / Patio",
+        "Landscaping",
+        "Fence / Gate",
+        "Utility / HVAC",
+        "Pool / Outdoor Amenities"
+    ]
+
+    private let defaultCommercialExteriorTypes: [String] = [
+        "Overview",
+        "Elevation",
+        "Entry",
+        "Storefront",
+        "Loading Dock",
+        "Parking Area",
+        "Site Circulation",
+        "Signage",
+        "Window / Glazing",
+        "Roofline",
+        "Cladding / Facade",
+        "Canopy / Awning",
+        "Exterior Stairs / Ramp",
+        "Trash / Service Area",
+        "Fence / Gate",
+        "Utility / HVAC",
+        "Mechanical Equipment",
+        "Landscape / Hardscape"
+    ]
+
+    private let defaultCommercialInteriorTypes: [String] = [
+        "Overview",
+        "Lobby / Reception",
+        "Corridor",
+        "Stairs",
+        "Elevator",
+        "Office",
+        "Conference Room",
+        "Open Workspace",
+        "Break Room / Kitchenette",
+        "Restroom",
+        "Storage",
+        "Electrical Room",
+        "Mechanical Room",
+        "IT / Server Room",
+        "Janitorial / Service Room",
+        "Retail Floor",
+        "Suite Entry",
+        "Leasing / Amenity Area"
+    ]
 
     init() {
         load()
@@ -2738,158 +2846,194 @@ private final class DetailTypesModel: ObservableObject {
         persistAll()
     }
 
-    func types(for mode: ContentView.LocationMode) -> [DetailTypeItem] {
-        mode == .interior ? interiorTypes : exteriorTypes
+    func types(for mode: ContentView.LocationMode, profile: CaptureProfile) -> [DetailTypeItem] {
+        switch (profile, mode) {
+        case (.residential, .interior): residentialInteriorTypes
+        case (.residential, .exterior): residentialExteriorTypes
+        case (.commercial, .interior): commercialInteriorTypes
+        case (.commercial, .exterior): commercialExteriorTypes
+        }
     }
 
-    func selected(for mode: ContentView.LocationMode) -> String {
-        mode == .interior ? selectedInterior : selectedExterior
+    func selected(for mode: ContentView.LocationMode, profile: CaptureProfile) -> String {
+        switch (profile, mode) {
+        case (.residential, .interior): selectedResidentialInterior
+        case (.residential, .exterior): selectedResidentialExterior
+        case (.commercial, .interior): selectedCommercialInterior
+        case (.commercial, .exterior): selectedCommercialExterior
+        }
     }
 
-    func setSelected(_ value: String, for mode: ContentView.LocationMode) {
-        if mode == .interior { selectedInterior = value } else { selectedExterior = value }
+    func setSelected(_ value: String, for mode: ContentView.LocationMode, profile: CaptureProfile) {
+        switch (profile, mode) {
+        case (.residential, .interior): selectedResidentialInterior = value
+        case (.residential, .exterior): selectedResidentialExterior = value
+        case (.commercial, .interior): selectedCommercialInterior = value
+        case (.commercial, .exterior): selectedCommercialExterior = value
+        }
         persistSelected()
     }
 
     @discardableResult
-    func insertBlankItem(for mode: ContentView.LocationMode) -> UUID {
+    func insertBlankItem(for mode: ContentView.LocationMode, profile: CaptureProfile) -> UUID {
         let newItem = DetailTypeItem(name: "")
-        if mode == .interior {
-            interiorTypes.append(newItem)
-            persistAll()
-            return newItem.id
-        } else {
-            exteriorTypes.append(newItem)
-            persistAll()
-            return newItem.id
+        switch (profile, mode) {
+        case (.residential, .interior): residentialInteriorTypes.append(newItem)
+        case (.residential, .exterior): residentialExteriorTypes.append(newItem)
+        case (.commercial, .interior): commercialInteriorTypes.append(newItem)
+        case (.commercial, .exterior): commercialExteriorTypes.append(newItem)
         }
+        persistAll()
+        return newItem.id
     }
 
-    func updateItem(_ value: String, id: UUID, for mode: ContentView.LocationMode) {
+    func updateItem(_ value: String, id: UUID, for mode: ContentView.LocationMode, profile: CaptureProfile) {
         let cleaned = value.trimmingCharacters(in: .newlines)
 
-        if mode == .interior {
-            guard let idx = interiorTypes.firstIndex(where: { $0.id == id }) else { return }
-            interiorTypes[idx].name = cleaned
-        } else {
-            guard let idx = exteriorTypes.firstIndex(where: { $0.id == id }) else { return }
-            exteriorTypes[idx].name = cleaned
+        switch (profile, mode) {
+        case (.residential, .interior):
+            guard let idx = residentialInteriorTypes.firstIndex(where: { $0.id == id }) else { return }
+            residentialInteriorTypes[idx].name = cleaned
+        case (.residential, .exterior):
+            guard let idx = residentialExteriorTypes.firstIndex(where: { $0.id == id }) else { return }
+            residentialExteriorTypes[idx].name = cleaned
+        case (.commercial, .interior):
+            guard let idx = commercialInteriorTypes.firstIndex(where: { $0.id == id }) else { return }
+            commercialInteriorTypes[idx].name = cleaned
+        case (.commercial, .exterior):
+            guard let idx = commercialExteriorTypes.firstIndex(where: { $0.id == id }) else { return }
+            commercialExteriorTypes[idx].name = cleaned
         }
 
         normalizeDefaultsIfNeeded()
         persistAll()
     }
 
-    func delete(at offsets: IndexSet, for mode: ContentView.LocationMode) {
-        if mode == .interior {
-            let deleting = offsets.compactMap { interiorTypes.indices.contains($0) ? interiorTypes[$0].name : nil }
-            interiorTypes.remove(atOffsets: offsets)
-            if deleting.contains(selectedInterior) { selectedInterior = interiorTypes.first?.name ?? "" }
-        } else {
-            let deleting = offsets.compactMap { exteriorTypes.indices.contains($0) ? exteriorTypes[$0].name : nil }
-            exteriorTypes.remove(atOffsets: offsets)
-            if deleting.contains(selectedExterior) { selectedExterior = exteriorTypes.first?.name ?? "" }
+    func delete(at offsets: IndexSet, for mode: ContentView.LocationMode, profile: CaptureProfile) {
+        switch (profile, mode) {
+        case (.residential, .interior):
+            let deleting = offsets.compactMap { residentialInteriorTypes.indices.contains($0) ? residentialInteriorTypes[$0].name : nil }
+            residentialInteriorTypes.remove(atOffsets: offsets)
+            if deleting.contains(selectedResidentialInterior) { selectedResidentialInterior = residentialInteriorTypes.first?.name ?? "" }
+        case (.residential, .exterior):
+            let deleting = offsets.compactMap { residentialExteriorTypes.indices.contains($0) ? residentialExteriorTypes[$0].name : nil }
+            residentialExteriorTypes.remove(atOffsets: offsets)
+            if deleting.contains(selectedResidentialExterior) { selectedResidentialExterior = residentialExteriorTypes.first?.name ?? "" }
+        case (.commercial, .interior):
+            let deleting = offsets.compactMap { commercialInteriorTypes.indices.contains($0) ? commercialInteriorTypes[$0].name : nil }
+            commercialInteriorTypes.remove(atOffsets: offsets)
+            if deleting.contains(selectedCommercialInterior) { selectedCommercialInterior = commercialInteriorTypes.first?.name ?? "" }
+        case (.commercial, .exterior):
+            let deleting = offsets.compactMap { commercialExteriorTypes.indices.contains($0) ? commercialExteriorTypes[$0].name : nil }
+            commercialExteriorTypes.remove(atOffsets: offsets)
+            if deleting.contains(selectedCommercialExterior) { selectedCommercialExterior = commercialExteriorTypes.first?.name ?? "" }
         }
         normalizeDefaultsIfNeeded()
         persistAll()
     }
 
-    func move(from source: IndexSet, to destination: Int, for mode: ContentView.LocationMode) {
-        if mode == .interior {
-            interiorTypes.move(fromOffsets: source, toOffset: destination)
-            schedulePersist(for: .interior)
-        } else {
-            exteriorTypes.move(fromOffsets: source, toOffset: destination)
-            schedulePersist(for: .exterior)
+    func move(from source: IndexSet, to destination: Int, for mode: ContentView.LocationMode, profile: CaptureProfile) {
+        switch (profile, mode) {
+        case (.residential, .interior): residentialInteriorTypes.move(fromOffsets: source, toOffset: destination)
+        case (.residential, .exterior): residentialExteriorTypes.move(fromOffsets: source, toOffset: destination)
+        case (.commercial, .interior): commercialInteriorTypes.move(fromOffsets: source, toOffset: destination)
+        case (.commercial, .exterior): commercialExteriorTypes.move(fromOffsets: source, toOffset: destination)
         }
+        schedulePersist()
     }
 
-    private func schedulePersist(for mode: ContentView.LocationMode) {
-        if mode == .interior {
-            pendingPersistInterior?.cancel()
-            let work = DispatchWorkItem { [weak self] in
-                guard let self else { return }
-                self.normalizeDefaultsIfNeeded()
-                self.persistAll()
-            }
-            pendingPersistInterior = work
-            DispatchQueue.main.asyncAfter(deadline: .now() + persistDebounceSeconds, execute: work)
-        } else {
-            pendingPersistExterior?.cancel()
-            let work = DispatchWorkItem { [weak self] in
-                guard let self else { return }
-                self.normalizeDefaultsIfNeeded()
-                self.persistAll()
-            }
-            pendingPersistExterior = work
-            DispatchQueue.main.asyncAfter(deadline: .now() + persistDebounceSeconds, execute: work)
+    private func schedulePersist() {
+        pendingPersist?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.normalizeDefaultsIfNeeded()
+            self.persistAll()
         }
+        pendingPersist = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + persistDebounceSeconds, execute: work)
     }
 
     private func load() {
-        interiorTypes = loadItems(key: interiorTypesKey, legacyStringKey: legacyInteriorTypesKey)
-        exteriorTypes = loadItems(key: exteriorTypesKey, legacyStringKey: legacyExteriorTypesKey)
+        residentialInteriorTypes = loadItems(
+            key: residentialInteriorTypesKey,
+            legacyKeys: [legacyResidentialInteriorTypesKey, legacyInteriorTypesKey]
+        )
+        residentialExteriorTypes = loadItems(
+            key: residentialExteriorTypesKey,
+            legacyKeys: [legacyResidentialExteriorTypesKey, legacyExteriorTypesKey]
+        )
+        commercialInteriorTypes = loadItems(key: commercialInteriorTypesKey, legacyKeys: [])
+        commercialExteriorTypes = loadItems(key: commercialExteriorTypesKey, legacyKeys: [])
 
-        selectedInterior = UserDefaults.standard.string(forKey: selectedInteriorKey)
+        selectedResidentialInterior = UserDefaults.standard.string(forKey: selectedResidentialInteriorKey)
+            ?? UserDefaults.standard.string(forKey: legacySelectedResidentialInteriorKey)
             ?? UserDefaults.standard.string(forKey: legacySelectedInteriorKey)
             ?? ""
 
-        selectedExterior = UserDefaults.standard.string(forKey: selectedExteriorKey)
+        selectedResidentialExterior = UserDefaults.standard.string(forKey: selectedResidentialExteriorKey)
+            ?? UserDefaults.standard.string(forKey: legacySelectedResidentialExteriorKey)
             ?? UserDefaults.standard.string(forKey: legacySelectedExteriorKey)
+            ?? ""
+
+        selectedCommercialInterior = UserDefaults.standard.string(forKey: selectedCommercialInteriorKey)
+            ?? ""
+
+        selectedCommercialExterior = UserDefaults.standard.string(forKey: selectedCommercialExteriorKey)
             ?? ""
     }
 
     private func persistAll() {
-        saveItems(interiorTypes, key: interiorTypesKey)
-        saveItems(exteriorTypes, key: exteriorTypesKey)
+        saveItems(residentialInteriorTypes, key: residentialInteriorTypesKey)
+        saveItems(residentialExteriorTypes, key: residentialExteriorTypesKey)
+        saveItems(commercialInteriorTypes, key: commercialInteriorTypesKey)
+        saveItems(commercialExteriorTypes, key: commercialExteriorTypesKey)
         persistSelected()
     }
 
     private func persistSelected() {
-        UserDefaults.standard.set(selectedInterior, forKey: selectedInteriorKey)
-        UserDefaults.standard.set(selectedExterior, forKey: selectedExteriorKey)
+        UserDefaults.standard.set(selectedResidentialInterior, forKey: selectedResidentialInteriorKey)
+        UserDefaults.standard.set(selectedResidentialExterior, forKey: selectedResidentialExteriorKey)
+        UserDefaults.standard.set(selectedCommercialInterior, forKey: selectedCommercialInteriorKey)
+        UserDefaults.standard.set(selectedCommercialExterior, forKey: selectedCommercialExteriorKey)
     }
 
     private func normalizeDefaultsIfNeeded() {
-        let defaultInteriorTypes: [String] = [
-            "Main Lobby",
-            "Office Space",
-            "Common Areas",
-            "Restrooms",
-            "Mechanical or Utility Rooms"
-        ]
+        if residentialInteriorTypes.isEmpty { residentialInteriorTypes = defaultResidentialInteriorTypes.map { DetailTypeItem(name: $0) } }
+        if residentialExteriorTypes.isEmpty { residentialExteriorTypes = defaultResidentialExteriorTypes.map { DetailTypeItem(name: $0) } }
+        if commercialInteriorTypes.isEmpty { commercialInteriorTypes = defaultCommercialInteriorTypes.map { DetailTypeItem(name: $0) } }
+        if commercialExteriorTypes.isEmpty { commercialExteriorTypes = defaultCommercialExteriorTypes.map { DetailTypeItem(name: $0) } }
 
-        let defaultExteriorTypes: [String] = [
-            "General Elevation",
-            "Window Detail",
-            "Cladding Transition",
-            "Entry Detail",
-            "Roofline Detail"
-        ]
+        if selectedResidentialInterior.isEmpty { selectedResidentialInterior = firstNonEmpty(from: residentialInteriorTypes) ?? (residentialInteriorTypes.first?.name ?? "") }
+        if selectedResidentialExterior.isEmpty { selectedResidentialExterior = firstNonEmpty(from: residentialExteriorTypes) ?? (residentialExteriorTypes.first?.name ?? "") }
+        if selectedCommercialInterior.isEmpty { selectedCommercialInterior = firstNonEmpty(from: commercialInteriorTypes) ?? (commercialInteriorTypes.first?.name ?? "") }
+        if selectedCommercialExterior.isEmpty { selectedCommercialExterior = firstNonEmpty(from: commercialExteriorTypes) ?? (commercialExteriorTypes.first?.name ?? "") }
 
-        if interiorTypes.isEmpty { interiorTypes = defaultInteriorTypes.map { DetailTypeItem(name: $0) } }
-        if exteriorTypes.isEmpty { exteriorTypes = defaultExteriorTypes.map { DetailTypeItem(name: $0) } }
-
-        if selectedInterior.isEmpty { selectedInterior = firstNonEmpty(from: interiorTypes) ?? (interiorTypes.first?.name ?? "") }
-        if selectedExterior.isEmpty { selectedExterior = firstNonEmpty(from: exteriorTypes) ?? (exteriorTypes.first?.name ?? "") }
-
-        if !interiorTypes.contains(where: { $0.name == selectedInterior }) { selectedInterior = firstNonEmpty(from: interiorTypes) ?? (interiorTypes.first?.name ?? "") }
-        if !exteriorTypes.contains(where: { $0.name == selectedExterior }) { selectedExterior = firstNonEmpty(from: exteriorTypes) ?? (exteriorTypes.first?.name ?? "") }
+        if !residentialInteriorTypes.contains(where: { $0.name == selectedResidentialInterior }) { selectedResidentialInterior = firstNonEmpty(from: residentialInteriorTypes) ?? (residentialInteriorTypes.first?.name ?? "") }
+        if !residentialExteriorTypes.contains(where: { $0.name == selectedResidentialExterior }) { selectedResidentialExterior = firstNonEmpty(from: residentialExteriorTypes) ?? (residentialExteriorTypes.first?.name ?? "") }
+        if !commercialInteriorTypes.contains(where: { $0.name == selectedCommercialInterior }) { selectedCommercialInterior = firstNonEmpty(from: commercialInteriorTypes) ?? (commercialInteriorTypes.first?.name ?? "") }
+        if !commercialExteriorTypes.contains(where: { $0.name == selectedCommercialExterior }) { selectedCommercialExterior = firstNonEmpty(from: commercialExteriorTypes) ?? (commercialExteriorTypes.first?.name ?? "") }
     }
 
     private func firstNonEmpty(from list: [DetailTypeItem]) -> String? {
         list.first(where: { !$0.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty })?.name
     }
 
-    private func loadItems(key: String, legacyStringKey: String) -> [DetailTypeItem] {
+    private func loadItems(key: String, legacyKeys: [String]) -> [DetailTypeItem] {
         if let data = UserDefaults.standard.data(forKey: key),
            let decoded = try? JSONDecoder().decode([DetailTypeItem].self, from: data) {
             return decoded
         }
 
-        if let legacyData = UserDefaults.standard.data(forKey: legacyStringKey),
-           let decodedStrings = try? JSONDecoder().decode([String].self, from: legacyData) {
-            return decodedStrings.map { DetailTypeItem(name: $0) }
+        for legacyKey in legacyKeys {
+            if let legacyData = UserDefaults.standard.data(forKey: legacyKey),
+               let decodedItems = try? JSONDecoder().decode([DetailTypeItem].self, from: legacyData) {
+                return decodedItems
+            }
+
+            if let legacyData = UserDefaults.standard.data(forKey: legacyKey),
+               let decodedStrings = try? JSONDecoder().decode([String].self, from: legacyData) {
+                return decodedStrings.map { DetailTypeItem(name: $0) }
+            }
         }
 
         return []
@@ -2907,6 +3051,7 @@ struct ContentView: View {
     @EnvironmentObject private var appState: AppState
     @Environment(\.colorScheme) private var colorScheme
     private let localStore = LocalStore()
+    private let propertyCaptureProfileDefaultsPrefix = "scout.captureProfile.property"
     let onExitToHub: (() -> Void)?
     
     private let shutterHaptic = UIImpactFeedbackGenerator(style: .medium)
@@ -2938,7 +3083,10 @@ struct ContentView: View {
     
     @State private var showDetailTypeSheet: Bool = false
     @State var locationMode: LocationMode = .exterior
-    
+    @State private var captureProfile: CaptureProfile = .residential
+    @State private var sessionCaptureProfileLocked: Bool = false
+    @State private var showCaptureProfileUnlockConfirmation: Bool = false
+
     @State private var showQuickMenu: Bool = false
     @State private var showMetadataFilterSheet: Bool = false
     @State private var shouldReopenMetadataAfterManagerDismiss: Bool = false
@@ -4666,6 +4814,7 @@ struct ContentView: View {
     private struct ManageContext: Identifiable {
         let id = UUID()
         let mode: LocationMode
+        let profile: CaptureProfile
     }
 
     private enum ReportEditorMode {
@@ -4690,7 +4839,7 @@ struct ContentView: View {
     }
     
     private var currentDetailType: String {
-        detailTypesModel.selected(for: locationMode)
+        detailTypesModel.selected(for: locationMode, profile: captureProfile)
     }
 
     // MARK: - SwiftUI View conformance
@@ -4721,13 +4870,13 @@ struct ContentView: View {
                     onInteriorList: {
                         showQuickMenu = false
                         DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
-                            manageContext = ManageContext(mode: .interior)
+                            manageContext = ManageContext(mode: .interior, profile: captureProfile)
                         }
                     },
                     onExteriorList: {
                         showQuickMenu = false
                         DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
-                            manageContext = ManageContext(mode: .exterior)
+                            manageContext = ManageContext(mode: .exterior, profile: captureProfile)
                         }
                     },
                     onTrades: {
@@ -4774,6 +4923,14 @@ struct ContentView: View {
                     }
                 )
             }
+            .alert("Switch Capture Mode?", isPresented: $showCaptureProfileUnlockConfirmation) {
+                Button("Cancel", role: .cancel) { }
+                Button("Switch") {
+                    confirmCaptureProfileSwitch()
+                }
+            } message: {
+                Text("Changing the mode will reclassify this entire session as \(captureProfile == .residential ? "Commercial" : "Residential"). Continue?")
+            }
             .fullScreenCover(isPresented: $showLibraryFullscreen) {
                 ReportLibraryFullscreen(
                     reportLibrary: reportLibrary,
@@ -4788,7 +4945,7 @@ struct ContentView: View {
             .sheet(item: $manageContext, onDismiss: {
                 reopenMetadataSheetAfterManagerDismissIfNeeded()
             }) { ctx in
-                ManageDetailTypesView(mode: ctx.mode, model: detailTypesModel)
+                ManageDetailTypesView(mode: ctx.mode, profile: ctx.profile, model: detailTypesModel)
             }
             .fullScreenCover(isPresented: $showActiveIssuesSheet) {
                 activeIssuesSheetView
@@ -4884,6 +5041,7 @@ struct ContentView: View {
                     propertyID: appState.selectedPropertyID,
                     sessionID: appState.currentSession?.id
                 )
+                refreshCaptureProfileSessionState()
                 loadBuildingOptions()
                 loadTradeOptions()
                 refreshActiveIssues()
@@ -4907,6 +5065,7 @@ struct ContentView: View {
                     propertyID: appState.selectedPropertyID,
                     sessionID: appState.currentSession?.id
                 )
+                refreshCaptureProfileSessionState()
                 reservedAngleByContextKey = [:]
                 resetSelectionForSwitch()
                 refreshActiveIssues()
@@ -4929,6 +5088,7 @@ struct ContentView: View {
                     "to=\(nextSessionID?.uuidString ?? "NONE") " +
                     "property=\(propertyIDText) baseline=\(baselineActive)"
                 )
+                refreshCaptureProfileSessionState()
                 ensureCameraSessionPrecondition()
                 if hasValidCurrentSession {
                     camera.ensurePreviewRunningAsync()
@@ -5008,6 +5168,7 @@ struct ContentView: View {
             referencePathByID: flaggedReferencePathByID,
             angleIndexByIssueID: flaggedAngleIndexByID,
             allowReferenceFallback: shouldAllowChecklistReferenceFallback,
+            captureProfile: captureProfile,
             buildingOptions: $buildingOptions,
             detailTypesModel: detailTypesModel,
             buildingCodeForOption: buildingCode(from:),
@@ -5043,6 +5204,7 @@ struct ContentView: View {
             currentSessionEndedAt: appState.currentSession?.endedAt,
             isBaselineSession: isCurrentSessionBaselineFromPersisted,
             allowReferenceFallback: shouldAllowChecklistReferenceFallback,
+            captureProfile: captureProfile,
             buildingOptions: $buildingOptions,
             detailTypesModel: detailTypesModel,
             buildingCodeForOption: buildingCode(from:),
@@ -5124,17 +5286,28 @@ struct ContentView: View {
             VStack(spacing: isLandscapeUI ? 0 : 10) {
                 VStack(spacing: 2) {
                     ZStack {
-                        Text(headerPropertyName)
-                            .font(.system(size: titleFontSize, weight: .medium))
-                            .tracking(0.4)
-                            .foregroundColor(.white.opacity(0.66))
-                            .lineLimit(1)
-                            .minimumScaleFactor(0.54)
-                            .truncationMode(.tail)
-                            .padding(.horizontal, titleSideInset)
-                            .frame(maxWidth: .infinity, alignment: .center)
+                        VStack(spacing: -2) {
+                            Text(captureProfile.title)
+                                .font(.system(size: 11, weight: .semibold))
+                                .tracking(0.5)
+                                .foregroundColor(currentProfileAccentColor.opacity(0.92))
+                                .lineLimit(1)
+                                .minimumScaleFactor(0.8)
+
+                            Text(headerPropertyName)
+                                .font(.system(size: titleFontSize, weight: .medium))
+                                .tracking(0.4)
+                                .foregroundColor(.white.opacity(0.66))
+                                .lineLimit(1)
+                                .minimumScaleFactor(0.54)
+                                .truncationMode(.tail)
+                        }
+                        .padding(.horizontal, titleSideInset)
+                        .frame(maxWidth: .infinity, alignment: .center)
 
                         HStack(spacing: 0) {
+                            profileToggleControl()
+                                .padding(.leading, rowPadding)
                             Spacer(minLength: 0)
                             endSessionControl()
                                 .padding(.trailing, rowPadding)
@@ -5159,9 +5332,9 @@ struct ContentView: View {
     }
 
     private func metadataHUDStrip(isLandscapeStyle: Bool) -> some View {
-        let priorityBlue: Color = isLandscapeStyle
-            ? Color(red: 0.12, green: 0.66, blue: 1.0)
-            : .blue
+        let accentColor: Color = isLandscapeStyle
+            ? currentProfileAccentColor.opacity(0.96)
+            : currentProfileAccentColor
 
         let metadataText = HStack(spacing: 0) {
             Text(selectedBuilding)
@@ -5176,7 +5349,7 @@ struct ContentView: View {
             separatorToken()
             Text(shortShotTypeLabel(currentDetailType))
                 .font(.system(size: 15, weight: .heavy))
-                .foregroundColor(priorityBlue)
+                .foregroundColor(accentColor)
                 .shadow(
                     color: .black.opacity(isLandscapeStyle ? 0.78 : 0.45),
                     radius: isLandscapeStyle ? 1.4 : 0.8,
@@ -5197,7 +5370,7 @@ struct ContentView: View {
                 separatorToken()
                 Text(tradeTrimmed)
                     .font(.system(size: 15, weight: .heavy))
-                    .foregroundColor(priorityBlue)
+                    .foregroundColor(accentColor)
                     .shadow(
                         color: .black.opacity(isLandscapeStyle ? 0.78 : 0.45),
                         radius: isLandscapeStyle ? 1.4 : 0.8,
@@ -5330,10 +5503,146 @@ struct ContentView: View {
         .buttonStyle(.plain)
     }
 
+    private var isCaptureProfileLocked: Bool { sessionCaptureProfileLocked }
+
+    private var residentialAccentColor: Color {
+        Color(red: 0.95, green: 0.56, blue: 0.15)
+    }
+
+    private var commercialAccentColor: Color {
+        Color(red: 0.12, green: 0.66, blue: 1.0)
+    }
+
+    private var currentProfileAccentColor: Color {
+        captureProfile == .residential ? residentialAccentColor : commercialAccentColor
+    }
+
+    private func propertyCaptureProfileDefaultsKey(for propertyID: UUID) -> String {
+        "\(propertyCaptureProfileDefaultsPrefix).\(propertyID.uuidString)"
+    }
+
+    private func storedPropertyCaptureProfile(for propertyID: UUID) -> CaptureProfile? {
+        CaptureProfile(
+            storedValue: UserDefaults.standard.string(
+                forKey: propertyCaptureProfileDefaultsKey(for: propertyID)
+            )
+        )
+    }
+
+    private func persistPropertyCaptureProfile(_ profile: CaptureProfile, for propertyID: UUID) {
+        UserDefaults.standard.set(profile.rawValue, forKey: propertyCaptureProfileDefaultsKey(for: propertyID))
+    }
+
+    private func inheritedCaptureProfileForCurrentProperty(
+        propertyID: UUID,
+        currentSessionID: UUID
+    ) -> CaptureProfile? {
+        if let storedProfile = storedPropertyCaptureProfile(for: propertyID) {
+            return storedProfile
+        }
+
+        guard let sessions = try? localStore.fetchSessions(propertyID: propertyID) else { return nil }
+
+        let priorSessions = sessions
+            .filter { $0.id != currentSessionID }
+            .sorted { $0.startedAt > $1.startedAt }
+
+        for session in priorSessions {
+            guard let metadata = try? localStore.loadSessionMetadata(propertyID: propertyID, sessionID: session.id),
+                  let profile = CaptureProfile(storedValue: metadata.captureProfile) else {
+                continue
+            }
+            return profile
+        }
+
+        return nil
+    }
+
+    private func refreshCaptureProfileSessionState() {
+        guard let propertyID = appState.selectedPropertyID,
+              let sessionID = appState.currentSession?.id,
+              let metadata = try? localStore.loadSessionMetadata(propertyID: propertyID, sessionID: sessionID) else {
+            sessionCaptureProfileLocked = false
+            return
+        }
+
+        let inheritedProfile = inheritedCaptureProfileForCurrentProperty(
+            propertyID: propertyID,
+            currentSessionID: sessionID
+        )
+
+        if let storedProfile = CaptureProfile(storedValue: metadata.captureProfile) {
+            captureProfile = storedProfile
+        } else if let inheritedProfile {
+            captureProfile = inheritedProfile
+            persistCaptureProfileToCurrentSession()
+        }
+
+        sessionCaptureProfileLocked = !metadata.shots.isEmpty || inheritedProfile != nil
+    }
+
+    private func persistCaptureProfileToCurrentSession(lockStateOverride: Bool? = nil) {
+        guard let propertyID = appState.selectedPropertyID,
+              let sessionID = appState.currentSession?.id,
+              var metadata = try? localStore.loadSessionMetadata(propertyID: propertyID, sessionID: sessionID) else {
+            return
+        }
+
+        metadata.captureProfile = captureProfile.rawValue
+        try? localStore.saveSessionMetadataAtomically(propertyID: propertyID, sessionID: sessionID, metadata: metadata)
+        persistPropertyCaptureProfile(captureProfile, for: propertyID)
+
+        if let lockStateOverride {
+            sessionCaptureProfileLocked = lockStateOverride
+        } else {
+            sessionCaptureProfileLocked = !metadata.shots.isEmpty
+        }
+    }
+
+    private func toggleCaptureProfileIfAllowed() {
+        if isCaptureProfileLocked {
+            showCaptureProfileUnlockConfirmation = true
+            return
+        }
+
+        captureProfile = captureProfile == .residential ? .commercial : .residential
+        persistCaptureProfileToCurrentSession()
+    }
+
+    private func confirmCaptureProfileSwitch() {
+        captureProfile = captureProfile == .residential ? .commercial : .residential
+        persistCaptureProfileToCurrentSession(lockStateOverride: sessionCaptureProfileLocked)
+        showHDToast("\(captureProfile.title) applied to session")
+    }
+
+    private func profileToggleControl() -> some View {
+        Button {
+            toggleCaptureProfileIfAllowed()
+        } label: {
+            HStack(spacing: 3) {
+                Image(systemName: captureProfile == .residential ? "house.fill" : "building.2.fill")
+                    .font(.system(size: 18, weight: .semibold))
+                    .foregroundColor(currentProfileAccentColor)
+                if isCaptureProfileLocked {
+                    Image(systemName: "lock.fill")
+                        .font(.system(size: 8, weight: .bold))
+                        .foregroundColor(.white.opacity(0.7))
+                        .offset(y: -6)
+                }
+            }
+            .frame(width: 34, height: 30)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .opacity(isCaptureProfileLocked ? 0.76 : 1.0)
+        .rotationEffect(isLandscapeUI ? bottomGlyphRotationAngle : .zero)
+        .accessibilityLabel(captureProfile == .residential ? "Residential capture mode" : "Commercial capture mode")
+    }
+
     private func detailTypeSelectionBinding() -> Binding<String> {
         Binding(
-            get: { detailTypesModel.selected(for: locationMode) },
-            set: { detailTypesModel.setSelected($0, for: locationMode) }
+            get: { detailTypesModel.selected(for: locationMode, profile: captureProfile) },
+            set: { detailTypesModel.setSelected($0, for: locationMode, profile: captureProfile) }
         )
     }
 
@@ -5395,7 +5704,7 @@ struct ContentView: View {
                     }
 
                     Picker(selection: detailTypeSelectionBinding()) {
-                        ForEach(detailTypesModel.types(for: locationMode)) { item in
+                        ForEach(detailTypesModel.types(for: locationMode, profile: captureProfile)) { item in
                             Text(shortShotTypeLabel(item.name)).tag(item.name)
                         }
                     } label: {
@@ -5500,9 +5809,9 @@ struct ContentView: View {
         case .buildings:
             showManageBuildingsSheet = true
         case .interior:
-            manageContext = ManageContext(mode: .interior)
+            manageContext = ManageContext(mode: .interior, profile: captureProfile)
         case .exterior:
-            manageContext = ManageContext(mode: .exterior)
+            manageContext = ManageContext(mode: .exterior, profile: captureProfile)
         case .trades:
             showManageTradesSheet = true
         }
@@ -6588,7 +6897,7 @@ extension ContentView {
     
     @ViewBuilder
     private func centeredDetailMenuContent() -> some View {
-        let list = detailTypesModel.types(for: locationMode)
+        let list = detailTypesModel.types(for: locationMode, profile: captureProfile)
         
         VStack(spacing: 0) {
             centeredMenuHeader(title: locationMode == .interior ? "Interior Detail Type" : "Exterior Detail Type")
@@ -6598,10 +6907,10 @@ extension ContentView {
                 LazyVStack(spacing: 0) {
                     ForEach(list) { item in
                         let name = item.name.isEmpty ? " " : item.name
-                        let isSelected = (detailTypesModel.selected(for: locationMode) == item.name)
+                        let isSelected = (detailTypesModel.selected(for: locationMode, profile: captureProfile) == item.name)
                         
                         centeredMenuRow(title: name, isSelected: isSelected) {
-                            detailTypesModel.setSelected(item.name, for: locationMode)
+                            detailTypesModel.setSelected(item.name, for: locationMode, profile: captureProfile)
                             dismissLandscapeMenus()
                         }
                         
@@ -6619,7 +6928,7 @@ extension ContentView {
             
             centeredMenuRow(title: "Manage…", isSelected: false) {
                 dismissLandscapeMenus()
-                manageContext = ManageContext(mode: locationMode)
+                manageContext = ManageContext(mode: locationMode, profile: captureProfile)
             }
         }
         .background(.ultraThinMaterial)
@@ -8114,7 +8423,10 @@ extension ContentView {
                 shot: metadata,
                 matchMode: matchMode
             )
-            let updated = try localStore.loadSessionMetadata(propertyID: propertyID, sessionID: session.id)
+            var updated = try localStore.loadSessionMetadata(propertyID: propertyID, sessionID: session.id)
+            updated.captureProfile = captureProfile.rawValue
+            try localStore.saveSessionMetadataAtomically(propertyID: propertyID, sessionID: session.id, metadata: updated)
+            sessionCaptureProfileLocked = true
             let originalsURL = localStore.originalsDirectoryURL(propertyID: propertyID, sessionID: session.id)
             let originalsItems = (try? FileManager.default.contentsOfDirectory(
                 at: originalsURL,
@@ -8517,7 +8829,7 @@ extension ContentView {
         }
         let detail = guidedShot.detailType?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         if !detail.isEmpty {
-            detailTypesModel.setSelected(detail, for: locationMode)
+            detailTypesModel.setSelected(detail, for: locationMode, profile: captureProfile)
         }
         loadGuidedArmedThumbnail(for: guidedShot)
         showGuidedAlignmentOverlay = false
@@ -8540,7 +8852,7 @@ extension ContentView {
         }
         let detail = guidedShot.detailType?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         if !detail.isEmpty {
-            detailTypesModel.setSelected(detail, for: locationMode)
+            detailTypesModel.setSelected(detail, for: locationMode, profile: captureProfile)
         }
         var retakeReferencePath: String? = nil
         var retakeReferenceSource = "none"
@@ -10821,7 +11133,7 @@ extension ContentView {
             elevation = targetElevation
         }
         if let detail = observation.detailType?.trimmingCharacters(in: .whitespacesAndNewlines), !detail.isEmpty {
-            detailTypesModel.setSelected(detail, for: locationMode)
+            detailTypesModel.setSelected(detail, for: locationMode, profile: captureProfile)
         }
         armedIssueNoteText = Self.observationCurrentReasonText(observation) ?? ""
         detailNote = armedIssueNoteText
@@ -11291,7 +11603,7 @@ extension ContentView {
             elevation = targetElevation
         }
         if let detail = observation.detailType?.trimmingCharacters(in: .whitespacesAndNewlines), !detail.isEmpty {
-            detailTypesModel.setSelected(detail, for: locationMode)
+            detailTypesModel.setSelected(detail, for: locationMode, profile: captureProfile)
         }
         armedUpdateObservationID = observation.id
         setCaptureIntent(.flagged(observation.id))
@@ -13677,6 +13989,7 @@ extension ContentView {
     private struct ManageDetailTypesView: View {
         
         let mode: ContentView.LocationMode
+        let profile: CaptureProfile
         @ObservedObject var model: DetailTypesModel
         @Environment(\.colorScheme) private var colorScheme
         private var theme: SheetControlTheme { .forScheme(colorScheme) }
@@ -13686,7 +13999,9 @@ extension ContentView {
         @FocusState private var focusedRow: UUID?
         
         private var titleText: String {
-            mode == .interior ? "Interior Detail Types" : "Exterior Detail Types"
+            let prefix = profile == .residential ? "Residential" : "Commercial"
+            let suffix = mode == .interior ? "Interior Detail Types" : "Exterior Detail Types"
+            return "\(prefix) \(suffix)"
         }
         
         private var isEditing: Bool { editModeState == .active }
@@ -13694,16 +14009,16 @@ extension ContentView {
         var body: some View {
             NavigationStack {
                 List {
-                    let items = model.types(for: mode)
+                    let items = model.types(for: mode, profile: profile)
                     
                     ForEach(items) { item in
                         rowView(item: item)
                     }
                     .onDelete { offsets in
-                        withAnimation(.none) { model.delete(at: offsets, for: mode) }
+                        withAnimation(.none) { model.delete(at: offsets, for: mode, profile: profile) }
                     }
                     .onMove { source, destination in
-                        withAnimation(.none) { model.move(from: source, to: destination, for: mode) } // fixed label for iOS 26
+                        withAnimation(.none) { model.move(from: source, to: destination, for: mode, profile: profile) } // fixed label for iOS 26
                     }
                 }
                 .environment(\.editMode, $editModeState)
@@ -13734,7 +14049,7 @@ extension ContentView {
                         HStack(spacing: 0) {
                             Button {
                                 if editModeState != .active { editModeState = .active }
-                                let newId = model.insertBlankItem(for: mode)
+                                let newId = model.insertBlankItem(for: mode, profile: profile)
                                 DispatchQueue.main.async { focusedRow = newId }
                             } label: {
                                 Image(systemName: "plus")
@@ -13817,12 +14132,12 @@ extension ContentView {
         private func bindingForRow(id: UUID) -> Binding<String> {
             Binding(
                 get: {
-                    let items = model.types(for: mode)
+                    let items = model.types(for: mode, profile: profile)
                     return items.first(where: { $0.id == id })?.name ?? ""
                 },
                 set: { newValue in
                     withAnimation(.none) {
-                        model.updateItem(newValue, id: id, for: mode)
+                        model.updateItem(newValue, id: id, for: mode, profile: profile)
                     }
                 }
             )
@@ -13864,6 +14179,7 @@ extension ContentView {
         let initialBuilding: String?
         let initialElevation: String?
         let initialDetailType: String?
+        let captureProfile: CaptureProfile
         @Binding var buildingOptions: [String]
         @ObservedObject var detailTypesModel: DetailTypesModel
         let buildingCodeForOption: (String) -> String
@@ -13893,7 +14209,7 @@ extension ContentView {
         }
 
         private var availableDetailTypes: [DetailTypesModel.DetailTypeItem] {
-            detailTypesModel.types(for: selectedDirection.locationMode)
+            detailTypesModel.types(for: selectedDirection.locationMode, profile: captureProfile)
         }
 
         private var canConfirm: Bool {
@@ -13977,7 +14293,7 @@ extension ContentView {
                     )
                 }
                 .sheet(item: $manageDetailMode) { mode in
-                    ManageDetailTypesView(mode: mode, model: detailTypesModel)
+                    ManageDetailTypesView(mode: mode, profile: captureProfile, model: detailTypesModel)
                 }
                 .overlay {
                     pickerOverlay
@@ -14191,6 +14507,7 @@ extension ContentView {
         let currentSessionEndedAt: Date?
         let isBaselineSession: Bool
         let allowReferenceFallback: Bool
+        let captureProfile: CaptureProfile
         @Binding var buildingOptions: [String]
         @ObservedObject var detailTypesModel: DetailTypesModel
         let buildingCodeForOption: (String) -> String
@@ -14390,6 +14707,7 @@ extension ContentView {
                             initialBuilding: target.building,
                             initialElevation: target.targetElevation,
                             initialDetailType: target.detailType,
+                            captureProfile: captureProfile,
                             buildingOptions: $buildingOptions,
                             detailTypesModel: detailTypesModel,
                             buildingCodeForOption: buildingCodeForOption,
@@ -15024,6 +15342,7 @@ extension ContentView {
         let referencePathByID: [UUID: String]
         let angleIndexByIssueID: [UUID: Int]
         let allowReferenceFallback: Bool
+        let captureProfile: CaptureProfile
         @Binding var buildingOptions: [String]
         @ObservedObject var detailTypesModel: DetailTypesModel
         let buildingCodeForOption: (String) -> String
@@ -15178,6 +15497,7 @@ extension ContentView {
                             initialBuilding: target.building,
                             initialElevation: target.targetElevation,
                             initialDetailType: target.detailType,
+                            captureProfile: captureProfile,
                             buildingOptions: $buildingOptions,
                             detailTypesModel: detailTypesModel,
                             buildingCodeForOption: buildingCodeForOption,

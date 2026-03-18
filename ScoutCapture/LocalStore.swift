@@ -2,7 +2,7 @@ import Foundation
 import UIKit
 
 final class LocalStore {
-    private let currentSessionSchemaVersion = 9
+    private let currentSessionSchemaVersion = 10
     private let fileIOQueue = DispatchQueue(label: "ScoutCapture.LocalStore.fileIO")
     private let fileIOQueueKey = DispatchSpecificKey<UInt8>()
     private let fileIOQueueValue: UInt8 = 1
@@ -327,7 +327,8 @@ final class LocalStore {
             "status",
             "schema_version",
             "app_version",
-            "time_zone"
+            "time_zone",
+            "capture_profile"
         ]
 
         let property = currentProperty(for: metadata.propertyID)
@@ -362,7 +363,8 @@ final class LocalStore {
             metadata.status.rawValue,
             String(metadata.schemaVersion),
             metadata.appVersion,
-            metadata.timeZoneIdentifierAtCapture
+            metadata.timeZoneIdentifierAtCapture,
+            metadata.captureProfile ?? ""
         ]
         return csvString(headers: headers, rows: [row])
     }
@@ -393,7 +395,8 @@ final class LocalStore {
             "original_filename",
             "original_byte_size",
             "trade",
-            "priority"
+            "priority",
+            "capture_profile"
         ]
 
         let property = currentProperty(for: metadata.propertyID)
@@ -427,7 +430,8 @@ final class LocalStore {
                 shot.originalFilename,
                 intString(shot.originalByteSize),
                 shot.trade ?? "",
-                shot.isFlagged ? (shot.priority ?? "") : ""
+                shot.isFlagged ? (shot.priority ?? "") : "",
+                metadata.captureProfile ?? ""
             ]
         }
 
@@ -1769,6 +1773,7 @@ final class LocalStore {
             timeZoneIdentifierAtCapture: captureTimeZone.identifier,
             timeZoneOffsetAtCapture: captureTimeZone.offsetString,
             timeZoneOffsetMinutesAtCapture: captureTimeZone.offsetMinutes,
+            captureProfile: trimmedNonEmpty(metadata.captureProfile),
             startedAt: metadata.startedAt,
             sessionStartedAtLocal: localISO8601String(for: metadata.startedAt, timeZone: captureTimeZone.timeZone),
             endedAt: metadata.endedAt,
