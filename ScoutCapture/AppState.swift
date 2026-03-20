@@ -33,6 +33,7 @@ final class AppState: ObservableObject {
         let addressLine: String?
         let normalizedNameToken: String
         let normalizedClientToken: String
+        let normalizedOrganizationToken: String
         let normalizedAddressToken: String
     }
 
@@ -638,6 +639,8 @@ final class AppState: ObservableObject {
             }
 
             let client = property.clientName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let organization = organizations.first(where: { $0.id == property.orgId })?.name
+                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             let address = normalizedAddressLine(property.address)
             let name = property.name.trimmingCharacters(in: .whitespacesAndNewlines)
             meta[property.id] = HubPropertyMeta(
@@ -645,6 +648,7 @@ final class AppState: ObservableObject {
                 addressLine: address.isEmpty ? nil : address,
                 normalizedNameToken: name.lowercased(),
                 normalizedClientToken: client.lowercased(),
+                normalizedOrganizationToken: organization.lowercased(),
                 normalizedAddressToken: address.lowercased()
             )
         }
