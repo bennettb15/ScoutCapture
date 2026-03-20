@@ -35,6 +35,7 @@ struct SessionMetadata: Codable {
     var timeZoneIdentifierAtCapture: String
     var timeZoneOffsetAtCapture: String
     var timeZoneOffsetMinutesAtCapture: Int?
+    var captureProfile: String?
     var startedAt: Date
     var sessionStartedAtLocal: String
     var endedAt: Date?
@@ -89,6 +90,11 @@ struct SessionMetadata: Codable {
         case timeZoneIdentifierAtCapture
         case timeZoneOffsetAtCapture
         case timeZoneOffsetMinutesAtCapture
+        case captureProfile
+        case capture_profile
+        case building
+        case elevation
+        case detailType
         case startedAt
         case sessionStartedAtLocal
         case endedAt
@@ -127,6 +133,7 @@ struct SessionMetadata: Codable {
         timeZoneIdentifierAtCapture: String = TimeZone.current.identifier,
         timeZoneOffsetAtCapture: String = "+00:00",
         timeZoneOffsetMinutesAtCapture: Int? = nil,
+        captureProfile: String? = nil,
         startedAt: Date,
         sessionStartedAtLocal: String = "",
         endedAt: Date?,
@@ -162,6 +169,7 @@ struct SessionMetadata: Codable {
         self.timeZoneIdentifierAtCapture = timeZoneIdentifierAtCapture.trimmingCharacters(in: .whitespacesAndNewlines)
         self.timeZoneOffsetAtCapture = timeZoneOffsetAtCapture.trimmingCharacters(in: .whitespacesAndNewlines)
         self.timeZoneOffsetMinutesAtCapture = timeZoneOffsetMinutesAtCapture
+        self.captureProfile = SessionMetadata.trimmedNonEmpty(captureProfile)
         self.startedAt = startedAt
         self.sessionStartedAtLocal = sessionStartedAtLocal.trimmingCharacters(in: .whitespacesAndNewlines)
         self.endedAt = endedAt
@@ -232,6 +240,10 @@ struct SessionMetadata: Codable {
         timeZoneOffsetAtCapture = try c.decodeIfPresent(String.self, forKey: .timeZoneOffsetAtCapture)?
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? "+00:00"
         timeZoneOffsetMinutesAtCapture = try c.decodeIfPresent(Int.self, forKey: .timeZoneOffsetMinutesAtCapture)
+        captureProfile = SessionMetadata.trimmedNonEmpty(
+            try c.decodeIfPresent(String.self, forKey: .captureProfile)
+                ?? c.decodeIfPresent(String.self, forKey: .capture_profile)
+        )
         startedAt = try c.decodeIfPresent(Date.self, forKey: .startedAt) ?? Date()
         sessionStartedAtLocal = try c.decodeIfPresent(String.self, forKey: .sessionStartedAtLocal)?
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
@@ -291,6 +303,11 @@ struct SessionMetadata: Codable {
         try c.encode(timeZoneIdentifierAtCapture.trimmingCharacters(in: .whitespacesAndNewlines), forKey: .timeZoneIdentifierAtCapture)
         try c.encode(timeZoneOffsetAtCapture.trimmingCharacters(in: .whitespacesAndNewlines), forKey: .timeZoneOffsetAtCapture)
         try c.encodeIfPresent(timeZoneOffsetMinutesAtCapture, forKey: .timeZoneOffsetMinutesAtCapture)
+        try c.encodeIfPresent(SessionMetadata.trimmedNonEmpty(captureProfile), forKey: .captureProfile)
+        try c.encodeIfPresent(SessionMetadata.trimmedNonEmpty(captureProfile), forKey: .capture_profile)
+        try c.encodeIfPresent(shots.first?.building.trimmingCharacters(in: .whitespacesAndNewlines), forKey: .building)
+        try c.encodeIfPresent(shots.first?.elevation.trimmingCharacters(in: .whitespacesAndNewlines), forKey: .elevation)
+        try c.encodeIfPresent(shots.first?.detailType.trimmingCharacters(in: .whitespacesAndNewlines), forKey: .detailType)
         try c.encode(startedAt, forKey: .startedAt)
         try c.encode(sessionStartedAtLocal.trimmingCharacters(in: .whitespacesAndNewlines), forKey: .sessionStartedAtLocal)
         try c.encodeIfPresent(endedAt, forKey: .endedAt)
@@ -428,10 +445,14 @@ struct ShotMetadata: Codable, Identifiable, Equatable {
         case detailType
         case angleIndex
         case shotKey
+        case shotName
         case isGuided
         case isFlagged
         case issueID
+        case issueId
         case issueStatus
+        case currentReason
+        case propertyName
         case captureKind
         case firstCaptureKind
         case noteText
@@ -554,6 +575,7 @@ struct ShotMetadata: Codable, Identifiable, Equatable {
         isGuided = try c.decodeIfPresent(Bool.self, forKey: .isGuided) ?? false
         isFlagged = try c.decodeIfPresent(Bool.self, forKey: .isFlagged) ?? false
         issueID = try c.decodeIfPresent(UUID.self, forKey: .issueID)
+            ?? c.decodeIfPresent(UUID.self, forKey: .issueId)
         issueStatus = try c.decodeIfPresent(String.self, forKey: .issueStatus)
         captureKind = ShotMetadata.trimmedNonEmpty(try c.decodeIfPresent(String.self, forKey: .captureKind))
         firstCaptureKind = ShotMetadata.trimmedNonEmpty(try c.decodeIfPresent(String.self, forKey: .firstCaptureKind))
@@ -603,9 +625,13 @@ struct ShotMetadata: Codable, Identifiable, Equatable {
         try c.encode(max(1, angleIndex), forKey: .angleIndex)
         let encodedKey = shotKey.trimmingCharacters(in: .whitespacesAndNewlines)
         try c.encode(encodedKey.isEmpty ? ShotMetadata.makeShotKey(building: building, elevation: elevation, detailType: detailType, angleIndex: angleIndex) : encodedKey, forKey: .shotKey)
+        try c.encode(shotName, forKey: .shotName)
         try c.encode(isGuided, forKey: .isGuided)
         try c.encode(isFlagged, forKey: .isFlagged)
         try c.encodeIfPresent(issueID, forKey: .issueID)
+        try c.encodeIfPresent(issueID, forKey: .issueId)
+        try c.encodeIfPresent(ShotMetadata.trimmedNonEmpty(currentReason), forKey: .currentReason)
+        try c.encodeIfPresent(ShotMetadata.trimmedNonEmpty(propertyName), forKey: .propertyName)
         try c.encodeIfPresent(ShotMetadata.trimmedNonEmpty(captureKind), forKey: .captureKind)
         try c.encodeIfPresent(ShotMetadata.trimmedNonEmpty(firstCaptureKind), forKey: .firstCaptureKind)
         try c.encodeIfPresent(noteText, forKey: .noteText)
@@ -640,6 +666,23 @@ struct ShotMetadata: Codable, Identifiable, Equatable {
         value
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .lowercased()
+    }
+
+    private var shotName: String {
+        let trimmedDetail = detailType.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmedDetail.isEmpty {
+            return trimmedDetail
+        }
+        let trimmedKey = shotKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmedKey
+    }
+
+    private var currentReason: String? {
+        noteText
+    }
+
+    private var propertyName: String? {
+        nil
     }
 
     private static func trimmedNonEmpty(_ value: String?) -> String? {
@@ -705,8 +748,11 @@ struct IssueMetadata: Codable, Identifiable, Equatable {
 
     private enum CodingKeys: String, CodingKey {
         case issueID
+        case issueId
+        case id
         case issueStatus
         case currentReason
+        case reason
         case previousReason
         case firstSeenAt
         case firstSeenAtLocal
@@ -720,6 +766,7 @@ struct IssueMetadata: Codable, Identifiable, Equatable {
         case historyEvents
         case status
         case statement
+        case name
     }
 
     init(
@@ -756,7 +803,9 @@ struct IssueMetadata: Codable, Identifiable, Equatable {
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
-        issueID = try c.decode(UUID.self, forKey: .issueID)
+        issueID = try c.decodeIfPresent(UUID.self, forKey: .issueID)
+            ?? c.decodeIfPresent(UUID.self, forKey: .issueId)
+            ?? c.decode(UUID.self, forKey: .id)
 
         if let raw = try c.decodeIfPresent(String.self, forKey: .issueStatus) {
             issueStatus = IssueMetadata.normalizedStatus(raw)
@@ -768,7 +817,11 @@ struct IssueMetadata: Codable, Identifiable, Equatable {
             issueStatus = "active"
         }
 
-        currentReason = IssueMetadata.trimmedNonEmpty(try c.decodeIfPresent(String.self, forKey: .currentReason))
+        currentReason = IssueMetadata.trimmedNonEmpty(
+            try c.decodeIfPresent(String.self, forKey: .currentReason)
+                ?? c.decodeIfPresent(String.self, forKey: .reason)
+                ?? c.decodeIfPresent(String.self, forKey: .name)
+        )
         previousReason = IssueMetadata.trimmedNonEmpty(try c.decodeIfPresent(String.self, forKey: .previousReason))
         firstSeenAt = try c.decodeIfPresent(Date.self, forKey: .firstSeenAt)
         firstSeenAtLocal = IssueMetadata.trimmedNonEmpty(try c.decodeIfPresent(String.self, forKey: .firstSeenAtLocal))
@@ -792,9 +845,13 @@ struct IssueMetadata: Codable, Identifiable, Equatable {
     func encode(to encoder: Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
         try c.encode(issueID, forKey: .issueID)
+        try c.encode(issueID, forKey: .issueId)
+        try c.encode(issueID, forKey: .id)
         try c.encode(IssueMetadata.normalizedStatus(issueStatus), forKey: .issueStatus)
         try c.encode(IssueMetadata.normalizedStatus(issueStatus), forKey: .status)
         try c.encodeIfPresent(IssueMetadata.trimmedNonEmpty(currentReason), forKey: .currentReason)
+        try c.encodeIfPresent(IssueMetadata.trimmedNonEmpty(currentReason), forKey: .reason)
+        try c.encodeIfPresent(IssueMetadata.trimmedNonEmpty(issueName), forKey: .name)
         try c.encodeIfPresent(IssueMetadata.trimmedNonEmpty(previousReason), forKey: .previousReason)
         try c.encodeIfPresent(firstSeenAt, forKey: .firstSeenAt)
         try c.encodeIfPresent(IssueMetadata.trimmedNonEmpty(firstSeenAtLocal), forKey: .firstSeenAtLocal)
@@ -817,6 +874,10 @@ struct IssueMetadata: Codable, Identifiable, Equatable {
     private static func normalizedStatus(_ value: String) -> String {
         let lowered = value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         return lowered == "resolved" ? "resolved" : "active"
+    }
+
+    private var issueName: String? {
+        IssueMetadata.trimmedNonEmpty(currentReason) ?? IssueMetadata.trimmedNonEmpty(detailNote)
     }
 }
 

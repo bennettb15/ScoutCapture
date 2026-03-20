@@ -1244,85 +1244,7 @@ struct SessionHubView: View {
         session: Session,
         progress: ((ExportChecklistStep) -> Void)? = nil
     ) throws -> URL {
-        struct SessionExportAssetEntry: Codable {
-            let localIdentifier: String
-            let creationDate: Date?
-            let pixelWidth: Int
-            let pixelHeight: Int
-            let originalFilename: String
-        }
-
-        struct SessionExportPayload: Codable {
-            let exportedAt: Date
-            let albumTitle: String
-            let albumLocalId: String
-            let orgId: UUID?
-            let orgName: String?
-            let folderId: String?
-            let propertyId: UUID
-            let propertyName: String
-            let primaryContactName: String?
-            let primaryContactPhone: String?
-            let propertyAddress: String?
-            let propertyStreet: String
-            let propertyCity: String
-            let propertyState: String
-            let propertyZip: String
-            let property: Property?
-            let session: Session?
-            let activeIssueCount: Int
-            let assets: [SessionExportAssetEntry]
-            let observations: [Observation]
-            let guidedShots: [GuidedShot]
-        }
-
         let validationArtifacts = try localStore.validatedSessionExportArtifacts(for: session)
-        let observations = (try? localStore.fetchObservations(propertyID: property.id)) ?? []
-        let guidedShots = (try? localStore.fetchGuidedShots(propertyID: property.id)) ?? []
-
-        let start = session.startedAt
-        let end = session.endedAt ?? Date.distantFuture
-        let sessionObservations = observations.filter { obs in
-            if obs.sessionID == session.id { return true }
-            return obs.sessionID == nil && obs.createdAt >= start && obs.createdAt <= end
-        }
-
-        let shotIDs = Set(sessionObservations.flatMap { obs in
-            var ids = obs.shots.map(\.id)
-            if let linked = obs.linkedShotID {
-                ids.append(linked)
-            }
-            return ids
-        })
-
-        let sessionGuidedShots = guidedShots.filter { guided in
-            if let shotID = guided.shot?.id, shotIDs.contains(shotID) {
-                return true
-            }
-            if let capturedAt = guided.shot?.capturedAt, capturedAt >= start && capturedAt <= end {
-                return true
-            }
-            return false
-        }
-
-        var orderedIDs: [String] = []
-        var seen = Set<String>()
-        func appendLocalID(_ value: String?) {
-            let id = (value ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !id.isEmpty, seen.insert(id).inserted else { return }
-            orderedIDs.append(id)
-        }
-
-        for observation in sessionObservations {
-            for shot in observation.shots {
-                appendLocalID(shot.imageLocalIdentifier)
-            }
-        }
-        for guided in sessionGuidedShots {
-            appendLocalID(guided.shot?.imageLocalIdentifier)
-        }
-
-        var assetEntries: [SessionExportAssetEntry] = []
         let propertyFolderName = try localStore.exportPropertyFolderName(propertyID: property.id)
         let exportRoot = try StorageRoot.makeSessionExportRootFolder(
             propertyFolderName: propertyFolderName,
@@ -1355,63 +1277,19 @@ struct SessionHubView: View {
             print("Pending export reExportExpiresAt: \(reExportExpiresAt)")
         }
 #endif
-        for (index, localID) in orderedIDs.enumerated() {
-            let trimmed = localID.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !trimmed.isEmpty else { continue }
-            let fileURL = URL(fileURLWithPath: trimmed)
-            guard FileManager.default.fileExists(atPath: fileURL.path) else { continue }
-            guard let data = requestImageData(for: fileURL) else { continue }
-            let filename = exportFilename(for: fileURL, index: index + 1)
-            let image = UIImage(data: data)
-            let attrs = try? FileManager.default.attributesOfItem(atPath: fileURL.path)
+        for originalFile in validationArtifacts.originalFiles {
+            let data = try Data(contentsOf: originalFile.sourceURL)
+            let attrs = try? FileManager.default.attributesOfItem(atPath: originalFile.sourceURL.path)
             let modifiedAt = (attrs?[.modificationDate] as? Date) ?? (attrs?[.creationDate] as? Date)
-            assetEntries.append(
-                SessionExportAssetEntry(
-                    localIdentifier: trimmed,
-                    creationDate: attrs?[.creationDate] as? Date,
-                    pixelWidth: image.map { Int($0.size.width) } ?? 0,
-                    pixelHeight: image.map { Int($0.size.height) } ?? 0,
-                    originalFilename: filename
-                )
-            )
-            let destinationURL = originalsRoot.appendingPathComponent(filename)
+            let destinationURL = originalsRoot.appendingPathComponent(originalFile.filename)
             try data.write(to: destinationURL, options: .atomic)
             if let modifiedAt {
                 try? FileManager.default.setAttributes([.modificationDate: modifiedAt], ofItemAtPath: destinationURL.path)
             }
-            expectedPaths.insert("Originals/\(filename)")
+            expectedPaths.insert("Originals/\(originalFile.filename)")
         }
         progress?(.originals)
-
-        let payload = SessionExportPayload(
-            exportedAt: Date(),
-            albumTitle: property.name,
-            albumLocalId: "",
-            orgId: property.orgId,
-            orgName: appState.organizations.first(where: { $0.id == property.orgId })?.name,
-            folderId: property.folderId,
-            propertyId: property.id,
-            propertyName: property.name,
-            primaryContactName: property.clientName,
-            primaryContactPhone: property.clientPhone,
-            propertyAddress: property.address,
-            propertyStreet: property.street ?? "",
-            propertyCity: property.city ?? "",
-            propertyState: property.state ?? "",
-            propertyZip: property.zip ?? "",
-            property: property,
-            session: session,
-            activeIssueCount: sessionObservations.filter { $0.status == .active }.count,
-            assets: assetEntries,
-            observations: sessionObservations,
-            guidedShots: sessionGuidedShots
-        )
-
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        encoder.dateEncodingStrategy = .iso8601
-        let sessionData = try encoder.encode(payload)
-        try sessionData.write(to: exportRoot.appendingPathComponent("session.json"), options: .atomic)
+        try validationArtifacts.sessionData.write(to: exportRoot.appendingPathComponent("session.json"), options: .atomic)
         try validationArtifacts.validationData.write(to: exportRoot.appendingPathComponent("validation.txt"), options: .atomic)
         for csvFile in localStore.exportCSVFiles(for: validationArtifacts.metadata) {
             try csvFile.data.write(to: exportRoot.appendingPathComponent(csvFile.filename), options: .atomic)

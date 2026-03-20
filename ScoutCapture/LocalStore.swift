@@ -2,7 +2,7 @@ import Foundation
 import UIKit
 
 final class LocalStore {
-    private let currentSessionSchemaVersion = 9
+    private let currentSessionSchemaVersion = 10
     private let fileIOQueue = DispatchQueue(label: "ScoutCapture.LocalStore.fileIO")
     private let fileIOQueueKey = DispatchSpecificKey<UInt8>()
     private let fileIOQueueValue: UInt8 = 1
@@ -31,8 +31,14 @@ final class LocalStore {
         let metadata: SessionMetadata
         let sessionData: Data
         let validationData: Data
+        let originalFiles: [ExportOriginalFile]
         let prewritePassed: Bool
         let postwritePassed: Bool
+    }
+
+    struct ExportOriginalFile {
+        let filename: String
+        let sourceURL: URL
     }
 
     private let fileManager: FileManager
@@ -278,22 +284,110 @@ final class LocalStore {
         let sessionURL = sessionJSONURL(propertyID: session.propertyID, sessionID: session.id)
         let sessionData = try Data(contentsOf: sessionURL)
         let exportObjectPost = try decoder.decode(SessionMetadata.self, from: sessionData)
-        let validationReportPost = validateExport(exportObjectPost, phase: "postwrite")
+        let exportReadyMetadata = sanitizedExportMetadata(exportObjectPost)
+        let validationReportPost = validateExport(exportReadyMetadata, phase: "postwrite")
         let validationData = Data(
             validationText(
-                for: exportObjectPost,
+                for: exportReadyMetadata,
                 prewrite: validationReportPre,
                 postwrite: validationReportPost
             ).utf8
         )
+        let exportSessionData = try encoder.encode(exportReadyMetadata)
+        let originalFiles = exportOriginalFiles(for: exportReadyMetadata)
 
         return ValidatedSessionExportArtifacts(
-            metadata: exportObjectPost,
-            sessionData: sessionData,
+            metadata: exportReadyMetadata,
+            sessionData: exportSessionData,
             validationData: validationData,
+            originalFiles: originalFiles,
             prewritePassed: validationReportPre.passed,
             postwritePassed: validationReportPost.passed
         )
+    }
+
+    func exportOriginalFiles(for metadata: SessionMetadata) -> [ExportOriginalFile] {
+        let originalsRoot = originalsFolderURL(propertyID: metadata.propertyID, sessionID: metadata.sessionID)
+        var seen = Set<String>()
+
+        return metadata.shots.compactMap { shot in
+            let filename = exportOriginalFilename(for: shot)
+            guard !filename.isEmpty else { return nil }
+            guard seen.insert(filename).inserted else { return nil }
+
+            let directURL = originalsRoot.appendingPathComponent(filename)
+            if fileManager.fileExists(atPath: directURL.path) {
+                return ExportOriginalFile(filename: filename, sourceURL: directURL)
+            }
+
+            let relativeName = URL(fileURLWithPath: shot.originalRelativePath).lastPathComponent
+            guard !relativeName.isEmpty else { return nil }
+            let relativeURL = originalsRoot.appendingPathComponent(relativeName)
+            guard fileManager.fileExists(atPath: relativeURL.path) else { return nil }
+            return ExportOriginalFile(filename: filename, sourceURL: relativeURL)
+        }
+    }
+
+    private func sanitizedExportMetadata(_ metadata: SessionMetadata) -> SessionMetadata {
+        var sanitized = metadata
+        let shotRelativePathByID = Dictionary(uniqueKeysWithValues: metadata.shots.map { ($0.shotID, $0.originalRelativePath) })
+        sanitized.guidedShots = metadata.guidedShots.map { guided in
+            sanitizeGuidedShotForExport(guided, shotRelativePathByID: shotRelativePathByID)
+        }
+        return sanitized
+    }
+
+    private func sanitizeGuidedShotForExport(
+        _ guidedShot: GuidedShot,
+        shotRelativePathByID: [UUID: String]
+    ) -> GuidedShot {
+        var sanitized = guidedShot
+        let mappedShotPath = guidedShot.shot.flatMap { shotRelativePathByID[$0.id] }
+
+        if var shot = sanitized.shot {
+            shot.imageLocalIdentifier = sanitizeExportPath(
+                shot.imageLocalIdentifier,
+                preferredRelativePath: mappedShotPath,
+                defaultFolder: "Originals"
+            )
+            sanitized.shot = shot
+        }
+
+        sanitized.referenceImageLocalIdentifier = sanitizeExportPath(
+            guidedShot.referenceImageLocalIdentifier,
+            preferredRelativePath: mappedShotPath,
+            defaultFolder: "Originals"
+        )
+        sanitized.referenceImagePath = sanitizeExportPath(
+            guidedShot.referenceImagePath,
+            preferredRelativePath: mappedShotPath,
+            defaultFolder: "Originals"
+        )
+
+        return sanitized
+    }
+
+    private func sanitizeExportPath(
+        _ rawValue: String?,
+        preferredRelativePath: String?,
+        defaultFolder: String
+    ) -> String? {
+        let trimmed = trimmedNonEmpty(rawValue)
+        if let preferred = trimmedNonEmpty(preferredRelativePath) {
+            return preferred
+        }
+        guard let trimmed else { return nil }
+        let filename = URL(fileURLWithPath: trimmed).lastPathComponent
+        guard !filename.isEmpty else { return nil }
+        return "\(defaultFolder)/\(filename)"
+    }
+
+    private func exportOriginalFilename(for shot: ShotMetadata) -> String {
+        let directName = URL(fileURLWithPath: shot.originalFilename).lastPathComponent
+        if !directName.isEmpty {
+            return directName
+        }
+        return URL(fileURLWithPath: shot.originalRelativePath).lastPathComponent
     }
 
     func exportCSVFiles(for metadata: SessionMetadata) -> [(filename: String, data: Data)] {
@@ -327,7 +421,8 @@ final class LocalStore {
             "status",
             "schema_version",
             "app_version",
-            "time_zone"
+            "time_zone",
+            "capture_profile"
         ]
 
         let property = currentProperty(for: metadata.propertyID)
@@ -362,7 +457,8 @@ final class LocalStore {
             metadata.status.rawValue,
             String(metadata.schemaVersion),
             metadata.appVersion,
-            metadata.timeZoneIdentifierAtCapture
+            metadata.timeZoneIdentifierAtCapture,
+            metadata.captureProfile ?? ""
         ]
         return csvString(headers: headers, rows: [row])
     }
@@ -393,7 +489,8 @@ final class LocalStore {
             "original_filename",
             "original_byte_size",
             "trade",
-            "priority"
+            "priority",
+            "capture_profile"
         ]
 
         let property = currentProperty(for: metadata.propertyID)
@@ -427,7 +524,8 @@ final class LocalStore {
                 shot.originalFilename,
                 intString(shot.originalByteSize),
                 shot.trade ?? "",
-                shot.isFlagged ? (shot.priority ?? "") : ""
+                shot.isFlagged ? (shot.priority ?? "") : "",
+                metadata.captureProfile ?? ""
             ]
         }
 
@@ -1769,6 +1867,7 @@ final class LocalStore {
             timeZoneIdentifierAtCapture: captureTimeZone.identifier,
             timeZoneOffsetAtCapture: captureTimeZone.offsetString,
             timeZoneOffsetMinutesAtCapture: captureTimeZone.offsetMinutes,
+            captureProfile: trimmedNonEmpty(metadata.captureProfile),
             startedAt: metadata.startedAt,
             sessionStartedAtLocal: localISO8601String(for: metadata.startedAt, timeZone: captureTimeZone.timeZone),
             endedAt: metadata.endedAt,

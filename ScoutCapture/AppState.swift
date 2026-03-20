@@ -413,7 +413,10 @@ final class AppState: ObservableObject {
         if let cached = draftSessionByProperty[propertyID] {
             return cached
         }
-        return try? localStore.latestDraftSession(propertyID: propertyID)
+        guard let draft = try? localStore.latestDraftSession(propertyID: propertyID) else {
+            return nil
+        }
+        return sessionHasCaptures(draft) ? draft : nil
     }
     
     func sessions(for propertyID: UUID) -> [Session] {
@@ -623,10 +626,7 @@ final class AppState: ObservableObject {
             let sessions = loadAndNormalizeSessions(propertyID: property.id)
             sessionIndex[property.id] = sessions
 
-            if let draft = sessions
-                .filter({ $0.status == .draft })
-                .sorted(by: { $0.startedAt > $1.startedAt })
-                .first {
+            if let draft = latestVisibleDraft(in: sessions) {
                 drafts[property.id] = draft
             }
 
@@ -677,15 +677,32 @@ final class AppState: ObservableObject {
         let sessions = loadAndNormalizeSessions(propertyID: propertyID)
         sessionIndexByProperty[propertyID] = sessions
 
-        draftSessionByProperty[propertyID] = sessions
-            .filter { $0.status == .draft }
-            .sorted { $0.startedAt > $1.startedAt }
-            .first
+        draftSessionByProperty[propertyID] = latestVisibleDraft(in: sessions)
 
         pendingExportSessionByProperty[propertyID] = sessions
             .filter { isPendingDelivery($0) }
             .sorted { $0.startedAt > $1.startedAt }
             .first
+    }
+
+    private func latestVisibleDraft(in sessions: [Session]) -> Session? {
+        sessions
+            .filter { $0.status == .draft && sessionHasCaptures($0) }
+            .sorted { $0.startedAt > $1.startedAt }
+            .first
+    }
+
+    private func sessionHasCaptures(_ session: Session) -> Bool {
+        guard let metadata = try? localStore.loadSessionMetadata(propertyID: session.propertyID, sessionID: session.id) else {
+            return false
+        }
+        let sessionFolder = localStore.sessionFolderURL(propertyID: session.propertyID, sessionID: session.id)
+        return metadata.shots.contains { shot in
+            let originalRelative = shot.originalRelativePath.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !originalRelative.isEmpty else { return false }
+            let originalURL = sessionFolder.appendingPathComponent(originalRelative, isDirectory: false)
+            return FileManager.default.fileExists(atPath: originalURL.path)
+        }
     }
 
     func isPendingDelivery(_ session: Session) -> Bool {
