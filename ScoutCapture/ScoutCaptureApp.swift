@@ -583,7 +583,13 @@ struct SessionHubView: View {
     }
 
     private func propertyClientLine(_ property: Property) -> String? {
-        appState.hubMeta(for: property.id)?.clientLine
+        let client = appState.hubMeta(for: property.id)?.clientLine?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let organization = appState.organizations.first(where: { $0.id == property.orgId })?.name
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+
+        if client.isEmpty { return organization.isEmpty ? nil : organization }
+        if organization.isEmpty { return client }
+        return "\(client) (\(organization))"
     }
 
     private func propertyAddressLine(_ property: Property) -> String? {
@@ -856,7 +862,7 @@ struct SessionHubView: View {
                         .font(.system(size: 14, weight: .semibold))
                         .foregroundColor(.secondary)
 
-                    TextField("Search name or address", text: $searchQuery)
+                    TextField("Search name, org, or address", text: $searchQuery)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
                         .focused($isSearchFieldFocused)
@@ -1094,15 +1100,11 @@ struct SessionHubView: View {
     private func matchesSearch(_ property: Property) -> Bool {
         let query = normalizedSearchQuery
         guard !query.isEmpty else { return true }
-        if let meta = appState.hubMeta(for: property.id) {
-            return meta.normalizedNameToken.contains(query) ||
-                meta.normalizedClientToken.contains(query) ||
-                meta.normalizedAddressToken.contains(query)
-        }
+
         let name = property.name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        let client = property.clientName?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
-        let address = property.address?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
-        return name.contains(query) || client.contains(query) || address.contains(query)
+        let clientLine = propertyClientLine(property)?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
+        let addressLine = propertyAddressLine(property)?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
+        return name.contains(query) || clientLine.contains(query) || addressLine.contains(query)
     }
 
     @ViewBuilder

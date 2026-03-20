@@ -9992,7 +9992,7 @@ extension ContentView {
             return !capturedShotKeys.contains(shotKey)
         }.count
 
-        return (remaining, metadata.shots.count)
+        return (remaining, capturedShotKeys.count)
     }
 
     private func isGuidedShotSkippedInCurrentSession(_ guidedShot: GuidedShot) -> Bool {
