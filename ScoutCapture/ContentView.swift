@@ -230,31 +230,39 @@ private extension View {
 final class AssetImageCache: ObservableObject {
     private let cache = NSCache<NSString, UIImage>()
 
-    func requestThumbnail(for asset: ReportAsset, pixelSize: CGFloat, completion: @escaping (UIImage?) -> Void) {
+    init() {
+        cache.countLimit = 120
+    }
 
+    private func makeThumbnail(from asset: ReportAsset, pixelSize: CGFloat) -> UIImage? {
+        guard let source = CGImageSourceCreateWithURL(asset.fileURL as CFURL, nil) else {
+            return nil
+        }
+
+        let maxPixelSize = max(1, Int(ceil(pixelSize)))
+        let options: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceShouldCacheImmediately: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceThumbnailMaxPixelSize: maxPixelSize
+        ]
+
+        guard let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else {
+            return nil
+        }
+        return UIImage(cgImage: cgImage)
+    }
+
+    func requestThumbnail(for asset: ReportAsset, pixelSize: CGFloat, completion: @escaping (UIImage?) -> Void) {
         let key = "\(asset.localIdentifier)-\(Int(pixelSize))" as NSString
         if let cached = cache.object(forKey: key) {
             completion(cached)
             return
         }
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            guard let data = try? Data(contentsOf: asset.fileURL),
-                  let image = UIImage(data: data) else {
+            guard let thumb = self?.makeThumbnail(from: asset, pixelSize: pixelSize) else {
                 DispatchQueue.main.async { completion(nil) }
                 return
-            }
-            let target = CGSize(width: pixelSize, height: pixelSize)
-            let renderer = UIGraphicsImageRenderer(size: target)
-            let thumb = renderer.image { _ in
-                let src = image.size
-                guard src.width > 0, src.height > 0 else { return }
-                let scale = max(target.width / src.width, target.height / src.height)
-                let drawSize = CGSize(width: src.width * scale, height: src.height * scale)
-                let origin = CGPoint(
-                    x: (target.width - drawSize.width) * 0.5,
-                    y: (target.height - drawSize.height) * 0.5
-                )
-                image.draw(in: CGRect(origin: origin, size: drawSize))
             }
             self?.cache.setObject(thumb, forKey: key)
             DispatchQueue.main.async {
@@ -397,6 +405,17 @@ final class ReportLibraryModel: ObservableObject {
     private var propertyID: UUID?
     private var sessionID: UUID?
 
+    static func imageDimensions(at url: URL) -> (width: Int, height: Int) {
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
+              let props = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any] else {
+            return (0, 0)
+        }
+
+        let width = (props[kCGImagePropertyPixelWidth] as? NSNumber)?.intValue ?? 0
+        let height = (props[kCGImagePropertyPixelHeight] as? NSNumber)?.intValue ?? 0
+        return (width, height)
+    }
+
     init() {
         albumTitle = UserDefaults.standard.string(forKey: activeAlbumTitleKey) ?? ""
         activeIssueCount = loadActiveIssueCount(for: albumTitle)
@@ -461,17 +480,14 @@ final class ReportLibraryModel: ObservableObject {
         let out: [ReportAsset] = urls.compactMap { url in
             guard let attrs = try? fileManager.attributesOfItem(atPath: url.path) else { return nil }
             let created = (attrs[.creationDate] as? Date) ?? (attrs[.modificationDate] as? Date)
-            let data = try? Data(contentsOf: url)
-            let image = data.flatMap(UIImage.init)
-            let width = image.map { Int($0.size.width) } ?? 0
-            let height = image.map { Int($0.size.height) } ?? 0
+            let dimensions = Self.imageDimensions(at: url)
             let localId = url.path
             return ReportAsset(
                 localIdentifier: localId,
                 fileURL: url,
                 creationDate: created,
-                pixelWidth: width,
-                pixelHeight: height,
+                pixelWidth: dimensions.width,
+                pixelHeight: dimensions.height,
                 originalFilename: url.lastPathComponent
             )
         }
@@ -3089,6 +3105,7 @@ struct ContentView: View {
 
     @State private var showQuickMenu: Bool = false
     @State private var showMetadataFilterSheet: Bool = false
+    @State private var metadataSelectionContext: MetadataSelectionContext? = nil
     @State private var shouldReopenMetadataAfterManagerDismiss: Bool = false
     @State private var manageContext: ManageContext? = nil
     @State private var showManageBuildingsSheet: Bool = false
@@ -3231,6 +3248,19 @@ struct ContentView: View {
         case interior
         case exterior
         case trades
+    }
+
+    private enum MetadataSelectionKind: Hashable {
+        case building
+        case elevation
+        case detailType
+        case trade
+    }
+
+    private struct MetadataSelectionContext: Identifiable, Hashable {
+        let id = UUID()
+        let kind: MetadataSelectionKind
+        let title: String
     }
 
     @State private var pendingManageDestination: PendingManageDestination? = nil
@@ -3444,7 +3474,14 @@ struct ContentView: View {
         let newFlaggedUpdatedIDs = Set(
             allObservations.compactMap { observation -> UUID? in
                 guard newFlaggedReferenceIDs.contains(observation.id) else { return nil }
-                if observation.updatedInSessionID == currentSession.id || observation.resolvedInSessionID == currentSession.id {
+                if observation.resolvedInSessionID == currentSession.id {
+                    return observation.id
+                }
+                let currentSessionEvents = observation.historyEvents.filter { $0.sessionID == currentSession.id }
+                let hasCurrentSessionCaptureEvent = currentSessionEvents.contains {
+                    $0.kind == .captured || $0.kind == .retake
+                }
+                if hasCurrentSessionCaptureEvent {
                     return observation.id
                 }
                 return nil
@@ -4103,14 +4140,13 @@ struct ContentView: View {
         guard FileManager.default.fileExists(atPath: url.path) else { return nil }
         let attrs = try? FileManager.default.attributesOfItem(atPath: url.path)
         let created = (attrs?[.creationDate] as? Date) ?? (attrs?[.modificationDate] as? Date)
-        let data = try? Data(contentsOf: url)
-        let image = data.flatMap(UIImage.init)
+        let dimensions = ReportLibraryModel.imageDimensions(at: url)
         return ReportAsset(
             localIdentifier: url.path,
             fileURL: url,
             creationDate: created,
-            pixelWidth: image.map { Int($0.size.width) } ?? 0,
-            pixelHeight: image.map { Int($0.size.height) } ?? 0,
+            pixelWidth: dimensions.width,
+            pixelHeight: dimensions.height,
             originalFilename: url.lastPathComponent
         )
     }
@@ -4239,6 +4275,10 @@ struct ContentView: View {
             hasBaseline && guidedRemainingCount == 0 && flaggedRemainingCount == 0
         }
 
+        var hasCaptures: Bool {
+            currentSessionCaptureCount > 0
+        }
+
         var hasOutstandingChecklistItems: Bool {
             guidedRemainingCount > 0 || flaggedRemainingCount > 0
         }
@@ -4258,6 +4298,10 @@ struct ContentView: View {
                 return reExportEligibleNow ? "Re-export" : "Re-export Window Expired"
             }
             return "Export"
+        }
+
+        var exitActionTitle: String {
+            hasCaptures ? "Save Draft and Exit" : "Exit"
         }
 
         var isExportActionEnabled: Bool {
@@ -5654,6 +5698,35 @@ struct ContentView: View {
         return tradeOptions + [current]
     }
 
+    private var buildingSelectionLabel: String {
+        let trimmed = selectedBuilding.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? "Select" : buildingDisplayName(for: trimmed)
+    }
+
+    private var detailTypeSelectionLabel: String {
+        let trimmed = currentDetailType.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? "Select" : shortShotTypeLabel(trimmed)
+    }
+
+    private func makeBuildingSelectionContext() -> MetadataSelectionContext {
+        MetadataSelectionContext(kind: .building, title: "Building")
+    }
+
+    private func makeElevationSelectionContext() -> MetadataSelectionContext {
+        MetadataSelectionContext(kind: .elevation, title: "Elevation")
+    }
+
+    private func makeDetailTypeSelectionContext() -> MetadataSelectionContext {
+        MetadataSelectionContext(
+            kind: .detailType,
+            title: locationMode == .interior ? "Interior Detail Type" : "Exterior Detail Type"
+        )
+    }
+
+    private func makeTradeSelectionContext() -> MetadataSelectionContext {
+        MetadataSelectionContext(kind: .trade, title: "Trade")
+    }
+
     private func hudAngleIndex() -> Int {
         if let retakeContext {
             return max(1, retakeContext.angleIndex)
@@ -5683,47 +5756,41 @@ struct ContentView: View {
         NavigationStack {
             Form {
                 Section("Metadata") {
-                    Picker(selection: $selectedBuilding) {
-                        ForEach(buildingOptions, id: \.self) { option in
-                            let optionCode = buildingCode(from: option)
-                            Text(buildingDisplayName(for: option)).tag(optionCode)
-                        }
-                    } label: {
-                        metadataFieldLabel("Building", manageDestination: .buildings)
-                    }
+                    metadataSelectorRow(
+                        title: "Building",
+                        value: buildingSelectionLabel,
+                        context: makeBuildingSelectionContext(),
+                        manageDestination: .buildings
+                    )
 
                     if locationMode == .exterior {
-                        Picker(selection: $elevation) {
-                            Text("North").tag("North")
-                            Text("South").tag("South")
-                            Text("East").tag("East")
-                            Text("West").tag("West")
-                        } label: {
-                            metadataFieldLabel("Elevation", titleColor: .white)
-                        }
-                    }
-
-                    Picker(selection: detailTypeSelectionBinding()) {
-                        ForEach(detailTypesModel.types(for: locationMode, profile: captureProfile)) { item in
-                            Text(shortShotTypeLabel(item.name)).tag(item.name)
-                        }
-                    } label: {
-                        metadataFieldLabel(
-                            "Detail Type",
-                            titleColor: .blue,
-                            manageDestination: locationMode == .interior ? .interior : .exterior
+                        metadataSelectorRow(
+                            title: "Elevation",
+                            value: elevation,
+                            context: makeElevationSelectionContext(),
+                            titleColor: .white
                         )
                     }
 
-                    Picker(selection: $selectedTrade) {
-                        Text("None").tag("")
-                        ForEach(tradePickerOptions, id: \.self) { option in
-                            Text(option).tag(option)
-                        }
-                    } label: {
-                        metadataFieldLabel("Trade", titleColor: .blue, manageDestination: .trades)
-                    }
+                    metadataSelectorRow(
+                        title: "Detail Type",
+                        value: detailTypeSelectionLabel,
+                        context: makeDetailTypeSelectionContext(),
+                        titleColor: .blue,
+                        manageDestination: locationMode == .interior ? .interior : .exterior
+                    )
+
+                    metadataSelectorRow(
+                        title: "Trade",
+                        value: selectedTrade.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "None" : selectedTrade,
+                        context: makeTradeSelectionContext(),
+                        titleColor: .blue,
+                        manageDestination: .trades
+                    )
                 }
+            }
+            .navigationDestination(item: $metadataSelectionContext) { context in
+                metadataSelectionDestination(context: context)
             }
             .toolbar(.hidden, for: .navigationBar)
             .safeAreaInset(edge: .top, spacing: 0) {
@@ -5786,6 +5853,164 @@ struct ContentView: View {
                 .contentShape(Circle())
             }
         }
+    }
+
+    @ViewBuilder
+    private func metadataSelectorRow(
+        title: String,
+        value: String,
+        context: MetadataSelectionContext,
+        titleColor: Color = .primary,
+        manageDestination: PendingManageDestination? = nil
+    ) -> some View {
+        HStack(spacing: 12) {
+            metadataFieldLabel(title, titleColor: titleColor, manageDestination: manageDestination)
+
+            Spacer(minLength: 0)
+
+            Button {
+                metadataSelectionContext = context
+            } label: {
+                HStack(spacing: 8) {
+                    Text(value)
+                        .foregroundColor(.secondary)
+                        .lineLimit(1)
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundColor(.secondary.opacity(0.8))
+                }
+            }
+            .buttonStyle(.plain)
+        }
+    }
+
+    private struct MetadataSelectionListView: View {
+        let title: String
+        let options: [(title: String, value: String)]
+        let selectedValue: String
+        let onSelect: (String) -> Void
+
+        @Environment(\.dismiss) private var dismiss
+        @Environment(\.colorScheme) private var colorScheme
+        private var theme: SheetControlTheme { .forScheme(colorScheme) }
+
+        var body: some View {
+            List(options, id: \.value) { option in
+                Button {
+                    onSelect(option.value)
+                } label: {
+                    HStack(spacing: 10) {
+                        Text(option.title)
+                            .font(.system(size: 16, weight: .medium))
+                            .foregroundColor(.primary)
+                            .lineLimit(2)
+
+                        Spacer(minLength: 0)
+
+                        if selectedValue == option.value {
+                            Image(systemName: "checkmark")
+                                .font(.system(size: 14, weight: .medium))
+                                .foregroundColor(.blue)
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
+            .listStyle(.insetGrouped)
+            .toolbar(.hidden, for: .navigationBar)
+            .safeAreaInset(edge: .top, spacing: 0) {
+                HStack(spacing: 12) {
+                    Button {
+                        dismiss()
+                    } label: {
+                        Image(systemName: "chevron.left")
+                            .font(.system(size: 22, weight: .semibold))
+                            .foregroundColor(theme.label)
+                            .frame(width: 44, height: 44)
+                            .background(theme.fill)
+                            .clipShape(Circle())
+                            .overlay(
+                                Circle()
+                                    .stroke(theme.stroke, lineWidth: 1)
+                            )
+                    }
+                    .buttonStyle(.plain)
+
+                    Spacer(minLength: 0)
+
+                    Text(title)
+                        .font(.system(size: 18, weight: .medium))
+                        .foregroundColor(theme.label)
+                        .lineLimit(1)
+
+                    Spacer(minLength: 0)
+
+                    Color.clear.frame(width: 44, height: 44)
+                }
+                .padding(.horizontal, 14)
+                .padding(.top, 14)
+                .padding(.bottom, 4)
+                .background(Color(uiColor: .systemGroupedBackground))
+            }
+        }
+    }
+
+    private func metadataSelectionDestination(context: MetadataSelectionContext) -> some View {
+        MetadataSelectionListView(
+            title: context.title,
+            options: selectionOptions(for: context.kind),
+            selectedValue: currentMetadataSelectionValue(for: context.kind),
+            onSelect: { value in
+                applyMetadataSelection(value, for: context.kind)
+            }
+        )
+    }
+
+    private func selectionOptions(for kind: MetadataSelectionKind) -> [(title: String, value: String)] {
+        switch kind {
+        case .building:
+            return buildingOptions.map { option in
+                let code = buildingCode(from: option)
+                return (buildingDisplayName(for: option), code)
+            }
+        case .elevation:
+            return ["North", "South", "East", "West"].map { ($0, $0) }
+        case .detailType:
+            return detailTypesModel.types(for: locationMode, profile: captureProfile).map { item in
+                (shortShotTypeLabel(item.name), item.name)
+            }
+        case .trade:
+            return [("None", "")] + tradePickerOptions.map { ($0, $0) }
+        }
+    }
+
+    private func currentMetadataSelectionValue(for kind: MetadataSelectionKind) -> String {
+        switch kind {
+        case .building:
+            return selectedBuilding
+        case .elevation:
+            return elevation
+        case .detailType:
+            return currentDetailType
+        case .trade:
+            return selectedTrade
+        }
+    }
+
+    private func applyMetadataSelection(_ value: String, for kind: MetadataSelectionKind) {
+        switch kind {
+        case .building:
+            selectedBuilding = value
+        case .elevation:
+            elevation = value
+        case .detailType:
+            detailTypesModel.setSelected(value, for: locationMode, profile: captureProfile)
+        case .trade:
+            selectedTrade = value
+        }
+        metadataSelectionContext = nil
     }
 
     private func beginManageListFlowFromMetadata(_ destination: PendingManageDestination) {
@@ -9174,16 +9399,32 @@ extension ContentView {
         detailType: String,
         excludingShotID: UUID?
     ) -> Int {
-        guard let sessionID else { return 1 }
         let normalizedElevation = CanonicalElevation.normalize(elevation) ?? elevation
-        let metadata = try? localStore.loadSessionMetadata(propertyID: propertyID, sessionID: sessionID)
+        let trimmedBuilding = building.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedDetailType = detailType.trimmingCharacters(in: .whitespacesAndNewlines)
+        let sessions = ((try? localStore.fetchSessions(propertyID: propertyID)) ?? [])
+            .sorted { lhs, rhs in
+                if lhs.startedAt == rhs.startedAt {
+                    return lhs.id.uuidString < rhs.id.uuidString
+                }
+                return lhs.startedAt > rhs.startedAt
+            }
+        let sessionIDs: [UUID]
+        if let sessionID {
+            sessionIDs = [sessionID] + sessions.map(\.id).filter { $0 != sessionID }
+        } else {
+            sessionIDs = sessions.map(\.id)
+        }
         let usedAngles = Set(
-            (metadata?.shots ?? []).compactMap { shot -> Int? in
-                guard shot.shotID != excludingShotID else { return nil }
-                guard shot.building.caseInsensitiveCompare(building) == .orderedSame else { return nil }
-                guard (CanonicalElevation.normalize(shot.elevation) ?? shot.elevation) == normalizedElevation else { return nil }
-                guard shot.detailType.caseInsensitiveCompare(detailType) == .orderedSame else { return nil }
-                return max(1, shot.angleIndex)
+            sessionIDs.flatMap { id in
+                ((try? localStore.loadSessionMetadata(propertyID: propertyID, sessionID: id))?.shots ?? [])
+                    .compactMap { shot -> Int? in
+                        guard shot.shotID != excludingShotID else { return nil }
+                        guard shot.building.caseInsensitiveCompare(trimmedBuilding) == .orderedSame else { return nil }
+                        guard (CanonicalElevation.normalize(shot.elevation) ?? shot.elevation) == normalizedElevation else { return nil }
+                        guard shot.detailType.caseInsensitiveCompare(trimmedDetailType) == .orderedSame else { return nil }
+                        return max(1, shot.angleIndex)
+                    }
             }
         )
 
@@ -9207,6 +9448,7 @@ extension ContentView {
         captureKind: String? = nil
     ) {
         let sessions = (try? localStore.fetchSessions(propertyID: propertyID)) ?? []
+        var didUpdate = false
         for session in sessions {
             guard var metadata = try? localStore.loadSessionMetadata(propertyID: propertyID, sessionID: session.id),
                   let idx = metadata.shots.firstIndex(where: { $0.shotID == shotID }) else { continue }
@@ -9246,6 +9488,9 @@ extension ContentView {
                 sessionID: session.id,
                 metadata: metadata
             )
+            didUpdate = true
+        }
+        if !didUpdate {
             return
         }
     }
@@ -9892,10 +10137,14 @@ extension ContentView {
     }
 
     private func handleSaveDraftAndExit(summary: SessionActionsSummary) {
-        _ = summary
         resetSelectionForSwitch()
         camera.updateDetailNoteActive(false)
-        appState.saveDraftCurrentSession()
+        if summary.hasCaptures {
+            appState.saveDraftCurrentSession()
+        } else if let propertyID = appState.selectedPropertyID,
+                  let sessionID = appState.currentSession?.id {
+            _ = appState.deleteSession(propertyID: propertyID, sessionID: sessionID)
+        }
         appState.refreshProperties()
         showSessionActionsSheet = false
         onExitToHub?()
@@ -9964,7 +10213,6 @@ extension ContentView {
 
     private func buildSessionExportArchive(progress: ((ExportChecklistStep) -> Void)? = nil) throws -> URL {
         let fileManager = FileManager.default
-        let assets = reportLibrary.assets
         guard let propertyID = appState.selectedPropertyID,
               let session = appState.currentSession else {
             throw NSError(domain: "ScoutCapture.Export", code: 1, userInfo: [NSLocalizedDescriptionKey: "No active session for export."])
@@ -9989,17 +10237,16 @@ extension ContentView {
             "guided_rows.csv",
             "Originals/"
         ])
-        for (index, asset) in assets.enumerated() {
-            guard let data = requestSessionExportImageData(for: asset) else { continue }
-            let filename = sessionExportFilename(for: asset, index: index + 1)
-            let attrs = try? fileManager.attributesOfItem(atPath: asset.fileURL.path)
+        for originalFile in exportArtifacts.originalFiles {
+            let data = try Data(contentsOf: originalFile.sourceURL)
+            let attrs = try? fileManager.attributesOfItem(atPath: originalFile.sourceURL.path)
             let modifiedAt = (attrs?[.modificationDate] as? Date) ?? (attrs?[.creationDate] as? Date)
-            let destinationURL = originalsRoot.appendingPathComponent(filename)
+            let destinationURL = originalsRoot.appendingPathComponent(originalFile.filename)
             try data.write(to: destinationURL, options: .atomic)
             if let modifiedAt {
                 try? fileManager.setAttributes([.modificationDate: modifiedAt], ofItemAtPath: destinationURL.path)
             }
-            expectedPaths.insert("Originals/\(filename)")
+            expectedPaths.insert("Originals/\(originalFile.filename)")
         }
         try exportArtifacts.sessionData.write(to: exportRoot.appendingPathComponent("session.json"), options: .atomic)
         try exportArtifacts.validationData.write(to: exportRoot.appendingPathComponent("validation.txt"), options: .atomic)
@@ -10110,10 +10357,6 @@ extension ContentView {
 #endif
         progress?(.zipReady)
         return finalURL
-    }
-
-    private func requestSessionExportImageData(for asset: ReportAsset) -> Data? {
-        try? Data(contentsOf: asset.fileURL)
     }
 
     private func ensureSessionStampedJPEGs(
@@ -11795,7 +12038,7 @@ extension ContentView {
                     action: onExportLater
                 )
                 actionButton(
-                    title: "Save Draft and Exit",
+                    title: summary.exitActionTitle,
                     role: .secondary,
                     isEnabled: !isPreparingExport,
                     action: onSaveDraftAndExit
@@ -12141,26 +12384,6 @@ extension ContentView {
             let url: URL
         }
         
-        private struct ExportAssetEntry: Codable {
-            let localIdentifier: String
-            let creationDate: Date?
-            let pixelWidth: Int
-            let pixelHeight: Int
-            let originalFilename: String
-        }
-        
-        private struct ExportSessionPayload: Codable {
-            let exportedAt: Date
-            let albumTitle: String
-            let albumLocalId: String
-            let property: Property?
-            let session: Session?
-            let activeIssueCount: Int
-            let assets: [ExportAssetEntry]
-            let observations: [Observation]
-            let guidedShots: [GuidedShot]
-        }
-
         private enum ExportError: LocalizedError {
             case zipCreationFailed
 
@@ -13174,10 +13397,9 @@ extension ContentView {
             exportErrorMessage = nil
             isPreparingExport = true
             
-            let assets = reportLibrary.assets
             DispatchQueue.global(qos: .userInitiated).async {
                 do {
-                    let zipURL = try buildExportArchive(for: assets)
+                    let zipURL = try buildExportArchive()
                     DispatchQueue.main.async {
                         isPreparingExport = false
                         exportFile = ExportFile(url: zipURL)
@@ -13192,7 +13414,7 @@ extension ContentView {
             }
         }
         
-        private func buildExportArchive(for assets: [ReportAsset]) throws -> URL {
+        private func buildExportArchive() throws -> URL {
             let fileManager = FileManager.default
             guard let propertyID = appState.selectedPropertyID,
                   let session = appState.currentSession else {
@@ -13252,11 +13474,10 @@ extension ContentView {
                 )
             }
             
-            for (index, asset) in assets.enumerated() {
-                guard let imageData = requestOriginalImageData(for: asset) else { continue }
-                let filename = makeArchiveFilename(for: asset, index: index + 1)
-                try imageData.write(to: originalsRoot.appendingPathComponent(filename), options: .atomic)
-                try imageData.write(to: stampedRoot.appendingPathComponent(filename), options: .atomic)
+            for originalFile in exportArtifacts.originalFiles {
+                let imageData = try Data(contentsOf: originalFile.sourceURL)
+                try imageData.write(to: originalsRoot.appendingPathComponent(originalFile.filename), options: .atomic)
+                try imageData.write(to: stampedRoot.appendingPathComponent(originalFile.filename), options: .atomic)
             }
 #if DEBUG
             print("EXPORT ROOT FILES: \((try? StorageRoot.exportRootFilenames(exportRoot)) ?? [])")
@@ -13281,45 +13502,6 @@ extension ContentView {
             }
 #endif
             return zipURL
-        }
-        
-        private func makeExportSessionPayload(from assets: [ReportAsset]) -> ExportSessionPayload {
-            let entries = assets.enumerated().map { index, asset in
-                ExportAssetEntry(
-                    localIdentifier: asset.localIdentifier,
-                    creationDate: asset.creationDate,
-                    pixelWidth: asset.pixelWidth,
-                    pixelHeight: asset.pixelHeight,
-                    originalFilename: makeArchiveFilename(for: asset, index: index + 1)
-                )
-            }
-            
-            let property = appState.selectedProperty
-            let observations: [Observation]
-            let guidedShots: [GuidedShot]
-            if let propertyID = property?.id {
-                observations = (try? localStore.fetchObservations(propertyID: propertyID)) ?? []
-                guidedShots = (try? localStore.fetchGuidedShots(propertyID: propertyID)) ?? []
-            } else {
-                observations = []
-                guidedShots = []
-            }
-            
-            return ExportSessionPayload(
-                exportedAt: Date(),
-                albumTitle: reportLibrary.albumTitle,
-                albumLocalId: reportLibrary.albumLocalId,
-                property: property,
-                session: appState.currentSession,
-                activeIssueCount: reportLibrary.activeIssueCount,
-                assets: entries,
-                observations: observations,
-                guidedShots: guidedShots
-            )
-        }
-        
-        private func requestOriginalImageData(for asset: ReportAsset) -> Data? {
-            try? Data(contentsOf: asset.fileURL)
         }
         
         private func makeArchiveFilename(for asset: ReportAsset, index: Int) -> String {
@@ -14123,9 +14305,15 @@ extension ContentView {
                     .submitLabel(.done)
                     .onSubmit { focusedRow = nil }
             } else {
-                Text(item.name.isEmpty ? " " : item.name)
-                    .font(.system(size: 16, weight: .regular))
-                    .foregroundColor(.primary)
+                HStack(spacing: 10) {
+                    Text(item.name.isEmpty ? " " : item.name)
+                        .font(.system(size: 16, weight: .regular))
+                        .foregroundColor(.primary)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.8)
+
+                    Spacer(minLength: 0)
+                }
             }
         }
         
@@ -15807,14 +15995,25 @@ extension ContentView {
                     guard let angleIndex else { return "" }
                     return " - Angle \(max(1, angleIndex))"
                 }()
+                let currentSessionEvents = observation.historyEvents.filter { $0.sessionID == currentSessionID }
+                let hasCurrentSessionCaptureEvent = currentSessionEvents.contains {
+                    $0.kind == .captured || $0.kind == .retake
+                }
+                let hasCurrentSessionReclassifyEvent = currentSessionEvents.contains { $0.kind == .reclassified }
                 if observation.resolvedInSessionID == currentSessionID {
                     return "Resolved\(angleSuffix)"
                 }
                 if observation.updatedInSessionID == currentSessionID {
-                    if observation.sessionID == currentSessionID {
+                    if hasCurrentSessionCaptureEvent && observation.sessionID == currentSessionID {
                         return "Active - Captured\(angleSuffix)"
                     }
-                    return "Active - Update Captured\(angleSuffix)"
+                    if hasCurrentSessionCaptureEvent {
+                        return "Active - Update Captured\(angleSuffix)"
+                    }
+                    if hasCurrentSessionReclassifyEvent {
+                        return "Active - Reclassified\(angleSuffix)"
+                    }
+                    return "Active - Updated\(angleSuffix)"
                 }
                 return "Active\(angleSuffix)"
             }
@@ -15823,7 +16022,11 @@ extension ContentView {
                 if observation.resolvedInSessionID == currentSessionID {
                     return .green
                 }
-                if observation.updatedInSessionID == currentSessionID {
+                let currentSessionEvents = observation.historyEvents.filter { $0.sessionID == currentSessionID }
+                let hasCurrentSessionCaptureEvent = currentSessionEvents.contains {
+                    $0.kind == .captured || $0.kind == .retake
+                }
+                if observation.updatedInSessionID == currentSessionID && hasCurrentSessionCaptureEvent {
                     return .green
                 }
                 return .orange
@@ -16717,27 +16920,15 @@ extension ContentView {
                             .submitLabel(.done)
                         } else {
                             let option = options[index]
-                            Button {
-                                selectedTrade = option
-                                onClose()
-                            } label: {
-                                HStack(spacing: 10) {
-                                    Text(option)
-                                        .font(.system(size: 16, weight: .medium))
-                                        .foregroundColor(.primary)
-                                        .lineLimit(1)
-                                        .minimumScaleFactor(0.8)
+                            HStack(spacing: 10) {
+                                Text(option)
+                                    .font(.system(size: 16, weight: .medium))
+                                    .foregroundColor(.primary)
+                                    .lineLimit(1)
+                                    .minimumScaleFactor(0.8)
 
-                                    Spacer(minLength: 0)
-
-                                    if selectedTrade == option {
-                                        Image(systemName: "checkmark")
-                                            .font(.system(size: 14, weight: .medium))
-                                            .foregroundColor(.blue)
-                                    }
-                                }
+                                Spacer(minLength: 0)
                             }
-                            .buttonStyle(.plain)
                         }
                     }
                     .onDelete { offsets in
@@ -16871,27 +17062,15 @@ extension ContentView {
                             .submitLabel(.done)
                         } else {
                             let option = options[index]
-                            Button {
-                                selectedBuilding = buildingCodeForOption(option)
-                                onClose()
-                            } label: {
-                                HStack(spacing: 10) {
-                                    Text(buildingFullLabelForOption(option))
-                                        .font(.system(size: 16, weight: .medium))
-                                        .foregroundColor(.primary)
-                                        .lineLimit(1)
-                                        .minimumScaleFactor(0.8)
+                            HStack(spacing: 10) {
+                                Text(buildingFullLabelForOption(option))
+                                    .font(.system(size: 16, weight: .medium))
+                                    .foregroundColor(.primary)
+                                    .lineLimit(1)
+                                    .minimumScaleFactor(0.8)
 
-                                    Spacer(minLength: 0)
-
-                                    if selectedBuilding == buildingCodeForOption(option) {
-                                        Image(systemName: "checkmark")
-                                            .font(.system(size: 14, weight: .medium))
-                                            .foregroundColor(.blue)
-                                    }
-                                }
+                                Spacer(minLength: 0)
                             }
-                            .buttonStyle(.plain)
                         }
                     }
                     .onDelete { offsets in
