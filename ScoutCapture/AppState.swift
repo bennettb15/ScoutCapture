@@ -153,7 +153,8 @@ final class AppState: ObservableObject {
         city: String = "",
         state: String = "",
         zip: String = "",
-        clientPhone: String = ""
+        clientPhone: String = "",
+        clientEmail: String = ""
     ) throws -> Property {
         let cleanedClientName = clientName.trimmingCharacters(in: .whitespacesAndNewlines)
         let cleanedName = propertyName.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -163,6 +164,7 @@ final class AppState: ObservableObject {
         let cleanedState = state.trimmingCharacters(in: .whitespacesAndNewlines)
         let cleanedZip = zip.trimmingCharacters(in: .whitespacesAndNewlines)
         let cleanedPhone = clientPhone.filter(\.isNumber)
+        let cleanedEmail = clientEmail.trimmingCharacters(in: .whitespacesAndNewlines)
 
         guard !cleanedName.isEmpty else { throw PropertyCreationError.missingPropertyName }
         guard organizations.contains(where: { $0.id == organizationID }) else { throw PropertyCreationError.missingOrganization }
@@ -173,6 +175,7 @@ final class AppState: ObservableObject {
                 orgId: organizationID,
                 clientName: cleanedClientName.isEmpty ? nil : cleanedClientName,
                 clientPhone: cleanedPhone.isEmpty ? nil : cleanedPhone,
+                clientEmail: cleanedEmail.isEmpty ? nil : cleanedEmail,
                 name: cleanedName,
                 address: cleanedAddress.isEmpty ? nil : cleanedAddress,
                 street: cleanedStreet.isEmpty ? nil : cleanedStreet,
@@ -182,6 +185,7 @@ final class AppState: ObservableObject {
             )
             let created = try localStore.createProperty(property)
             properties.append(created)
+            organizations = (try? localStore.fetchOrganizations()) ?? organizations
             let caches = makeHubCaches(for: properties)
             applyHubCachePayload(properties: properties, caches: caches)
             if selectedPropertyID == nil {
@@ -206,6 +210,33 @@ final class AppState: ObservableObject {
             return created
         } catch {
             return organizations.first(where: { $0.name.trimmingCharacters(in: .whitespacesAndNewlines).caseInsensitiveCompare(trimmedName) == .orderedSame })
+        }
+    }
+
+    func organizationContacts(for organizationID: UUID?) -> [OrganizationContact] {
+        guard let organizationID else { return [] }
+        return organizations.first(where: { $0.id == organizationID })?.contacts ?? []
+    }
+
+    @discardableResult
+    func updateOrganizationContact(organizationID: UUID, contact: OrganizationContact) -> Bool {
+        do {
+            _ = try localStore.updateOrganizationContact(organizationID: organizationID, contact: contact)
+            organizations = (try? localStore.fetchOrganizations()) ?? organizations
+            return true
+        } catch {
+            return false
+        }
+    }
+
+    @discardableResult
+    func deleteOrganizationContact(organizationID: UUID, contactID: UUID) -> Bool {
+        do {
+            _ = try localStore.deleteOrganizationContact(organizationID: organizationID, contactID: contactID)
+            organizations = (try? localStore.fetchOrganizations()) ?? organizations
+            return true
+        } catch {
+            return false
         }
     }
 
@@ -264,7 +295,8 @@ final class AppState: ObservableObject {
         city: String?,
         state: String?,
         zip: String?,
-        clientPhone: String?
+        clientPhone: String?,
+        clientEmail: String?
     ) -> Bool {
         guard let index = properties.firstIndex(where: { $0.id == id }) else { return false }
         var updated = properties[index]
@@ -276,6 +308,7 @@ final class AppState: ObservableObject {
         let cleanedState = state?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         let cleanedZip = zip?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         let digitsOnlyPhone = (clientPhone ?? "").filter(\.isNumber)
+        let cleanedEmail = clientEmail?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
 
         if let organizationID, organizations.contains(where: { $0.id == organizationID }) {
             updated.orgId = organizationID
@@ -290,10 +323,12 @@ final class AppState: ObservableObject {
         updated.state = cleanedState.isEmpty ? nil : cleanedState
         updated.zip = cleanedZip.isEmpty ? nil : cleanedZip
         updated.clientPhone = digitsOnlyPhone.isEmpty ? nil : digitsOnlyPhone
+        updated.clientEmail = cleanedEmail.isEmpty ? nil : cleanedEmail
 
         do {
             let persisted = try localStore.updateProperty(updated)
             properties[index] = persisted
+            organizations = (try? localStore.fetchOrganizations()) ?? organizations
             let caches = makeHubCaches(for: properties)
             applyHubCachePayload(properties: properties, caches: caches)
             return true

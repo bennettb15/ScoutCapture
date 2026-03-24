@@ -26,6 +26,7 @@ struct SessionMetadata: Codable {
     var propertyNameAtCapture: String?
     var propertyNameAtExport: String?
     var primaryContactNameAtCapture: String?
+    var primaryContactEmailAtCapture: String?
     var propertyAddressAtCapture: String?
     var propertyStreetAtCapture: String?
     var propertyCityAtCapture: String?
@@ -75,6 +76,8 @@ struct SessionMetadata: Codable {
         case propertyNameAtExport
         case primaryContactNameAtCapture
         case primaryContactName
+        case primaryContactEmailAtCapture
+        case primaryContactEmail
         case propertyAddressAtCapture
         case propertyAddress
         case propertyStreetAtCapture
@@ -124,6 +127,7 @@ struct SessionMetadata: Codable {
         propertyNameAtCapture: String?,
         propertyNameAtExport: String?,
         primaryContactNameAtCapture: String? = nil,
+        primaryContactEmailAtCapture: String? = nil,
         propertyAddressAtCapture: String? = nil,
         propertyStreetAtCapture: String? = nil,
         propertyCityAtCapture: String? = nil,
@@ -160,6 +164,7 @@ struct SessionMetadata: Codable {
         self.propertyNameAtCapture = propertyNameAtCapture
         self.propertyNameAtExport = propertyNameAtExport
         self.primaryContactNameAtCapture = SessionMetadata.trimmedNonEmpty(primaryContactNameAtCapture)
+        self.primaryContactEmailAtCapture = SessionMetadata.trimmedNonEmpty(primaryContactEmailAtCapture)
         self.propertyAddressAtCapture = SessionMetadata.trimmedNonEmpty(propertyAddressAtCapture)
         self.propertyStreetAtCapture = SessionMetadata.trimmedNonEmpty(propertyStreetAtCapture)
         self.propertyCityAtCapture = SessionMetadata.trimmedNonEmpty(propertyCityAtCapture)
@@ -210,6 +215,10 @@ struct SessionMetadata: Codable {
         primaryContactNameAtCapture = SessionMetadata.trimmedNonEmpty(
             try c.decodeIfPresent(String.self, forKey: .primaryContactNameAtCapture)
                 ?? c.decodeIfPresent(String.self, forKey: .primaryContactName)
+        )
+        primaryContactEmailAtCapture = SessionMetadata.trimmedNonEmpty(
+            try c.decodeIfPresent(String.self, forKey: .primaryContactEmailAtCapture)
+                ?? c.decodeIfPresent(String.self, forKey: .primaryContactEmail)
         )
         propertyAddressAtCapture = SessionMetadata.trimmedNonEmpty(
             try c.decodeIfPresent(String.self, forKey: .propertyAddressAtCapture)
@@ -288,6 +297,8 @@ struct SessionMetadata: Codable {
         try c.encodeIfPresent(propertyNameAtExport, forKey: .propertyNameAtExport)
         try c.encodeIfPresent(SessionMetadata.trimmedNonEmpty(primaryContactNameAtCapture), forKey: .primaryContactNameAtCapture)
         try c.encodeIfPresent(SessionMetadata.trimmedNonEmpty(primaryContactNameAtCapture), forKey: .primaryContactName)
+        try c.encodeIfPresent(SessionMetadata.trimmedNonEmpty(primaryContactEmailAtCapture), forKey: .primaryContactEmailAtCapture)
+        try c.encodeIfPresent(SessionMetadata.trimmedNonEmpty(primaryContactEmailAtCapture), forKey: .primaryContactEmail)
         try c.encodeIfPresent(SessionMetadata.trimmedNonEmpty(propertyAddressAtCapture), forKey: .propertyAddressAtCapture)
         try c.encodeIfPresent(SessionMetadata.trimmedNonEmpty(propertyAddressAtCapture), forKey: .propertyAddress)
         try c.encodeIfPresent(SessionMetadata.trimmedNonEmpty(propertyStreetAtCapture), forKey: .propertyStreetAtCapture)
@@ -337,10 +348,12 @@ struct SessionMetadata: Codable {
 struct Organization: Codable, Identifiable, Equatable {
     let id: UUID
     var name: String
+    var contacts: [OrganizationContact]
 
-    init(id: UUID = UUID(), name: String) {
+    init(id: UUID = UUID(), name: String, contacts: [OrganizationContact] = []) {
         self.id = id
         self.name = name
+        self.contacts = contacts
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -348,6 +361,8 @@ struct Organization: Codable, Identifiable, Equatable {
         case orgId
         case name
         case orgName
+        case contacts
+        case orgContacts
     }
 
     init(from decoder: Decoder) throws {
@@ -356,6 +371,9 @@ struct Organization: Codable, Identifiable, Equatable {
             ?? c.decode(UUID.self, forKey: .orgId)
         name = try c.decodeIfPresent(String.self, forKey: .name)
             ?? c.decode(String.self, forKey: .orgName)
+        contacts = try c.decodeIfPresent([OrganizationContact].self, forKey: .contacts)
+            ?? c.decodeIfPresent([OrganizationContact].self, forKey: .orgContacts)
+            ?? []
     }
 
     func encode(to encoder: Encoder) throws {
@@ -364,6 +382,60 @@ struct Organization: Codable, Identifiable, Equatable {
         try c.encode(id, forKey: .orgId)
         try c.encode(name, forKey: .name)
         try c.encode(name, forKey: .orgName)
+        try c.encode(contacts, forKey: .contacts)
+        try c.encode(contacts, forKey: .orgContacts)
+    }
+}
+
+struct OrganizationContact: Codable, Identifiable, Equatable {
+    let id: UUID
+    var name: String
+    var phone: String?
+    var email: String?
+
+    init(
+        id: UUID = UUID(),
+        name: String,
+        phone: String? = nil,
+        email: String? = nil
+    ) {
+        self.id = id
+        self.name = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.phone = OrganizationContact.trimmedNonEmpty(phone)
+        self.email = OrganizationContact.trimmedNonEmpty(email)
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id
+        case contactId
+        case name
+        case phone
+        case email
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decodeIfPresent(UUID.self, forKey: .id)
+            ?? c.decodeIfPresent(UUID.self, forKey: .contactId)
+            ?? UUID()
+        name = try c.decode(String.self, forKey: .name).trimmingCharacters(in: .whitespacesAndNewlines)
+        phone = OrganizationContact.trimmedNonEmpty(try c.decodeIfPresent(String.self, forKey: .phone))
+        email = OrganizationContact.trimmedNonEmpty(try c.decodeIfPresent(String.self, forKey: .email))
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(id, forKey: .id)
+        try c.encode(id, forKey: .contactId)
+        try c.encode(name.trimmingCharacters(in: .whitespacesAndNewlines), forKey: .name)
+        try c.encodeIfPresent(OrganizationContact.trimmedNonEmpty(phone), forKey: .phone)
+        try c.encodeIfPresent(OrganizationContact.trimmedNonEmpty(email), forKey: .email)
+    }
+
+    private static func trimmedNonEmpty(_ value: String?) -> String? {
+        guard let value else { return nil }
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
     }
 }
 
@@ -887,6 +959,7 @@ struct Property: Codable, Identifiable, Equatable {
     var folderId: String?
     var clientName: String?
     var clientPhone: String?
+    var clientEmail: String?
     var name: String
     var address: String?
     var street: String?
@@ -904,6 +977,7 @@ struct Property: Codable, Identifiable, Equatable {
         folderId: String? = nil,
         clientName: String? = nil,
         clientPhone: String? = nil,
+        clientEmail: String? = nil,
         name: String,
         address: String? = nil,
         street: String? = nil,
@@ -920,6 +994,7 @@ struct Property: Codable, Identifiable, Equatable {
         self.folderId = folderId?.trimmingCharacters(in: .whitespacesAndNewlines)
         self.clientName = clientName
         self.clientPhone = clientPhone
+        self.clientEmail = clientEmail?.trimmingCharacters(in: .whitespacesAndNewlines)
         self.name = name
         self.address = address
         self.street = street?.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -938,6 +1013,7 @@ struct Property: Codable, Identifiable, Equatable {
         case folderId
         case clientName
         case clientPhone
+        case clientEmail
         case name
         case address
         case street
@@ -957,6 +1033,7 @@ struct Property: Codable, Identifiable, Equatable {
         folderId = try c.decodeIfPresent(String.self, forKey: .folderId)?.trimmingCharacters(in: .whitespacesAndNewlines)
         clientName = try c.decodeIfPresent(String.self, forKey: .clientName)
         clientPhone = try c.decodeIfPresent(String.self, forKey: .clientPhone)
+        clientEmail = try c.decodeIfPresent(String.self, forKey: .clientEmail)?.trimmingCharacters(in: .whitespacesAndNewlines)
         name = try c.decode(String.self, forKey: .name)
         address = try c.decodeIfPresent(String.self, forKey: .address)
         street = try c.decodeIfPresent(String.self, forKey: .street)?.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -976,6 +1053,7 @@ struct Property: Codable, Identifiable, Equatable {
         try c.encodeIfPresent(folderId?.trimmingCharacters(in: .whitespacesAndNewlines), forKey: .folderId)
         try c.encodeIfPresent(clientName, forKey: .clientName)
         try c.encodeIfPresent(clientPhone, forKey: .clientPhone)
+        try c.encodeIfPresent(clientEmail?.trimmingCharacters(in: .whitespacesAndNewlines), forKey: .clientEmail)
         try c.encode(name, forKey: .name)
         try c.encodeIfPresent(address, forKey: .address)
         try c.encodeIfPresent(street?.trimmingCharacters(in: .whitespacesAndNewlines), forKey: .street)

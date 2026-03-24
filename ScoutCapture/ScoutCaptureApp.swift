@@ -2339,6 +2339,8 @@ private struct HubAddPropertySheet: View {
     @State private var showPropertyCreationError: Bool = false
     @State private var clientName: String = ""
     @State private var clientPhone: String = ""
+    @State private var clientEmail: String = ""
+    @State private var showContactPicker: Bool = false
     @State private var propertyName: String = ""
     @State private var streetAddress: String = ""
     @State private var city: String = ""
@@ -2354,6 +2356,7 @@ private struct HubAddPropertySheet: View {
     private enum Field: Int, CaseIterable {
         case clientName
         case clientPhone
+        case clientEmail
         case propertyName
         case streetAddress
         case city
@@ -2392,6 +2395,14 @@ private struct HubAddPropertySheet: View {
     private var primaryButtonFill: Color { .blue }
     private var primaryButtonStroke: Color { .blue.opacity(0.85) }
     private var primaryButtonLabel: Color { .white }
+
+    private var selectedOrganizationContacts: [OrganizationContact] {
+        appState.organizationContacts(for: selectedOrganizationID)
+    }
+
+    private var selectedOrganizationName: String {
+        appState.organizations.first(where: { $0.id == selectedOrganizationID })?.name ?? "Organization"
+    }
     
     var body: some View {
         VStack(spacing: 0) {
@@ -2436,27 +2447,49 @@ private struct HubAddPropertySheet: View {
                 }
 
                 Section("Primary Contact") {
-                    TextField("Primary Contact Name", text: $clientName)
-                        .textInputAutocapitalization(.words)
-                        .focused($focusedField, equals: .clientName)
-                        .submitLabel(.next)
-                        .onSubmit {
-                            focusedField = .clientPhone
+                    HStack(spacing: 12) {
+                        TextField("Primary Contact Name", text: $clientName)
+                            .textInputAutocapitalization(.words)
+                            .focused($focusedField, equals: .clientName)
+                            .submitLabel(.next)
+                            .onSubmit {
+                                focusedField = .clientPhone
+                            }
+
+                        Button {
+                            showContactPicker = true
+                        } label: {
+                            Image(systemName: "plus.circle.fill")
+                                .font(.system(size: 20, weight: .semibold))
                         }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("Choose saved contact")
+                    }
 
                     TextField("Phone (optional)", text: $clientPhone)
                         .focused($focusedField, equals: .clientPhone)
                         .submitLabel(.next)
                         .onSubmit {
-                            focusedField = .propertyName
+                            focusedField = .clientEmail
                         }
                         .keyboardType(.phonePad)
                         .onChange(of: clientPhone) { _, newValue in
-                            let filtered = newValue.filter(\.isNumber)
-                            let limited = String(filtered.prefix(15))
-                            if limited != clientPhone {
-                                clientPhone = limited
+                            let digits = newValue.filter(\.isNumber)
+                            let limited = String(digits.prefix(15))
+                            let formatted = formatContactPhoneDisplay(limited)
+                            if formatted != clientPhone {
+                                clientPhone = formatted
                             }
+                        }
+
+                    TextField("Email (optional)", text: $clientEmail)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                        .keyboardType(.emailAddress)
+                        .focused($focusedField, equals: .clientEmail)
+                        .submitLabel(.next)
+                        .onSubmit {
+                            focusedField = .propertyName
                         }
                 }
 
@@ -2566,6 +2599,15 @@ private struct HubAddPropertySheet: View {
         } message: {
             Text(propertyCreationErrorMessage ?? "The property could not be saved.")
         }
+        .sheet(isPresented: $showContactPicker) {
+            OrganizationContactPickerSheet(
+                organizationID: selectedOrganizationID,
+                organizationName: selectedOrganizationName,
+                contacts: selectedOrganizationContacts
+            ) { contact in
+                apply(contact: contact)
+            }
+        }
     }
 
     private var organizationSelectionToken: Binding<String> {
@@ -2669,7 +2711,8 @@ private struct HubAddPropertySheet: View {
                 city: city,
                 state: state,
                 zip: zipCode,
-                clientPhone: clientPhone
+                clientPhone: clientPhone,
+                clientEmail: clientEmail
             )
             appState.selectProperty(id: created.id)
             dismiss()
@@ -2699,6 +2742,13 @@ private struct HubAddPropertySheet: View {
             syncSelectedOrganizationIfNeeded()
         }
         newOrganizationName = ""
+    }
+
+    private func apply(contact: OrganizationContact) {
+        clientName = contact.name
+        clientPhone = contact.phone ?? ""
+        clientEmail = contact.email ?? ""
+        focusedField = .propertyName
     }
 
     @ViewBuilder
@@ -2821,11 +2871,13 @@ private struct EditContactSheet: View {
     @State private var newOrganizationName: String = ""
     @State private var propertyName: String = ""
     @State private var clientName: String = ""
+    @State private var clientEmail: String = ""
     @State private var streetAddress: String = ""
     @State private var city: String = ""
     @State private var state: String = ""
     @State private var zipCode: String = ""
     @State private var phoneInput: String = ""
+    @State private var showContactPicker: Bool = false
     @State private var showPendingExportRenameConfirm: Bool = false
     private let addOrganizationToken = "__add_new_organization__"
 
@@ -2844,6 +2896,14 @@ private struct EditContactSheet: View {
     private var primaryButtonFill: Color { .blue }
     private var primaryButtonStroke: Color { .blue.opacity(0.85) }
     private var primaryButtonLabel: Color { .white }
+
+    private var selectedOrganizationContacts: [OrganizationContact] {
+        appState.organizationContacts(for: selectedOrganizationID)
+    }
+
+    private var selectedOrganizationName: String {
+        appState.organizations.first(where: { $0.id == selectedOrganizationID })?.name ?? "Organization"
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -2888,8 +2948,19 @@ private struct EditContactSheet: View {
                 }
 
                 Section("Primary Contact") {
-                    TextField("Primary Contact Name", text: $clientName)
-                        .textInputAutocapitalization(.words)
+                    HStack(spacing: 12) {
+                        TextField("Primary Contact Name", text: $clientName)
+                            .textInputAutocapitalization(.words)
+
+                        Button {
+                            showContactPicker = true
+                        } label: {
+                            Image(systemName: "plus.circle.fill")
+                                .font(.system(size: 20, weight: .semibold))
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("Choose saved contact")
+                    }
 
                     TextField("Phone (optional)", text: $phoneInput)
                         .keyboardType(.phonePad)
@@ -2901,6 +2972,11 @@ private struct EditContactSheet: View {
                                 phoneInput = formatted
                             }
                         }
+
+                    TextField("Email (optional)", text: $clientEmail)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                        .keyboardType(.emailAddress)
                 }
 
                 Section("Property") {
@@ -2963,6 +3039,15 @@ private struct EditContactSheet: View {
         } message: {
             Text("This property has pending exports. Export filenames will use the updated property name.")
         }
+        .sheet(isPresented: $showContactPicker) {
+            OrganizationContactPickerSheet(
+                organizationID: selectedOrganizationID,
+                organizationName: selectedOrganizationName,
+                contacts: selectedOrganizationContacts
+            ) { contact in
+                apply(contact: contact)
+            }
+        }
     }
 
     private var composedAddress: String {
@@ -3018,7 +3103,8 @@ private struct EditContactSheet: View {
             city: city,
             state: state,
             zip: zipCode,
-            clientPhone: digits
+            clientPhone: digits,
+            clientEmail: clientEmail
         )
         dismiss()
     }
@@ -3035,6 +3121,7 @@ private struct EditContactSheet: View {
         selectedOrganizationID = property.orgId ?? appState.organizations.first?.id
         propertyName = property.name
         clientName = property.clientName ?? ""
+        clientEmail = property.clientEmail ?? ""
         if property.street != nil || property.city != nil || property.state != nil || property.zip != nil {
             streetAddress = property.street ?? ""
             city = property.city ?? ""
@@ -3070,6 +3157,12 @@ private struct EditContactSheet: View {
             syncSelectedOrganizationIfNeeded()
         }
         newOrganizationName = ""
+    }
+
+    private func apply(contact: OrganizationContact) {
+        clientName = contact.name
+        phoneInput = formatPhoneDisplay(contact.phone ?? "")
+        clientEmail = contact.email ?? ""
     }
 
     private func parseAddress(_ raw: String?) -> (street: String, city: String, state: String, zip: String) {
@@ -3136,6 +3229,191 @@ private struct EditContactSheet: View {
         .buttonStyle(.plain)
         .disabled(!isEnabled)
     }
+}
+
+private struct OrganizationContactPickerSheet: View {
+    @EnvironmentObject private var appState: AppState
+    @Environment(\.dismiss) private var dismiss
+
+    let organizationID: UUID?
+    let organizationName: String
+    let contacts: [OrganizationContact]
+    let onSelect: (OrganizationContact) -> Void
+
+    @State private var contactToEdit: OrganizationContact? = nil
+
+    private var canManageContacts: Bool {
+        organizationID != nil
+    }
+
+    var body: some View {
+        NavigationStack {
+            Group {
+                if contacts.isEmpty {
+                    ContentUnavailableView(
+                        "No Saved Contacts",
+                        systemImage: "person.crop.circle.badge.questionmark",
+                        description: Text("Saved contacts for \(organizationName) will appear here after you use them on a property.")
+                    )
+                } else {
+                    List(contacts) { contact in
+                        Button {
+                            onSelect(contact)
+                            dismiss()
+                        } label: {
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text(contact.name)
+                                    .font(.system(size: 16, weight: .semibold))
+                                    .foregroundStyle(.primary)
+
+                                if let phone = contact.phone, !phone.isEmpty {
+                                    Text(formatContactPhoneDisplay(phone))
+                                        .font(.system(size: 14))
+                                        .foregroundStyle(.secondary)
+                                }
+
+                                if let email = contact.email, !email.isEmpty {
+                                    Text(email)
+                                        .font(.system(size: 14))
+                                        .foregroundStyle(.secondary)
+                                }
+                            }
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                        .buttonStyle(.plain)
+                        .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                            if canManageContacts {
+                                Button(role: .destructive) {
+                                    delete(contact: contact)
+                                } label: {
+                                    Label("Delete", systemImage: "trash")
+                                }
+
+                                Button {
+                                    contactToEdit = contact
+                                } label: {
+                                    Label("Edit", systemImage: "pencil")
+                                }
+                                .tint(.blue)
+                            }
+                        }
+                    }
+                }
+            }
+            .navigationTitle(organizationName)
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Done") {
+                        dismiss()
+                    }
+                }
+            }
+        }
+        .sheet(item: $contactToEdit) { contact in
+            EditOrganizationContactSheet(contact: contact) { updated in
+                save(contact: updated)
+            }
+        }
+    }
+
+    private func save(contact: OrganizationContact) {
+        guard let organizationID else { return }
+        _ = appState.updateOrganizationContact(organizationID: organizationID, contact: contact)
+    }
+
+    private func delete(contact: OrganizationContact) {
+        guard let organizationID else { return }
+        _ = appState.deleteOrganizationContact(organizationID: organizationID, contactID: contact.id)
+    }
+}
+
+private struct EditOrganizationContactSheet: View {
+    @Environment(\.dismiss) private var dismiss
+
+    let contact: OrganizationContact
+    let onSave: (OrganizationContact) -> Void
+
+    @State private var name: String
+    @State private var phone: String
+    @State private var email: String
+
+    init(contact: OrganizationContact, onSave: @escaping (OrganizationContact) -> Void) {
+        self.contact = contact
+        self.onSave = onSave
+        _name = State(initialValue: contact.name)
+        _phone = State(initialValue: formatContactPhoneDisplay(contact.phone ?? ""))
+        _email = State(initialValue: contact.email ?? "")
+    }
+
+    private var canSave: Bool {
+        !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("Contact") {
+                    TextField("Name", text: $name)
+                        .textInputAutocapitalization(.words)
+
+                    TextField("Phone (optional)", text: $phone)
+                        .keyboardType(.phonePad)
+                        .onChange(of: phone) { _, newValue in
+                            let digits = newValue.filter(\.isNumber)
+                            let limited = String(digits.prefix(15))
+                            let formatted = formatContactPhoneDisplay(limited)
+                            if formatted != phone {
+                                phone = formatted
+                            }
+                        }
+
+                    TextField("Email (optional)", text: $email)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                        .keyboardType(.emailAddress)
+                }
+            }
+            .navigationTitle("Edit Contact")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button("Cancel") {
+                        dismiss()
+                    }
+                }
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Save") {
+                        onSave(OrganizationContact(
+                            id: contact.id,
+                            name: name,
+                            phone: phone.filter(\.isNumber),
+                            email: email
+                        ))
+                        dismiss()
+                    }
+                    .disabled(!canSave)
+                }
+            }
+        }
+    }
+}
+
+private func formatContactPhoneDisplay(_ digits: String) -> String {
+    let digitsOnly = digits.filter(\.isNumber)
+    if digitsOnly.count <= 3 { return digitsOnly }
+    if digitsOnly.count <= 6 {
+        let area = digitsOnly.prefix(3)
+        let rest = digitsOnly.dropFirst(3)
+        return "(\(area)) \(rest)"
+    }
+    if digitsOnly.count <= 10 {
+        let area = digitsOnly.prefix(3)
+        let mid = digitsOnly.dropFirst(3).prefix(3)
+        let end = digitsOnly.dropFirst(6)
+        return "(\(area)) \(mid)-\(end)"
+    }
+    return digitsOnly
 }
 
 @MainActor

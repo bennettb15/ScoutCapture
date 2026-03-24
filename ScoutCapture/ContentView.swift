@@ -2801,8 +2801,7 @@ private final class DetailTypesModel: ObservableObject {
     private let defaultResidentialExteriorTypes: [String] = [
         "Overview",
         "Elevation",
-        "Entry",
-        "Porch",
+        "Entry / Porch",
         "Window",
         "Roofline",
         "Cladding / Siding",
@@ -2811,7 +2810,12 @@ private final class DetailTypesModel: ObservableObject {
         "Landscaping",
         "Fence / Gate",
         "Utility / HVAC",
-        "Pool / Outdoor Amenities"
+        "Pool / Outdoor Amenities",
+        "Sidewalk",
+        "Exterior Stairs / Ramp",
+        "Downspout",
+        "Chimney",
+        "Foundation"
     ]
 
     private let defaultCommercialExteriorTypes: [String] = [
@@ -2832,7 +2836,9 @@ private final class DetailTypesModel: ObservableObject {
         "Fence / Gate",
         "Utility / HVAC",
         "Mechanical Equipment",
-        "Landscape / Hardscape"
+        "Landscape / Hardscape",
+        "Downspout",
+        "Foundation"
     ]
 
     private let defaultCommercialInteriorTypes: [String] = [
@@ -3120,6 +3126,7 @@ struct ContentView: View {
     @State private var activeSessionShotIDs: Set<UUID> = []
     @State private var carryoverIssueBadgeCount: Int = 0
     @State private var flaggedPendingCaptureCount: Int = 0
+    @State private var showCoreElevationChecklist: Bool = false
     @State private var guidedReferenceKeys: Set<String> = []
     @State private var flaggedReferenceIDs: Set<UUID> = []
     @State private var guidedUpdatedKeysThisSession: Set<String> = []
@@ -4886,6 +4893,135 @@ struct ContentView: View {
         detailTypesModel.selected(for: locationMode, profile: captureProfile)
     }
 
+    private enum CoreElevationChecklistCategory: String, CaseIterable, Identifiable {
+        case overview
+        case elevation
+        case roofline
+        case cladding
+        case foundation
+        case entry
+        case openings
+        case drainage
+        case hardscape
+
+        var id: String { rawValue }
+
+        var title: String {
+            switch self {
+            case .overview:
+                return "Overview"
+            case .elevation:
+                return "Elevation (Center / Left / Right)"
+            case .roofline:
+                return "Roofline / Top"
+            case .cladding:
+                return "Cladding / Facade"
+            case .foundation:
+                return "Foundation / Ground Line"
+            case .entry:
+                return "Entry / Access"
+            case .openings:
+                return "Openings"
+            case .drainage:
+                return "Drainage"
+            case .hardscape:
+                return "Hardscape Interface"
+            }
+        }
+
+        var note: String? {
+            switch self {
+            case .overview, .elevation:
+                return nil
+            case .roofline:
+                return "soffit, fascia, gutter edge"
+            case .cladding:
+                return "siding, facade, wall material"
+            case .foundation:
+                return "foundation, grade, wall interface"
+            case .entry:
+                return "doors, stairs, overhangs"
+            case .openings:
+                return "windows, trim, sealant"
+            case .drainage:
+                return "outlets + termination"
+            case .hardscape:
+                return "paving + slope"
+            }
+        }
+
+        var showsCompletionIndicator: Bool {
+            self == .overview || self == .elevation
+        }
+    }
+
+    private struct CoreElevationChecklistRowState: Identifiable {
+        let category: CoreElevationChecklistCategory
+        let count: Int
+
+        var id: CoreElevationChecklistCategory { category }
+
+        var isComplete: Bool {
+            switch category {
+            case .overview, .elevation:
+                return count >= 1
+            default:
+                return false
+            }
+        }
+
+        var countLabel: String {
+            switch category {
+            case .overview, .elevation:
+                return "\(min(count, 1))/1"
+            default:
+                return "\(count)"
+            }
+        }
+    }
+
+    private static let coreElevationChecklistCategoryByShotType: [String: CoreElevationChecklistCategory] = [
+        "overview": .overview,
+        "elevation": .elevation,
+        "roofline": .roofline,
+        "chimney": .roofline,
+        "canopy / awning": .roofline,
+        "cladding / siding": .cladding,
+        "cladding / facade": .cladding,
+        "foundation": .foundation,
+        "entry / porch": .entry,
+        "porch": .entry,
+        "entry": .entry,
+        "storefront": .entry,
+        "loading dock": .entry,
+        "window": .openings,
+        "window / glazing": .openings,
+        "downspout": .drainage,
+        "downspouts": .drainage,
+        "utility / hvac": .drainage,
+        "mechanical equipment": .drainage,
+        "trash / service area": .drainage,
+        "driveway / garage": .hardscape,
+        "backyard / patio": .hardscape,
+        "landscaping": .hardscape,
+        "fence / gate": .hardscape,
+        "pool / outdoor amenities": .hardscape,
+        "sidewalk": .hardscape,
+        "exterior stairs / ramp": .hardscape,
+        "exterior stairs": .hardscape,
+        "parking area": .hardscape,
+        "site circulation": .hardscape,
+        "landscape / hardscape": .hardscape,
+        "signage": .hardscape
+    ]
+
+    private var coreElevationChecklistRows: [CoreElevationChecklistRowState] {
+        let counts = coreElevationChecklistCounts()
+        return CoreElevationChecklistCategory.allCases.map { category in
+            CoreElevationChecklistRowState(category: category, count: counts[category, default: 0])
+        }
+    }
+
     // MARK: - SwiftUI View conformance
     var body: some View {
         contentBody
@@ -5200,6 +5336,19 @@ struct ContentView: View {
                 )
                 .zIndex(710)
             }
+
+            if showCoreElevationChecklist {
+                Color.black.opacity(0.42)
+                    .ignoresSafeArea()
+                    .onTapGesture {
+                        showCoreElevationChecklist = false
+                    }
+                    .zIndex(715)
+
+                coreElevationChecklistSheetView
+                    .padding(.horizontal, 18)
+                    .zIndex(720)
+            }
         }
     }
 
@@ -5283,6 +5432,16 @@ struct ContentView: View {
                     elevation: elevation,
                     detailType: detailType
                 )
+            }
+        )
+    }
+
+    private var coreElevationChecklistSheetView: some View {
+        CoreElevationChecklistSheet(
+            elevationTitle: CanonicalElevation.normalize(elevation) ?? elevation,
+            rows: coreElevationChecklistRows,
+            onClose: {
+                showCoreElevationChecklist = false
             }
         )
     }
@@ -7590,6 +7749,11 @@ extension ContentView {
                 let liveGuidedCountAfter = guidedRemainingForCompass
                 print("[Badge] afterOpen guidedCount=\(liveGuidedCountAfter) flaggedCount=\(flaggedPendingCaptureCount)")
             }
+
+            coreElevationChecklistButton {
+                fireQuickButtonHaptic()
+                showCoreElevationChecklist = true
+            }
         }
     }
 
@@ -7681,6 +7845,22 @@ extension ContentView {
             .rotationEffect(bottomGlyphRotationAngle)
             .frame(width: hitArea, height: hitArea)
             .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .frame(width: hitArea, height: hitArea)
+    }
+
+    private func coreElevationChecklistButton(action: @escaping () -> Void) -> some View {
+        let hitArea: CGFloat = 44
+        let symbolSize: CGFloat = 22
+
+        return Button(action: action) {
+            Image(systemName: "checkmark")
+                .font(.system(size: symbolSize, weight: .semibold))
+                .foregroundStyle(.white)
+                .rotationEffect(bottomGlyphRotationAngle)
+                .frame(width: hitArea, height: hitArea)
+                .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .frame(width: hitArea, height: hitArea)
@@ -10042,6 +10222,36 @@ extension ContentView {
             return false
         }
         return true
+    }
+
+    private func coreElevationChecklistCounts() -> [CoreElevationChecklistCategory: Int] {
+        let normalizedElevation = CanonicalElevation.normalize(elevation) ?? elevation
+        guard let currentSession = appState.currentSession else {
+            return [:]
+        }
+
+        let propertyID = appState.selectedPropertyID ?? currentSession.propertyID
+        let sessionID = currentSession.id
+        guard let metadata = sessionMetadataForActiveSession(propertyID: propertyID, sessionID: sessionID) else {
+            return [:]
+        }
+
+        return metadata.shots.reduce(into: [CoreElevationChecklistCategory: Int]()) { counts, shot in
+            guard shot.sessionID == sessionID else { return }
+            guard shot.createdAt >= currentSession.startedAt else { return }
+            if let endedAt = currentSession.endedAt, shot.createdAt > endedAt {
+                return
+            }
+
+            let shotElevation = CanonicalElevation.normalize(shot.elevation) ?? shot.elevation
+            guard shotElevation.caseInsensitiveCompare(normalizedElevation) == .orderedSame else { return }
+
+            let detailTypeKey = shot.detailType
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .lowercased()
+            guard let category = Self.coreElevationChecklistCategoryByShotType[detailTypeKey] else { return }
+            counts[category, default: 0] += 1
+        }
     }
 
     private func sessionShotIDsForActiveSession(propertyID: UUID, sessionID: UUID?) -> Set<UUID> {
@@ -14683,6 +14893,114 @@ extension ContentView {
                 .filter { !$0.isEmpty }
             if available.contains(selectedDetailType) { return }
             selectedDetailType = available.first ?? ""
+        }
+    }
+
+    private struct CoreElevationChecklistSheet: View {
+        let elevationTitle: String
+        let rows: [CoreElevationChecklistRowState]
+        let onClose: () -> Void
+        @Environment(\.colorScheme) private var colorScheme
+
+        private var theme: SheetControlTheme { .forScheme(colorScheme) }
+
+        var body: some View {
+            VStack(spacing: 0) {
+                HStack(spacing: 10) {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("Core Elevation Checklist")
+                            .font(.system(size: 18, weight: .semibold))
+                            .foregroundStyle(theme.label)
+                            .lineLimit(1)
+
+                        if !elevationTitle.isEmpty {
+                            Text(elevationTitle)
+                                .font(.system(size: 13, weight: .semibold))
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+
+                    Spacer(minLength: 12)
+
+                    Button(action: onClose) {
+                        Text("Done")
+                            .font(.system(size: 16, weight: .semibold))
+                            .foregroundStyle(theme.label)
+                            .padding(.horizontal, 14)
+                            .frame(height: 36)
+                            .background(theme.fill)
+                            .clipShape(Capsule())
+                            .overlay(
+                                Capsule()
+                                    .stroke(theme.stroke, lineWidth: 1)
+                            )
+                    }
+                    .buttonStyle(.plain)
+                }
+                .padding(.horizontal, 18)
+                .padding(.top, 18)
+                .padding(.bottom, 12)
+
+                VStack(spacing: 0) {
+                    ForEach(rows) { row in
+                        coreChecklistRow(row)
+                        if row.id != rows.last?.id {
+                            Divider()
+                                .padding(.leading, 14)
+                        }
+                    }
+                }
+                .background(theme.fill)
+                .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 18, style: .continuous)
+                        .stroke(theme.stroke, lineWidth: 1)
+                )
+                .padding(.horizontal, 18)
+                .padding(.bottom, 18)
+            }
+            .frame(maxWidth: 450)
+            .background(Color(uiColor: .secondarySystemGroupedBackground))
+            .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 24, style: .continuous)
+                    .stroke(theme.stroke, lineWidth: 1)
+            )
+            .shadow(color: Color.black.opacity(0.35), radius: 24, x: 0, y: 16)
+        }
+
+        private func coreChecklistRow(_ row: CoreElevationChecklistRowState) -> some View {
+            HStack(alignment: .center, spacing: 12) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(row.category.title)
+                        .font(.system(size: 16, weight: .semibold))
+                        .foregroundStyle(theme.label)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    if let note = row.category.note {
+                        Text(note)
+                            .font(.system(size: 12, weight: .regular))
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+
+                Spacer(minLength: 12)
+
+                Text(row.countLabel)
+                    .font(.system(size: 16, weight: .semibold, design: .rounded))
+                    .foregroundStyle(theme.label)
+                    .frame(minWidth: 36, alignment: .trailing)
+
+                if row.category.showsCompletionIndicator {
+                    Image(systemName: row.isComplete ? "checkmark.circle.fill" : "checkmark.circle")
+                        .font(.system(size: 18, weight: .semibold))
+                        .foregroundStyle(row.isComplete ? Color.green : Color.gray)
+                        .frame(width: 22)
+                }
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 10)
         }
     }
 

@@ -2,7 +2,7 @@ import Foundation
 import UIKit
 
 final class LocalStore {
-    private let currentSessionSchemaVersion = 10
+    private let currentSessionSchemaVersion = 11
     private let fileIOQueue = DispatchQueue(label: "ScoutCapture.LocalStore.fileIO")
     private let fileIOQueueKey = DispatchSpecificKey<UInt8>()
     private let fileIOQueueValue: UInt8 = 1
@@ -415,6 +415,7 @@ final class LocalStore {
             "propertyZip",
             "primary_contact_name",
             "primary_contact_phone",
+            "primary_contact_email",
             "started_at_utc",
             "ended_at_utc",
             "is_baseline",
@@ -433,6 +434,7 @@ final class LocalStore {
         let folderID = metadata.folderIDAtCapture ?? property?.folderId ?? ""
         let primaryContactName = metadata.primaryContactNameAtCapture ?? property?.clientName ?? ""
         let primaryContactPhone = metadata.propertyPhoneAtCapture ?? property?.clientPhone ?? ""
+        let primaryContactEmail = metadata.primaryContactEmailAtCapture ?? property?.clientEmail ?? ""
         let propertyStreet = metadata.propertyStreetAtCapture ?? property?.street ?? ""
         let propertyCity = metadata.propertyCityAtCapture ?? property?.city ?? ""
         let propertyState = metadata.propertyStateAtCapture ?? property?.state ?? ""
@@ -451,6 +453,7 @@ final class LocalStore {
             propertyZip,
             primaryContactName,
             primaryContactPhone,
+            primaryContactEmail,
             iso8601String(metadata.startedAt),
             iso8601String(metadata.endedAt),
             boolString(metadata.isBaselineSession),
@@ -780,6 +783,47 @@ final class LocalStore {
         }
     }
 
+    @discardableResult
+    func updateOrganizationContact(organizationID: UUID, contact: OrganizationContact) throws -> Organization {
+        try performFileIOSync {
+            var state = try migratedPropertyAndOrganizationState()
+            guard let index = state.organizations.firstIndex(where: { $0.id == organizationID }) else {
+                throw StoreError.organizationNotFound(organizationID)
+            }
+
+            var organization = state.organizations[index]
+            var contacts = organization.contacts
+            if let contactIndex = contacts.firstIndex(where: { $0.id == contact.id }) {
+                contacts[contactIndex] = contact
+            } else {
+                contacts.append(contact)
+            }
+            organization.contacts = normalizedOrganizationContacts(contacts)
+            state.organizations[index] = organization
+            state.organizations = normalizedOrganizations(state.organizations)
+            try writeOrganizations(state.organizations)
+            return state.organizations.first(where: { $0.id == organizationID }) ?? organization
+        }
+    }
+
+    @discardableResult
+    func deleteOrganizationContact(organizationID: UUID, contactID: UUID) throws -> Organization {
+        try performFileIOSync {
+            var state = try migratedPropertyAndOrganizationState()
+            guard let index = state.organizations.firstIndex(where: { $0.id == organizationID }) else {
+                throw StoreError.organizationNotFound(organizationID)
+            }
+
+            var organization = state.organizations[index]
+            organization.contacts.removeAll { $0.id == contactID }
+            organization.contacts = normalizedOrganizationContacts(organization.contacts)
+            state.organizations[index] = organization
+            state.organizations = normalizedOrganizations(state.organizations)
+            try writeOrganizations(state.organizations)
+            return state.organizations.first(where: { $0.id == organizationID }) ?? organization
+        }
+    }
+
     func exportPropertyFolderName(propertyID: UUID) throws -> String {
         let properties = try fetchProperties()
         guard let property = properties.first(where: { $0.id == propertyID }) else {
@@ -809,6 +853,7 @@ final class LocalStore {
                 created.folderId = try nextAvailableFolderID(in: state.properties)
             }
             state.properties.append(created)
+            syncOrganizationContacts(in: &state.organizations, with: created)
             try writeOrganizations(state.organizations)
             try writeProperties(state.properties)
             return created
@@ -836,6 +881,7 @@ final class LocalStore {
             }
             updated.updatedAt = Date()
             state.properties[index] = updated
+            syncOrganizationContacts(in: &state.organizations, with: updated)
             try writeOrganizations(state.organizations)
             try writeProperties(state.properties)
             return updated
@@ -1410,13 +1456,84 @@ final class LocalStore {
             guard !trimmedName.isEmpty else { continue }
             let key = trimmedName.lowercased()
             guard seenNames.insert(key).inserted else { continue }
-            output.append(Organization(id: organization.id, name: trimmedName))
+            output.append(Organization(
+                id: organization.id,
+                name: trimmedName,
+                contacts: normalizedOrganizationContacts(organization.contacts)
+            ))
         }
         return output.sorted { lhs, rhs in
             if lhs.name.caseInsensitiveCompare("Individual") == .orderedSame { return true }
             if rhs.name.caseInsensitiveCompare("Individual") == .orderedSame { return false }
             return lhs.name.localizedCaseInsensitiveCompare(rhs.name) == .orderedAscending
         }
+    }
+
+    private func normalizedOrganizationContacts(_ contacts: [OrganizationContact]) -> [OrganizationContact] {
+        var output: [OrganizationContact] = []
+        for contact in contacts {
+            let normalizedName = trimmedNonEmpty(contact.name)
+            let normalizedPhone = normalizedPropertyPhone(contact.phone)
+            let normalizedEmail = trimmedNonEmpty(contact.email)
+            guard let normalizedName else { continue }
+            let candidate = OrganizationContact(
+                id: contact.id,
+                name: normalizedName,
+                phone: normalizedPhone,
+                email: normalizedEmail
+            )
+            upsertOrganizationContact(candidate, into: &output)
+        }
+        return output.sorted {
+            $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending
+        }
+    }
+
+    private func syncOrganizationContacts(in organizations: inout [Organization], with property: Property) {
+        guard let organizationID = property.orgId,
+              let organizationIndex = organizations.firstIndex(where: { $0.id == organizationID }),
+              let name = trimmedNonEmpty(property.clientName) else {
+            return
+        }
+
+        let candidate = OrganizationContact(
+            name: name,
+            phone: normalizedPropertyPhone(property.clientPhone),
+            email: trimmedNonEmpty(property.clientEmail)
+        )
+        var contacts = organizations[organizationIndex].contacts
+        upsertOrganizationContact(candidate, into: &contacts)
+        organizations[organizationIndex].contacts = normalizedOrganizationContacts(contacts)
+    }
+
+    private func upsertOrganizationContact(_ candidate: OrganizationContact, into contacts: inout [OrganizationContact]) {
+        if let index = contacts.firstIndex(where: { organizationContactMatches($0, candidate) }) {
+            var existing = contacts[index]
+            existing.name = trimmedNonEmpty(candidate.name) ?? existing.name
+            existing.phone = normalizedPropertyPhone(candidate.phone) ?? normalizedPropertyPhone(existing.phone)
+            existing.email = trimmedNonEmpty(candidate.email) ?? trimmedNonEmpty(existing.email)
+            contacts[index] = existing
+            return
+        }
+        contacts.append(candidate)
+    }
+
+    private func organizationContactMatches(_ lhs: OrganizationContact, _ rhs: OrganizationContact) -> Bool {
+        let lhsEmail = trimmedNonEmpty(lhs.email)?.lowercased()
+        let rhsEmail = trimmedNonEmpty(rhs.email)?.lowercased()
+        if let lhsEmail, let rhsEmail, lhsEmail == rhsEmail {
+            return true
+        }
+
+        let lhsPhone = normalizedPropertyPhone(lhs.phone)
+        let rhsPhone = normalizedPropertyPhone(rhs.phone)
+        if let lhsPhone, let rhsPhone, lhsPhone == rhsPhone {
+            return true
+        }
+
+        let lhsName = trimmedNonEmpty(lhs.name)?.lowercased()
+        let rhsName = trimmedNonEmpty(rhs.name)?.lowercased()
+        return lhsName != nil && lhsName == rhsName
     }
 
     private func defaultOrganization(in organizations: inout [Organization]) -> Organization {
@@ -1550,6 +1667,7 @@ final class LocalStore {
         let propertyName = currentProperty?.name.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         let currentOrganization = currentProperty?.orgId.flatMap { organization(withID: $0) }
         let primaryContactName = trimmedNonEmpty(currentProperty?.clientName)
+        let primaryContactEmail = trimmedNonEmpty(currentProperty?.clientEmail)
         if (metadata.propertyNameAtCapture ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
            !propertyName.isEmpty {
             metadata.propertyNameAtCapture = propertyName
@@ -1565,6 +1683,9 @@ final class LocalStore {
         }
         if metadata.primaryContactNameAtCapture?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true {
             metadata.primaryContactNameAtCapture = primaryContactName
+        }
+        if metadata.primaryContactEmailAtCapture?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true {
+            metadata.primaryContactEmailAtCapture = primaryContactEmail
         }
         if session.exportedAt != nil, !propertyName.isEmpty {
             metadata.propertyNameAtExport = propertyName
@@ -1626,6 +1747,7 @@ final class LocalStore {
                 propertyNameAtCapture: nil,
                 propertyNameAtExport: nil,
                 primaryContactNameAtCapture: property?.clientName,
+                primaryContactEmailAtCapture: property?.clientEmail,
                 propertyAddressAtCapture: normalizedPropertyAddress(property?.address),
                 propertyStreetAtCapture: trimmedNonEmpty(property?.street),
                 propertyCityAtCapture: trimmedNonEmpty(property?.city),
@@ -1685,6 +1807,7 @@ final class LocalStore {
                 propertyNameAtCapture: nil,
                 propertyNameAtExport: nil,
                 primaryContactNameAtCapture: property?.clientName,
+                primaryContactEmailAtCapture: property?.clientEmail,
                 propertyAddressAtCapture: normalizedPropertyAddress(property?.address),
                 propertyStreetAtCapture: trimmedNonEmpty(property?.street),
                 propertyCityAtCapture: trimmedNonEmpty(property?.city),
@@ -1808,6 +1931,7 @@ final class LocalStore {
         let resolvedOrgName = resolvedOrgID.flatMap { organization(withID: $0)?.name } ?? trimmedNonEmpty(metadata.orgNameAtCapture)
         let resolvedFolderID = trimmedNonEmpty(metadata.folderIDAtCapture) ?? trimmedNonEmpty(property?.folderId)
         let resolvedPrimaryContactName = trimmedNonEmpty(metadata.primaryContactNameAtCapture) ?? trimmedNonEmpty(property?.clientName)
+        let resolvedPrimaryContactEmail = trimmedNonEmpty(metadata.primaryContactEmailAtCapture) ?? trimmedNonEmpty(property?.clientEmail)
         let captureTimeZone = captureTimeZoneContext(
             identifier: metadata.timeZoneIdentifierAtCapture,
             offsetString: metadata.timeZoneOffsetAtCapture,
@@ -1858,6 +1982,7 @@ final class LocalStore {
             propertyNameAtCapture: trimmedNonEmpty(metadata.propertyNameAtCapture) ?? (propertyName.isEmpty ? nil : propertyName),
             propertyNameAtExport: trimmedNonEmpty(metadata.propertyNameAtExport),
             primaryContactNameAtCapture: resolvedPrimaryContactName,
+            primaryContactEmailAtCapture: resolvedPrimaryContactEmail,
             propertyAddressAtCapture: resolvedAddress,
             propertyStreetAtCapture: resolvedStreet,
             propertyCityAtCapture: resolvedCity,
