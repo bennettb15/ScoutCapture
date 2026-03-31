@@ -122,6 +122,8 @@ struct SessionHubView: View {
     @FocusState private var isSearchFieldFocused: Bool
     @State private var propertyListFilter: PropertyListFilter = .all
     @State private var showCalendarComingSoonPopup: Bool = false
+    @State private var showTemporaryMigrationExport: Bool = false
+    @State private var showTemporaryMigrationImport: Bool = false
 #if DEBUG
     @State private var showDebugTools: Bool = false
 #endif
@@ -297,6 +299,14 @@ struct SessionHubView: View {
                         appState.refreshProperties()
                     }
                 )
+            }
+            .sheet(isPresented: $showTemporaryMigrationExport) {
+                TemporaryMigrationExportView()
+                    .environmentObject(appState)
+            }
+            .sheet(isPresented: $showTemporaryMigrationImport) {
+                TemporaryMigrationImportView()
+                    .environmentObject(appState)
             }
 #if DEBUG
             .fullScreenCover(isPresented: $showDebugTools) {
@@ -998,6 +1008,24 @@ struct SessionHubView: View {
             VStack(spacing: 0) {
                 Divider()
                 HStack {
+                    customCapsuleToolbarButton(
+                        title: "Migration Export",
+                        isEnabled: true,
+                        fill: Color.orange.opacity(0.92),
+                        stroke: Color.orange.opacity(0.96),
+                        label: .white
+                    ) {
+                        showTemporaryMigrationExport = true
+                    }
+                    customCapsuleToolbarButton(
+                        title: "Migration Import",
+                        isEnabled: true,
+                        fill: Color.green.opacity(0.88),
+                        stroke: Color.green.opacity(0.94),
+                        label: .white
+                    ) {
+                        showTemporaryMigrationImport = true
+                    }
                     Spacer(minLength: 0)
                     customCapsuleToolbarButton(
                         title: showArchivedProperties ? "Hide Archived" : "Show Archived",
@@ -1005,7 +1033,6 @@ struct SessionHubView: View {
                     ) {
                         showArchivedProperties.toggle()
                     }
-                    Spacer(minLength: 0)
                 }
                 .padding(.horizontal, 16)
                 .padding(.vertical, 10)
@@ -2379,7 +2406,7 @@ private struct HubAddPropertySheet: View {
         !addressAutocomplete.completions.isEmpty &&
         !streetAddress.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
-    
+
     private var buttonFill: Color {
         colorScheme == .light ? Color.white.opacity(0.90) : Color.black.opacity(0.55)
     }
@@ -2434,148 +2461,169 @@ private struct HubAddPropertySheet: View {
             .padding(.bottom, 8)
             .background(Color(uiColor: .systemBackground))
 
-            Form {
-                Section("Organization") {
-                    Picker("Organization", selection: organizationSelectionToken) {
-                        ForEach(appState.organizations) { organization in
-                            Text(organization.name)
-                                .tag(organization.id.uuidString)
+            ScrollViewReader { proxy in
+                Form {
+                    Section("Organization") {
+                        Picker("Organization", selection: organizationSelectionToken) {
+                            ForEach(appState.organizations) { organization in
+                                Text(organization.name)
+                                    .tag(organization.id.uuidString)
+                            }
+                            Text("Add new organization")
+                                .tag(addOrganizationToken)
                         }
-                        Text("Add new organization")
-                            .tag(addOrganizationToken)
                     }
-                }
 
-                Section("Primary Contact") {
-                    HStack(spacing: 12) {
-                        TextField("Primary Contact Name", text: $clientName)
-                            .textInputAutocapitalization(.words)
-                            .focused($focusedField, equals: .clientName)
+                    Section("Primary Contact") {
+                        HStack(spacing: 12) {
+                            TextField("Primary Contact Name", text: $clientName)
+                                .textInputAutocapitalization(.words)
+                                .focused($focusedField, equals: .clientName)
+                                .submitLabel(.next)
+                                .onSubmit {
+                                    focusedField = .clientPhone
+                                }
+                                .id(Field.clientName)
+
+                            Button {
+                                showContactPicker = true
+                            } label: {
+                                Image(systemName: "plus.circle.fill")
+                                    .font(.system(size: 20, weight: .semibold))
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityLabel("Choose saved contact")
+                        }
+
+                        TextField("Phone (optional)", text: $clientPhone)
+                            .focused($focusedField, equals: .clientPhone)
                             .submitLabel(.next)
                             .onSubmit {
-                                focusedField = .clientPhone
+                                focusedField = .clientEmail
+                            }
+                            .keyboardType(.phonePad)
+                            .id(Field.clientPhone)
+                            .onChange(of: clientPhone) { _, newValue in
+                                let digits = newValue.filter(\.isNumber)
+                                let limited = String(digits.prefix(15))
+                                let formatted = formatContactPhoneDisplay(limited)
+                                if formatted != clientPhone {
+                                    clientPhone = formatted
+                                }
                             }
 
-                        Button {
-                            showContactPicker = true
-                        } label: {
-                            Image(systemName: "plus.circle.fill")
-                                .font(.system(size: 20, weight: .semibold))
-                        }
-                        .buttonStyle(.plain)
-                        .accessibilityLabel("Choose saved contact")
+                        TextField("Email (optional)", text: $clientEmail)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                            .keyboardType(.emailAddress)
+                            .focused($focusedField, equals: .clientEmail)
+                            .submitLabel(.next)
+                            .onSubmit {
+                                focusedField = .propertyName
+                            }
+                            .id(Field.clientEmail)
                     }
 
-                    TextField("Phone (optional)", text: $clientPhone)
-                        .focused($focusedField, equals: .clientPhone)
-                        .submitLabel(.next)
-                        .onSubmit {
-                            focusedField = .clientEmail
-                        }
-                        .keyboardType(.phonePad)
-                        .onChange(of: clientPhone) { _, newValue in
-                            let digits = newValue.filter(\.isNumber)
-                            let limited = String(digits.prefix(15))
-                            let formatted = formatContactPhoneDisplay(limited)
-                            if formatted != clientPhone {
-                                clientPhone = formatted
+                    Section("Property") {
+                        TextField("Property name", text: $propertyName)
+                            .focused($focusedField, equals: .propertyName)
+                            .submitLabel(.next)
+                            .onSubmit {
+                                focusedField = .streetAddress
+                            }
+                            .onChange(of: propertyName) { _, newValue in
+                                propertyNameAutocomplete.update(query: newValue)
+                            }
+                            .id(Field.propertyName)
+                        if hasPropertyNameResults {
+                            ForEach(propertyNameAutocomplete.completions, id: \.id) { completion in
+                                autocompleteRow(completion) {
+                                    selectPropertyNameCompletion(completion)
+                                }
                             }
                         }
-
-                    TextField("Email (optional)", text: $clientEmail)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
-                        .keyboardType(.emailAddress)
-                        .focused($focusedField, equals: .clientEmail)
-                        .submitLabel(.next)
-                        .onSubmit {
-                            focusedField = .propertyName
+                        TextField("Address", text: $streetAddress)
+                            .focused($focusedField, equals: .streetAddress)
+                            .submitLabel(.next)
+                            .onSubmit {
+                                focusedField = .city
+                            }
+                            .onChange(of: streetAddress) { _, newValue in
+                                addressAutocomplete.update(query: newValue)
+                                syncNormalizedAddress()
+                            }
+                            .id(Field.streetAddress)
+                        if hasAddressResults {
+                            ForEach(addressAutocomplete.completions, id: \.id) { completion in
+                                autocompleteRow(completion) {
+                                    selectAddressCompletion(completion)
+                                }
+                            }
                         }
+                        TextField("City", text: $city)
+                            .focused($focusedField, equals: .city)
+                            .submitLabel(.next)
+                            .onSubmit {
+                                focusedField = .state
+                            }
+                            .onChange(of: city) { _, _ in
+                                syncNormalizedAddress()
+                            }
+                            .id(Field.city)
+                        TextField("State", text: $state)
+                            .focused($focusedField, equals: .state)
+                            .submitLabel(.next)
+                            .onSubmit {
+                                focusedField = .zipCode
+                            }
+                            .textInputAutocapitalization(.characters)
+                            .id(Field.state)
+                            .onChange(of: state) { _, newValue in
+                                let filtered = newValue.uppercased().filter(\.isLetter)
+                                let limited = String(filtered.prefix(2))
+                                if limited != state {
+                                    state = limited
+                                }
+                                syncNormalizedAddress()
+                            }
+                        TextField("Zip Code", text: $zipCode)
+                            .focused($focusedField, equals: .zipCode)
+                            .submitLabel(.go)
+                            .keyboardType(.numberPad)
+                            .id(Field.zipCode)
+                            .onSubmit {
+                                if canSave {
+                                    submitProperty()
+                                } else {
+                                    focusFirstInvalidField()
+                                }
+                            }
+                            .onChange(of: zipCode) { _, newValue in
+                                let filtered = newValue.filter(\.isNumber)
+                                let limited = String(filtered.prefix(5))
+                                if limited != zipCode {
+                                    zipCode = limited
+                                }
+                                syncNormalizedAddress()
+                            }
+                    }
                 }
-
-                Section("Property") {
-                    TextField("Property name", text: $propertyName)
-                        .focused($focusedField, equals: .propertyName)
-                        .submitLabel(.next)
-                        .onSubmit {
-                            focusedField = .streetAddress
-                        }
-                        .onChange(of: propertyName) { _, newValue in
-                            propertyNameAutocomplete.update(query: newValue)
-                        }
-                    if hasPropertyNameResults {
-                        ForEach(propertyNameAutocomplete.completions, id: \.id) { completion in
-                            autocompleteRow(completion) {
-                                selectPropertyNameCompletion(completion)
-                            }
-                        }
-                    }
-                    TextField("Address", text: $streetAddress)
-                        .focused($focusedField, equals: .streetAddress)
-                        .submitLabel(.next)
-                        .onSubmit {
-                            focusedField = .city
-                        }
-                        .onChange(of: streetAddress) { _, newValue in
-                            addressAutocomplete.update(query: newValue)
-                            syncNormalizedAddress()
-                        }
-                    if hasAddressResults {
-                        ForEach(addressAutocomplete.completions, id: \.id) { completion in
-                            autocompleteRow(completion) {
-                                selectAddressCompletion(completion)
-                            }
-                        }
-                    }
-                    TextField("City", text: $city)
-                        .focused($focusedField, equals: .city)
-                        .submitLabel(.next)
-                        .onSubmit {
-                            focusedField = .state
-                        }
-                        .onChange(of: city) { _, _ in
-                            syncNormalizedAddress()
-                        }
-                    TextField("State", text: $state)
-                        .focused($focusedField, equals: .state)
-                        .submitLabel(.next)
-                        .onSubmit {
-                            focusedField = .zipCode
-                        }
-                        .textInputAutocapitalization(.characters)
-                        .onChange(of: state) { _, newValue in
-                            let filtered = newValue.uppercased().filter(\.isLetter)
-                            let limited = String(filtered.prefix(2))
-                            if limited != state {
-                                state = limited
-                            }
-                            syncNormalizedAddress()
-                        }
-                    TextField("Zip Code", text: $zipCode)
-                        .focused($focusedField, equals: .zipCode)
-                        .submitLabel(.go)
-                        .keyboardType(.numberPad)
-                        .onSubmit {
-                            if canSave {
-                                submitProperty()
-                            } else {
-                                focusFirstInvalidField()
-                            }
-                        }
-                        .onChange(of: zipCode) { _, newValue in
-                            let filtered = newValue.filter(\.isNumber)
-                            let limited = String(filtered.prefix(5))
-                            if limited != zipCode {
-                                zipCode = limited
-                            }
-                            syncNormalizedAddress()
-                        }
+                .scrollContentBackground(.hidden)
+                .background(Color(uiColor: .systemBackground))
+                .onChange(of: focusedField) { _, newValue in
+                    guard let newValue else { return }
+                    scrollToField(newValue, with: proxy)
+                }
+                .onChange(of: propertyNameAutocomplete.completions.count) { _, newValue in
+                    guard focusedField == .propertyName, newValue > 0 else { return }
+                    scrollToField(.propertyName, with: proxy)
+                }
+                .onChange(of: addressAutocomplete.completions.count) { _, newValue in
+                    guard focusedField == .streetAddress, newValue > 0 else { return }
+                    scrollToField(.streetAddress, with: proxy)
                 }
             }
-            .scrollContentBackground(.hidden)
-            .background(Color(uiColor: .systemBackground))
         }
-        .ignoresSafeArea(edges: .bottom)
         .onAppear {
             syncSelectedOrganizationIfNeeded()
             applyInitialClientFocusIfNeeded()
@@ -2826,6 +2874,14 @@ private struct HubAddPropertySheet: View {
         return [trimmedStreet, trimmedCity, stateZip]
             .filter { !$0.isEmpty }
             .joined(separator: ", ")
+    }
+
+    private func scrollToField(_ field: Field, with proxy: ScrollViewProxy) {
+        DispatchQueue.main.async {
+            withAnimation(.easeInOut(duration: 0.2)) {
+                proxy.scrollTo(field, anchor: .center)
+            }
+        }
     }
     
     @ViewBuilder
