@@ -3,8 +3,8 @@ import UIKit
 import UniformTypeIdentifiers
 
 private enum TemporaryMigrationExportConstants {
-    nonisolated static let archiveFilename = "ScoutCapture_Migration.zip"
     nonisolated static let exportRootFolderName = "ScoutCapture_Migration"
+    nonisolated static let exportArchiveName = "ScoutCapture_Migration.zip"
     nonisolated static let userDefaultsFilename = "userdefaults_export.json"
     nonisolated static let applicationSupportFolderName = "Application Support"
     nonisolated static let documentsFolderName = "Documents"
@@ -63,7 +63,7 @@ struct TemporaryMigrationExportView: View {
                         .buttonStyle(.plain)
                         .disabled(isPreparingExport)
 
-                        Text("Creates `ScoutCapture_Migration.zip` and opens the standard iOS share sheet so it can be saved to Files or iCloud Drive.")
+                        Text("Creates a `ScoutCapture_Migration.zip` archive and opens the standard iOS share sheet so it can be saved to Files or iCloud Drive.")
                             .font(.system(size: 13, weight: .medium))
                             .foregroundColor(.secondary)
 
@@ -151,16 +151,16 @@ struct TemporaryMigrationExportView: View {
 
         Task.detached(priority: .userInitiated) {
             do {
-                let archiveURL = try TemporaryMigrationExportManager.createMigrationArchive { phase in
+                let exportArchiveURL = try TemporaryMigrationExportManager.createMigrationArchive { phase in
                     Task { @MainActor in
                         exportPhaseMessage = phase
                     }
                 }
                 await MainActor.run {
                     isPreparingExport = false
-                    exportStatusMessage = "Migration zip created. Save it from the share sheet."
+                    exportStatusMessage = "Migration zip prepared. Save it from the share sheet."
                     exportPhaseMessage = "Share sheet ready."
-                    shareItem = MigrationShareItem(url: archiveURL)
+                    shareItem = MigrationShareItem(url: exportArchiveURL)
                 }
             } catch {
                 await MainActor.run {
@@ -206,8 +206,7 @@ enum TemporaryMigrationExportManager {
         var copyFailures: [String] = []
 
         let documentsURL = fileManager.urls(for: .documentDirectory, in: .userDomainMask).first
-        let applicationSupportURL = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first?
-            .appendingPathComponent("ScoutCapture", isDirectory: true)
+        let activeStorageRootURL = StorageRoot.prepareStorage()
 
         if let documentsURL {
             onPhaseUpdate("Copying Documents...")
@@ -220,16 +219,14 @@ enum TemporaryMigrationExportManager {
             )
         }
 
-        if let applicationSupportURL {
-            onPhaseUpdate("Copying Application Support/ScoutCapture...")
-            copyDirectoryContentsIfPresent(
-                from: applicationSupportURL,
-                to: exportRootURL.appendingPathComponent("Application Support", isDirectory: true),
-                label: "Application Support/ScoutCapture",
-                fileManager: fileManager,
-                failures: &copyFailures
-            )
-        }
+        onPhaseUpdate("Copying active ScoutCapture storage...")
+        copyDirectoryContentsIfPresent(
+            from: activeStorageRootURL,
+            to: exportRootURL.appendingPathComponent("Application Support", isDirectory: true),
+            label: "Active ScoutCapture storage",
+            fileManager: fileManager,
+            failures: &copyFailures
+        )
 
         onPhaseUpdate("Exporting UserDefaults...")
         let defaultsExportURL = exportRootURL
@@ -237,21 +234,17 @@ enum TemporaryMigrationExportManager {
         let defaultsData = try makeUserDefaultsExportData(userDefaults: userDefaults)
         try defaultsData.write(to: defaultsExportURL, options: [.atomic])
 
-        onPhaseUpdate("Building ZIP manifest...")
-        let zipEntries = try makeZipEntries(
-            rootURL: exportRootURL,
-            fileManager: fileManager
+        onPhaseUpdate("Creating ZIP archive...")
+        let archiveURL = workspaceURL.appendingPathComponent(TemporaryMigrationExportConstants.exportArchiveName)
+        let entryCount = try buildZipArchive(
+            at: archiveURL,
+            from: exportRootURL,
+            fileManager: fileManager,
+            onProgress: { completed, total in
+                onPhaseUpdate("Creating ZIP archive (\(completed)/\(total))...")
+            }
         )
-        onPhaseUpdate("Creating ZIP archive (\(zipEntries.count) entries)...")
-        let zipData = buildZipData(entries: zipEntries)
-
-        let finalArchiveURL = fileManager.temporaryDirectory
-            .appendingPathComponent(TemporaryMigrationExportConstants.archiveFilename)
-        if fileManager.fileExists(atPath: finalArchiveURL.path) {
-            try? fileManager.removeItem(at: finalArchiveURL)
-        }
-        try zipData.write(to: finalArchiveURL, options: [.atomic])
-        onPhaseUpdate("Finalizing archive...")
+        onPhaseUpdate("Created ZIP archive with \(entryCount) entries.")
 
         if !copyFailures.isEmpty {
             print("[MigrationExport] completed with copy failures:")
@@ -262,7 +255,7 @@ enum TemporaryMigrationExportManager {
             print("[MigrationExport] completed without copy failures.")
         }
 
-        return finalArchiveURL
+        return archiveURL
     }
 
     private nonisolated static func copyDirectoryContentsIfPresent(
@@ -375,7 +368,7 @@ enum TemporaryMigrationExportManager {
 
     private struct ZipEntry {
         let path: String
-        let data: Data
+        let fileURL: URL?
         let modifiedAt: Date
     }
 
@@ -391,7 +384,7 @@ enum TemporaryMigrationExportManager {
     private nonisolated static func makeZipEntries(rootURL: URL, fileManager: FileManager) throws -> [ZipEntry] {
         var entries: [ZipEntry] = []
         let rootName = rootURL.lastPathComponent
-        entries.append(ZipEntry(path: "\(rootName)/", data: Data(), modifiedAt: Date()))
+        entries.append(ZipEntry(path: "\(rootName)/", fileURL: nil, modifiedAt: Date()))
         try appendZipEntries(in: rootURL, relativePath: rootName, fileManager: fileManager, entries: &entries)
         return entries
     }
@@ -414,7 +407,7 @@ enum TemporaryMigrationExportManager {
             let modifiedAt = values.contentModificationDate ?? values.creationDate ?? Date()
 
             if values.isDirectory == true {
-                entries.append(ZipEntry(path: "\(childRelativePath)/", data: Data(), modifiedAt: modifiedAt))
+                entries.append(ZipEntry(path: "\(childRelativePath)/", fileURL: nil, modifiedAt: modifiedAt))
                 try appendZipEntries(
                     in: childURL,
                     relativePath: childRelativePath,
@@ -425,7 +418,7 @@ enum TemporaryMigrationExportManager {
                 entries.append(
                     ZipEntry(
                         path: childRelativePath,
-                        data: try Data(contentsOf: childURL),
+                        fileURL: childURL,
                         modifiedAt: modifiedAt
                     )
                 )
@@ -433,30 +426,53 @@ enum TemporaryMigrationExportManager {
         }
     }
 
-    private nonisolated static func buildZipData(entries: [ZipEntry]) -> Data {
-        var zip = Data()
+    private nonisolated static func buildZipArchive(
+        at archiveURL: URL,
+        from rootURL: URL,
+        fileManager: FileManager,
+        onProgress: @escaping @Sendable (Int, Int) -> Void = { _, _ in }
+    ) throws -> Int {
+        let entries = try makeZipEntries(rootURL: rootURL, fileManager: fileManager)
+        fileManager.createFile(atPath: archiveURL.path, contents: nil)
+        let fileHandle = try FileHandle(forWritingTo: archiveURL)
+        defer { try? fileHandle.close() }
+
         var centralDirectory: [ZipCentralDirectoryRecord] = []
+        var offset: UInt32 = 0
 
-        for entry in entries {
+        for (index, entry) in entries.enumerated() {
             let pathData = Data(entry.path.utf8)
-            let size = UInt32(entry.data.count)
-            let crc = crc32(entry.data)
-            let (dosTime, dosDate) = dosDateTime(for: entry.modifiedAt)
-            let localHeaderOffset = UInt32(zip.count)
+            let (crc, size): (UInt32, UInt32)
+            if let fileURL = entry.fileURL {
+                (crc, size) = try fileCRC32AndSize(at: fileURL)
+            } else {
+                (crc, size) = (0, 0)
+            }
 
-            appendUInt32LE(0x04034B50, to: &zip)
-            appendUInt16LE(20, to: &zip)
-            appendUInt16LE(0, to: &zip)
-            appendUInt16LE(0, to: &zip)
-            appendUInt16LE(dosTime, to: &zip)
-            appendUInt16LE(dosDate, to: &zip)
-            appendUInt32LE(crc, to: &zip)
-            appendUInt32LE(size, to: &zip)
-            appendUInt32LE(size, to: &zip)
-            appendUInt16LE(UInt16(pathData.count), to: &zip)
-            appendUInt16LE(0, to: &zip)
-            zip.append(pathData)
-            zip.append(entry.data)
+            let (dosTime, dosDate) = dosDateTime(for: entry.modifiedAt)
+            let localHeaderOffset = offset
+
+            var header = Data()
+            appendUInt32LE(0x04034B50, to: &header)
+            appendUInt16LE(20, to: &header)
+            appendUInt16LE(0, to: &header)
+            appendUInt16LE(0, to: &header)
+            appendUInt16LE(dosTime, to: &header)
+            appendUInt16LE(dosDate, to: &header)
+            appendUInt32LE(crc, to: &header)
+            appendUInt32LE(size, to: &header)
+            appendUInt32LE(size, to: &header)
+            appendUInt16LE(UInt16(pathData.count), to: &header)
+            appendUInt16LE(0, to: &header)
+            header.append(pathData)
+
+            try write(header, to: fileHandle)
+            offset += UInt32(header.count)
+
+            if let fileURL = entry.fileURL {
+                let written = try streamFile(at: fileURL, to: fileHandle)
+                offset += UInt32(written)
+            }
 
             centralDirectory.append(
                 ZipCentralDirectoryRecord(
@@ -468,44 +484,73 @@ enum TemporaryMigrationExportManager {
                     localHeaderOffset: localHeaderOffset
                 )
             )
+            onProgress(index + 1, entries.count)
         }
 
-        let centralDirectoryOffset = UInt32(zip.count)
-
+        let centralDirectoryOffset = offset
         for record in centralDirectory {
-            appendUInt32LE(0x02014B50, to: &zip)
-            appendUInt16LE(20, to: &zip)
-            appendUInt16LE(20, to: &zip)
-            appendUInt16LE(0, to: &zip)
-            appendUInt16LE(0, to: &zip)
-            appendUInt16LE(record.dosTime, to: &zip)
-            appendUInt16LE(record.dosDate, to: &zip)
-            appendUInt32LE(record.crc32, to: &zip)
-            appendUInt32LE(record.size, to: &zip)
-            appendUInt32LE(record.size, to: &zip)
-            appendUInt16LE(UInt16(record.pathData.count), to: &zip)
-            appendUInt16LE(0, to: &zip)
-            appendUInt16LE(0, to: &zip)
-            appendUInt16LE(0, to: &zip)
-            appendUInt16LE(0, to: &zip)
-            appendUInt32LE(0, to: &zip)
-            appendUInt32LE(record.localHeaderOffset, to: &zip)
-            zip.append(record.pathData)
+            var header = Data()
+            appendUInt32LE(0x02014B50, to: &header)
+            appendUInt16LE(20, to: &header)
+            appendUInt16LE(20, to: &header)
+            appendUInt16LE(0, to: &header)
+            appendUInt16LE(0, to: &header)
+            appendUInt16LE(record.dosTime, to: &header)
+            appendUInt16LE(record.dosDate, to: &header)
+            appendUInt32LE(record.crc32, to: &header)
+            appendUInt32LE(record.size, to: &header)
+            appendUInt32LE(record.size, to: &header)
+            appendUInt16LE(UInt16(record.pathData.count), to: &header)
+            appendUInt16LE(0, to: &header)
+            appendUInt16LE(0, to: &header)
+            appendUInt16LE(0, to: &header)
+            appendUInt16LE(0, to: &header)
+            appendUInt32LE(0, to: &header)
+            appendUInt32LE(record.localHeaderOffset, to: &header)
+            header.append(record.pathData)
+            try write(header, to: fileHandle)
+            offset += UInt32(header.count)
         }
 
-        let centralDirectorySize = UInt32(zip.count) - centralDirectoryOffset
+        let centralDirectorySize = offset - centralDirectoryOffset
         let count = UInt16(min(centralDirectory.count, Int(UInt16.max)))
+        var endOfCentralDirectory = Data()
+        appendUInt32LE(0x06054B50, to: &endOfCentralDirectory)
+        appendUInt16LE(0, to: &endOfCentralDirectory)
+        appendUInt16LE(0, to: &endOfCentralDirectory)
+        appendUInt16LE(count, to: &endOfCentralDirectory)
+        appendUInt16LE(count, to: &endOfCentralDirectory)
+        appendUInt32LE(centralDirectorySize, to: &endOfCentralDirectory)
+        appendUInt32LE(centralDirectoryOffset, to: &endOfCentralDirectory)
+        appendUInt16LE(0, to: &endOfCentralDirectory)
+        try write(endOfCentralDirectory, to: fileHandle)
 
-        appendUInt32LE(0x06054B50, to: &zip)
-        appendUInt16LE(0, to: &zip)
-        appendUInt16LE(0, to: &zip)
-        appendUInt16LE(count, to: &zip)
-        appendUInt16LE(count, to: &zip)
-        appendUInt32LE(centralDirectorySize, to: &zip)
-        appendUInt32LE(centralDirectoryOffset, to: &zip)
-        appendUInt16LE(0, to: &zip)
+        return entries.count
+    }
 
-        return zip
+    private nonisolated static func fileCRC32AndSize(at url: URL) throws -> (UInt32, UInt32) {
+        let fileHandle = try FileHandle(forReadingFrom: url)
+        defer { try? fileHandle.close() }
+
+        var crc: UInt32 = 0xFFFF_FFFF
+        var size: UInt32 = 0
+        while let chunk = try fileHandle.read(upToCount: 64 * 1024), !chunk.isEmpty {
+            size += UInt32(chunk.count)
+            crc = updateCRC32(crc, with: chunk)
+        }
+        return (~crc, size)
+    }
+
+    private nonisolated static func streamFile(at url: URL, to fileHandle: FileHandle) throws -> Int {
+        let inputHandle = try FileHandle(forReadingFrom: url)
+        defer { try? inputHandle.close() }
+
+        var totalWritten = 0
+        while let chunk = try inputHandle.read(upToCount: 64 * 1024), !chunk.isEmpty {
+            try write(chunk, to: fileHandle)
+            totalWritten += chunk.count
+        }
+        return totalWritten
     }
 
     private nonisolated static func dosDateTime(for date: Date) -> (UInt16, UInt16) {
@@ -524,14 +569,24 @@ enum TemporaryMigrationExportManager {
 
     private nonisolated static func crc32(_ data: Data) -> UInt32 {
         var crc: UInt32 = 0xFFFF_FFFF
+        crc = updateCRC32(crc, with: data)
+        return ~crc
+    }
+
+    private nonisolated static func updateCRC32(_ crc: UInt32, with data: Data) -> UInt32 {
+        var currentCRC = crc
         for byte in data {
-            crc ^= UInt32(byte)
+            currentCRC ^= UInt32(byte)
             for _ in 0..<8 {
-                let mask = UInt32(bitPattern: -Int32(crc & 1))
-                crc = (crc >> 1) ^ (0xEDB8_8320 & mask)
+                let mask = UInt32(bitPattern: -Int32(currentCRC & 1))
+                currentCRC = (currentCRC >> 1) ^ (0xEDB8_8320 & mask)
             }
         }
-        return ~crc
+        return currentCRC
+    }
+
+    private nonisolated static func write(_ data: Data, to fileHandle: FileHandle) throws {
+        try fileHandle.write(contentsOf: data)
     }
 
     private nonisolated static func appendUInt16LE(_ value: UInt16, to data: inout Data) {
@@ -794,8 +849,7 @@ enum TemporaryMigrationImportManager {
         let documentsPrefix = "\(rootPrefix)\(TemporaryMigrationExportConstants.documentsFolderName)/"
         let userDefaultsPath = "\(rootPrefix)\(TemporaryMigrationExportConstants.userDefaultsFilename)"
 
-        let applicationSupportRoot = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("ScoutCapture", isDirectory: true)
+        let applicationSupportRoot = StorageRoot.prepareStorage()
         let documentsRoot = fileManager.urls(for: .documentDirectory, in: .userDomainMask)[0]
 
         onPhaseUpdate("Clearing local ScoutCapture data...")
