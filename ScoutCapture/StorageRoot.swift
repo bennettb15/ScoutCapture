@@ -11,26 +11,26 @@ enum StorageRoot {
         let cloudRoot: URL?
         let localRoot: URL
 
-        var activeRoot: URL {
+        nonisolated var activeRoot: URL {
             cloudRoot ?? localRoot
         }
     }
 
-    private static let fileManager = FileManager.default
-    private static let lock = NSLock()
-    private static var cachedResolution: Resolution?
-    private static var didPrepareStorage = false
-    private static var didLogStatus = false
+    private nonisolated(unsafe) static let fileManager = FileManager.default
+    private nonisolated static let lock = NSLock()
+    private nonisolated(unsafe) static var cachedResolution: Resolution?
+    private nonisolated(unsafe) static var didPrepareStorage = false
+    private nonisolated(unsafe) static var didLogStatus = false
 
-    static func activeRootURL() -> URL {
+    nonisolated static func activeRootURL() -> URL {
         resolve().activeRoot
     }
 
-    static func scoutRootURL() -> URL {
+    nonisolated static func scoutRootURL() -> URL {
         activeRootURL().appendingPathComponent("SCOUT", isDirectory: true)
     }
 
-    static func scoutRootCandidates() -> [URL] {
+    nonisolated static func scoutRootCandidates() -> [URL] {
         let resolution = resolve()
         var candidates: [URL] = [resolution.activeRoot.appendingPathComponent("SCOUT", isDirectory: true)]
 
@@ -49,8 +49,12 @@ enum StorageRoot {
         return candidates
     }
 
+    nonisolated static func cloudBackupRootURL() -> URL? {
+        resolve().cloudRoot?.appendingPathComponent("Backups", isDirectory: true)
+    }
+
     @discardableResult
-    static func prepareStorage() -> URL {
+    nonisolated static func prepareStorage() -> URL {
         lock.lock()
         defer { lock.unlock() }
 
@@ -95,7 +99,7 @@ enum StorageRoot {
         return activeRoot
     }
 
-    private static func resolve() -> Resolution {
+    private nonisolated static func resolve() -> Resolution {
         lock.lock()
         defer { lock.unlock() }
 
@@ -108,7 +112,7 @@ enum StorageRoot {
         return resolution
     }
 
-    private static func makeResolution() -> Resolution {
+    private nonisolated static func makeResolution() -> Resolution {
         let localRoot = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("ScoutCapture", isDirectory: true)
         let cloudRoot = fileManager.url(forUbiquityContainerIdentifier: nil)?
@@ -117,7 +121,7 @@ enum StorageRoot {
         return Resolution(cloudRoot: cloudRoot, localRoot: localRoot)
     }
 
-    private static func migrateLocalSCOUTToCloudIfNeeded(using resolution: Resolution) -> (attempted: Bool, result: String) {
+    private nonisolated static func migrateLocalSCOUTToCloudIfNeeded(using resolution: Resolution) -> (attempted: Bool, result: String) {
         guard let cloudRoot = resolution.cloudRoot else {
             return (false, "skipped")
         }
@@ -152,7 +156,7 @@ enum StorageRoot {
         }
     }
 
-    static func makeSessionExportRootFolder(propertyFolderName: String, sessionID: UUID) throws -> URL {
+    nonisolated static func makeSessionExportRootFolder(propertyFolderName: String, sessionID: UUID) throws -> URL {
         let root = fileManager.temporaryDirectory
             .appendingPathComponent("ScoutCapture-Exports", isDirectory: true)
             .appendingPathComponent(propertyFolderName, isDirectory: true)
@@ -165,18 +169,18 @@ enum StorageRoot {
         return root
     }
 
-    static func zipEntriesForExportRoot(_ root: URL) throws -> [ExportZipEntry] {
+    nonisolated static func zipEntriesForExportRoot(_ root: URL) throws -> [ExportZipEntry] {
         var entries: [ExportZipEntry] = []
         let propertyFolderName = root.deletingLastPathComponent().lastPathComponent
         try appendZipEntries(in: root, relativeBase: propertyFolderName, to: &entries)
         return entries.sorted { $0.path < $1.path }
     }
 
-    static func exportRootFilenames(_ root: URL) throws -> [String] {
+    nonisolated static func exportRootFilenames(_ root: URL) throws -> [String] {
         try fileManager.contentsOfDirectory(atPath: root.path).sorted()
     }
 
-    private static func appendZipEntries(
+    private nonisolated static func appendZipEntries(
         in directory: URL,
         relativeBase: String,
         to entries: inout [ExportZipEntry]

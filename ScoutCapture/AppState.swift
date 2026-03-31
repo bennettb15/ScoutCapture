@@ -54,6 +54,7 @@ final class AppState: ObservableObject {
     @Published private(set) var draftSessionByProperty: [UUID: Session] = [:]
     @Published private(set) var pendingExportSessionByProperty: [UUID: Session] = [:]
     @Published private(set) var hubMetaByProperty: [UUID: HubPropertyMeta] = [:]
+    @Published private(set) var cloudBackupStatus: CloudBackupStatus
 
     @Published var selectedPropertyID: UUID? {
         didSet {
@@ -74,9 +75,11 @@ final class AppState: ObservableObject {
 
     private let localStore: LocalStore
     private let userDefaults: UserDefaults
+    private let cloudBackupManager: CloudBackupManager
     private let selectedPropertyDefaultsKey = "scoutcapture.selectedPropertyID"
     private let reExportWindowDays = 7
     private var didLoad = false
+    private var cancellables: Set<AnyCancellable> = []
 
     init(
         localStore: LocalStore = LocalStore(),
@@ -84,6 +87,8 @@ final class AppState: ObservableObject {
     ) {
         self.localStore = localStore
         self.userDefaults = userDefaults
+        self.cloudBackupManager = CloudBackupManager(userDefaults: userDefaults)
+        self.cloudBackupStatus = cloudBackupManager.status
 
         if let rawID = userDefaults.string(forKey: selectedPropertyDefaultsKey) {
             self.selectedPropertyID = UUID(uuidString: rawID)
@@ -92,6 +97,20 @@ final class AppState: ObservableObject {
         }
 
         self.currentSession = nil
+
+        cloudBackupManager.$status
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] status in
+                self?.cloudBackupStatus = status
+            }
+            .store(in: &cancellables)
+
+        NotificationCenter.default.publisher(for: .scoutPersistentDataDidChange)
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in
+                self?.cloudBackupManager.markDataChanged()
+            }
+            .store(in: &cancellables)
     }
 
     func loadIfNeeded() {
@@ -122,6 +141,7 @@ final class AppState: ObservableObject {
     }
 
     func refreshProperties() {
+        cloudBackupManager.refreshStatus()
         isLoading = true
         do {
             let fetched = try localStore.fetchProperties()
@@ -357,6 +377,10 @@ final class AppState: ObservableObject {
                 selectedPropertyID = nil
                 clearCurrentSession()
             }
+            cloudBackupManager.pauseAutomaticBackupsForSafetyWindow(
+                minutes: 15,
+                reason: "after deleting a property"
+            )
             return true
         } catch {
             return false
@@ -374,6 +398,10 @@ final class AppState: ObservableObject {
                 selectedPropertyID = nil
                 clearCurrentSession()
             }
+            cloudBackupManager.pauseAutomaticBackupsForSafetyWindow(
+                minutes: 15,
+                reason: "after deleting a property"
+            )
             return true
         } catch {
             return false
@@ -390,6 +418,7 @@ final class AppState: ObservableObject {
             print("[StartSession] propertyID=\(selectedPropertyID.uuidString) blockedReason=none pendingDeliveryExists=\(pendingDeliveryExists) reExportEligibleExists=\(reExportEligibleExists)")
             logActiveSession(currentSession)
             try? localStore.ensureSessionMetadata(for: currentSession)
+            cloudBackupManager.setCaptureModeActive(true)
             return currentSession
         }
         
@@ -397,6 +426,7 @@ final class AppState: ObservableObject {
             currentSession = draft
             print("[StartSession] propertyID=\(selectedPropertyID.uuidString) blockedReason=none pendingDeliveryExists=\(pendingDeliveryExists) reExportEligibleExists=\(reExportEligibleExists)")
             try? localStore.ensureSessionMetadata(for: draft)
+            cloudBackupManager.setCaptureModeActive(true)
             return draft
         }
 
@@ -404,6 +434,7 @@ final class AppState: ObservableObject {
         currentSession = session
         print("[StartSession] propertyID=\(selectedPropertyID.uuidString) blockedReason=none pendingDeliveryExists=\(pendingDeliveryExists) reExportEligibleExists=\(reExportEligibleExists)")
         _ = try? localStore.upsertSession(session)
+        cloudBackupManager.setCaptureModeActive(true)
         reloadSessionCache(for: selectedPropertyID)
         return session
     }
@@ -439,10 +470,13 @@ final class AppState: ObservableObject {
         currentSession = session
         _ = try? localStore.upsertSession(session)
         reloadSessionCache(for: session.propertyID)
+        cloudBackupManager.setCaptureModeActive(false)
+        triggerBackupForLifecycleEvent()
     }
     
     func clearCurrentSession() {
         currentSession = nil
+        cloudBackupManager.setCaptureModeActive(false)
     }
     
     func draftSession(for propertyID: UUID) -> Session? {
@@ -512,6 +546,8 @@ final class AppState: ObservableObject {
         currentSession = session
         _ = try? localStore.upsertSession(session)
         reloadSessionCache(for: session.propertyID)
+        cloudBackupManager.setCaptureModeActive(false)
+        triggerBackupForLifecycleEvent()
     }
 
     func sealCurrentSessionForExportLater() {
@@ -526,6 +562,8 @@ final class AppState: ObservableObject {
         currentSession = session
         _ = try? localStore.upsertSession(session)
         reloadSessionCache(for: session.propertyID)
+        cloudBackupManager.setCaptureModeActive(false)
+        triggerBackupForLifecycleEvent()
     }
 
     func sealCurrentSessionForExportNow() {
@@ -539,6 +577,8 @@ final class AppState: ObservableObject {
         currentSession = session
         _ = try? localStore.upsertSession(session)
         reloadSessionCache(for: session.propertyID)
+        cloudBackupManager.setCaptureModeActive(false)
+        triggerBackupForLifecycleEvent()
     }
     
     func loadDraftSession(for propertyID: UUID) -> Session? {
@@ -546,6 +586,7 @@ final class AppState: ObservableObject {
         selectedPropertyID = propertyID
         currentSession = draft
         try? localStore.ensureSessionMetadata(for: draft)
+        cloudBackupManager.setCaptureModeActive(true)
         return draft
     }
 
@@ -569,6 +610,8 @@ final class AppState: ObservableObject {
         do {
             _ = try localStore.upsertSession(session)
             reloadSessionCache(for: propertyID)
+            cloudBackupManager.setCaptureModeActive(false)
+            triggerBackupForLifecycleEvent()
             return true
         } catch {
             return false
@@ -583,6 +626,10 @@ final class AppState: ObservableObject {
                 clearCurrentSession()
             }
             reloadSessionCache(for: propertyID)
+            cloudBackupManager.pauseAutomaticBackupsForSafetyWindow(
+                minutes: 15,
+                reason: "after deleting a session"
+            )
             return true
         } catch {
             return false
@@ -629,7 +676,56 @@ final class AppState: ObservableObject {
            properties.contains(where: { $0.id == restoredSelectedPropertyID }) {
             selectedPropertyID = restoredSelectedPropertyID
         }
+        cloudBackupManager.refreshStatus()
         NotificationCenter.default.post(name: .scoutClearLocalUICache, object: nil)
+    }
+
+    func backupNow() {
+        cloudBackupManager.backupNow()
+    }
+
+    func refreshBackupStatus() {
+        cloudBackupManager.refreshStatus()
+    }
+
+    func backupStatusSubtitle() -> String {
+        if !cloudBackupStatus.iCloudAvailable {
+            return "iCloud unavailable"
+        }
+        if let lastSuccessfulBackupAt = cloudBackupStatus.lastSuccessfulBackupAt {
+            return "Last backup \(RelativeDateTimeFormatter().localizedString(for: lastSuccessfulBackupAt, relativeTo: Date()))"
+        }
+        return "No backup yet"
+    }
+
+    func restoreLatestBackup(completion: @escaping (String?) -> Void) {
+        cloudBackupManager.refreshStatus()
+        let status = cloudBackupStatus
+        guard status.iCloudAvailable else {
+            completion("iCloud is unavailable.")
+            return
+        }
+        guard status.hasBackup,
+              !status.isRunning else {
+            completion("No restorable backup is available yet.")
+            return
+        }
+        do {
+            let restoredSelectedPropertyID = try cloudBackupManager.restoreLatestBackup()
+            completeMigrationImport(restoredSelectedPropertyID: restoredSelectedPropertyID)
+            completion(nil)
+        } catch {
+            cloudBackupManager.refreshStatus()
+            completion(error.localizedDescription)
+        }
+    }
+
+    func triggerBackupForLifecycleEvent() {
+        cloudBackupManager.scheduleAutomaticBackup(after: 0)
+    }
+
+    func handleSceneDidEnterBackground() {
+        cloudBackupManager.scheduleAutomaticBackup(after: 0)
     }
 
     private func persistSelectedPropertyID() {
@@ -638,6 +734,7 @@ final class AppState: ObservableObject {
         } else {
             userDefaults.removeObject(forKey: selectedPropertyDefaultsKey)
         }
+        NotificationCenter.default.post(name: .scoutPersistentDataDidChange, object: nil)
     }
 
     private func clearAllUserDefaults() {
