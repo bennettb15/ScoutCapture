@@ -27,11 +27,203 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
 struct ScoutCaptureApp: App {
     @UIApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
     @StateObject private var appState = AppState()
+    @Environment(\.scenePhase) private var scenePhase
 
     var body: some Scene {
         WindowGroup {
             AppRootView()
                 .environmentObject(appState)
+                .onChange(of: scenePhase) { _, newValue in
+                    if newValue == .background {
+                        appState.handleSceneDidEnterBackground()
+                    } else if newValue == .active {
+                        appState.refreshBackupStatus()
+                    }
+                }
+        }
+    }
+}
+
+private struct CloudBackupSheet: View {
+    @EnvironmentObject private var appState: AppState
+    @Environment(\.dismiss) private var dismiss
+    @State private var showRestoreConfirmation: Bool = false
+    @State private var restoreErrorMessage: String? = nil
+    @State private var isRestoring: Bool = false
+
+    var body: some View {
+        NavigationStack {
+            VStack(alignment: .leading, spacing: 18) {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text(statusTitle)
+                        .font(.system(size: 24, weight: .bold))
+                        .foregroundColor(.primary)
+                    Text(appState.backupStatusSubtitle())
+                        .font(.system(size: 14, weight: .medium))
+                        .foregroundColor(.secondary)
+                }
+
+                VStack(alignment: .leading, spacing: 12) {
+                    backupRow(
+                        title: "iCloud",
+                        value: appState.cloudBackupStatus.iCloudAvailable ? "Available" : "Unavailable"
+                    )
+                    backupRow(
+                        title: "Status",
+                        value: statusLine
+                    )
+                    if let snapshotSummary {
+                        backupRow(
+                            title: "Snapshot",
+                            value: snapshotSummary
+                        )
+                    }
+                    if let lastFailureMessage = appState.cloudBackupStatus.lastFailureMessage,
+                       !lastFailureMessage.isEmpty {
+                        backupRow(title: "Last Error", value: lastFailureMessage)
+                    }
+                    if appState.cloudBackupStatus.isRunning,
+                       let progressCompleted = appState.cloudBackupStatus.progressCompleted,
+                       let progressTotal = appState.cloudBackupStatus.progressTotal,
+                       progressTotal > 0 {
+                        backupRow(
+                            title: appState.cloudBackupStatus.progressPhase ?? "Progress",
+                            value: "\(Int((Double(progressCompleted) / Double(progressTotal)) * 100))% (\(progressCompleted)/\(progressTotal))"
+                        )
+                        backupRow(
+                            title: "Remaining",
+                            value: "\(max(progressTotal - progressCompleted, 0)) entries"
+                        )
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(16)
+                .background(Color(uiColor: .secondarySystemBackground))
+                .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+
+                Button(action: {
+                    appState.backupNow()
+                }) {
+                    Text(appState.cloudBackupStatus.isRunning ? "Backing Up..." : "Back Up Now")
+                        .font(.system(size: 16, weight: .semibold))
+                        .frame(maxWidth: .infinity, minHeight: 50)
+                        .foregroundColor(.white)
+                        .background(Color.blue.opacity(appState.cloudBackupStatus.iCloudAvailable ? 1.0 : 0.45))
+                        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                }
+                .buttonStyle(.plain)
+                .disabled(!appState.cloudBackupStatus.iCloudAvailable || appState.cloudBackupStatus.isRunning || isRestoring)
+
+                Button(action: {
+                    showRestoreConfirmation = true
+                }) {
+                    Text(isRestoring ? "Restoring..." : "Restore from Backup")
+                        .font(.system(size: 16, weight: .semibold))
+                        .frame(maxWidth: .infinity, minHeight: 50)
+                        .foregroundColor(.white)
+                        .background(canRestore ? Color.green : Color.gray)
+                        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                }
+                .buttonStyle(.plain)
+                .disabled(!canRestore || isRestoring || appState.cloudBackupStatus.isRunning)
+
+                Spacer()
+            }
+            .padding(16)
+            .navigationTitle("iCloud Backup")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button("Done") {
+                        dismiss()
+                    }
+                }
+            }
+        }
+        .alert("Restore Backup?", isPresented: $showRestoreConfirmation) {
+            Button("Restore", role: .destructive) {
+                isRestoring = true
+                appState.restoreLatestBackup { errorMessage in
+                    isRestoring = false
+                    restoreErrorMessage = errorMessage
+                    if errorMessage == nil {
+                        dismiss()
+                    }
+                }
+            }
+            Button("Cancel", role: .cancel) { }
+        } message: {
+            Text("This will replace the current local ScoutCapture data on this device with the latest iCloud backup.")
+        }
+        .alert("Restore Failed", isPresented: Binding(
+            get: { restoreErrorMessage != nil },
+            set: { if !$0 { restoreErrorMessage = nil } }
+        )) {
+            Button("OK", role: .cancel) { }
+        } message: {
+            Text(restoreErrorMessage ?? "Unable to restore the backup.")
+        }
+        .onAppear {
+            appState.refreshBackupStatus()
+            appState.triggerBackupForLifecycleEvent()
+        }
+    }
+
+    private var canRestore: Bool {
+        appState.cloudBackupStatus.iCloudAvailable &&
+        appState.cloudBackupStatus.hasBackup &&
+        !appState.cloudBackupStatus.isRunning
+    }
+
+    private var statusTitle: String {
+        switch appState.cloudBackupStatus.state {
+        case .backedUp:
+            return "Backed Up"
+        case .pending:
+            return appState.cloudBackupStatus.isRunning ? "Backup Running" : "Backup Pending"
+        case .unavailable:
+            return "iCloud Unavailable"
+        }
+    }
+
+    private var statusLine: String {
+        if let pauseUntil = appState.cloudBackupStatus.safetyPauseUntil, pauseUntil > Date() {
+            let minutesRemaining = max(1, Int(ceil(pauseUntil.timeIntervalSinceNow / 60)))
+            let reason = appState.cloudBackupStatus.safetyPauseReason ?? "after a destructive action"
+            return "Automatic backup paused \(reason) (\(minutesRemaining)m left)."
+        }
+        switch appState.cloudBackupStatus.state {
+        case .backedUp:
+            return "Latest local data is backed up."
+        case .pending:
+            return appState.cloudBackupStatus.isRunning
+                ? "ScoutCapture is writing a backup now."
+                : "Local changes are waiting to be backed up."
+        case .unavailable:
+            return "Sign in to iCloud or re-enable iCloud Drive."
+        }
+    }
+
+    private var snapshotSummary: String? {
+        guard let fileCount = appState.cloudBackupStatus.snapshotFileCount,
+              let byteCount = appState.cloudBackupStatus.snapshotByteCount else {
+            return nil
+        }
+        let formatter = ByteCountFormatter()
+        formatter.countStyle = .file
+        let sizeString = formatter.string(fromByteCount: Int64(byteCount))
+        return "\(fileCount) files • \(sizeString)"
+    }
+
+    @ViewBuilder
+    private func backupRow(title: String, value: String) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title)
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundColor(.secondary)
+            Text(value)
+                .font(.system(size: 15, weight: .medium))
+                .foregroundColor(.primary)
         }
     }
 }
@@ -124,6 +316,7 @@ struct SessionHubView: View {
     @State private var showCalendarComingSoonPopup: Bool = false
     @State private var showTemporaryMigrationExport: Bool = false
     @State private var showTemporaryMigrationImport: Bool = false
+    @State private var showCloudBackupSheet: Bool = false
 #if DEBUG
     @State private var showDebugTools: Bool = false
 #endif
@@ -269,7 +462,9 @@ struct SessionHubView: View {
                         .environmentObject(appState)
                 }
             }
-            .fullScreenCover(isPresented: $showAddProperty) {
+            .fullScreenCover(isPresented: $showAddProperty, onDismiss: {
+                appState.triggerBackupForLifecycleEvent()
+            }) {
                 HubAddPropertySheet()
                     .environmentObject(appState)
             }
@@ -297,6 +492,7 @@ struct SessionHubView: View {
                         pendingExportFile = nil
                         isPreparingPendingExport = false
                         appState.refreshProperties()
+                        appState.triggerBackupForLifecycleEvent()
                     }
                 )
             }
@@ -306,6 +502,10 @@ struct SessionHubView: View {
             }
             .sheet(isPresented: $showTemporaryMigrationImport) {
                 TemporaryMigrationImportView()
+                    .environmentObject(appState)
+            }
+            .sheet(isPresented: $showCloudBackupSheet) {
+                CloudBackupSheet()
                     .environmentObject(appState)
             }
 #if DEBUG
@@ -321,6 +521,7 @@ struct SessionHubView: View {
                 if appState.properties.isEmpty {
                     appState.refreshProperties()
                 }
+                appState.triggerBackupForLifecycleEvent()
                 selectionHaptic.prepare()
             }
             .alert("Archive Property?", isPresented: Binding(
@@ -791,6 +992,19 @@ struct SessionHubView: View {
                     }
 
                     Spacer(minLength: 0)
+                    Button {
+                        showCloudBackupSheet = true
+                    } label: {
+                        cloudStatusIcon
+                            .frame(width: 42, height: 42)
+                            .background(buttonFill)
+                            .clipShape(Circle())
+                            .overlay(
+                                Circle()
+                                    .stroke(buttonStroke, lineWidth: 1)
+                            )
+                    }
+                    .buttonStyle(.plain)
                     customCapsuleToolbarButton(
                         title: isEditMode ? "Done" : "Edit",
                         isEnabled: true,
@@ -938,6 +1152,62 @@ struct SessionHubView: View {
                 addCircleButton
             }
         }
+    }
+
+    private var cloudStatusTint: Color {
+        cloudIconMode == .offline ? .gray : .blue
+    }
+
+    private enum CloudIconMode {
+        case offline
+        case errorOnline
+        case backedUp
+        case pending
+    }
+
+    private var cloudIconMode: CloudIconMode {
+        let status = appState.cloudBackupStatus
+        if !status.iCloudAvailable {
+            return .offline
+        }
+        if let lastFailureMessage = status.lastFailureMessage,
+           !lastFailureMessage.isEmpty,
+           !status.isRunning {
+            return .errorOnline
+        }
+        if status.state == .backedUp && !status.isRunning {
+            return .backedUp
+        }
+        return .pending
+    }
+
+    @ViewBuilder
+    private var cloudStatusIcon: some View {
+        switch cloudIconMode {
+        case .offline, .errorOnline:
+            Image(systemName: "icloud.slash")
+                .font(.system(size: 18, weight: .semibold))
+                .foregroundColor(cloudStatusTint)
+        case .backedUp:
+            Image(systemName: "icloud.fill")
+                .font(.system(size: 18, weight: .semibold))
+                .foregroundColor(cloudStatusTint)
+        case .pending:
+            ZStack {
+                Image(systemName: "icloud")
+                    .font(.system(size: 18, weight: .semibold))
+                    .foregroundColor(cloudStatusTint)
+                Image(systemName: "arrow.triangle.2.circlepath")
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundColor(cloudStatusTint)
+                    .offset(y: 1)
+                    .symbolEffect(.rotate.clockwise, options: .repeating, isActive: shouldAnimateCloudIcon)
+            }
+        }
+    }
+
+    private var shouldAnimateCloudIcon: Bool {
+        appState.cloudBackupStatus.isRunning && cloudIconMode == .pending
     }
 
     @ViewBuilder

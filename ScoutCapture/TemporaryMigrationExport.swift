@@ -215,6 +215,7 @@ enum TemporaryMigrationExportManager {
                 to: exportRootURL.appendingPathComponent("Documents", isDirectory: true),
                 label: "Documents",
                 fileManager: fileManager,
+                excludedTopLevelNames: [],
                 failures: &copyFailures
             )
         }
@@ -225,6 +226,7 @@ enum TemporaryMigrationExportManager {
             to: exportRootURL.appendingPathComponent("Application Support", isDirectory: true),
             label: "Active ScoutCapture storage",
             fileManager: fileManager,
+            excludedTopLevelNames: ["Backups"],
             failures: &copyFailures
         )
 
@@ -263,6 +265,7 @@ enum TemporaryMigrationExportManager {
         to destinationURL: URL,
         label: String,
         fileManager: FileManager,
+        excludedTopLevelNames: Set<String>,
         failures: inout [String]
     ) {
         guard fileManager.fileExists(atPath: sourceURL.path) else {
@@ -272,7 +275,13 @@ enum TemporaryMigrationExportManager {
 
         do {
             try fileManager.createDirectory(at: destinationURL, withIntermediateDirectories: true)
-            try copyDirectoryContents(from: sourceURL, to: destinationURL, fileManager: fileManager, failures: &failures)
+            try copyDirectoryContents(
+                from: sourceURL,
+                to: destinationURL,
+                fileManager: fileManager,
+                excludedTopLevelNames: excludedTopLevelNames,
+                failures: &failures
+            )
         } catch {
             let message = "\(label) root copy failed: \(sourceURL.path) error=\(error.localizedDescription)"
             failures.append(message)
@@ -284,6 +293,7 @@ enum TemporaryMigrationExportManager {
         from sourceURL: URL,
         to destinationURL: URL,
         fileManager: FileManager,
+        excludedTopLevelNames: Set<String>,
         failures: inout [String]
     ) throws {
         let children = try fileManager.contentsOfDirectory(
@@ -293,13 +303,22 @@ enum TemporaryMigrationExportManager {
         ).sorted { $0.lastPathComponent < $1.lastPathComponent }
 
         for childURL in children {
+            if excludedTopLevelNames.contains(childURL.lastPathComponent) {
+                continue
+            }
             let resourceValues = try childURL.resourceValues(forKeys: [.isDirectoryKey])
             let targetURL = destinationURL.appendingPathComponent(childURL.lastPathComponent, isDirectory: resourceValues.isDirectory == true)
 
             if resourceValues.isDirectory == true {
                 do {
                     try fileManager.createDirectory(at: targetURL, withIntermediateDirectories: true)
-                    try copyDirectoryContents(from: childURL, to: targetURL, fileManager: fileManager, failures: &failures)
+                    try copyDirectoryContents(
+                        from: childURL,
+                        to: targetURL,
+                        fileManager: fileManager,
+                        excludedTopLevelNames: [],
+                        failures: &failures
+                    )
                 } catch {
                     let message = "Directory copy failed: \(childURL.path) error=\(error.localizedDescription)"
                     failures.append(message)

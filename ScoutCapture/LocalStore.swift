@@ -11,7 +11,7 @@ final class LocalStore {
         case append
         case replaceGuidedKey
     }
-
+ 
     enum StoreError: Error {
         case propertyNotFound(UUID)
         case organizationNotFound(UUID)
@@ -780,6 +780,7 @@ final class LocalStore {
             state.organizations.append(created)
             state.organizations = normalizedOrganizations(state.organizations)
             try writeOrganizations(state.organizations)
+            NotificationCenter.default.post(name: .scoutPersistentDataDidChange, object: nil)
             return created
         }
     }
@@ -803,6 +804,7 @@ final class LocalStore {
             state.organizations[index] = organization
             state.organizations = normalizedOrganizations(state.organizations)
             try writeOrganizations(state.organizations)
+            NotificationCenter.default.post(name: .scoutPersistentDataDidChange, object: nil)
             return state.organizations.first(where: { $0.id == organizationID }) ?? organization
         }
     }
@@ -821,6 +823,7 @@ final class LocalStore {
             state.organizations[index] = organization
             state.organizations = normalizedOrganizations(state.organizations)
             try writeOrganizations(state.organizations)
+            NotificationCenter.default.post(name: .scoutPersistentDataDidChange, object: nil)
             return state.organizations.first(where: { $0.id == organizationID }) ?? organization
         }
     }
@@ -857,6 +860,7 @@ final class LocalStore {
             syncOrganizationContacts(in: &state.organizations, with: created)
             try writeOrganizations(state.organizations)
             try writeProperties(state.properties)
+            NotificationCenter.default.post(name: .scoutPersistentDataDidChange, object: nil)
             return created
         }
     }
@@ -885,6 +889,7 @@ final class LocalStore {
             syncOrganizationContacts(in: &state.organizations, with: updated)
             try writeOrganizations(state.organizations)
             try writeProperties(state.properties)
+            NotificationCenter.default.post(name: .scoutPersistentDataDidChange, object: nil)
             return updated
         }
     }
@@ -931,6 +936,7 @@ final class LocalStore {
                 didWriteUpdatedProperties = true
 
                 try fileManager.removeItem(at: transactionRoot)
+                NotificationCenter.default.post(name: .scoutPersistentDataDidChange, object: nil)
             } catch {
                 if didWriteUpdatedProperties {
                     try? writeProperties(originalProperties)
@@ -976,6 +982,7 @@ final class LocalStore {
         var observations = try readObservations(propertyID: observation.propertyID)
         observations.append(observation)
         try writeObservations(observations, propertyID: observation.propertyID)
+        NotificationCenter.default.post(name: .scoutPersistentDataDidChange, object: nil)
         return observation
     }
 
@@ -991,6 +998,7 @@ final class LocalStore {
         updated.updatedAt = Date()
         observations[index] = updated
         try writeObservations(observations, propertyID: observation.propertyID)
+        NotificationCenter.default.post(name: .scoutPersistentDataDidChange, object: nil)
         return updated
     }
 
@@ -999,6 +1007,7 @@ final class LocalStore {
         var observations = try readObservations(propertyID: propertyID)
         observations.removeAll { $0.id == id }
         try writeObservations(observations, propertyID: propertyID)
+        NotificationCenter.default.post(name: .scoutPersistentDataDidChange, object: nil)
     }
 
     // MARK: - Guided Shots CRUD (per-property)
@@ -1015,6 +1024,7 @@ final class LocalStore {
     func saveGuidedShots(_ guidedShots: [GuidedShot], propertyID: UUID) throws {
         try ensurePropertyExists(propertyID)
         try writeGuidedShots(guidedShots, propertyID: propertyID)
+        NotificationCenter.default.post(name: .scoutPersistentDataDidChange, object: nil)
     }
     
     // MARK: - Sessions CRUD (per-property)
@@ -1033,6 +1043,7 @@ final class LocalStore {
         sessions.sort { $0.startedAt < $1.startedAt }
         try writeSessions(sessions, propertyID: session.propertyID)
         try upsertSessionMetadataLifecycle(for: session)
+        NotificationCenter.default.post(name: .scoutPersistentDataDidChange, object: nil)
         return session
     }
 
@@ -1063,6 +1074,7 @@ final class LocalStore {
         updated.osVersion = osVersionString()
         updated = normalizeSessionMetadata(updated, propertyID: propertyID, sessionID: sessionID)
         try writeSessionMetadata(updated)
+        NotificationCenter.default.post(name: .scoutPersistentDataDidChange, object: nil)
     }
 
     func syncGuidedShotsToSessionMetadata(
@@ -1211,6 +1223,7 @@ final class LocalStore {
                     || targets.contains("/\(stem).heic")
             }
             try writeSessionMetadata(metadata)
+            NotificationCenter.default.post(name: .scoutPersistentDataDidChange, object: nil)
         }
     }
 
@@ -1237,6 +1250,7 @@ final class LocalStore {
             if fileManager.fileExists(atPath: metadataFolder.path) {
                 try? fileManager.removeItem(at: metadataFolder)
             }
+            NotificationCenter.default.post(name: .scoutPersistentDataDidChange, object: nil)
         }
     }
 
@@ -1290,6 +1304,7 @@ final class LocalStore {
             if fileManager.fileExists(atPath: metadataFolder.path) {
                 try? fileManager.removeItem(at: metadataFolder)
             }
+            NotificationCenter.default.post(name: .scoutPersistentDataDidChange, object: nil)
         }
     }
 
@@ -1380,6 +1395,7 @@ final class LocalStore {
                 try fileManager.removeItem(at: scoutRootURL)
             }
             try createStorageDirectories(baseDirectoryURL: scoutRootURL)
+            NotificationCenter.default.post(name: .scoutPersistentDataDidChange, object: nil)
         }
     }
 
