@@ -310,7 +310,10 @@ struct SessionHubView: View {
             }
 #if DEBUG
             .fullScreenCover(isPresented: $showDebugTools) {
-                DebugToolsView()
+                DebugToolsView(
+                    onShowMigrationExport: { showTemporaryMigrationExport = true },
+                    onShowMigrationImport: { showTemporaryMigrationImport = true }
+                )
                     .environmentObject(appState)
             }
 #endif
@@ -1008,24 +1011,6 @@ struct SessionHubView: View {
             VStack(spacing: 0) {
                 Divider()
                 HStack {
-                    customCapsuleToolbarButton(
-                        title: "Migration Export",
-                        isEnabled: true,
-                        fill: Color.orange.opacity(0.92),
-                        stroke: Color.orange.opacity(0.96),
-                        label: .white
-                    ) {
-                        showTemporaryMigrationExport = true
-                    }
-                    customCapsuleToolbarButton(
-                        title: "Migration Import",
-                        isEnabled: true,
-                        fill: Color.green.opacity(0.88),
-                        stroke: Color.green.opacity(0.94),
-                        label: .white
-                    ) {
-                        showTemporaryMigrationImport = true
-                    }
                     Spacer(minLength: 0)
                     customCapsuleToolbarButton(
                         title: showArchivedProperties ? "Hide Archived" : "Show Archived",
@@ -1033,6 +1018,7 @@ struct SessionHubView: View {
                     ) {
                         showArchivedProperties.toggle()
                     }
+                    Spacer(minLength: 0)
                 }
                 .padding(.horizontal, 16)
                 .padding(.vertical, 10)
@@ -3870,7 +3856,7 @@ private struct PropertySessionsManagerView: View {
             Text(title)
                 .font(.system(size: 15, weight: .medium))
                 .foregroundColor(isEnabled ? resolvedLabel : resolvedLabel.opacity(0.45))
-                .frame(minHeight: 38)
+                .frame(maxWidth: .infinity, minHeight: 38)
                 .padding(.horizontal, 12)
                 .background(resolvedFill)
                 .clipShape(Capsule())
@@ -3889,6 +3875,9 @@ private struct DebugToolsView: View {
     @EnvironmentObject private var appState: AppState
     @Environment(\.dismiss) private var dismiss
     @Environment(\.colorScheme) private var colorScheme
+
+    let onShowMigrationExport: () -> Void
+    let onShowMigrationImport: () -> Void
 
     private let localStore = LocalStore()
     @State private var showNuclearConfirm: Bool = false
@@ -3926,6 +3915,30 @@ private struct DebugToolsView: View {
 
             ScrollView {
                 VStack(spacing: 14) {
+                    HStack(spacing: 10) {
+                        customCapsuleButton(
+                            title: "Migration Export",
+                            isEnabled: true,
+                            fill: Color.orange.opacity(0.92),
+                            stroke: Color.orange.opacity(0.96),
+                            label: .white
+                        ) {
+                            dismiss()
+                            onShowMigrationExport()
+                        }
+
+                        customCapsuleButton(
+                            title: "Migration Import",
+                            isEnabled: true,
+                            fill: Color.green.opacity(0.88),
+                            stroke: Color.green.opacity(0.94),
+                            label: .white
+                        ) {
+                            dismiss()
+                            onShowMigrationImport()
+                        }
+                    }
+
                     debugActionCard(
                         title: "Nuclear Reset (Local Only)",
                         detail: "Wipes all local app data: properties, sessions, guided, observations, references, and indexes. Does NOT modify iCloud Drive library data.",
@@ -4026,6 +4039,7 @@ private struct DebugToolsView: View {
                 action: action
             )
         }
+        .frame(maxWidth: .infinity, alignment: .topLeading)
         .padding(12)
         .background(Color(uiColor: .secondarySystemBackground))
         .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
