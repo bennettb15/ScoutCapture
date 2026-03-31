@@ -616,6 +616,22 @@ final class AppState: ObservableObject {
         NotificationCenter.default.post(name: .scoutClearLocalUICache, object: nil)
     }
 
+    func completeMigrationImport(restoredSelectedPropertyID: UUID?) {
+        clearCurrentSession()
+        selectedPropertyID = nil
+        properties = []
+        sessionIndexByProperty = [:]
+        draftSessionByProperty = [:]
+        pendingExportSessionByProperty = [:]
+        hubMetaByProperty = [:]
+        refreshProperties()
+        if let restoredSelectedPropertyID,
+           properties.contains(where: { $0.id == restoredSelectedPropertyID }) {
+            selectedPropertyID = restoredSelectedPropertyID
+        }
+        NotificationCenter.default.post(name: .scoutClearLocalUICache, object: nil)
+    }
+
     private func persistSelectedPropertyID() {
         if let selectedPropertyID {
             userDefaults.set(selectedPropertyID.uuidString, forKey: selectedPropertyDefaultsKey)
