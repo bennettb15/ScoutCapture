@@ -18,6 +18,7 @@ final class LocalStore {
         case observationNotFound(UUID)
         case sessionNotFound(UUID)
         case noAvailableFolderID
+        case deleteVerificationFailed(URL)
     }
 
     struct ExportValidationReport {
@@ -890,34 +891,70 @@ final class LocalStore {
 
     func deleteProperty(id: UUID) throws {
         try performFileIOSync {
-            let guided = try readGuidedShots(propertyID: id)
-            let observations = try readObservations(propertyID: id)
-            try cleanupReferenceFilesForGuidedShots(guided)
-            let observationGuidedRefs = observations.flatMap { $0.guidedShots.compactMap(\.referenceImagePath) }
-            try cleanupReferenceFiles(paths: observationGuidedRefs)
-
-            var properties = try readProperties()
-            properties.removeAll { $0.id == id }
-            try writeProperties(properties)
-
-            let propertyObservationURL = observationsFileURL(for: id)
-            if fileManager.fileExists(atPath: propertyObservationURL.path) {
-                try fileManager.removeItem(at: propertyObservationURL)
+            let originalProperties = try readProperties()
+            guard originalProperties.contains(where: { $0.id == id }) else {
+                throw StoreError.propertyNotFound(id)
             }
 
-            let propertyGuidedShotsURL = guidedShotsFileURL(for: id)
-            if fileManager.fileExists(atPath: propertyGuidedShotsURL.path) {
-                try fileManager.removeItem(at: propertyGuidedShotsURL)
-            }
+            let deletePlan = try makePropertyDeletePlan(propertyID: id, allProperties: originalProperties)
+            let transactionRoot = activeRootURL
+                .appendingPathComponent(".delete-transactions", isDirectory: true)
+                .appendingPathComponent(id.uuidString, isDirectory: true)
 
-            let propertySessionsURL = sessionsFileURL(for: id)
-            if fileManager.fileExists(atPath: propertySessionsURL.path) {
-                try fileManager.removeItem(at: propertySessionsURL)
+            if fileManager.fileExists(atPath: transactionRoot.path) {
+                try fileManager.removeItem(at: transactionRoot)
             }
+            try fileManager.createDirectory(at: transactionRoot, withIntermediateDirectories: true)
 
-            let propertyFolder = propertyFolderURL(propertyID: id)
-            if fileManager.fileExists(atPath: propertyFolder.path) {
-                try? fileManager.removeItem(at: propertyFolder)
+            var movedArtifacts: [(source: URL, trash: URL)] = []
+            var didWriteUpdatedProperties = false
+
+            do {
+                for (index, sourceURL) in deletePlan.urls.enumerated() where fileManager.fileExists(atPath: sourceURL.path) {
+                    let trashURL = transactionRoot
+                        .appendingPathComponent(String(format: "%03d", index), isDirectory: false)
+                        .appendingPathExtension(sourceURL.pathExtension.isEmpty ? "artifact" : sourceURL.pathExtension)
+                    try fileManager.moveItem(at: sourceURL, to: trashURL)
+                    movedArtifacts.append((source: sourceURL, trash: trashURL))
+                }
+
+                for sourceURL in deletePlan.urls where fileManager.fileExists(atPath: sourceURL.path) {
+                    throw StoreError.deleteVerificationFailed(sourceURL)
+                }
+
+                let updatedProperties = originalProperties.filter { $0.id != id }
+                try writeProperties(updatedProperties)
+                if updatedProperties.isEmpty, fileManager.fileExists(atPath: propertiesURL.path) {
+                    try fileManager.removeItem(at: propertiesURL)
+                }
+                try purgeUnreferencedGuidedReferenceFiles(allProperties: updatedProperties)
+                didWriteUpdatedProperties = true
+
+                try fileManager.removeItem(at: transactionRoot)
+            } catch {
+                if didWriteUpdatedProperties {
+                    try? writeProperties(originalProperties)
+                }
+
+                for moved in movedArtifacts.reversed() {
+                    do {
+                        let parent = moved.source.deletingLastPathComponent()
+                        if !fileManager.fileExists(atPath: parent.path) {
+                            try fileManager.createDirectory(at: parent, withIntermediateDirectories: true)
+                        }
+                        if fileManager.fileExists(atPath: moved.trash.path) {
+                            try fileManager.moveItem(at: moved.trash, to: moved.source)
+                        }
+                    } catch {
+                        print("[DeleteProperty] rollback failed source=\(moved.source.path) trash=\(moved.trash.path) error=\(error)")
+                    }
+                }
+
+                if fileManager.fileExists(atPath: transactionRoot.path) {
+                    try? fileManager.removeItem(at: transactionRoot)
+                }
+
+                throw error
             }
         }
     }
@@ -1317,6 +1354,10 @@ final class LocalStore {
     func stampedFolderURL(propertyID: UUID, sessionID: UUID) -> URL {
         sessionFolderURL(propertyID: propertyID, sessionID: sessionID)
             .appendingPathComponent("Stamped", isDirectory: true)
+    }
+
+    func guidedReferencesDirectoryURL() -> URL {
+        scoutRootURL.appendingPathComponent("guided-references", isDirectory: true)
     }
 
     func sessionJSONURL(propertyID: UUID, sessionID: UUID) -> URL {
@@ -1879,6 +1920,130 @@ final class LocalStore {
 
     private func sessionMetadataFileURL(propertyID: UUID, sessionID: UUID) -> URL {
         sessionJSONURL(propertyID: propertyID, sessionID: sessionID)
+    }
+
+    private struct PropertyDeletePlan {
+        let urls: [URL]
+    }
+
+    private func makePropertyDeletePlan(propertyID: UUID, allProperties: [Property]) throws -> PropertyDeletePlan {
+        let guided = try readGuidedShots(propertyID: propertyID)
+        let observations = try readObservations(propertyID: propertyID)
+
+        let propertyScopedFiles: [URL] = [
+            observationsFileURL(for: propertyID),
+            guidedShotsFileURL(for: propertyID),
+            sessionsFileURL(for: propertyID),
+            propertyFolderURL(propertyID: propertyID)
+        ]
+
+        let referencedPaths = Set(
+            (
+                guided.compactMap(\.referenceImagePath) +
+                observations.flatMap { $0.guidedShots.compactMap(\.referenceImagePath) }
+            )
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        )
+
+        let retainedReferencePaths = try referencedPathsStillUsedByOtherProperties(
+            excluding: propertyID,
+            allProperties: allProperties
+        )
+
+        let deletableReferenceURLs = referencedPaths
+            .subtracting(retainedReferencePaths)
+            .compactMap { path -> URL? in
+                guard path.hasPrefix(activeRootURL.path) || path.hasPrefix(scoutRootURL.path) else { return nil }
+                return URL(fileURLWithPath: path)
+            }
+
+        var ordered: [URL] = []
+        var seen = Set<String>()
+        for url in propertyScopedFiles + deletableReferenceURLs.sorted(by: { $0.path < $1.path }) {
+            if seen.insert(url.path).inserted {
+                ordered.append(url)
+            }
+        }
+        return PropertyDeletePlan(urls: ordered)
+    }
+
+    private func referencedPathsStillUsedByOtherProperties(excluding propertyID: UUID, allProperties: [Property]) throws -> Set<String> {
+        var referencedPaths = Set<String>()
+
+        for otherPropertyID in allProperties.map(\.id) where otherPropertyID != propertyID {
+            let guided = try readGuidedShots(propertyID: otherPropertyID)
+            let observations = try readObservations(propertyID: otherPropertyID)
+
+            for path in guided.compactMap(\.referenceImagePath) {
+                let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !trimmed.isEmpty {
+                    referencedPaths.insert(trimmed)
+                }
+            }
+
+            for path in observations.flatMap({ $0.guidedShots.compactMap(\.referenceImagePath) }) {
+                let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !trimmed.isEmpty {
+                    referencedPaths.insert(trimmed)
+                }
+            }
+        }
+
+        return referencedPaths
+    }
+
+    private func referencedPaths(for properties: [Property]) throws -> Set<String> {
+        var referencedPaths = Set<String>()
+
+        for propertyID in properties.map(\.id) {
+            let guided = try readGuidedShots(propertyID: propertyID)
+            let observations = try readObservations(propertyID: propertyID)
+
+            for path in guided.compactMap(\.referenceImagePath) {
+                let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !trimmed.isEmpty {
+                    referencedPaths.insert(trimmed)
+                }
+            }
+
+            for path in observations.flatMap({ $0.guidedShots.compactMap(\.referenceImagePath) }) {
+                let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !trimmed.isEmpty {
+                    referencedPaths.insert(trimmed)
+                }
+            }
+        }
+
+        return referencedPaths
+    }
+
+    private func purgeUnreferencedGuidedReferenceFiles(allProperties: [Property]) throws {
+        let guidedReferencesDirectory = guidedReferencesDirectoryURL()
+        guard fileManager.fileExists(atPath: guidedReferencesDirectory.path) else { return }
+
+        let referencedPaths = try referencedPaths(for: allProperties)
+        let children = try fileManager.contentsOfDirectory(
+            at: guidedReferencesDirectory,
+            includingPropertiesForKeys: [.isDirectoryKey],
+            options: [.skipsHiddenFiles]
+        )
+
+        for childURL in children {
+            let childPath = childURL.path.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !referencedPaths.contains(childPath) {
+                try fileManager.removeItem(at: childURL)
+            }
+        }
+
+        let remaining = try fileManager.contentsOfDirectory(
+            at: guidedReferencesDirectory,
+            includingPropertiesForKeys: nil,
+            options: [.skipsHiddenFiles]
+        )
+        if remaining.isEmpty {
+            try fileManager.removeItem(at: guidedReferencesDirectory)
+        }
     }
 
     private func appVersionString() -> String {
