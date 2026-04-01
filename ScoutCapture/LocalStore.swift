@@ -2711,7 +2711,6 @@ final class LocalStore {
     }
 }
 
-#if DEBUG
 extension LocalStore {
     func printSessionSchema() {
         let sampleSession = SessionMetadata(
@@ -2781,4 +2780,3 @@ extension LocalStore {
         }
     }
 }
-#endif
