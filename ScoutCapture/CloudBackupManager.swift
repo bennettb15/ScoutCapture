@@ -11,6 +11,14 @@ struct CloudBackupManifest: Codable {
         let relativePath: String
         let byteCount: Int
         let sha256: String
+        let contentRelativePath: String?
+
+        init(relativePath: String, byteCount: Int, sha256: String, contentRelativePath: String? = nil) {
+            self.relativePath = relativePath
+            self.byteCount = byteCount
+            self.sha256 = sha256
+            self.contentRelativePath = contentRelativePath
+        }
     }
 
     let backupID: UUID
@@ -47,19 +55,78 @@ struct CloudBackupStatus: Equatable {
     var lastRunUpdatedCount: Int?
     var lastRunSourceFileCount: Int?
     var lastRunPrunedCount: Int?
+    var lastRunNewBlobsWrittenCount: Int?
+    var lastRunReusedBlobsReferencedCount: Int?
+    var lastRunBlobBytesWritten: Int?
+    var lastRunBlobBytesReused: Int?
     var lastRunChangedPathsSample: [String]?
     var lastRunPrunedPathsSample: [String]?
     var safetyPauseUntil: Date?
     var safetyPauseReason: String?
 }
 
+enum CloudBackupDedupeSupport {
+    static func shouldStoreAsDeduplicatedBlob(relativePath: String) -> Bool {
+        let ext = URL(fileURLWithPath: relativePath).pathExtension.lowercased()
+        let dedupeExtensions: Set<String> = [
+            "heic", "jpg", "jpeg", "png", "tif", "tiff", "gif", "bmp", "webp",
+            "dng", "raw", "mov", "mp4", "m4v", "avi"
+        ]
+        return dedupeExtensions.contains(ext)
+    }
+
+    static func blobRelativePath(for sha256: String, blobsFolderName: String = "blobs") -> String {
+        let prefixA = String(sha256.prefix(2))
+        let prefixB = String(sha256.dropFirst(2).prefix(2))
+        return "\(blobsFolderName)/\(prefixA)/\(prefixB)/\(sha256)"
+    }
+
+    static func resolvedContentRelativePath(for record: CloudBackupManifest.FileRecord) -> String {
+        if let candidate = record.contentRelativePath?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !candidate.isEmpty {
+            return candidate
+        }
+        return record.relativePath
+    }
+
+    static func materializeStorageRoot(
+        fileManager: FileManager,
+        backupFolder: URL,
+        manifest: CloudBackupManifest,
+        destinationStorageRoot: URL,
+        storageRootFolderName: String = "storage-root",
+        ensureAvailable: (URL) -> Bool
+    ) throws {
+        try fileManager.createDirectory(at: destinationStorageRoot, withIntermediateDirectories: true)
+        for file in manifest.files where file.relativePath.hasPrefix("\(storageRootFolderName)/") {
+            let logicalRelativePath = String(file.relativePath.dropFirst(storageRootFolderName.count + 1))
+            let sourceRelativePath = resolvedContentRelativePath(for: file)
+            let sourceURL = backupFolder.appendingPathComponent(sourceRelativePath, isDirectory: false)
+            guard ensureAvailable(sourceURL) else {
+                throw NSError(domain: "ScoutCapture.CloudBackup", code: 3, userInfo: [
+                    NSLocalizedDescriptionKey: "Backup file missing: \(file.relativePath)"
+                ])
+            }
+            let destinationURL = destinationStorageRoot.appendingPathComponent(logicalRelativePath, isDirectory: false)
+            let parent = destinationURL.deletingLastPathComponent()
+            try fileManager.createDirectory(at: parent, withIntermediateDirectories: true)
+            if fileManager.fileExists(atPath: destinationURL.path) {
+                try fileManager.removeItem(at: destinationURL)
+            }
+            try fileManager.copyItem(at: sourceURL, to: destinationURL)
+        }
+    }
+}
+
 final class CloudBackupManager: ObservableObject {
     private enum Constants {
-        static let schemaVersion = 1
+        static let latestSchemaVersion = 2
+        static let supportedSchemaVersions: Set<Int> = [1, 2]
         static let latestFolderName = "latest"
         static let inProgressFolderName = "in-progress"
         static let manifestFilename = "manifest.json"
         static let storageRootFolderName = "storage-root"
+        static let blobsFolderName = "blobs"
         static let userDefaultsFilename = "userdefaults.json"
         static let localRevisionKey = "scout.backup.localRevision"
         static let backedUpRevisionKey = "scout.backup.backedUpRevision"
@@ -72,6 +139,10 @@ final class CloudBackupManager: ObservableObject {
         static let lastRunUpdatedCountKey = "scout.backup.lastRunUpdatedCount"
         static let lastRunSourceFileCountKey = "scout.backup.lastRunSourceFileCount"
         static let lastRunPrunedCountKey = "scout.backup.lastRunPrunedCount"
+        static let lastRunNewBlobsWrittenCountKey = "scout.backup.lastRunNewBlobsWrittenCount"
+        static let lastRunReusedBlobsReferencedCountKey = "scout.backup.lastRunReusedBlobsReferencedCount"
+        static let lastRunBlobBytesWrittenKey = "scout.backup.lastRunBlobBytesWritten"
+        static let lastRunBlobBytesReusedKey = "scout.backup.lastRunBlobBytesReused"
         static let lastRunChangedPathsSampleKey = "scout.backup.lastRunChangedPathsSample"
         static let lastRunPrunedPathsSampleKey = "scout.backup.lastRunPrunedPathsSample"
         static let automaticBackupsEnabledKey = "scout.backup.automaticEnabled"
@@ -88,6 +159,7 @@ final class CloudBackupManager: ObservableObject {
     private let backupQueueSpecificValue: UInt8 = 1
     private let stateLock = NSLock()
     private var scheduledBackupWorkItem: DispatchWorkItem?
+    private var scheduledBackupDeadline: Date?
     private var isRunning = false
     private var isCaptureModeActive = false
     private var progressPhase: String?
@@ -123,6 +195,10 @@ final class CloudBackupManager: ObservableObject {
             lastRunUpdatedCount: userDefaults.object(forKey: Constants.lastRunUpdatedCountKey) as? Int,
             lastRunSourceFileCount: userDefaults.object(forKey: Constants.lastRunSourceFileCountKey) as? Int,
             lastRunPrunedCount: userDefaults.object(forKey: Constants.lastRunPrunedCountKey) as? Int,
+            lastRunNewBlobsWrittenCount: userDefaults.object(forKey: Constants.lastRunNewBlobsWrittenCountKey) as? Int,
+            lastRunReusedBlobsReferencedCount: userDefaults.object(forKey: Constants.lastRunReusedBlobsReferencedCountKey) as? Int,
+            lastRunBlobBytesWritten: userDefaults.object(forKey: Constants.lastRunBlobBytesWrittenKey) as? Int,
+            lastRunBlobBytesReused: userDefaults.object(forKey: Constants.lastRunBlobBytesReusedKey) as? Int,
             lastRunChangedPathsSample: userDefaults.stringArray(forKey: Constants.lastRunChangedPathsSampleKey),
             lastRunPrunedPathsSample: userDefaults.stringArray(forKey: Constants.lastRunPrunedPathsSampleKey),
             safetyPauseUntil: nil,
@@ -149,6 +225,10 @@ final class CloudBackupManager: ObservableObject {
         let lastRunUpdatedCount = userDefaults.object(forKey: Constants.lastRunUpdatedCountKey) as? Int
         let lastRunSourceFileCount = userDefaults.object(forKey: Constants.lastRunSourceFileCountKey) as? Int
         let lastRunPrunedCount = userDefaults.object(forKey: Constants.lastRunPrunedCountKey) as? Int
+        let lastRunNewBlobsWrittenCount = userDefaults.object(forKey: Constants.lastRunNewBlobsWrittenCountKey) as? Int
+        let lastRunReusedBlobsReferencedCount = userDefaults.object(forKey: Constants.lastRunReusedBlobsReferencedCountKey) as? Int
+        let lastRunBlobBytesWritten = userDefaults.object(forKey: Constants.lastRunBlobBytesWrittenKey) as? Int
+        let lastRunBlobBytesReused = userDefaults.object(forKey: Constants.lastRunBlobBytesReusedKey) as? Int
         let lastRunChangedPathsSample = userDefaults.stringArray(forKey: Constants.lastRunChangedPathsSampleKey)
         let lastRunPrunedPathsSample = userDefaults.stringArray(forKey: Constants.lastRunPrunedPathsSampleKey)
         let safetyPauseUntil = userDefaults.object(forKey: Constants.safetyPauseUntilKey) as? Date
@@ -192,6 +272,10 @@ final class CloudBackupManager: ObservableObject {
                 lastRunUpdatedCount: lastRunUpdatedCount,
                 lastRunSourceFileCount: lastRunSourceFileCount,
                 lastRunPrunedCount: lastRunPrunedCount,
+                lastRunNewBlobsWrittenCount: lastRunNewBlobsWrittenCount,
+                lastRunReusedBlobsReferencedCount: lastRunReusedBlobsReferencedCount,
+                lastRunBlobBytesWritten: lastRunBlobBytesWritten,
+                lastRunBlobBytesReused: lastRunBlobBytesReused,
                 lastRunChangedPathsSample: lastRunChangedPathsSample,
                 lastRunPrunedPathsSample: lastRunPrunedPathsSample,
                 safetyPauseUntil: safetyPauseUntil,
@@ -223,16 +307,28 @@ final class CloudBackupManager: ObservableObject {
             refreshStatus()
             return
         }
+        let normalizedDelay = max(0, delay)
+        let requestedDeadline = Date().addingTimeInterval(normalizedDelay)
+        if let existingDeadline = scheduledBackupDeadline,
+           scheduledBackupWorkItem != nil,
+           existingDeadline <= requestedDeadline {
+            return
+        }
         scheduledBackupWorkItem?.cancel()
         let workItem = DispatchWorkItem { [weak self] in
+            self?.scheduledBackupWorkItem = nil
+            self?.scheduledBackupDeadline = nil
             self?.performBackup(trigger: "automatic")
         }
         scheduledBackupWorkItem = workItem
-        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: workItem)
+        scheduledBackupDeadline = requestedDeadline
+        DispatchQueue.main.asyncAfter(deadline: .now() + normalizedDelay, execute: workItem)
     }
 
     func backupNow() {
         scheduledBackupWorkItem?.cancel()
+        scheduledBackupWorkItem = nil
+        scheduledBackupDeadline = nil
         clearSafetyPause()
         performBackup(trigger: "manual")
     }
@@ -247,6 +343,8 @@ final class CloudBackupManager: ObservableObject {
 
     func restoreLatestBackup() throws -> UUID? {
         scheduledBackupWorkItem?.cancel()
+        scheduledBackupWorkItem = nil
+        scheduledBackupDeadline = nil
         return try executeOnBackupQueueSync {
             let selectedPropertyID = try restoreLatestBackupSync()
             refreshStatus()
@@ -259,6 +357,8 @@ final class CloudBackupManager: ObservableObject {
         userDefaults.set(until, forKey: Constants.safetyPauseUntilKey)
         userDefaults.set(reason, forKey: Constants.safetyPauseReasonKey)
         scheduledBackupWorkItem?.cancel()
+        scheduledBackupWorkItem = nil
+        scheduledBackupDeadline = nil
         refreshStatus()
     }
 
@@ -376,16 +476,21 @@ final class CloudBackupManager: ObservableObject {
         let sourceFiles = try recursiveFileURLs(in: sourceRoot).filter { fileURL in
             !isWithinBackupsFolder(fileURL, storageRoot: sourceRoot)
         }
-        let totalProgressSteps = sourceFiles.count + 3
+        let totalProgressSteps = sourceFiles.count + 4
         var completedProgressSteps = 0
         updateProgress(phase: "Scanning files", completed: completedProgressSteps, total: totalProgressSteps)
         var sourceRelativePaths = Set<String>()
+        var referencedBlobPaths = Set<String>()
         var fileRecords: [CloudBackupManifest.FileRecord] = []
         var changedFilesCount = 0
         var unchangedFilesCount = 0
         var changedFilesByteCount = 0
         var addedFilesCount = 0
         var updatedFilesCount = 0
+        var newBlobsWrittenCount = 0
+        var reusedBlobsReferencedCount = 0
+        var blobBytesWritten = 0
+        var blobBytesReused = 0
         var changedRelativePaths: [String] = []
         for sourceFileURL in sourceFiles {
             let relativePath = sourceFileURL.path.replacingOccurrences(of: "\(sourceRoot.path)/", with: "")
@@ -394,21 +499,49 @@ final class CloudBackupManager: ObservableObject {
             let sourceData = try Data(contentsOf: sourceFileURL)
             let digest = SHA256.hash(data: sourceData)
             let sha256 = digest.map { String(format: "%02x", $0) }.joined()
+            let dedupeContentRelativePath: String? = CloudBackupDedupeSupport.shouldStoreAsDeduplicatedBlob(relativePath: relativePath)
+                ? CloudBackupDedupeSupport.blobRelativePath(for: sha256, blobsFolderName: Constants.blobsFolderName)
+                : nil
             let fileRecord = CloudBackupManifest.FileRecord(
                 relativePath: "storage-root/\(relativePath)",
                 byteCount: sourceData.count,
-                sha256: sha256
+                sha256: sha256,
+                contentRelativePath: dedupeContentRelativePath
             )
             fileRecords.append(fileRecord)
+            if let dedupeContentRelativePath {
+                referencedBlobPaths.insert(dedupeContentRelativePath)
+            }
 
             let baselineRecord = previousRecordsByPath[fileRecord.relativePath]
+            let targetContentURL = inProgressURL.appendingPathComponent(
+                CloudBackupDedupeSupport.resolvedContentRelativePath(for: fileRecord),
+                isDirectory: false
+            )
             let isUnchanged = baselineRecord?.byteCount == fileRecord.byteCount &&
                 baselineRecord?.sha256 == fileRecord.sha256 &&
-                fileManager.fileExists(atPath: targetURL.path)
+                baselineRecord?.contentRelativePath == fileRecord.contentRelativePath &&
+                fileManager.fileExists(atPath: targetContentURL.path)
             if isUnchanged {
                 unchangedFilesCount += 1
             } else {
-                try writeFileData(sourceData, to: targetURL)
+                if let dedupeContentRelativePath {
+                    let blobURL = inProgressURL.appendingPathComponent(dedupeContentRelativePath, isDirectory: false)
+                    let blobAlreadyExists = fileManager.fileExists(atPath: blobURL.path)
+                    if !blobAlreadyExists {
+                        try writeFileData(sourceData, to: blobURL)
+                        newBlobsWrittenCount += 1
+                        blobBytesWritten += sourceData.count
+                    } else {
+                        reusedBlobsReferencedCount += 1
+                        blobBytesReused += sourceData.count
+                    }
+                    if fileManager.fileExists(atPath: targetURL.path) {
+                        try fileManager.removeItem(at: targetURL)
+                    }
+                } else {
+                    try writeFileData(sourceData, to: targetURL)
+                }
                 changedFilesCount += 1
                 changedFilesByteCount += sourceData.count
                 if baselineRecord == nil {
@@ -424,6 +557,10 @@ final class CloudBackupManager: ObservableObject {
         let prunedRelativePaths = try removeStaleStorageFiles(in: inProgressStorage, keepingRelativePaths: sourceRelativePaths)
         completedProgressSteps += 1
         updateProgress(phase: "Pruning stale files", completed: completedProgressSteps, total: totalProgressSteps)
+        let prunedBlobPaths = try removeStaleBlobFiles(in: inProgressURL, keepingRelativePaths: referencedBlobPaths)
+        completedProgressSteps += 1
+        updateProgress(phase: "Pruning stale blobs", completed: completedProgressSteps, total: totalProgressSteps)
+        let allPrunedPaths = (prunedRelativePaths + prunedBlobPaths).sorted()
 
         let defaultsURL = inProgressURL.appendingPathComponent(Constants.userDefaultsFilename)
         let defaultsData = try makeUserDefaultsExportData()
@@ -442,7 +579,7 @@ final class CloudBackupManager: ObservableObject {
         let manifest = CloudBackupManifest(
             backupID: UUID(),
             createdAt: Date(),
-            schemaVersion: Constants.schemaVersion,
+            schemaVersion: Constants.latestSchemaVersion,
             appVersion: appVersionString(),
             localRevision: localRevision,
             selectedPropertyID: userDefaults.string(forKey: "scoutcapture.selectedPropertyID"),
@@ -461,7 +598,9 @@ final class CloudBackupManager: ObservableObject {
                 fileRecords
                     .filter { record in
                         guard let baselineRecord = previousRecordsByPath[record.relativePath] else { return true }
-                        return baselineRecord.byteCount != record.byteCount || baselineRecord.sha256 != record.sha256
+                        return baselineRecord.byteCount != record.byteCount ||
+                            baselineRecord.sha256 != record.sha256 ||
+                            baselineRecord.contentRelativePath != record.contentRelativePath
                     }
                     .map(\.relativePath)
             )
@@ -492,9 +631,13 @@ final class CloudBackupManager: ObservableObject {
         userDefaults.set(addedFilesCount, forKey: Constants.lastRunAddedCountKey)
         userDefaults.set(updatedFilesCount, forKey: Constants.lastRunUpdatedCountKey)
         userDefaults.set(sourceFiles.count, forKey: Constants.lastRunSourceFileCountKey)
-        userDefaults.set(prunedRelativePaths.count, forKey: Constants.lastRunPrunedCountKey)
+        userDefaults.set(allPrunedPaths.count, forKey: Constants.lastRunPrunedCountKey)
+        userDefaults.set(newBlobsWrittenCount, forKey: Constants.lastRunNewBlobsWrittenCountKey)
+        userDefaults.set(reusedBlobsReferencedCount, forKey: Constants.lastRunReusedBlobsReferencedCountKey)
+        userDefaults.set(blobBytesWritten, forKey: Constants.lastRunBlobBytesWrittenKey)
+        userDefaults.set(blobBytesReused, forKey: Constants.lastRunBlobBytesReusedKey)
         userDefaults.set(Array(changedRelativePaths.prefix(8)), forKey: Constants.lastRunChangedPathsSampleKey)
-        userDefaults.set(Array(prunedRelativePaths.prefix(8)), forKey: Constants.lastRunPrunedPathsSampleKey)
+        userDefaults.set(Array(allPrunedPaths.prefix(8)), forKey: Constants.lastRunPrunedPathsSampleKey)
         userDefaults.removeObject(forKey: Constants.lastFailureMessageKey)
         backupCommitted = true
         print(
@@ -563,10 +706,14 @@ final class CloudBackupManager: ObservableObject {
             .appendingPathComponent("ScoutCaptureCloudRestore-\(UUID().uuidString)", isDirectory: true)
         let tempStorageRoot = tempRestoreRoot.appendingPathComponent(Constants.storageRootFolderName, isDirectory: true)
         try fileManager.createDirectory(at: tempRestoreRoot, withIntermediateDirectories: true)
-        try copyDirectoryContents(
-            from: latestURL.appendingPathComponent(Constants.storageRootFolderName, isDirectory: true),
-            to: tempStorageRoot
-        )
+        if let manifest = try? loadManifest(at: latestURL), isSupportedSchemaVersion(manifest.schemaVersion) {
+            try materializeStorageRoot(from: latestURL, manifest: manifest, to: tempStorageRoot)
+        } else {
+            try copyDirectoryContents(
+                from: latestURL.appendingPathComponent(Constants.storageRootFolderName, isDirectory: true),
+                to: tempStorageRoot
+            )
+        }
 
         let activeRoot = StorageRoot.prepareStorage()
         let rollbackRoot = fileManager.temporaryDirectory
@@ -628,7 +775,7 @@ final class CloudBackupManager: ObservableObject {
             let decoder = JSONDecoder()
             decoder.dateDecodingStrategy = .iso8601
             guard let manifest = try? decoder.decode(CloudBackupManifest.self, from: data),
-                  manifest.schemaVersion == Constants.schemaVersion else {
+                  isSupportedSchemaVersion(manifest.schemaVersion) else {
                 continue
             }
             return candidate
@@ -693,7 +840,7 @@ final class CloudBackupManager: ObservableObject {
         return CloudBackupManifest(
             backupID: UUID(),
             createdAt: Date(),
-            schemaVersion: Constants.schemaVersion,
+            schemaVersion: Constants.latestSchemaVersion,
             appVersion: appVersionString(),
             localRevision: localRevision,
             selectedPropertyID: selectedPropertyID,
@@ -739,14 +886,15 @@ final class CloudBackupManager: ObservableObject {
 
     private func validateBackup(at backupFolder: URL) throws {
         let manifest = try loadManifest(at: backupFolder)
-        guard manifest.schemaVersion == Constants.schemaVersion else {
+        guard isSupportedSchemaVersion(manifest.schemaVersion) else {
             throw NSError(domain: "ScoutCapture.CloudBackup", code: 2, userInfo: [
                 NSLocalizedDescriptionKey: "The backup schema is not supported by this app version."
             ])
         }
 
         for file in manifest.files {
-            let url = backupFolder.appendingPathComponent(file.relativePath)
+            let contentRelativePath = CloudBackupDedupeSupport.resolvedContentRelativePath(for: file)
+            let url = backupFolder.appendingPathComponent(contentRelativePath)
             guard ensureUbiquitousItemAvailable(at: url) else {
                 throw NSError(domain: "ScoutCapture.CloudBackup", code: 3, userInfo: [
                     NSLocalizedDescriptionKey: "Backup file missing: \(file.relativePath)"
@@ -764,7 +912,7 @@ final class CloudBackupManager: ObservableObject {
 
     private func validateBackup(at backupFolder: URL, onlyRelativePaths: Set<String>) throws {
         let manifest = try loadManifest(at: backupFolder)
-        guard manifest.schemaVersion == Constants.schemaVersion else {
+        guard isSupportedSchemaVersion(manifest.schemaVersion) else {
             throw NSError(domain: "ScoutCapture.CloudBackup", code: 2, userInfo: [
                 NSLocalizedDescriptionKey: "The backup schema is not supported by this app version."
             ])
@@ -776,7 +924,8 @@ final class CloudBackupManager: ObservableObject {
                     NSLocalizedDescriptionKey: "Backup file missing: \(relativePath)"
                 ])
             }
-            let url = backupFolder.appendingPathComponent(file.relativePath)
+            let contentRelativePath = CloudBackupDedupeSupport.resolvedContentRelativePath(for: file)
+            let url = backupFolder.appendingPathComponent(contentRelativePath)
             guard ensureUbiquitousItemAvailable(at: url) else {
                 throw NSError(domain: "ScoutCapture.CloudBackup", code: 3, userInfo: [
                     NSLocalizedDescriptionKey: "Backup file missing: \(file.relativePath)"
@@ -904,6 +1053,64 @@ final class CloudBackupManager: ObservableObject {
         try removeEmptyDirectoriesRecursively(in: storageRoot)
         return prunedRelativePaths.sorted()
     }
+
+    private func removeStaleBlobFiles(in backupFolder: URL, keepingRelativePaths: Set<String>) throws -> [String] {
+        let blobsRoot = backupFolder.appendingPathComponent(Constants.blobsFolderName, isDirectory: true)
+        guard fileManager.fileExists(atPath: blobsRoot.path) else { return [] }
+        let existingFiles = try recursiveFileURLs(in: blobsRoot)
+        var prunedRelativePaths: [String] = []
+        for fileURL in existingFiles {
+            let relativePath = fileURL.path.replacingOccurrences(of: "\(backupFolder.path)/", with: "")
+            if !keepingRelativePaths.contains(relativePath) {
+                try fileManager.removeItem(at: fileURL)
+                prunedRelativePaths.append(relativePath)
+            }
+        }
+        try removeEmptyDirectoriesRecursively(in: blobsRoot)
+        return prunedRelativePaths.sorted()
+    }
+
+    private func materializeStorageRoot(
+        from backupFolder: URL,
+        manifest: CloudBackupManifest,
+        to destinationStorageRoot: URL
+    ) throws {
+        try CloudBackupDedupeSupport.materializeStorageRoot(
+            fileManager: fileManager,
+            backupFolder: backupFolder,
+            manifest: manifest,
+            destinationStorageRoot: destinationStorageRoot,
+            storageRootFolderName: Constants.storageRootFolderName
+        ) { sourceURL in
+            ensureUbiquitousItemAvailable(at: sourceURL)
+        }
+    }
+
+    private func isSupportedSchemaVersion(_ version: Int) -> Bool {
+        Constants.supportedSchemaVersions.contains(version)
+    }
+
+#if DEBUG
+    func _debug_materializeStorageRoot(
+        from backupFolder: URL,
+        manifest: CloudBackupManifest,
+        to destinationStorageRoot: URL
+    ) throws {
+        try materializeStorageRoot(from: backupFolder, manifest: manifest, to: destinationStorageRoot)
+    }
+
+    func _debug_blobRelativePath(for sha256: String) -> String {
+        CloudBackupDedupeSupport.blobRelativePath(for: sha256, blobsFolderName: Constants.blobsFolderName)
+    }
+
+    func _debug_resolvedContentRelativePath(for record: CloudBackupManifest.FileRecord) -> String {
+        CloudBackupDedupeSupport.resolvedContentRelativePath(for: record)
+    }
+
+    func _debug_shouldStoreAsDeduplicatedBlob(relativePath: String) -> Bool {
+        CloudBackupDedupeSupport.shouldStoreAsDeduplicatedBlob(relativePath: relativePath)
+    }
+#endif
 
     private func removeEmptyDirectoriesRecursively(in directory: URL) throws {
         guard fileManager.fileExists(atPath: directory.path) else { return }

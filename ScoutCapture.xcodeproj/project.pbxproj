@@ -8,6 +8,7 @@
 
 /* Begin PBXFileReference section */
 		D35FBC532F324104009057B0 /* ScoutCapture.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = ScoutCapture.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		E54A7A7524D14C26A9A7B101 /* ScoutCaptureTests.xctest */ = {isa = PBXFileReference; explicitFileType = "wrapper.cfbundle"; includeInIndex = 0; path = ScoutCaptureTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
@@ -29,10 +30,22 @@
 			path = ScoutCapture;
 			sourceTree = "<group>";
 		};
+		E54A7A7524D14C26A9A7B102 /* ScoutCaptureTests */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = ScoutCaptureTests;
+			sourceTree = "<group>";
+		};
 /* End PBXFileSystemSynchronizedRootGroup section */
 
 /* Begin PBXFrameworksBuildPhase section */
 		D35FBC502F324104009057B0 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		E54A7A7524D14C26A9A7B103 /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -46,6 +59,7 @@
 			isa = PBXGroup;
 			children = (
 				D35FBC552F324104009057B0 /* ScoutCapture */,
+				E54A7A7524D14C26A9A7B102 /* ScoutCaptureTests */,
 				D35FBC542F324104009057B0 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -54,6 +68,7 @@
 			isa = PBXGroup;
 			children = (
 				D35FBC532F324104009057B0 /* ScoutCapture.app */,
+				E54A7A7524D14C26A9A7B101 /* ScoutCaptureTests.xctest */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -83,7 +98,48 @@
 			productReference = D35FBC532F324104009057B0 /* ScoutCapture.app */;
 			productType = "com.apple.product-type.application";
 		};
+		E54A7A7524D14C26A9A7B104 /* ScoutCaptureTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = E54A7A7524D14C26A9A7B105 /* Build configuration list for PBXNativeTarget "ScoutCaptureTests" */;
+			buildPhases = (
+				E54A7A7524D14C26A9A7B106 /* Sources */,
+				E54A7A7524D14C26A9A7B103 /* Frameworks */,
+				E54A7A7524D14C26A9A7B107 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				E54A7A7524D14C26A9A7B10B /* PBXTargetDependency */,
+			);
+			fileSystemSynchronizedGroups = (
+				E54A7A7524D14C26A9A7B102 /* ScoutCaptureTests */,
+			);
+			name = ScoutCaptureTests;
+			packageProductDependencies = (
+			);
+			productName = ScoutCaptureTests;
+			productReference = E54A7A7524D14C26A9A7B101 /* ScoutCaptureTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
 /* End PBXNativeTarget section */
+
+/* Begin PBXContainerItemProxy section */
+		E54A7A7524D14C26A9A7B10A /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = D35FBC4B2F324104009057B0 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = D35FBC522F324104009057B0;
+			remoteInfo = ScoutCapture;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXTargetDependency section */
+		E54A7A7524D14C26A9A7B10B /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = D35FBC522F324104009057B0 /* ScoutCapture */;
+			targetProxy = E54A7A7524D14C26A9A7B10A /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
 
 /* Begin PBXProject section */
 		D35FBC4B2F324104009057B0 /* Project object */ = {
@@ -95,6 +151,10 @@
 				TargetAttributes = {
 					D35FBC522F324104009057B0 = {
 						CreatedOnToolsVersion = 26.2;
+					};
+					E54A7A7524D14C26A9A7B104 = {
+						CreatedOnToolsVersion = 26.2;
+						TestTargetID = D35FBC522F324104009057B0;
 					};
 				};
 			};
@@ -113,6 +173,7 @@
 			projectRoot = "";
 			targets = (
 				D35FBC522F324104009057B0 /* ScoutCapture */,
+				E54A7A7524D14C26A9A7B104 /* ScoutCaptureTests */,
 			);
 		};
 /* End PBXProject section */
@@ -125,10 +186,24 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		E54A7A7524D14C26A9A7B107 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
 		D35FBC4F2F324104009057B0 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		E54A7A7524D14C26A9A7B106 /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -341,6 +416,54 @@
 			};
 			name = Release;
 		};
+		E54A7A7524D14C26A9A7B108 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = MY5BGG7755;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.2;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.scoutsystems.scoutcapture.dev.tests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/ScoutCapture.app/ScoutCapture";
+			};
+			name = Debug;
+		};
+		E54A7A7524D14C26A9A7B109 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = MY5BGG7755;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.2;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.scoutsystems.scoutcapture.dev.tests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/ScoutCapture.app/ScoutCapture";
+			};
+			name = Release;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -358,6 +481,15 @@
 			buildConfigurations = (
 				D35FBC5F2F324106009057B0 /* Debug */,
 				D35FBC602F324106009057B0 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		E54A7A7524D14C26A9A7B105 /* Build configuration list for PBXNativeTarget "ScoutCaptureTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				E54A7A7524D14C26A9A7B108 /* Debug */,
+				E54A7A7524D14C26A9A7B109 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;

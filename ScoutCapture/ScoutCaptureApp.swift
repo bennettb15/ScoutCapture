@@ -47,14 +47,54 @@ struct ScoutCaptureApp: App {
 private struct CloudBackupSheet: View {
     @EnvironmentObject private var appState: AppState
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.colorScheme) private var colorScheme
     @State private var showRestoreConfirmation: Bool = false
     @State private var restoreErrorMessage: String? = nil
     @State private var isRestoring: Bool = false
-    @State private var showDetails: Bool = false
+
+    private var buttonFill: Color {
+        colorScheme == .light ? Color.white.opacity(0.90) : Color.black.opacity(0.65)
+    }
+
+    private var buttonStroke: Color {
+        colorScheme == .light ? Color.black.opacity(0.14) : Color.white.opacity(0.28)
+    }
+
+    private var buttonLabel: Color {
+        colorScheme == .light ? Color.black.opacity(0.88) : .white
+    }
 
     var body: some View {
         NavigationStack {
             VStack(alignment: .leading, spacing: 18) {
+                HStack {
+                    Color.clear
+                        .frame(width: 76, height: 36)
+
+                    Spacer(minLength: 0)
+
+                    Text("iCloud Backup")
+                        .font(.system(size: 20, weight: .semibold))
+                        .foregroundStyle(.primary)
+
+                    Spacer(minLength: 0)
+
+                    Button("Done") {
+                        dismiss()
+                    }
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundStyle(buttonLabel)
+                    .padding(.horizontal, 14)
+                    .frame(height: 36)
+                    .background(buttonFill)
+                    .clipShape(Capsule())
+                    .overlay(
+                        Capsule()
+                            .stroke(buttonStroke, lineWidth: 1)
+                    )
+                    .buttonStyle(.plain)
+                }
+
                 VStack(alignment: .leading, spacing: 8) {
                     Text(statusTitle)
                         .font(.system(size: 24, weight: .bold))
@@ -81,34 +121,6 @@ private struct CloudBackupSheet: View {
                             title: "Last Delta",
                             value: lastRunSummary
                         )
-                    }
-                    if hasDetailContent {
-                        Button(showDetails ? "Hide Details" : "Show Details") {
-                            showDetails.toggle()
-                        }
-                        .font(.system(size: 13, weight: .semibold))
-                        .foregroundColor(.blue)
-                        .buttonStyle(.plain)
-                    }
-                    if showDetails {
-                        if let detailSummary {
-                            backupRow(
-                                title: "Run Details",
-                                value: detailSummary
-                            )
-                        }
-                        if let changedPathsSummary {
-                            backupRow(
-                                title: "Changed Files",
-                                value: changedPathsSummary
-                            )
-                        }
-                        if let prunedPathsSummary {
-                            backupRow(
-                                title: "Pruned Files",
-                                value: prunedPathsSummary
-                            )
-                        }
                     }
                     if let lastFailureMessage = appState.cloudBackupStatus.lastFailureMessage,
                        !lastFailureMessage.isEmpty {
@@ -162,15 +174,6 @@ private struct CloudBackupSheet: View {
                 Spacer()
             }
             .padding(16)
-            .navigationTitle("iCloud Backup")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .topBarLeading) {
-                    Button("Done") {
-                        dismiss()
-                    }
-                }
-            }
         }
         .alert("Restore Backup?", isPresented: $showRestoreConfirmation) {
             Button("Restore", role: .destructive) {
@@ -197,7 +200,6 @@ private struct CloudBackupSheet: View {
         }
         .onAppear {
             appState.refreshBackupStatus()
-            appState.triggerBackupForLifecycleEvent()
         }
     }
 
@@ -229,8 +231,8 @@ private struct CloudBackupSheet: View {
             return "Latest local data is backed up."
         case .pending:
             return appState.cloudBackupStatus.isRunning
-                ? "ScoutCapture is writing a backup now."
-                : "Local changes are waiting to be backed up."
+                ? "Backup is running now."
+                : "Changes are queued for backup."
         case .unavailable:
             return "Sign in to iCloud or re-enable iCloud Drive."
         }
@@ -262,54 +264,6 @@ private struct CloudBackupSheet: View {
             sizeString = "n/a"
         }
         return "+\(added) • ~\(updated) • -\(pruned) • \(sizeString)"
-    }
-
-    private var detailSummary: String? {
-        guard let sourceCount = appState.cloudBackupStatus.lastRunSourceFileCount,
-              let addedCount = appState.cloudBackupStatus.lastRunAddedCount,
-              let updatedCount = appState.cloudBackupStatus.lastRunUpdatedCount,
-              let unchangedCount = appState.cloudBackupStatus.lastRunUnchangedCount,
-              let prunedCount = appState.cloudBackupStatus.lastRunPrunedCount else {
-            return nil
-        }
-        return "Scanned \(sourceCount) • Added \(addedCount) • Updated \(updatedCount) • Unchanged \(unchangedCount) • Pruned \(prunedCount)\nApp-level delta metrics (network bytes can differ)."
-    }
-
-    private var hasDetailContent: Bool {
-        detailSummary != nil || changedPathsSummary != nil || prunedPathsSummary != nil
-    }
-
-    private var changedPathsSummary: String? {
-        guard let paths = appState.cloudBackupStatus.lastRunChangedPathsSample,
-              !paths.isEmpty else {
-            return nil
-        }
-        return summarizePaths(paths)
-    }
-
-    private var prunedPathsSummary: String? {
-        guard let paths = appState.cloudBackupStatus.lastRunPrunedPathsSample,
-              !paths.isEmpty else {
-            return nil
-        }
-        return summarizePaths(paths)
-    }
-
-    private func summarizePaths(_ paths: [String], maxItems: Int = 3) -> String {
-        let compact = paths.map(compactPath)
-        if compact.count <= maxItems {
-            return compact.joined(separator: "\n")
-        }
-        let preview = compact.prefix(maxItems).joined(separator: "\n")
-        return "\(preview)\n+\(compact.count - maxItems) more"
-    }
-
-    private func compactPath(_ path: String) -> String {
-        let components = path
-            .split(separator: "/", omittingEmptySubsequences: true)
-            .map(String.init)
-        guard components.count >= 2 else { return path }
-        return "\(components[components.count - 2])/\(components[components.count - 1])"
     }
 
     @ViewBuilder
@@ -405,8 +359,8 @@ struct SessionHubView: View {
     @State private var path: [HubRoute] = []
     @State private var showAddProperty: Bool = false
     @State private var pressedPropertyID: UUID? = nil
-    @State private var isEditMode: Bool = false
     @State private var showArchivedProperties: Bool = false
+    @State private var showSettingsSheet: Bool = false
     @State private var propertyToArchive: Property? = nil
     @State private var propertyToDelete: Property? = nil
     @State private var editContactProperty: Property? = nil
@@ -521,7 +475,7 @@ struct SessionHubView: View {
     var body: some View {
         NavigationStack(path: $path) {
             Group {
-                let showArchivedSection = isEditMode && showArchivedProperties
+                let showArchivedSection = showArchivedProperties
                 let hasNoMatches = filteredActiveProperties.isEmpty && (!showArchivedSection || filteredArchivedProperties.isEmpty)
                 let hasNoPropertiesAtAll = activeProperties.isEmpty && (!showArchivedSection || archivedProperties.isEmpty)
                 if hasNoPropertiesAtAll {
@@ -565,9 +519,6 @@ struct SessionHubView: View {
             .navigationBarTitleDisplayMode(.inline)
             .safeAreaInset(edge: .top, spacing: 0) {
                 countersHeader
-            }
-            .safeAreaInset(edge: .bottom, spacing: 0) {
-                debugToolsBottomBar
             }
             .navigationDestination(for: HubRoute.self) { route in
                 switch route {
@@ -621,6 +572,19 @@ struct SessionHubView: View {
             .sheet(isPresented: $showCloudBackupSheet) {
                 CloudBackupSheet()
                     .environmentObject(appState)
+            }
+            .sheet(isPresented: $showSettingsSheet) {
+#if DEBUG
+                HubSettingsSheet(
+                    showArchivedProperties: $showArchivedProperties,
+                    onOpenDebugTools: { showDebugTools = true }
+                )
+#else
+                HubSettingsSheet(
+                    showArchivedProperties: $showArchivedProperties,
+                    onOpenDebugTools: nil
+                )
+#endif
             }
 #if DEBUG
             .fullScreenCover(isPresented: $showDebugTools) {
@@ -756,7 +720,7 @@ struct SessionHubView: View {
         let addressLine = propertyAddressLine(property)
         let hasMapsButton = mapsAddressQuery(for: property) != nil
         let hasPhoneActions = hasValidPhoneNumber(property)
-        let hasStatusRow = draft != nil || hasPendingExport || hasReExportGlyph || isEditMode
+        let hasStatusRow = draft != nil || hasPendingExport || hasReExportGlyph
         let _ = {
             let firstDelivered = latestReExportSession?.firstDeliveredAt
             let expiresAt = latestReExportSession?.reExportExpiresAt
@@ -812,43 +776,6 @@ struct SessionHubView: View {
                     }
                 }
 
-                if isEditMode {
-                    Spacer(minLength: 0)
-                    HStack(spacing: 8) {
-                        Menu {
-                            Button("Manage Sessions") {
-                                manageSessionsProperty = property
-                            }
-                            Button("Edit Contact") {
-                                editContactProperty = property
-                            }
-                            if property.isArchived {
-                                Button("Unarchive Property") {
-                                    _ = appState.setPropertyArchived(id: property.id, archived: false)
-                                }
-                            } else {
-                                Button("Archive Property") {
-                                    propertyToArchive = property
-                                }
-                            }
-                            Button("Delete Property", role: .destructive) {
-                                requestDeleteProperty(property)
-                            }
-                        } label: {
-                            Image(systemName: "ellipsis")
-                                .font(.system(size: 12, weight: .bold))
-                                .foregroundColor(.white)
-                                .frame(width: 26, height: 26)
-                                .background(Color.white.opacity(0.16))
-                                .clipShape(Circle())
-                                .overlay(
-                                    Circle()
-                                        .stroke(Color.white.opacity(0.28), lineWidth: 1)
-                                )
-                        }
-                        .buttonStyle(.plain)
-                    }
-                }
             }
             .frame(minHeight: (addressLine != nil ? (clientLine != nil ? 58 : 40) : 24), alignment: .top)
         }
@@ -865,40 +792,56 @@ struct SessionHubView: View {
         .animation(.easeOut(duration: 0.12), value: isPressed)
         .contentShape(Rectangle())
         .onTapGesture {
-            guard !isEditMode else { return }
             handlePropertyTap(property)
         }
+        .contextMenu {
+            Button("Manage Sessions") {
+                manageSessionsProperty = property
+            }
+            Button("Edit Contact") {
+                editContactProperty = property
+            }
+            if property.isArchived {
+                Button("Unarchive Property") {
+                    _ = appState.setPropertyArchived(id: property.id, archived: false)
+                }
+            } else {
+                Button("Archive Property") {
+                    propertyToArchive = property
+                }
+            }
+            Button("Delete Property", role: .destructive) {
+                requestDeleteProperty(property)
+            }
+        }
         .swipeActions(edge: .trailing, allowsFullSwipe: false) {
-            if !isEditMode {
-                if hasMapsButton {
-                    Button {
-                        openMaps(for: property)
-                    } label: {
-                        Label("Maps", systemImage: "map.fill")
-                    }
-                    .tint(.blue)
+            if hasMapsButton {
+                Button {
+                    openMaps(for: property)
+                } label: {
+                    Label("Maps", systemImage: "map.fill")
                 }
+                .tint(.blue)
+            }
 
-                if hasPhoneActions {
-                    Button {
-                        triggerPhoneAction(.message, for: property)
-                    } label: {
-                        Label("Message", systemImage: "message.fill")
-                    }
-                    .tint(.green)
-
-                    Button {
-                        triggerPhoneAction(.call, for: property)
-                    } label: {
-                        Label("Call", systemImage: "phone.fill")
-                    }
-                    .tint(.green)
+            if hasPhoneActions {
+                Button {
+                    triggerPhoneAction(.message, for: property)
+                } label: {
+                    Label("Message", systemImage: "message.fill")
                 }
+                .tint(.green)
 
+                Button {
+                    triggerPhoneAction(.call, for: property)
+                } label: {
+                    Label("Call", systemImage: "phone.fill")
+                }
+                .tint(.green)
             }
         }
         .swipeActions(edge: .leading, allowsFullSwipe: false) {
-            if !isEditMode, hasReExportGlyph, let reExportSession = latestReExportSession {
+            if hasReExportGlyph, let reExportSession = latestReExportSession {
                 Button {
                     print("[ReExportInvoke] propertyID=\(property.id.uuidString) sessionID=\(reExportSession.id.uuidString) source=leadingSwipe")
                     beginPendingExport(for: property, session: reExportSession)
@@ -1071,9 +1014,13 @@ struct SessionHubView: View {
 
     private var countersHeader: some View {
         VStack(spacing: 12) {
-            ZStack {
-                HStack {
-                    if !isEditMode {
+            if isSearchExpanded {
+                propertiesSearchRow
+            }
+
+            if !isSearchExpanded {
+                ZStack {
+                    HStack {
                         Button {
                             showCalendarComingSoonPopup = true
                         } label: {
@@ -1089,47 +1036,36 @@ struct SessionHubView: View {
                                 )
                         }
                         .buttonStyle(.plain)
-                    }
 
-                    if isEditMode {
-#if DEBUG
-                        customCapsuleToolbarButton(
-                            title: "Debug",
-                            isEnabled: true,
-                            fill: .red.opacity(0.92),
-                            stroke: .red.opacity(0.95),
-                            label: .white
-                        ) {
-                            showDebugTools = true
+                        Spacer(minLength: 0)
+                        Button {
+                            showCloudBackupSheet = true
+                        } label: {
+                            cloudStatusIcon
+                                .frame(width: 42, height: 42)
+                                .background(buttonFill)
+                                .clipShape(Circle())
+                                .overlay(
+                                    Circle()
+                                        .stroke(buttonStroke, lineWidth: 1)
+                                )
                         }
-#endif
-                    }
-
-                    Spacer(minLength: 0)
-                    Button {
-                        showCloudBackupSheet = true
-                    } label: {
-                        cloudStatusIcon
-                            .frame(width: 42, height: 42)
-                            .background(buttonFill)
-                            .clipShape(Circle())
-                            .overlay(
-                                Circle()
-                                    .stroke(buttonStroke, lineWidth: 1)
-                            )
-                    }
-                    .buttonStyle(.plain)
-                    customCapsuleToolbarButton(
-                        title: isEditMode ? "Done" : "Edit",
-                        isEnabled: true,
-                        fill: isEditMode ? .blue : nil,
-                        stroke: isEditMode ? .blue.opacity(0.9) : nil,
-                        label: isEditMode ? .white : nil
-                    ) {
-                        isEditMode.toggle()
-                        if !isEditMode {
-                            showArchivedProperties = false
+                        .buttonStyle(.plain)
+                        Button {
+                            showSettingsSheet = true
+                        } label: {
+                            Image(systemName: "gearshape")
+                                .font(.system(size: 18, weight: .medium))
+                                .foregroundColor(buttonLabel)
+                                .frame(width: 42, height: 42)
+                                .background(buttonFill)
+                                .clipShape(Circle())
+                                .overlay(
+                                    Circle()
+                                        .stroke(buttonStroke, lineWidth: 1)
+                                )
                         }
+                        .buttonStyle(.plain)
                     }
                 }
             }
@@ -1179,7 +1115,9 @@ struct SessionHubView: View {
                 }
             }
 
-            propertiesSearchRow
+            if !isSearchExpanded {
+                propertiesSearchRow
+            }
         }
         .padding(.horizontal, 16)
         .padding(.top, isCompactSearchMode ? 4 : 6)
@@ -1191,11 +1129,13 @@ struct SessionHubView: View {
 
     private var propertiesSearchRow: some View {
         HStack(spacing: 10) {
-            Text("Properties")
-                .font(.system(size: 14, weight: .semibold))
-                .foregroundColor(.secondary)
+            if !isSearchExpanded {
+                Text("Properties")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundColor(.secondary)
 
-            Spacer(minLength: 0)
+                Spacer(minLength: 0)
+            }
 
             if isSearchExpanded {
                 HStack(spacing: 8) {
@@ -1236,10 +1176,17 @@ struct SessionHubView: View {
                 Button("Cancel") {
                     collapseSearch()
                 }
-                .font(.system(size: 14, weight: .medium))
-                .foregroundColor(.secondary)
-
-                addCircleButton
+                .font(.system(size: 16, weight: .semibold))
+                .foregroundStyle(buttonLabel)
+                .padding(.horizontal, 14)
+                .frame(height: 36)
+                .background(buttonFill)
+                .clipShape(Capsule())
+                .overlay(
+                    Capsule()
+                        .stroke(buttonStroke, lineWidth: 1)
+                )
+                .buttonStyle(.plain)
             } else {
                 Button {
                     withAnimation(.easeInOut(duration: 0.18)) {
@@ -1390,28 +1337,6 @@ struct SessionHubView: View {
     }
 
     @ViewBuilder
-    private var debugToolsBottomBar: some View {
-        if isEditMode {
-            VStack(spacing: 0) {
-                Divider()
-                HStack {
-                    Spacer(minLength: 0)
-                    customCapsuleToolbarButton(
-                        title: showArchivedProperties ? "Hide Archived" : "Show Archived",
-                        isEnabled: true
-                    ) {
-                        showArchivedProperties.toggle()
-                    }
-                    Spacer(minLength: 0)
-                }
-                .padding(.horizontal, 16)
-                .padding(.vertical, 10)
-                .background(Color(uiColor: .systemBackground))
-            }
-        }
-    }
-
-    @ViewBuilder
     private func counterCard(
         title: String,
         value: Int,
@@ -1439,6 +1364,78 @@ struct SessionHubView: View {
             )
         }
         .buttonStyle(.plain)
+    }
+
+    private struct HubSettingsSheet: View {
+        @Binding var showArchivedProperties: Bool
+        let onOpenDebugTools: (() -> Void)?
+        @Environment(\.dismiss) private var dismiss
+        @Environment(\.colorScheme) private var colorScheme
+
+        private var buttonFill: Color {
+            colorScheme == .light ? Color.white.opacity(0.90) : Color.black.opacity(0.65)
+        }
+
+        private var buttonStroke: Color {
+            colorScheme == .light ? Color.black.opacity(0.14) : Color.white.opacity(0.28)
+        }
+
+        private var buttonLabel: Color {
+            colorScheme == .light ? Color.black.opacity(0.88) : .white
+        }
+
+        var body: some View {
+            NavigationStack {
+                VStack(spacing: 0) {
+                    HStack {
+                        Text("Settings")
+                            .font(.system(size: 28, weight: .bold))
+                            .foregroundStyle(.primary)
+
+                        Spacer(minLength: 0)
+
+                        Button("Done") {
+                            dismiss()
+                        }
+                        .font(.system(size: 16, weight: .semibold))
+                        .foregroundStyle(buttonLabel)
+                        .padding(.horizontal, 14)
+                        .frame(height: 36)
+                        .background(buttonFill)
+                        .clipShape(Capsule())
+                        .overlay(
+                            Capsule()
+                                .stroke(buttonStroke, lineWidth: 1)
+                        )
+                        .buttonStyle(.plain)
+                    }
+                    .padding(.horizontal, 16)
+                    .padding(.top, 12)
+                    .padding(.bottom, 2)
+
+                    List {
+                        Section("View") {
+                            Toggle("Show Archived", isOn: $showArchivedProperties)
+                                .tint(.blue)
+                        }
+
+                        if let onOpenDebugTools {
+                            Section("Developer") {
+                                Button("Debug Tools") {
+                                    dismiss()
+                                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                                        onOpenDebugTools()
+                                    }
+                                }
+                                .foregroundStyle(.white)
+                                .listRowBackground(Color.red)
+                            }
+                        }
+                    }
+                    .listSectionSpacing(18)
+                }
+            }
+        }
     }
 
     @ViewBuilder
@@ -4280,93 +4277,112 @@ private struct DebugToolsView: View {
     }
 
     var body: some View {
-        VStack(spacing: 0) {
-            HStack(spacing: 10) {
-                customCapsuleButton(title: "Done", isEnabled: true) {
-                    dismiss()
-                }
-                Spacer(minLength: 0)
-                Text("Debug Tools")
-                    .font(.system(size: 18, weight: .semibold))
-                    .foregroundColor(buttonLabel)
-                Spacer(minLength: 0)
-                Color.clear.frame(width: 72, height: 42)
-            }
-            .padding(.horizontal, 14)
-            .padding(.top, 10)
-            .padding(.bottom, 8)
-            .background(Color(uiColor: .systemBackground))
+        ZStack {
+            Color(uiColor: .systemBackground)
+                .ignoresSafeArea()
 
-            ScrollView {
-                VStack(spacing: 14) {
-                    HStack(spacing: 10) {
-                        customCapsuleButton(
-                            title: "Migration Export",
-                            isEnabled: true,
-                            fill: Color.orange.opacity(0.92),
-                            stroke: Color.orange.opacity(0.96),
-                            label: .white
-                        ) {
-                            dismiss()
-                            onShowMigrationExport()
+            VStack(spacing: 0) {
+                HStack(spacing: 10) {
+                    Color.clear
+                        .frame(width: 76, height: 36)
+
+                    Spacer(minLength: 0)
+                    Text("Debug Tools")
+                        .font(.system(size: 18, weight: .semibold))
+                        .foregroundColor(buttonLabel)
+                    Spacer(minLength: 0)
+
+                    Button("Done") {
+                        dismiss()
+                    }
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundStyle(buttonLabel)
+                    .padding(.horizontal, 14)
+                    .frame(height: 36)
+                    .background(buttonFill)
+                    .clipShape(Capsule())
+                    .overlay(
+                        Capsule()
+                            .stroke(buttonStroke, lineWidth: 1)
+                    )
+                    .buttonStyle(.plain)
+                }
+                .padding(.horizontal, 14)
+                .padding(.top, 10)
+                .padding(.bottom, 8)
+                .background(Color(uiColor: .systemBackground))
+
+                ScrollView {
+                    VStack(spacing: 14) {
+                        HStack(spacing: 10) {
+                            customCapsuleButton(
+                                title: "Migration Export",
+                                isEnabled: true,
+                                fill: Color.orange.opacity(0.92),
+                                stroke: Color.orange.opacity(0.96),
+                                label: .white
+                            ) {
+                                dismiss()
+                                onShowMigrationExport()
+                            }
+
+                            customCapsuleButton(
+                                title: "Migration Import",
+                                isEnabled: true,
+                                fill: Color.green.opacity(0.88),
+                                stroke: Color.green.opacity(0.94),
+                                label: .white
+                            ) {
+                                dismiss()
+                                onShowMigrationImport()
+                            }
                         }
 
-                        customCapsuleButton(
-                            title: "Migration Import",
-                            isEnabled: true,
-                            fill: Color.green.opacity(0.88),
-                            stroke: Color.green.opacity(0.94),
-                            label: .white
+                        debugActionCard(
+                            title: "Nuclear Reset (Local Only)",
+                            detail: "Wipes all local app data: properties, sessions, guided, observations, references, and indexes. Does NOT modify iCloud Drive library data.",
+                            role: .destructive
                         ) {
-                            dismiss()
-                            onShowMigrationImport()
+                            showNuclearConfirm = true
+                        }
+
+                        debugActionCard(
+                            title: "Clear Local Index / UI Cache (Local Only)",
+                            detail: "Clears in-memory image/UI caches and reloads thumbnails from local SCOUT files. Does NOT delete Originals, Stamped, session.json, or iCloud Drive data.",
+                            role: .normal
+                        ) {
+                            showClearCacheConfirm = true
+                        }
+
+                        debugActionCard(
+                            title: "Print Metadata Schema",
+                            detail: "Prints SessionMetadata and ShotMetadata field names to the Xcode console.",
+                            role: .normal,
+                            buttonTitle: "Print Metadata Schema"
+                        ) {
+                            localStore.printSessionSchema()
+                        }
+
+                        debugActionCard(
+                            title: "Verify session.json source",
+                            detail: "Prints on-disk session.json path, existence, size, schemaVersion, shot count, and shotKey/originalRelativePath presence.",
+                            role: .normal,
+                            buttonTitle: "Verify session.json source"
+                        ) {
+                            verifySessionJSONSource()
+                        }
+
+                        debugActionCard(
+                            title: "Verify export session.json source",
+                            detail: "Prints export session.json source path and key presence checks used by export.",
+                            role: .normal,
+                            buttonTitle: "Verify export source"
+                        ) {
+                            verifyExportSessionJSONSource()
                         }
                     }
-
-                    debugActionCard(
-                        title: "Nuclear Reset (Local Only)",
-                        detail: "Wipes all local app data: properties, sessions, guided, observations, references, and indexes. Does NOT modify iCloud Drive library data.",
-                        role: .destructive
-                    ) {
-                        showNuclearConfirm = true
-                    }
-
-                    debugActionCard(
-                        title: "Clear Local Index / UI Cache (Local Only)",
-                        detail: "Clears in-memory image/UI caches and reloads thumbnails from local SCOUT files. Does NOT delete Originals, Stamped, session.json, or iCloud Drive data.",
-                        role: .normal
-                    ) {
-                        showClearCacheConfirm = true
-                    }
-
-                    debugActionCard(
-                        title: "Print Metadata Schema",
-                        detail: "Prints SessionMetadata and ShotMetadata field names to the Xcode console.",
-                        role: .normal,
-                        buttonTitle: "Print Metadata Schema"
-                    ) {
-                        localStore.printSessionSchema()
-                    }
-
-                    debugActionCard(
-                        title: "Verify session.json source",
-                        detail: "Prints on-disk session.json path, existence, size, schemaVersion, shot count, and shotKey/originalRelativePath presence.",
-                        role: .normal,
-                        buttonTitle: "Verify session.json source"
-                    ) {
-                        verifySessionJSONSource()
-                    }
-
-                    debugActionCard(
-                        title: "Verify export session.json source",
-                        detail: "Prints export session.json source path and key presence checks used by export.",
-                        role: .normal,
-                        buttonTitle: "Verify export source"
-                    ) {
-                        verifyExportSessionJSONSource()
-                    }
+                    .padding(14)
                 }
-                .padding(14)
             }
         }
         .alert("Nuclear Reset (Local Only)?", isPresented: $showNuclearConfirm) {

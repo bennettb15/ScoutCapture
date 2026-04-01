@@ -619,17 +619,26 @@ final class AppState: ObservableObject {
     }
 
     @discardableResult
-    func deleteSession(propertyID: UUID, sessionID: UUID) -> Bool {
+    func deleteSession(
+        propertyID: UUID,
+        sessionID: UUID,
+        triggerSafetyPause: Bool = true
+    ) -> Bool {
         do {
             try localStore.deleteSessionCascade(id: sessionID, propertyID: propertyID)
             if currentSession?.id == sessionID {
                 clearCurrentSession()
             }
             reloadSessionCache(for: propertyID)
-            cloudBackupManager.pauseAutomaticBackupsForSafetyWindow(
-                minutes: 15,
-                reason: "after deleting a session"
-            )
+            if triggerSafetyPause {
+                cloudBackupManager.pauseAutomaticBackupsForSafetyWindow(
+                    minutes: 15,
+                    reason: "after deleting a session"
+                )
+            } else {
+                // Empty-session exit cleanup should still auto-back up immediately.
+                cloudBackupManager.markDataChanged(scheduleBackupAfter: 0)
+            }
             return true
         } catch {
             return false
@@ -721,7 +730,8 @@ final class AppState: ObservableObject {
     }
 
     func triggerBackupForLifecycleEvent() {
-        cloudBackupManager.scheduleAutomaticBackup(after: 0)
+        cloudBackupManager.setCaptureModeActive(false)
+        cloudBackupManager.markDataChanged(scheduleBackupAfter: 0)
     }
 
     func handleSceneDidEnterBackground() {
