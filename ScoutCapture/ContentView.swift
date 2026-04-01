@@ -4961,10 +4961,21 @@ struct ContentView: View {
 
         var id: CoreElevationChecklistCategory { category }
 
+        private var requiredCount: Int {
+            switch category {
+            case .overview:
+                return 1
+            case .elevation:
+                return 3
+            default:
+                return 0
+            }
+        }
+
         var isComplete: Bool {
             switch category {
             case .overview, .elevation:
-                return count >= 1
+                return count >= requiredCount
             default:
                 return false
             }
@@ -4973,7 +4984,7 @@ struct ContentView: View {
         var countLabel: String {
             switch category {
             case .overview, .elevation:
-                return "\(min(count, 1))/1"
+                return "\(min(count, requiredCount))/\(requiredCount)"
             default:
                 return "\(count)"
             }
@@ -10351,9 +10362,14 @@ extension ContentView {
         camera.updateDetailNoteActive(false)
         if summary.hasCaptures {
             appState.saveDraftCurrentSession()
+            appState.triggerBackupForLifecycleEvent()
         } else if let propertyID = appState.selectedPropertyID,
                   let sessionID = appState.currentSession?.id {
-            _ = appState.deleteSession(propertyID: propertyID, sessionID: sessionID)
+            _ = appState.deleteSession(
+                propertyID: propertyID,
+                sessionID: sessionID,
+                triggerSafetyPause: false
+            )
         }
         appState.refreshProperties()
         showSessionActionsSheet = false
