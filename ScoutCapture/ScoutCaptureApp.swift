@@ -1371,6 +1371,7 @@ struct SessionHubView: View {
         let onOpenDebugTools: (() -> Void)?
         @Environment(\.dismiss) private var dismiss
         @Environment(\.colorScheme) private var colorScheme
+        private let showDeveloperSection: Bool = false
 
         private var buttonFill: Color {
             colorScheme == .light ? Color.white.opacity(0.90) : Color.black.opacity(0.65)
@@ -1419,7 +1420,7 @@ struct SessionHubView: View {
                                 .tint(.blue)
                         }
 
-                        if let onOpenDebugTools {
+                        if showDeveloperSection, let onOpenDebugTools {
                             Section("Developer") {
                                 Button("Debug Tools") {
                                     dismiss()
