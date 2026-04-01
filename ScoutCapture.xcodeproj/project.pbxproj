@@ -6,9 +6,19 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXContainerItemProxy section */
+		E54A7A7524D14C26A9A7B10A /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = D35FBC4B2F324104009057B0 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = D35FBC522F324104009057B0;
+			remoteInfo = ScoutCapture;
+		};
+/* End PBXContainerItemProxy section */
+
 /* Begin PBXFileReference section */
 		D35FBC532F324104009057B0 /* ScoutCapture.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = ScoutCapture.app; sourceTree = BUILT_PRODUCTS_DIR; };
-		E54A7A7524D14C26A9A7B101 /* ScoutCaptureTests.xctest */ = {isa = PBXFileReference; explicitFileType = "wrapper.cfbundle"; includeInIndex = 0; path = ScoutCaptureTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		E54A7A7524D14C26A9A7B101 /* ScoutCaptureTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = ScoutCaptureTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
@@ -123,24 +133,6 @@
 		};
 /* End PBXNativeTarget section */
 
-/* Begin PBXContainerItemProxy section */
-		E54A7A7524D14C26A9A7B10A /* PBXContainerItemProxy */ = {
-			isa = PBXContainerItemProxy;
-			containerPortal = D35FBC4B2F324104009057B0 /* Project object */;
-			proxyType = 1;
-			remoteGlobalIDString = D35FBC522F324104009057B0;
-			remoteInfo = ScoutCapture;
-		};
-/* End PBXContainerItemProxy section */
-
-/* Begin PBXTargetDependency section */
-		E54A7A7524D14C26A9A7B10B /* PBXTargetDependency */ = {
-			isa = PBXTargetDependency;
-			target = D35FBC522F324104009057B0 /* ScoutCapture */;
-			targetProxy = E54A7A7524D14C26A9A7B10A /* PBXContainerItemProxy */;
-		};
-/* End PBXTargetDependency section */
-
 /* Begin PBXProject section */
 		D35FBC4B2F324104009057B0 /* Project object */ = {
 			isa = PBXProject;
@@ -211,6 +203,14 @@
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		E54A7A7524D14C26A9A7B10B /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = D35FBC522F324104009057B0 /* ScoutCapture */;
+			targetProxy = E54A7A7524D14C26A9A7B10A /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
 		D35FBC5C2F324106009057B0 /* Debug */ = {
@@ -342,7 +342,7 @@
 				CODE_SIGN_ENTITLEMENTS = ScoutCapture/ScoutCapture.entitlements;
 				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 1;
+				CURRENT_PROJECT_VERSION = 2;
 				DEVELOPMENT_TEAM = MY5BGG7755;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
@@ -383,7 +383,7 @@
 				CODE_SIGN_ENTITLEMENTS = ScoutCapture/ScoutCapture.entitlements;
 				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 1;
+				CURRENT_PROJECT_VERSION = 2;
 				DEVELOPMENT_TEAM = MY5BGG7755;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
