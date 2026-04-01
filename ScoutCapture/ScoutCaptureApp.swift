@@ -385,11 +385,12 @@ struct SessionHubView: View {
     @State private var showTemporaryMigrationExport: Bool = false
     @State private var showTemporaryMigrationImport: Bool = false
     @State private var showCloudBackupSheet: Bool = false
-#if DEBUG
     @State private var showDebugTools: Bool = false
-#endif
+    @State private var hiddenDebugTapCount: Int = 0
+    @State private var lastHiddenDebugTapAt: Date? = nil
 
     private let selectionHaptic = UIImpactFeedbackGenerator(style: .light)
+    private let hiddenDebugTapWindow: TimeInterval = 1.5
 
     private enum HubRoute: Hashable {
         case propertySession(propertyID: UUID, resumeDraft: Bool)
@@ -574,19 +575,11 @@ struct SessionHubView: View {
                     .environmentObject(appState)
             }
             .sheet(isPresented: $showSettingsSheet) {
-#if DEBUG
                 HubSettingsSheet(
                     showArchivedProperties: $showArchivedProperties,
                     onOpenDebugTools: { showDebugTools = true }
                 )
-#else
-                HubSettingsSheet(
-                    showArchivedProperties: $showArchivedProperties,
-                    onOpenDebugTools: nil
-                )
-#endif
             }
-#if DEBUG
             .fullScreenCover(isPresented: $showDebugTools) {
                 DebugToolsView(
                     onShowMigrationExport: { showTemporaryMigrationExport = true },
@@ -594,7 +587,6 @@ struct SessionHubView: View {
                 )
                     .environmentObject(appState)
             }
-#endif
             .onAppear {
                 if appState.properties.isEmpty {
                     appState.refreshProperties()
@@ -1076,6 +1068,10 @@ struct SessionHubView: View {
                     .scaledToFit()
                     .frame(height: 58)
                     .accessibilityHidden(true)
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        handleHiddenDebugTap()
+                    }
                 
                 Text("Session View")
                     .font(.system(size: 24, weight: .bold))
@@ -1582,6 +1578,24 @@ struct SessionHubView: View {
             if pressedPropertyID == property.id {
                 pressedPropertyID = nil
             }
+        }
+    }
+
+    private func handleHiddenDebugTap() {
+        let now = Date()
+        if let lastTapAt = lastHiddenDebugTapAt,
+           now.timeIntervalSince(lastTapAt) > hiddenDebugTapWindow {
+            hiddenDebugTapCount = 0
+        }
+
+        lastHiddenDebugTapAt = now
+        hiddenDebugTapCount += 1
+
+        if hiddenDebugTapCount >= 5 {
+            hiddenDebugTapCount = 0
+            lastHiddenDebugTapAt = nil
+            selectionHaptic.impactOccurred()
+            showDebugTools = true
         }
     }
 
@@ -4252,7 +4266,6 @@ private struct PropertySessionsManagerView: View {
     }
 }
 
-#if DEBUG
 private struct DebugToolsView: View {
     @EnvironmentObject private var appState: AppState
     @Environment(\.dismiss) private var dismiss
@@ -4561,7 +4574,6 @@ private struct DebugToolsView: View {
         }
     }
 }
-#endif
 
 struct PropertySessionView: View {
     @EnvironmentObject private var appState: AppState
