@@ -50,6 +50,7 @@ private struct CloudBackupSheet: View {
     @State private var showRestoreConfirmation: Bool = false
     @State private var restoreErrorMessage: String? = nil
     @State private var isRestoring: Bool = false
+    @State private var showDetails: Bool = false
 
     var body: some View {
         NavigationStack {
@@ -64,10 +65,7 @@ private struct CloudBackupSheet: View {
                 }
 
                 VStack(alignment: .leading, spacing: 12) {
-                    backupRow(
-                        title: "iCloud",
-                        value: appState.cloudBackupStatus.iCloudAvailable ? "Available" : "Unavailable"
-                    )
+                    iCloudAvailabilityRow
                     backupRow(
                         title: "Status",
                         value: statusLine
@@ -77,6 +75,40 @@ private struct CloudBackupSheet: View {
                             title: "Snapshot",
                             value: snapshotSummary
                         )
+                    }
+                    if let lastRunSummary {
+                        backupRow(
+                            title: "Last Delta",
+                            value: lastRunSummary
+                        )
+                    }
+                    if hasDetailContent {
+                        Button(showDetails ? "Hide Details" : "Show Details") {
+                            showDetails.toggle()
+                        }
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundColor(.blue)
+                        .buttonStyle(.plain)
+                    }
+                    if showDetails {
+                        if let detailSummary {
+                            backupRow(
+                                title: "Run Details",
+                                value: detailSummary
+                            )
+                        }
+                        if let changedPathsSummary {
+                            backupRow(
+                                title: "Changed Files",
+                                value: changedPathsSummary
+                            )
+                        }
+                        if let prunedPathsSummary {
+                            backupRow(
+                                title: "Pruned Files",
+                                value: prunedPathsSummary
+                            )
+                        }
                     }
                     if let lastFailureMessage = appState.cloudBackupStatus.lastFailureMessage,
                        !lastFailureMessage.isEmpty {
@@ -215,6 +247,71 @@ private struct CloudBackupSheet: View {
         return "\(fileCount) files • \(sizeString)"
     }
 
+    private var lastRunSummary: String? {
+        guard let added = appState.cloudBackupStatus.lastRunAddedCount,
+              let updated = appState.cloudBackupStatus.lastRunUpdatedCount,
+              let pruned = appState.cloudBackupStatus.lastRunPrunedCount else {
+            return nil
+        }
+        let sizeString: String
+        if let changedBytes = appState.cloudBackupStatus.lastRunChangedByteCount {
+            let formatter = ByteCountFormatter()
+            formatter.countStyle = .file
+            sizeString = formatter.string(fromByteCount: Int64(changedBytes))
+        } else {
+            sizeString = "n/a"
+        }
+        return "+\(added) • ~\(updated) • -\(pruned) • \(sizeString)"
+    }
+
+    private var detailSummary: String? {
+        guard let sourceCount = appState.cloudBackupStatus.lastRunSourceFileCount,
+              let addedCount = appState.cloudBackupStatus.lastRunAddedCount,
+              let updatedCount = appState.cloudBackupStatus.lastRunUpdatedCount,
+              let unchangedCount = appState.cloudBackupStatus.lastRunUnchangedCount,
+              let prunedCount = appState.cloudBackupStatus.lastRunPrunedCount else {
+            return nil
+        }
+        return "Scanned \(sourceCount) • Added \(addedCount) • Updated \(updatedCount) • Unchanged \(unchangedCount) • Pruned \(prunedCount)\nApp-level delta metrics (network bytes can differ)."
+    }
+
+    private var hasDetailContent: Bool {
+        detailSummary != nil || changedPathsSummary != nil || prunedPathsSummary != nil
+    }
+
+    private var changedPathsSummary: String? {
+        guard let paths = appState.cloudBackupStatus.lastRunChangedPathsSample,
+              !paths.isEmpty else {
+            return nil
+        }
+        return summarizePaths(paths)
+    }
+
+    private var prunedPathsSummary: String? {
+        guard let paths = appState.cloudBackupStatus.lastRunPrunedPathsSample,
+              !paths.isEmpty else {
+            return nil
+        }
+        return summarizePaths(paths)
+    }
+
+    private func summarizePaths(_ paths: [String], maxItems: Int = 3) -> String {
+        let compact = paths.map(compactPath)
+        if compact.count <= maxItems {
+            return compact.joined(separator: "\n")
+        }
+        let preview = compact.prefix(maxItems).joined(separator: "\n")
+        return "\(preview)\n+\(compact.count - maxItems) more"
+    }
+
+    private func compactPath(_ path: String) -> String {
+        let components = path
+            .split(separator: "/", omittingEmptySubsequences: true)
+            .map(String.init)
+        guard components.count >= 2 else { return path }
+        return "\(components[components.count - 2])/\(components[components.count - 1])"
+    }
+
     @ViewBuilder
     private func backupRow(title: String, value: String) -> some View {
         VStack(alignment: .leading, spacing: 4) {
@@ -224,6 +321,23 @@ private struct CloudBackupSheet: View {
             Text(value)
                 .font(.system(size: 15, weight: .medium))
                 .foregroundColor(.primary)
+        }
+    }
+
+    @ViewBuilder
+    private var iCloudAvailabilityRow: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("iCloud")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundColor(.secondary)
+            HStack(spacing: 8) {
+                Image(systemName: appState.cloudBackupStatus.iCloudAvailable ? "checkmark.circle.fill" : "xmark.circle")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundColor(appState.cloudBackupStatus.iCloudAvailable ? .green : .gray)
+                Text(appState.cloudBackupStatus.iCloudAvailable ? "Available" : "Unavailable")
+                    .font(.system(size: 15, weight: .medium))
+                    .foregroundColor(.primary)
+            }
         }
     }
 }
