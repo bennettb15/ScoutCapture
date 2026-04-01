@@ -40,6 +40,15 @@ struct CloudBackupStatus: Equatable {
     var progressTotal: Int?
     var snapshotFileCount: Int?
     var snapshotByteCount: Int?
+    var lastRunChangedCount: Int?
+    var lastRunUnchangedCount: Int?
+    var lastRunChangedByteCount: Int?
+    var lastRunAddedCount: Int?
+    var lastRunUpdatedCount: Int?
+    var lastRunSourceFileCount: Int?
+    var lastRunPrunedCount: Int?
+    var lastRunChangedPathsSample: [String]?
+    var lastRunPrunedPathsSample: [String]?
     var safetyPauseUntil: Date?
     var safetyPauseReason: String?
 }
@@ -56,6 +65,15 @@ final class CloudBackupManager: ObservableObject {
         static let backedUpRevisionKey = "scout.backup.backedUpRevision"
         static let lastSuccessfulBackupAtKey = "scout.backup.lastSuccessfulBackupAt"
         static let lastFailureMessageKey = "scout.backup.lastFailureMessage"
+        static let lastRunChangedCountKey = "scout.backup.lastRunChangedCount"
+        static let lastRunUnchangedCountKey = "scout.backup.lastRunUnchangedCount"
+        static let lastRunChangedByteCountKey = "scout.backup.lastRunChangedByteCount"
+        static let lastRunAddedCountKey = "scout.backup.lastRunAddedCount"
+        static let lastRunUpdatedCountKey = "scout.backup.lastRunUpdatedCount"
+        static let lastRunSourceFileCountKey = "scout.backup.lastRunSourceFileCount"
+        static let lastRunPrunedCountKey = "scout.backup.lastRunPrunedCount"
+        static let lastRunChangedPathsSampleKey = "scout.backup.lastRunChangedPathsSample"
+        static let lastRunPrunedPathsSampleKey = "scout.backup.lastRunPrunedPathsSample"
         static let automaticBackupsEnabledKey = "scout.backup.automaticEnabled"
         static let safetyPauseUntilKey = "scout.backup.safetyPauseUntil"
         static let safetyPauseReasonKey = "scout.backup.safetyPauseReason"
@@ -98,6 +116,15 @@ final class CloudBackupManager: ObservableObject {
             progressTotal: nil,
             snapshotFileCount: nil,
             snapshotByteCount: nil,
+            lastRunChangedCount: userDefaults.object(forKey: Constants.lastRunChangedCountKey) as? Int,
+            lastRunUnchangedCount: userDefaults.object(forKey: Constants.lastRunUnchangedCountKey) as? Int,
+            lastRunChangedByteCount: userDefaults.object(forKey: Constants.lastRunChangedByteCountKey) as? Int,
+            lastRunAddedCount: userDefaults.object(forKey: Constants.lastRunAddedCountKey) as? Int,
+            lastRunUpdatedCount: userDefaults.object(forKey: Constants.lastRunUpdatedCountKey) as? Int,
+            lastRunSourceFileCount: userDefaults.object(forKey: Constants.lastRunSourceFileCountKey) as? Int,
+            lastRunPrunedCount: userDefaults.object(forKey: Constants.lastRunPrunedCountKey) as? Int,
+            lastRunChangedPathsSample: userDefaults.stringArray(forKey: Constants.lastRunChangedPathsSampleKey),
+            lastRunPrunedPathsSample: userDefaults.stringArray(forKey: Constants.lastRunPrunedPathsSampleKey),
             safetyPauseUntil: nil,
             safetyPauseReason: nil
         )
@@ -115,6 +142,15 @@ final class CloudBackupManager: ObservableObject {
         let backedUpRevision = userDefaults.string(forKey: Constants.backedUpRevisionKey)
         let lastSuccessfulBackupAt = userDefaults.object(forKey: Constants.lastSuccessfulBackupAtKey) as? Date
         let lastFailureMessage = userDefaults.string(forKey: Constants.lastFailureMessageKey)
+        let lastRunChangedCount = userDefaults.object(forKey: Constants.lastRunChangedCountKey) as? Int
+        let lastRunUnchangedCount = userDefaults.object(forKey: Constants.lastRunUnchangedCountKey) as? Int
+        let lastRunChangedByteCount = userDefaults.object(forKey: Constants.lastRunChangedByteCountKey) as? Int
+        let lastRunAddedCount = userDefaults.object(forKey: Constants.lastRunAddedCountKey) as? Int
+        let lastRunUpdatedCount = userDefaults.object(forKey: Constants.lastRunUpdatedCountKey) as? Int
+        let lastRunSourceFileCount = userDefaults.object(forKey: Constants.lastRunSourceFileCountKey) as? Int
+        let lastRunPrunedCount = userDefaults.object(forKey: Constants.lastRunPrunedCountKey) as? Int
+        let lastRunChangedPathsSample = userDefaults.stringArray(forKey: Constants.lastRunChangedPathsSampleKey)
+        let lastRunPrunedPathsSample = userDefaults.stringArray(forKey: Constants.lastRunPrunedPathsSampleKey)
         let safetyPauseUntil = userDefaults.object(forKey: Constants.safetyPauseUntilKey) as? Date
         let safetyPauseReason = userDefaults.string(forKey: Constants.safetyPauseReasonKey)
         let snapshotMetrics = currentSnapshotMetrics()
@@ -149,6 +185,15 @@ final class CloudBackupManager: ObservableObject {
                 progressTotal: runtime.progressTotal,
                 snapshotFileCount: snapshotMetrics?.fileCount,
                 snapshotByteCount: snapshotMetrics?.byteCount,
+                lastRunChangedCount: lastRunChangedCount,
+                lastRunUnchangedCount: lastRunUnchangedCount,
+                lastRunChangedByteCount: lastRunChangedByteCount,
+                lastRunAddedCount: lastRunAddedCount,
+                lastRunUpdatedCount: lastRunUpdatedCount,
+                lastRunSourceFileCount: lastRunSourceFileCount,
+                lastRunPrunedCount: lastRunPrunedCount,
+                lastRunChangedPathsSample: lastRunChangedPathsSample,
+                lastRunPrunedPathsSample: lastRunPrunedPathsSample,
                 safetyPauseUntil: safetyPauseUntil,
                 safetyPauseReason: safetyPauseReason
             )
@@ -171,6 +216,10 @@ final class CloudBackupManager: ObservableObject {
         guard automaticBackupsEnabled else { return }
         guard !isCaptureModeActive else { return }
         guard !isSafetyPauseActive else {
+            refreshStatus()
+            return
+        }
+        guard hasPendingBackup else {
             refreshStatus()
             return
         }
@@ -290,36 +339,116 @@ final class CloudBackupManager: ObservableObject {
             refreshStatus()
             return
         }
-        let stagingRoot = fileManager.temporaryDirectory
-            .appendingPathComponent("ScoutCaptureCloudBackup-\(UUID().uuidString)", isDirectory: true)
-        let stagingBackup = stagingRoot.appendingPathComponent(Constants.latestFolderName, isDirectory: true)
-        let stagingStorage = stagingBackup.appendingPathComponent(Constants.storageRootFolderName, isDirectory: true)
+        try fileManager.createDirectory(at: backupRoot, withIntermediateDirectories: true)
+        let inProgressURL = backupRoot.appendingPathComponent(Constants.inProgressFolderName, isDirectory: true)
+        let latestURL = backupRoot.appendingPathComponent(Constants.latestFolderName, isDirectory: true)
+        let inProgressStorage = inProgressURL.appendingPathComponent(Constants.storageRootFolderName, isDirectory: true)
+        let hadLatestSnapshot = fileManager.fileExists(atPath: latestURL.path)
 
-        if fileManager.fileExists(atPath: stagingRoot.path) {
-            try? fileManager.removeItem(at: stagingRoot)
+        if fileManager.fileExists(atPath: inProgressURL.path) {
+            try fileManager.removeItem(at: inProgressURL)
         }
-        try fileManager.createDirectory(at: stagingStorage, withIntermediateDirectories: true)
+        if hadLatestSnapshot {
+            try fileManager.moveItem(at: latestURL, to: inProgressURL)
+        } else {
+            try fileManager.createDirectory(at: inProgressStorage, withIntermediateDirectories: true)
+        }
+        try fileManager.createDirectory(at: inProgressStorage, withIntermediateDirectories: true)
+
+        var backupCommitted = false
+        defer {
+            if backupCommitted == false, fileManager.fileExists(atPath: inProgressURL.path) {
+                if hadLatestSnapshot, !fileManager.fileExists(atPath: latestURL.path) {
+                    try? fileManager.moveItem(at: inProgressURL, to: latestURL)
+                } else {
+                    try? fileManager.removeItem(at: inProgressURL)
+                }
+            }
+        }
+
+        var previousRecordsByPath: [String: CloudBackupManifest.FileRecord] = [:]
+        if hadLatestSnapshot, let priorManifest = try? loadManifest(at: inProgressURL) {
+            previousRecordsByPath = Dictionary(
+                uniqueKeysWithValues: priorManifest.files.map { ($0.relativePath, $0) }
+            )
+        }
+
         let sourceFiles = try recursiveFileURLs(in: sourceRoot).filter { fileURL in
             !isWithinBackupsFolder(fileURL, storageRoot: sourceRoot)
         }
-        let totalProgressSteps = sourceFiles.count + 2
+        let totalProgressSteps = sourceFiles.count + 3
         var completedProgressSteps = 0
-        updateProgress(phase: "Copying files", completed: completedProgressSteps, total: totalProgressSteps)
+        updateProgress(phase: "Scanning files", completed: completedProgressSteps, total: totalProgressSteps)
+        var sourceRelativePaths = Set<String>()
+        var fileRecords: [CloudBackupManifest.FileRecord] = []
+        var changedFilesCount = 0
+        var unchangedFilesCount = 0
+        var changedFilesByteCount = 0
+        var addedFilesCount = 0
+        var updatedFilesCount = 0
+        var changedRelativePaths: [String] = []
         for sourceFileURL in sourceFiles {
             let relativePath = sourceFileURL.path.replacingOccurrences(of: "\(sourceRoot.path)/", with: "")
-            let targetURL = stagingStorage.appendingPathComponent(relativePath, isDirectory: false)
-            try copyFile(from: sourceFileURL, to: targetURL)
-            completedProgressSteps += 1
-            updateProgress(phase: "Copying files", completed: completedProgressSteps, total: totalProgressSteps)
-        }
+            sourceRelativePaths.insert(relativePath)
+            let targetURL = inProgressStorage.appendingPathComponent(relativePath, isDirectory: false)
+            let sourceData = try Data(contentsOf: sourceFileURL)
+            let digest = SHA256.hash(data: sourceData)
+            let sha256 = digest.map { String(format: "%02x", $0) }.joined()
+            let fileRecord = CloudBackupManifest.FileRecord(
+                relativePath: "storage-root/\(relativePath)",
+                byteCount: sourceData.count,
+                sha256: sha256
+            )
+            fileRecords.append(fileRecord)
 
-        let defaultsURL = stagingBackup.appendingPathComponent(Constants.userDefaultsFilename)
-        try makeUserDefaultsExportData().write(to: defaultsURL, options: [.atomic])
+            let baselineRecord = previousRecordsByPath[fileRecord.relativePath]
+            let isUnchanged = baselineRecord?.byteCount == fileRecord.byteCount &&
+                baselineRecord?.sha256 == fileRecord.sha256 &&
+                fileManager.fileExists(atPath: targetURL.path)
+            if isUnchanged {
+                unchangedFilesCount += 1
+            } else {
+                try writeFileData(sourceData, to: targetURL)
+                changedFilesCount += 1
+                changedFilesByteCount += sourceData.count
+                if baselineRecord == nil {
+                    addedFilesCount += 1
+                } else {
+                    updatedFilesCount += 1
+                }
+                changedRelativePaths.append(relativePath)
+            }
+            completedProgressSteps += 1
+            updateProgress(phase: "Scanning files", completed: completedProgressSteps, total: totalProgressSteps)
+        }
+        let prunedRelativePaths = try removeStaleStorageFiles(in: inProgressStorage, keepingRelativePaths: sourceRelativePaths)
+        completedProgressSteps += 1
+        updateProgress(phase: "Pruning stale files", completed: completedProgressSteps, total: totalProgressSteps)
+
+        let defaultsURL = inProgressURL.appendingPathComponent(Constants.userDefaultsFilename)
+        let defaultsData = try makeUserDefaultsExportData()
+        try defaultsData.write(to: defaultsURL, options: [.atomic])
+        let defaultsDigest = SHA256.hash(data: defaultsData).map { String(format: "%02x", $0) }.joined()
+        fileRecords.append(
+            CloudBackupManifest.FileRecord(
+                relativePath: Constants.userDefaultsFilename,
+                byteCount: defaultsData.count,
+                sha256: defaultsDigest
+            )
+        )
         completedProgressSteps += 1
         updateProgress(phase: "Writing preferences", completed: completedProgressSteps, total: totalProgressSteps)
 
-        let manifest = try makeManifest(for: stagingBackup, localRevision: localRevision)
-        let manifestURL = stagingBackup.appendingPathComponent(Constants.manifestFilename)
+        let manifest = CloudBackupManifest(
+            backupID: UUID(),
+            createdAt: Date(),
+            schemaVersion: Constants.schemaVersion,
+            appVersion: appVersionString(),
+            localRevision: localRevision,
+            selectedPropertyID: userDefaults.string(forKey: "scoutcapture.selectedPropertyID"),
+            files: fileRecords.sorted(by: { $0.relativePath < $1.relativePath })
+        )
+        let manifestURL = inProgressURL.appendingPathComponent(Constants.manifestFilename)
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         encoder.dateEncodingStrategy = .iso8601
@@ -327,23 +456,25 @@ final class CloudBackupManager: ObservableObject {
         completedProgressSteps += 1
         updateProgress(phase: "Validating backup", completed: completedProgressSteps, total: totalProgressSteps)
 
-        try validateBackup(at: stagingBackup)
-
-        try fileManager.createDirectory(at: backupRoot, withIntermediateDirectories: true)
-        let inProgressURL = backupRoot.appendingPathComponent(Constants.inProgressFolderName, isDirectory: true)
-        let latestURL = backupRoot.appendingPathComponent(Constants.latestFolderName, isDirectory: true)
-        let rollbackURL = backupRoot.appendingPathComponent("\(Constants.latestFolderName)-previous", isDirectory: true)
-
-        if fileManager.fileExists(atPath: inProgressURL.path) {
-            try fileManager.removeItem(at: inProgressURL)
+        if hadLatestSnapshot, !previousRecordsByPath.isEmpty {
+            let changedPaths = Set(
+                fileRecords
+                    .filter { record in
+                        guard let baselineRecord = previousRecordsByPath[record.relativePath] else { return true }
+                        return baselineRecord.byteCount != record.byteCount || baselineRecord.sha256 != record.sha256
+                    }
+                    .map(\.relativePath)
+            )
+            try validateBackup(
+                at: inProgressURL,
+                onlyRelativePaths: changedPaths.union([Constants.userDefaultsFilename])
+            )
+        } else {
+            try validateBackup(at: inProgressURL)
         }
-        try moveReplacingItem(at: stagingBackup, to: inProgressURL)
 
-        if fileManager.fileExists(atPath: rollbackURL.path) {
-            try fileManager.removeItem(at: rollbackURL)
-        }
         if fileManager.fileExists(atPath: latestURL.path) {
-            try fileManager.moveItem(at: latestURL, to: rollbackURL)
+            try fileManager.removeItem(at: latestURL)
         }
         try fileManager.moveItem(at: inProgressURL, to: latestURL)
         let finalManifestURL = latestURL.appendingPathComponent(Constants.manifestFilename, isDirectory: false)
@@ -352,17 +483,23 @@ final class CloudBackupManager: ObservableObject {
                 NSLocalizedDescriptionKey: "Backup validation failed: manifest missing after write."
             ])
         }
-        if fileManager.fileExists(atPath: rollbackURL.path) {
-            try fileManager.removeItem(at: rollbackURL)
-        }
-        if fileManager.fileExists(atPath: stagingRoot.path) {
-            try? fileManager.removeItem(at: stagingRoot)
-        }
 
         userDefaults.set(localRevision, forKey: Constants.backedUpRevisionKey)
         userDefaults.set(Date(), forKey: Constants.lastSuccessfulBackupAtKey)
+        userDefaults.set(changedFilesCount, forKey: Constants.lastRunChangedCountKey)
+        userDefaults.set(unchangedFilesCount, forKey: Constants.lastRunUnchangedCountKey)
+        userDefaults.set(changedFilesByteCount, forKey: Constants.lastRunChangedByteCountKey)
+        userDefaults.set(addedFilesCount, forKey: Constants.lastRunAddedCountKey)
+        userDefaults.set(updatedFilesCount, forKey: Constants.lastRunUpdatedCountKey)
+        userDefaults.set(sourceFiles.count, forKey: Constants.lastRunSourceFileCountKey)
+        userDefaults.set(prunedRelativePaths.count, forKey: Constants.lastRunPrunedCountKey)
+        userDefaults.set(Array(changedRelativePaths.prefix(8)), forKey: Constants.lastRunChangedPathsSampleKey)
+        userDefaults.set(Array(prunedRelativePaths.prefix(8)), forKey: Constants.lastRunPrunedPathsSampleKey)
         userDefaults.removeObject(forKey: Constants.lastFailureMessageKey)
-        print("[CloudBackup] trigger=\(trigger) result=success revision=\(localRevision)")
+        backupCommitted = true
+        print(
+            "[CloudBackup] trigger=\(trigger) result=success revision=\(localRevision) changed=\(changedFilesCount) unchanged=\(unchangedFilesCount)"
+        )
     }
 
     private func updateProgress(phase: String, completed: Int, total: Int) {
@@ -625,6 +762,36 @@ final class CloudBackupManager: ObservableObject {
         }
     }
 
+    private func validateBackup(at backupFolder: URL, onlyRelativePaths: Set<String>) throws {
+        let manifest = try loadManifest(at: backupFolder)
+        guard manifest.schemaVersion == Constants.schemaVersion else {
+            throw NSError(domain: "ScoutCapture.CloudBackup", code: 2, userInfo: [
+                NSLocalizedDescriptionKey: "The backup schema is not supported by this app version."
+            ])
+        }
+        let recordsByPath = Dictionary(uniqueKeysWithValues: manifest.files.map { ($0.relativePath, $0) })
+        for relativePath in onlyRelativePaths {
+            guard let file = recordsByPath[relativePath] else {
+                throw NSError(domain: "ScoutCapture.CloudBackup", code: 3, userInfo: [
+                    NSLocalizedDescriptionKey: "Backup file missing: \(relativePath)"
+                ])
+            }
+            let url = backupFolder.appendingPathComponent(file.relativePath)
+            guard ensureUbiquitousItemAvailable(at: url) else {
+                throw NSError(domain: "ScoutCapture.CloudBackup", code: 3, userInfo: [
+                    NSLocalizedDescriptionKey: "Backup file missing: \(file.relativePath)"
+                ])
+            }
+            let data = try Data(contentsOf: url)
+            let digest = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+            guard data.count == file.byteCount, digest == file.sha256 else {
+                throw NSError(domain: "ScoutCapture.CloudBackup", code: 4, userInfo: [
+                    NSLocalizedDescriptionKey: "Backup validation failed for \(file.relativePath)."
+                ])
+            }
+        }
+    }
+
     private func loadManifest(at backupFolder: URL) throws -> CloudBackupManifest {
         let manifestURL = backupFolder.appendingPathComponent(Constants.manifestFilename, isDirectory: false)
         guard ensureUbiquitousItemAvailable(at: manifestURL) else {
@@ -701,6 +868,15 @@ final class CloudBackupManager: ObservableObject {
         try fileManager.copyItem(at: sourceURL, to: destinationURL)
     }
 
+    private func writeFileData(_ data: Data, to destinationURL: URL) throws {
+        let parent = destinationURL.deletingLastPathComponent()
+        try fileManager.createDirectory(at: parent, withIntermediateDirectories: true)
+        if fileManager.fileExists(atPath: destinationURL.path) {
+            try fileManager.removeItem(at: destinationURL)
+        }
+        try data.write(to: destinationURL, options: [.atomic])
+    }
+
     private func moveReplacingItem(at source: URL, to destination: URL) throws {
         if fileManager.fileExists(atPath: destination.path) {
             try fileManager.removeItem(at: destination)
@@ -712,6 +888,44 @@ final class CloudBackupManager: ObservableObject {
         let backupsRoot = storageRoot.appendingPathComponent("Backups", isDirectory: true).standardizedFileURL.path
         let filePath = fileURL.standardizedFileURL.path
         return filePath == backupsRoot || filePath.hasPrefix(backupsRoot + "/")
+    }
+
+    private func removeStaleStorageFiles(in storageRoot: URL, keepingRelativePaths: Set<String>) throws -> [String] {
+        guard fileManager.fileExists(atPath: storageRoot.path) else { return [] }
+        let existingFiles = try recursiveFileURLs(in: storageRoot)
+        var prunedRelativePaths: [String] = []
+        for fileURL in existingFiles {
+            let relativePath = fileURL.path.replacingOccurrences(of: "\(storageRoot.path)/", with: "")
+            if !keepingRelativePaths.contains(relativePath) {
+                try fileManager.removeItem(at: fileURL)
+                prunedRelativePaths.append(relativePath)
+            }
+        }
+        try removeEmptyDirectoriesRecursively(in: storageRoot)
+        return prunedRelativePaths.sorted()
+    }
+
+    private func removeEmptyDirectoriesRecursively(in directory: URL) throws {
+        guard fileManager.fileExists(atPath: directory.path) else { return }
+        let children = try fileManager.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: [.isDirectoryKey],
+            options: [.skipsHiddenFiles]
+        )
+        for child in children {
+            let values = try child.resourceValues(forKeys: [.isDirectoryKey])
+            if values.isDirectory == true {
+                try removeEmptyDirectoriesRecursively(in: child)
+            }
+        }
+        let refreshedChildren = try fileManager.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: nil,
+            options: [.skipsHiddenFiles]
+        )
+        if refreshedChildren.isEmpty && directory.lastPathComponent != Constants.storageRootFolderName {
+            try fileManager.removeItem(at: directory)
+        }
     }
 
     private func makeUserDefaultsExportData() throws -> Data {

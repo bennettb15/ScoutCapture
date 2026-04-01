@@ -272,6 +272,7 @@
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = ScoutCapture/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = "Scout Capture";
 				INFOPLIST_KEY_NSCameraUsageDescription = "SCOUT needs camera access to capture time-stamped property photos.";
 				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "Location is used to embed GPS metadata into photos.";
 				INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription = "SCOUT needs permission to save captured photos to your photo library.";
@@ -312,6 +313,7 @@
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = ScoutCapture/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = "Scout Capture";
 				INFOPLIST_KEY_NSCameraUsageDescription = "SCOUT needs camera access to capture time-stamped property photos.";
 				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "Location is used to embed GPS metadata into photos.";
 				INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription = "SCOUT needs permission to save captured photos to your photo library.";
