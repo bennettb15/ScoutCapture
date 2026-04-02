@@ -7004,9 +7004,11 @@ struct ContentView: View {
                                 .offset(x: cancelOffsetX, y: -12)
                             }
 
-                            hdQuickButton(size: 44)
-                                .rotationEffect(bottomGlyphRotationAngle)
-                                .offset(x: hdOffsetX, y: -12)
+                            if camera.hdSupported {
+                                hdQuickButton(size: 44)
+                                    .rotationEffect(bottomGlyphRotationAngle)
+                                    .offset(x: hdOffsetX, y: -12)
+                            }
 
                             detailNoteQuickButton(size: 44)
                                 .rotationEffect(bottomGlyphRotationAngle)
