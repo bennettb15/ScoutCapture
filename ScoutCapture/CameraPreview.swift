@@ -289,6 +289,7 @@ final class CameraManager: NSObject, ObservableObject {
     private var isSessionConfigured = false
     private var shouldResumeRunningOnActive = false
     private var videoDevice: AVCaptureDevice?
+    private var defaultFormatByDeviceID: [String: AVCaptureDevice.Format] = [:]
     private let photoOutput = AVCapturePhotoOutput()
 
     // Deliver photo data off the main thread so downstream work (e.g. Photos writes) cannot freeze UI.
@@ -667,14 +668,7 @@ final class CameraManager: NSObject, ObservableObject {
 
         let minZ = CGFloat(device.minAvailableVideoZoomFactor)
         let maxZ = CGFloat(device.maxAvailableVideoZoomFactor)
-
-        let uiBase: CGFloat = (currentPosition == .back) ? 0.5 : 1.0
-        let uiToDeviceScale: CGFloat = (minZ <= uiBase + 0.01) ? 1.0 : (minZ / uiBase)
-
-        var deviceZoom = uiZoom * uiToDeviceScale
-        if currentPosition == .front {
-            deviceZoom *= frontSelfieCropFactor
-        }
+        let deviceZoom = deviceZoomFactor(forDisplayZoom: uiZoom, device: device, position: currentPosition)
         let target = max(minZ, min(deviceZoom, maxZ))
 
         do {
@@ -702,14 +696,7 @@ final class CameraManager: NSObject, ObservableObject {
 
         let minZ = CGFloat(device.minAvailableVideoZoomFactor)
         let maxZ = CGFloat(device.maxAvailableVideoZoomFactor)
-
-        let uiBase: CGFloat = (currentPosition == .back) ? 0.5 : 1.0
-        let uiToDeviceScale: CGFloat = (minZ <= uiBase + 0.01) ? 1.0 : (minZ / uiBase)
-
-        var deviceZoom = uiZoom * uiToDeviceScale
-        if currentPosition == .front {
-            deviceZoom *= frontSelfieCropFactor
-        }
+        let deviceZoom = deviceZoomFactor(forDisplayZoom: uiZoom, device: device, position: currentPosition)
         let target = max(minZ, min(deviceZoom, maxZ))
 
         do {
@@ -833,7 +820,7 @@ final class CameraManager: NSObject, ObservableObject {
         videoDevice = device
         configureDefaultContinuousFocus(on: device)
         DispatchQueue.main.async {
-            self.hdSupported = (self.currentPosition == .back)
+            self.hdSupported = self.deviceSupportsHDCapture(device, position: self.currentPosition)
         }
 
         do {
@@ -895,7 +882,7 @@ final class CameraManager: NSObject, ObservableObject {
         videoDevice = device
         configureDefaultContinuousFocus(on: device)
         DispatchQueue.main.async {
-            self.hdSupported = (self.currentPosition == .back)
+            self.hdSupported = self.deviceSupportsHDCapture(device, position: self.currentPosition)
         }
 
         do {
@@ -942,39 +929,62 @@ final class CameraManager: NSObject, ObservableObject {
         }
     }
 
-    private func rebuildZoomSteps(for device: AVCaptureDevice, position: AVCaptureDevice.Position) {
+    private func deviceSupportsHDCapture(_ device: AVCaptureDevice, position: AVCaptureDevice.Position) -> Bool {
+        guard position == .back else { return false }
 
+        // Treat standard 12 MP sensors as non-HD-capable for this UI.
+        // A slightly higher threshold avoids counting 4032x3024-class cameras.
+        let thresholdPixels = Int64(13_000_000)
+        for format in device.formats {
+            if #available(iOS 16.0, *) {
+                let bestDims = format.supportedMaxPhotoDimensions.max {
+                    Int64($0.width) * Int64($0.height) < Int64($1.width) * Int64($1.height)
+                }
+                if let bestDims {
+                    let pixels = Int64(bestDims.width) * Int64(bestDims.height)
+                    if pixels > thresholdPixels {
+                        return true
+                    }
+                }
+            } else {
+                let dims = format.highResolutionStillImageDimensions
+                let pixels = Int64(dims.width) * Int64(dims.height)
+                if pixels > thresholdPixels {
+                    return true
+                }
+            }
+        }
+
+        return false
+    }
+
+    private func rebuildZoomSteps(for device: AVCaptureDevice, position: AVCaptureDevice.Position) {
+        let filterDevice: AVCaptureDevice
         let desired: [CGFloat]
         if position == .back, effectiveHDEnabled {
             // In HD mode, only show zoom steps that map to physically available back lenses.
             desired = hdBackZoomStepsForAvailableLenses()
+            filterDevice = pickBestCameraDevice(for: .back) ?? device
         } else {
-            desired = (position == .back) ? [0.5, 1, 2, 4, 8] : [1, 2]
+            desired = (position == .back) ? nonHDBackZoomStepsForDevice(device) : [1, 2]
+            filterDevice = device
         }
 
-        let minZ = CGFloat(device.minAvailableVideoZoomFactor)
-        let maxZ = CGFloat(device.maxAvailableVideoZoomFactor)
-
-        let uiBase: CGFloat = (position == .back) ? 0.5 : 1.0
-        let uiToDeviceScale: CGFloat = (minZ <= uiBase + 0.01) ? 1.0 : (minZ / uiBase)
+        let minZ = CGFloat(filterDevice.minAvailableVideoZoomFactor)
+        let maxZ = CGFloat(filterDevice.maxAvailableVideoZoomFactor)
 
         let filtered = desired.filter { ui in
-            let dz = ui * uiToDeviceScale
+            let dz = deviceZoomFactor(forDisplayZoom: ui, device: filterDevice, position: position)
             return dz >= minZ - 0.001 && dz <= maxZ + 0.001
         }
 
         zoomSteps = filtered.map { z in
-            let id: String
-            if z == 0.5 { id = "0.5" }
-            else if z == 1 { id = "1" }
-            else { id = String(Int(z)) }
-
-            let label: String
-            if z == 0.5 { label = "0.5" }
-            else if z == 1 { label = "1" }
-            else { label = String(Int(z)) }
-
-            return ZoomStep(id: id, factor: z, label: label)
+            let normalized = canonicalDisplayZoom(z)
+            return ZoomStep(
+                id: displayZoomID(normalized),
+                factor: normalized,
+                label: displayZoomLabel(normalized)
+            )
         }
 
         if zoomSteps.isEmpty {
@@ -982,12 +992,8 @@ final class CameraManager: NSObject, ObservableObject {
         }
 
         if position == .back {
-            let nativeIds = backLensAnchors()
-                .map { anchor -> String in
-                    if anchor.uiFactor == 0.5 { return "0.5" }
-                    if anchor.uiFactor == 1.0 { return "1" }
-                    return String(Int(anchor.uiFactor))
-                }
+            let nativeIds = hdBackZoomStepsForAvailableLenses()
+                .map(displayZoomID(_:))
                 .sorted { a, b in
                     let av = (a == "0.5") ? 0.5 : Double(a) ?? 0
                     let bv = (b == "0.5") ? 0.5 : Double(b) ?? 0
@@ -1004,7 +1010,11 @@ final class CameraManager: NSObject, ObservableObject {
     }
 
     private func hdBackZoomStepsForAvailableLenses() -> [CGFloat] {
-        var steps = backLensAnchors().map { $0.uiFactor }.sorted()
+        guard let device = pickBestCameraDevice(for: .back) else {
+            return [1.0]
+        }
+
+        var steps = nativeBackDisplayZoomSteps(for: device, includeSecondaryNative: false)
 
         // Defensive fallback: every supported iPhone should at least provide wide.
         if steps.isEmpty {
@@ -1026,43 +1036,44 @@ final class CameraManager: NSObject, ObservableObject {
     }
 
     private func nonHDBackZoomStepsForDevice(_ device: AVCaptureDevice) -> [CGFloat] {
-        let desired: [CGFloat] = [0.5, 1, 2, 4, 8]
-        let minZ = CGFloat(device.minAvailableVideoZoomFactor)
-        let maxZ = CGFloat(device.maxAvailableVideoZoomFactor)
-
-        let uiBase: CGFloat = 0.5
-        let uiToDeviceScale: CGFloat = (minZ <= uiBase + 0.01) ? 1.0 : (minZ / uiBase)
-
-        let filtered = desired.filter { ui in
-            let dz = ui * uiToDeviceScale
-            return dz >= minZ - 0.001 && dz <= maxZ + 0.001
-        }
-
-        return filtered.isEmpty ? [1.0] : filtered
+        let steps = nativeBackDisplayZoomSteps(for: device, includeSecondaryNative: true)
+        return steps.isEmpty ? [1.0] : steps
     }
 
-    private func backLensAnchors() -> [(uiFactor: CGFloat, device: AVCaptureDevice)] {
-        var anchors: [(uiFactor: CGFloat, device: AVCaptureDevice)] = []
+    private func nativeBackDisplayZoomSteps(for device: AVCaptureDevice, includeSecondaryNative: Bool) -> [CGFloat] {
+        let multiplier = displayZoomFactorMultiplier(for: device, position: .back)
+        var steps: [CGFloat] = [canonicalDisplayZoom(CGFloat(device.minAvailableVideoZoomFactor) * multiplier)]
 
-        if let uw = AVCaptureDevice.default(.builtInUltraWideCamera, for: .video, position: .back) {
-            anchors.append((0.5, uw))
-        }
-        if let wide = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back) {
-            anchors.append((1.0, wide))
-        }
-        if let tele = AVCaptureDevice.default(.builtInTelephotoCamera, for: .video, position: .back) {
-            anchors.append((4.0, tele))
+        let switchOvers = device.virtualDeviceSwitchOverVideoZoomFactors.map { canonicalDisplayZoom(CGFloat(truncating: $0) * multiplier) }
+        steps.append(contentsOf: switchOvers)
+
+        if includeSecondaryNative {
+            let upscale = canonicalDisplayZoom(device.activeFormat.videoZoomFactorUpscaleThreshold * multiplier)
+            if upscale > 1.0 {
+                steps.append(upscale)
+            }
+
+            let nativeAnchors = Array(Set(steps.filter { $0 >= 1.0 })).sorted()
+            let maxDisplayZoom = canonicalDisplayZoom(CGFloat(device.maxAvailableVideoZoomFactor) * multiplier)
+            let supportsCropAnchors = device.isVirtualDevice || nativeAnchors.count > 1
+            if supportsCropAnchors {
+                let doubledAnchors = nativeAnchors
+                    .map { canonicalDisplayZoom($0 * 2.0) }
+                    .filter { $0 > 1.0 && $0 <= maxDisplayZoom + 0.001 }
+                steps.append(contentsOf: doubledAnchors)
+            } else if let baseAnchor = nativeAnchors.first, baseAnchor >= 1.0 {
+                // Single-lens devices like iPad can still expose a native-style 2x crop stop
+                // in the system camera UI without supporting the broader multi-lens anchor set.
+                let doubled = canonicalDisplayZoom(baseAnchor * 2.0)
+                if doubled > 1.0 && doubled <= maxDisplayZoom + 0.001 {
+                    steps.append(doubled)
+                }
+            }
         }
 
-        // Some devices can expose the same underlying lens across multiple types.
-        // Keep one anchor per unique device identity.
-        var seen = Set<String>()
-        return anchors.filter { entry in
-            let key = entry.device.uniqueID
-            if seen.contains(key) { return false }
-            seen.insert(key)
-            return true
-        }
+        let filtered = steps.filter { $0 > 0 }
+        let unique = Array(Set(filtered)).sorted()
+        return unique.isEmpty ? [1.0] : unique
     }
 
     private func nearestBackLensDevice(forUIZoom uiZoom: CGFloat) -> AVCaptureDevice? {
@@ -1081,6 +1092,76 @@ final class CameraManager: NSObject, ObservableObject {
         }
 
         return best?.device
+    }
+
+    private func backLensAnchors() -> [(uiFactor: CGFloat, device: AVCaptureDevice)] {
+        guard let wide = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back) else {
+            return []
+        }
+
+        var devices: [AVCaptureDevice] = []
+        if let ultra = AVCaptureDevice.default(.builtInUltraWideCamera, for: .video, position: .back) {
+            devices.append(ultra)
+        }
+        devices.append(wide)
+        if let tele = AVCaptureDevice.default(.builtInTelephotoCamera, for: .video, position: .back) {
+            devices.append(tele)
+        }
+
+        let uniqueDevices = Dictionary(grouping: devices, by: \.uniqueID).compactMap { $0.value.first }
+        let wideFOV = max(CGFloat(wide.activeFormat.videoFieldOfView), 0.01)
+
+        let anchors = uniqueDevices.compactMap { device -> (uiFactor: CGFloat, device: AVCaptureDevice)? in
+            let fov = max(CGFloat(device.activeFormat.videoFieldOfView), 0.01)
+            guard fov > 0 else { return nil }
+            let ratio = tan((wideFOV * .pi / 180) / 2) / tan((fov * .pi / 180) / 2)
+            return (canonicalDisplayZoom(ratio), device)
+        }
+
+        return anchors.sorted { $0.uiFactor < $1.uiFactor }
+    }
+
+    private func displayZoomFactorMultiplier(for device: AVCaptureDevice, position: AVCaptureDevice.Position) -> CGFloat {
+        guard position == .back else { return 1.0 }
+        if #available(iOS 18.0, *) {
+            let multiplier = device.displayVideoZoomFactorMultiplier
+            if multiplier > 0.01 {
+                return multiplier
+            }
+        }
+        if device.constituentDevices.contains(where: { $0.deviceType == .builtInUltraWideCamera }) {
+            return 0.5
+        }
+        return 1.0
+    }
+
+    private func deviceZoomFactor(forDisplayZoom displayZoom: CGFloat, device: AVCaptureDevice, position: AVCaptureDevice.Position) -> CGFloat {
+        let multiplier = displayZoomFactorMultiplier(for: device, position: position)
+        let baseZoom = max(0.01, displayZoom / max(multiplier, 0.01))
+        if position == .front {
+            return baseZoom * frontSelfieCropFactor
+        }
+        return baseZoom
+    }
+
+    private func canonicalDisplayZoom(_ zoom: CGFloat) -> CGFloat {
+        if abs(zoom - 0.5) < 0.12 { return 0.5 }
+        let roundedInt = zoom.rounded()
+        if abs(zoom - roundedInt) < 0.12 { return roundedInt }
+        return (zoom * 10).rounded() / 10
+    }
+
+    private func displayZoomID(_ zoom: CGFloat) -> String {
+        if abs(zoom - 0.5) < 0.01 { return "0.5" }
+        let roundedInt = zoom.rounded()
+        if abs(zoom - roundedInt) < 0.01 {
+            return String(Int(roundedInt))
+        }
+        return String(format: "%.1f", zoom)
+    }
+
+    private func displayZoomLabel(_ zoom: CGFloat) -> String {
+        displayZoomID(zoom)
     }
 
     private func refreshLensDebug() {
@@ -1256,6 +1337,7 @@ final class CameraManager: NSObject, ObservableObject {
 
             // Update the active device reference.
             videoDevice = device
+            rememberDefaultFormatIfNeeded(for: device)
             configureDefaultContinuousFocus(on: device)
             // When HD is enabled on the back camera, force the device into the format
             // that supports the largest still photo dimensions.
@@ -1264,6 +1346,12 @@ final class CameraManager: NSObject, ObservableObject {
 
                 if #available(iOS 16.0, *) {
                     // Must happen after activeFormat is set.
+                    self.syncPhotoOutputMaxDimensions(to: device)
+                }
+            } else {
+                self.restoreDefaultFormatIfNeeded(on: device)
+
+                if #available(iOS 16.0, *) {
                     self.syncPhotoOutputMaxDimensions(to: device)
                 }
             }
@@ -1284,6 +1372,8 @@ final class CameraManager: NSObject, ObservableObject {
         // Goal: select the format whose supportedMaxPhotoDimensions includes the largest still size.
         // This is what enables true 48MP on devices/lenses that support it.
         guard #available(iOS 16.0, *) else { return }
+
+        rememberDefaultFormatIfNeeded(for: device)
 
         // Pick the format with the largest max photo dimensions.
         var bestFormat: AVCaptureDevice.Format?
@@ -1307,6 +1397,24 @@ final class CameraManager: NSObject, ObservableObject {
             device.unlockForConfiguration()
         } catch {
             // If we cannot lock, keep current format.
+        }
+    }
+
+    private func rememberDefaultFormatIfNeeded(for device: AVCaptureDevice) {
+        if defaultFormatByDeviceID[device.uniqueID] == nil {
+            defaultFormatByDeviceID[device.uniqueID] = device.activeFormat
+        }
+    }
+
+    private func restoreDefaultFormatIfNeeded(on device: AVCaptureDevice) {
+        guard let defaultFormat = defaultFormatByDeviceID[device.uniqueID] else { return }
+
+        do {
+            try device.lockForConfiguration()
+            device.activeFormat = defaultFormat
+            device.unlockForConfiguration()
+        } catch {
+            // Keep the current format if restoring fails.
         }
     }
 
