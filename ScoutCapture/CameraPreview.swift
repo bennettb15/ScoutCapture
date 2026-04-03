@@ -208,6 +208,23 @@ struct ZoomStep: Identifiable, Equatable {
     let label: String
 }
 
+private enum BackZoomPresetSourceResolutionClass {
+    case mp12
+    case higherThan12MP
+    case unknown
+}
+
+private enum BackZoomPresetKind {
+    case native
+    case cropped
+}
+
+private struct BackZoomPresetCandidate {
+    let zoom: CGFloat
+    let sourceZoom: CGFloat
+    let kind: BackZoomPresetKind
+}
+
 // MARK: - Camera Manager
 
 final class CameraManager: NSObject, ObservableObject {
@@ -1042,38 +1059,91 @@ final class CameraManager: NSObject, ObservableObject {
 
     private func nativeBackDisplayZoomSteps(for device: AVCaptureDevice, includeSecondaryNative: Bool) -> [CGFloat] {
         let multiplier = displayZoomFactorMultiplier(for: device, position: .back)
-        var steps: [CGFloat] = [canonicalDisplayZoom(CGFloat(device.minAvailableVideoZoomFactor) * multiplier)]
+        var nativeAnchors: [CGFloat] = [canonicalDisplayZoom(CGFloat(device.minAvailableVideoZoomFactor) * multiplier)]
+        let switchOvers = device.virtualDeviceSwitchOverVideoZoomFactors
+            .map { canonicalDisplayZoom(CGFloat(truncating: $0) * multiplier) }
+        nativeAnchors.append(contentsOf: switchOvers)
 
-        let switchOvers = device.virtualDeviceSwitchOverVideoZoomFactors.map { canonicalDisplayZoom(CGFloat(truncating: $0) * multiplier) }
-        steps.append(contentsOf: switchOvers)
+        let dedupedNativeAnchors = Array(Set(nativeAnchors.filter { $0 > 0 })).sorted()
+        var candidates = dedupedNativeAnchors.map { zoom in
+            BackZoomPresetCandidate(zoom: zoom, sourceZoom: zoom, kind: .native)
+        }
 
         if includeSecondaryNative {
             let upscale = canonicalDisplayZoom(device.activeFormat.videoZoomFactorUpscaleThreshold * multiplier)
             if upscale > 1.0 {
-                steps.append(upscale)
+                let source = sourceAnchor(forDerivedZoom: upscale, nativeAnchors: dedupedNativeAnchors)
+                candidates.append(BackZoomPresetCandidate(zoom: upscale, sourceZoom: source, kind: .cropped))
             }
 
-            let nativeAnchors = Array(Set(steps.filter { $0 >= 1.0 })).sorted()
+            let nativeAnchorsAtOrAbove1x = dedupedNativeAnchors.filter { $0 >= 1.0 }
             let maxDisplayZoom = canonicalDisplayZoom(CGFloat(device.maxAvailableVideoZoomFactor) * multiplier)
-            let supportsCropAnchors = device.isVirtualDevice || nativeAnchors.count > 1
+            let supportsCropAnchors = device.isVirtualDevice || nativeAnchorsAtOrAbove1x.count > 1
             if supportsCropAnchors {
-                let doubledAnchors = nativeAnchors
-                    .map { canonicalDisplayZoom($0 * 2.0) }
-                    .filter { $0 > 1.0 && $0 <= maxDisplayZoom + 0.001 }
-                steps.append(contentsOf: doubledAnchors)
-            } else if let baseAnchor = nativeAnchors.first, baseAnchor >= 1.0 {
+                for source in nativeAnchorsAtOrAbove1x {
+                    let doubled = canonicalDisplayZoom(source * 2.0)
+                    if doubled > 1.0 && doubled <= maxDisplayZoom + 0.001 {
+                        candidates.append(BackZoomPresetCandidate(zoom: doubled, sourceZoom: source, kind: .cropped))
+                    }
+                }
+            } else if let baseAnchor = nativeAnchorsAtOrAbove1x.first, baseAnchor >= 1.0 {
                 // Single-lens devices like iPad can still expose a native-style 2x crop stop
                 // in the system camera UI without supporting the broader multi-lens anchor set.
                 let doubled = canonicalDisplayZoom(baseAnchor * 2.0)
                 if doubled > 1.0 && doubled <= maxDisplayZoom + 0.001 {
-                    steps.append(doubled)
+                    candidates.append(BackZoomPresetCandidate(zoom: doubled, sourceZoom: baseAnchor, kind: .cropped))
                 }
             }
         }
 
-        let filtered = steps.filter { $0 > 0 }
-        let unique = Array(Set(filtered)).sorted()
+        let visibleCandidates = candidates.filter(shouldShowBackZoomPresetButton(_:))
+        let unique = Array(Set(visibleCandidates.map(\.zoom).filter { $0 > 0 })).sorted()
         return unique.isEmpty ? [1.0] : unique
+    }
+
+    private func sourceAnchor(forDerivedZoom zoom: CGFloat, nativeAnchors: [CGFloat]) -> CGFloat {
+        let candidates = nativeAnchors.filter { $0 >= 1.0 && $0 <= zoom + 0.001 }
+        return candidates.max() ?? max(1.0, zoom)
+    }
+
+    private func shouldShowBackZoomPresetButton(_ candidate: BackZoomPresetCandidate) -> Bool {
+        switch candidate.kind {
+        case .native:
+            return true
+        case .cropped:
+            let sourceResolution = sourceResolutionClassForBackZoomPreset(sourceZoom: candidate.sourceZoom)
+            return sourceResolution != .mp12
+        }
+    }
+
+    private func sourceResolutionClassForBackZoomPreset(sourceZoom: CGFloat) -> BackZoomPresetSourceResolutionClass {
+        guard let sourceDevice = nearestBackLensDevice(forUIZoom: sourceZoom) else {
+            return .unknown
+        }
+
+        let thresholdPixels = Int64(13_000_000)
+        var bestPixels: Int64 = 0
+
+        for format in sourceDevice.formats {
+            if #available(iOS 16.0, *) {
+                if let maxDims = format.supportedMaxPhotoDimensions.max(by: {
+                    Int64($0.width) * Int64($0.height) < Int64($1.width) * Int64($1.height)
+                }) {
+                    let pixels = Int64(maxDims.width) * Int64(maxDims.height)
+                    bestPixels = max(bestPixels, pixels)
+                }
+            } else {
+                let dims = format.highResolutionStillImageDimensions
+                let pixels = Int64(dims.width) * Int64(dims.height)
+                bestPixels = max(bestPixels, pixels)
+            }
+        }
+
+        if bestPixels == 0 {
+            return .unknown
+        }
+
+        return bestPixels > thresholdPixels ? .higherThan12MP : .mp12
     }
 
     private func nearestBackLensDevice(forUIZoom uiZoom: CGFloat) -> AVCaptureDevice? {
