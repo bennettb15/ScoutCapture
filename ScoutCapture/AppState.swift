@@ -80,6 +80,9 @@ final class AppState: ObservableObject {
     private let reExportWindowDays = 7
     private var didLoad = false
     private var cancellables: Set<AnyCancellable> = []
+    private var liveSyncTimer: Timer?
+    private var lastLiveSyncFingerprint: String?
+    private var liveSyncBurstUntil: Date?
 
     init(
         localStore: LocalStore = LocalStore(),
@@ -108,6 +111,7 @@ final class AppState: ObservableObject {
         NotificationCenter.default.publisher(for: .scoutPersistentDataDidChange)
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in
+                self?.markLiveSyncBurstWindow(seconds: 20)
                 self?.cloudBackupManager.markDataChanged()
             }
             .store(in: &cancellables)
@@ -148,19 +152,52 @@ final class AppState: ObservableObject {
             organizations = (try? localStore.fetchOrganizations()) ?? []
             let caches = makeHubCaches(for: fetched)
             applyHubCachePayload(properties: fetched, caches: caches)
+            lastLiveSyncFingerprint = localStore.propertiesLedgerFingerprint()
 
             if let selectedPropertyID, properties.contains(where: { $0.id == selectedPropertyID }) == false {
                 self.selectedPropertyID = nil
             }
         } catch {
-            properties = []
-            organizations = []
-            sessionIndexByProperty = [:]
-            draftSessionByProperty = [:]
-            pendingExportSessionByProperty = [:]
-            hubMetaByProperty = [:]
+            // Preserve current in-memory view on transient iCloud read failures.
+            print("[PropertiesRefresh] transient read failure: \(error.localizedDescription)")
         }
         isLoading = false
+    }
+
+    func setLiveSyncMonitoringActive(_ active: Bool) {
+        if active {
+            guard liveSyncTimer == nil else { return }
+            liveSyncTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
+                guard let self else { return }
+                if self.isLoading { return }
+                let now = Date()
+                let isBurst = (self.liveSyncBurstUntil.map { $0 > now }) ?? false
+                if !isBurst {
+                    // In steady state, sample every other tick (~1s effective).
+                    if Int(now.timeIntervalSince1970 * 2) % 2 != 0 {
+                        return
+                    }
+                }
+                let fingerprint = self.localStore.propertiesLedgerFingerprint()
+                if fingerprint != self.lastLiveSyncFingerprint {
+                    self.refreshProperties()
+                }
+            }
+            liveSyncTimer?.tolerance = 0.25
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
+                guard let self else { return }
+                if self.isLoading { return }
+                self.refreshProperties()
+            }
+        } else {
+            liveSyncTimer?.invalidate()
+            liveSyncTimer = nil
+            liveSyncBurstUntil = nil
+        }
+    }
+
+    private func markLiveSyncBurstWindow(seconds: TimeInterval) {
+        liveSyncBurstUntil = Date().addingTimeInterval(max(seconds, 1))
     }
 
     @discardableResult
@@ -377,18 +414,19 @@ final class AppState: ObservableObject {
                 selectedPropertyID = nil
                 clearCurrentSession()
             }
-            cloudBackupManager.pauseAutomaticBackupsForSafetyWindow(
-                minutes: 15,
-                reason: "after deleting a property"
-            )
+            cloudBackupManager.markDataChanged(scheduleBackupAfter: 0)
             return true
         } catch {
+            if handleDeletePropertyNotFound(id: id, error: error) {
+                return true
+            }
             return false
         }
     }
 
     @discardableResult
     func deleteProperty(id: UUID) -> Bool {
+        refreshProperties()
         do {
             try localStore.deleteProperty(id: id)
             properties.removeAll { $0.id == id }
@@ -398,14 +436,31 @@ final class AppState: ObservableObject {
                 selectedPropertyID = nil
                 clearCurrentSession()
             }
-            cloudBackupManager.pauseAutomaticBackupsForSafetyWindow(
-                minutes: 15,
-                reason: "after deleting a property"
-            )
+            cloudBackupManager.markDataChanged(scheduleBackupAfter: 0)
             return true
         } catch {
+            if handleDeletePropertyNotFound(id: id, error: error) {
+                return true
+            }
             return false
         }
+    }
+
+    private func handleDeletePropertyNotFound(id: UUID, error: Error) -> Bool {
+        guard case LocalStore.StoreError.propertyNotFound = error else {
+            return false
+        }
+
+        // Cross-device iCloud updates can remove a property on disk before this device's in-memory list refreshes.
+        refreshProperties()
+        properties.removeAll { $0.id == id }
+        let caches = makeHubCaches(for: properties)
+        applyHubCachePayload(properties: properties, caches: caches)
+        if selectedPropertyID == id {
+            selectedPropertyID = nil
+            clearCurrentSession()
+        }
+        return true
     }
 
     @discardableResult
@@ -630,15 +685,7 @@ final class AppState: ObservableObject {
                 clearCurrentSession()
             }
             reloadSessionCache(for: propertyID)
-            if triggerSafetyPause {
-                cloudBackupManager.pauseAutomaticBackupsForSafetyWindow(
-                    minutes: 15,
-                    reason: "after deleting a session"
-                )
-            } else {
-                // Empty-session exit cleanup should still auto-back up immediately.
-                cloudBackupManager.markDataChanged(scheduleBackupAfter: 0)
-            }
+            cloudBackupManager.markDataChanged(scheduleBackupAfter: 0)
             return true
         } catch {
             return false
@@ -719,13 +766,20 @@ final class AppState: ObservableObject {
             completion("No restorable backup is available yet.")
             return
         }
-        do {
-            let restoredSelectedPropertyID = try cloudBackupManager.restoreLatestBackup()
-            completeMigrationImport(restoredSelectedPropertyID: restoredSelectedPropertyID)
-            completion(nil)
-        } catch {
-            cloudBackupManager.refreshStatus()
-            completion(error.localizedDescription)
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self else { return }
+            do {
+                let restoredSelectedPropertyID = try self.cloudBackupManager.restoreLatestBackup(mode: .mergeMissingPropertiesOnly)
+                DispatchQueue.main.async {
+                    self.completeMigrationImport(restoredSelectedPropertyID: restoredSelectedPropertyID)
+                    completion(nil)
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    self.cloudBackupManager.refreshStatus()
+                    completion(error.localizedDescription)
+                }
+            }
         }
     }
 

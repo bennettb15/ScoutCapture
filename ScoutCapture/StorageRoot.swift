@@ -115,10 +115,23 @@ enum StorageRoot {
     private nonisolated static func makeResolution() -> Resolution {
         let localRoot = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("ScoutCapture", isDirectory: true)
-        let cloudRoot = fileManager.url(forUbiquityContainerIdentifier: nil)?
+        let cloudRoot = resolvedCloudRootWithRetry(timeout: 15.0)
+        return Resolution(cloudRoot: cloudRoot, localRoot: localRoot)
+    }
+
+    private nonisolated static func resolvedCloudRootWithRetry(timeout: TimeInterval) -> URL? {
+        let deadline = Date().addingTimeInterval(max(timeout, 0))
+        while Date() < deadline {
+            if let root = fileManager.url(forUbiquityContainerIdentifier: nil)?
+                .appendingPathComponent("Documents", isDirectory: true)
+                .appendingPathComponent("ScoutCapture", isDirectory: true) {
+                return root
+            }
+            Thread.sleep(forTimeInterval: 0.1)
+        }
+        return fileManager.url(forUbiquityContainerIdentifier: nil)?
             .appendingPathComponent("Documents", isDirectory: true)
             .appendingPathComponent("ScoutCapture", isDirectory: true)
-        return Resolution(cloudRoot: cloudRoot, localRoot: localRoot)
     }
 
     private nonisolated static func migrateLocalSCOUTToCloudIfNeeded(using resolution: Resolution) -> (attempted: Bool, result: String) {
