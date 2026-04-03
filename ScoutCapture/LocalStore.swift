@@ -50,6 +50,8 @@ final class LocalStore {
     private let scoutRootURL: URL
     private let propertiesURL: URL
     private let organizationsURL: URL
+    private let propertyTombstonesURL: URL
+    private let propertySyncEventsDirectoryURL: URL
     private let propertyFoldersURL: URL
     private let observationsDirectoryURL: URL
     private let guidedShotsDirectoryURL: URL
@@ -73,6 +75,10 @@ final class LocalStore {
         self.scoutRootURL = scoutRoot
         self.propertiesURL = scoutRoot.appendingPathComponent("properties.json")
         self.organizationsURL = scoutRoot.appendingPathComponent("organizations.json")
+        self.propertyTombstonesURL = scoutRoot.appendingPathComponent("property-tombstones.json")
+        self.propertySyncEventsDirectoryURL = scoutRoot
+            .appendingPathComponent("sync-events", isDirectory: true)
+            .appendingPathComponent("properties", isDirectory: true)
         self.propertyFoldersURL = scoutRoot.appendingPathComponent("Properties", isDirectory: true)
         self.observationsDirectoryURL = scoutRoot.appendingPathComponent("observations", isDirectory: true)
         self.guidedShotsDirectoryURL = scoutRoot.appendingPathComponent("guided-shots", isDirectory: true)
@@ -860,6 +866,13 @@ final class LocalStore {
             syncOrganizationContacts(in: &state.organizations, with: created)
             try writeOrganizations(state.organizations)
             try writeProperties(state.properties)
+            try removePropertyDeletionTombstone(propertyID: created.id)
+            try appendPropertySyncEvent(
+                propertyID: created.id,
+                operation: .upsert,
+                property: created,
+                occurredAt: created.updatedAt
+            )
             NotificationCenter.default.post(name: .scoutPersistentDataDidChange, object: nil)
             return created
         }
@@ -889,6 +902,13 @@ final class LocalStore {
             syncOrganizationContacts(in: &state.organizations, with: updated)
             try writeOrganizations(state.organizations)
             try writeProperties(state.properties)
+            try removePropertyDeletionTombstone(propertyID: updated.id)
+            try appendPropertySyncEvent(
+                propertyID: updated.id,
+                operation: .upsert,
+                property: updated,
+                occurredAt: updated.updatedAt
+            )
             NotificationCenter.default.post(name: .scoutPersistentDataDidChange, object: nil)
             return updated
         }
@@ -913,6 +933,8 @@ final class LocalStore {
 
             var movedArtifacts: [(source: URL, trash: URL)] = []
             var didWriteUpdatedProperties = false
+            let originalTombstones = try readPropertyDeletionTombstones()
+            var didWriteTombstones = false
 
             do {
                 for (index, sourceURL) in deletePlan.urls.enumerated() where fileManager.fileExists(atPath: sourceURL.path) {
@@ -934,12 +956,23 @@ final class LocalStore {
                 }
                 try purgeUnreferencedGuidedReferenceFiles(allProperties: updatedProperties)
                 didWriteUpdatedProperties = true
+                try appendPropertyDeletionTombstone(propertyID: id, deletedAt: Date())
+                didWriteTombstones = true
+                try appendPropertySyncEvent(
+                    propertyID: id,
+                    operation: .delete,
+                    property: nil,
+                    occurredAt: Date()
+                )
 
                 try fileManager.removeItem(at: transactionRoot)
                 NotificationCenter.default.post(name: .scoutPersistentDataDidChange, object: nil)
             } catch {
                 if didWriteUpdatedProperties {
                     try? writeProperties(originalProperties)
+                }
+                if didWriteTombstones {
+                    try? writePropertyDeletionTombstones(originalTombstones)
                 }
 
                 for moved in movedArtifacts.reversed() {
@@ -1347,6 +1380,22 @@ final class LocalStore {
         activeRootURL
     }
 
+    func propertiesLedgerFingerprint() -> String {
+        performFileIOSync {
+            let fileURL = propertiesURL
+            if !fileManager.fileExists(atPath: fileURL.path) {
+                _ = ensureUbiquitousItemAvailable(at: fileURL, timeout: 0.8)
+            }
+            guard fileManager.fileExists(atPath: fileURL.path) else {
+                return "missing"
+            }
+            let attrs = (try? fileManager.attributesOfItem(atPath: fileURL.path)) ?? [:]
+            let size = (attrs[.size] as? NSNumber)?.int64Value ?? -1
+            let modified = (attrs[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0
+            return "\(size)|\(modified)"
+        }
+    }
+
     func propertyFolderURL(propertyID: UUID) -> URL {
         propertyFoldersURL.appendingPathComponent(propertyID.uuidString, isDirectory: true)
     }
@@ -1421,6 +1470,10 @@ final class LocalStore {
         if !fileManager.fileExists(atPath: propertyFoldersURL.path) {
             try fileManager.createDirectory(at: propertyFoldersURL, withIntermediateDirectories: true)
         }
+
+        if !fileManager.fileExists(atPath: propertySyncEventsDirectoryURL.path) {
+            try fileManager.createDirectory(at: propertySyncEventsDirectoryURL, withIntermediateDirectories: true)
+        }
     }
 
     private func ensurePropertyExists(_ propertyID: UUID) throws {
@@ -1435,11 +1488,35 @@ final class LocalStore {
     }
 
     private func readPropertiesRaw() throws -> [Property] {
+        let syncProjected = try projectedPropertiesFromSyncEvents()
+        if let syncProjected {
+            if syncProjected.isEmpty {
+                if fileManager.fileExists(atPath: propertiesURL.path) {
+                    try? fileManager.removeItem(at: propertiesURL)
+                }
+            } else {
+                try writeProperties(syncProjected)
+            }
+            return syncProjected
+        }
+
+        if !fileManager.fileExists(atPath: propertiesURL.path) {
+            _ = ensureUbiquitousItemAvailable(at: propertiesURL, timeout: 6.0)
+        }
         guard fileManager.fileExists(atPath: propertiesURL.path) else {
             return []
         }
 
-        let data = try Data(contentsOf: propertiesURL)
+        let data: Data
+        do {
+            data = try Data(contentsOf: propertiesURL)
+        } catch {
+            if ensureUbiquitousItemAvailable(at: propertiesURL, timeout: 6.0) {
+                data = try Data(contentsOf: propertiesURL)
+            } else {
+                throw error
+            }
+        }
         return try decoder.decode([Property].self, from: data)
     }
 
@@ -1448,18 +1525,196 @@ final class LocalStore {
         try data.write(to: propertiesURL, options: .atomic)
     }
 
+    private func projectedPropertiesFromSyncEvents() throws -> [Property]? {
+        let events = try readPropertySyncEvents()
+        guard !events.isEmpty else { return nil }
+
+        var latestByPropertyID: [UUID: PropertySyncEvent] = [:]
+        for event in events {
+            if let existing = latestByPropertyID[event.propertyID] {
+                if existing.occurredAt > event.occurredAt {
+                    continue
+                }
+                if existing.occurredAt == event.occurredAt,
+                   existing.eventID.uuidString > event.eventID.uuidString {
+                    continue
+                }
+            }
+            latestByPropertyID[event.propertyID] = event
+        }
+
+        let projected = latestByPropertyID.values.compactMap { event -> Property? in
+            guard event.operation == .upsert else { return nil }
+            return event.property
+        }
+        return projected.sorted { lhs, rhs in
+            if lhs.createdAt == rhs.createdAt {
+                return lhs.id.uuidString < rhs.id.uuidString
+            }
+            return lhs.createdAt < rhs.createdAt
+        }
+    }
+
+    private func readPropertySyncEvents() throws -> [PropertySyncEvent] {
+        guard fileManager.fileExists(atPath: propertySyncEventsDirectoryURL.path) else {
+            return []
+        }
+        let files = try fileManager.contentsOfDirectory(
+            at: propertySyncEventsDirectoryURL,
+            includingPropertiesForKeys: [.isDirectoryKey],
+            options: [.skipsHiddenFiles]
+        )
+        var events: [PropertySyncEvent] = []
+        for fileURL in files.sorted(by: { $0.lastPathComponent < $1.lastPathComponent }) {
+            let values = try fileURL.resourceValues(forKeys: [.isDirectoryKey])
+            if values.isDirectory == true { continue }
+            let data = try Data(contentsOf: fileURL)
+            if let event = try? decoder.decode(PropertySyncEvent.self, from: data) {
+                events.append(event)
+            }
+        }
+        return events
+    }
+
+    private func appendPropertySyncEvent(
+        propertyID: UUID,
+        operation: PropertySyncEvent.Operation,
+        property: Property?,
+        occurredAt: Date
+    ) throws {
+        if !fileManager.fileExists(atPath: propertySyncEventsDirectoryURL.path) {
+            try fileManager.createDirectory(at: propertySyncEventsDirectoryURL, withIntermediateDirectories: true)
+        }
+        let event = PropertySyncEvent(
+            eventID: UUID(),
+            propertyID: propertyID,
+            occurredAt: occurredAt,
+            operation: operation,
+            property: property
+        )
+        let timestamp = String(format: "%.6f", occurredAt.timeIntervalSince1970).replacingOccurrences(of: ".", with: "_")
+        let filename = "\(timestamp)-\(event.eventID.uuidString).json"
+        let data = try encoder.encode(event)
+        try data.write(
+            to: propertySyncEventsDirectoryURL.appendingPathComponent(filename, isDirectory: false),
+            options: .atomic
+        )
+    }
+
+    private func seedPropertySyncEventsIfNeeded(from properties: [Property]) throws {
+        let existing = try readPropertySyncEvents()
+        guard existing.isEmpty else { return }
+        for property in properties {
+            try appendPropertySyncEvent(
+                propertyID: property.id,
+                operation: .upsert,
+                property: property,
+                occurredAt: property.updatedAt
+            )
+        }
+    }
+
     private func readOrganizationsRaw() throws -> [Organization] {
+        if !fileManager.fileExists(atPath: organizationsURL.path) {
+            _ = ensureUbiquitousItemAvailable(at: organizationsURL, timeout: 6.0)
+        }
         guard fileManager.fileExists(atPath: organizationsURL.path) else {
             return []
         }
 
-        let data = try Data(contentsOf: organizationsURL)
+        let data: Data
+        do {
+            data = try Data(contentsOf: organizationsURL)
+        } catch {
+            if ensureUbiquitousItemAvailable(at: organizationsURL, timeout: 6.0) {
+                data = try Data(contentsOf: organizationsURL)
+            } else {
+                throw error
+            }
+        }
         return try decoder.decode([Organization].self, from: data)
+    }
+
+    private func ensureUbiquitousItemAvailable(at url: URL, timeout: TimeInterval) -> Bool {
+        if fileManager.fileExists(atPath: url.path) {
+            return true
+        }
+        try? fileManager.startDownloadingUbiquitousItem(at: url)
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if fileManager.fileExists(atPath: url.path) {
+                return true
+            }
+            Thread.sleep(forTimeInterval: 0.1)
+        }
+        return fileManager.fileExists(atPath: url.path)
     }
 
     private func writeOrganizations(_ organizations: [Organization]) throws {
         let data = try encoder.encode(organizations)
         try data.write(to: organizationsURL, options: .atomic)
+    }
+
+    private struct PropertyDeletionTombstone: Codable {
+        let propertyID: UUID
+        let deletedAt: Date
+    }
+
+    private struct PropertySyncEvent: Codable {
+        enum Operation: String, Codable {
+            case upsert
+            case delete
+        }
+
+        let eventID: UUID
+        let propertyID: UUID
+        let occurredAt: Date
+        let operation: Operation
+        let property: Property?
+    }
+
+    private func readPropertyDeletionTombstones() throws -> [PropertyDeletionTombstone] {
+        guard fileManager.fileExists(atPath: propertyTombstonesURL.path) else {
+            return []
+        }
+        let data = try Data(contentsOf: propertyTombstonesURL)
+        return try decoder.decode([PropertyDeletionTombstone].self, from: data)
+    }
+
+    private func writePropertyDeletionTombstones(_ tombstones: [PropertyDeletionTombstone]) throws {
+        if tombstones.isEmpty {
+            if fileManager.fileExists(atPath: propertyTombstonesURL.path) {
+                try fileManager.removeItem(at: propertyTombstonesURL)
+            }
+            return
+        }
+        let normalized = tombstones.sorted { lhs, rhs in
+            if lhs.deletedAt == rhs.deletedAt {
+                return lhs.propertyID.uuidString < rhs.propertyID.uuidString
+            }
+            return lhs.deletedAt < rhs.deletedAt
+        }
+        let data = try encoder.encode(normalized)
+        try data.write(to: propertyTombstonesURL, options: .atomic)
+    }
+
+    private func appendPropertyDeletionTombstone(propertyID: UUID, deletedAt: Date) throws {
+        var byID: [UUID: PropertyDeletionTombstone] = Dictionary(
+            uniqueKeysWithValues: try readPropertyDeletionTombstones().map { ($0.propertyID, $0) }
+        )
+        let incoming = PropertyDeletionTombstone(propertyID: propertyID, deletedAt: deletedAt)
+        if let existing = byID[propertyID], existing.deletedAt >= incoming.deletedAt {
+            return
+        }
+        byID[propertyID] = incoming
+        try writePropertyDeletionTombstones(Array(byID.values))
+    }
+
+    private func removePropertyDeletionTombstone(propertyID: UUID) throws {
+        let existing = try readPropertyDeletionTombstones()
+        let filtered = existing.filter { $0.propertyID != propertyID }
+        guard filtered.count != existing.count else { return }
+        try writePropertyDeletionTombstones(filtered)
     }
 
     private func migratedPropertyAndOrganizationState() throws -> (properties: [Property], organizations: [Organization]) {
@@ -1501,6 +1756,7 @@ final class LocalStore {
         if didChangeProperties {
             try writeProperties(properties)
         }
+        try seedPropertySyncEventsIfNeeded(from: properties)
 
         return (properties.sorted { $0.createdAt < $1.createdAt }, organizations)
     }

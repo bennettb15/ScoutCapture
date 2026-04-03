@@ -65,6 +65,24 @@ struct CloudBackupStatus: Equatable {
     var safetyPauseReason: String?
 }
 
+enum CloudBackupRestoreMode {
+    case mergeMissingPropertiesOnly
+    case fullReplace
+}
+
+struct CloudBackupRestorePreflight: Equatable {
+    let localPropertyCount: Int
+    let backupPropertyCount: Int
+    let matchingPropertyCount: Int
+    let missingLocalPropertyIDs: [UUID]
+    let missingBackupPropertyIDs: [UUID]
+    let conflictingPropertyIDs: [UUID]
+
+    var hasMissingLocalProperties: Bool {
+        !missingLocalPropertyIDs.isEmpty
+    }
+}
+
 enum CloudBackupDedupeSupport {
     static func shouldStoreAsDeduplicatedBlob(relativePath: String) -> Bool {
         let ext = URL(fileURLWithPath: relativePath).pathExtension.lowercased()
@@ -148,6 +166,11 @@ final class CloudBackupManager: ObservableObject {
         static let automaticBackupsEnabledKey = "scout.backup.automaticEnabled"
         static let safetyPauseUntilKey = "scout.backup.safetyPauseUntil"
         static let safetyPauseReasonKey = "scout.backup.safetyPauseReason"
+    }
+
+    private struct PropertyDeletionTombstone: Codable {
+        let propertyID: UUID
+        let deletedAt: Date
     }
 
     @Published private(set) var status: CloudBackupStatus
@@ -341,12 +364,12 @@ final class CloudBackupManager: ObservableObject {
         refreshStatus()
     }
 
-    func restoreLatestBackup() throws -> UUID? {
+    func restoreLatestBackup(mode: CloudBackupRestoreMode = .mergeMissingPropertiesOnly) throws -> UUID? {
         scheduledBackupWorkItem?.cancel()
         scheduledBackupWorkItem = nil
         scheduledBackupDeadline = nil
         return try executeOnBackupQueueSync {
-            let selectedPropertyID = try restoreLatestBackupSync()
+            let selectedPropertyID = try restoreLatestBackupSync(mode: mode)
             refreshStatus()
             return selectedPropertyID
         }
@@ -494,9 +517,20 @@ final class CloudBackupManager: ObservableObject {
         var changedRelativePaths: [String] = []
         for sourceFileURL in sourceFiles {
             let relativePath = sourceFileURL.path.replacingOccurrences(of: "\(sourceRoot.path)/", with: "")
-            sourceRelativePaths.insert(relativePath)
             let targetURL = inProgressStorage.appendingPathComponent(relativePath, isDirectory: false)
-            let sourceData = try Data(contentsOf: sourceFileURL)
+            let sourceData: Data
+            do {
+                sourceData = try Data(contentsOf: sourceFileURL)
+            } catch {
+                let nsError = error as NSError
+                if nsError.domain == NSCocoaErrorDomain && nsError.code == NSFileNoSuchFileError {
+                    completedProgressSteps += 1
+                    updateProgress(phase: "Scanning files", completed: completedProgressSteps, total: totalProgressSteps)
+                    continue
+                }
+                throw error
+            }
+            sourceRelativePaths.insert(relativePath)
             let digest = SHA256.hash(data: sourceData)
             let sha256 = digest.map { String(format: "%02x", $0) }.joined()
             let dedupeContentRelativePath: String? = CloudBackupDedupeSupport.shouldStoreAsDeduplicatedBlob(relativePath: relativePath)
@@ -613,7 +647,14 @@ final class CloudBackupManager: ObservableObject {
         }
 
         if fileManager.fileExists(atPath: latestURL.path) {
-            try fileManager.removeItem(at: latestURL)
+            do {
+                try fileManager.removeItem(at: latestURL)
+            } catch {
+                let nsError = error as NSError
+                if !(nsError.domain == NSCocoaErrorDomain && nsError.code == NSFileNoSuchFileError) {
+                    throw error
+                }
+            }
         }
         try fileManager.moveItem(at: inProgressURL, to: latestURL)
         let finalManifestURL = latestURL.appendingPathComponent(Constants.manifestFilename, isDirectory: false)
@@ -660,7 +701,7 @@ final class CloudBackupManager: ObservableObject {
         return operation()
     }
 
-    private func restoreLatestBackupSync() throws -> UUID? {
+    private func restoreLatestBackupSync(mode: CloudBackupRestoreMode) throws -> UUID? {
         let restoreDeadline = Date().addingTimeInterval(20)
         var selectedBackupURL: URL?
         var selectedBackupValidatedWithManifest = false
@@ -720,16 +761,24 @@ final class CloudBackupManager: ObservableObject {
             .appendingPathComponent("ScoutCaptureCloudRollback-\(UUID().uuidString)", isDirectory: true)
         try fileManager.createDirectory(at: rollbackRoot, withIntermediateDirectories: true)
         try copyDirectoryContents(from: activeRoot, to: rollbackRoot)
-
-        let defaultsData = try Data(contentsOf: latestURL.appendingPathComponent(Constants.userDefaultsFilename))
-        let restoredSelectedPropertyID = try restoreUserDefaults(from: defaultsData)
+        let restoredSelectedPropertyID: UUID?
+        if mode == .fullReplace {
+            let defaultsData = try Data(contentsOf: latestURL.appendingPathComponent(Constants.userDefaultsFilename))
+            restoredSelectedPropertyID = try restoreUserDefaults(from: defaultsData)
+        } else {
+            restoredSelectedPropertyID = nil
+        }
 
         do {
-            try clearDirectoryContentsIfPresent(
-                at: activeRoot,
-                preservingTopLevelNames: ["Backups"]
-            )
-            try copyDirectoryContents(from: tempStorageRoot, to: activeRoot)
+            if mode == .fullReplace {
+                try clearDirectoryContentsIfPresent(
+                    at: activeRoot,
+                    preservingTopLevelNames: ["Backups"]
+                )
+                try copyDirectoryContents(from: tempStorageRoot, to: activeRoot)
+            } else {
+                _ = try mergeMissingProperties(from: tempStorageRoot, into: activeRoot)
+            }
             if selectedBackupValidatedWithManifest, let manifest = try? loadManifest(at: latestURL) {
                 userDefaults.set(manifest.localRevision, forKey: Constants.localRevisionKey)
                 userDefaults.set(manifest.localRevision, forKey: Constants.backedUpRevisionKey)
@@ -799,6 +848,34 @@ final class CloudBackupManager: ObservableObject {
             Thread.sleep(forTimeInterval: 0.1)
         }
         return fileManager.fileExists(atPath: url.path)
+    }
+
+    func restorePreflight() throws -> CloudBackupRestorePreflight {
+        try executeOnBackupQueueSync {
+            guard let latestURL = restorableBackupFolderURL() else {
+                throw NSError(domain: "ScoutCapture.CloudBackup", code: 404, userInfo: [
+                    NSLocalizedDescriptionKey: "No completed iCloud backup is available yet."
+                ])
+            }
+
+            let tempRestoreRoot = fileManager.temporaryDirectory
+                .appendingPathComponent("ScoutCaptureCloudPreflight-\(UUID().uuidString)", isDirectory: true)
+            let tempStorageRoot = tempRestoreRoot.appendingPathComponent(Constants.storageRootFolderName, isDirectory: true)
+            defer { try? fileManager.removeItem(at: tempRestoreRoot) }
+
+            try fileManager.createDirectory(at: tempRestoreRoot, withIntermediateDirectories: true)
+            if let manifest = try? loadManifest(at: latestURL), isSupportedSchemaVersion(manifest.schemaVersion) {
+                try materializeStorageRoot(from: latestURL, manifest: manifest, to: tempStorageRoot)
+            } else {
+                try copyDirectoryContents(
+                    from: latestURL.appendingPathComponent(Constants.storageRootFolderName, isDirectory: true),
+                    to: tempStorageRoot
+                )
+            }
+
+            let activeRoot = StorageRoot.prepareStorage()
+            return try buildRestorePreflight(localStorageRoot: activeRoot, backupStorageRoot: tempStorageRoot)
+        }
     }
 
     private func hasMinimalRestorablePayload(in backupFolder: URL) -> Bool {
@@ -1046,7 +1123,15 @@ final class CloudBackupManager: ObservableObject {
         for fileURL in existingFiles {
             let relativePath = fileURL.path.replacingOccurrences(of: "\(storageRoot.path)/", with: "")
             if !keepingRelativePaths.contains(relativePath) {
-                try fileManager.removeItem(at: fileURL)
+                do {
+                    try fileManager.removeItem(at: fileURL)
+                } catch {
+                    let nsError = error as NSError
+                    if nsError.domain == NSCocoaErrorDomain && nsError.code == NSFileNoSuchFileError {
+                        continue
+                    }
+                    throw error
+                }
                 prunedRelativePaths.append(relativePath)
             }
         }
@@ -1062,7 +1147,15 @@ final class CloudBackupManager: ObservableObject {
         for fileURL in existingFiles {
             let relativePath = fileURL.path.replacingOccurrences(of: "\(backupFolder.path)/", with: "")
             if !keepingRelativePaths.contains(relativePath) {
-                try fileManager.removeItem(at: fileURL)
+                do {
+                    try fileManager.removeItem(at: fileURL)
+                } catch {
+                    let nsError = error as NSError
+                    if nsError.domain == NSCocoaErrorDomain && nsError.code == NSFileNoSuchFileError {
+                        continue
+                    }
+                    throw error
+                }
                 prunedRelativePaths.append(relativePath)
             }
         }
@@ -1109,6 +1202,18 @@ final class CloudBackupManager: ObservableObject {
 
     func _debug_shouldStoreAsDeduplicatedBlob(relativePath: String) -> Bool {
         CloudBackupDedupeSupport.shouldStoreAsDeduplicatedBlob(relativePath: relativePath)
+    }
+
+    func _debug_buildRestorePreflight(localStorageRoot: URL, backupStorageRoot: URL) throws -> CloudBackupRestorePreflight {
+        try buildRestorePreflight(localStorageRoot: localStorageRoot, backupStorageRoot: backupStorageRoot)
+    }
+
+    func _debug_mergeMissingProperties(from backupStorageRoot: URL, into localStorageRoot: URL) throws -> CloudBackupRestorePreflight {
+        try mergeMissingProperties(from: backupStorageRoot, into: localStorageRoot)
+    }
+
+    func _debug_loadProperties(in storageRoot: URL) throws -> [Property] {
+        try loadProperties(in: storageRoot)
     }
 #endif
 
@@ -1238,20 +1343,262 @@ final class CloudBackupManager: ObservableObject {
     }
 
     private func hasAnyProperties(in sourceRoot: URL) -> Bool {
-        let candidates = [
-            sourceRoot
-                .appendingPathComponent("SCOUT", isDirectory: true)
-                .appendingPathComponent("properties.json", isDirectory: false),
-            sourceRoot.appendingPathComponent("properties.json", isDirectory: false)
-        ]
-        for propertiesJSONURL in candidates {
-            guard fileManager.fileExists(atPath: propertiesJSONURL.path) else { continue }
-            guard let data = try? Data(contentsOf: propertiesJSONURL) else { continue }
-            guard let raw = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else { continue }
-            if !raw.isEmpty {
-                return true
+        ((try? loadProperties(in: sourceRoot).isEmpty) == false)
+    }
+
+    private func buildRestorePreflight(localStorageRoot: URL, backupStorageRoot: URL) throws -> CloudBackupRestorePreflight {
+        let localProperties = try loadProperties(in: localStorageRoot)
+        let backupProperties = try loadProperties(in: backupStorageRoot)
+
+        let localByID = Dictionary(uniqueKeysWithValues: localProperties.map { ($0.id, $0) })
+        let backupByID = Dictionary(uniqueKeysWithValues: backupProperties.map { ($0.id, $0) })
+        let localIDs = Set(localByID.keys)
+        let backupIDs = Set(backupByID.keys)
+        let matchingIDs = localIDs.intersection(backupIDs)
+
+        let conflicts = matchingIDs.filter { localByID[$0] != backupByID[$0] }.sorted { $0.uuidString < $1.uuidString }
+        let missingLocal = backupIDs.subtracting(localIDs).sorted { $0.uuidString < $1.uuidString }
+        let missingBackup = localIDs.subtracting(backupIDs).sorted { $0.uuidString < $1.uuidString }
+
+        return CloudBackupRestorePreflight(
+            localPropertyCount: localProperties.count,
+            backupPropertyCount: backupProperties.count,
+            matchingPropertyCount: matchingIDs.count,
+            missingLocalPropertyIDs: missingLocal,
+            missingBackupPropertyIDs: missingBackup,
+            conflictingPropertyIDs: conflicts
+        )
+    }
+
+    private func mergeMissingProperties(from backupStorageRoot: URL, into localStorageRoot: URL) throws -> CloudBackupRestorePreflight {
+        let preflight = try buildRestorePreflight(localStorageRoot: localStorageRoot, backupStorageRoot: backupStorageRoot)
+        let backupProperties = try loadProperties(in: backupStorageRoot)
+        let localProperties = try loadProperties(in: localStorageRoot)
+        var currentProperties = localProperties
+
+        if preflight.hasMissingLocalProperties {
+            let localIDs = Set(localProperties.map(\.id))
+            let propertiesToAppend = backupProperties.filter { !localIDs.contains($0.id) }
+
+            try copyMissingPropertyStorage(from: backupStorageRoot, to: localStorageRoot, propertyIDs: preflight.missingLocalPropertyIDs)
+
+            currentProperties += propertiesToAppend
+            try writeProperties(currentProperties, to: localStorageRoot)
+
+            try mergeMissingOrganizations(
+                from: backupStorageRoot,
+                into: localStorageRoot,
+                restoredProperties: propertiesToAppend
+            )
+        }
+
+        try applyPropertyDeletionTombstones(
+            from: backupStorageRoot,
+            into: localStorageRoot,
+            currentProperties: currentProperties
+        )
+
+        return preflight
+    }
+
+    private func copyMissingPropertyStorage(from backupStorageRoot: URL, to localStorageRoot: URL, propertyIDs: [UUID]) throws {
+        let backupScoutRoot = scoutRootURL(in: backupStorageRoot)
+        let localScoutRoot = scoutRootURL(in: localStorageRoot)
+        for propertyID in propertyIDs {
+            let propertyKey = propertyID.uuidString
+            let propertyFolderSource = backupScoutRoot
+                .appendingPathComponent("Properties", isDirectory: true)
+                .appendingPathComponent(propertyKey, isDirectory: true)
+            let propertyFolderDestination = localScoutRoot
+                .appendingPathComponent("Properties", isDirectory: true)
+                .appendingPathComponent(propertyKey, isDirectory: true)
+            try copyDirectoryContents(from: propertyFolderSource, to: propertyFolderDestination)
+
+            let categoryFolders = ["sessions", "observations", "guided-shots"]
+            for folder in categoryFolders {
+                let source = backupScoutRoot
+                    .appendingPathComponent(folder, isDirectory: true)
+                    .appendingPathComponent("\(propertyKey).json", isDirectory: false)
+                guard fileManager.fileExists(atPath: source.path) else { continue }
+                let destination = localScoutRoot
+                    .appendingPathComponent(folder, isDirectory: true)
+                    .appendingPathComponent("\(propertyKey).json", isDirectory: false)
+                try copyFile(from: source, to: destination)
             }
         }
-        return false
+    }
+
+    private func mergeMissingOrganizations(from backupStorageRoot: URL, into localStorageRoot: URL, restoredProperties: [Property]) throws {
+        let orgIDs = Set(restoredProperties.compactMap(\.orgId))
+        guard !orgIDs.isEmpty else { return }
+
+        let backupOrganizations = try loadOrganizations(in: backupStorageRoot)
+        let localOrganizations = try loadOrganizations(in: localStorageRoot)
+        var localByID = Dictionary(uniqueKeysWithValues: localOrganizations.map { ($0.id, $0) })
+        var merged = localOrganizations
+        for organization in backupOrganizations where orgIDs.contains(organization.id) {
+            guard localByID[organization.id] == nil else { continue }
+            merged.append(organization)
+            localByID[organization.id] = organization
+        }
+        if merged.count != localOrganizations.count {
+            try writeOrganizations(merged, to: localStorageRoot)
+        }
+    }
+
+    private func applyPropertyDeletionTombstones(
+        from backupStorageRoot: URL,
+        into localStorageRoot: URL,
+        currentProperties: [Property]
+    ) throws {
+        let backupTombstones = try loadPropertyDeletionTombstones(in: backupStorageRoot)
+        guard !backupTombstones.isEmpty else { return }
+
+        var localTombstonesByID = Dictionary(
+            uniqueKeysWithValues: try loadPropertyDeletionTombstones(in: localStorageRoot).map { ($0.propertyID, $0) }
+        )
+        var updatedProperties = currentProperties
+        var didDeleteProperty = false
+        var didUpdateTombstones = false
+
+        for tombstone in backupTombstones.sorted(by: { $0.deletedAt < $1.deletedAt }) {
+            if let localTombstone = localTombstonesByID[tombstone.propertyID], localTombstone.deletedAt >= tombstone.deletedAt {
+                continue
+            }
+
+            if updatedProperties.contains(where: { $0.id == tombstone.propertyID }) {
+                try removePropertyStorage(propertyID: tombstone.propertyID, in: localStorageRoot)
+                updatedProperties.removeAll { $0.id == tombstone.propertyID }
+                didDeleteProperty = true
+            }
+
+            localTombstonesByID[tombstone.propertyID] = tombstone
+            didUpdateTombstones = true
+        }
+
+        if didDeleteProperty {
+            try writeProperties(updatedProperties, to: localStorageRoot)
+        }
+        if didUpdateTombstones {
+            try writePropertyDeletionTombstones(Array(localTombstonesByID.values), to: localStorageRoot)
+        }
+    }
+
+    private func removePropertyStorage(propertyID: UUID, in storageRoot: URL) throws {
+        let scoutRoot = scoutRootURL(in: storageRoot)
+        let propertyKey = propertyID.uuidString
+
+        let targets: [URL] = [
+            scoutRoot
+                .appendingPathComponent("Properties", isDirectory: true)
+                .appendingPathComponent(propertyKey, isDirectory: true),
+            scoutRoot
+                .appendingPathComponent("sessions", isDirectory: true)
+                .appendingPathComponent("\(propertyKey).json", isDirectory: false),
+            scoutRoot
+                .appendingPathComponent("observations", isDirectory: true)
+                .appendingPathComponent("\(propertyKey).json", isDirectory: false),
+            scoutRoot
+                .appendingPathComponent("guided-shots", isDirectory: true)
+                .appendingPathComponent("\(propertyKey).json", isDirectory: false)
+        ]
+
+        for url in targets where fileManager.fileExists(atPath: url.path) {
+            try fileManager.removeItem(at: url)
+        }
+    }
+
+    private func loadProperties(in storageRoot: URL) throws -> [Property] {
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+
+        for candidate in propertiesJSONCandidates(in: storageRoot) where fileManager.fileExists(atPath: candidate.path) {
+            let data = try Data(contentsOf: candidate)
+            return try decoder.decode([Property].self, from: data)
+        }
+        return []
+    }
+
+    private func writeProperties(_ properties: [Property], to storageRoot: URL) throws {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        encoder.dateEncodingStrategy = .iso8601
+        let data = try encoder.encode(properties)
+        try writeFileData(data, to: propertiesJSONCandidates(in: storageRoot)[0])
+    }
+
+    private func loadOrganizations(in storageRoot: URL) throws -> [Organization] {
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+
+        for candidate in organizationsJSONCandidates(in: storageRoot) where fileManager.fileExists(atPath: candidate.path) {
+            let data = try Data(contentsOf: candidate)
+            return try decoder.decode([Organization].self, from: data)
+        }
+        return []
+    }
+
+    private func writeOrganizations(_ organizations: [Organization], to storageRoot: URL) throws {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        encoder.dateEncodingStrategy = .iso8601
+        let data = try encoder.encode(organizations)
+        try writeFileData(data, to: organizationsJSONCandidates(in: storageRoot)[0])
+    }
+
+    private func loadPropertyDeletionTombstones(in storageRoot: URL) throws -> [PropertyDeletionTombstone] {
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        for candidate in propertyTombstonesCandidates(in: storageRoot) where fileManager.fileExists(atPath: candidate.path) {
+            let data = try Data(contentsOf: candidate)
+            return try decoder.decode([PropertyDeletionTombstone].self, from: data)
+        }
+        return []
+    }
+
+    private func writePropertyDeletionTombstones(_ tombstones: [PropertyDeletionTombstone], to storageRoot: URL) throws {
+        if tombstones.isEmpty {
+            let target = propertyTombstonesCandidates(in: storageRoot)[0]
+            if fileManager.fileExists(atPath: target.path) {
+                try fileManager.removeItem(at: target)
+            }
+            return
+        }
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        encoder.dateEncodingStrategy = .iso8601
+        let normalized = tombstones.sorted { lhs, rhs in
+            if lhs.deletedAt == rhs.deletedAt {
+                return lhs.propertyID.uuidString < rhs.propertyID.uuidString
+            }
+            return lhs.deletedAt < rhs.deletedAt
+        }
+        let data = try encoder.encode(normalized)
+        try writeFileData(data, to: propertyTombstonesCandidates(in: storageRoot)[0])
+    }
+
+    private func scoutRootURL(in storageRoot: URL) -> URL {
+        storageRoot.appendingPathComponent("SCOUT", isDirectory: true)
+    }
+
+    private func propertiesJSONCandidates(in storageRoot: URL) -> [URL] {
+        [
+            scoutRootURL(in: storageRoot).appendingPathComponent("properties.json", isDirectory: false),
+            storageRoot.appendingPathComponent("properties.json", isDirectory: false)
+        ]
+    }
+
+    private func organizationsJSONCandidates(in storageRoot: URL) -> [URL] {
+        [
+            scoutRootURL(in: storageRoot).appendingPathComponent("organizations.json", isDirectory: false),
+            storageRoot.appendingPathComponent("organizations.json", isDirectory: false)
+        ]
+    }
+
+    private func propertyTombstonesCandidates(in storageRoot: URL) -> [URL] {
+        [
+            scoutRootURL(in: storageRoot).appendingPathComponent("property-tombstones.json", isDirectory: false),
+            storageRoot.appendingPathComponent("property-tombstones.json", isDirectory: false)
+        ]
     }
 }

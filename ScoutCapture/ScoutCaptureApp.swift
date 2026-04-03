@@ -72,9 +72,22 @@ struct ScoutCaptureApp: App {
             )
                 .onChange(of: scenePhase) { _, newValue in
                     if newValue == .background {
+                        appState.setLiveSyncMonitoringActive(false)
                         appState.handleSceneDidEnterBackground()
+                    } else if newValue == .inactive {
+                        appState.setLiveSyncMonitoringActive(false)
                     } else if newValue == .active {
+                        appState.setLiveSyncMonitoringActive(true)
+                        appState.refreshProperties()
                         appState.refreshBackupStatus()
+                        if appState.properties.isEmpty {
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                                appState.refreshProperties()
+                            }
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
+                                appState.refreshProperties()
+                            }
+                        }
                     }
                 }
         }
@@ -225,7 +238,7 @@ private struct CloudBackupSheet: View {
             }
             Button("Cancel", role: .cancel) { }
         } message: {
-            Text("This will replace the current local ScoutCapture data on this device with the latest iCloud backup.")
+            Text("This will add any missing properties and related files from the latest iCloud backup without deleting existing local data on this device.")
         }
         .alert("Restore Failed", isPresented: Binding(
             get: { restoreErrorMessage != nil },
