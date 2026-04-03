@@ -23,6 +23,41 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
     }
 }
 
+private final class PortraitLockedHostingController<Content: View>: UIHostingController<Content> {
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        view.insetsLayoutMarginsFromSafeArea = false
+        if #available(iOS 16.4, *) {
+            safeAreaRegions = [.container]
+        }
+    }
+
+    override var supportedInterfaceOrientations: UIInterfaceOrientationMask {
+        .portrait
+    }
+
+    override var shouldAutorotate: Bool {
+        false
+    }
+
+    override var preferredInterfaceOrientationForPresentation: UIInterfaceOrientation {
+        .portrait
+    }
+}
+
+private struct PortraitLockedRootView<Content: View>: UIViewControllerRepresentable {
+    let rootView: Content
+
+    func makeUIViewController(context: Context) -> PortraitLockedHostingController<Content> {
+        PortraitLockedHostingController(rootView: rootView)
+    }
+
+    func updateUIViewController(_ uiViewController: PortraitLockedHostingController<Content>, context: Context) {
+        uiViewController.rootView = rootView
+        uiViewController.setNeedsUpdateOfSupportedInterfaceOrientations()
+    }
+}
+
 @main
 struct ScoutCaptureApp: App {
     @UIApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
@@ -31,8 +66,10 @@ struct ScoutCaptureApp: App {
 
     var body: some Scene {
         WindowGroup {
-            AppRootView()
-                .environmentObject(appState)
+            PortraitLockedRootView(
+                rootView: AppRootView()
+                    .environmentObject(appState)
+            )
                 .onChange(of: scenePhase) { _, newValue in
                     if newValue == .background {
                         appState.handleSceneDidEnterBackground()
