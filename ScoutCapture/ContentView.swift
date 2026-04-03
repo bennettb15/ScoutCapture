@@ -3295,6 +3295,8 @@ struct ContentView: View {
     
     @State private var showDetailOverlay: Bool = false
     @State private var draftDetailNote: String = ""
+    @State private var currentCameraLayoutSize: CGSize = .zero
+    @State private var frozenCameraLayoutSize: CGSize = .zero
     
     @State private var showLibraryFullscreen: Bool = false
     @State private var showSessionActionsSheet: Bool = false
@@ -4397,6 +4399,10 @@ struct ContentView: View {
     }
     
     private var isLandscapeUI: Bool {
+        return lastValidDeviceOrientation == .landscapeLeft || lastValidDeviceOrientation == .landscapeRight
+    }
+
+    private var usesLandscapeChrome: Bool {
         lastValidDeviceOrientation == .landscapeLeft || lastValidDeviceOrientation == .landscapeRight
     }
 
@@ -5085,7 +5091,11 @@ struct ContentView: View {
                     onFlash: { camera.cycleFlash() },
                     onCameraSwap: { swapCameraWithRotationFreeze() }
                 )
-                .presentationDetents([.medium])
+                .presentationDetents(
+                    UIDevice.current.userInterfaceIdiom == .pad
+                    ? [.height(430)]
+                    : [.medium]
+                )
                 .presentationDragIndicator(.visible)
                 .onDisappear {
                     showQuickMenu = false
@@ -5195,10 +5205,7 @@ struct ContentView: View {
             Color.black
                 .ignoresSafeArea()
 
-            GeometryReader { geo in
-                layoutContent(in: geo)
-            }
-            .fullScreenCover(isPresented: $showDetailOverlay) {
+            OverFullScreenPresenter(isPresented: $showDetailOverlay) {
                 DetailNoteModal(
                     elevation: elevation,
                     detailType: currentDetailType,
@@ -5219,8 +5226,21 @@ struct ContentView: View {
                         showDetailOverlay = false
                     }
                 )
-                .presentationBackground(.clear)
             }
+            .frame(width: 0, height: 0)
+
+            GeometryReader { geo in
+                layoutContent(in: geo)
+                    .onAppear {
+                        currentCameraLayoutSize = geo.size
+                    }
+                    .onChange(of: geo.size) { _, newSize in
+                        if !showDetailOverlay {
+                            currentCameraLayoutSize = newSize
+                        }
+                    }
+            }
+            .ignoresSafeArea(.keyboard, edges: .bottom)
             .overlay {
                 centeredLandscapeMenuOverlay()
             }
@@ -5367,6 +5387,13 @@ struct ContentView: View {
                     .zIndex(720)
             }
         }
+        .onChange(of: showDetailOverlay) { _, isShown in
+            if isShown {
+                frozenCameraLayoutSize = currentCameraLayoutSize
+            } else {
+                frozenCameraLayoutSize = .zero
+            }
+        }
     }
 
     private var activeIssuesSheetView: some View {
@@ -5465,8 +5492,15 @@ struct ContentView: View {
 
     @ViewBuilder
     private func layoutContent(in geo: GeometryProxy) -> some View {
-        let w = geo.size.width
-        let h = geo.size.height
+        let effectiveSize: CGSize = {
+            if showDetailOverlay && frozenCameraLayoutSize != .zero {
+                return frozenCameraLayoutSize
+            }
+            return geo.size
+        }()
+
+        let w = effectiveSize.width
+        let h = effectiveSize.height
 
         // Top mask: fixed inset so layout is stable.
         let topInset: CGFloat = 30
@@ -5490,7 +5524,7 @@ struct ContentView: View {
                 previewAreaView(w: w, previewH: previewH, baseToastTop: baseToastTop)
                 bottomMaskView(bottomBarH: bottomBarH, containerWidth: w)
             }
-            .frame(width: geo.size.width, height: geo.size.height, alignment: .top)
+            .frame(width: w, height: h, alignment: .top)
             .clipped()
         )
     }
@@ -5500,10 +5534,10 @@ struct ContentView: View {
             Color.black
 
             let rowPadding: CGFloat = 16
-            let titleFontSize: CGFloat = isLandscapeUI ? 38 : 34
-            let titleSideInset: CGFloat = isLandscapeUI ? 126 : 132
+            let titleFontSize: CGFloat = usesLandscapeChrome ? 38 : 34
+            let titleSideInset: CGFloat = usesLandscapeChrome ? 126 : 132
 
-            VStack(spacing: isLandscapeUI ? 0 : 10) {
+            VStack(spacing: usesLandscapeChrome ? 0 : 10) {
                 VStack(spacing: 2) {
                     ZStack {
                         VStack(spacing: -2) {
@@ -5533,20 +5567,20 @@ struct ContentView: View {
                                 .padding(.trailing, rowPadding)
                         }
                     }
-                    .frame(height: isLandscapeUI ? 44 : nil)
+                    .frame(height: usesLandscapeChrome ? 44 : nil)
                 }
 
-                if !isLandscapeUI {
+                if !usesLandscapeChrome {
                     metadataHUDStrip(isLandscapeStyle: false)
                         .padding(.horizontal, rowPadding)
                         .offset(y: 3)
                 }
             }
             .frame(maxWidth: .infinity, alignment: .center)
-            .padding(.top, isLandscapeUI ? 0 : topInset)
+            .padding(.top, usesLandscapeChrome ? 0 : topInset)
             .padding(.bottom, 0)
             .padding(.horizontal, 10)
-            .offset(y: isLandscapeUI ? -8 : topContentLift)
+            .offset(y: usesLandscapeChrome ? -8 : topContentLift)
         }
         .frame(height: topBarH + 6)
     }
@@ -5662,8 +5696,8 @@ struct ContentView: View {
         Text(" | ")
             .foregroundColor(.white.opacity(0.78))
             .shadow(
-                color: .black.opacity(isLandscapeUI ? 0.78 : 0.0),
-                radius: isLandscapeUI ? 1.4 : 0.0,
+                color: .black.opacity(usesLandscapeChrome ? 0.78 : 0.0),
+                radius: usesLandscapeChrome ? 1.4 : 0.0,
                 x: 0,
                 y: 0
             )
@@ -5673,8 +5707,8 @@ struct ContentView: View {
         HStack(spacing: 3) {
             Text(Self.shortElevationLabel(elevationPillLabel()))
                 .shadow(
-                    color: .black.opacity(isLandscapeUI ? 0.78 : 0.0),
-                    radius: isLandscapeUI ? 1.4 : 0.0,
+                    color: .black.opacity(usesLandscapeChrome ? 0.78 : 0.0),
+                    radius: usesLandscapeChrome ? 1.4 : 0.0,
                     x: 0,
                     y: 0
                 )
@@ -5722,7 +5756,7 @@ struct ContentView: View {
             .multilineTextAlignment(.center)
             .foregroundColor(.red.opacity(0.72))
             .shadow(color: .black.opacity(0.45), radius: 2, x: 0, y: 1)
-            .rotationEffect(isLandscapeUI ? bottomGlyphRotationAngle : .zero)
+            .rotationEffect(usesLandscapeChrome ? bottomGlyphRotationAngle : .zero)
             .offset(y: 1.5)
         }
         .buttonStyle(.plain)
@@ -5860,7 +5894,7 @@ struct ContentView: View {
         }
         .buttonStyle(.plain)
         .opacity(isCaptureProfileLocked ? 0.76 : 1.0)
-        .rotationEffect(isLandscapeUI ? bottomGlyphRotationAngle : .zero)
+            .rotationEffect(usesLandscapeChrome ? bottomGlyphRotationAngle : .zero)
         .accessibilityLabel(captureProfile == .residential ? "Residential capture mode" : "Commercial capture mode")
     }
 
@@ -6258,7 +6292,7 @@ struct ContentView: View {
                 tx.animation = nil
             }
 
-            if isLandscapeUI {
+            if usesLandscapeChrome {
                 landscapeHeaderOverlay(w: w, previewH: previewH)
                     .zIndex(82)
             }
@@ -6455,7 +6489,7 @@ struct ContentView: View {
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
                 .padding(.horizontal, 26)
-                .padding(.bottom, isLandscapeUI ? 94 : 74)
+                .padding(.bottom, usesLandscapeChrome ? 94 : 74)
                 .rotationEffect(bottomGlyphRotationAngle)
                 .zIndex(21)
             }
@@ -6483,7 +6517,7 @@ struct ContentView: View {
                             .stroke(Color.white.opacity(0.18), lineWidth: 1)
                     )
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
-                    .padding(.top, isLandscapeUI ? 44 : 0)
+                    .padding(.top, usesLandscapeChrome ? 44 : 0)
                     .rotationEffect(bottomGlyphRotationAngle)
                     .allowsHitTesting(false)
                     .zIndex(25)
@@ -6502,7 +6536,7 @@ struct ContentView: View {
                             .stroke(Color.white.opacity(0.18), lineWidth: 1)
                     )
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
-                    .padding(.top, isLandscapeUI ? 44 : 0)
+                    .padding(.top, usesLandscapeChrome ? 44 : 0)
                     .rotationEffect(bottomGlyphRotationAngle)
                     .allowsHitTesting(false)
                     .zIndex(25)
@@ -6521,7 +6555,7 @@ struct ContentView: View {
                             .stroke(Color.white.opacity(0.18), lineWidth: 1)
                     )
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
-                    .padding(.top, isLandscapeUI ? 44 : 0)
+                    .padding(.top, usesLandscapeChrome ? 44 : 0)
                     .rotationEffect(bottomGlyphRotationAngle)
                     .allowsHitTesting(false)
                     .zIndex(25)
@@ -6574,7 +6608,7 @@ struct ContentView: View {
                             .stroke(Color.white.opacity(0.18), lineWidth: 1)
                     )
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
-                    .padding(.top, isLandscapeUI ? 44 : 0)
+                    .padding(.top, usesLandscapeChrome ? 44 : 0)
                     .rotationEffect(bottomGlyphRotationAngle)
                     .allowsHitTesting(false)
                     .zIndex(25)
@@ -14480,6 +14514,51 @@ extension ContentView {
             .ignoresSafeArea(.keyboard, edges: .bottom)
         }
     }
+
+    private struct OverFullScreenPresenter<Overlay: View>: UIViewControllerRepresentable {
+        @Binding var isPresented: Bool
+        let overlay: () -> Overlay
+
+        final class Coordinator {
+            var hostingController: UIHostingController<Overlay>?
+        }
+
+        func makeCoordinator() -> Coordinator {
+            Coordinator()
+        }
+
+        func makeUIViewController(context: Context) -> UIViewController {
+            let controller = UIViewController()
+            controller.view.backgroundColor = .clear
+            return controller
+        }
+
+        func updateUIViewController(_ uiViewController: UIViewController, context: Context) {
+            if isPresented {
+                if let hostingController = context.coordinator.hostingController {
+                    hostingController.rootView = overlay()
+                    return
+                }
+
+                let rootView = overlay()
+                DispatchQueue.main.async {
+                    guard context.coordinator.hostingController == nil else { return }
+                    guard uiViewController.presentedViewController == nil else { return }
+
+                    let hostingController = UIHostingController(rootView: rootView)
+                    hostingController.view.backgroundColor = .clear
+                    hostingController.modalPresentationStyle = .overFullScreen
+                    uiViewController.present(hostingController, animated: false)
+                    context.coordinator.hostingController = hostingController
+                }
+            } else if let hostingController = context.coordinator.hostingController {
+                DispatchQueue.main.async {
+                    hostingController.dismiss(animated: false)
+                    context.coordinator.hostingController = nil
+                }
+            }
+        }
+    }
     
     // MARK: - Manage Detail Types View
 
@@ -15109,8 +15188,21 @@ extension ContentView {
         let rows: [CoreElevationChecklistRowState]
         let onClose: () -> Void
         @Environment(\.colorScheme) private var colorScheme
+        @State private var lastValidOrientation: UIDeviceOrientation = .portrait
 
         private var theme: SheetControlTheme { .forScheme(colorScheme) }
+
+        private var rotationAngle: Angle {
+            guard UIDevice.current.userInterfaceIdiom == .pad else { return .zero }
+            switch lastValidOrientation {
+            case .landscapeLeft:
+                return .degrees(90)
+            case .landscapeRight:
+                return .degrees(-90)
+            default:
+                return .zero
+            }
+        }
 
         var body: some View {
             VStack(spacing: 0) {
@@ -15175,6 +15267,27 @@ extension ContentView {
                     .stroke(theme.stroke, lineWidth: 1)
             )
             .shadow(color: Color.black.opacity(0.35), radius: 24, x: 0, y: 16)
+            .rotationEffect(rotationAngle)
+            .onAppear {
+                UIDevice.current.beginGeneratingDeviceOrientationNotifications()
+                refreshOrientation()
+            }
+            .onReceive(NotificationCenter.default.publisher(for: UIDevice.orientationDidChangeNotification)) { _ in
+                refreshOrientation()
+            }
+            .onDisappear {
+                UIDevice.current.endGeneratingDeviceOrientationNotifications()
+            }
+        }
+
+        private func refreshOrientation() {
+            let orientation = UIDevice.current.orientation
+            switch orientation {
+            case .portrait, .portraitUpsideDown, .landscapeLeft, .landscapeRight:
+                lastValidOrientation = orientation
+            default:
+                break
+            }
         }
 
         private func coreChecklistRow(_ row: CoreElevationChecklistRowState) -> some View {
@@ -17266,6 +17379,10 @@ extension ContentView {
         
         // Pass the target camera: true = front, false = rear
         let onCameraSwap: () -> Void
+
+        private var isPad: Bool {
+            UIDevice.current.userInterfaceIdiom == .pad
+        }
         
         var body: some View {
             GeometryReader { geo in
@@ -17287,7 +17404,7 @@ extension ContentView {
                     ZStack {
                         Color.clear
                             .ignoresSafeArea()
-                        
+
                         VStack(spacing: 18) {
                             
                             HStack(spacing: spacing) {
@@ -17405,8 +17522,6 @@ extension ContentView {
                             }
                             .frame(maxWidth: .infinity, alignment: .center)
                             .padding(.top, 8)
-                            
-                            Spacer(minLength: 0)
                         }
                         .padding(.top, 18)
                         .padding(.horizontal, 18)
