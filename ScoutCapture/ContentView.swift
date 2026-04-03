@@ -5837,7 +5837,8 @@ struct ContentView: View {
             persistCaptureProfileToCurrentSession()
         }
 
-        sessionCaptureProfileLocked = !metadata.shots.isEmpty || inheritedProfile != nil
+        // Keep mode switch unlocked until this session records its first capture.
+        sessionCaptureProfileLocked = !metadata.shots.isEmpty
     }
 
     private func persistCaptureProfileToCurrentSession(lockStateOverride: Bool? = nil) {
