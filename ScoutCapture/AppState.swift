@@ -73,7 +73,8 @@ final class AppState: ObservableObject {
         return properties.first { $0.id == selectedPropertyID }
     }
 
-    private let localStore: LocalStore
+    private let injectedLocalStore: LocalStore?
+    private lazy var localStore: LocalStore = injectedLocalStore ?? LocalStore()
     private let userDefaults: UserDefaults
     private let cloudBackupManager: CloudBackupManager
     private let selectedPropertyDefaultsKey = "scoutcapture.selectedPropertyID"
@@ -83,12 +84,17 @@ final class AppState: ObservableObject {
     private var liveSyncTimer: Timer?
     private var lastLiveSyncFingerprint: String?
     private var liveSyncBurstUntil: Date?
+    private var lastLiveSyncRefreshAt: Date?
+
+    var sharedLocalStore: LocalStore {
+        localStore
+    }
 
     init(
-        localStore: LocalStore = LocalStore(),
+        localStore: LocalStore? = nil,
         userDefaults: UserDefaults = .standard
     ) {
-        self.localStore = localStore
+        self.injectedLocalStore = localStore
         self.userDefaults = userDefaults
         self.cloudBackupManager = CloudBackupManager(userDefaults: userDefaults)
         self.cloudBackupStatus = cloudBackupManager.status
@@ -148,15 +154,8 @@ final class AppState: ObservableObject {
         cloudBackupManager.refreshStatus()
         isLoading = true
         do {
-            let fetched = try localStore.fetchProperties()
-            organizations = (try? localStore.fetchOrganizations()) ?? []
-            let caches = makeHubCaches(for: fetched)
-            applyHubCachePayload(properties: fetched, caches: caches)
-            lastLiveSyncFingerprint = localStore.propertiesLedgerFingerprint()
-
-            if let selectedPropertyID, properties.contains(where: { $0.id == selectedPropertyID }) == false {
-                self.selectedPropertyID = nil
-            }
+            let payload = try makeRefreshPayload()
+            applyRefreshPayload(payload)
         } catch {
             // Preserve current in-memory view on transient iCloud read failures.
             print("[PropertiesRefresh] transient read failure: \(error.localizedDescription)")
@@ -164,35 +163,86 @@ final class AppState: ObservableObject {
         isLoading = false
     }
 
+    func refreshPropertiesInBackground() {
+        cloudBackupManager.refreshStatus()
+        isLoading = true
+        DispatchQueue.global(qos: .userInitiated).async {
+            do {
+                let payload = try self.makeRefreshPayload()
+                DispatchQueue.main.async {
+                    self.applyRefreshPayload(payload)
+                    self.isLoading = false
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    // Preserve current in-memory view on transient iCloud read failures.
+                    print("[PropertiesRefresh] transient read failure: \(error.localizedDescription)")
+                    self.isLoading = false
+                }
+            }
+        }
+    }
+
     func setLiveSyncMonitoringActive(_ active: Bool) {
         if active {
             guard liveSyncTimer == nil else { return }
-            liveSyncTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
+            liveSyncTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
                 guard let self else { return }
                 if self.isLoading { return }
                 let now = Date()
                 let isBurst = (self.liveSyncBurstUntil.map { $0 > now }) ?? false
-                if !isBurst {
-                    // In steady state, sample every other tick (~1s effective).
-                    if Int(now.timeIntervalSince1970 * 2) % 2 != 0 {
-                        return
-                    }
+                if !isBurst,
+                   let lastRefresh = self.lastLiveSyncRefreshAt,
+                   now.timeIntervalSince(lastRefresh) < 6.0 {
+                    return
                 }
                 let fingerprint = self.localStore.propertiesLedgerFingerprint()
                 if fingerprint != self.lastLiveSyncFingerprint {
-                    self.refreshProperties()
+                    self.lastLiveSyncRefreshAt = now
+                    self.refreshPropertiesInBackground()
                 }
             }
-            liveSyncTimer?.tolerance = 0.25
+            liveSyncTimer?.tolerance = 1.0
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
                 guard let self else { return }
                 if self.isLoading { return }
-                self.refreshProperties()
+                self.refreshPropertiesInBackground()
             }
         } else {
             liveSyncTimer?.invalidate()
             liveSyncTimer = nil
             liveSyncBurstUntil = nil
+            lastLiveSyncRefreshAt = nil
+        }
+    }
+
+    private struct PropertyRefreshPayload {
+        let properties: [Property]
+        let organizations: [Organization]
+        let caches: HubCachePayload
+        let fingerprint: String
+    }
+
+    private func makeRefreshPayload() throws -> PropertyRefreshPayload {
+        let fetchedProperties = try localStore.fetchProperties()
+        let fetchedOrganizations = (try? localStore.fetchOrganizations()) ?? []
+        let caches = makeHubCaches(for: fetchedProperties)
+        let fingerprint = localStore.propertiesLedgerFingerprint()
+        return PropertyRefreshPayload(
+            properties: fetchedProperties,
+            organizations: fetchedOrganizations,
+            caches: caches,
+            fingerprint: fingerprint
+        )
+    }
+
+    private func applyRefreshPayload(_ payload: PropertyRefreshPayload) {
+        organizations = payload.organizations
+        applyHubCachePayload(properties: payload.properties, caches: payload.caches)
+        lastLiveSyncFingerprint = payload.fingerprint
+
+        if let selectedPropertyID, properties.contains(where: { $0.id == selectedPropertyID }) == false {
+            self.selectedPropertyID = nil
         }
     }
 
@@ -912,12 +962,14 @@ final class AppState: ObservableObject {
         guard let metadata = try? localStore.loadSessionMetadata(propertyID: session.propertyID, sessionID: session.id) else {
             return false
         }
-        let sessionFolder = localStore.sessionFolderURL(propertyID: session.propertyID, sessionID: session.id)
         return metadata.shots.contains { shot in
             let originalRelative = shot.originalRelativePath.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !originalRelative.isEmpty else { return false }
-            let originalURL = sessionFolder.appendingPathComponent(originalRelative, isDirectory: false)
-            return FileManager.default.fileExists(atPath: originalURL.path)
+            return localStore.resolveSessionRelativeFileURL(
+                propertyID: session.propertyID,
+                sessionID: session.id,
+                relativePath: originalRelative
+            ) != nil
         }
     }
 

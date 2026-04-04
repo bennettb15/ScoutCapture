@@ -58,7 +58,8 @@ enum StorageRoot {
         lock.lock()
         defer { lock.unlock() }
 
-        let resolution = cachedResolution ?? makeResolution()
+        let timeout: TimeInterval = Thread.isMainThread ? 0 : 15.0
+        let resolution = cachedResolution ?? makeResolution(timeout: timeout)
         cachedResolution = resolution
 
         let cloudAvailable = resolution.cloudRoot != nil
@@ -107,15 +108,16 @@ enum StorageRoot {
             return cachedResolution
         }
 
-        let resolution = makeResolution()
+        let timeout: TimeInterval = Thread.isMainThread ? 0 : 15.0
+        let resolution = makeResolution(timeout: timeout)
         cachedResolution = resolution
         return resolution
     }
 
-    private nonisolated static func makeResolution() -> Resolution {
+    private nonisolated static func makeResolution(timeout: TimeInterval = 15.0) -> Resolution {
         let localRoot = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("ScoutCapture", isDirectory: true)
-        let cloudRoot = resolvedCloudRootWithRetry(timeout: 15.0)
+        let cloudRoot = resolvedCloudRootWithRetry(timeout: timeout)
         return Resolution(cloudRoot: cloudRoot, localRoot: localRoot)
     }
 
