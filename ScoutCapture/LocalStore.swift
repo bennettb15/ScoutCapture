@@ -1429,6 +1429,31 @@ final class LocalStore {
             .appendingPathComponent("session.json")
     }
 
+    func resolveSessionRelativeFileURL(propertyID: UUID, sessionID: UUID, relativePath: String) -> URL? {
+        let trimmed = relativePath.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+
+        let preferredURL = sessionFolderURL(propertyID: propertyID, sessionID: sessionID)
+            .appendingPathComponent(trimmed, isDirectory: false)
+        if fileManager.fileExists(atPath: preferredURL.path) {
+            return preferredURL
+        }
+
+        for scoutRoot in StorageRoot.scoutRootCandidates() {
+            let candidateURL = scoutRoot
+                .appendingPathComponent("Properties", isDirectory: true)
+                .appendingPathComponent(propertyID.uuidString, isDirectory: true)
+                .appendingPathComponent("Sessions", isDirectory: true)
+                .appendingPathComponent(sessionID.uuidString, isDirectory: true)
+                .appendingPathComponent(trimmed, isDirectory: false)
+            if fileManager.fileExists(atPath: candidateURL.path) {
+                return candidateURL
+            }
+        }
+
+        return nil
+    }
+
     // Backward-compatible wrappers used by existing call sites.
     func originalsDirectoryURL(propertyID: UUID, sessionID: UUID) -> URL {
         originalsFolderURL(propertyID: propertyID, sessionID: sessionID)

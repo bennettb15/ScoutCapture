@@ -60,14 +60,25 @@ private struct PortraitLockedRootView<Content: View>: UIViewControllerRepresenta
 
 @main
 struct ScoutCaptureApp: App {
+    private static let firstLaunchCompletedKey = "scoutcapture.firstLaunchCompleted"
     @UIApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
-    @StateObject private var appState = AppState()
+    @State private var appState: AppState
+    @State private var hasCompletedFirstLaunch: Bool
     @Environment(\.scenePhase) private var scenePhase
+
+    init() {
+        let hasCompleted = UserDefaults.standard.bool(forKey: Self.firstLaunchCompletedKey)
+        _hasCompletedFirstLaunch = State(initialValue: hasCompleted)
+        _appState = State(initialValue: AppState())
+    }
 
     var body: some Scene {
         WindowGroup {
             PortraitLockedRootView(
-                rootView: AppRootView()
+                rootView: AppRootView(
+                    skipStartupLoading: true,
+                    onInitialLaunchCompleted: markInitialLaunchCompleted
+                )
                     .environmentObject(appState)
             )
                 .onChange(of: scenePhase) { _, newValue in
@@ -78,19 +89,25 @@ struct ScoutCaptureApp: App {
                         appState.setLiveSyncMonitoringActive(false)
                     } else if newValue == .active {
                         appState.setLiveSyncMonitoringActive(true)
-                        appState.refreshProperties()
+                        appState.refreshPropertiesInBackground()
                         appState.refreshBackupStatus()
                         if appState.properties.isEmpty {
                             DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-                                appState.refreshProperties()
+                                appState.refreshPropertiesInBackground()
                             }
                             DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
-                                appState.refreshProperties()
+                                appState.refreshPropertiesInBackground()
                             }
                         }
                     }
                 }
         }
+    }
+
+    private func markInitialLaunchCompleted() {
+        guard !hasCompletedFirstLaunch else { return }
+        hasCompletedFirstLaunch = true
+        UserDefaults.standard.set(true, forKey: Self.firstLaunchCompletedKey)
     }
 }
 
@@ -348,56 +365,99 @@ private struct CloudBackupSheet: View {
 
 private struct AppRootView: View {
     @EnvironmentObject private var appState: AppState
+    let skipStartupLoading: Bool
+    let onInitialLaunchCompleted: () -> Void
     @State private var sessionHubReady: Bool = false
-    @State private var cameraPreviewReady: Bool = false
     @State private var minimumLaunchDelayMet: Bool = false
     @State private var didStartWarmup: Bool = false
+    @State private var launchProgress: Double = 0
+    @State private var showsProgressBar: Bool = false
+    private let warmLaunchTimeoutSeconds: TimeInterval = 1.0
 
     private var isAppReady: Bool {
-        sessionHubReady && cameraPreviewReady && minimumLaunchDelayMet
+        skipStartupLoading || (sessionHubReady && minimumLaunchDelayMet)
     }
 
     var body: some View {
         Group {
             if !isAppReady {
-                LoadingView()
+                LoadingView(
+                    progress: launchProgress,
+                    showsProgressBar: false,
+                    showsLogo: true
+                )
             } else {
                 SessionHubView()
-            }
-        }
-        .onReceive(CameraManager.shared.$isReadyForPreview.removeDuplicates()) { ready in
-            if ready {
-                cameraPreviewReady = true
             }
         }
         .task {
             guard !didStartWarmup else { return }
             didStartWarmup = true
 
-            _ = StorageRoot.prepareStorage()
+            if skipStartupLoading {
+                sessionHubReady = true
+                minimumLaunchDelayMet = true
+                CameraManager.prewarm()
+                appState.warmLaunchReadiness { }
+                AddPropertyWarmup.prewarm()
+                OptionalDetailNoteWarmup.prewarm()
+                return
+            }
 
+            withAnimation(.easeOut(duration: 0.16)) {
+                showsProgressBar = true
+            }
+
+            advanceLaunchProgress(to: 0.22)
             async let minDelay: Void = {
-                try? await Task.sleep(nanoseconds: 500_000_000)
-                await MainActor.run {
-                    minimumLaunchDelayMet = true
-                }
+                try? await Task.sleep(nanoseconds: 1_800_000_000)
             }()
 
             CameraManager.prewarm()
-            if CameraManager.shared.isReadyForPreview {
-                cameraPreviewReady = true
-            }
+            advanceLaunchProgress(to: 0.40)
 
             await withCheckedContinuation { continuation in
+                var didResume = false
+                let resumeOnce: () -> Void = {
+                    guard !didResume else { return }
+                    didResume = true
+                    continuation.resume()
+                }
+
+                DispatchQueue.main.asyncAfter(deadline: .now() + warmLaunchTimeoutSeconds) {
+                    guard !sessionHubReady else {
+                        resumeOnce()
+                        return
+                    }
+                    print("[Launch] warm launch timed out; continuing app launch")
+                    sessionHubReady = true
+                    advanceLaunchProgress(to: 0.88)
+                    resumeOnce()
+                }
+
                 appState.warmLaunchReadiness {
                     sessionHubReady = true
-                    continuation.resume()
+                    advanceLaunchProgress(to: 0.88)
+                    resumeOnce()
                 }
             }
 
             _ = await minDelay
+            advanceLaunchProgress(to: 0.96)
             AddPropertyWarmup.prewarm()
             OptionalDetailNoteWarmup.prewarm()
+            advanceLaunchProgress(to: 1.0)
+            try? await Task.sleep(nanoseconds: 60_000_000)
+            minimumLaunchDelayMet = true
+            onInitialLaunchCompleted()
+        }
+    }
+
+    private func advanceLaunchProgress(to value: Double) {
+        let clamped = min(max(value, 0), 1)
+        guard clamped > launchProgress else { return }
+        withAnimation(.easeOut(duration: 0.20)) {
+            launchProgress = clamped
         }
     }
 }
@@ -405,7 +465,7 @@ private struct AppRootView: View {
 struct SessionHubView: View {
     @EnvironmentObject private var appState: AppState
     @Environment(\.colorScheme) private var colorScheme
-    private let localStore = LocalStore()
+    private var localStore: LocalStore { appState.sharedLocalStore }
     @State private var path: [HubRoute] = []
     @State private var showAddProperty: Bool = false
     @State private var pressedPropertyID: UUID? = nil
@@ -438,6 +498,7 @@ struct SessionHubView: View {
     @State private var showDebugTools: Bool = false
     @State private var hiddenDebugTapCount: Int = 0
     @State private var lastHiddenDebugTapAt: Date? = nil
+    @State private var propertyTapToken: Int = 0
 
     private let selectionHaptic = UIImpactFeedbackGenerator(style: .light)
     private let hiddenDebugTapWindow: TimeInterval = 1.5
@@ -639,7 +700,7 @@ struct SessionHubView: View {
             }
             .onAppear {
                 if appState.properties.isEmpty {
-                    appState.refreshProperties()
+                    appState.refreshPropertiesInBackground()
                 }
                 appState.triggerBackupForLifecycleEvent()
                 selectionHaptic.prepare()
@@ -763,12 +824,6 @@ struct SessionHubView: View {
         let hasMapsButton = mapsAddressQuery(for: property) != nil
         let hasPhoneActions = hasValidPhoneNumber(property)
         let hasStatusRow = draft != nil || hasPendingExport || hasReExportGlyph
-        let _ = {
-            let firstDelivered = latestReExportSession?.firstDeliveredAt
-            let expiresAt = latestReExportSession?.reExportExpiresAt
-            print("[ReExportEligibility] propertyID=\(property.id.uuidString) firstDeliveredAt=\(String(describing: firstDelivered)) reExportExpiresAt=\(String(describing: expiresAt)) eligible=\(hasReExportGlyph)")
-        }()
-
         HStack(alignment: .top, spacing: 10) {
             VStack(alignment: .leading, spacing: 4) {
                 HStack(alignment: .firstTextBaseline, spacing: 6) {
@@ -834,7 +889,7 @@ struct SessionHubView: View {
         .animation(.easeOut(duration: 0.12), value: isPressed)
         .contentShape(Rectangle())
         .onTapGesture {
-            handlePropertyTap(property)
+            handlePropertyTap(property, latestSession: sessionsForProperty.first, pendingSession: appState.latestPendingExportSession(for: property.id))
         }
         .contextMenu {
             Button("Manage Sessions") {
@@ -1603,18 +1658,25 @@ struct SessionHubView: View {
         }
     }
 
-    private func handlePropertyTap(_ property: Property) {
+    private func handlePropertyTap(
+        _ property: Property,
+        latestSession: Session?,
+        pendingSession: Session?
+    ) {
         selectionHaptic.impactOccurred()
-        pressedPropertyID = property.id
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) {
-            let sessions = appState.sessions(for: property.id).sorted { $0.startedAt > $1.startedAt }
-            let latest = sessions.first
-            let pendingSession = appState.latestPendingExportSession(for: property.id)
+        withAnimation(.easeOut(duration: 0.08)) {
+            pressedPropertyID = property.id
+        }
+        propertyTapToken += 1
+        let tapToken = propertyTapToken
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.10) {
+            guard tapToken == propertyTapToken else { return }
             let pending = pendingSession != nil
-            let latestID = latest?.id.uuidString ?? "NONE"
-            let isBaseline = latest.map { property.baselineSessionID == $0.id } ?? false
-            let sealed = latest?.isSealed ?? false
-            let firstDelivered = latest?.firstDeliveredAt.map { "\($0)" } ?? "nil"
+            let latestID = latestSession?.id.uuidString ?? "NONE"
+            let isBaseline = latestSession.map { property.baselineSessionID == $0.id } ?? false
+            let sealed = latestSession?.isSealed ?? false
+            let firstDelivered = latestSession?.firstDeliveredAt.map { "\($0)" } ?? "nil"
             let action = pending ? "promptDeliver" : "openCamera"
             print("[PropertyTap] propertyID=\(property.id.uuidString) latestSessionID=\(latestID) isBaseline=\(isBaseline) sealed=\(sealed) firstDeliveredAt=\(firstDelivered) pending=\(pending) action=\(action)")
             if let pendingSession {
@@ -1624,7 +1686,8 @@ struct SessionHubView: View {
             }
             openProperty(property)
         }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.18) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.22) {
+            guard tapToken == propertyTapToken else { return }
             if pressedPropertyID == property.id {
                 pressedPropertyID = nil
             }

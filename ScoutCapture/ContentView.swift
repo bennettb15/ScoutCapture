@@ -5837,8 +5837,11 @@ struct ContentView: View {
             persistCaptureProfileToCurrentSession()
         }
 
-        // Keep mode switch unlocked until this session records its first capture.
-        sessionCaptureProfileLocked = !metadata.shots.isEmpty
+        sessionCaptureProfileLocked = !isCaptureProfileUnlockAllowed(
+            propertyID: propertyID,
+            sessionID: sessionID,
+            metadata: metadata
+        )
     }
 
     private func persistCaptureProfileToCurrentSession(lockStateOverride: Bool? = nil) {
@@ -5855,8 +5858,25 @@ struct ContentView: View {
         if let lockStateOverride {
             sessionCaptureProfileLocked = lockStateOverride
         } else {
-            sessionCaptureProfileLocked = !metadata.shots.isEmpty
+            sessionCaptureProfileLocked = !isCaptureProfileUnlockAllowed(
+                propertyID: propertyID,
+                sessionID: sessionID,
+                metadata: metadata
+            )
         }
+    }
+
+    private func isCaptureProfileUnlockAllowed(
+        propertyID: UUID,
+        sessionID: UUID,
+        metadata: SessionMetadata
+    ) -> Bool {
+        guard metadata.shots.isEmpty else { return false }
+        guard !appState.propertyHasBaseline(propertyID) else { return false }
+
+        let allSessions = (try? localStore.fetchSessions(propertyID: propertyID)) ?? []
+        let uniqueSessionIDs = Set(allSessions.map(\.id))
+        return uniqueSessionIDs.count <= 1 && uniqueSessionIDs.contains(sessionID)
     }
 
     private func toggleCaptureProfileIfAllowed() {
@@ -10352,12 +10372,14 @@ extension ContentView {
             return (fallbackRemaining, 0)
         }
 
-        let sessionFolder = localStore.sessionFolderURL(propertyID: propertyID, sessionID: sessionID)
         let capturedShotKeys = Set(metadata.shots.compactMap { shot -> String? in
             let originalRelative = shot.originalRelativePath.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !originalRelative.isEmpty else { return nil }
-            let originalURL = sessionFolder.appendingPathComponent(originalRelative, isDirectory: false)
-            guard FileManager.default.fileExists(atPath: originalURL.path) else { return nil }
+            guard localStore.resolveSessionRelativeFileURL(
+                propertyID: propertyID,
+                sessionID: sessionID,
+                relativePath: originalRelative
+            ) != nil else { return nil }
             return shot.shotKey
         })
 
@@ -10475,18 +10497,21 @@ extension ContentView {
         propertyID: UUID,
         sessionID: UUID
     ) -> (absolutePath: String?, source: String, relativePath: String, exists: Bool) {
-        let sessionFolder = localStore.sessionFolderURL(propertyID: propertyID, sessionID: sessionID)
         if let stamped = shot.stampedRelativePath?.trimmingCharacters(in: .whitespacesAndNewlines), !stamped.isEmpty {
-            let stampedURL = sessionFolder.appendingPathComponent(stamped)
-            let stampedExists = FileManager.default.fileExists(atPath: stampedURL.path)
-            if stampedExists {
+            if let stampedURL = localStore.resolveSessionRelativeFileURL(
+                propertyID: propertyID,
+                sessionID: sessionID,
+                relativePath: stamped
+            ) {
                 print("[StampedResolve] metadataPath=\(stamped) exists=true fallbackPath=NONE exists=false chosen=\(stampedURL.path)")
                 return (stampedURL.path, "stamped", stamped, true)
             }
             let fallbackRelative = "Stamped/\(shot.shotID.uuidString).jpg"
-            let fallbackURL = sessionFolder.appendingPathComponent(fallbackRelative)
-            let fallbackExists = FileManager.default.fileExists(atPath: fallbackURL.path)
-            if fallbackExists {
+            if let fallbackURL = localStore.resolveSessionRelativeFileURL(
+                propertyID: propertyID,
+                sessionID: sessionID,
+                relativePath: fallbackRelative
+            ) {
                 print("[StampedResolve] metadataPath=\(stamped) exists=false fallbackPath=\(fallbackRelative) exists=true chosen=\(fallbackURL.path)")
                 return (fallbackURL.path, "stamped", fallbackRelative, true)
             }
@@ -10495,9 +10520,11 @@ extension ContentView {
 
         let originalRelative = shot.originalRelativePath.trimmingCharacters(in: .whitespacesAndNewlines)
         if !originalRelative.isEmpty {
-            let originalURL = sessionFolder.appendingPathComponent(originalRelative)
-            let originalExists = FileManager.default.fileExists(atPath: originalURL.path)
-            if originalExists {
+            if let originalURL = localStore.resolveSessionRelativeFileURL(
+                propertyID: propertyID,
+                sessionID: sessionID,
+                relativePath: originalRelative
+            ) {
                 return (originalURL.path, "original", originalRelative, true)
             }
             return (nil, "original", originalRelative, false)

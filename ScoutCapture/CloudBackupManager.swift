@@ -227,7 +227,6 @@ final class CloudBackupManager: ObservableObject {
             safetyPauseUntil: nil,
             safetyPauseReason: nil
         )
-        refreshStatus()
     }
 
     var automaticBackupsEnabled: Bool {
