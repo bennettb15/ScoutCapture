@@ -293,8 +293,10 @@ final class AppState: ObservableObject {
             let created = try localStore.createProperty(property)
             properties.append(created)
             organizations = (try? localStore.fetchOrganizations()) ?? organizations
-            let caches = makeHubCaches(for: properties)
-            applyHubCachePayload(properties: properties, caches: caches)
+            sessionIndexByProperty[created.id] = []
+            draftSessionByProperty[created.id] = nil
+            pendingExportSessionByProperty[created.id] = nil
+            hubMetaByProperty[created.id] = makeHubMeta(for: created)
             if selectedPropertyID == nil {
                 selectedPropertyID = created.id
             }
@@ -900,19 +902,7 @@ final class AppState: ObservableObject {
                 pending[property.id] = pendingSession
             }
 
-            let client = property.clientName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            let organization = organizations.first(where: { $0.id == property.orgId })?.name
-                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            let address = normalizedAddressLine(property.address)
-            let name = property.name.trimmingCharacters(in: .whitespacesAndNewlines)
-            meta[property.id] = HubPropertyMeta(
-                clientLine: client.isEmpty ? nil : client,
-                addressLine: address.isEmpty ? nil : address,
-                normalizedNameToken: name.lowercased(),
-                normalizedClientToken: client.lowercased(),
-                normalizedOrganizationToken: organization.lowercased(),
-                normalizedAddressToken: address.lowercased()
-            )
+            meta[property.id] = makeHubMeta(for: property)
         }
 
         return HubCachePayload(
@@ -920,6 +910,22 @@ final class AppState: ObservableObject {
             drafts: drafts,
             pending: pending,
             meta: meta
+        )
+    }
+
+    private func makeHubMeta(for property: Property) -> HubPropertyMeta {
+        let client = property.clientName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let organization = organizations.first(where: { $0.id == property.orgId })?.name
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let address = normalizedAddressLine(property.address)
+        let name = property.name.trimmingCharacters(in: .whitespacesAndNewlines)
+        return HubPropertyMeta(
+            clientLine: client.isEmpty ? nil : client,
+            addressLine: address.isEmpty ? nil : address,
+            normalizedNameToken: name.lowercased(),
+            normalizedClientToken: client.lowercased(),
+            normalizedOrganizationToken: organization.lowercased(),
+            normalizedAddressToken: address.lowercased()
         )
     }
 
