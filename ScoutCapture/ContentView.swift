@@ -3970,6 +3970,8 @@ struct ContentView: View {
         let title: String
         let detailId: String
         let localIdentifier: String
+        let metadataPropertyID: UUID?
+        let metadataSessionID: UUID?
     }
 
     private enum GuidedThumbSource: String {
@@ -5184,6 +5186,8 @@ struct ContentView: View {
                     assets: assets,
                     startIndex: 0,
                     detailIdOverride: state.detailId,
+                    metadataPropertyID: state.metadataPropertyID,
+                    metadataSessionID: state.metadataSessionID,
                     cache: imageCache,
                     viewerToken: state.localIdentifier.hashValue
                 )
@@ -7853,11 +7857,34 @@ extension ContentView {
 
     private func showArmedReferenceImage(isCaptured: Bool) {
         guard let localID = armedReferenceImageLocalIdentifier(isCaptured: isCaptured) else { return }
+        var metadataPropertyID: UUID? = appState.selectedPropertyID
+        var metadataSessionID: UUID? = appState.currentSession?.id
+        if let flaggedID = armedUpdateObservationID,
+           let propertyID = appState.selectedPropertyID,
+           let observations = try? localStore.fetchObservations(propertyID: propertyID),
+           let observation = observations.first(where: { $0.id == flaggedID }) {
+            metadataPropertyID = observation.propertyID
+            metadataSessionID = flaggedMetadataSessionID(for: observation, isCaptured: isCaptured)
+        }
         armedReferenceViewerState = ArmedReferenceViewerState(
             title: isCaptured ? "Captured Image" : "Reference Image",
             detailId: armedReferenceDetailLabel(),
-            localIdentifier: localID
+            localIdentifier: localID,
+            metadataPropertyID: metadataPropertyID,
+            metadataSessionID: metadataSessionID
         )
+    }
+
+    private func flaggedMetadataSessionID(for observation: Observation, isCaptured: Bool) -> UUID? {
+        if isCaptured {
+            return observation.updatedInSessionID
+                ?? observation.resolvedInSessionID
+                ?? appState.currentSession?.id
+                ?? observation.sessionID
+        }
+        return observation.sessionID
+            ?? observation.updatedInSessionID
+            ?? appState.currentSession?.id
     }
 
     @discardableResult
@@ -7881,7 +7908,9 @@ extension ContentView {
                 elevation: observation.targetElevation,
                 detailType: observation.detailType
             ),
-            localIdentifier: trimmed
+            localIdentifier: trimmed,
+            metadataPropertyID: observation.propertyID,
+            metadataSessionID: flaggedMetadataSessionID(for: observation, isCaptured: isCaptured)
         )
         return true
     }
@@ -16222,6 +16251,8 @@ extension ContentView {
             let detailId: String
             let asset: ReportAsset
             let viewerToken: Int
+            let metadataPropertyID: UUID?
+            let metadataSessionID: UUID?
         }
 
         private var isLandscape: Bool {
@@ -16408,6 +16439,8 @@ extension ContentView {
                     assets: [state.asset],
                     startIndex: 0,
                     detailIdOverride: state.detailId,
+                    metadataPropertyID: state.metadataPropertyID,
+                    metadataSessionID: state.metadataSessionID,
                     cache: cache,
                     viewerToken: state.viewerToken
                 )
@@ -16456,8 +16489,22 @@ extension ContentView {
                     detailType: observation.detailType
                 ),
                 asset: asset,
-                viewerToken: trimmed.hashValue
+                viewerToken: trimmed.hashValue,
+                metadataPropertyID: observation.propertyID,
+                metadataSessionID: metadataSessionID(for: observation, isCaptured: isCaptured)
             )
+        }
+
+        private func metadataSessionID(for observation: Observation, isCaptured: Bool) -> UUID? {
+            if isCaptured {
+                return observation.updatedInSessionID
+                    ?? observation.resolvedInSessionID
+                    ?? currentSessionID
+                    ?? observation.sessionID
+            }
+            return observation.sessionID
+                ?? observation.updatedInSessionID
+                ?? currentSessionID
         }
 
         private func showInlineToast(_ text: String) {
