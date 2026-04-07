@@ -13,6 +13,14 @@ import AVFoundation
 import ImageIO
 import UniformTypeIdentifiers
 
+private let isVerboseConsoleLoggingEnabled = false
+
+@inline(__always)
+private func verboseLog(_ message: @autoclosure () -> String) {
+    guard isVerboseConsoleLoggingEnabled else { return }
+    print(message())
+}
+
 private func proportionalCircleGlyphSize(for diameter: CGFloat) -> CGFloat {
     min(30, max(18, (diameter * 0.5).rounded()))
 }
@@ -229,6 +237,15 @@ private extension View {
 
 final class AssetImageCache: ObservableObject {
     private let cache = NSCache<NSString, UIImage>()
+    private let thumbnailQueue: OperationQueue = {
+        let queue = OperationQueue()
+        queue.name = "ScoutCapture.AssetImageCache.Thumbnails"
+        queue.qualityOfService = .utility
+        queue.maxConcurrentOperationCount = 2
+        return queue
+    }()
+    private let stateQueue = DispatchQueue(label: "ScoutCapture.AssetImageCache.State")
+    private var inflightThumbnailCompletions: [NSString: [(UIImage?) -> Void]] = [:]
 
     init() {
         cache.countLimit = 120
@@ -256,17 +273,35 @@ final class AssetImageCache: ObservableObject {
     func requestThumbnail(for asset: ReportAsset, pixelSize: CGFloat, completion: @escaping (UIImage?) -> Void) {
         let key = "\(asset.localIdentifier)-\(Int(pixelSize))" as NSString
         if let cached = cache.object(forKey: key) {
+            verboseLog("[GalleryImage] mode=thumb cache=hit id=\(asset.localIdentifier) px=\(Int(pixelSize))")
             completion(cached)
             return
         }
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            guard let thumb = self?.makeThumbnail(from: asset, pixelSize: pixelSize) else {
-                DispatchQueue.main.async { completion(nil) }
-                return
+        verboseLog("[GalleryImage] mode=thumb cache=miss id=\(asset.localIdentifier) px=\(Int(pixelSize))")
+        let shouldStartDecode: Bool = stateQueue.sync {
+            if inflightThumbnailCompletions[key] != nil {
+                inflightThumbnailCompletions[key, default: []].append(completion)
+                return false
             }
-            self?.cache.setObject(thumb, forKey: key)
+            inflightThumbnailCompletions[key] = [completion]
+            return true
+        }
+        guard shouldStartDecode else { return }
+
+        thumbnailQueue.addOperation { [weak self] in
+            guard let self else { return }
+            let thumb = self.makeThumbnail(from: asset, pixelSize: pixelSize)
+            if let thumb {
+                self.cache.setObject(thumb, forKey: key)
+            }
+            let completions = self.stateQueue.sync { () -> [(UIImage?) -> Void] in
+                let callbacks = self.inflightThumbnailCompletions.removeValue(forKey: key) ?? []
+                return callbacks
+            }
             DispatchQueue.main.async {
-                completion(thumb)
+                for callback in completions {
+                    callback(thumb)
+                }
             }
         }
     }
@@ -275,9 +310,11 @@ final class AssetImageCache: ObservableObject {
 
         let key = "\(asset.localIdentifier)-full" as NSString
         if let cached = cache.object(forKey: key) {
+            verboseLog("[GalleryImage] mode=full cache=hit id=\(asset.localIdentifier)")
             completion(cached)
             return
         }
+        verboseLog("[GalleryImage] mode=full cache=miss id=\(asset.localIdentifier)")
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let data = try? Data(contentsOf: asset.fileURL),
                   let image = UIImage(data: data) else {
@@ -471,28 +508,72 @@ final class ReportLibraryModel: ObservableObject {
             assets = []
             return
         }
+        let sessionFolder = localStore.sessionFolderURL(propertyID: propertyID, sessionID: sessionID)
         let originals = localStore.originalsDirectoryURL(propertyID: propertyID, sessionID: sessionID)
-        guard fileManager.fileExists(atPath: originals.path) else {
-            assets = []
-            return
+        let sessionWindow: (start: Date, end: Date?)? = {
+            guard let session = (try? localStore.fetchSessions(propertyID: propertyID))?.first(where: { $0.id == sessionID }) else {
+                return nil
+            }
+            return (session.startedAt, session.endedAt)
+        }()
+
+        // Fast path: build the gallery list from session metadata without touching image bytes.
+        // This keeps current/previous toggles responsive even when iCloud files are cold.
+        var out: [ReportAsset] = []
+        if let metadata = try? localStore.loadSessionMetadata(propertyID: propertyID, sessionID: sessionID),
+           !metadata.shots.isEmpty {
+            out = metadata.shots
+                .sorted { lhs, rhs in
+                    if lhs.createdAt != rhs.createdAt { return lhs.createdAt < rhs.createdAt }
+                    return lhs.shotID.uuidString < rhs.shotID.uuidString
+                }
+                .compactMap { shot in
+                    // Only surface shots that belong to this session's capture window.
+                    if let window = sessionWindow {
+                        if shot.createdAt < window.start { return nil }
+                        if let end = window.end, shot.createdAt > end { return nil }
+                    }
+                    let relative = shot.originalRelativePath.trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard !relative.isEmpty else { return nil }
+                    let url = sessionFolder.appendingPathComponent(relative, isDirectory: false)
+                    guard fileManager.fileExists(atPath: url.path) else { return nil }
+                    let filename = shot.originalFilename.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                        ? url.lastPathComponent
+                        : shot.originalFilename
+                    return ReportAsset(
+                        localIdentifier: url.path,
+                        fileURL: url,
+                        creationDate: shot.createdAt,
+                        pixelWidth: 0,
+                        pixelHeight: 0,
+                        originalFilename: filename
+                    )
+                }
         }
-        let urls = (try? fileManager.contentsOfDirectory(at: originals, includingPropertiesForKeys: [.creationDateKey, .contentModificationDateKey], options: [.skipsHiddenFiles])) ?? []
-        let out: [ReportAsset] = urls.compactMap { url in
-            guard let attrs = try? fileManager.attributesOfItem(atPath: url.path) else { return nil }
-            let created = (attrs[.creationDate] as? Date) ?? (attrs[.modificationDate] as? Date)
-            let dimensions = Self.imageDimensions(at: url)
-            let localId = url.path
-            return ReportAsset(
-                localIdentifier: localId,
-                fileURL: url,
-                creationDate: created,
-                pixelWidth: dimensions.width,
-                pixelHeight: dimensions.height,
-                originalFilename: url.lastPathComponent
-            )
-        }
-        .sorted { lhs, rhs in
-            (lhs.creationDate ?? .distantPast) < (rhs.creationDate ?? .distantPast)
+
+        // Fallback for older/missing metadata: enumerate originals folder, still avoiding dimension reads.
+        if out.isEmpty, fileManager.fileExists(atPath: originals.path) {
+            let urls = (try? fileManager.contentsOfDirectory(
+                at: originals,
+                includingPropertiesForKeys: [.creationDateKey, .contentModificationDateKey],
+                options: [.skipsHiddenFiles]
+            )) ?? []
+            out = urls.compactMap { url in
+                guard let attrs = try? fileManager.attributesOfItem(atPath: url.path) else { return nil }
+                let created = (attrs[.creationDate] as? Date) ?? (attrs[.modificationDate] as? Date)
+                let localId = url.path
+                return ReportAsset(
+                    localIdentifier: localId,
+                    fileURL: url,
+                    creationDate: created,
+                    pixelWidth: 0,
+                    pixelHeight: 0,
+                    originalFilename: url.lastPathComponent
+                )
+            }
+            .sorted { lhs, rhs in
+                (lhs.creationDate ?? .distantPast) < (rhs.creationDate ?? .distantPast)
+            }
         }
 
         DispatchQueue.main.async {
@@ -2245,7 +2326,8 @@ private struct ReportPhotoViewer: View {
                 .onAppear {
                     if img != nil { return }
                     let scale = UIScreen.currentScale
-                    let px: CGFloat = max(220, side * 6) * scale
+                    // Keep filmstrip in thumbnail mode; full-res is loaded only in the focused image viewer.
+                    let px: CGFloat = max(180, side * 2) * scale
                     cache.requestThumbnail(for: asset, pixelSize: px) { im in
                         DispatchQueue.main.async { self.img = im }
                     }
@@ -3138,6 +3220,8 @@ struct ContentView: View {
     @State private var flaggedResolvedThumbnailPathByID: [UUID: String] = [:]
     @State private var flaggedReferencePathByID: [UUID: String] = [:]
     @State private var flaggedAngleIndexByID: [UUID: Int] = [:]
+    @State private var allowReferenceThumbnailResolution: Bool = false
+    @State private var referenceResolutionToken: Int = 0
     @State private var reservedAngleByContextKey: [String: Int] = [:]
     @State private var guidedThumbnailRefreshToken: UUID = UUID()
     @State private var gridThumbnailRefreshToken: UUID = UUID()
@@ -3413,6 +3497,19 @@ struct ContentView: View {
         )
     }
 
+    private func primeDeferredReferenceResolution() {
+        referenceResolutionToken += 1
+        allowReferenceThumbnailResolution = false
+    }
+
+    private func ensureReferenceResolutionReady() {
+        guard !allowReferenceThumbnailResolution else { return }
+        referenceResolutionToken += 1
+        allowReferenceThumbnailResolution = true
+        refreshGuidedShots()
+        refreshActiveIssues()
+    }
+
     private func refreshReferenceSetsAndPendingCounts() {
         guard let propertyID = appState.selectedPropertyID,
               let currentSession = appState.currentSession else {
@@ -3421,9 +3518,9 @@ struct ContentView: View {
             guidedUpdatedKeysThisSession = []
             flaggedUpdatedIDsThisSession = []
             flaggedPendingCaptureCount = 0
-            print("[ReferenceSet] sessionID=NONE guidedRefCount=0 flaggedRefCount=0")
-            print("[PendingUpdate] intent=\(captureIntentDebugLabel) guidedUpdated=0 flaggedUpdated=0")
-            print("[BadgeCompute] guidedRemaining=0 flaggedRemaining=0")
+            verboseLog("[ReferenceSet] sessionID=NONE guidedRefCount=0 flaggedRefCount=0")
+            verboseLog("[PendingUpdate] intent=\(captureIntentDebugLabel) guidedUpdated=0 flaggedUpdated=0")
+            verboseLog("[BadgeCompute] guidedRemaining=0 flaggedRemaining=0")
             return
         }
 
@@ -3433,9 +3530,9 @@ struct ContentView: View {
             guidedUpdatedKeysThisSession = []
             flaggedUpdatedIDsThisSession = []
             flaggedPendingCaptureCount = 0
-            print("[ReferenceSet] sessionID=\(currentSession.id.uuidString) guidedRefCount=0 flaggedRefCount=0")
-            print("[PendingUpdate] intent=\(captureIntentDebugLabel) guidedUpdated=0 flaggedUpdated=0")
-            print("[BadgeCompute] guidedRemaining=0 flaggedRemaining=0")
+            verboseLog("[ReferenceSet] sessionID=\(currentSession.id.uuidString) guidedRefCount=0 flaggedRefCount=0")
+            verboseLog("[PendingUpdate] intent=\(captureIntentDebugLabel) guidedUpdated=0 flaggedUpdated=0")
+            verboseLog("[BadgeCompute] guidedRemaining=0 flaggedRemaining=0")
             return
         }
 
@@ -3446,16 +3543,22 @@ struct ContentView: View {
         metadataCache[currentSession.id] = currentSessionMetadata
 
         var newGuidedReferenceKeys: Set<String> = []
-        for guidedShot in guidedShots {
-            let resolved = resolveGuidedRetakeReferenceForDisplay(
-                propertyID: propertyID,
-                currentSession: currentSession,
-                baselineSessionID: baselineState.baselineSessionID,
-                guidedShot: guidedShot,
-                orderedSessions: orderedSessions,
-                metadataCache: &metadataCache
-            )
-            if resolved.exists {
+        if allowReferenceThumbnailResolution {
+            for guidedShot in guidedShots {
+                let resolved = resolveGuidedRetakeReferenceForDisplay(
+                    propertyID: propertyID,
+                    currentSession: currentSession,
+                    baselineSessionID: baselineState.baselineSessionID,
+                    guidedShot: guidedShot,
+                    orderedSessions: orderedSessions,
+                    metadataCache: &metadataCache
+                )
+                if resolved.exists {
+                    newGuidedReferenceKeys.insert(guidedKey(for: guidedShot))
+                }
+            }
+        } else {
+            for guidedShot in guidedShots {
                 newGuidedReferenceKeys.insert(guidedKey(for: guidedShot))
             }
         }
@@ -3505,9 +3608,9 @@ struct ContentView: View {
         flaggedUpdatedIDsThisSession = newFlaggedUpdatedIDs
         flaggedPendingCaptureCount = max(0, newFlaggedReferenceIDs.subtracting(newFlaggedUpdatedIDs).count)
 
-        print("[ReferenceSet] sessionID=\(currentSession.id.uuidString) guidedRefCount=\(guidedReferenceKeys.count) flaggedRefCount=\(flaggedReferenceIDs.count)")
-        print("[PendingUpdate] intent=\(captureIntentDebugLabel) guidedUpdated=\(guidedUpdatedKeysThisSession.count) flaggedUpdated=\(flaggedUpdatedIDsThisSession.count)")
-        print("[BadgeCompute] guidedRemaining=\(guidedRemainingForCompass) flaggedRemaining=\(flaggedPendingCaptureCount)")
+        verboseLog("[ReferenceSet] sessionID=\(currentSession.id.uuidString) guidedRefCount=\(guidedReferenceKeys.count) flaggedRefCount=\(flaggedReferenceIDs.count)")
+        verboseLog("[PendingUpdate] intent=\(captureIntentDebugLabel) guidedUpdated=\(guidedUpdatedKeysThisSession.count) flaggedUpdated=\(flaggedUpdatedIDsThisSession.count)")
+        verboseLog("[BadgeCompute] guidedRemaining=\(guidedRemainingForCompass) flaggedRemaining=\(flaggedPendingCaptureCount)")
     }
 
     private func shotMetadata(_ shot: ShotMetadata, matches guidedShot: GuidedShot, guidedKey: String) -> Bool {
@@ -3628,7 +3731,7 @@ struct ContentView: View {
                 sessionID: currentSessionID
             )
             if let path = resolved.absolutePath {
-                print("[FlagThumbResolve] matchBy=\(currentMatch.matchBy) target=\(target) chosenShotID=\(currentMatch.shot.shotID.uuidString) chosenSession=\(currentSessionID.uuidString) reason=matched source=\(resolved.source) pathExists=true")
+                verboseLog("[FlagThumbResolve] matchBy=\(currentMatch.matchBy) target=\(target) chosenShotID=\(currentMatch.shot.shotID.uuidString) chosenSession=\(currentSessionID.uuidString) reason=matched source=\(resolved.source) pathExists=true")
                 return GuidedSessionThumbnailResolution(source: .current, sessionID: currentSessionID, path: path, exists: true)
             }
         }
@@ -3651,7 +3754,7 @@ struct ContentView: View {
                 sessionID: prior.id
             )
             if let path = resolved.absolutePath {
-                print("[FlagThumbResolve] matchBy=\(priorMatch.matchBy) target=\(target) chosenShotID=\(priorMatch.shot.shotID.uuidString) chosenSession=\(prior.id.uuidString) reason=matched source=\(resolved.source) pathExists=true")
+                verboseLog("[FlagThumbResolve] matchBy=\(priorMatch.matchBy) target=\(target) chosenShotID=\(priorMatch.shot.shotID.uuidString) chosenSession=\(prior.id.uuidString) reason=matched source=\(resolved.source) pathExists=true")
                 return GuidedSessionThumbnailResolution(source: .prior, sessionID: prior.id, path: path, exists: true)
             }
         }
@@ -3666,7 +3769,7 @@ struct ContentView: View {
                 sessionID: baselineSessionID
             )
             if let path = resolved.absolutePath {
-                print("[FlagThumbResolve] matchBy=\(baselineMatch.matchBy) target=\(target) chosenShotID=\(baselineMatch.shot.shotID.uuidString) chosenSession=\(baselineSessionID.uuidString) reason=matched source=\(resolved.source) pathExists=true")
+                verboseLog("[FlagThumbResolve] matchBy=\(baselineMatch.matchBy) target=\(target) chosenShotID=\(baselineMatch.shot.shotID.uuidString) chosenSession=\(baselineSessionID.uuidString) reason=matched source=\(resolved.source) pathExists=true")
                 return GuidedSessionThumbnailResolution(source: .baseline, sessionID: baselineSessionID, path: path, exists: true)
             }
         }
@@ -3677,11 +3780,11 @@ struct ContentView: View {
             .imageLocalIdentifier?
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         if !fallbackReference.isEmpty, FileManager.default.fileExists(atPath: fallbackReference) {
-            print("[FlagThumbResolve] matchBy=none target=\(target) chosenShotID=NONE chosenSession=NONE reason=referenceFallback source=reference pathExists=true")
+            verboseLog("[FlagThumbResolve] matchBy=none target=\(target) chosenShotID=NONE chosenSession=NONE reason=referenceFallback source=reference pathExists=true")
             return GuidedSessionThumbnailResolution(source: .reference, sessionID: nil, path: fallbackReference, exists: true)
         }
 
-        print("[FlagThumbResolve] matchBy=none target=\(target) chosenShotID=NONE chosenSession=NONE reason=noMatch source=none pathExists=false")
+        verboseLog("[FlagThumbResolve] matchBy=none target=\(target) chosenShotID=NONE chosenSession=NONE reason=noMatch source=none pathExists=false")
         return GuidedSessionThumbnailResolution(source: .none, sessionID: nil, path: nil, exists: false)
     }
 
@@ -3695,14 +3798,34 @@ struct ContentView: View {
         metadataCache: inout [UUID: SessionMetadata]
     ) -> GuidedSessionThumbnailResolution {
         let currentSessionID = currentSession?.id
+        let currentSessionStart = currentSession?.startedAt
+        let currentSessionEnd = currentSession?.endedAt
         let key = guidedKey(for: guidedShot)
 
         if let currentSessionID,
            let currentShot = guidedShot.shot,
            activeSessionShotIDs.contains(currentShot.id) {
+            let isCurrentSessionCapture: Bool = {
+                guard let currentSessionStart else { return false }
+                if currentShot.capturedAt < currentSessionStart { return false }
+                if let currentSessionEnd, currentShot.capturedAt > currentSessionEnd { return false }
+                return true
+            }()
+            guard isCurrentSessionCapture else {
+                // Seeded carryover metadata can include prior shot IDs in the active session map.
+                // Do not treat those as current captures for guided thumbnail source selection.
+                return resolveGuidedRetakeReferenceForDisplay(
+                    propertyID: propertyID,
+                    currentSession: currentSession,
+                    baselineSessionID: baselineSessionID,
+                    guidedShot: guidedShot,
+                    orderedSessions: orderedSessions,
+                    metadataCache: &metadataCache
+                )
+            }
             let directPath = currentShot.imageLocalIdentifier?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             if !directPath.isEmpty, FileManager.default.fileExists(atPath: directPath) {
-                print("[GuidedThumbResolve] propertyID=\(propertyID.uuidString) currentSessionID=\(currentSessionID.uuidString) guidedKey=\(key) chosenSource=current chosenSessionID=\(currentSessionID.uuidString) chosenPath=\(directPath) exists=true")
+                verboseLog("[GuidedThumbResolve] propertyID=\(propertyID.uuidString) currentSessionID=\(currentSessionID.uuidString) guidedKey=\(key) chosenSource=current chosenSessionID=\(currentSessionID.uuidString) chosenPath=\(directPath) exists=true")
                 return GuidedSessionThumbnailResolution(source: .current, sessionID: currentSessionID, path: directPath, exists: true)
             }
         }
@@ -3711,13 +3834,29 @@ struct ContentView: View {
            let currentSessionMetadata,
            let currentShotID = guidedShot.shot?.id,
            let currentShot = currentSessionMetadata.shots.first(where: { $0.shotID == currentShotID && shotMetadata($0, matches: guidedShot, guidedKey: key) }) {
+            let isCurrentSessionCapture: Bool = {
+                guard let currentSessionStart else { return false }
+                if currentShot.createdAt < currentSessionStart { return false }
+                if let currentSessionEnd, currentShot.createdAt > currentSessionEnd { return false }
+                return true
+            }()
+            guard isCurrentSessionCapture else {
+                return resolveGuidedRetakeReferenceForDisplay(
+                    propertyID: propertyID,
+                    currentSession: currentSession,
+                    baselineSessionID: baselineSessionID,
+                    guidedShot: guidedShot,
+                    orderedSessions: orderedSessions,
+                    metadataCache: &metadataCache
+                )
+            }
             let resolved = resolvedSessionImagePath(
                 for: currentShot,
                 propertyID: propertyID,
                 sessionID: currentSessionID
             )
             if let path = resolved.absolutePath {
-                print("[GuidedThumbResolve] propertyID=\(propertyID.uuidString) currentSessionID=\(currentSessionID.uuidString) guidedKey=\(key) chosenSource=current chosenSessionID=\(currentSessionID.uuidString) chosenPath=\(path) exists=true")
+                verboseLog("[GuidedThumbResolve] propertyID=\(propertyID.uuidString) currentSessionID=\(currentSessionID.uuidString) guidedKey=\(key) chosenSource=current chosenSessionID=\(currentSessionID.uuidString) chosenPath=\(path) exists=true")
                 return GuidedSessionThumbnailResolution(source: .current, sessionID: currentSessionID, path: path, exists: true)
             }
         }
@@ -3735,7 +3874,7 @@ struct ContentView: View {
             }
             if let priorGuidedSnapshot = priorMeta.guidedShots.first(where: { guidedSnapshot($0, matches: guidedShot, guidedKey: key) }),
                let path = resolvedGuidedSnapshotImagePath(priorGuidedSnapshot) {
-                print("[GuidedThumbResolve] propertyID=\(propertyID.uuidString) currentSessionID=\(currentSessionID?.uuidString ?? "NONE") guidedKey=\(key) chosenSource=prior chosenSessionID=\(prior.id.uuidString) chosenPath=\(path) exists=true")
+                verboseLog("[GuidedThumbResolve] propertyID=\(propertyID.uuidString) currentSessionID=\(currentSessionID?.uuidString ?? "NONE") guidedKey=\(key) chosenSource=prior chosenSessionID=\(prior.id.uuidString) chosenPath=\(path) exists=true")
                 return GuidedSessionThumbnailResolution(source: .prior, sessionID: prior.id, path: path, exists: true)
             }
             if let priorShot = priorMeta.shots.first(where: { shotMetadata($0, matches: guidedShot, guidedKey: key) }) {
@@ -3745,7 +3884,7 @@ struct ContentView: View {
                     sessionID: prior.id
                 )
                 if let path = resolved.absolutePath {
-                    print("[GuidedThumbResolve] propertyID=\(propertyID.uuidString) currentSessionID=\(currentSessionID?.uuidString ?? "NONE") guidedKey=\(key) chosenSource=prior chosenSessionID=\(prior.id.uuidString) chosenPath=\(path) exists=true")
+                    verboseLog("[GuidedThumbResolve] propertyID=\(propertyID.uuidString) currentSessionID=\(currentSessionID?.uuidString ?? "NONE") guidedKey=\(key) chosenSource=prior chosenSessionID=\(prior.id.uuidString) chosenPath=\(path) exists=true")
                     return GuidedSessionThumbnailResolution(source: .prior, sessionID: prior.id, path: path, exists: true)
                 }
             }
@@ -3758,7 +3897,7 @@ struct ContentView: View {
         .first(where: { !$0.isEmpty && FileManager.default.fileExists(atPath: $0) })
 
         if let fallbackReference {
-            print("[GuidedThumbResolve] propertyID=\(propertyID.uuidString) currentSessionID=\(currentSessionID?.uuidString ?? "NONE") guidedKey=\(key) chosenSource=reference chosenSessionID=NONE chosenPath=\(fallbackReference) exists=true")
+            verboseLog("[GuidedThumbResolve] propertyID=\(propertyID.uuidString) currentSessionID=\(currentSessionID?.uuidString ?? "NONE") guidedKey=\(key) chosenSource=reference chosenSessionID=NONE chosenPath=\(fallbackReference) exists=true")
             return GuidedSessionThumbnailResolution(source: .reference, sessionID: nil, path: fallbackReference, exists: true)
         }
 
@@ -3766,7 +3905,7 @@ struct ContentView: View {
            let baselineMeta = metadataForSession(propertyID: propertyID, sessionID: baselineSessionID, cache: &metadataCache) {
             if let baselineGuidedSnapshot = baselineMeta.guidedShots.first(where: { guidedSnapshot($0, matches: guidedShot, guidedKey: key) }),
                let path = resolvedGuidedSnapshotImagePath(baselineGuidedSnapshot) {
-                print("[GuidedThumbResolve] propertyID=\(propertyID.uuidString) currentSessionID=\(currentSessionID?.uuidString ?? "NONE") guidedKey=\(key) chosenSource=baseline chosenSessionID=\(baselineSessionID.uuidString) chosenPath=\(path) exists=true")
+                verboseLog("[GuidedThumbResolve] propertyID=\(propertyID.uuidString) currentSessionID=\(currentSessionID?.uuidString ?? "NONE") guidedKey=\(key) chosenSource=baseline chosenSessionID=\(baselineSessionID.uuidString) chosenPath=\(path) exists=true")
                 return GuidedSessionThumbnailResolution(source: .baseline, sessionID: baselineSessionID, path: path, exists: true)
             }
             if let baselineShot = baselineMeta.shots.first(where: { shotMetadata($0, matches: guidedShot, guidedKey: key) }) {
@@ -3776,13 +3915,13 @@ struct ContentView: View {
                     sessionID: baselineSessionID
                 )
                 if let path = resolved.absolutePath {
-                    print("[GuidedThumbResolve] propertyID=\(propertyID.uuidString) currentSessionID=\(currentSessionID?.uuidString ?? "NONE") guidedKey=\(key) chosenSource=baseline chosenSessionID=\(baselineSessionID.uuidString) chosenPath=\(path) exists=true")
+                    verboseLog("[GuidedThumbResolve] propertyID=\(propertyID.uuidString) currentSessionID=\(currentSessionID?.uuidString ?? "NONE") guidedKey=\(key) chosenSource=baseline chosenSessionID=\(baselineSessionID.uuidString) chosenPath=\(path) exists=true")
                     return GuidedSessionThumbnailResolution(source: .baseline, sessionID: baselineSessionID, path: path, exists: true)
                 }
             }
         }
 
-        print("[GuidedThumbResolve] propertyID=\(propertyID.uuidString) currentSessionID=\(currentSessionID?.uuidString ?? "NONE") guidedKey=\(key) chosenSource=none chosenSessionID=NONE chosenPath=NONE exists=false")
+        verboseLog("[GuidedThumbResolve] propertyID=\(propertyID.uuidString) currentSessionID=\(currentSessionID?.uuidString ?? "NONE") guidedKey=\(key) chosenSource=none chosenSessionID=NONE chosenPath=NONE exists=false")
         return GuidedSessionThumbnailResolution(source: .none, sessionID: nil, path: nil, exists: false)
     }
 
@@ -4153,15 +4292,23 @@ struct ContentView: View {
         guard FileManager.default.fileExists(atPath: url.path) else { return nil }
         let attrs = try? FileManager.default.attributesOfItem(atPath: url.path)
         let created = (attrs?[.creationDate] as? Date) ?? (attrs?[.modificationDate] as? Date)
-        let dimensions = ReportLibraryModel.imageDimensions(at: url)
         return ReportAsset(
             localIdentifier: url.path,
             fileURL: url,
             creationDate: created,
-            pixelWidth: dimensions.width,
-            pixelHeight: dimensions.height,
+            pixelWidth: 0,
+            pixelHeight: 0,
             originalFilename: url.lastPathComponent
         )
+    }
+
+    private static func requestUbiquitousDownloadIfNeeded(path: String) {
+        let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        let url = URL(fileURLWithPath: trimmed)
+        let fm = FileManager.default
+        guard fm.isUbiquitousItem(at: url) else { return }
+        try? fm.startDownloadingUbiquitousItem(at: url)
     }
 
     private static func resolveGuidedThumbnail(
@@ -5176,7 +5323,7 @@ struct ContentView: View {
             .onChange(of: sessionExportFile?.id) { oldValue, newValue in
                 guard oldValue != nil, newValue == nil, awaitingSessionExportDismiss else { return }
                 awaitingSessionExportDismiss = false
-                appState.refreshProperties()
+                appState.refreshPropertiesInBackground()
                 onExitToHub?()
             }
             .fullScreenCover(item: $armedReferenceViewerState) { state in
@@ -5263,6 +5410,7 @@ struct ContentView: View {
                     sessionID: appState.currentSession?.id
                 )
                 refreshCaptureProfileSessionState()
+                primeDeferredReferenceResolution()
                 loadBuildingOptions()
                 loadTradeOptions()
                 refreshActiveIssues()
@@ -5288,6 +5436,7 @@ struct ContentView: View {
                 )
                 refreshCaptureProfileSessionState()
                 reservedAngleByContextKey = [:]
+                primeDeferredReferenceResolution()
                 resetSelectionForSwitch()
                 refreshActiveIssues()
                 refreshGuidedShots()
@@ -5314,6 +5463,7 @@ struct ContentView: View {
                 if hasValidCurrentSession {
                     camera.ensurePreviewRunningAsync()
                 }
+                primeDeferredReferenceResolution()
                 resetSelectionForSwitch()
                 refreshActiveIssues()
                 refreshGuidedShots()
@@ -7932,12 +8082,15 @@ extension ContentView {
                 fireQuickButtonHaptic()
                 let snapshot = guidedSessionCountSnapshot()
                 let sessionIDText = appState.currentSession?.id.uuidString ?? "NONE"
-                print("[GuidedCount] session=\(sessionIDText) guidedTotal=\(snapshot.total) capturedForSession=\(snapshot.captured) remaining=\(snapshot.remaining)")
+                verboseLog("[GuidedCount] session=\(sessionIDText) guidedTotal=\(snapshot.total) capturedForSession=\(snapshot.captured) remaining=\(snapshot.remaining)")
                 let liveGuidedCount = guidedRemainingForCompass
-                print("[Badge] beforeOpen guidedCount=\(liveGuidedCount) flaggedCount=\(flaggedPendingCaptureCount)")
+                verboseLog("[Badge] beforeOpen guidedCount=\(liveGuidedCount) flaggedCount=\(flaggedPendingCaptureCount)")
                 showGuidedChecklist = true
+                DispatchQueue.main.async {
+                    ensureReferenceResolutionReady()
+                }
                 let liveGuidedCountAfter = guidedRemainingForCompass
-                print("[Badge] afterOpen guidedCount=\(liveGuidedCountAfter) flaggedCount=\(flaggedPendingCaptureCount)")
+                verboseLog("[Badge] afterOpen guidedCount=\(liveGuidedCountAfter) flaggedCount=\(flaggedPendingCaptureCount)")
             }
 
             coreElevationChecklistButton {
@@ -7958,6 +8111,9 @@ extension ContentView {
             refreshActiveIssues()
             if !activeObservations.isEmpty {
                 showActiveIssuesSheet = true
+                DispatchQueue.main.async {
+                    ensureReferenceResolutionReady()
+                }
             } else {
                 showNoFlaggedIssuesToast = true
                 DispatchQueue.main.asyncAfter(deadline: .now() + 1.8) {
@@ -9205,8 +9361,32 @@ extension ContentView {
         }
 
         let activeSessionID = appState.currentSession?.id
+        if !allowReferenceThumbnailResolution {
+            activeSessionShotIDs = sessionShotIDsForActiveSession(propertyID: propertyID, sessionID: activeSessionID)
+            let baselineState = persistedBaselineState(propertyID: propertyID)
+            guidedShots = loadGuidedChecklistForSession(
+                propertyID: propertyID,
+                sessionID: activeSessionID,
+                baselineState: baselineState
+            )
+            guidedResolvedThumbnailPathByID = [:]
+            guidedReferencePathByID = [:]
+            if armedGuidedShotID != nil || armedGuidedRetakeShotID != nil {
+                armedGuidedShotID = nil
+                armedGuidedRetakeShotID = nil
+                currentCaptureIntent = .free
+                showArmedReferenceMenu = false
+            }
+            verboseLog(
+                "[GuidedData] deferred sessionID=\(activeSessionID?.uuidString ?? "NONE") " +
+                "shotsCount=\(activeSessionShotIDs.count) guidedCount=\(guidedShots.count)"
+            )
+            refreshReferenceSetsAndPendingCounts()
+            return
+        }
+
         let baselineState = persistedBaselineState(propertyID: propertyID)
-        print(
+        verboseLog(
             "[BaselineState] propertyID=\(propertyID.uuidString) baselineSessionID=\(baselineState.baselineSessionID?.uuidString ?? "NONE") hasBaseline=\(baselineState.hasBaseline)"
         )
         let sessionMetadata = sessionMetadataForActiveSession(propertyID: propertyID, sessionID: activeSessionID)
@@ -9278,36 +9458,29 @@ extension ContentView {
             }
         }
 
-        for index in fetchedGuidedShots.indices {
-            let guided = fetchedGuidedShots[index]
-            if resolvedMap[guided.id] != nil {
-                continue
-            }
-            let resolved = resolveGuidedThumbnailForDisplay(
-                propertyID: propertyID,
-                currentSession: currentSession,
-                baselineSessionID: baselineState.baselineSessionID,
-                guidedShot: guided,
-                currentSessionMetadata: sessionMetadata,
-                orderedSessions: orderedSessions,
-                metadataCache: &metadataCache
-            )
-            if let chosenPath = resolved.path, resolved.exists {
-                resolvedMap[guided.id] = chosenPath
-                if resolved.source != .current {
-                    fetchedGuidedShots[index].referenceImagePath = chosenPath
-                    fetchedGuidedShots[index].referenceImageLocalIdentifier = chosenPath
-                    referenceMap[guided.id] = chosenPath
+        if allowReferenceThumbnailResolution {
+            for index in fetchedGuidedShots.indices {
+                var guided = fetchedGuidedShots[index]
+                let resolved = resolveGuidedThumbnailForDisplay(
+                    propertyID: propertyID,
+                    currentSession: currentSession,
+                    baselineSessionID: baselineState.baselineSessionID,
+                    guidedShot: guided,
+                    currentSessionMetadata: sessionMetadata,
+                    orderedSessions: orderedSessions,
+                    metadataCache: &metadataCache
+                )
+
+                if let resolvedPath = resolved.path?.trimmingCharacters(in: .whitespacesAndNewlines),
+                   !resolvedPath.isEmpty {
+                    resolvedMap[guided.id] = resolvedPath
+                    if resolved.source != .current {
+                        referenceMap[guided.id] = resolvedPath
+                        guided.referenceImagePath = resolvedPath
+                        guided.referenceImageLocalIdentifier = resolvedPath
+                    }
                 }
-            }
-            if referenceMap[guided.id] == nil,
-               let referencePath = resolveGuidedReferencePathForDisplay(
-                propertyID: propertyID,
-                guidedShot: fetchedGuidedShots[index],
-                currentSession: currentSession,
-                baselineSessionID: baselineState.baselineSessionID
-               ) {
-                referenceMap[guided.id] = referencePath
+                fetchedGuidedShots[index] = guided
             }
         }
         activeSessionShotIDs = sessionShotIDs
@@ -9322,14 +9495,14 @@ extension ContentView {
             showArmedReferenceMenu = false
         }
 
-        print(
+        verboseLog(
             "[GuidedData] using sessionID=\(activeSessionID?.uuidString ?? "NONE") " +
             "shotsCount=\(sessionShotIDs.count) " +
             "flaggedCount=\(activeObservations.count) " +
             "guidedCount=\(guidedShots.count)"
         )
         let snapshot = guidedSessionCountSnapshot()
-        print(
+        verboseLog(
             "[GuidedCount] session=\(activeSessionID?.uuidString ?? "NONE") " +
             "guidedTotal=\(snapshot.total) capturedForSession=\(snapshot.captured) remaining=\(snapshot.remaining)"
         )
@@ -10338,22 +10511,22 @@ extension ContentView {
             return
         }
 
-        let guided = (try? localStore.fetchGuidedShots(propertyID: propertyID)) ?? []
-
         let flaggedRemaining = flaggedPendingCaptureCount
-        let persisted = persistedGuidedSummary(propertyID: propertyID, sessionID: currentSession.id)
         let guidedRemaining = guidedRemainingForCompass
         let hasBaseline = appState.propertyHasBaseline(propertyID)
-        let currentSessionCaptureCount = currentSessionPhotoCount(propertyID: propertyID)
+        let currentSessionCaptureCount = currentSessionCaptureCountForSummary(
+            propertyID: propertyID,
+            session: currentSession
+        )
         let reExportEligibleNow = appState.isReExportEligible(currentSession)
         let isPendingDelivery = appState.isPendingDelivery(currentSession)
 
         print(
             "[EndSession] sessionID=\(currentSession.id.uuidString) " +
-            "metadataShots=\(persisted.metadataShotCount) guidedCount=\(guided.count) guidedRemaining=\(guidedRemaining) flaggedRemaining=\(flaggedRemaining)"
+            "metadataShots=\(currentSessionCaptureCount) guidedCount=\(guidedShots.count) guidedRemaining=\(guidedRemaining) flaggedRemaining=\(flaggedRemaining)"
         )
         let liveGuidedCount = guidedRemainingForCompass
-        print("[Badge] beforeOpen guidedCount=\(liveGuidedCount) flaggedCount=\(flaggedPendingCaptureCount)")
+        verboseLog("[Badge] beforeOpen guidedCount=\(liveGuidedCount) flaggedCount=\(flaggedPendingCaptureCount)")
 
         sessionActionsSummary = SessionActionsSummary(
             guidedRemainingCount: guidedRemaining,
@@ -10373,7 +10546,31 @@ extension ContentView {
         print("[ExportUI] sessionID=\(currentSession.id.uuidString) isPendingDelivery=\(isPendingDelivery) isReExportEligible=\(reExportEligibleNow)")
         showSessionActionsSheet = true
         let liveGuidedCountAfter = guidedRemainingForCompass
-        print("[Badge] afterOpen guidedCount=\(liveGuidedCountAfter) flaggedCount=\(flaggedPendingCaptureCount)")
+        verboseLog("[Badge] afterOpen guidedCount=\(liveGuidedCountAfter) flaggedCount=\(flaggedPendingCaptureCount)")
+    }
+
+    private func currentSessionCaptureCountForSummary(propertyID: UUID, session: Session) -> Int {
+        guard let metadata = try? localStore.loadSessionMetadata(propertyID: propertyID, sessionID: session.id) else {
+            return 0
+        }
+        let sessionStart = session.startedAt
+        let sessionEnd = session.endedAt
+        var count = 0
+        for shot in metadata.shots {
+            if shot.createdAt < sessionStart { continue }
+            if let sessionEnd, shot.createdAt > sessionEnd { continue }
+            let relative = shot.originalRelativePath.trimmingCharacters(in: .whitespacesAndNewlines)
+            if relative.isEmpty { continue }
+            guard localStore.resolveSessionRelativeFileURL(
+                propertyID: propertyID,
+                sessionID: session.id,
+                relativePath: relative
+            ) != nil else {
+                continue
+            }
+            count += 1
+        }
+        return count
     }
 
     private func carryoverFlaggedRemainingCount(observations: [Observation]) -> Int {
@@ -10526,27 +10723,7 @@ extension ContentView {
         propertyID: UUID,
         sessionID: UUID
     ) -> (absolutePath: String?, source: String, relativePath: String, exists: Bool) {
-        if let stamped = shot.stampedRelativePath?.trimmingCharacters(in: .whitespacesAndNewlines), !stamped.isEmpty {
-            if let stampedURL = localStore.resolveSessionRelativeFileURL(
-                propertyID: propertyID,
-                sessionID: sessionID,
-                relativePath: stamped
-            ) {
-                print("[StampedResolve] metadataPath=\(stamped) exists=true fallbackPath=NONE exists=false chosen=\(stampedURL.path)")
-                return (stampedURL.path, "stamped", stamped, true)
-            }
-            let fallbackRelative = "Stamped/\(shot.shotID.uuidString).jpg"
-            if let fallbackURL = localStore.resolveSessionRelativeFileURL(
-                propertyID: propertyID,
-                sessionID: sessionID,
-                relativePath: fallbackRelative
-            ) {
-                print("[StampedResolve] metadataPath=\(stamped) exists=false fallbackPath=\(fallbackRelative) exists=true chosen=\(fallbackURL.path)")
-                return (fallbackURL.path, "stamped", fallbackRelative, true)
-            }
-            print("[StampedResolve] metadataPath=\(stamped) exists=false fallbackPath=\(fallbackRelative) exists=false chosen=NONE")
-        }
-
+        let sessionFolder = localStore.sessionFolderURL(propertyID: propertyID, sessionID: sessionID)
         let originalRelative = shot.originalRelativePath.trimmingCharacters(in: .whitespacesAndNewlines)
         if !originalRelative.isEmpty {
             if let originalURL = localStore.resolveSessionRelativeFileURL(
@@ -10556,7 +10733,8 @@ extension ContentView {
             ) {
                 return (originalURL.path, "original", originalRelative, true)
             }
-            return (nil, "original", originalRelative, false)
+            let originalPath = sessionFolder.appendingPathComponent(originalRelative, isDirectory: false).path
+            return (originalPath, "original", originalRelative, false)
         }
 
         return (nil, "placeholder", "", false)
@@ -10620,7 +10798,7 @@ extension ContentView {
                 triggerSafetyPause: false
             )
         }
-        appState.refreshProperties()
+        appState.refreshPropertiesInBackground()
         showSessionActionsSheet = false
         onExitToHub?()
     }
@@ -10628,7 +10806,7 @@ extension ContentView {
     private func handleExportLaterAndExit(summary: SessionActionsSummary) {
         guard summary.isExportLaterEnabled else { return }
         appState.sealCurrentSessionForExportLater()
-        appState.refreshProperties()
+        appState.refreshPropertiesInBackground()
         showSessionActionsSheet = false
         onExitToHub?()
     }
@@ -12209,13 +12387,58 @@ extension ContentView {
             carryoverIssueBadgeCount = 0
             flaggedPendingCaptureCount = 0
             reportLibrary.setActiveIssueCount(0)
-            print("[FlaggedData] using sessionID=\(appState.currentSession?.id.uuidString ?? "NONE") flaggedCount=0 sessionShotsCount=0")
+            verboseLog("[FlaggedData] using sessionID=\(appState.currentSession?.id.uuidString ?? "NONE") flaggedCount=0 sessionShotsCount=0")
             refreshReferenceSetsAndPendingCounts()
-            print("[BadgeCounts] sessionID=\(appState.currentSession?.id.uuidString ?? "NONE") guidedPending=\(guidedRemainingForCompass) flaggedPending=\(flaggedPendingCaptureCount) carryoverIssues=0")
+            verboseLog("[BadgeCounts] sessionID=\(appState.currentSession?.id.uuidString ?? "NONE") guidedPending=\(guidedRemainingForCompass) flaggedPending=\(flaggedPendingCaptureCount) carryoverIssues=0")
             return
         }
 
         let activeSessionID = appState.currentSession?.id
+        if !allowReferenceThumbnailResolution {
+            activeSessionShotIDs = sessionShotIDsForActiveSession(propertyID: propertyID, sessionID: activeSessionID)
+            do {
+                let observations = try localStore.fetchObservations(propertyID: propertyID)
+                activeObservations = observations
+                    .filter { observation in
+                        if observation.status == .active {
+                            return true
+                        }
+                        if observation.status == .resolved,
+                           let activeSessionID,
+                           observation.resolvedInSessionID == activeSessionID {
+                            return true
+                        }
+                        return false
+                    }
+                    .sorted { lhs, rhs in
+                        if lhs.createdAt != rhs.createdAt {
+                            return lhs.createdAt < rhs.createdAt
+                        }
+                        if lhs.updatedAt != rhs.updatedAt {
+                            return lhs.updatedAt < rhs.updatedAt
+                        }
+                        return lhs.id.uuidString < rhs.id.uuidString
+                    }
+            } catch {
+                activeObservations = []
+            }
+            flaggedResolvedThumbnailPathByID = [:]
+            flaggedReferencePathByID = [:]
+            flaggedAngleIndexByID = [:]
+            carryoverIssueBadgeCount = 0
+            reportLibrary.setActiveIssueCount(activeObservations.count)
+            verboseLog(
+                "[FlaggedData] deferred sessionID=\(activeSessionID?.uuidString ?? "NONE") " +
+                "flaggedCount=\(activeObservations.count) sessionShotsCount=\(activeSessionShotIDs.count)"
+            )
+            refreshReferenceSetsAndPendingCounts()
+            verboseLog(
+                "[BadgeCounts] sessionID=\(activeSessionID?.uuidString ?? "NONE") " +
+                "guidedPending=\(guidedRemainingForCompass) flaggedPending=\(flaggedPendingCaptureCount) carryoverIssues=0"
+            )
+            return
+        }
+
         let sessionShotIDs = sessionShotIDsForActiveSession(propertyID: propertyID, sessionID: activeSessionID)
         activeSessionShotIDs = sessionShotIDs
         do {
@@ -12245,40 +12468,26 @@ extension ContentView {
                     return lhs.id.uuidString < rhs.id.uuidString
                 }
 
-            let baselineState = persistedBaselineState(propertyID: propertyID)
-            let orderedSessions = ((try? localStore.fetchSessions(propertyID: propertyID)) ?? []).sorted { $0.startedAt < $1.startedAt }
-            let currentSession = orderedSessions.first(where: { $0.id == activeSessionID }) ?? appState.currentSession
-            let currentSessionMetadata = sessionMetadataForActiveSession(propertyID: propertyID, sessionID: activeSessionID)
-            var metadataCache: [UUID: SessionMetadata] = [:]
-            if let currentSessionMetadata, let activeSessionID {
-                metadataCache[activeSessionID] = currentSessionMetadata
-            }
             var resolvedMap: [UUID: String] = [:]
             var referenceMap: [UUID: String] = [:]
             var angleMap: [UUID: Int] = [:]
-            for observation in activeObservations {
-                let resolved = resolveFlaggedThumbnailForDisplay(
-                    propertyID: propertyID,
-                    currentSession: currentSession,
-                    baselineSessionID: baselineState.baselineSessionID,
-                    observation: observation,
-                    currentSessionMetadata: currentSessionMetadata,
-                    orderedSessions: orderedSessions,
-                    metadataCache: &metadataCache
-                )
-                if let path = resolved.path, resolved.exists {
-                    resolvedMap[observation.id] = path
-                }
-                if let referencePath = resolveFlaggedReferencePathForDisplay(
-                    propertyID: propertyID,
-                    observation: observation,
-                    currentSession: currentSession,
-                    baselineSessionID: baselineState.baselineSessionID
-                ) {
-                    referenceMap[observation.id] = referencePath
-                }
-                if let persistedAngle = persistedAngleIndexForIssue(propertyID: propertyID, issueID: observation.id) {
-                    angleMap[observation.id] = max(1, persistedAngle)
+            if allowReferenceThumbnailResolution {
+                let fm = FileManager.default
+                for observation in activeObservations {
+                    let sortedShots = observation.shots.sorted { $0.capturedAt > $1.capturedAt }
+                    let candidatePaths = sortedShots.compactMap { shot in
+                        shot.imageLocalIdentifier?.trimmingCharacters(in: .whitespacesAndNewlines)
+                    }
+                    if let existing = candidatePaths.first(where: { !$0.isEmpty && fm.fileExists(atPath: $0) }) {
+                        resolvedMap[observation.id] = existing
+                        referenceMap[observation.id] = existing
+                    } else if let fallback = candidatePaths.first(where: { !$0.isEmpty }) {
+                        resolvedMap[observation.id] = fallback
+                        referenceMap[observation.id] = fallback
+                    }
+                    if let persistedAngle = persistedAngleIndexForIssue(propertyID: propertyID, issueID: observation.id) {
+                        angleMap[observation.id] = max(1, persistedAngle)
+                    }
                 }
             }
             flaggedResolvedThumbnailPathByID = resolvedMap
@@ -12296,13 +12505,13 @@ extension ContentView {
             }
 
             reportLibrary.setActiveIssueCount(activeObservations.count)
-            print(
+            verboseLog(
                 "[FlaggedData] using sessionID=\(activeSessionID?.uuidString ?? "NONE") " +
                 "flaggedCount=\(activeObservations.count) " +
                 "sessionShotsCount=\(sessionShotIDs.count)"
             )
             refreshReferenceSetsAndPendingCounts()
-            print(
+            verboseLog(
                 "[BadgeCounts] sessionID=\(activeSessionID?.uuidString ?? "NONE") " +
                 "guidedPending=\(guidedRemainingForCompass) flaggedPending=\(flaggedPendingCaptureCount) carryoverIssues=\(carryoverIssueBadgeCount)"
             )
@@ -12314,12 +12523,12 @@ extension ContentView {
             carryoverIssueBadgeCount = 0
             flaggedPendingCaptureCount = 0
             reportLibrary.setActiveIssueCount(0)
-            print(
+            verboseLog(
                 "[FlaggedData] using sessionID=\(activeSessionID?.uuidString ?? "NONE") " +
                 "flaggedCount=0 sessionShotsCount=0"
             )
             refreshReferenceSetsAndPendingCounts()
-            print(
+            verboseLog(
                 "[BadgeCounts] sessionID=\(activeSessionID?.uuidString ?? "NONE") " +
                 "guidedPending=\(guidedRemainingForCompass) flaggedPending=\(flaggedPendingCaptureCount) carryoverIssues=0"
             )
@@ -12939,6 +13148,8 @@ extension ContentView {
         @State private var dragAutoScrollDirection: Int = 0
         @State private var dragAutoScrollWorkItem: DispatchWorkItem? = nil
         @State private var viewingCurrentSession: Bool = true
+        @State private var lastPreheatSignature: String = ""
+        @State private var preheatWorkItem: DispatchWorkItem? = nil
         
         var body: some View {
             GeometryReader { geo in
@@ -13055,9 +13266,13 @@ extension ContentView {
                     UIDevice.current.beginGeneratingDeviceOrientationNotifications()
                     refreshOrientation()
                     resetToCurrentSessionSource()
+                    preheatGridThumbnails(side: side)
                 }
                 .onReceive(NotificationCenter.default.publisher(for: UIDevice.orientationDidChangeNotification)) { _ in
                     refreshOrientation()
+                }
+                .onChange(of: reportLibrary.assets.map(\.localIdentifier)) { _, _ in
+                    preheatGridThumbnails(side: side)
                 }
                 .onChange(of: isSelectionMode) { _, newValue in
                     if newValue {
@@ -13069,12 +13284,14 @@ extension ContentView {
                 }
                 .onDisappear {
                     UIDevice.current.endGeneratingDeviceOrientationNotifications()
+                    preheatWorkItem?.cancel()
+                    preheatWorkItem = nil
                     handleSelectionDragEnded()
                     selectedAssetIds.removeAll()
                     isSelectionMode = false
                     showHeaderOverflowMenu = false
                     resetToCurrentSessionSource()
-                    print("[PhotoGrid] exit reset viewingCurrent=true")
+                    verboseLog("[PhotoGrid] exit reset viewingCurrent=true")
                 }
             }
             .fullScreenCover(item: $viewerState) { state in
@@ -13479,13 +13696,13 @@ extension ContentView {
             guard let propertyID = appState.selectedPropertyID else { return }
             guard let previousSessionID else {
                 viewingCurrentSession = true
-                print("[PhotoGrid] previousSession unavailable propertyID=\(propertyID.uuidString) currentSessionID=\(currentSessionID.uuidString)")
+                verboseLog("[PhotoGrid] previousSession unavailable propertyID=\(propertyID.uuidString) currentSessionID=\(currentSessionID.uuidString)")
                 return
             }
             viewingCurrentSession.toggle()
             let displayedSessionID = viewingCurrentSession ? currentSessionID : previousSessionID
             reportLibrary.reloadSessionAssets(propertyID: propertyID, sessionID: displayedSessionID)
-            print(
+            verboseLog(
                 "[PhotoGridToggle] propertyID=\(propertyID.uuidString) " +
                 "currentSessionID=\(currentSessionID.uuidString) " +
                 "previousSessionID=\(previousSessionID.uuidString) " +
@@ -13513,7 +13730,7 @@ extension ContentView {
             }
             viewingCurrentSession = true
             if previousSessionID(currentSessionID: currentSessionID) == nil {
-                print("[PhotoGrid] previousSession unavailable propertyID=\(propertyID.uuidString) currentSessionID=\(currentSessionID.uuidString)")
+                verboseLog("[PhotoGrid] previousSession unavailable propertyID=\(propertyID.uuidString) currentSessionID=\(currentSessionID.uuidString)")
             }
             reportLibrary.reloadSessionAssets(propertyID: propertyID, sessionID: currentSessionID)
         }
@@ -13541,6 +13758,30 @@ extension ContentView {
                     showShareSheet = true
                 }
             }
+        }
+
+        private func preheatGridThumbnails(side: CGFloat) {
+            guard !reportLibrary.assets.isEmpty else { return }
+            let scale = UIScreen.currentScale
+            // Match LibraryThumb target so on-screen rows appear populated sooner on cold opens.
+            // Keep preload bounded so decode churn does not hitch vertical scrolling.
+            let px = max(140, side * 1.35) * scale
+            let ids = reportLibrary.assets.map(\.localIdentifier)
+            let firstID = ids.first ?? ""
+            let lastID = ids.last ?? ""
+            let signature = "\(ids.count)#\(firstID)#\(lastID)#\(Int(px))"
+            guard signature != lastPreheatSignature else { return }
+            lastPreheatSignature = signature
+
+            preheatWorkItem?.cancel()
+            let work = DispatchWorkItem {
+                let preheatCount = min(self.reportLibrary.assets.count, 8)
+                for asset in self.reportLibrary.assets.prefix(preheatCount) {
+                    self.cache.requestThumbnail(for: asset, pixelSize: px) { _ in }
+                }
+            }
+            preheatWorkItem = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.20, execute: work)
         }
 
         private func toggleAssetSelection(_ localId: String) {
@@ -14249,24 +14490,24 @@ extension ContentView {
                 }
                 .frame(width: side, height: side)
                 .clipped()
-                .onAppear {
-                    if img != nil { return }
-                    let scale = UIScreen.currentScale
-                    let px = max(300, side * 3) * scale
-                    cache.requestThumbnail(for: asset, pixelSize: px) { im in
-                        DispatchQueue.main.async {
-                            self.img = im
-                        }
+            .onAppear {
+                if img != nil { return }
+                let scale = UIScreen.currentScale
+                let px = max(140, side * 1.35) * scale
+                cache.requestThumbnail(for: asset, pixelSize: px) { im in
+                    DispatchQueue.main.async {
+                        self.img = im
                     }
                 }
-                .onChange(of: refreshToken) { _, _ in
-                    let scale = UIScreen.currentScale
-                    let px = max(300, side * 3) * scale
-                    cache.requestThumbnail(for: asset, pixelSize: px) { im in
-                        DispatchQueue.main.async {
-                            self.img = im
-                        }
+            }
+            .onChange(of: refreshToken) { _, _ in
+                let scale = UIScreen.currentScale
+                let px = max(140, side * 1.35) * scale
+                cache.requestThumbnail(for: asset, pixelSize: px) { im in
+                    DispatchQueue.main.async {
+                        self.img = im
                     }
+                }
                 }
             }
         }
@@ -15947,6 +16188,7 @@ extension ContentView {
 
         @State private var thumbnail: UIImage? = nil
         @State private var loadedID: String = ""
+        @State private var isThumbnailLoading: Bool = false
 
         private var status: RowStatus {
             if isSkippedInCurrentSession { return .skipped }
@@ -16106,6 +16348,14 @@ extension ContentView {
                     Image(uiImage: thumbnail)
                         .resizable()
                         .scaledToFill()
+                } else if isThumbnailLoading {
+                    ZStack {
+                        Color.white.opacity(0.08)
+                        ProgressView()
+                            .progressViewStyle(.circular)
+                            .tint(.white.opacity(0.9))
+                            .scaleEffect(0.8)
+                    }
                 } else {
                     ZStack {
                         Color.white.opacity(0.08)
@@ -16185,18 +16435,59 @@ extension ContentView {
             let sessionIDText = currentSessionID?.uuidString ?? "NONE"
             let chosenPath = resolvedThumbnailPath?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             let sourceID = "chosen:\(sessionIDText):\(chosenPath)"
-            guard sourceID != loadedID || thumbnail == nil else { return }
+            guard sourceID != loadedID || (thumbnail == nil && !isThumbnailLoading) else { return }
             loadedID = sourceID
 
-            guard !chosenPath.isEmpty, let asset = ContentView.reportAsset(fromPath: chosenPath) else {
+            guard !chosenPath.isEmpty else {
                 thumbnail = nil
+                isThumbnailLoading = false
                 return
             }
 
-            let px = max(120, 56 * UIScreen.currentScale * 2.0)
-            cache.requestThumbnail(for: asset, pixelSize: px) { image in
+            if let asset = ContentView.reportAsset(fromPath: chosenPath) {
+                isThumbnailLoading = true
+                let px = max(120, 56 * UIScreen.currentScale * 2.0)
+                cache.requestThumbnail(for: asset, pixelSize: px) { image in
+                    DispatchQueue.main.async {
+                        self.thumbnail = image
+                        self.isThumbnailLoading = false
+                        if image == nil {
+                            verboseLog("[GuidedThumbLoad] sessionID=\(sessionIDText) guidedID=\(guidedShot.id.uuidString) outcome=decodeNil path=\(chosenPath)")
+                        }
+                    }
+                }
+                return
+            }
+
+            isThumbnailLoading = true
+            DispatchQueue.global(qos: .utility).async {
+                ContentView.requestUbiquitousDownloadIfNeeded(path: chosenPath)
+                let maxAttempts = 75
+                for attempt in 0..<maxAttempts {
+                    if FileManager.default.fileExists(atPath: chosenPath) { break }
+                    if attempt % 5 == 0 {
+                        ContentView.requestUbiquitousDownloadIfNeeded(path: chosenPath)
+                    }
+                    Thread.sleep(forTimeInterval: 0.20)
+                }
                 DispatchQueue.main.async {
-                    self.thumbnail = image
+                    guard self.loadedID == sourceID else { return }
+                    guard let asset = ContentView.reportAsset(fromPath: chosenPath) else {
+                        self.thumbnail = nil
+                        self.isThumbnailLoading = false
+                        verboseLog("[GuidedThumbLoad] sessionID=\(sessionIDText) guidedID=\(guidedShot.id.uuidString) outcome=fileUnavailable path=\(chosenPath)")
+                        return
+                    }
+                    let px = max(120, 56 * UIScreen.currentScale * 2.0)
+                    cache.requestThumbnail(for: asset, pixelSize: px) { image in
+                        DispatchQueue.main.async {
+                            self.thumbnail = image
+                            self.isThumbnailLoading = false
+                            if image == nil {
+                                verboseLog("[GuidedThumbLoad] sessionID=\(sessionIDText) guidedID=\(guidedShot.id.uuidString) outcome=postDownloadDecodeNil path=\(chosenPath)")
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -16694,6 +16985,7 @@ extension ContentView {
 
             @State private var thumbnail: UIImage? = nil
             @State private var loadedID: String = ""
+            @State private var isThumbnailLoading: Bool = false
 
             private var contextLabel: String {
                 let composed = ContentView.conciseContextLabel(
@@ -16876,6 +17168,14 @@ extension ContentView {
                         Image(uiImage: thumbnail)
                             .resizable()
                             .scaledToFill()
+                    } else if isThumbnailLoading {
+                        ZStack {
+                            Color.white.opacity(0.08)
+                            ProgressView()
+                                .progressViewStyle(.circular)
+                                .tint(.white.opacity(0.9))
+                                .scaleEffect(0.8)
+                        }
                     } else {
                         ZStack {
                             Color.white.opacity(0.08)
@@ -16901,24 +17201,54 @@ extension ContentView {
                     angleIndex: 1
                 )
                 let linkedIDText = observation.linkedShotID?.uuidString ?? "NONE"
-                print("[FlagRow] rowID=\(observation.id.uuidString) issueID=\(observation.id.uuidString) shotID=\(linkedIDText) shotKey=\(shotKey)")
+                verboseLog("[FlagRow] rowID=\(observation.id.uuidString) issueID=\(observation.id.uuidString) shotID=\(linkedIDText) shotKey=\(shotKey)")
                 let chosenID = resolvedThumbnailPath?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
                 guard !chosenID.isEmpty else {
                     thumbnail = nil
                     loadedID = ""
+                    isThumbnailLoading = false
                     return
                 }
-                guard chosenID != loadedID || thumbnail == nil else { return }
+                guard chosenID != loadedID || (thumbnail == nil && !isThumbnailLoading) else { return }
                 loadedID = chosenID
 
-                guard let asset = ContentView.reportAsset(from: chosenID) else {
-                    thumbnail = nil
+                if let asset = ContentView.reportAsset(from: chosenID) {
+                    isThumbnailLoading = true
+                    let px = max(120, 56 * UIScreen.currentScale * 2.0)
+                    cache.requestThumbnail(for: asset, pixelSize: px) { image in
+                        DispatchQueue.main.async {
+                            self.thumbnail = image
+                            self.isThumbnailLoading = false
+                        }
+                    }
                     return
                 }
-                let px = max(120, 56 * UIScreen.currentScale * 2.0)
-                cache.requestThumbnail(for: asset, pixelSize: px) { image in
+
+                isThumbnailLoading = true
+                DispatchQueue.global(qos: .utility).async {
+                    ContentView.requestUbiquitousDownloadIfNeeded(path: chosenID)
+                    let maxAttempts = 75
+                    for attempt in 0..<maxAttempts {
+                        if FileManager.default.fileExists(atPath: chosenID) { break }
+                        if attempt % 5 == 0 {
+                            ContentView.requestUbiquitousDownloadIfNeeded(path: chosenID)
+                        }
+                        Thread.sleep(forTimeInterval: 0.20)
+                    }
                     DispatchQueue.main.async {
-                        self.thumbnail = image
+                        guard self.loadedID == chosenID else { return }
+                        guard let asset = ContentView.reportAsset(from: chosenID) else {
+                            self.thumbnail = nil
+                            self.isThumbnailLoading = false
+                            return
+                        }
+                        let px = max(120, 56 * UIScreen.currentScale * 2.0)
+                        cache.requestThumbnail(for: asset, pixelSize: px) { image in
+                            DispatchQueue.main.async {
+                                self.thumbnail = image
+                                self.isThumbnailLoading = false
+                            }
+                        }
                     }
                 }
             }

@@ -1,6 +1,14 @@
 import Foundation
 import UIKit
 
+private let isVerboseConsoleLoggingEnabled = false
+
+@inline(__always)
+private func verboseLog(_ message: @autoclosure () -> String) {
+    guard isVerboseConsoleLoggingEnabled else { return }
+    print(message())
+}
+
 final class LocalStore {
     private let currentSessionSchemaVersion = 11
     private let fileIOQueue = DispatchQueue(label: "ScoutCapture.LocalStore.fileIO")
@@ -10,6 +18,18 @@ final class LocalStore {
     enum ShotUpsertMatchMode {
         case append
         case replaceGuidedKey
+    }
+
+    enum HubFetchSource: String {
+        case iCloudSmallManifest = "icloud-small"
+        case localSnapshot = "local-snapshot"
+        case fullFallback = "full-fallback"
+    }
+
+    struct HubFetchResult {
+        let properties: [Property]
+        let organizations: [Organization]
+        let source: HubFetchSource
     }
  
     enum StoreError: Error {
@@ -50,6 +70,8 @@ final class LocalStore {
     private let scoutRootURL: URL
     private let propertiesURL: URL
     private let organizationsURL: URL
+    private let hubIndexURL: URL
+    private let localHubIndexCacheURL: URL
     private let propertyTombstonesURL: URL
     private let propertySyncEventsDirectoryURL: URL
     private let propertyFoldersURL: URL
@@ -75,6 +97,10 @@ final class LocalStore {
         self.scoutRootURL = scoutRoot
         self.propertiesURL = scoutRoot.appendingPathComponent("properties.json")
         self.organizationsURL = scoutRoot.appendingPathComponent("organizations.json")
+        self.hubIndexURL = scoutRoot.appendingPathComponent("hub-index.json")
+        let localAppSupportRoot = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("ScoutCapture", isDirectory: true)
+        self.localHubIndexCacheURL = localAppSupportRoot.appendingPathComponent("local-hub-index.json")
         self.propertyTombstonesURL = scoutRoot.appendingPathComponent("property-tombstones.json")
         self.propertySyncEventsDirectoryURL = scoutRoot
             .appendingPathComponent("sync-events", isDirectory: true)
@@ -773,6 +799,60 @@ final class LocalStore {
         }
     }
 
+    func fetchPropertyAndOrganizationStateForHub(downloadTimeout: TimeInterval) throws -> HubFetchResult {
+        try performFileIOSync {
+            if let hubIndex = try readHubIndexRaw(downloadTimeout: downloadTimeout),
+               !hubIndex.properties.isEmpty {
+                let properties = hubIndex.properties.map { $0.asProperty() }
+                let organizations = hubIndex.organizations.map { $0.asOrganization() }
+                return HubFetchResult(
+                    properties: properties,
+                    organizations: organizations,
+                    source: .iCloudSmallManifest
+                )
+            }
+
+            let state = try migratedPropertyAndOrganizationState(downloadTimeout: downloadTimeout)
+            return HubFetchResult(
+                properties: state.properties,
+                organizations: state.organizations,
+                source: .fullFallback
+            )
+        }
+    }
+
+    func fetchPropertyAndOrganizationStateFromHubIndex(downloadTimeout: TimeInterval) throws -> HubFetchResult? {
+        try performFileIOSync {
+            guard let hubIndex = try readHubIndexRaw(downloadTimeout: downloadTimeout),
+                  !hubIndex.properties.isEmpty else {
+                return nil
+            }
+            let properties = hubIndex.properties.map { $0.asProperty() }
+            let organizations = hubIndex.organizations.map { $0.asOrganization() }
+            return HubFetchResult(
+                properties: properties,
+                organizations: organizations,
+                source: .iCloudSmallManifest
+            )
+        }
+    }
+
+    func fetchPropertyAndOrganizationStateFromLocalHubIndexCache() throws -> HubFetchResult? {
+        try performFileIOSync {
+            guard let hubIndex = try readLocalHubIndexCacheRaw(),
+                  !hubIndex.properties.isEmpty else {
+                return nil
+            }
+            let properties = hubIndex.properties.map { $0.asProperty() }
+            let organizations = hubIndex.organizations.map { $0.asOrganization() }
+            return HubFetchResult(
+                properties: properties,
+                organizations: organizations,
+                source: .localSnapshot
+            )
+        }
+    }
+
     @discardableResult
     func createOrganization(_ organization: Organization) throws -> Organization {
         try performFileIOSync {
@@ -1463,6 +1543,18 @@ final class LocalStore {
         stampedFolderURL(propertyID: propertyID, sessionID: sessionID)
     }
 
+    @discardableResult
+    func offloadSessionMediaAssets(propertyID: UUID, sessionID: UUID) -> Int {
+        performFileIOSync {
+            let originals = originalsFolderURL(propertyID: propertyID, sessionID: sessionID)
+            let stamped = stampedFolderURL(propertyID: propertyID, sessionID: sessionID)
+            var offloaded = 0
+            offloaded += offloadUbiquitousFiles(in: originals)
+            offloaded += offloadUbiquitousFiles(in: stamped)
+            return offloaded
+        }
+    }
+
     func wipeAllLocalData() throws {
         try performFileIOSync {
             if fileManager.fileExists(atPath: scoutRootURL.path) {
@@ -1508,11 +1600,40 @@ final class LocalStore {
         }
     }
 
+    @discardableResult
+    private func offloadUbiquitousFiles(in directoryURL: URL) -> Int {
+        guard fileManager.fileExists(atPath: directoryURL.path) else { return 0 }
+        let urls = (try? fileManager.contentsOfDirectory(
+            at: directoryURL,
+            includingPropertiesForKeys: [.isDirectoryKey, .isUbiquitousItemKey, .ubiquitousItemDownloadingStatusKey],
+            options: [.skipsHiddenFiles]
+        )) ?? []
+
+        var offloaded = 0
+        for url in urls {
+            let values = try? url.resourceValues(forKeys: [.isDirectoryKey, .isUbiquitousItemKey, .ubiquitousItemDownloadingStatusKey])
+            if values?.isDirectory == true {
+                offloaded += offloadUbiquitousFiles(in: url)
+                continue
+            }
+            guard values?.isUbiquitousItem == true else { continue }
+            guard values?.ubiquitousItemDownloadingStatus == .current else { continue }
+            if (try? fileManager.evictUbiquitousItem(at: url)) != nil {
+                offloaded += 1
+            }
+        }
+        return offloaded
+    }
+
     private func readProperties() throws -> [Property] {
         try migratedPropertyAndOrganizationState().properties
     }
 
     private func readPropertiesRaw() throws -> [Property] {
+        try readPropertiesRaw(downloadTimeout: 6.0)
+    }
+
+    private func readPropertiesRaw(downloadTimeout: TimeInterval) throws -> [Property] {
         let syncProjected = try projectedPropertiesFromSyncEvents()
         if let syncProjected {
             if syncProjected.isEmpty {
@@ -1526,7 +1647,7 @@ final class LocalStore {
         }
 
         if !fileManager.fileExists(atPath: propertiesURL.path) {
-            _ = ensureUbiquitousItemAvailable(at: propertiesURL, timeout: 6.0)
+            _ = ensureUbiquitousItemAvailable(at: propertiesURL, timeout: downloadTimeout)
         }
         guard fileManager.fileExists(atPath: propertiesURL.path) else {
             return []
@@ -1536,7 +1657,7 @@ final class LocalStore {
         do {
             data = try Data(contentsOf: propertiesURL)
         } catch {
-            if ensureUbiquitousItemAvailable(at: propertiesURL, timeout: 6.0) {
+            if ensureUbiquitousItemAvailable(at: propertiesURL, timeout: downloadTimeout) {
                 data = try Data(contentsOf: propertiesURL)
             } else {
                 throw error
@@ -1640,8 +1761,12 @@ final class LocalStore {
     }
 
     private func readOrganizationsRaw() throws -> [Organization] {
+        try readOrganizationsRaw(downloadTimeout: 6.0)
+    }
+
+    private func readOrganizationsRaw(downloadTimeout: TimeInterval) throws -> [Organization] {
         if !fileManager.fileExists(atPath: organizationsURL.path) {
-            _ = ensureUbiquitousItemAvailable(at: organizationsURL, timeout: 6.0)
+            _ = ensureUbiquitousItemAvailable(at: organizationsURL, timeout: downloadTimeout)
         }
         guard fileManager.fileExists(atPath: organizationsURL.path) else {
             return []
@@ -1651,7 +1776,7 @@ final class LocalStore {
         do {
             data = try Data(contentsOf: organizationsURL)
         } catch {
-            if ensureUbiquitousItemAvailable(at: organizationsURL, timeout: 6.0) {
+            if ensureUbiquitousItemAvailable(at: organizationsURL, timeout: downloadTimeout) {
                 data = try Data(contentsOf: organizationsURL)
             } else {
                 throw error
@@ -1696,6 +1821,141 @@ final class LocalStore {
         let occurredAt: Date
         let operation: Operation
         let property: Property?
+    }
+
+    private struct HubIndex: Codable {
+        struct PropertyRow: Codable {
+            let id: UUID
+            let orgId: UUID?
+            let folderId: String?
+            let clientName: String?
+            let clientPhone: String?
+            let clientEmail: String?
+            let name: String
+            let address: String?
+            let street: String?
+            let city: String?
+            let state: String?
+            let zip: String?
+            let baselineSessionID: UUID?
+            let isArchived: Bool
+            let createdAt: Date
+            let updatedAt: Date
+
+            func asProperty() -> Property {
+                Property(
+                    id: id,
+                    orgId: orgId,
+                    folderId: folderId,
+                    clientName: clientName,
+                    clientPhone: clientPhone,
+                    clientEmail: clientEmail,
+                    name: name,
+                    address: address,
+                    street: street,
+                    city: city,
+                    state: state,
+                    zip: zip,
+                    baselineSessionID: baselineSessionID,
+                    isArchived: isArchived,
+                    createdAt: createdAt,
+                    updatedAt: updatedAt
+                )
+            }
+        }
+
+        struct OrganizationRow: Codable {
+            let id: UUID
+            let name: String
+
+            func asOrganization() -> Organization {
+                Organization(id: id, name: name, contacts: [])
+            }
+        }
+
+        let schemaVersion: Int
+        let generatedAt: Date
+        let properties: [PropertyRow]
+        let organizations: [OrganizationRow]
+    }
+
+    private func readHubIndexRaw(downloadTimeout: TimeInterval) throws -> HubIndex? {
+        if !fileManager.fileExists(atPath: hubIndexURL.path) {
+            _ = ensureUbiquitousItemAvailable(at: hubIndexURL, timeout: downloadTimeout)
+        }
+        guard fileManager.fileExists(atPath: hubIndexURL.path) else { return nil }
+        if shouldAvoidBlockingUbiquitousRead(at: hubIndexURL, timeout: downloadTimeout) {
+            return nil
+        }
+
+        let data: Data
+        do {
+            data = try Data(contentsOf: hubIndexURL)
+        } catch {
+            if downloadTimeout <= 0.08 {
+                return nil
+            }
+            if ensureUbiquitousItemAvailable(at: hubIndexURL, timeout: downloadTimeout) {
+                data = try Data(contentsOf: hubIndexURL)
+            } else {
+                throw error
+            }
+        }
+        try? data.write(to: localHubIndexCacheURL, options: .atomic)
+        return try decoder.decode(HubIndex.self, from: data)
+    }
+
+    private func shouldAvoidBlockingUbiquitousRead(at url: URL, timeout: TimeInterval) -> Bool {
+        guard timeout <= 0.08 else { return false }
+        let keys: Set<URLResourceKey> = [.isUbiquitousItemKey, .ubiquitousItemDownloadingStatusKey]
+        guard let values = try? url.resourceValues(forKeys: keys),
+              values.isUbiquitousItem == true else {
+            return false
+        }
+        if values.ubiquitousItemDownloadingStatus == .current {
+            return false
+        }
+        try? fileManager.startDownloadingUbiquitousItem(at: url)
+        return true
+    }
+
+    private func writeHubIndex(properties: [Property], organizations: [Organization]) throws {
+        let payload = HubIndex(
+            schemaVersion: 1,
+            generatedAt: Date(),
+            properties: properties.map { property in
+                HubIndex.PropertyRow(
+                    id: property.id,
+                    orgId: property.orgId,
+                    folderId: property.folderId,
+                    clientName: property.clientName,
+                    clientPhone: property.clientPhone,
+                    clientEmail: property.clientEmail,
+                    name: property.name,
+                    address: property.address,
+                    street: property.street,
+                    city: property.city,
+                    state: property.state,
+                    zip: property.zip,
+                    baselineSessionID: property.baselineSessionID,
+                    isArchived: property.isArchived,
+                    createdAt: property.createdAt,
+                    updatedAt: property.updatedAt
+                )
+            },
+            organizations: organizations.map { org in
+                HubIndex.OrganizationRow(id: org.id, name: org.name)
+            }
+        )
+        let data = try encoder.encode(payload)
+        try data.write(to: hubIndexURL, options: .atomic)
+        try? data.write(to: localHubIndexCacheURL, options: .atomic)
+    }
+
+    private func readLocalHubIndexCacheRaw() throws -> HubIndex? {
+        guard fileManager.fileExists(atPath: localHubIndexCacheURL.path) else { return nil }
+        let data = try Data(contentsOf: localHubIndexCacheURL)
+        return try decoder.decode(HubIndex.self, from: data)
     }
 
     private func readPropertyDeletionTombstones() throws -> [PropertyDeletionTombstone] {
@@ -1743,14 +2003,18 @@ final class LocalStore {
     }
 
     private func migratedPropertyAndOrganizationState() throws -> (properties: [Property], organizations: [Organization]) {
+        try migratedPropertyAndOrganizationState(downloadTimeout: 6.0)
+    }
+
+    private func migratedPropertyAndOrganizationState(downloadTimeout: TimeInterval) throws -> (properties: [Property], organizations: [Organization]) {
         let organizationsFileExists = fileManager.fileExists(atPath: organizationsURL.path)
-        var organizations = normalizedOrganizations(try readOrganizationsRaw())
+        var organizations = normalizedOrganizations(try readOrganizationsRaw(downloadTimeout: downloadTimeout))
         let originalOrganizationIDs = Set(organizations.map(\.id))
         let defaultOrganization = defaultOrganization(in: &organizations)
         let validOrganizationIDs = Set(organizations.map(\.id))
         let didChangeOrganizations = !organizationsFileExists || Set(organizations.map(\.id)) != originalOrganizationIDs
 
-        var properties = try readPropertiesRaw()
+        var properties = try readPropertiesRaw(downloadTimeout: downloadTimeout)
         var didChangeProperties = false
         var seenFolderNumbers = Set<Int>()
 
@@ -1783,7 +2047,9 @@ final class LocalStore {
         }
         try seedPropertySyncEventsIfNeeded(from: properties)
 
-        return (properties.sorted { $0.createdAt < $1.createdAt }, organizations)
+        let sortedProperties = properties.sorted { $0.createdAt < $1.createdAt }
+        try writeHubIndex(properties: sortedProperties, organizations: organizations)
+        return (sortedProperties, organizations)
     }
 
     private func normalizedOrganizations(_ organizations: [Organization]) -> [Organization] {
@@ -2203,11 +2469,11 @@ final class LocalStore {
         }
         let hasAddressSnapshot = !(normalized.propertyAddressAtCapture?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
         let hasTimeZoneOffset = !normalized.timeZoneOffsetAtCapture.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        print("[SessionJSON] schemaVersion=\(normalized.schemaVersion) sessionID=\(sessionID.uuidString) shotsCount=\(normalized.shots.count) issuesCount=\(normalized.issues.count) hasAddressSnapshot=\(hasAddressSnapshot) hasTimeZoneOffset=\(hasTimeZoneOffset)")
+        verboseLog("[SessionJSON] schemaVersion=\(normalized.schemaVersion) sessionID=\(sessionID.uuidString) shotsCount=\(normalized.shots.count) issuesCount=\(normalized.issues.count) hasAddressSnapshot=\(hasAddressSnapshot) hasTimeZoneOffset=\(hasTimeZoneOffset)")
         if let firstShot = normalized.shots.first {
-            print("[SessionJSONTime] startedAt=\(normalized.startedAt) sessionStartedAtLocal=\(normalized.sessionStartedAtLocal) timeZoneIdentifierAtCapture=\(normalized.timeZoneIdentifierAtCapture) timeZoneOffsetAtCapture=\(normalized.timeZoneOffsetAtCapture) firstShotCreatedAt=\(firstShot.createdAt) firstShotCapturedAtLocal=\(firstShot.capturedAtLocal ?? "nil") firstShotExifOrientation=\(firstShot.exifOrientation ?? 0)")
+            verboseLog("[SessionJSONTime] startedAt=\(normalized.startedAt) sessionStartedAtLocal=\(normalized.sessionStartedAtLocal) timeZoneIdentifierAtCapture=\(normalized.timeZoneIdentifierAtCapture) timeZoneOffsetAtCapture=\(normalized.timeZoneOffsetAtCapture) firstShotCreatedAt=\(firstShot.createdAt) firstShotCapturedAtLocal=\(firstShot.capturedAtLocal ?? "nil") firstShotExifOrientation=\(firstShot.exifOrientation ?? 0)")
         } else {
-            print("[SessionJSONTime] startedAt=\(normalized.startedAt) sessionStartedAtLocal=\(normalized.sessionStartedAtLocal) timeZoneIdentifierAtCapture=\(normalized.timeZoneIdentifierAtCapture) timeZoneOffsetAtCapture=\(normalized.timeZoneOffsetAtCapture) firstShotCreatedAt=nil firstShotCapturedAtLocal=nil firstShotExifOrientation=0")
+            verboseLog("[SessionJSONTime] startedAt=\(normalized.startedAt) sessionStartedAtLocal=\(normalized.sessionStartedAtLocal) timeZoneIdentifierAtCapture=\(normalized.timeZoneIdentifierAtCapture) timeZoneOffsetAtCapture=\(normalized.timeZoneOffsetAtCapture) firstShotCreatedAt=nil firstShotCapturedAtLocal=nil firstShotExifOrientation=0")
         }
     }
 

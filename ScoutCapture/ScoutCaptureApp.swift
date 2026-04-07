@@ -12,6 +12,14 @@ import Combine
 import ImageIO
 import UniformTypeIdentifiers
 
+private let isVerboseConsoleLoggingEnabled = false
+
+@inline(__always)
+private func verboseLog(_ message: @autoclosure () -> String) {
+    guard isVerboseConsoleLoggingEnabled else { return }
+    print(message())
+}
+
 final class AppDelegate: NSObject, UIApplicationDelegate {
 
     func application(
@@ -372,7 +380,8 @@ private struct AppRootView: View {
     @State private var didStartWarmup: Bool = false
     @State private var launchProgress: Double = 0
     @State private var showsProgressBar: Bool = false
-    private let warmLaunchTimeoutSeconds: TimeInterval = 1.0
+    // Allow warm-launch hub fetch to complete more often before leaving splash.
+    private let warmLaunchTimeoutSeconds: TimeInterval = 1.9
 
     private var isAppReady: Bool {
         skipStartupLoading || (sessionHubReady && minimumLaunchDelayMet)
@@ -468,7 +477,6 @@ struct SessionHubView: View {
     private var localStore: LocalStore { appState.sharedLocalStore }
     @State private var path: [HubRoute] = []
     @State private var showAddProperty: Bool = false
-    @State private var pressedPropertyID: UUID? = nil
     @State private var showArchivedProperties: Bool = false
     @State private var showSettingsSheet: Bool = false
     @State private var propertyToArchive: Property? = nil
@@ -499,9 +507,13 @@ struct SessionHubView: View {
     @State private var hiddenDebugTapCount: Int = 0
     @State private var lastHiddenDebugTapAt: Date? = nil
     @State private var propertyTapToken: Int = 0
+    @State private var pressedPropertyID: UUID? = nil
+    @State private var isOpeningProperty: Bool = false
+    @State private var placeholderHoldUntil: Date? = nil
 
     private let selectionHaptic = UIImpactFeedbackGenerator(style: .light)
     private let hiddenDebugTapWindow: TimeInterval = 1.5
+    private let startupPlaceholderHoldSeconds: TimeInterval = 20.0
 
     private enum HubRoute: Hashable {
         case propertySession(propertyID: UUID, resumeDraft: Bool)
@@ -531,7 +543,7 @@ struct SessionHubView: View {
         case sessionData
         case zipReady
     }
-    
+
     private var buttonFill: Color {
         colorScheme == .light ? Color.white.opacity(0.90) : Color.black.opacity(0.85)
     }
@@ -580,6 +592,17 @@ struct SessionHubView: View {
             .filter(matchesPropertyFilter(_:))
     }
 
+    private var shouldShowStartupPlaceholders: Bool {
+        guard appState.properties.isEmpty else { return false }
+        if appState.isLoading {
+            return true
+        }
+        if let holdUntil = placeholderHoldUntil, Date() < holdUntil {
+            return true
+        }
+        return false
+    }
+
     private var isCompactSearchMode: Bool {
         (isSearchExpanded && isSearchFieldFocused) || !normalizedSearchQuery.isEmpty
     }
@@ -590,7 +613,20 @@ struct SessionHubView: View {
                 let showArchivedSection = showArchivedProperties
                 let hasNoMatches = filteredActiveProperties.isEmpty && (!showArchivedSection || filteredArchivedProperties.isEmpty)
                 let hasNoPropertiesAtAll = activeProperties.isEmpty && (!showArchivedSection || archivedProperties.isEmpty)
-                if hasNoPropertiesAtAll {
+                if shouldShowStartupPlaceholders {
+                    List {
+                        Section {
+                            ForEach(0..<4, id: \.self) { index in
+                                startupPlaceholderRow(index: index)
+                            }
+                        } header: {
+                            Text("Syncing Properties...")
+                                .font(.system(size: 13, weight: .semibold))
+                                .textCase(nil)
+                        }
+                    }
+                    .listStyle(.plain)
+                } else if hasNoPropertiesAtAll {
                     ContentUnavailableView(
                         "No Properties",
                         systemImage: "house",
@@ -699,11 +735,31 @@ struct SessionHubView: View {
                     .environmentObject(appState)
             }
             .onAppear {
+                isOpeningProperty = false
+                pressedPropertyID = nil
+                if appState.properties.isEmpty {
+                    beginStartupPlaceholderHoldWindow()
+                } else {
+                    placeholderHoldUntil = nil
+                }
                 if appState.properties.isEmpty {
                     appState.refreshPropertiesInBackground()
                 }
                 appState.triggerBackupForLifecycleEvent()
                 selectionHaptic.prepare()
+            }
+            .onChange(of: appState.properties.count) { _, newCount in
+                if newCount > 0 {
+                    placeholderHoldUntil = nil
+                } else if placeholderHoldUntil == nil {
+                    beginStartupPlaceholderHoldWindow()
+                }
+            }
+            .onChange(of: path.count) { _, newCount in
+                if newCount == 0 {
+                    isOpeningProperty = false
+                    pressedPropertyID = nil
+                }
             }
             .alert("Archive Property?", isPresented: Binding(
                 get: { propertyToArchive != nil },
@@ -811,12 +867,45 @@ struct SessionHubView: View {
         }
     }
 
+    private func beginStartupPlaceholderHoldWindow() {
+        let holdUntil = Date().addingTimeInterval(startupPlaceholderHoldSeconds)
+        placeholderHoldUntil = holdUntil
+        DispatchQueue.main.asyncAfter(deadline: .now() + startupPlaceholderHoldSeconds) {
+            guard let currentHold = placeholderHoldUntil, currentHold == holdUntil else { return }
+            placeholderHoldUntil = nil
+        }
+    }
+
+    @ViewBuilder
+    private func startupPlaceholderRow(index: Int) -> some View {
+        HStack(alignment: .top, spacing: 10) {
+            VStack(alignment: .leading, spacing: 7) {
+                RoundedRectangle(cornerRadius: 4, style: .continuous)
+                    .fill(Color.secondary.opacity(0.22))
+                    .frame(width: 180, height: 18)
+                RoundedRectangle(cornerRadius: 4, style: .continuous)
+                    .fill(Color.secondary.opacity(0.18))
+                    .frame(width: 120, height: 13)
+                RoundedRectangle(cornerRadius: 4, style: .continuous)
+                    .fill(Color.secondary.opacity(0.16))
+                    .frame(width: 210, height: 13)
+            }
+            Spacer(minLength: 0)
+            ProgressView()
+                .scaleEffect(0.85)
+                .padding(.top, 3)
+        }
+        .opacity(0.95 - (Double(index) * 0.08))
+        .redacted(reason: .placeholder)
+    }
+
     @ViewBuilder
     private func propertyRow(_ property: Property) -> some View {
         let isPressed = pressedPropertyID == property.id
-        let draft = appState.draftSession(for: property.id)
         let sessionsForProperty = appState.sessions(for: property.id).sorted { $0.startedAt > $1.startedAt }
-        let hasPendingExport = sessionsForProperty.contains(where: { appState.isPendingDelivery($0) })
+        let draft = appState.draftSession(for: property.id)
+        let pendingSession = sessionsForProperty.first(where: { appState.isPendingDelivery($0) })
+        let hasPendingExport = pendingSession != nil
         let latestReExportSession = reExportCandidateSession(for: property.id)
         let hasReExportGlyph = latestReExportSession != nil
         let clientLine = propertyClientLine(property)
@@ -880,16 +969,15 @@ struct SessionHubView: View {
         .padding(.horizontal, 10)
         .background(
             RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .fill(isPressed ? Color.primary.opacity(colorScheme == .light ? 0.08 : 0.16) : Color.clear)
+                .fill(isPressed ? Color.blue.opacity(colorScheme == .light ? 0.22 : 0.30) : Color.clear)
         )
         .overlay(
             RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .stroke(isPressed ? Color.primary.opacity(0.18) : .clear, lineWidth: 1)
+                .stroke(isPressed ? Color.blue.opacity(colorScheme == .light ? 0.55 : 0.70) : .clear, lineWidth: 1)
         )
-        .animation(.easeOut(duration: 0.12), value: isPressed)
         .contentShape(Rectangle())
         .onTapGesture {
-            handlePropertyTap(property, latestSession: sessionsForProperty.first, pendingSession: appState.latestPendingExportSession(for: property.id))
+            handlePropertyTap(property, latestSession: sessionsForProperty.first, pendingSession: pendingSession)
         }
         .contextMenu {
             Button("Manage Sessions") {
@@ -1649,13 +1737,9 @@ struct SessionHubView: View {
 
     private func openProperty(_ property: Property) {
         appState.selectProperty(id: property.id)
-        if appState.draftSession(for: property.id) != nil {
-            _ = appState.loadDraftSession(for: property.id)
-            path.append(.propertySession(propertyID: property.id, resumeDraft: true))
-        } else {
-            _ = appState.startSession()
-            path.append(.propertySession(propertyID: property.id, resumeDraft: false))
-        }
+        // Avoid pre-open draft checks on the hub thread; PropertySessionView will resume/start as needed.
+        path.append(.propertySession(propertyID: property.id, resumeDraft: false))
+        isOpeningProperty = false
     }
 
     private func handlePropertyTap(
@@ -1663,34 +1747,37 @@ struct SessionHubView: View {
         latestSession: Session?,
         pendingSession: Session?
     ) {
-        selectionHaptic.impactOccurred()
-        withAnimation(.easeOut(duration: 0.08)) {
-            pressedPropertyID = property.id
-        }
+        guard !isOpeningProperty else { return }
+        isOpeningProperty = true
         propertyTapToken += 1
         let tapToken = propertyTapToken
+        selectionHaptic.impactOccurred()
+        pressedPropertyID = property.id
 
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.10) {
-            guard tapToken == propertyTapToken else { return }
-            let pending = pendingSession != nil
-            let latestID = latestSession?.id.uuidString ?? "NONE"
-            let isBaseline = latestSession.map { property.baselineSessionID == $0.id } ?? false
-            let sealed = latestSession?.isSealed ?? false
-            let firstDelivered = latestSession?.firstDeliveredAt.map { "\($0)" } ?? "nil"
-            let action = pending ? "promptDeliver" : "openCamera"
-            print("[PropertyTap] propertyID=\(property.id.uuidString) latestSessionID=\(latestID) isBaseline=\(isBaseline) sealed=\(sealed) firstDeliveredAt=\(firstDelivered) pending=\(pending) action=\(action)")
-            if let pendingSession {
-                pendingExportPromptProperty = property
-                pendingExportPromptSession = pendingSession
-                return
+        let pending = pendingSession != nil
+        let latestID = latestSession?.id.uuidString ?? "NONE"
+        let isBaseline = latestSession.map { property.baselineSessionID == $0.id } ?? false
+        let sealed = latestSession?.isSealed ?? false
+        let firstDelivered = latestSession?.firstDeliveredAt.map { "\($0)" } ?? "nil"
+        let action = pending ? "promptDeliver" : "openCamera"
+        verboseLog("[PropertyTap] propertyID=\(property.id.uuidString) latestSessionID=\(latestID) isBaseline=\(isBaseline) sealed=\(sealed) firstDeliveredAt=\(firstDelivered) pending=\(pending) action=\(action)")
+        if let pendingSession {
+            isOpeningProperty = false
+            pendingExportPromptProperty = property
+            pendingExportPromptSession = pendingSession
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.20) {
+                guard tapToken == propertyTapToken else { return }
+                if pressedPropertyID == property.id { pressedPropertyID = nil }
             }
+            return
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.18) {
+            guard tapToken == propertyTapToken else { return }
             openProperty(property)
         }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.22) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) {
             guard tapToken == propertyTapToken else { return }
-            if pressedPropertyID == property.id {
-                pressedPropertyID = nil
-            }
+            if pressedPropertyID == property.id { pressedPropertyID = nil }
         }
     }
 
@@ -4443,7 +4530,7 @@ private struct DebugToolsView: View {
                     VStack(spacing: 14) {
                         HStack(spacing: 10) {
                             customCapsuleButton(
-                                title: "Migration Export",
+                                title: "Archive Export",
                                 isEnabled: true,
                                 fill: Color.orange.opacity(0.92),
                                 stroke: Color.orange.opacity(0.96),
@@ -4454,7 +4541,7 @@ private struct DebugToolsView: View {
                             }
 
                             customCapsuleButton(
-                                title: "Migration Import",
+                                title: "Archive Import",
                                 isEnabled: true,
                                 fill: Color.green.opacity(0.88),
                                 stroke: Color.green.opacity(0.94),
@@ -4699,6 +4786,7 @@ struct PropertySessionView: View {
     @State private var showOpenCameraTimeout: Bool = false
     @State private var didStartOpenFlow: Bool = false
     @State private var openFlowToken: Int = 0
+    @State private var hasSessionReadyForProperty: Bool = false
 
     private let camera = CameraManager.shared
     private let timeoutSeconds: Double = 4.0
@@ -4718,7 +4806,7 @@ struct PropertySessionView: View {
             .navigationBarBackButtonHidden(true)
             .toolbar(.hidden, for: .navigationBar)
             .onReceive(camera.$isPreviewRunning.removeDuplicates()) { isRunning in
-                if isRunning {
+                if isRunning && didStartOpenFlow && hasSessionReadyForProperty {
                     completeOpenFlow()
                 }
             }
@@ -4733,7 +4821,14 @@ struct PropertySessionView: View {
                 } else {
                     _ = appState.startSession()
                 }
+                refreshSessionReadiness()
                 beginOpenFlow()
+            }
+            .onChange(of: appState.currentSession?.id) { _, _ in
+                refreshSessionReadiness()
+                if camera.isPreviewRunning && didStartOpenFlow && hasSessionReadyForProperty {
+                    completeOpenFlow()
+                }
             }
     }
 
@@ -4816,18 +4911,23 @@ struct PropertySessionView: View {
         camera.prepareForPreviewAsync()
         camera.ensurePreviewRunningAsync()
 
-        if camera.isPreviewRunning {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.10) {
-                guard token == openFlowToken else { return }
+        // Do not hard-gate view transition on preview startup; preview can finish after ContentView appears.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+            guard token == openFlowToken else { return }
+            refreshSessionReadiness()
+            if hasSessionReadyForProperty {
                 completeOpenFlow()
             }
-            return
         }
 
         DispatchQueue.main.asyncAfter(deadline: .now() + timeoutSeconds) {
             guard token == openFlowToken else { return }
+            guard !showCameraContent else { return }
             guard !camera.isPreviewRunning else {
-                completeOpenFlow()
+                refreshSessionReadiness()
+                if hasSessionReadyForProperty {
+                    completeOpenFlow()
+                }
                 return
             }
             showOpenCameraTimeout = true
@@ -4839,5 +4939,11 @@ struct PropertySessionView: View {
         withAnimation(.easeInOut(duration: 0.14)) {
             showCameraContent = true
         }
+        appState.ensureCurrentSessionMetadataInBackground()
+    }
+
+    private func refreshSessionReadiness() {
+        let session = appState.currentSession
+        hasSessionReadyForProperty = session?.propertyID == propertyID && session?.status == .draft
     }
 }
