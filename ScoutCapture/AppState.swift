@@ -78,16 +78,95 @@ final class AppState: ObservableObject {
     private let userDefaults: UserDefaults
     private let cloudBackupManager: CloudBackupManager
     private let selectedPropertyDefaultsKey = "scoutcapture.selectedPropertyID"
+    private let propertyActivationTimestampsDefaultsKey = "scoutcapture.propertyActivationTimestamps.v1"
     private let reExportWindowDays = 7
+    private let sessionMediaOffloadCooldown: TimeInterval = 30 * 60
+    private let activatedPropertyRetentionWindow: TimeInterval = 7 * 24 * 60 * 60
+    private let offloadSweepQueue = DispatchQueue(label: "ScoutCapture.AppState.offloadSweep", qos: .utility)
+    private let archiveSnapshotQueue = DispatchQueue(label: "ScoutCapture.AppState.archiveSnapshot", qos: .utility)
     private var didLoad = false
     private var cancellables: Set<AnyCancellable> = []
     private var liveSyncTimer: Timer?
     private var lastLiveSyncFingerprint: String?
     private var liveSyncBurstUntil: Date?
     private var lastLiveSyncRefreshAt: Date?
+    private var isBackgroundRefreshInFlight: Bool = false
+    private var lastBackgroundRefreshStartedAt: Date?
+    private let minimumBackgroundRefreshInterval: TimeInterval = 1.0
+    // Give iCloud small-manifest fetch enough time during splash to avoid source=none on cold starts.
+    private let startupHubIndexTimeout: TimeInterval = 1.25
+    private var isStartupHydrationInProgress: Bool = false
+    private var startupHydrationCompletedAt: Date?
+    // Keep a short grace for non-empty in-memory states, but do not stall first-load empty hubs.
+    private let startupFallbackGraceWindow: TimeInterval = 2.0
 
     var sharedLocalStore: LocalStore {
         localStore
+    }
+
+    func sessionArchiveSummaries() -> [LocalStore.SessionArchiveSummary] {
+        (try? localStore.fetchSessionArchiveSummaries()) ?? []
+    }
+
+    @discardableResult
+    func deleteSessionArchiveSnapshot(
+        propertyID: UUID,
+        sessionID: UUID,
+        snapshotName: String
+    ) -> Bool {
+        do {
+            try localStore.deleteSessionArchiveSnapshot(
+                propertyID: propertyID,
+                sessionID: sessionID,
+                snapshotName: snapshotName
+            )
+            triggerBackupForLifecycleEvent()
+            return true
+        } catch {
+            print(
+                "[SessionArchiveDelete] result=failed " +
+                "propertyID=\(propertyID.uuidString) " +
+                "sessionID=\(sessionID.uuidString) " +
+                "snapshot=\(snapshotName) " +
+                "error=\(error.localizedDescription)"
+            )
+            return false
+        }
+    }
+
+    @discardableResult
+    func restoreSessionArchiveSnapshot(
+        propertyID: UUID,
+        sessionID: UUID,
+        snapshotName: String
+    ) -> Bool {
+        do {
+            let restored = try localStore.restoreSessionArchiveSnapshot(
+                propertyID: propertyID,
+                sessionID: sessionID,
+                snapshotName: snapshotName
+            )
+            let applyUIUpdates = {
+                self.reloadSessionCache(for: restored.propertyID)
+                self.refreshProperties()
+                self.triggerBackupForLifecycleEvent()
+            }
+            if Thread.isMainThread {
+                applyUIUpdates()
+            } else {
+                DispatchQueue.main.sync(execute: applyUIUpdates)
+            }
+            return true
+        } catch {
+            print(
+                "[SessionRestore] result=failed " +
+                "propertyID=\(propertyID.uuidString) " +
+                "sessionID=\(sessionID.uuidString) " +
+                "snapshot=\(snapshotName) " +
+                "error=\(error.localizedDescription)"
+            )
+            return false
+        }
     }
 
     init(
@@ -135,16 +214,36 @@ final class AppState: ObservableObject {
             return
         }
         didLoad = true
-        isLoading = true
+        isStartupHydrationInProgress = true
+        isLoading = properties.isEmpty
 
-        DispatchQueue.global(qos: .userInitiated).async {
-            let fetchedProperties = (try? self.localStore.fetchProperties()) ?? []
-            let fetchedOrganizations = (try? self.localStore.fetchOrganizations()) ?? []
-            let caches = self.makeHubCaches(for: fetchedProperties)
+        if properties.isEmpty,
+           let localState = try? localStore.fetchPropertyAndOrganizationStateFromLocalHubIndexCache(),
+           !localState.properties.isEmpty {
+            let caches = makeHubCaches(for: localState.properties)
+            organizations = localState.organizations
+            applyHubCachePayload(properties: localState.properties, caches: caches)
+            isLoading = false
+            print("[HubFetch] phase=warmLaunch source=\(localState.source.rawValue) properties=\(localState.properties.count) orgs=\(localState.organizations.count) ms=0")
+        }
+
+        DispatchQueue.global(qos: .utility).async {
+            let start = Date()
+            let fetchedState = try? self.localStore.fetchPropertyAndOrganizationStateFromHubIndex(downloadTimeout: self.startupHubIndexTimeout)
             DispatchQueue.main.async {
-                self.organizations = fetchedOrganizations
-                self.applyHubCachePayload(properties: fetchedProperties, caches: caches)
+                if let fetchedState, !fetchedState.properties.isEmpty {
+                    let elapsedMs = Int(Date().timeIntervalSince(start) * 1000)
+                    print("[HubFetch] phase=warmLaunch source=\(fetchedState.source.rawValue) properties=\(fetchedState.properties.count) orgs=\(fetchedState.organizations.count) ms=\(elapsedMs)")
+                    let caches = self.makeHubCaches(for: fetchedState.properties)
+                    self.organizations = fetchedState.organizations
+                    self.applyHubCachePayload(properties: fetchedState.properties, caches: caches)
+                } else {
+                    let elapsedMs = Int(Date().timeIntervalSince(start) * 1000)
+                    print("[HubFetch] phase=warmLaunch source=none properties=0 orgs=0 ms=\(elapsedMs)")
+                }
                 self.isLoading = false
+                self.isStartupHydrationInProgress = false
+                self.startupHydrationCompletedAt = Date()
                 completion()
             }
         }
@@ -165,19 +264,76 @@ final class AppState: ObservableObject {
 
     func refreshPropertiesInBackground() {
         cloudBackupManager.refreshStatus()
-        isLoading = true
+        if isStartupHydrationInProgress {
+            return
+        }
+        if currentSession?.status == .draft {
+            return
+        }
+        let now = Date()
+        if isBackgroundRefreshInFlight { return }
+        if !properties.isEmpty,
+           let lastBackgroundRefreshStartedAt,
+           now.timeIntervalSince(lastBackgroundRefreshStartedAt) < minimumBackgroundRefreshInterval {
+            return
+        }
+        isBackgroundRefreshInFlight = true
+        lastBackgroundRefreshStartedAt = now
+        isLoading = properties.isEmpty
         DispatchQueue.global(qos: .userInitiated).async {
+            let fastPayload = try? self.makeRefreshPayloadForHubIndexOnly()
+            let fastHasProperties = (fastPayload?.properties.isEmpty == false)
+            let withinStartupFallbackGraceWindow: Bool = {
+                guard self.properties.isEmpty,
+                      let completedAt = self.startupHydrationCompletedAt else {
+                    return false
+                }
+                return Date().timeIntervalSince(completedAt) < self.startupFallbackGraceWindow
+            }()
+            // When the hub is empty, start full fallback immediately to avoid long "syncing" dead time.
+            let shouldRunFallback: Bool = {
+                if fastHasProperties { return false }
+                if self.properties.isEmpty { return true }
+                return !withinStartupFallbackGraceWindow
+            }()
+
+            DispatchQueue.main.async {
+                if let fastPayload, fastHasProperties || self.properties.isEmpty {
+                    self.applyRefreshPayload(fastPayload)
+                    self.scheduleOffloadEligibleSessionMedia(excludingSessionID: self.currentSession?.id)
+                }
+                if fastHasProperties || !self.properties.isEmpty {
+                    self.isLoading = false
+                }
+                if !fastHasProperties, withinStartupFallbackGraceWindow {
+                    self.isLoading = false
+                    self.isBackgroundRefreshInFlight = false
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                        self.refreshPropertiesInBackground()
+                    }
+                    return
+                }
+                if !shouldRunFallback {
+                    self.isBackgroundRefreshInFlight = false
+                }
+            }
+
+            guard shouldRunFallback else { return }
+
             do {
                 let payload = try self.makeRefreshPayload()
                 DispatchQueue.main.async {
                     self.applyRefreshPayload(payload)
+                    self.scheduleOffloadEligibleSessionMedia(excludingSessionID: self.currentSession?.id)
                     self.isLoading = false
+                    self.isBackgroundRefreshInFlight = false
                 }
             } catch {
                 DispatchQueue.main.async {
                     // Preserve current in-memory view on transient iCloud read failures.
                     print("[PropertiesRefresh] transient read failure: \(error.localizedDescription)")
                     self.isLoading = false
+                    self.isBackgroundRefreshInFlight = false
                 }
             }
         }
@@ -223,14 +379,37 @@ final class AppState: ObservableObject {
         let fingerprint: String
     }
 
+
     private func makeRefreshPayload() throws -> PropertyRefreshPayload {
+        let start = Date()
         let fetchedProperties = try localStore.fetchProperties()
         let fetchedOrganizations = (try? localStore.fetchOrganizations()) ?? []
         let caches = makeHubCaches(for: fetchedProperties)
         let fingerprint = localStore.propertiesLedgerFingerprint()
+        let elapsedMs = Int(Date().timeIntervalSince(start) * 1000)
+        print("[HubFetch] phase=background source=full-fallback properties=\(fetchedProperties.count) orgs=\(fetchedOrganizations.count) ms=\(elapsedMs)")
         return PropertyRefreshPayload(
             properties: fetchedProperties,
             organizations: fetchedOrganizations,
+            caches: caches,
+            fingerprint: fingerprint
+        )
+    }
+
+    private func makeRefreshPayloadForHubIndexOnly() throws -> PropertyRefreshPayload {
+        let start = Date()
+        guard let state = try localStore.fetchPropertyAndOrganizationStateFromHubIndex(downloadTimeout: 0.80) else {
+            let elapsedMs = Int(Date().timeIntervalSince(start) * 1000)
+            print("[HubFetch] phase=background source=none properties=0 orgs=0 ms=\(elapsedMs)")
+            throw NSError(domain: "AppState.HubIndex", code: 1)
+        }
+        let elapsedMs = Int(Date().timeIntervalSince(start) * 1000)
+        print("[HubFetch] phase=background source=\(state.source.rawValue) properties=\(state.properties.count) orgs=\(state.organizations.count) ms=\(elapsedMs)")
+        let caches = makeHubCaches(for: state.properties)
+        let fingerprint = localStore.propertiesLedgerFingerprint()
+        return PropertyRefreshPayload(
+            properties: state.properties,
+            organizations: state.organizations,
             caches: caches,
             fingerprint: fingerprint
         )
@@ -351,6 +530,7 @@ final class AppState: ObservableObject {
 
     func selectProperty(id: UUID) {
         selectedPropertyID = id
+        markPropertyActivated(id: id)
     }
 
     func propertyHasBaseline(_ propertyID: UUID) -> Bool {
@@ -524,15 +704,16 @@ final class AppState: ObservableObject {
         if let currentSession, currentSession.status == .draft, currentSession.propertyID == selectedPropertyID {
             print("[StartSession] propertyID=\(selectedPropertyID.uuidString) blockedReason=none pendingDeliveryExists=\(pendingDeliveryExists) reExportEligibleExists=\(reExportEligibleExists)")
             logActiveSession(currentSession)
-            try? localStore.ensureSessionMetadata(for: currentSession)
             cloudBackupManager.setCaptureModeActive(true)
             return currentSession
         }
         
-        if let draft = try? localStore.latestDraftSession(propertyID: selectedPropertyID) {
+        if let draft = sessionsForProperty
+            .filter({ $0.status == .draft })
+            .sorted(by: { $0.startedAt > $1.startedAt })
+            .first {
             currentSession = draft
             print("[StartSession] propertyID=\(selectedPropertyID.uuidString) blockedReason=none pendingDeliveryExists=\(pendingDeliveryExists) reExportEligibleExists=\(reExportEligibleExists)")
-            try? localStore.ensureSessionMetadata(for: draft)
             cloudBackupManager.setCaptureModeActive(true)
             return draft
         }
@@ -577,11 +758,13 @@ final class AppState: ObservableObject {
         currentSession = session
         _ = try? localStore.upsertSession(session)
         reloadSessionCache(for: session.propertyID)
+        scheduleOffloadEligibleSessionMedia(excludingSessionID: currentSession?.id)
         cloudBackupManager.setCaptureModeActive(false)
         triggerBackupForLifecycleEvent()
     }
     
     func clearCurrentSession() {
+        scheduleOffloadEligibleSessionMedia(excludingSessionID: currentSession?.id)
         currentSession = nil
         cloudBackupManager.setCaptureModeActive(false)
     }
@@ -653,6 +836,8 @@ final class AppState: ObservableObject {
         currentSession = session
         _ = try? localStore.upsertSession(session)
         reloadSessionCache(for: session.propertyID)
+        scheduleSessionArchiveSnapshot(session, trigger: "markCurrentSessionExported")
+        scheduleOffloadEligibleSessionMedia(excludingSessionID: currentSession?.id)
         cloudBackupManager.setCaptureModeActive(false)
         triggerBackupForLifecycleEvent()
     }
@@ -669,6 +854,8 @@ final class AppState: ObservableObject {
         currentSession = session
         _ = try? localStore.upsertSession(session)
         reloadSessionCache(for: session.propertyID)
+        scheduleSessionArchiveSnapshot(session, trigger: "sealCurrentSessionForExportLater")
+        scheduleOffloadEligibleSessionMedia(excludingSessionID: currentSession?.id)
         cloudBackupManager.setCaptureModeActive(false)
         triggerBackupForLifecycleEvent()
     }
@@ -684,6 +871,8 @@ final class AppState: ObservableObject {
         currentSession = session
         _ = try? localStore.upsertSession(session)
         reloadSessionCache(for: session.propertyID)
+        scheduleSessionArchiveSnapshot(session, trigger: "sealCurrentSessionForExportNow")
+        scheduleOffloadEligibleSessionMedia(excludingSessionID: currentSession?.id)
         cloudBackupManager.setCaptureModeActive(false)
         triggerBackupForLifecycleEvent()
     }
@@ -692,9 +881,20 @@ final class AppState: ObservableObject {
         guard let draft = draftSession(for: propertyID) else { return nil }
         selectedPropertyID = propertyID
         currentSession = draft
-        try? localStore.ensureSessionMetadata(for: draft)
         cloudBackupManager.setCaptureModeActive(true)
         return draft
+    }
+
+    func ensureSessionMetadataInBackground(for session: Session) {
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            guard let self else { return }
+            try? self.localStore.ensureSessionMetadata(for: session)
+        }
+    }
+
+    func ensureCurrentSessionMetadataInBackground() {
+        guard let session = currentSession else { return }
+        ensureSessionMetadataInBackground(for: session)
     }
 
     @discardableResult
@@ -717,6 +917,8 @@ final class AppState: ObservableObject {
         do {
             _ = try localStore.upsertSession(session)
             reloadSessionCache(for: propertyID)
+            scheduleSessionArchiveSnapshot(session, trigger: "markSessionExported")
+            scheduleOffloadEligibleSessionMedia(excludingSessionID: currentSession?.id)
             cloudBackupManager.setCaptureModeActive(false)
             triggerBackupForLifecycleEvent()
             return true
@@ -859,6 +1061,7 @@ final class AppState: ObservableObject {
             userDefaults.synchronize()
         } else {
             userDefaults.removeObject(forKey: selectedPropertyDefaultsKey)
+            userDefaults.removeObject(forKey: propertyActivationTimestampsDefaultsKey)
         }
     }
 
@@ -977,6 +1180,106 @@ final class AppState: ObservableObject {
                 relativePath: originalRelative
             ) != nil
         }
+    }
+
+    private func scheduleOffloadEligibleSessionMedia(excludingSessionID: UUID?) {
+        let excludedSessionID = excludingSessionID
+        offloadSweepQueue.async { [weak self] in
+            self?.offloadEligibleSessionMedia(excludingSessionID: excludedSessionID)
+        }
+    }
+
+    private func scheduleSessionArchiveSnapshot(_ session: Session, trigger: String) {
+        guard session.status == .completed, session.isSealed else { return }
+        archiveSnapshotQueue.async { [weak self] in
+            guard let self else { return }
+            do {
+                _ = try self.localStore.createSessionArchiveSnapshot(session: session, trigger: trigger)
+            } catch {
+                print(
+                    "[SessionArchive] result=failed " +
+                    "propertyID=\(session.propertyID.uuidString) " +
+                    "sessionID=\(session.id.uuidString) " +
+                    "trigger=\(trigger) " +
+                    "error=\(error.localizedDescription)"
+                )
+            }
+        }
+    }
+
+    private func offloadEligibleSessionMedia(excludingSessionID: UUID?) {
+        let now = Date()
+        var scanned = 0
+        var offloadedFiles = 0
+        var skippedCooldown = 0
+        var skippedRecentActivation = 0
+
+        let allProperties = (try? localStore.fetchProperties()) ?? []
+        for property in allProperties {
+            if isPropertyWithinActivationRetentionWindow(property.id, now: now) {
+                skippedRecentActivation += 1
+                continue
+            }
+            let propertySessions = (try? localStore.fetchSessions(propertyID: property.id)) ?? []
+            for session in propertySessions {
+                scanned += 1
+                if session.id == excludingSessionID { continue }
+                guard session.status == .completed else { continue }
+                guard session.isSealed else { continue }
+                guard !isPendingDelivery(session) else { continue }
+                guard !isReExportEligible(session, now: now) else { continue }
+                guard let endedAt = session.endedAt else { continue }
+                if now.timeIntervalSince(endedAt) < sessionMediaOffloadCooldown {
+                    skippedCooldown += 1
+                    continue
+                }
+                offloadedFiles += localStore.offloadSessionMediaAssets(
+                    propertyID: session.propertyID,
+                    sessionID: session.id
+                )
+            }
+        }
+
+        if offloadedFiles > 0 || skippedCooldown > 0 || skippedRecentActivation > 0 {
+            print(
+                "[SessionOffload] scanned=\(scanned) " +
+                "offloadedFiles=\(offloadedFiles) " +
+                "skippedCooldown=\(skippedCooldown) " +
+                "skippedRecentActivation=\(skippedRecentActivation) " +
+                "activationRetentionDays=\(Int(activatedPropertyRetentionWindow / 86_400)) " +
+                "cooldownSeconds=\(Int(sessionMediaOffloadCooldown))"
+            )
+        }
+    }
+
+    private func markPropertyActivated(id: UUID, at date: Date = Date()) {
+        var map = propertyActivationTimestampMap()
+        map[id.uuidString] = date.timeIntervalSince1970
+        let cutoff = date.timeIntervalSince1970 - activatedPropertyRetentionWindow
+        map = map.filter { $0.value >= cutoff }
+        userDefaults.set(map, forKey: propertyActivationTimestampsDefaultsKey)
+    }
+
+    private func propertyActivationTimestampMap() -> [String: TimeInterval] {
+        guard let raw = userDefaults.dictionary(forKey: propertyActivationTimestampsDefaultsKey) else {
+            return [:]
+        }
+        var mapped: [String: TimeInterval] = [:]
+        mapped.reserveCapacity(raw.count)
+        for (key, value) in raw {
+            if let time = value as? TimeInterval {
+                mapped[key] = time
+            } else if let number = value as? NSNumber {
+                mapped[key] = number.doubleValue
+            }
+        }
+        return mapped
+    }
+
+    private func isPropertyWithinActivationRetentionWindow(_ propertyID: UUID, now: Date) -> Bool {
+        let map = propertyActivationTimestampMap()
+        guard let timestamp = map[propertyID.uuidString] else { return false }
+        return now.timeIntervalSince1970 - timestamp < activatedPropertyRetentionWindow
     }
 
     func isPendingDelivery(_ session: Session) -> Bool {

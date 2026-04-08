@@ -63,7 +63,7 @@ struct TemporaryMigrationExportView: View {
                         .buttonStyle(.plain)
                         .disabled(isPreparingExport)
 
-                        Text("Creates a `ScoutCapture_Migration.zip` archive and opens the standard iOS share sheet so it can be saved to Files or iCloud Drive.")
+                        Text("Creates a `ScoutCapture_Migration.zip` archive and opens the standard iOS share sheet so it can be saved to Files, iCloud Drive, AirDrop, or transferred to Finder for USB restore workflows.")
                             .font(.system(size: 13, weight: .medium))
                             .foregroundColor(.secondary)
 
@@ -83,7 +83,7 @@ struct TemporaryMigrationExportView: View {
                 }
                 .padding(16)
             }
-            .navigationTitle("Migration Export")
+            .navigationTitle("Archive Export")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
@@ -648,11 +648,11 @@ struct TemporaryMigrationImportView: View {
                             .font(.system(size: 18, weight: .semibold))
                             .foregroundColor(.primary)
 
-                        importRow("Choose a `ScoutCapture_Migration.zip` file from Files or iCloud Drive")
+                        importRow("Choose a `ScoutCapture_Migration.zip` file from Files, iCloud Drive, AirDrop, or Finder-transferred local storage")
                         importRow("Current local ScoutCapture migration-target data will be replaced")
                         importRow("Restores exported app files into the current ScoutCapture local storage root")
                         importRow("Restores only ScoutCapture-owned `UserDefaults` keys")
-                        importRow("Leaves the migration export tool available in case you need to export again")
+                        importRow("Supports offline recovery workflows when iCloud sync is unavailable")
                     }
                     .padding(16)
                     .background(Color(uiColor: .secondarySystemBackground))
@@ -693,7 +693,7 @@ struct TemporaryMigrationImportView: View {
                 }
                 .padding(16)
             }
-            .navigationTitle("Migration Import")
+            .navigationTitle("Archive Import")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {

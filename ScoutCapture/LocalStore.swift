@@ -1,5 +1,14 @@
 import Foundation
 import UIKit
+import CryptoKit
+
+private let isVerboseConsoleLoggingEnabled = false
+
+@inline(__always)
+private func verboseLog(_ message: @autoclosure () -> String) {
+    guard isVerboseConsoleLoggingEnabled else { return }
+    print(message())
+}
 
 final class LocalStore {
     private let currentSessionSchemaVersion = 11
@@ -10,6 +19,18 @@ final class LocalStore {
     enum ShotUpsertMatchMode {
         case append
         case replaceGuidedKey
+    }
+
+    enum HubFetchSource: String {
+        case iCloudSmallManifest = "icloud-small"
+        case localSnapshot = "local-snapshot"
+        case fullFallback = "full-fallback"
+    }
+
+    struct HubFetchResult {
+        let properties: [Property]
+        let organizations: [Organization]
+        let source: HubFetchSource
     }
  
     enum StoreError: Error {
@@ -42,6 +63,49 @@ final class LocalStore {
         let sourceURL: URL
     }
 
+    struct SessionArchiveSummary: Identifiable {
+        let id: String
+        let propertyID: UUID
+        let sessionID: UUID
+        let snapshotName: String
+        let createdAt: Date
+        let trigger: String
+        let clientNameAtCapture: String?
+        let orgNameAtCapture: String?
+        let propertyNameAtCapture: String?
+        let propertyAddressAtCapture: String?
+        let isSealedCheckpoint: Bool
+        let isDeliveredCheckpoint: Bool
+        let fileCount: Int
+        let totalBytes: Int64
+    }
+
+    private struct SessionArchiveManifest: Codable {
+        struct FileRecord: Codable {
+            let relativePath: String
+            let size: Int64
+            let sha256: String
+        }
+
+        let schemaVersion: Int
+        let createdAt: Date
+        let trigger: String
+        let propertyID: UUID
+        let sessionID: UUID
+        let clientNameAtCapture: String?
+        let orgNameAtCapture: String?
+        let propertyNameAtCapture: String?
+        let propertyAddressAtCapture: String?
+        let sessionStatus: String
+        let isSealed: Bool
+        let firstDeliveredAt: Date?
+        let reExportExpiresAt: Date?
+        let exportedAt: Date?
+        let fileCount: Int
+        let totalBytes: Int64
+        let files: [FileRecord]
+    }
+
     private let fileManager: FileManager
     private let encoder: JSONEncoder
     private let decoder: JSONDecoder
@@ -50,6 +114,8 @@ final class LocalStore {
     private let scoutRootURL: URL
     private let propertiesURL: URL
     private let organizationsURL: URL
+    private let hubIndexURL: URL
+    private let localHubIndexCacheURL: URL
     private let propertyTombstonesURL: URL
     private let propertySyncEventsDirectoryURL: URL
     private let propertyFoldersURL: URL
@@ -75,6 +141,10 @@ final class LocalStore {
         self.scoutRootURL = scoutRoot
         self.propertiesURL = scoutRoot.appendingPathComponent("properties.json")
         self.organizationsURL = scoutRoot.appendingPathComponent("organizations.json")
+        self.hubIndexURL = scoutRoot.appendingPathComponent("hub-index.json")
+        let localAppSupportRoot = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("ScoutCapture", isDirectory: true)
+        self.localHubIndexCacheURL = localAppSupportRoot.appendingPathComponent("local-hub-index.json")
         self.propertyTombstonesURL = scoutRoot.appendingPathComponent("property-tombstones.json")
         self.propertySyncEventsDirectoryURL = scoutRoot
             .appendingPathComponent("sync-events", isDirectory: true)
@@ -773,6 +843,60 @@ final class LocalStore {
         }
     }
 
+    func fetchPropertyAndOrganizationStateForHub(downloadTimeout: TimeInterval) throws -> HubFetchResult {
+        try performFileIOSync {
+            if let hubIndex = try readHubIndexRaw(downloadTimeout: downloadTimeout),
+               !hubIndex.properties.isEmpty {
+                let properties = hubIndex.properties.map { $0.asProperty() }
+                let organizations = hubIndex.organizations.map { $0.asOrganization() }
+                return HubFetchResult(
+                    properties: properties,
+                    organizations: organizations,
+                    source: .iCloudSmallManifest
+                )
+            }
+
+            let state = try migratedPropertyAndOrganizationState(downloadTimeout: downloadTimeout)
+            return HubFetchResult(
+                properties: state.properties,
+                organizations: state.organizations,
+                source: .fullFallback
+            )
+        }
+    }
+
+    func fetchPropertyAndOrganizationStateFromHubIndex(downloadTimeout: TimeInterval) throws -> HubFetchResult? {
+        try performFileIOSync {
+            guard let hubIndex = try readHubIndexRaw(downloadTimeout: downloadTimeout),
+                  !hubIndex.properties.isEmpty else {
+                return nil
+            }
+            let properties = hubIndex.properties.map { $0.asProperty() }
+            let organizations = hubIndex.organizations.map { $0.asOrganization() }
+            return HubFetchResult(
+                properties: properties,
+                organizations: organizations,
+                source: .iCloudSmallManifest
+            )
+        }
+    }
+
+    func fetchPropertyAndOrganizationStateFromLocalHubIndexCache() throws -> HubFetchResult? {
+        try performFileIOSync {
+            guard let hubIndex = try readLocalHubIndexCacheRaw(),
+                  !hubIndex.properties.isEmpty else {
+                return nil
+            }
+            let properties = hubIndex.properties.map { $0.asProperty() }
+            let organizations = hubIndex.organizations.map { $0.asOrganization() }
+            return HubFetchResult(
+                properties: properties,
+                organizations: organizations,
+                source: .localSnapshot
+            )
+        }
+    }
+
     @discardableResult
     func createOrganization(_ organization: Organization) throws -> Organization {
         try performFileIOSync {
@@ -1463,6 +1587,557 @@ final class LocalStore {
         stampedFolderURL(propertyID: propertyID, sessionID: sessionID)
     }
 
+    @discardableResult
+    func offloadSessionMediaAssets(propertyID: UUID, sessionID: UUID) -> Int {
+        performFileIOSync {
+            let originals = originalsFolderURL(propertyID: propertyID, sessionID: sessionID)
+            let stamped = stampedFolderURL(propertyID: propertyID, sessionID: sessionID)
+            var offloaded = 0
+            offloaded += offloadUbiquitousFiles(in: originals)
+            offloaded += offloadUbiquitousFiles(in: stamped)
+            return offloaded
+        }
+    }
+
+    @discardableResult
+    func createSessionArchiveSnapshot(session: Session, trigger: String) throws -> URL? {
+        try performFileIOSync {
+            guard session.status == .completed, session.isSealed else { return nil }
+
+            let artifacts = try validatedSessionExportArtifacts(for: session)
+            let createdAt = Date()
+            let stamp = archiveTimestampString(createdAt)
+            let triggerSlug = sanitizedArchivePathSegment(trigger)
+            let deliveryStateSlug = session.firstDeliveredAt == nil ? "sealed" : "delivered"
+
+            let archivesRoot = activeRootURL
+                .appendingPathComponent("Archives", isDirectory: true)
+                .appendingPathComponent("Sessions", isDirectory: true)
+                .appendingPathComponent(session.propertyID.uuidString, isDirectory: true)
+                .appendingPathComponent(session.id.uuidString, isDirectory: true)
+            try fileManager.createDirectory(at: archivesRoot, withIntermediateDirectories: true)
+
+            let snapshotFolderName = "\(stamp)-\(deliveryStateSlug)-\(triggerSlug)"
+            let snapshotRoot = archivesRoot.appendingPathComponent(snapshotFolderName, isDirectory: true)
+            if fileManager.fileExists(atPath: snapshotRoot.path) {
+                try fileManager.removeItem(at: snapshotRoot)
+            }
+            try fileManager.createDirectory(at: snapshotRoot, withIntermediateDirectories: true)
+
+            let payloadRoot = snapshotRoot.appendingPathComponent("Payload", isDirectory: true)
+            let originalsRoot = payloadRoot.appendingPathComponent("Originals", isDirectory: true)
+            let csvRoot = payloadRoot.appendingPathComponent("CSV", isDirectory: true)
+            try fileManager.createDirectory(at: payloadRoot, withIntermediateDirectories: true)
+            try fileManager.createDirectory(at: originalsRoot, withIntermediateDirectories: true)
+            try fileManager.createDirectory(at: csvRoot, withIntermediateDirectories: true)
+
+            try artifacts.sessionData.write(
+                to: payloadRoot.appendingPathComponent("session.json", isDirectory: false),
+                options: .atomic
+            )
+            try artifacts.validationData.write(
+                to: payloadRoot.appendingPathComponent("validation.txt", isDirectory: false),
+                options: .atomic
+            )
+
+            for csv in exportCSVFiles(for: artifacts.metadata) {
+                try csv.data.write(
+                    to: csvRoot.appendingPathComponent(csv.filename, isDirectory: false),
+                    options: .atomic
+                )
+            }
+
+            for original in artifacts.originalFiles {
+                guard ensureUbiquitousItemAvailable(at: original.sourceURL, timeout: 20) else {
+                    throw NSError(
+                        domain: "LocalStore.SessionArchive",
+                        code: 1,
+                        userInfo: [NSLocalizedDescriptionKey: "Missing source file during archive snapshot: \(original.filename)"]
+                    )
+                }
+                let destination = originalsRoot.appendingPathComponent(original.filename, isDirectory: false)
+                if fileManager.fileExists(atPath: destination.path) {
+                    try fileManager.removeItem(at: destination)
+                }
+                try fileManager.copyItem(at: original.sourceURL, to: destination)
+            }
+
+            let fileRecords = try archiveFileRecords(in: snapshotRoot)
+            let totalBytes = fileRecords.reduce(Int64(0)) { $0 + $1.size }
+            let manifest = SessionArchiveManifest(
+                schemaVersion: 1,
+                createdAt: createdAt,
+                trigger: trigger,
+                propertyID: session.propertyID,
+                sessionID: session.id,
+                clientNameAtCapture: artifacts.metadata.primaryContactNameAtCapture,
+                orgNameAtCapture: artifacts.metadata.orgNameAtCapture,
+                propertyNameAtCapture: artifacts.metadata.propertyNameAtCapture,
+                propertyAddressAtCapture: artifacts.metadata.propertyAddressAtCapture,
+                sessionStatus: session.status.rawValue,
+                isSealed: session.isSealed,
+                firstDeliveredAt: session.firstDeliveredAt,
+                reExportExpiresAt: session.reExportExpiresAt,
+                exportedAt: session.exportedAt,
+                fileCount: fileRecords.count,
+                totalBytes: totalBytes,
+                files: fileRecords
+            )
+
+            let manifestData = try encoder.encode(manifest)
+            let manifestURL = snapshotRoot.appendingPathComponent("manifest.json", isDirectory: false)
+            try manifestData.write(to: manifestURL, options: .atomic)
+            try verifySessionArchiveSnapshot(at: snapshotRoot, manifest: manifest)
+
+            print(
+                "[SessionArchive] result=success " +
+                "propertyID=\(session.propertyID.uuidString) " +
+                "sessionID=\(session.id.uuidString) " +
+                "trigger=\(trigger) " +
+                "snapshot=\(snapshotFolderName) " +
+                "files=\(manifest.fileCount) " +
+                "bytes=\(manifest.totalBytes)"
+            )
+            return snapshotRoot
+        }
+    }
+
+    func fetchSessionArchiveSummaries() throws -> [SessionArchiveSummary] {
+        try performFileIOSync {
+            let archivesRoot = activeRootURL
+                .appendingPathComponent("Archives", isDirectory: true)
+                .appendingPathComponent("Sessions", isDirectory: true)
+            guard fileManager.fileExists(atPath: archivesRoot.path) else { return [] }
+
+            var summaries: [SessionArchiveSummary] = []
+            func composedAddress(from json: [String: Any]) -> String? {
+                if let direct = trimmedNonEmpty(json["propertyAddressAtCapture"] as? String) {
+                    return direct
+                }
+                let street = trimmedNonEmpty(json["propertyStreetAtCapture"] as? String)
+                let city = trimmedNonEmpty(json["propertyCityAtCapture"] as? String)
+                let state = trimmedNonEmpty(json["propertyStateAtCapture"] as? String)
+                let zip = trimmedNonEmpty(json["propertyZipAtCapture"] as? String)
+                let parts = [street, city, state, zip].compactMap { $0 }
+                guard !parts.isEmpty else { return nil }
+                return parts.joined(separator: ", ")
+            }
+            func composedClientName(from json: [String: Any]) -> String? {
+                trimmedNonEmpty(json["primaryContactNameAtCapture"] as? String)
+                    ?? trimmedNonEmpty(json["primaryContactName"] as? String)
+                    ?? trimmedNonEmpty(json["clientName"] as? String)
+            }
+            let propertyFolders = try fileManager.contentsOfDirectory(
+                at: archivesRoot,
+                includingPropertiesForKeys: [.isDirectoryKey],
+                options: [.skipsHiddenFiles]
+            ).sorted { $0.lastPathComponent < $1.lastPathComponent }
+
+            for propertyFolder in propertyFolders {
+                let propertyValues = try propertyFolder.resourceValues(forKeys: [.isDirectoryKey])
+                guard propertyValues.isDirectory == true else { continue }
+                guard let propertyID = UUID(uuidString: propertyFolder.lastPathComponent) else { continue }
+
+                let sessionFolders = try fileManager.contentsOfDirectory(
+                    at: propertyFolder,
+                    includingPropertiesForKeys: [.isDirectoryKey],
+                    options: [.skipsHiddenFiles]
+                ).sorted { $0.lastPathComponent < $1.lastPathComponent }
+
+                for sessionFolder in sessionFolders {
+                    let sessionValues = try sessionFolder.resourceValues(forKeys: [.isDirectoryKey])
+                    guard sessionValues.isDirectory == true else { continue }
+                    guard let sessionID = UUID(uuidString: sessionFolder.lastPathComponent) else { continue }
+
+                    let snapshots = try fileManager.contentsOfDirectory(
+                        at: sessionFolder,
+                        includingPropertiesForKeys: [.isDirectoryKey],
+                        options: [.skipsHiddenFiles]
+                    ).sorted { $0.lastPathComponent < $1.lastPathComponent }
+
+                    for snapshot in snapshots {
+                        let snapshotValues = try snapshot.resourceValues(forKeys: [.isDirectoryKey])
+                        guard snapshotValues.isDirectory == true else { continue }
+                        let manifestURL = snapshot.appendingPathComponent("manifest.json", isDirectory: false)
+                        guard fileManager.fileExists(atPath: manifestURL.path) else { continue }
+                        let manifestData = try Data(contentsOf: manifestURL)
+                        let manifest = try decoder.decode(SessionArchiveManifest.self, from: manifestData)
+                        var clientNameAtCapture = trimmedNonEmpty(manifest.clientNameAtCapture)
+                        var orgNameAtCapture = trimmedNonEmpty(manifest.orgNameAtCapture)
+                        var propertyNameAtCapture = trimmedNonEmpty(manifest.propertyNameAtCapture)
+                        var propertyAddressAtCapture = trimmedNonEmpty(manifest.propertyAddressAtCapture)
+
+                        if clientNameAtCapture == nil || orgNameAtCapture == nil || propertyNameAtCapture == nil || propertyAddressAtCapture == nil {
+                            let payloadSessionURL = snapshot
+                                .appendingPathComponent("Payload", isDirectory: true)
+                                .appendingPathComponent("session.json", isDirectory: false)
+                            if fileManager.fileExists(atPath: payloadSessionURL.path),
+                               let payloadData = try? Data(contentsOf: payloadSessionURL),
+                               let payloadObject = try? JSONSerialization.jsonObject(with: payloadData) as? [String: Any] {
+                                if clientNameAtCapture == nil {
+                                    clientNameAtCapture = composedClientName(from: payloadObject)
+                                }
+                                if propertyNameAtCapture == nil {
+                                    propertyNameAtCapture = trimmedNonEmpty(payloadObject["propertyNameAtCapture"] as? String)
+                                        ?? trimmedNonEmpty(payloadObject["propertyNameAtExport"] as? String)
+                                }
+                                if orgNameAtCapture == nil {
+                                    orgNameAtCapture = trimmedNonEmpty(payloadObject["orgNameAtCapture"] as? String)
+                                }
+                                if propertyAddressAtCapture == nil {
+                                    propertyAddressAtCapture = composedAddress(from: payloadObject)
+                                }
+                            }
+                        }
+                        let snapshotName = snapshot.lastPathComponent
+                        summaries.append(
+                            SessionArchiveSummary(
+                                id: "\(propertyID.uuidString)|\(sessionID.uuidString)|\(snapshotName)",
+                                propertyID: propertyID,
+                                sessionID: sessionID,
+                                snapshotName: snapshotName,
+                                createdAt: manifest.createdAt,
+                                trigger: manifest.trigger,
+                                clientNameAtCapture: clientNameAtCapture,
+                                orgNameAtCapture: orgNameAtCapture,
+                                propertyNameAtCapture: propertyNameAtCapture,
+                                propertyAddressAtCapture: propertyAddressAtCapture,
+                                isSealedCheckpoint: true,
+                                isDeliveredCheckpoint: manifest.firstDeliveredAt != nil,
+                                fileCount: manifest.fileCount,
+                                totalBytes: manifest.totalBytes
+                            )
+                        )
+                    }
+                }
+            }
+
+            var bestBySession: [String: SessionArchiveSummary] = [:]
+            func mergedSummary(preferred: SessionArchiveSummary, fallback: SessionArchiveSummary) -> SessionArchiveSummary {
+                SessionArchiveSummary(
+                    id: preferred.id,
+                    propertyID: preferred.propertyID,
+                    sessionID: preferred.sessionID,
+                    snapshotName: preferred.snapshotName,
+                    createdAt: preferred.createdAt,
+                    trigger: preferred.trigger,
+                    clientNameAtCapture: preferred.clientNameAtCapture ?? fallback.clientNameAtCapture,
+                    orgNameAtCapture: preferred.orgNameAtCapture ?? fallback.orgNameAtCapture,
+                    propertyNameAtCapture: preferred.propertyNameAtCapture ?? fallback.propertyNameAtCapture,
+                    propertyAddressAtCapture: preferred.propertyAddressAtCapture ?? fallback.propertyAddressAtCapture,
+                    isSealedCheckpoint: preferred.isSealedCheckpoint,
+                    isDeliveredCheckpoint: preferred.isDeliveredCheckpoint,
+                    fileCount: preferred.fileCount,
+                    totalBytes: preferred.totalBytes
+                )
+            }
+            for summary in summaries {
+                let key = "\(summary.propertyID.uuidString)|\(summary.sessionID.uuidString)"
+                if let existing = bestBySession[key] {
+                    let existingRank = existing.isDeliveredCheckpoint ? 2 : 1
+                    let incomingRank = summary.isDeliveredCheckpoint ? 2 : 1
+                    if incomingRank > existingRank {
+                        bestBySession[key] = mergedSummary(preferred: summary, fallback: existing)
+                    } else if incomingRank == existingRank, summary.createdAt > existing.createdAt {
+                        bestBySession[key] = mergedSummary(preferred: summary, fallback: existing)
+                    } else {
+                        bestBySession[key] = mergedSummary(preferred: existing, fallback: summary)
+                    }
+                } else {
+                    bestBySession[key] = summary
+                }
+            }
+
+            return Array(bestBySession.values).sorted { lhs, rhs in
+                if lhs.createdAt == rhs.createdAt {
+                    return lhs.id > rhs.id
+                }
+                return lhs.createdAt > rhs.createdAt
+            }
+        }
+    }
+
+    func deleteSessionArchiveSnapshot(
+        propertyID: UUID,
+        sessionID: UUID,
+        snapshotName: String
+    ) throws {
+        try performFileIOSync {
+            let sessionRoot = activeRootURL
+                .appendingPathComponent("Archives", isDirectory: true)
+                .appendingPathComponent("Sessions", isDirectory: true)
+                .appendingPathComponent(propertyID.uuidString, isDirectory: true)
+                .appendingPathComponent(sessionID.uuidString, isDirectory: true)
+            let snapshotRoot = sessionRoot.appendingPathComponent(snapshotName, isDirectory: true)
+
+            guard fileManager.fileExists(atPath: snapshotRoot.path) else { return }
+            try fileManager.removeItem(at: snapshotRoot)
+
+            if let remainingSnapshots = try? fileManager.contentsOfDirectory(
+                at: sessionRoot,
+                includingPropertiesForKeys: [.isDirectoryKey],
+                options: [.skipsHiddenFiles]
+            ), remainingSnapshots.isEmpty {
+                try? fileManager.removeItem(at: sessionRoot)
+                let propertyRoot = sessionRoot.deletingLastPathComponent()
+                if let remainingSessions = try? fileManager.contentsOfDirectory(
+                    at: propertyRoot,
+                    includingPropertiesForKeys: [.isDirectoryKey],
+                    options: [.skipsHiddenFiles]
+                ), remainingSessions.isEmpty {
+                    try? fileManager.removeItem(at: propertyRoot)
+                }
+            }
+
+            print(
+                "[SessionArchiveDelete] result=success " +
+                "propertyID=\(propertyID.uuidString) " +
+                "sessionID=\(sessionID.uuidString) " +
+                "snapshot=\(snapshotName)"
+            )
+        }
+    }
+
+    func restoreSessionArchiveSnapshot(
+        propertyID: UUID,
+        sessionID: UUID,
+        snapshotName: String
+    ) throws -> Session {
+        try performFileIOSync {
+            let snapshotRoot = activeRootURL
+                .appendingPathComponent("Archives", isDirectory: true)
+                .appendingPathComponent("Sessions", isDirectory: true)
+                .appendingPathComponent(propertyID.uuidString, isDirectory: true)
+                .appendingPathComponent(sessionID.uuidString, isDirectory: true)
+                .appendingPathComponent(snapshotName, isDirectory: true)
+
+            guard fileManager.fileExists(atPath: snapshotRoot.path) else {
+                throw NSError(
+                    domain: "LocalStore.SessionArchiveRestore",
+                    code: 1,
+                    userInfo: [NSLocalizedDescriptionKey: "Snapshot not found: \(snapshotName)"]
+                )
+            }
+
+            let manifestURL = snapshotRoot.appendingPathComponent("manifest.json", isDirectory: false)
+            guard fileManager.fileExists(atPath: manifestURL.path) else {
+                throw NSError(
+                    domain: "LocalStore.SessionArchiveRestore",
+                    code: 2,
+                    userInfo: [NSLocalizedDescriptionKey: "Snapshot manifest is missing."]
+                )
+            }
+            let manifestData = try Data(contentsOf: manifestURL)
+            let manifest = try decoder.decode(SessionArchiveManifest.self, from: manifestData)
+            try verifySessionArchiveSnapshot(at: snapshotRoot, manifest: manifest)
+
+            let sessionJSONURL = snapshotRoot
+                .appendingPathComponent("Payload", isDirectory: true)
+                .appendingPathComponent("session.json", isDirectory: false)
+            guard fileManager.fileExists(atPath: sessionJSONURL.path) else {
+                throw NSError(
+                    domain: "LocalStore.SessionArchiveRestore",
+                    code: 3,
+                    userInfo: [NSLocalizedDescriptionKey: "Snapshot payload is missing session.json."]
+                )
+            }
+
+            var metadata = try decoder.decode(SessionMetadata.self, from: Data(contentsOf: sessionJSONURL))
+            metadata.propertyID = propertyID
+            metadata.sessionID = sessionID
+
+            if (try? fetchProperties().contains(where: { $0.id == propertyID })) != true {
+                let placeholder = Property(
+                    id: propertyID,
+                    orgId: metadata.orgID,
+                    folderId: metadata.folderIDAtCapture,
+                    clientName: metadata.primaryContactNameAtCapture,
+                    clientPhone: metadata.propertyPhoneAtCapture,
+                    clientEmail: metadata.primaryContactEmailAtCapture,
+                    name: metadata.propertyNameAtCapture ?? "Restored Property",
+                    address: metadata.propertyAddressAtCapture,
+                    street: metadata.propertyStreetAtCapture,
+                    city: metadata.propertyCityAtCapture,
+                    state: metadata.propertyStateAtCapture,
+                    zip: metadata.propertyZipAtCapture
+                )
+                _ = try createProperty(placeholder)
+            }
+
+            let restoredSessionFolder = sessionFolderURL(propertyID: propertyID, sessionID: sessionID)
+            if fileManager.fileExists(atPath: restoredSessionFolder.path) {
+                try fileManager.removeItem(at: restoredSessionFolder)
+            }
+            try ensureSessionFileStorage(propertyID: propertyID, sessionID: sessionID)
+            let restoredOriginals = restoredSessionFolder.appendingPathComponent("Originals", isDirectory: true)
+            if fileManager.fileExists(atPath: restoredOriginals.path) == false {
+                try fileManager.createDirectory(at: restoredOriginals, withIntermediateDirectories: true)
+            }
+
+            let payloadOriginals = snapshotRoot
+                .appendingPathComponent("Payload", isDirectory: true)
+                .appendingPathComponent("Originals", isDirectory: true)
+            if fileManager.fileExists(atPath: payloadOriginals.path) {
+                let originalFiles = try fileManager.contentsOfDirectory(
+                    at: payloadOriginals,
+                    includingPropertiesForKeys: [.isDirectoryKey],
+                    options: [.skipsHiddenFiles]
+                )
+                for source in originalFiles {
+                    let values = try source.resourceValues(forKeys: [.isDirectoryKey])
+                    guard values.isDirectory != true else { continue }
+                    let destination = restoredOriginals.appendingPathComponent(source.lastPathComponent, isDirectory: false)
+                    if fileManager.fileExists(atPath: destination.path) {
+                        try fileManager.removeItem(at: destination)
+                    }
+                    try fileManager.copyItem(at: source, to: destination)
+                }
+            }
+
+            try saveSessionMetadataAtomically(propertyID: propertyID, sessionID: sessionID, metadata: metadata)
+            try syncPropertyStoresFromRestoredSessionMetadata(
+                metadata: metadata,
+                propertyID: propertyID,
+                sessionID: sessionID
+            )
+
+            let restoredSession = Session(
+                id: sessionID,
+                propertyID: propertyID,
+                startedAt: metadata.startedAt,
+                status: metadata.status,
+                endedAt: metadata.endedAt,
+                exportedAt: metadata.exportedAt,
+                isSealed: metadata.isSealed,
+                firstDeliveredAt: metadata.firstDeliveredAt,
+                reExportExpiresAt: metadata.reExportExpiresAt
+            )
+            _ = try upsertSession(restoredSession)
+
+            print(
+                "[SessionRestore] result=success " +
+                "propertyID=\(propertyID.uuidString) " +
+                "sessionID=\(sessionID.uuidString) " +
+                "snapshot=\(snapshotName)"
+            )
+            return restoredSession
+        }
+    }
+
+    private func syncPropertyStoresFromRestoredSessionMetadata(
+        metadata: SessionMetadata,
+        propertyID: UUID,
+        sessionID: UUID
+    ) throws {
+        // Authoritative restore: overwrite property-level guided store with snapshot state.
+        let normalizedGuided = metadata.guidedShots.map { guided -> GuidedShot in
+            var updated = guided
+            updated.angleIndex = max(1, guided.angleIndex ?? 1)
+            return updated
+        }
+        try writeGuidedShots(normalizedGuided, propertyID: propertyID)
+
+        let sessionFolder = sessionFolderURL(propertyID: propertyID, sessionID: sessionID)
+        let flaggedShotsByIssueID = Dictionary(grouping: metadata.shots.filter { $0.isFlagged && $0.issueID != nil }) { shot in
+            shot.issueID!
+        }
+
+        // Authoritative restore: property-level observation store is replaced by snapshot-derived issues.
+        var mergedByID: [UUID: Observation] = [:]
+
+        func shotPath(for shot: ShotMetadata) -> String {
+            let relative = shot.originalRelativePath.trimmingCharacters(in: .whitespacesAndNewlines)
+            if relative.isEmpty {
+                return sessionFolder
+                    .appendingPathComponent("Originals", isDirectory: true)
+                    .appendingPathComponent(shot.originalFilename, isDirectory: false)
+                    .path
+            }
+            return sessionFolder.appendingPathComponent(relative, isDirectory: false).path
+        }
+
+        func buildObservation(issue: IssueMetadata, fallbackSessionID: UUID) -> Observation {
+            let shots = (flaggedShotsByIssueID[issue.issueID] ?? [])
+                .sorted { $0.createdAt < $1.createdAt }
+                .map { shot in
+                    Shot(
+                        id: shot.shotID,
+                        capturedAt: shot.createdAt,
+                        imageLocalIdentifier: shotPath(for: shot),
+                        note: shot.noteText
+                    )
+                }
+
+            let linkedShot = shots.last?.id
+            let latestMetaShot = (flaggedShotsByIssueID[issue.issueID] ?? []).sorted { $0.updatedAt > $1.updatedAt }.first
+            let status: Observation.Status = issue.issueStatus.lowercased() == "resolved" ? .resolved : .active
+            let createdAt = issue.firstSeenAt ?? issue.lastSeenAt ?? metadata.startedAt
+            let updatedAt = issue.lastSeenAt ?? issue.resolvedAt ?? createdAt
+            let effectiveSessionID = issue.lastCaptureSessionId ?? fallbackSessionID
+
+            return Observation(
+                id: issue.issueID,
+                propertyID: propertyID,
+                sessionID: effectiveSessionID,
+                createdAt: createdAt,
+                updatedAt: updatedAt,
+                statement: trimmedNonEmpty(issue.detailNote) ?? "",
+                status: status,
+                linkedShotID: linkedShot,
+                resolutionPhotoRef: nil,
+                resolutionStatement: nil,
+                updatedInSessionID: effectiveSessionID,
+                resolvedInSessionID: status == .resolved ? effectiveSessionID : nil,
+                building: latestMetaShot?.building,
+                targetElevation: latestMetaShot?.elevation,
+                detailType: latestMetaShot?.detailType,
+                priority: latestMetaShot?.priority,
+                currentReason: trimmedNonEmpty(issue.currentReason) ?? trimmedNonEmpty(issue.detailNote),
+                previousReason: trimmedNonEmpty(issue.previousReason),
+                historyEvents: [],
+                updateHistory: [],
+                note: trimmedNonEmpty(issue.detailNote),
+                shots: shots,
+                guidedShots: []
+            )
+        }
+
+        var processedIssueIDs = Set<UUID>()
+        for issue in metadata.issues {
+            processedIssueIDs.insert(issue.issueID)
+            mergedByID[issue.issueID] = buildObservation(issue: issue, fallbackSessionID: sessionID)
+        }
+
+        // Fallback: if flagged shots exist without issue rows, still restore a usable flagged entry.
+        let orphanIssueIDs = Set(flaggedShotsByIssueID.keys).subtracting(processedIssueIDs)
+        for issueID in orphanIssueIDs {
+            let synthetic = IssueMetadata(
+                issueID: issueID,
+                issueStatus: "active",
+                currentReason: nil,
+                previousReason: nil,
+                firstSeenAt: metadata.startedAt,
+                firstSeenAtLocal: nil,
+                lastSeenAt: metadata.startedAt,
+                lastSeenAtLocal: nil,
+                resolvedAt: nil,
+                resolvedAtLocal: nil,
+                lastCaptureSessionId: sessionID,
+                detailNote: nil,
+                shotKey: nil,
+                historyEvents: []
+            )
+            mergedByID[issueID] = buildObservation(issue: synthetic, fallbackSessionID: sessionID)
+        }
+
+        let merged = mergedByID.values.sorted { lhs, rhs in
+            if lhs.createdAt != rhs.createdAt { return lhs.createdAt < rhs.createdAt }
+            if lhs.updatedAt != rhs.updatedAt { return lhs.updatedAt < rhs.updatedAt }
+            return lhs.id.uuidString < rhs.id.uuidString
+        }
+        try writeObservations(merged, propertyID: propertyID)
+    }
+
     func wipeAllLocalData() throws {
         try performFileIOSync {
             if fileManager.fileExists(atPath: scoutRootURL.path) {
@@ -1508,11 +2183,40 @@ final class LocalStore {
         }
     }
 
+    @discardableResult
+    private func offloadUbiquitousFiles(in directoryURL: URL) -> Int {
+        guard fileManager.fileExists(atPath: directoryURL.path) else { return 0 }
+        let urls = (try? fileManager.contentsOfDirectory(
+            at: directoryURL,
+            includingPropertiesForKeys: [.isDirectoryKey, .isUbiquitousItemKey, .ubiquitousItemDownloadingStatusKey],
+            options: [.skipsHiddenFiles]
+        )) ?? []
+
+        var offloaded = 0
+        for url in urls {
+            let values = try? url.resourceValues(forKeys: [.isDirectoryKey, .isUbiquitousItemKey, .ubiquitousItemDownloadingStatusKey])
+            if values?.isDirectory == true {
+                offloaded += offloadUbiquitousFiles(in: url)
+                continue
+            }
+            guard values?.isUbiquitousItem == true else { continue }
+            guard values?.ubiquitousItemDownloadingStatus == .current else { continue }
+            if (try? fileManager.evictUbiquitousItem(at: url)) != nil {
+                offloaded += 1
+            }
+        }
+        return offloaded
+    }
+
     private func readProperties() throws -> [Property] {
         try migratedPropertyAndOrganizationState().properties
     }
 
     private func readPropertiesRaw() throws -> [Property] {
+        try readPropertiesRaw(downloadTimeout: 6.0)
+    }
+
+    private func readPropertiesRaw(downloadTimeout: TimeInterval) throws -> [Property] {
         let syncProjected = try projectedPropertiesFromSyncEvents()
         if let syncProjected {
             if syncProjected.isEmpty {
@@ -1526,7 +2230,7 @@ final class LocalStore {
         }
 
         if !fileManager.fileExists(atPath: propertiesURL.path) {
-            _ = ensureUbiquitousItemAvailable(at: propertiesURL, timeout: 6.0)
+            _ = ensureUbiquitousItemAvailable(at: propertiesURL, timeout: downloadTimeout)
         }
         guard fileManager.fileExists(atPath: propertiesURL.path) else {
             return []
@@ -1536,7 +2240,7 @@ final class LocalStore {
         do {
             data = try Data(contentsOf: propertiesURL)
         } catch {
-            if ensureUbiquitousItemAvailable(at: propertiesURL, timeout: 6.0) {
+            if ensureUbiquitousItemAvailable(at: propertiesURL, timeout: downloadTimeout) {
                 data = try Data(contentsOf: propertiesURL)
             } else {
                 throw error
@@ -1640,8 +2344,12 @@ final class LocalStore {
     }
 
     private func readOrganizationsRaw() throws -> [Organization] {
+        try readOrganizationsRaw(downloadTimeout: 6.0)
+    }
+
+    private func readOrganizationsRaw(downloadTimeout: TimeInterval) throws -> [Organization] {
         if !fileManager.fileExists(atPath: organizationsURL.path) {
-            _ = ensureUbiquitousItemAvailable(at: organizationsURL, timeout: 6.0)
+            _ = ensureUbiquitousItemAvailable(at: organizationsURL, timeout: downloadTimeout)
         }
         guard fileManager.fileExists(atPath: organizationsURL.path) else {
             return []
@@ -1651,7 +2359,7 @@ final class LocalStore {
         do {
             data = try Data(contentsOf: organizationsURL)
         } catch {
-            if ensureUbiquitousItemAvailable(at: organizationsURL, timeout: 6.0) {
+            if ensureUbiquitousItemAvailable(at: organizationsURL, timeout: downloadTimeout) {
                 data = try Data(contentsOf: organizationsURL)
             } else {
                 throw error
@@ -1675,6 +2383,74 @@ final class LocalStore {
         return fileManager.fileExists(atPath: url.path)
     }
 
+    private func archiveTimestampString(_ date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(secondsFromGMT: 0)
+        formatter.dateFormat = "yyyyMMdd_HHmmss"
+        return formatter.string(from: date)
+    }
+
+    private func sanitizedArchivePathSegment(_ raw: String) -> String {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return "snapshot" }
+        let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-_"))
+        let mappedScalars = trimmed.unicodeScalars.map { allowed.contains($0) ? Character($0) : "_" }
+        let collapsed = String(mappedScalars)
+            .replacingOccurrences(of: "__", with: "_")
+            .trimmingCharacters(in: CharacterSet(charactersIn: "_"))
+        return collapsed.isEmpty ? "snapshot" : String(collapsed.prefix(48))
+    }
+
+    private func archiveFileRecords(in snapshotRoot: URL) throws -> [SessionArchiveManifest.FileRecord] {
+        let urls = try fileManager.subpathsOfDirectory(atPath: snapshotRoot.path)
+            .sorted()
+            .map { snapshotRoot.appendingPathComponent($0, isDirectory: false) }
+            .filter { $0.lastPathComponent != "manifest.json" }
+            .filter { fileManager.fileExists(atPath: $0.path) }
+
+        var records: [SessionArchiveManifest.FileRecord] = []
+        for url in urls {
+            var isDirectory: ObjCBool = false
+            guard fileManager.fileExists(atPath: url.path, isDirectory: &isDirectory), !isDirectory.boolValue else {
+                continue
+            }
+            let relativePath = url.path.replacingOccurrences(of: snapshotRoot.path + "/", with: "")
+            let data = try Data(contentsOf: url, options: [.mappedIfSafe])
+            let digest = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+            records.append(
+                SessionArchiveManifest.FileRecord(
+                    relativePath: relativePath,
+                    size: Int64(data.count),
+                    sha256: digest
+                )
+            )
+        }
+        return records.sorted { $0.relativePath < $1.relativePath }
+    }
+
+    private func verifySessionArchiveSnapshot(at snapshotRoot: URL, manifest: SessionArchiveManifest) throws {
+        for record in manifest.files {
+            let fileURL = snapshotRoot.appendingPathComponent(record.relativePath, isDirectory: false)
+            guard fileManager.fileExists(atPath: fileURL.path) else {
+                throw NSError(
+                    domain: "LocalStore.SessionArchive",
+                    code: 2,
+                    userInfo: [NSLocalizedDescriptionKey: "Archive verify failed: missing file \(record.relativePath)"]
+                )
+            }
+            let data = try Data(contentsOf: fileURL, options: [.mappedIfSafe])
+            let digest = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+            if digest != record.sha256 || Int64(data.count) != record.size {
+                throw NSError(
+                    domain: "LocalStore.SessionArchive",
+                    code: 3,
+                    userInfo: [NSLocalizedDescriptionKey: "Archive verify failed: checksum mismatch for \(record.relativePath)"]
+                )
+            }
+        }
+    }
+
     private func writeOrganizations(_ organizations: [Organization]) throws {
         let data = try encoder.encode(organizations)
         try data.write(to: organizationsURL, options: .atomic)
@@ -1696,6 +2472,141 @@ final class LocalStore {
         let occurredAt: Date
         let operation: Operation
         let property: Property?
+    }
+
+    private struct HubIndex: Codable {
+        struct PropertyRow: Codable {
+            let id: UUID
+            let orgId: UUID?
+            let folderId: String?
+            let clientName: String?
+            let clientPhone: String?
+            let clientEmail: String?
+            let name: String
+            let address: String?
+            let street: String?
+            let city: String?
+            let state: String?
+            let zip: String?
+            let baselineSessionID: UUID?
+            let isArchived: Bool
+            let createdAt: Date
+            let updatedAt: Date
+
+            func asProperty() -> Property {
+                Property(
+                    id: id,
+                    orgId: orgId,
+                    folderId: folderId,
+                    clientName: clientName,
+                    clientPhone: clientPhone,
+                    clientEmail: clientEmail,
+                    name: name,
+                    address: address,
+                    street: street,
+                    city: city,
+                    state: state,
+                    zip: zip,
+                    baselineSessionID: baselineSessionID,
+                    isArchived: isArchived,
+                    createdAt: createdAt,
+                    updatedAt: updatedAt
+                )
+            }
+        }
+
+        struct OrganizationRow: Codable {
+            let id: UUID
+            let name: String
+
+            func asOrganization() -> Organization {
+                Organization(id: id, name: name, contacts: [])
+            }
+        }
+
+        let schemaVersion: Int
+        let generatedAt: Date
+        let properties: [PropertyRow]
+        let organizations: [OrganizationRow]
+    }
+
+    private func readHubIndexRaw(downloadTimeout: TimeInterval) throws -> HubIndex? {
+        if !fileManager.fileExists(atPath: hubIndexURL.path) {
+            _ = ensureUbiquitousItemAvailable(at: hubIndexURL, timeout: downloadTimeout)
+        }
+        guard fileManager.fileExists(atPath: hubIndexURL.path) else { return nil }
+        if shouldAvoidBlockingUbiquitousRead(at: hubIndexURL, timeout: downloadTimeout) {
+            return nil
+        }
+
+        let data: Data
+        do {
+            data = try Data(contentsOf: hubIndexURL)
+        } catch {
+            if downloadTimeout <= 0.08 {
+                return nil
+            }
+            if ensureUbiquitousItemAvailable(at: hubIndexURL, timeout: downloadTimeout) {
+                data = try Data(contentsOf: hubIndexURL)
+            } else {
+                throw error
+            }
+        }
+        try? data.write(to: localHubIndexCacheURL, options: .atomic)
+        return try decoder.decode(HubIndex.self, from: data)
+    }
+
+    private func shouldAvoidBlockingUbiquitousRead(at url: URL, timeout: TimeInterval) -> Bool {
+        guard timeout <= 0.08 else { return false }
+        let keys: Set<URLResourceKey> = [.isUbiquitousItemKey, .ubiquitousItemDownloadingStatusKey]
+        guard let values = try? url.resourceValues(forKeys: keys),
+              values.isUbiquitousItem == true else {
+            return false
+        }
+        if values.ubiquitousItemDownloadingStatus == .current {
+            return false
+        }
+        try? fileManager.startDownloadingUbiquitousItem(at: url)
+        return true
+    }
+
+    private func writeHubIndex(properties: [Property], organizations: [Organization]) throws {
+        let payload = HubIndex(
+            schemaVersion: 1,
+            generatedAt: Date(),
+            properties: properties.map { property in
+                HubIndex.PropertyRow(
+                    id: property.id,
+                    orgId: property.orgId,
+                    folderId: property.folderId,
+                    clientName: property.clientName,
+                    clientPhone: property.clientPhone,
+                    clientEmail: property.clientEmail,
+                    name: property.name,
+                    address: property.address,
+                    street: property.street,
+                    city: property.city,
+                    state: property.state,
+                    zip: property.zip,
+                    baselineSessionID: property.baselineSessionID,
+                    isArchived: property.isArchived,
+                    createdAt: property.createdAt,
+                    updatedAt: property.updatedAt
+                )
+            },
+            organizations: organizations.map { org in
+                HubIndex.OrganizationRow(id: org.id, name: org.name)
+            }
+        )
+        let data = try encoder.encode(payload)
+        try data.write(to: hubIndexURL, options: .atomic)
+        try? data.write(to: localHubIndexCacheURL, options: .atomic)
+    }
+
+    private func readLocalHubIndexCacheRaw() throws -> HubIndex? {
+        guard fileManager.fileExists(atPath: localHubIndexCacheURL.path) else { return nil }
+        let data = try Data(contentsOf: localHubIndexCacheURL)
+        return try decoder.decode(HubIndex.self, from: data)
     }
 
     private func readPropertyDeletionTombstones() throws -> [PropertyDeletionTombstone] {
@@ -1743,14 +2654,18 @@ final class LocalStore {
     }
 
     private func migratedPropertyAndOrganizationState() throws -> (properties: [Property], organizations: [Organization]) {
+        try migratedPropertyAndOrganizationState(downloadTimeout: 6.0)
+    }
+
+    private func migratedPropertyAndOrganizationState(downloadTimeout: TimeInterval) throws -> (properties: [Property], organizations: [Organization]) {
         let organizationsFileExists = fileManager.fileExists(atPath: organizationsURL.path)
-        var organizations = normalizedOrganizations(try readOrganizationsRaw())
+        var organizations = normalizedOrganizations(try readOrganizationsRaw(downloadTimeout: downloadTimeout))
         let originalOrganizationIDs = Set(organizations.map(\.id))
         let defaultOrganization = defaultOrganization(in: &organizations)
         let validOrganizationIDs = Set(organizations.map(\.id))
         let didChangeOrganizations = !organizationsFileExists || Set(organizations.map(\.id)) != originalOrganizationIDs
 
-        var properties = try readPropertiesRaw()
+        var properties = try readPropertiesRaw(downloadTimeout: downloadTimeout)
         var didChangeProperties = false
         var seenFolderNumbers = Set<Int>()
 
@@ -1783,7 +2698,9 @@ final class LocalStore {
         }
         try seedPropertySyncEventsIfNeeded(from: properties)
 
-        return (properties.sorted { $0.createdAt < $1.createdAt }, organizations)
+        let sortedProperties = properties.sorted { $0.createdAt < $1.createdAt }
+        try writeHubIndex(properties: sortedProperties, organizations: organizations)
+        return (sortedProperties, organizations)
     }
 
     private func normalizedOrganizations(_ organizations: [Organization]) -> [Organization] {
@@ -2203,11 +3120,11 @@ final class LocalStore {
         }
         let hasAddressSnapshot = !(normalized.propertyAddressAtCapture?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
         let hasTimeZoneOffset = !normalized.timeZoneOffsetAtCapture.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        print("[SessionJSON] schemaVersion=\(normalized.schemaVersion) sessionID=\(sessionID.uuidString) shotsCount=\(normalized.shots.count) issuesCount=\(normalized.issues.count) hasAddressSnapshot=\(hasAddressSnapshot) hasTimeZoneOffset=\(hasTimeZoneOffset)")
+        verboseLog("[SessionJSON] schemaVersion=\(normalized.schemaVersion) sessionID=\(sessionID.uuidString) shotsCount=\(normalized.shots.count) issuesCount=\(normalized.issues.count) hasAddressSnapshot=\(hasAddressSnapshot) hasTimeZoneOffset=\(hasTimeZoneOffset)")
         if let firstShot = normalized.shots.first {
-            print("[SessionJSONTime] startedAt=\(normalized.startedAt) sessionStartedAtLocal=\(normalized.sessionStartedAtLocal) timeZoneIdentifierAtCapture=\(normalized.timeZoneIdentifierAtCapture) timeZoneOffsetAtCapture=\(normalized.timeZoneOffsetAtCapture) firstShotCreatedAt=\(firstShot.createdAt) firstShotCapturedAtLocal=\(firstShot.capturedAtLocal ?? "nil") firstShotExifOrientation=\(firstShot.exifOrientation ?? 0)")
+            verboseLog("[SessionJSONTime] startedAt=\(normalized.startedAt) sessionStartedAtLocal=\(normalized.sessionStartedAtLocal) timeZoneIdentifierAtCapture=\(normalized.timeZoneIdentifierAtCapture) timeZoneOffsetAtCapture=\(normalized.timeZoneOffsetAtCapture) firstShotCreatedAt=\(firstShot.createdAt) firstShotCapturedAtLocal=\(firstShot.capturedAtLocal ?? "nil") firstShotExifOrientation=\(firstShot.exifOrientation ?? 0)")
         } else {
-            print("[SessionJSONTime] startedAt=\(normalized.startedAt) sessionStartedAtLocal=\(normalized.sessionStartedAtLocal) timeZoneIdentifierAtCapture=\(normalized.timeZoneIdentifierAtCapture) timeZoneOffsetAtCapture=\(normalized.timeZoneOffsetAtCapture) firstShotCreatedAt=nil firstShotCapturedAtLocal=nil firstShotExifOrientation=0")
+            verboseLog("[SessionJSONTime] startedAt=\(normalized.startedAt) sessionStartedAtLocal=\(normalized.sessionStartedAtLocal) timeZoneIdentifierAtCapture=\(normalized.timeZoneIdentifierAtCapture) timeZoneOffsetAtCapture=\(normalized.timeZoneOffsetAtCapture) firstShotCreatedAt=nil firstShotCapturedAtLocal=nil firstShotExifOrientation=0")
         }
     }
 
