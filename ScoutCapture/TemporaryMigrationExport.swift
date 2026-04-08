@@ -66,6 +66,9 @@ struct TemporaryMigrationExportView: View {
                         Text("Creates a `ScoutCapture_Migration.zip` archive and opens the standard iOS share sheet so it can be saved to Files, iCloud Drive, AirDrop, or transferred to Finder for USB restore workflows.")
                             .font(.system(size: 13, weight: .medium))
                             .foregroundColor(.secondary)
+                        Text("USB tip: In Finder > iPhone > Files > ScoutCapture, drop the zip into the ScoutCapture root.")
+                            .font(.system(size: 13, weight: .medium))
+                            .foregroundColor(.secondary)
 
                         Text("Status: \(exportPhaseMessage)")
                             .font(.system(size: 13, weight: .semibold))
@@ -649,6 +652,7 @@ struct TemporaryMigrationImportView: View {
                             .foregroundColor(.primary)
 
                         importRow("Choose a `ScoutCapture_Migration.zip` file from Files, iCloud Drive, AirDrop, or Finder-transferred local storage")
+                        importRow("For USB transfer, place the zip in Finder > iPhone > Files > ScoutCapture")
                         importRow("Current local ScoutCapture migration-target data will be replaced")
                         importRow("Restores exported app files into the current ScoutCapture local storage root")
                         importRow("Restores only ScoutCapture-owned `UserDefaults` keys")
