@@ -84,6 +84,11 @@ final class AppState: ObservableObject {
     private let activatedPropertyRetentionWindow: TimeInterval = 7 * 24 * 60 * 60
     private let offloadSweepQueue = DispatchQueue(label: "ScoutCapture.AppState.offloadSweep", qos: .utility)
     private let archiveSnapshotQueue = DispatchQueue(label: "ScoutCapture.AppState.archiveSnapshot", qos: .utility)
+    private let logThrottleQueue = DispatchQueue(label: "ScoutCapture.AppState.logThrottle")
+    private var lastHubFetchLogSignature: String?
+    private var lastHubFetchLogAt: Date?
+    private var lastSessionOffloadLogSignature: String?
+    private var lastSessionOffloadLogAt: Date?
     private var didLoad = false
     private var cancellables: Set<AnyCancellable> = []
     private var liveSyncTimer: Timer?
@@ -224,7 +229,13 @@ final class AppState: ObservableObject {
             organizations = localState.organizations
             applyHubCachePayload(properties: localState.properties, caches: caches)
             isLoading = false
-            print("[HubFetch] phase=warmLaunch source=\(localState.source.rawValue) properties=\(localState.properties.count) orgs=\(localState.organizations.count) ms=0")
+            logHubFetch(
+                phase: "warmLaunch",
+                source: localState.source.rawValue,
+                properties: localState.properties.count,
+                orgs: localState.organizations.count,
+                elapsedMs: 0
+            )
         }
 
         DispatchQueue.global(qos: .utility).async {
@@ -233,13 +244,25 @@ final class AppState: ObservableObject {
             DispatchQueue.main.async {
                 if let fetchedState, !fetchedState.properties.isEmpty {
                     let elapsedMs = Int(Date().timeIntervalSince(start) * 1000)
-                    print("[HubFetch] phase=warmLaunch source=\(fetchedState.source.rawValue) properties=\(fetchedState.properties.count) orgs=\(fetchedState.organizations.count) ms=\(elapsedMs)")
+                    self.logHubFetch(
+                        phase: "warmLaunch",
+                        source: fetchedState.source.rawValue,
+                        properties: fetchedState.properties.count,
+                        orgs: fetchedState.organizations.count,
+                        elapsedMs: elapsedMs
+                    )
                     let caches = self.makeHubCaches(for: fetchedState.properties)
                     self.organizations = fetchedState.organizations
                     self.applyHubCachePayload(properties: fetchedState.properties, caches: caches)
                 } else {
                     let elapsedMs = Int(Date().timeIntervalSince(start) * 1000)
-                    print("[HubFetch] phase=warmLaunch source=none properties=0 orgs=0 ms=\(elapsedMs)")
+                    self.logHubFetch(
+                        phase: "warmLaunch",
+                        source: "none",
+                        properties: 0,
+                        orgs: 0,
+                        elapsedMs: elapsedMs
+                    )
                 }
                 self.isLoading = false
                 self.isStartupHydrationInProgress = false
@@ -387,7 +410,13 @@ final class AppState: ObservableObject {
         let caches = makeHubCaches(for: fetchedProperties)
         let fingerprint = localStore.propertiesLedgerFingerprint()
         let elapsedMs = Int(Date().timeIntervalSince(start) * 1000)
-        print("[HubFetch] phase=background source=full-fallback properties=\(fetchedProperties.count) orgs=\(fetchedOrganizations.count) ms=\(elapsedMs)")
+        logHubFetch(
+            phase: "background",
+            source: "full-fallback",
+            properties: fetchedProperties.count,
+            orgs: fetchedOrganizations.count,
+            elapsedMs: elapsedMs
+        )
         return PropertyRefreshPayload(
             properties: fetchedProperties,
             organizations: fetchedOrganizations,
@@ -400,11 +429,23 @@ final class AppState: ObservableObject {
         let start = Date()
         guard let state = try localStore.fetchPropertyAndOrganizationStateFromHubIndex(downloadTimeout: 0.80) else {
             let elapsedMs = Int(Date().timeIntervalSince(start) * 1000)
-            print("[HubFetch] phase=background source=none properties=0 orgs=0 ms=\(elapsedMs)")
+            logHubFetch(
+                phase: "background",
+                source: "none",
+                properties: 0,
+                orgs: 0,
+                elapsedMs: elapsedMs
+            )
             throw NSError(domain: "AppState.HubIndex", code: 1)
         }
         let elapsedMs = Int(Date().timeIntervalSince(start) * 1000)
-        print("[HubFetch] phase=background source=\(state.source.rawValue) properties=\(state.properties.count) orgs=\(state.organizations.count) ms=\(elapsedMs)")
+        logHubFetch(
+            phase: "background",
+            source: state.source.rawValue,
+            properties: state.properties.count,
+            orgs: state.organizations.count,
+            elapsedMs: elapsedMs
+        )
         let caches = makeHubCaches(for: state.properties)
         let fingerprint = localStore.propertiesLedgerFingerprint()
         return PropertyRefreshPayload(
@@ -1240,16 +1281,68 @@ final class AppState: ObservableObject {
             }
         }
 
-        if offloadedFiles > 0 || skippedCooldown > 0 || skippedRecentActivation > 0 {
-            print(
-                "[SessionOffload] scanned=\(scanned) " +
-                "offloadedFiles=\(offloadedFiles) " +
-                "skippedCooldown=\(skippedCooldown) " +
-                "skippedRecentActivation=\(skippedRecentActivation) " +
-                "activationRetentionDays=\(Int(activatedPropertyRetentionWindow / 86_400)) " +
-                "cooldownSeconds=\(Int(sessionMediaOffloadCooldown))"
-            )
+        logSessionOffload(
+            scanned: scanned,
+            offloadedFiles: offloadedFiles,
+            skippedCooldown: skippedCooldown,
+            skippedRecentActivation: skippedRecentActivation
+        )
+    }
+
+    private func logHubFetch(
+        phase: String,
+        source: String,
+        properties: Int,
+        orgs: Int,
+        elapsedMs: Int
+    ) {
+        let signature = "\(phase)|\(source)|\(properties)|\(orgs)"
+        let shouldLog = logThrottleQueue.sync { () -> Bool in
+            let now = Date()
+            let minInterval: TimeInterval = 15
+            if lastHubFetchLogSignature == signature,
+               let lastHubFetchLogAt,
+               now.timeIntervalSince(lastHubFetchLogAt) < minInterval {
+                return false
+            }
+            lastHubFetchLogSignature = signature
+            lastHubFetchLogAt = now
+            return true
         }
+        guard shouldLog else { return }
+        print("[HubFetch] phase=\(phase) source=\(source) properties=\(properties) orgs=\(orgs) ms=\(elapsedMs)")
+    }
+
+    private func logSessionOffload(
+        scanned: Int,
+        offloadedFiles: Int,
+        skippedCooldown: Int,
+        skippedRecentActivation: Int
+    ) {
+        let activationRetentionDays = Int(activatedPropertyRetentionWindow / 86_400)
+        let cooldownSeconds = Int(sessionMediaOffloadCooldown)
+        let signature = "\(scanned)|\(offloadedFiles)|\(skippedCooldown)|\(skippedRecentActivation)|\(activationRetentionDays)|\(cooldownSeconds)"
+        let shouldLog = logThrottleQueue.sync { () -> Bool in
+            let now = Date()
+            let minInterval: TimeInterval = 30
+            if lastSessionOffloadLogSignature == signature,
+               let lastSessionOffloadLogAt,
+               now.timeIntervalSince(lastSessionOffloadLogAt) < minInterval {
+                return false
+            }
+            lastSessionOffloadLogSignature = signature
+            lastSessionOffloadLogAt = now
+            return true
+        }
+        guard shouldLog else { return }
+        print(
+            "[SessionOffload] scanned=\(scanned) " +
+            "offloadedFiles=\(offloadedFiles) " +
+            "skippedCooldown=\(skippedCooldown) " +
+            "skippedRecentActivation=\(skippedRecentActivation) " +
+            "activationRetentionDays=\(activationRetentionDays) " +
+            "cooldownSeconds=\(cooldownSeconds)"
+        )
     }
 
     private func markPropertyActivated(id: UUID, at date: Date = Date()) {

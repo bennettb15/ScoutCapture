@@ -2197,10 +2197,9 @@ struct SessionHubView: View {
     }
 
     private func openProperty(_ property: Property) {
-        appState.selectProperty(id: property.id)
-        // Avoid pre-open draft checks on the hub thread; PropertySessionView will resume/start as needed.
+        // PropertySessionView sets selected property on appear.
+        // Avoid duplicating that state write during the navigation push.
         path.append(.propertySession(propertyID: property.id, resumeDraft: false))
-        isOpeningProperty = false
     }
 
     private func handlePropertyTap(
