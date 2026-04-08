@@ -6517,9 +6517,10 @@ struct ContentView: View {
                     maxHeight: .infinity,
                     alignment: lastValidDeviceOrientation == .landscapeRight ? .topTrailing : .topLeading
                 )
-                .padding(.top, 14)
-                .padding(.leading, lastValidDeviceOrientation == .landscapeRight ? 0 : 14)
-                .padding(.trailing, lastValidDeviceOrientation == .landscapeRight ? 14 : 0)
+                // Keep quick-action controls away from the system gesture edges.
+                .padding(.top, 28)
+                .padding(.leading, lastValidDeviceOrientation == .landscapeRight ? 0 : 22)
+                .padding(.trailing, lastValidDeviceOrientation == .landscapeRight ? 22 : 0)
                 .zIndex(12)
 
             if showGuidedAlignmentOverlay && isCaptureTargetArmed {
