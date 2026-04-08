@@ -120,12 +120,14 @@ struct ScoutCaptureApp: App {
 }
 
 private struct CloudBackupSheet: View {
+    let onOpenSessionRestore: (() -> Void)?
     @EnvironmentObject private var appState: AppState
     @Environment(\.dismiss) private var dismiss
     @Environment(\.colorScheme) private var colorScheme
     @State private var showRestoreConfirmation: Bool = false
     @State private var restoreErrorMessage: String? = nil
     @State private var isRestoring: Bool = false
+    @State private var showRestoreSuccess: Bool = false
 
     private var buttonFill: Color {
         colorScheme == .light ? Color.white.opacity(0.90) : Color.black.opacity(0.65)
@@ -233,37 +235,74 @@ private struct CloudBackupSheet: View {
                 .buttonStyle(.plain)
                 .disabled(!appState.cloudBackupStatus.iCloudAvailable || appState.cloudBackupStatus.isRunning || isRestoring)
 
-                Button(action: {
-                    showRestoreConfirmation = true
-                }) {
-                    Text(isRestoring ? "Restoring..." : "Restore from Backup")
-                        .font(.system(size: 16, weight: .semibold))
-                        .frame(maxWidth: .infinity, minHeight: 50)
-                        .foregroundColor(.white)
-                        .background(canRestore ? Color.green : Color.gray)
-                        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                VStack(alignment: .leading, spacing: 6) {
+                    Button(action: {
+                        showRestoreConfirmation = true
+                    }) {
+                        Text(isRestoring ? "Restoring..." : "Restore Full App Backup")
+                            .font(.system(size: 16, weight: .semibold))
+                            .frame(maxWidth: .infinity, minHeight: 50)
+                            .foregroundColor(.white)
+                            .background(canRestore ? Color.green : Color.gray)
+                            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(!canRestore || isRestoring || appState.cloudBackupStatus.isRunning)
+
+                    Text("Restores missing app-level data from the latest iCloud backup.")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundColor(.secondary)
                 }
-                .buttonStyle(.plain)
-                .disabled(!canRestore || isRestoring || appState.cloudBackupStatus.isRunning)
+
+                if let onOpenSessionRestore {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Button(action: {
+                            dismiss()
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                                onOpenSessionRestore()
+                            }
+                        }) {
+                            Text("Restore Session Snapshot")
+                                .font(.system(size: 16, weight: .semibold))
+                                .frame(maxWidth: .infinity, minHeight: 50)
+                                .foregroundColor(.white)
+                                .background(Color.orange)
+                                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(isRestoring || appState.cloudBackupStatus.isRunning)
+
+                        Text("Opens per-session recovery for a specific property/session snapshot.")
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundColor(.secondary)
+                    }
+                }
 
                 Spacer()
             }
             .padding(16)
         }
-        .alert("Restore Backup?", isPresented: $showRestoreConfirmation) {
+        .alert("Restore Full App Backup?", isPresented: $showRestoreConfirmation) {
             Button("Restore", role: .destructive) {
                 isRestoring = true
                 appState.restoreLatestBackup { errorMessage in
                     isRestoring = false
                     restoreErrorMessage = errorMessage
                     if errorMessage == nil {
-                        dismiss()
+                        showRestoreSuccess = true
                     }
                 }
             }
             Button("Cancel", role: .cancel) { }
         } message: {
-            Text("This will add any missing properties and related files from the latest iCloud backup without deleting existing local data on this device.")
+            Text("This restores missing app-level data from the latest iCloud backup. For one property/session only, use Restore Session Snapshot.")
+        }
+        .alert("Restore Complete", isPresented: $showRestoreSuccess) {
+            Button("OK", role: .cancel) {
+                dismiss()
+            }
+        } message: {
+            Text("App backup restore finished successfully.")
         }
         .alert("Restore Failed", isPresented: Binding(
             get: { restoreErrorMessage != nil },
@@ -503,6 +542,7 @@ struct SessionHubView: View {
     @State private var showTemporaryMigrationExport: Bool = false
     @State private var showTemporaryMigrationImport: Bool = false
     @State private var showCloudBackupSheet: Bool = false
+    @State private var showSessionRestoreSheet: Bool = false
     @State private var showDebugTools: Bool = false
     @State private var hiddenDebugTapCount: Int = 0
     @State private var lastHiddenDebugTapAt: Date? = nil
@@ -718,7 +758,13 @@ struct SessionHubView: View {
                     .environmentObject(appState)
             }
             .sheet(isPresented: $showCloudBackupSheet) {
-                CloudBackupSheet()
+                CloudBackupSheet(
+                    onOpenSessionRestore: { showSessionRestoreSheet = true }
+                )
+                    .environmentObject(appState)
+            }
+            .sheet(isPresented: $showSessionRestoreSheet) {
+                SessionArchiveRestoreSheet()
                     .environmentObject(appState)
             }
             .sheet(isPresented: $showSettingsSheet) {
@@ -1624,6 +1670,421 @@ struct SessionHubView: View {
                     }
                     .listSectionSpacing(18)
                 }
+            }
+        }
+    }
+
+    private struct SessionArchiveRestoreSheet: View {
+        private enum DeviceFilterMode: String, CaseIterable, Identifiable {
+            case all
+            case onDevice
+            case notOnDevice
+
+            var id: String { rawValue }
+
+            var title: String {
+                switch self {
+                case .all: return "All"
+                case .onDevice: return "On Device"
+                case .notOnDevice: return "Not On Device"
+                }
+            }
+        }
+
+        @EnvironmentObject private var appState: AppState
+        @Environment(\.dismiss) private var dismiss
+        @Environment(\.colorScheme) private var colorScheme
+        @State private var archives: [LocalStore.SessionArchiveSummary] = []
+        @State private var searchQuery: String = ""
+        @State private var isSearchActive: Bool = false
+        @State private var selectedArchive: LocalStore.SessionArchiveSummary?
+        @State private var pendingDeleteArchive: LocalStore.SessionArchiveSummary?
+        @State private var isRestoring: Bool = false
+        @State private var isRefreshingArchives: Bool = false
+        @State private var deviceFilterMode: DeviceFilterMode = .all
+        @State private var showRestoreSuccess: Bool = false
+        @State private var restoreErrorMessage: String?
+        @State private var showRestoreError: Bool = false
+        @State private var deleteErrorMessage: String?
+        @State private var showDeleteError: Bool = false
+
+        private var buttonFill: Color {
+            colorScheme == .light ? Color.white.opacity(0.90) : Color.black.opacity(0.65)
+        }
+
+        private var buttonStroke: Color {
+            colorScheme == .light ? Color.black.opacity(0.14) : Color.white.opacity(0.28)
+        }
+
+        private var buttonLabel: Color {
+            colorScheme == .light ? Color.black.opacity(0.88) : .white
+        }
+
+        private let dateFormatter: DateFormatter = {
+            let formatter = DateFormatter()
+            formatter.dateStyle = .medium
+            formatter.timeStyle = .short
+            return formatter
+        }()
+
+        private var filteredArchives: [LocalStore.SessionArchiveSummary] {
+            let baseArchives: [LocalStore.SessionArchiveSummary]
+            switch deviceFilterMode {
+            case .all:
+                baseArchives = archives
+            case .onDevice:
+                baseArchives = archives.filter { !isDeletedProperty($0) }
+            case .notOnDevice:
+                baseArchives = archives.filter { isDeletedProperty($0) }
+            }
+            let query = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            guard !query.isEmpty else { return baseArchives }
+            return baseArchives.filter { archive in
+                let propertyName = (archive.propertyNameAtCapture ?? appState.properties.first(where: { $0.id == archive.propertyID })?.name ?? "").lowercased()
+                let clientName = (archive.clientNameAtCapture ?? appState.properties.first(where: { $0.id == archive.propertyID })?.clientName ?? "").lowercased()
+                let orgName = (archive.orgNameAtCapture ?? appState.organizations.first(where: { $0.id == appState.properties.first(where: { $0.id == archive.propertyID })?.orgId })?.name ?? "").lowercased()
+                let address = (archive.propertyAddressAtCapture ?? "").lowercased()
+                let session = archive.sessionID.uuidString.lowercased()
+                return propertyName.contains(query)
+                    || clientName.contains(query)
+                    || orgName.contains(query)
+                    || address.contains(query)
+                    || session.contains(query)
+            }
+        }
+
+        var body: some View {
+            NavigationStack {
+                let items = filteredArchives
+                let hasQuery = !searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                VStack(alignment: .leading, spacing: 0) {
+                    if !isSearchActive {
+                        HStack {
+                            Button("Done") { dismiss() }
+                                .font(.system(size: 16, weight: .semibold))
+                                .foregroundStyle(buttonLabel)
+                                .padding(.horizontal, 14)
+                                .frame(height: 36)
+                                .background(buttonFill)
+                                .clipShape(Capsule())
+                                .overlay(
+                                    Capsule()
+                                        .stroke(buttonStroke, lineWidth: 1)
+                                )
+                                .buttonStyle(.plain)
+
+                            Spacer(minLength: 0)
+
+                            Text("Restore Session Snapshots")
+                                .font(.system(size: 20, weight: .semibold))
+                                .foregroundStyle(.primary)
+                                .lineLimit(1)
+
+                            Spacer(minLength: 0)
+
+                            HStack(spacing: 8) {
+                                Button {
+                                    reloadArchives()
+                                } label: {
+                                    Group {
+                                        if isRefreshingArchives {
+                                            ProgressView()
+                                                .progressViewStyle(.circular)
+                                                .tint(.primary)
+                                        } else {
+                                            Image(systemName: "arrow.clockwise")
+                                                .font(.system(size: 16, weight: .regular))
+                                                .foregroundColor(.primary)
+                                        }
+                                    }
+                                    .frame(width: 36, height: 36)
+                                    .background(
+                                        Circle()
+                                            .fill(buttonFill)
+                                    )
+                                    .overlay(
+                                        Circle()
+                                            .stroke(buttonStroke, lineWidth: 1)
+                                    )
+                                }
+                                .buttonStyle(.plain)
+                                .accessibilityLabel("Refresh")
+                                .disabled(isRestoring || isRefreshingArchives)
+
+                                Menu {
+                                    ForEach(DeviceFilterMode.allCases) { mode in
+                                        Button {
+                                            deviceFilterMode = mode
+                                        } label: {
+                                            if deviceFilterMode == mode {
+                                                Label(mode.title, systemImage: "checkmark")
+                                            } else {
+                                                Text(mode.title)
+                                            }
+                                        }
+                                    }
+                                } label: {
+                                    Image(systemName: "line.3.horizontal.decrease")
+                                        .font(.system(size: 16, weight: .regular))
+                                        .foregroundColor(deviceFilterMode == .all ? .primary : .orange)
+                                        .frame(width: 36, height: 36)
+                                        .background(
+                                            Circle()
+                                                .fill(buttonFill)
+                                        )
+                                        .overlay(
+                                            Circle()
+                                                .stroke(buttonStroke, lineWidth: 1)
+                                        )
+                                }
+                                .accessibilityLabel("Filter")
+                                .disabled(isRestoring)
+                            }
+                        }
+                        .padding(.horizontal, 16)
+                        .padding(.top, -58)
+                        .padding(.bottom, 4)
+                    }
+
+                    List {
+                        if archives.isEmpty {
+                            Section {
+                                Text("No archived snapshots found yet. Finish and seal/export a session first.")
+                                    .font(.system(size: 14, weight: .medium))
+                                    .foregroundColor(.secondary)
+                            }
+                        } else {
+                            Section("Session Snapshots") {
+                                ForEach(items) { archive in
+                                    Button {
+                                        selectedArchive = archive
+                                    } label: {
+                                        VStack(alignment: .leading, spacing: 4) {
+                                            HStack(spacing: 6) {
+                                                Text(archiveTitle(archive))
+                                                    .font(.system(size: 15, weight: .semibold))
+                                                    .foregroundColor(.primary)
+                                                    .lineLimit(1)
+                                                if archive.isDeliveredCheckpoint {
+                                                    Image(systemName: "checkmark.circle.fill")
+                                                        .font(.system(size: 14, weight: .semibold))
+                                                        .foregroundColor(.green)
+                                                } else if archive.isSealedCheckpoint {
+                                                    Image(systemName: "lock.fill")
+                                                        .font(.system(size: 13, weight: .semibold))
+                                                        .foregroundColor(.orange)
+                                                }
+                                                Spacer(minLength: 0)
+                                                if isDeletedProperty(archive) {
+                                                    HStack(spacing: 4) {
+                                                        Image(systemName: "xmark.circle.fill")
+                                                            .font(.system(size: 14, weight: .semibold))
+                                                            .foregroundColor(.red)
+                                                        Text("Not On Device")
+                                                            .font(.system(size: 11, weight: .semibold))
+                                                            .foregroundColor(.red)
+                                                    }
+                                                }
+                                            }
+                                            if let clientOrgLine = archiveClientOrgLine(archive) {
+                                                Text(clientOrgLine)
+                                                    .font(.system(size: 12, weight: .medium))
+                                                    .foregroundColor(.secondary)
+                                                    .lineLimit(1)
+                                            }
+                                            if let contextLine = archiveContextLine(archive) {
+                                                Text(contextLine)
+                                                    .font(.system(size: 12, weight: .medium))
+                                                    .foregroundColor(.secondary)
+                                                    .lineLimit(1)
+                                            }
+                                            Text("Created \(dateFormatter.string(from: archive.createdAt))  File: \(archive.fileCount)")
+                                                .font(.system(size: 12, weight: .medium))
+                                                .foregroundColor(.secondary)
+                                        }
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                    }
+                                    .buttonStyle(.plain)
+                                    .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                                        Button(role: .destructive) {
+                                            pendingDeleteArchive = archive
+                                        } label: {
+                                            Label("Delete", systemImage: "trash")
+                                        }
+                                    }
+                                }
+                            }
+                            if hasQuery && items.isEmpty {
+                                Section {
+                                    Text("No matching snapshots")
+                                        .font(.system(size: 14, weight: .medium))
+                                        .foregroundColor(.secondary)
+                                }
+                            }
+                        }
+                    }
+                }
+                .searchable(
+                    text: $searchQuery,
+                    isPresented: $isSearchActive,
+                    prompt: "Search property, org, address, session ID"
+                )
+            }
+            .toolbar(.hidden, for: .navigationBar)
+            .ignoresSafeArea(.keyboard, edges: .all)
+            .onAppear(perform: reloadArchives)
+            .alert("Restore Snapshot?", isPresented: Binding(
+                get: { selectedArchive != nil },
+                set: { if !$0 { selectedArchive = nil } }
+            )) {
+                Button("Restore", role: .destructive) {
+                    guard let archive = selectedArchive else { return }
+                    restore(archive)
+                }
+                Button("Cancel", role: .cancel) {
+                    selectedArchive = nil
+                }
+            } message: {
+                if let archive = selectedArchive {
+                    Text("Restore session \(archive.sessionID.uuidString.prefix(8)) from this snapshot created \(dateFormatter.string(from: archive.createdAt))?")
+                }
+            }
+            .alert("Restore Complete", isPresented: $showRestoreSuccess) {
+                Button("OK", role: .cancel) { }
+            } message: {
+                Text("Session snapshot restored successfully.")
+            }
+            .alert("Delete Snapshot?", isPresented: Binding(
+                get: { pendingDeleteArchive != nil },
+                set: { if !$0 { pendingDeleteArchive = nil } }
+            )) {
+                Button("Delete", role: .destructive) {
+                    guard let archive = pendingDeleteArchive else { return }
+                    delete(archive)
+                }
+                Button("Cancel", role: .cancel) {
+                    pendingDeleteArchive = nil
+                }
+            } message: {
+                if let archive = pendingDeleteArchive {
+                    Text("Delete archive snapshot for \(archiveTitle(archive)) created \(dateFormatter.string(from: archive.createdAt))?")
+                }
+            }
+            .alert("Restore Failed", isPresented: $showRestoreError) {
+                Button("OK", role: .cancel) { }
+            } message: {
+                Text(restoreErrorMessage ?? "Unable to restore snapshot.")
+            }
+            .alert("Delete Failed", isPresented: $showDeleteError) {
+                Button("OK", role: .cancel) { }
+            } message: {
+                Text(deleteErrorMessage ?? "Unable to delete snapshot.")
+            }
+            .overlay {
+                if isRestoring {
+                    ZStack {
+                        Color.black.opacity(0.2).ignoresSafeArea()
+                        ProgressView("Restoring...")
+                            .padding(18)
+                            .background(.ultraThinMaterial)
+                            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                    }
+                }
+            }
+        }
+
+        private func archiveTitle(_ archive: LocalStore.SessionArchiveSummary) -> String {
+            let propertyName = archive.propertyNameAtCapture
+                ?? appState.properties.first(where: { $0.id == archive.propertyID })?.name
+                ?? "Restorable Property"
+            return propertyName
+        }
+
+        private func isDeletedProperty(_ archive: LocalStore.SessionArchiveSummary) -> Bool {
+            !appState.properties.contains(where: { $0.id == archive.propertyID })
+        }
+
+        private func archiveClientOrgLine(_ archive: LocalStore.SessionArchiveSummary) -> String? {
+            let property = appState.properties.first(where: { $0.id == archive.propertyID })
+            let clientName = (archive.clientNameAtCapture ?? property?.clientName)?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let fallbackOrgName: String? = {
+                guard let orgId = property?.orgId else { return nil }
+                return appState.organizations.first(where: { $0.id == orgId })?.name
+            }()
+            let orgName = (archive.orgNameAtCapture ?? fallbackOrgName)?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+
+            if let clientName, !clientName.isEmpty, let orgName, !orgName.isEmpty {
+                return "\(clientName) (\(orgName))"
+            }
+            if let clientName, !clientName.isEmpty {
+                return clientName
+            }
+            if let orgName, !orgName.isEmpty {
+                return "(\(orgName))"
+            }
+            return nil
+        }
+
+        private func archiveContextLine(_ archive: LocalStore.SessionArchiveSummary) -> String? {
+            let property = appState.properties.first(where: { $0.id == archive.propertyID })
+            let address = archive.propertyAddressAtCapture
+                ?? property?.address
+                ?? property?.street
+            let trimmed = address?.trimmingCharacters(in: .whitespacesAndNewlines)
+            if let trimmed, !trimmed.isEmpty {
+                return trimmed
+            }
+            return "Session \(archive.sessionID.uuidString.prefix(8))"
+        }
+
+
+        private func reloadArchives() {
+            isRefreshingArchives = true
+            DispatchQueue.global(qos: .userInitiated).async {
+                let refreshed = appState.sessionArchiveSummaries()
+                DispatchQueue.main.async {
+                    archives = refreshed
+                    isRefreshingArchives = false
+                }
+            }
+        }
+
+        private func restore(_ archive: LocalStore.SessionArchiveSummary) {
+            isRestoring = true
+            selectedArchive = nil
+            DispatchQueue.global(qos: .userInitiated).async {
+                let success = appState.restoreSessionArchiveSnapshot(
+                    propertyID: archive.propertyID,
+                    sessionID: archive.sessionID,
+                    snapshotName: archive.snapshotName
+                )
+                DispatchQueue.main.async {
+                    isRestoring = false
+                    if success {
+                        showRestoreSuccess = true
+                        reloadArchives()
+                    } else {
+                        restoreErrorMessage = "Snapshot restore failed. Check console for [SessionRestore] details."
+                        showRestoreError = true
+                    }
+                }
+            }
+        }
+
+        private func delete(_ archive: LocalStore.SessionArchiveSummary) {
+            let success = appState.deleteSessionArchiveSnapshot(
+                propertyID: archive.propertyID,
+                sessionID: archive.sessionID,
+                snapshotName: archive.snapshotName
+            )
+            pendingDeleteArchive = nil
+            if success {
+                reloadArchives()
+            } else {
+                deleteErrorMessage = "Snapshot delete failed. Check console for [SessionArchiveDelete] details."
+                showDeleteError = true
             }
         }
     }

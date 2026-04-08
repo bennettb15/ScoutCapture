@@ -701,6 +701,8 @@ final class CloudBackupManager: ObservableObject {
     }
 
     private func restoreLatestBackupSync(mode: CloudBackupRestoreMode) throws -> UUID? {
+        let restoreStartedAt = Date()
+        print("[CloudBackupRestore] phase=start mode=\(mode == .fullReplace ? "fullReplace" : "mergeMissing")")
         let restoreDeadline = Date().addingTimeInterval(20)
         var selectedBackupURL: URL?
         var selectedBackupValidatedWithManifest = false
@@ -712,7 +714,16 @@ final class CloudBackupManager: ObservableObject {
                 continue
             }
             do {
-                try validateBackup(at: latestURL)
+                if mode == .mergeMissingPropertiesOnly {
+                    let manifest = try loadManifest(at: latestURL)
+                    guard isSupportedSchemaVersion(manifest.schemaVersion) else {
+                        throw NSError(domain: "ScoutCapture.CloudBackup", code: 2, userInfo: [
+                            NSLocalizedDescriptionKey: "The backup schema is not supported by this app version."
+                        ])
+                    }
+                } else {
+                    try validateBackup(at: latestURL)
+                }
                 selectedBackupURL = latestURL
                 selectedBackupValidatedWithManifest = true
                 break
@@ -746,8 +757,43 @@ final class CloudBackupManager: ObservableObject {
             .appendingPathComponent("ScoutCaptureCloudRestore-\(UUID().uuidString)", isDirectory: true)
         let tempStorageRoot = tempRestoreRoot.appendingPathComponent(Constants.storageRootFolderName, isDirectory: true)
         try fileManager.createDirectory(at: tempRestoreRoot, withIntermediateDirectories: true)
+
+        let activeRoot = StorageRoot.prepareStorage()
         if let manifest = try? loadManifest(at: latestURL), isSupportedSchemaVersion(manifest.schemaVersion) {
-            try materializeStorageRoot(from: latestURL, manifest: manifest, to: tempStorageRoot)
+            if mode == .mergeMissingPropertiesOnly {
+                // Keep app-restore lightweight: stage only metadata first, then hydrate
+                // media files for truly missing properties.
+                try materializeStorageRoot(
+                    from: latestURL,
+                    manifest: manifest,
+                    to: tempStorageRoot
+                ) { logicalRelativePath in
+                    self.isEssentialRestoreMetadataPath(logicalRelativePath)
+                }
+
+                let preflight = try buildRestorePreflight(
+                    localStorageRoot: activeRoot,
+                    backupStorageRoot: tempStorageRoot
+                )
+                print(
+                    "[CloudBackupRestore] phase=preflight mode=mergeMissing " +
+                    "local=\(preflight.localPropertyCount) backup=\(preflight.backupPropertyCount) " +
+                    "missingLocal=\(preflight.missingLocalPropertyIDs.count)"
+                )
+                let missingIDs = Set(preflight.missingLocalPropertyIDs.map { $0.uuidString.lowercased() })
+                if !missingIDs.isEmpty {
+                    try materializeStorageRoot(
+                        from: latestURL,
+                        manifest: manifest,
+                        to: tempStorageRoot
+                    ) { logicalRelativePath in
+                        self.isEssentialRestoreMetadataPath(logicalRelativePath)
+                            || self.isPathInMissingPropertyScope(logicalRelativePath, missingPropertyIDs: missingIDs)
+                    }
+                }
+            } else {
+                try materializeStorageRoot(from: latestURL, manifest: manifest, to: tempStorageRoot)
+            }
         } else {
             try copyDirectoryContents(
                 from: latestURL.appendingPathComponent(Constants.storageRootFolderName, isDirectory: true),
@@ -755,11 +801,13 @@ final class CloudBackupManager: ObservableObject {
             )
         }
 
-        let activeRoot = StorageRoot.prepareStorage()
         let rollbackRoot = fileManager.temporaryDirectory
             .appendingPathComponent("ScoutCaptureCloudRollback-\(UUID().uuidString)", isDirectory: true)
-        try fileManager.createDirectory(at: rollbackRoot, withIntermediateDirectories: true)
-        try copyDirectoryContents(from: activeRoot, to: rollbackRoot)
+        let usesRollback = mode == .fullReplace
+        if usesRollback {
+            try fileManager.createDirectory(at: rollbackRoot, withIntermediateDirectories: true)
+            try copyDirectoryContents(from: activeRoot, to: rollbackRoot)
+        }
         let restoredSelectedPropertyID: UUID?
         if mode == .fullReplace {
             let defaultsData = try Data(contentsOf: latestURL.appendingPathComponent(Constants.userDefaultsFilename))
@@ -787,17 +835,28 @@ final class CloudBackupManager: ObservableObject {
             }
             userDefaults.set(Date(), forKey: Constants.lastSuccessfulBackupAtKey)
             userDefaults.removeObject(forKey: Constants.lastFailureMessageKey)
-            try? fileManager.removeItem(at: rollbackRoot)
+            if usesRollback {
+                try? fileManager.removeItem(at: rollbackRoot)
+            }
             try? fileManager.removeItem(at: tempRestoreRoot)
+            let elapsedMS = Int(Date().timeIntervalSince(restoreStartedAt) * 1000)
+            print("[CloudBackupRestore] phase=done result=success mode=\(mode == .fullReplace ? "fullReplace" : "mergeMissing") ms=\(elapsedMS)")
             return restoredSelectedPropertyID
         } catch {
-            try? clearDirectoryContentsIfPresent(
-                at: activeRoot,
-                preservingTopLevelNames: ["Backups"]
-            )
-            try? copyDirectoryContents(from: rollbackRoot, to: activeRoot)
-            try? fileManager.removeItem(at: rollbackRoot)
+            if usesRollback {
+                try? clearDirectoryContentsIfPresent(
+                    at: activeRoot,
+                    preservingTopLevelNames: ["Backups"]
+                )
+                try? copyDirectoryContents(from: rollbackRoot, to: activeRoot)
+                try? fileManager.removeItem(at: rollbackRoot)
+            }
             try? fileManager.removeItem(at: tempRestoreRoot)
+            let elapsedMS = Int(Date().timeIntervalSince(restoreStartedAt) * 1000)
+            print(
+                "[CloudBackupRestore] phase=done result=failed mode=\(mode == .fullReplace ? "fullReplace" : "mergeMissing") " +
+                "ms=\(elapsedMS) error=\(error.localizedDescription)"
+            )
             throw error
         }
     }
@@ -1167,15 +1226,78 @@ final class CloudBackupManager: ObservableObject {
         manifest: CloudBackupManifest,
         to destinationStorageRoot: URL
     ) throws {
-        try CloudBackupDedupeSupport.materializeStorageRoot(
-            fileManager: fileManager,
-            backupFolder: backupFolder,
+        try materializeStorageRoot(
+            from: backupFolder,
             manifest: manifest,
-            destinationStorageRoot: destinationStorageRoot,
-            storageRootFolderName: Constants.storageRootFolderName
-        ) { sourceURL in
-            ensureUbiquitousItemAvailable(at: sourceURL)
+            to: destinationStorageRoot,
+            includeLogicalRelativePath: { _ in true }
+        )
+    }
+
+    private func materializeStorageRoot(
+        from backupFolder: URL,
+        manifest: CloudBackupManifest,
+        to destinationStorageRoot: URL,
+        includeLogicalRelativePath: (String) -> Bool
+    ) throws {
+        try fileManager.createDirectory(at: destinationStorageRoot, withIntermediateDirectories: true)
+        let prefix = "\(Constants.storageRootFolderName)/"
+        for file in manifest.files where file.relativePath.hasPrefix(prefix) {
+            let logicalRelativePath = String(file.relativePath.dropFirst(prefix.count))
+            guard includeLogicalRelativePath(logicalRelativePath) else { continue }
+
+            let sourceRelativePath = CloudBackupDedupeSupport.resolvedContentRelativePath(for: file)
+            let sourceURL = backupFolder.appendingPathComponent(sourceRelativePath, isDirectory: false)
+            guard ensureUbiquitousItemAvailable(at: sourceURL) else {
+                throw NSError(domain: "ScoutCapture.CloudBackup", code: 3, userInfo: [
+                    NSLocalizedDescriptionKey: "Backup file missing: \(file.relativePath)"
+                ])
+            }
+
+            let destinationURL = destinationStorageRoot.appendingPathComponent(logicalRelativePath, isDirectory: false)
+            let parent = destinationURL.deletingLastPathComponent()
+            try fileManager.createDirectory(at: parent, withIntermediateDirectories: true)
+            if fileManager.fileExists(atPath: destinationURL.path) {
+                try fileManager.removeItem(at: destinationURL)
+            }
+            try fileManager.copyItem(at: sourceURL, to: destinationURL)
         }
+    }
+
+    private func isEssentialRestoreMetadataPath(_ logicalRelativePath: String) -> Bool {
+        let normalized = logicalRelativePath.trimmingCharacters(in: .whitespacesAndNewlines)
+        let essentials: Set<String> = [
+            "SCOUT/properties.json",
+            "SCOUT/organizations.json",
+            "SCOUT/property-deletion-tombstones.json",
+            "SCOUT/property_deletion_tombstones.json"
+        ]
+        if essentials.contains(normalized) {
+            return true
+        }
+        // Keep metadata for session/observation/guided registries lightweight and available.
+        return normalized.hasPrefix("SCOUT/sessions/")
+            || normalized.hasPrefix("SCOUT/observations/")
+            || normalized.hasPrefix("SCOUT/guided-shots/")
+    }
+
+    private func isPathInMissingPropertyScope(
+        _ logicalRelativePath: String,
+        missingPropertyIDs: Set<String>
+    ) -> Bool {
+        guard logicalRelativePath.hasPrefix("SCOUT/") else { return false }
+        let lower = logicalRelativePath.lowercased()
+        for propertyID in missingPropertyIDs {
+            if lower.hasPrefix("scout/properties/\(propertyID)/") {
+                return true
+            }
+            if lower == "scout/sessions/\(propertyID).json"
+                || lower == "scout/observations/\(propertyID).json"
+                || lower == "scout/guided-shots/\(propertyID).json" {
+                return true
+            }
+        }
+        return false
     }
 
     private func isSupportedSchemaVersion(_ version: Int) -> Bool {

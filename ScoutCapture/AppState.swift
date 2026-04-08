@@ -83,6 +83,7 @@ final class AppState: ObservableObject {
     private let sessionMediaOffloadCooldown: TimeInterval = 30 * 60
     private let activatedPropertyRetentionWindow: TimeInterval = 7 * 24 * 60 * 60
     private let offloadSweepQueue = DispatchQueue(label: "ScoutCapture.AppState.offloadSweep", qos: .utility)
+    private let archiveSnapshotQueue = DispatchQueue(label: "ScoutCapture.AppState.archiveSnapshot", qos: .utility)
     private var didLoad = false
     private var cancellables: Set<AnyCancellable> = []
     private var liveSyncTimer: Timer?
@@ -101,6 +102,71 @@ final class AppState: ObservableObject {
 
     var sharedLocalStore: LocalStore {
         localStore
+    }
+
+    func sessionArchiveSummaries() -> [LocalStore.SessionArchiveSummary] {
+        (try? localStore.fetchSessionArchiveSummaries()) ?? []
+    }
+
+    @discardableResult
+    func deleteSessionArchiveSnapshot(
+        propertyID: UUID,
+        sessionID: UUID,
+        snapshotName: String
+    ) -> Bool {
+        do {
+            try localStore.deleteSessionArchiveSnapshot(
+                propertyID: propertyID,
+                sessionID: sessionID,
+                snapshotName: snapshotName
+            )
+            triggerBackupForLifecycleEvent()
+            return true
+        } catch {
+            print(
+                "[SessionArchiveDelete] result=failed " +
+                "propertyID=\(propertyID.uuidString) " +
+                "sessionID=\(sessionID.uuidString) " +
+                "snapshot=\(snapshotName) " +
+                "error=\(error.localizedDescription)"
+            )
+            return false
+        }
+    }
+
+    @discardableResult
+    func restoreSessionArchiveSnapshot(
+        propertyID: UUID,
+        sessionID: UUID,
+        snapshotName: String
+    ) -> Bool {
+        do {
+            let restored = try localStore.restoreSessionArchiveSnapshot(
+                propertyID: propertyID,
+                sessionID: sessionID,
+                snapshotName: snapshotName
+            )
+            let applyUIUpdates = {
+                self.reloadSessionCache(for: restored.propertyID)
+                self.refreshProperties()
+                self.triggerBackupForLifecycleEvent()
+            }
+            if Thread.isMainThread {
+                applyUIUpdates()
+            } else {
+                DispatchQueue.main.sync(execute: applyUIUpdates)
+            }
+            return true
+        } catch {
+            print(
+                "[SessionRestore] result=failed " +
+                "propertyID=\(propertyID.uuidString) " +
+                "sessionID=\(sessionID.uuidString) " +
+                "snapshot=\(snapshotName) " +
+                "error=\(error.localizedDescription)"
+            )
+            return false
+        }
     }
 
     init(
@@ -770,6 +836,7 @@ final class AppState: ObservableObject {
         currentSession = session
         _ = try? localStore.upsertSession(session)
         reloadSessionCache(for: session.propertyID)
+        scheduleSessionArchiveSnapshot(session, trigger: "markCurrentSessionExported")
         scheduleOffloadEligibleSessionMedia(excludingSessionID: currentSession?.id)
         cloudBackupManager.setCaptureModeActive(false)
         triggerBackupForLifecycleEvent()
@@ -787,6 +854,7 @@ final class AppState: ObservableObject {
         currentSession = session
         _ = try? localStore.upsertSession(session)
         reloadSessionCache(for: session.propertyID)
+        scheduleSessionArchiveSnapshot(session, trigger: "sealCurrentSessionForExportLater")
         scheduleOffloadEligibleSessionMedia(excludingSessionID: currentSession?.id)
         cloudBackupManager.setCaptureModeActive(false)
         triggerBackupForLifecycleEvent()
@@ -803,6 +871,7 @@ final class AppState: ObservableObject {
         currentSession = session
         _ = try? localStore.upsertSession(session)
         reloadSessionCache(for: session.propertyID)
+        scheduleSessionArchiveSnapshot(session, trigger: "sealCurrentSessionForExportNow")
         scheduleOffloadEligibleSessionMedia(excludingSessionID: currentSession?.id)
         cloudBackupManager.setCaptureModeActive(false)
         triggerBackupForLifecycleEvent()
@@ -848,6 +917,7 @@ final class AppState: ObservableObject {
         do {
             _ = try localStore.upsertSession(session)
             reloadSessionCache(for: propertyID)
+            scheduleSessionArchiveSnapshot(session, trigger: "markSessionExported")
             scheduleOffloadEligibleSessionMedia(excludingSessionID: currentSession?.id)
             cloudBackupManager.setCaptureModeActive(false)
             triggerBackupForLifecycleEvent()
@@ -1116,6 +1186,24 @@ final class AppState: ObservableObject {
         let excludedSessionID = excludingSessionID
         offloadSweepQueue.async { [weak self] in
             self?.offloadEligibleSessionMedia(excludingSessionID: excludedSessionID)
+        }
+    }
+
+    private func scheduleSessionArchiveSnapshot(_ session: Session, trigger: String) {
+        guard session.status == .completed, session.isSealed else { return }
+        archiveSnapshotQueue.async { [weak self] in
+            guard let self else { return }
+            do {
+                _ = try self.localStore.createSessionArchiveSnapshot(session: session, trigger: trigger)
+            } catch {
+                print(
+                    "[SessionArchive] result=failed " +
+                    "propertyID=\(session.propertyID.uuidString) " +
+                    "sessionID=\(session.id.uuidString) " +
+                    "trigger=\(trigger) " +
+                    "error=\(error.localizedDescription)"
+                )
+            }
         }
     }
 

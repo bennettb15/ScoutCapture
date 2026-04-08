@@ -8080,15 +8080,13 @@ extension ContentView {
 
             guidedCompassButton {
                 fireQuickButtonHaptic()
+                ensureReferenceResolutionReady()
                 let snapshot = guidedSessionCountSnapshot()
                 let sessionIDText = appState.currentSession?.id.uuidString ?? "NONE"
                 verboseLog("[GuidedCount] session=\(sessionIDText) guidedTotal=\(snapshot.total) capturedForSession=\(snapshot.captured) remaining=\(snapshot.remaining)")
                 let liveGuidedCount = guidedRemainingForCompass
                 verboseLog("[Badge] beforeOpen guidedCount=\(liveGuidedCount) flaggedCount=\(flaggedPendingCaptureCount)")
                 showGuidedChecklist = true
-                DispatchQueue.main.async {
-                    ensureReferenceResolutionReady()
-                }
                 let liveGuidedCountAfter = guidedRemainingForCompass
                 verboseLog("[Badge] afterOpen guidedCount=\(liveGuidedCountAfter) flaggedCount=\(flaggedPendingCaptureCount)")
             }
@@ -8108,12 +8106,10 @@ extension ContentView {
 
         return Button(action: {
             fireQuickButtonHaptic()
+            ensureReferenceResolutionReady()
             refreshActiveIssues()
             if !activeObservations.isEmpty {
                 showActiveIssuesSheet = true
-                DispatchQueue.main.async {
-                    ensureReferenceResolutionReady()
-                }
             } else {
                 showNoFlaggedIssuesToast = true
                 DispatchQueue.main.asyncAfter(deadline: .now() + 1.8) {
