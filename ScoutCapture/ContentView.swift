@@ -5465,6 +5465,13 @@ struct ContentView: View {
                 }
                 primeDeferredReferenceResolution()
                 resetSelectionForSwitch()
+                if let propertyID = appState.selectedPropertyID,
+                   let sessionID = nextSessionID {
+                    appState.ensureOperationalMediaAvailableForSession(
+                        propertyID: propertyID,
+                        sessionID: sessionID
+                    )
+                }
                 refreshActiveIssues()
                 refreshGuidedShots()
             }
@@ -5483,6 +5490,13 @@ struct ContentView: View {
                 ensureCameraSessionPrecondition()
                 if hasValidCurrentSession {
                     camera.ensurePreviewRunningAsync()
+                }
+                if let propertyID = appState.selectedPropertyID,
+                   let sessionID = appState.currentSession?.id {
+                    appState.ensureOperationalMediaAvailableForSession(
+                        propertyID: propertyID,
+                        sessionID: sessionID
+                    )
                 }
             }
 
@@ -9147,6 +9161,13 @@ extension ContentView {
             originalFilename: originalFilename,
             originalRelativePath: "Originals/\(originalFilename)",
             originalByteSize: imageData.count,
+            storageBucket: nil,
+            storagePath: nil,
+            checksumSHA256: nil,
+            byteSize: imageData.count,
+            uploadState: "pending",
+            uploadAttempts: 0,
+            lastUploadError: nil,
             stampedFilename: nil,
             stampedRelativePath: nil,
             captureMode: camera.effectiveHDEnabled ? "hd" : "normal",
@@ -9189,6 +9210,11 @@ extension ContentView {
 #if DEBUG
             print("[Session] shotsCount=\(updated.shots.count) originalsCount=\(originalsCount)")
 #endif
+            appState.uploadOperationalMediaIfNeeded(
+                propertyID: propertyID,
+                sessionID: session.id,
+                shotID: shot.id
+            )
         } catch {
             print("Recoverable shot metadata persistence failure: \(error)")
         }
@@ -10730,6 +10756,11 @@ extension ContentView {
             ) {
                 return (originalURL.path, "original", originalRelative, true)
             }
+            appState.ensureOperationalMediaAvailable(
+                propertyID: propertyID,
+                sessionID: sessionID,
+                shotID: shot.shotID
+            )
             let originalPath = sessionFolder.appendingPathComponent(originalRelative, isDirectory: false).path
             return (originalPath, "original", originalRelative, false)
         }

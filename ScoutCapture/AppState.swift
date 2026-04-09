@@ -1,10 +1,68 @@
 import Foundation
 import Combine
+import CryptoKit
+import Supabase
+#if canImport(UniformTypeIdentifiers)
+import UniformTypeIdentifiers
+#endif
 
 extension Notification.Name {
     static let scoutClearLocalUICache = Notification.Name("scout.clearLocalUICache")
     static let scoutVerifySessionJSONSource = Notification.Name("scout.verifySessionJSONSource")
     static let scoutVerifyExportSessionJSONSource = Notification.Name("scout.verifyExportSessionJSONSource")
+}
+
+struct SupabaseRuntimeConfiguration {
+    let url: URL?
+    let anonKey: String?
+
+    var isConfigured: Bool {
+        url != nil && !(anonKey?.isEmpty ?? true)
+    }
+}
+
+struct BackendFeatureFlags {
+    let supabaseEnabled: Bool
+    let shadowWriteEnabled: Bool
+    let supabaseReadEnabled: Bool
+    let mediaSupabaseUploadEnabled: Bool
+
+    static func load(
+        bundle: Bundle = .main,
+        userDefaults: UserDefaults = .standard
+    ) -> BackendFeatureFlags {
+        BackendFeatureFlags(
+            supabaseEnabled: Self.boolValue(for: "supabase_enabled", bundle: bundle, userDefaults: userDefaults),
+            shadowWriteEnabled: Self.boolValue(for: "shadow_write_enabled", bundle: bundle, userDefaults: userDefaults),
+            supabaseReadEnabled: Self.boolValue(for: "supabase_read_enabled", bundle: bundle, userDefaults: userDefaults),
+            mediaSupabaseUploadEnabled: Self.boolValue(for: "media_supabase_upload_enabled", bundle: bundle, userDefaults: userDefaults)
+        )
+    }
+
+    private static func boolValue(
+        for key: String,
+        bundle: Bundle,
+        userDefaults: UserDefaults
+    ) -> Bool {
+        if userDefaults.object(forKey: key) != nil {
+            return userDefaults.bool(forKey: key)
+        }
+
+        if let number = bundle.object(forInfoDictionaryKey: key) as? NSNumber {
+            return number.boolValue
+        }
+
+        if let string = bundle.object(forInfoDictionaryKey: key) as? String {
+            switch string.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+            case "1", "true", "yes", "on":
+                return true
+            default:
+                return false
+            }
+        }
+
+        return false
+    }
 }
 
 final class AppState: ObservableObject {
@@ -47,6 +105,99 @@ final class AppState: ObservableObject {
         }
     }
 
+    private struct SupabaseShotStoragePayload: Encodable {
+        let id: UUID
+        let orgID: UUID
+        let sessionID: UUID
+        let storageBucket: String?
+        let storagePath: String?
+        let checksumSHA256: String?
+        let byteSize: Int?
+        let uploadState: String
+        let uploadAttempts: Int
+        let lastUploadError: String?
+
+        enum CodingKeys: String, CodingKey {
+            case id
+            case orgID = "org_id"
+            case sessionID = "session_id"
+            case storageBucket = "storage_bucket"
+            case storagePath = "storage_path"
+            case checksumSHA256 = "checksum_sha256"
+            case byteSize = "byte_size"
+            case uploadState = "upload_state"
+            case uploadAttempts = "upload_attempts"
+            case lastUploadError = "last_upload_error"
+        }
+    }
+
+    private struct SupabaseOrgPayload: Encodable {
+        let id: UUID
+        let name: String
+    }
+
+    private struct SupabasePropertyPayload: Encodable {
+        let id: UUID
+        let orgID: UUID
+        let name: String
+        let addressLine1: String?
+        let city: String?
+        let state: String?
+        let postalCode: String?
+
+        enum CodingKeys: String, CodingKey {
+            case id
+            case orgID = "org_id"
+            case name
+            case addressLine1 = "address_line1"
+            case city
+            case state
+            case postalCode = "postal_code"
+        }
+    }
+
+    private struct SupabaseSessionPayload: Encodable {
+        let id: UUID
+        let orgID: UUID
+        let propertyID: UUID
+        let title: String?
+        let status: String
+        let startedAt: String
+        let completedAt: String?
+
+        enum CodingKeys: String, CodingKey {
+            case id
+            case orgID = "org_id"
+            case propertyID = "property_id"
+            case title
+            case status
+            case startedAt = "started_at"
+            case completedAt = "completed_at"
+        }
+    }
+
+    private struct SupabaseShotStorageRecord: Decodable {
+        let id: UUID
+        let storageBucket: String?
+        let storagePath: String?
+        let checksumSHA256: String?
+        let byteSize: Int?
+        let uploadState: String
+        let uploadAttempts: Int
+        let lastUploadError: String?
+
+        enum CodingKeys: String, CodingKey {
+            case id
+            case storageBucket = "storage_bucket"
+            case storagePath = "storage_path"
+            case checksumSHA256 = "checksum_sha256"
+            case byteSize = "byte_size"
+            case uploadState = "upload_state"
+            case uploadAttempts = "upload_attempts"
+            case lastUploadError = "last_upload_error"
+        }
+    }
+
     @Published var properties: [Property] = []
     @Published var organizations: [Organization] = []
     @Published private(set) var isLoading: Bool = true
@@ -55,6 +206,8 @@ final class AppState: ObservableObject {
     @Published private(set) var pendingExportSessionByProperty: [UUID: Session] = [:]
     @Published private(set) var hubMetaByProperty: [UUID: HubPropertyMeta] = [:]
     @Published private(set) var cloudBackupStatus: CloudBackupStatus
+    @Published private(set) var supabaseConfiguration: SupabaseRuntimeConfiguration
+    @Published private(set) var backendFeatureFlags: BackendFeatureFlags
 
     @Published var selectedPropertyID: UUID? {
         didSet {
@@ -75,6 +228,7 @@ final class AppState: ObservableObject {
 
     private let injectedLocalStore: LocalStore?
     private lazy var localStore: LocalStore = injectedLocalStore ?? LocalStore()
+    private var supabaseClient: SupabaseClient?
     private let userDefaults: UserDefaults
     private let cloudBackupManager: CloudBackupManager
     private let selectedPropertyDefaultsKey = "scoutcapture.selectedPropertyID"
@@ -85,6 +239,7 @@ final class AppState: ObservableObject {
     private let offloadSweepQueue = DispatchQueue(label: "ScoutCapture.AppState.offloadSweep", qos: .utility)
     private let archiveSnapshotQueue = DispatchQueue(label: "ScoutCapture.AppState.archiveSnapshot", qos: .utility)
     private let logThrottleQueue = DispatchQueue(label: "ScoutCapture.AppState.logThrottle")
+    private let supabaseMediaOperationQueue = DispatchQueue(label: "ScoutCapture.AppState.supabaseMediaOperations")
     private var lastHubFetchLogSignature: String?
     private var lastHubFetchLogAt: Date?
     private var lastSessionOffloadLogSignature: String?
@@ -104,6 +259,8 @@ final class AppState: ObservableObject {
     private var startupHydrationCompletedAt: Date?
     // Keep a short grace for non-empty in-memory states, but do not stall first-load empty hubs.
     private let startupFallbackGraceWindow: TimeInterval = 25.0
+    private let supabaseOperationalMediaBucket = "scoutcapture-originals"
+    private var inFlightSupabaseMediaOperations: Set<String> = []
 
     var sharedLocalStore: LocalStore {
         localStore
@@ -182,6 +339,8 @@ final class AppState: ObservableObject {
         self.userDefaults = userDefaults
         self.cloudBackupManager = CloudBackupManager(userDefaults: userDefaults)
         self.cloudBackupStatus = cloudBackupManager.status
+        self.supabaseConfiguration = AppState.loadSupabaseConfiguration()
+        self.backendFeatureFlags = BackendFeatureFlags.load(userDefaults: userDefaults)
 
         if let rawID = userDefaults.string(forKey: selectedPropertyDefaultsKey) {
             self.selectedPropertyID = UUID(uuidString: rawID)
@@ -205,6 +364,563 @@ final class AppState: ObservableObject {
                 self?.cloudBackupManager.markDataChanged()
             }
             .store(in: &cancellables)
+
+        prepareCollaborativeBackendBootstrap()
+    }
+
+    private static func loadSupabaseConfiguration(bundle: Bundle = .main) -> SupabaseRuntimeConfiguration {
+        let rawURL = (bundle.object(forInfoDictionaryKey: "SUPABASE_URL") as? String)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let rawAnonKey = (bundle.object(forInfoDictionaryKey: "SUPABASE_ANON_KEY") as? String)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        return SupabaseRuntimeConfiguration(
+            url: rawURL.flatMap(URL.init(string:)),
+            anonKey: rawAnonKey
+        )
+    }
+
+    private func prepareCollaborativeBackendBootstrap() {
+        guard backendFeatureFlags.supabaseEnabled else {
+            supabaseClient = nil
+            print("[Supabase] bootstrap skipped because supabase_enabled=false")
+            return
+        }
+
+        guard supabaseConfiguration.isConfigured else {
+            supabaseClient = nil
+            print("[Supabase] bootstrap skipped because configuration is missing or invalid")
+            return
+        }
+
+        print(
+            "[Supabase] dev bootstrap enabled " +
+            "shadowWrite=\(backendFeatureFlags.shadowWriteEnabled) " +
+            "read=\(backendFeatureFlags.supabaseReadEnabled) " +
+            "mediaUpload=\(backendFeatureFlags.mediaSupabaseUploadEnabled)"
+        )
+        if let url = supabaseConfiguration.url, let anonKey = supabaseConfiguration.anonKey {
+            supabaseClient = SupabaseClient(supabaseURL: url, supabaseKey: anonKey)
+        }
+    }
+
+    func uploadOperationalMediaIfNeeded(
+        propertyID: UUID,
+        sessionID: UUID,
+        shotID: UUID
+    ) {
+        guard backendFeatureFlags.supabaseEnabled,
+              backendFeatureFlags.mediaSupabaseUploadEnabled,
+              supabaseClient != nil else {
+            return
+        }
+
+        let operationKey = "upload|\(sessionID.uuidString.lowercased())|\(shotID.uuidString.lowercased())"
+        guard beginSupabaseMediaOperation(operationKey) else { return }
+
+        Task(priority: .utility) { [weak self] in
+            defer { self?.endSupabaseMediaOperation(operationKey) }
+            await self?.performOperationalMediaUpload(
+                propertyID: propertyID,
+                sessionID: sessionID,
+                shotID: shotID
+            )
+        }
+    }
+
+    func ensureOperationalMediaAvailable(
+        propertyID: UUID,
+        sessionID: UUID,
+        shotID: UUID
+    ) {
+        guard backendFeatureFlags.supabaseEnabled,
+              backendFeatureFlags.supabaseReadEnabled,
+              supabaseClient != nil else {
+            return
+        }
+
+        let operationKey = "download|\(sessionID.uuidString.lowercased())|\(shotID.uuidString.lowercased())"
+        guard beginSupabaseMediaOperation(operationKey) else { return }
+
+        Task(priority: .utility) { [weak self] in
+            defer { self?.endSupabaseMediaOperation(operationKey) }
+            await self?.performOperationalMediaHydration(
+                propertyID: propertyID,
+                sessionID: sessionID,
+                shotID: shotID
+            )
+        }
+    }
+
+    func ensureOperationalMediaAvailableForSession(
+        propertyID: UUID,
+        sessionID: UUID
+    ) {
+        guard backendFeatureFlags.supabaseEnabled,
+              backendFeatureFlags.supabaseReadEnabled else {
+            return
+        }
+
+        guard let metadata = try? localStore.loadSessionMetadata(propertyID: propertyID, sessionID: sessionID) else {
+            return
+        }
+
+        for shot in metadata.shots {
+            ensureOperationalMediaAvailable(
+                propertyID: propertyID,
+                sessionID: sessionID,
+                shotID: shot.shotID
+            )
+        }
+    }
+
+    private func performOperationalMediaUpload(
+        propertyID: UUID,
+        sessionID: UUID,
+        shotID: UUID
+    ) async {
+        guard let client = supabaseClient else { return }
+        guard let metadata = try? localStore.loadSessionMetadata(propertyID: propertyID, sessionID: sessionID),
+              let shot = metadata.shots.first(where: { $0.shotID == shotID }) else {
+            return
+        }
+        let orgID = metadata.orgID ?? properties.first(where: { $0.id == propertyID })?.orgId
+
+        let localFileURL: URL
+        if let resolved = localStore.resolveSessionRelativeFileURL(
+            propertyID: propertyID,
+            sessionID: sessionID,
+            relativePath: shot.originalRelativePath
+        ) {
+            localFileURL = resolved
+        } else {
+            localFileURL = localStore
+                .sessionFolderURL(propertyID: propertyID, sessionID: sessionID)
+                .appendingPathComponent(shot.originalRelativePath, isDirectory: false)
+        }
+
+        guard FileManager.default.fileExists(atPath: localFileURL.path) else {
+            print("[SupabaseMediaUpload] skipped missingLocalFile shotID=\(shotID.uuidString) path=\(localFileURL.path)")
+            return
+        }
+
+        let storagePath = operationalMediaStoragePath(
+            sessionID: sessionID,
+            shotID: shotID,
+            originalFilename: shot.originalFilename
+        )
+        var checksum: String?
+        var byteSize: Int?
+        var failurePhase = "localRead"
+
+        do {
+            let fileData = try Data(contentsOf: localFileURL, options: [.mappedIfSafe])
+            checksum = sha256Hex(for: fileData)
+            byteSize = fileData.count
+            try? localStore.updateShotStorageMetadata(propertyID: propertyID, sessionID: sessionID, shotID: shotID) { shot in
+                shot.storageBucket = self.supabaseOperationalMediaBucket
+                shot.storagePath = storagePath
+                shot.checksumSHA256 = checksum
+                shot.byteSize = byteSize
+                shot.uploadState = "uploading"
+                shot.uploadAttempts += 1
+                shot.lastUploadError = nil
+            }
+
+            failurePhase = "blobUpload"
+            _ = try await client.storage.from(supabaseOperationalMediaBucket).upload(
+                storagePath,
+                fileURL: localFileURL,
+                options: FileOptions(
+                    cacheControl: "31536000",
+                    contentType: contentType(for: localFileURL),
+                    upsert: true
+                )
+            )
+
+            guard let orgID else {
+                throw NSError(domain: "ScoutCapture.SupabaseMedia", code: 1, userInfo: [
+                    NSLocalizedDescriptionKey: "Missing orgID for shot \(shotID.uuidString)"
+                ])
+            }
+
+            failurePhase = "sessionPrereq"
+            try await ensureSupabaseSessionPrerequisites(
+                propertyID: propertyID,
+                sessionID: sessionID,
+                metadata: metadata,
+                orgID: orgID
+            )
+
+            failurePhase = "shotMetadataWrite"
+            try await persistShotStorageMetadataToSupabase(
+                orgID: orgID,
+                sessionID: sessionID,
+                shotID: shotID,
+                storageBucket: supabaseOperationalMediaBucket,
+                storagePath: storagePath,
+                checksumSHA256: checksum,
+                byteSize: byteSize,
+                uploadState: "uploaded",
+                uploadAttempts: shot.uploadAttempts + 1,
+                lastUploadError: nil
+            )
+
+            try? localStore.updateShotStorageMetadata(propertyID: propertyID, sessionID: sessionID, shotID: shotID) { shot in
+                shot.storageBucket = self.supabaseOperationalMediaBucket
+                shot.storagePath = storagePath
+                shot.checksumSHA256 = checksum
+                shot.byteSize = byteSize
+                shot.uploadState = "uploaded"
+                shot.lastUploadError = nil
+            }
+
+            print(
+                "[SupabaseMediaUpload] result=success " +
+                "shotID=\(shotID.uuidString) " +
+                "bucket=\(supabaseOperationalMediaBucket) " +
+                "path=\(storagePath)"
+            )
+        } catch {
+            try? localStore.updateShotStorageMetadata(propertyID: propertyID, sessionID: sessionID, shotID: shotID) { shot in
+                shot.storageBucket = self.supabaseOperationalMediaBucket
+                shot.storagePath = storagePath
+                shot.checksumSHA256 = checksum
+                shot.byteSize = byteSize
+                shot.uploadState = "failed"
+                shot.lastUploadError = "Supabase \(failurePhase) error: \(error.localizedDescription)"
+            }
+
+            print(
+                "[SupabaseMediaUpload] result=failed " +
+                "shotID=\(shotID.uuidString) " +
+                "bucket=\(supabaseOperationalMediaBucket) " +
+                "path=\(storagePath) " +
+                "phase=\(failurePhase) " +
+                "error=\(error.localizedDescription)"
+            )
+        }
+    }
+
+    private func performOperationalMediaHydration(
+        propertyID: UUID,
+        sessionID: UUID,
+        shotID: UUID
+    ) async {
+        guard let client = supabaseClient else { return }
+        guard let metadata = try? localStore.loadSessionMetadata(propertyID: propertyID, sessionID: sessionID),
+              let shot = metadata.shots.first(where: { $0.shotID == shotID }) else {
+            return
+        }
+
+        let resolvedShot = await resolveShotStorageMetadata(
+            propertyID: propertyID,
+            sessionID: sessionID,
+            shot: shot
+        )
+
+        let relativePath = resolvedShot.originalRelativePath.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !relativePath.isEmpty,
+              let bucket = resolvedShot.storageBucket?.trimmingCharacters(in: .whitespacesAndNewlines),
+              let path = resolvedShot.storagePath?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !bucket.isEmpty,
+              !path.isEmpty else {
+            return
+        }
+
+        let destinationURL = localStore
+            .sessionFolderURL(propertyID: propertyID, sessionID: sessionID)
+            .appendingPathComponent(relativePath, isDirectory: false)
+        if FileManager.default.fileExists(atPath: destinationURL.path) {
+            return
+        }
+
+        do {
+            let data = try await client.storage.from(bucket).download(path: path)
+
+            if let expectedChecksum = resolvedShot.checksumSHA256?.trimmingCharacters(in: .whitespacesAndNewlines),
+               !expectedChecksum.isEmpty,
+               sha256Hex(for: data) != expectedChecksum.lowercased() {
+                print(
+                    "[SupabaseMediaDownload] result=failed " +
+                    "shotID=\(shotID.uuidString) " +
+                    "reason=checksumMismatch " +
+                    "bucket=\(bucket) path=\(path)"
+                )
+                return
+            }
+
+            try FileManager.default.createDirectory(
+                at: destinationURL.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+            try data.write(to: destinationURL, options: [.atomic])
+
+            try? localStore.updateShotStorageMetadata(propertyID: propertyID, sessionID: sessionID, shotID: shotID) { shot in
+                shot.byteSize = data.count
+                if shot.checksumSHA256 == nil {
+                    shot.checksumSHA256 = self.sha256Hex(for: data)
+                }
+                if shot.storageBucket == nil {
+                    shot.storageBucket = bucket
+                }
+                if shot.storagePath == nil {
+                    shot.storagePath = path
+                }
+            }
+
+            DispatchQueue.main.async {
+                NotificationCenter.default.post(name: .scoutClearLocalUICache, object: nil)
+            }
+
+            print(
+                "[SupabaseMediaDownload] result=success " +
+                "shotID=\(shotID.uuidString) " +
+                "bucket=\(bucket) " +
+                "path=\(path) " +
+                "destination=\(destinationURL.path)"
+            )
+        } catch {
+            print(
+                "[SupabaseMediaDownload] result=failed " +
+                "shotID=\(shotID.uuidString) " +
+                "bucket=\(bucket) " +
+                "path=\(path) " +
+                "error=\(error.localizedDescription)"
+            )
+        }
+    }
+
+    private func ensureSupabaseSessionPrerequisites(
+        propertyID: UUID,
+        sessionID: UUID,
+        metadata: SessionMetadata,
+        orgID: UUID
+    ) async throws {
+        guard let client = supabaseClient else { return }
+
+        let property = properties.first(where: { $0.id == propertyID })
+        let organization = organizations.first(where: { $0.id == orgID })
+        let orgName = normalizedSupabaseText(
+            organization?.name ?? metadata.orgNameAtCapture
+        ) ?? "Organization \(orgID.uuidString)"
+        let propertyName = normalizedSupabaseText(
+            property?.name ?? metadata.propertyNameAtCapture
+        ) ?? "Property \(propertyID.uuidString)"
+
+        let propertyPayload = SupabasePropertyPayload(
+            id: propertyID,
+            orgID: orgID,
+            name: propertyName,
+            addressLine1: normalizedSupabaseText(property?.address ?? metadata.propertyAddressAtCapture),
+            city: normalizedSupabaseText(property?.city ?? metadata.propertyCityAtCapture),
+            state: normalizedSupabaseText(property?.state ?? metadata.propertyStateAtCapture),
+            postalCode: normalizedSupabaseText(property?.zip ?? metadata.propertyZipAtCapture)
+        )
+
+        let sessionPayload = SupabaseSessionPayload(
+            id: sessionID,
+            orgID: orgID,
+            propertyID: propertyID,
+            title: normalizedSupabaseText(metadata.propertyNameAtCapture ?? property?.name),
+            status: metadata.status.rawValue,
+            startedAt: metadata.startedAt.ISO8601Format(),
+            completedAt: metadata.endedAt?.ISO8601Format()
+        )
+
+        do {
+            try await client
+                .from("orgs")
+                .upsert(SupabaseOrgPayload(id: orgID, name: orgName), onConflict: "id", returning: .minimal)
+                .execute()
+
+            try await client
+                .from("properties")
+                .upsert(propertyPayload, onConflict: "id", returning: .minimal)
+                .execute()
+
+            try await client
+                .from("sessions")
+                .upsert(sessionPayload, onConflict: "id", returning: .minimal)
+                .execute()
+        } catch {
+            print(
+                "[SupabaseSessionEnsure] result=failed " +
+                "orgID=\(orgID.uuidString) " +
+                "propertyID=\(propertyID.uuidString) " +
+                "sessionID=\(sessionID.uuidString) " +
+                "error=\(error.localizedDescription)"
+            )
+            throw NSError(domain: "ScoutCapture.SupabaseMedia", code: 2, userInfo: [
+                NSLocalizedDescriptionKey: "Failed to ensure org/property/session rows before shot metadata write: \(error.localizedDescription)"
+            ])
+        }
+    }
+
+    private func persistShotStorageMetadataToSupabase(
+        orgID: UUID,
+        sessionID: UUID,
+        shotID: UUID,
+        storageBucket: String?,
+        storagePath: String?,
+        checksumSHA256: String?,
+        byteSize: Int?,
+        uploadState: String,
+        uploadAttempts: Int,
+        lastUploadError: String?
+    ) async throws {
+        guard let client = supabaseClient else { return }
+
+        let payload = SupabaseShotStoragePayload(
+            id: shotID,
+            orgID: orgID,
+            sessionID: sessionID,
+            storageBucket: storageBucket,
+            storagePath: storagePath,
+            checksumSHA256: checksumSHA256,
+            byteSize: byteSize,
+            uploadState: uploadState,
+            uploadAttempts: max(0, uploadAttempts),
+            lastUploadError: lastUploadError
+        )
+
+        try await client
+            .from("shots")
+            .upsert(payload, onConflict: "id", returning: .minimal)
+            .execute()
+    }
+
+    private func normalizedSupabaseText(_ value: String?) -> String? {
+        let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    private func fetchShotStorageMetadataFromSupabase(
+        sessionID: UUID,
+        shotID: UUID
+    ) async throws -> SupabaseShotStorageRecord? {
+        guard let client = supabaseClient else { return nil }
+
+        let rows = try await client
+            .from("shots")
+            .select(
+                """
+                id,
+                storage_bucket,
+                storage_path,
+                checksum_sha256,
+                byte_size,
+                upload_state,
+                upload_attempts,
+                last_upload_error
+                """
+            )
+            .eq("id", value: shotID.uuidString.lowercased())
+            .eq("session_id", value: sessionID.uuidString.lowercased())
+            .limit(1)
+            .execute()
+            .value as [SupabaseShotStorageRecord]
+
+        return rows.first
+    }
+
+    private func resolveShotStorageMetadata(
+        propertyID: UUID,
+        sessionID: UUID,
+        shot: ShotMetadata
+    ) async -> ShotMetadata {
+        let hasLocalBucket = shot.storageBucket?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+        let hasLocalPath = shot.storagePath?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+        guard !(hasLocalBucket && hasLocalPath) else {
+            return shot
+        }
+
+        guard let remote = try? await fetchShotStorageMetadataFromSupabase(
+            sessionID: sessionID,
+            shotID: shot.shotID
+        ) else {
+            return shot
+        }
+
+        try? localStore.updateShotStorageMetadata(propertyID: propertyID, sessionID: sessionID, shotID: shot.shotID) { localShot in
+            localShot.storageBucket = remote.storageBucket
+            localShot.storagePath = remote.storagePath
+            localShot.checksumSHA256 = remote.checksumSHA256
+            localShot.byteSize = remote.byteSize
+            localShot.uploadState = remote.uploadState
+            localShot.uploadAttempts = max(localShot.uploadAttempts, remote.uploadAttempts)
+            localShot.lastUploadError = remote.lastUploadError
+        }
+
+        var resolvedShot = shot
+        resolvedShot.storageBucket = remote.storageBucket
+        resolvedShot.storagePath = remote.storagePath
+        resolvedShot.checksumSHA256 = remote.checksumSHA256
+        resolvedShot.byteSize = remote.byteSize
+        resolvedShot.uploadState = remote.uploadState
+        resolvedShot.uploadAttempts = max(resolvedShot.uploadAttempts, remote.uploadAttempts)
+        resolvedShot.lastUploadError = remote.lastUploadError
+        return resolvedShot
+    }
+
+    private func operationalMediaStoragePath(
+        sessionID: UUID,
+        shotID: UUID,
+        originalFilename: String
+    ) -> String {
+        let normalizedFilename = sanitizedStorageFilename(originalFilename, fallbackShotID: shotID)
+        return "sessions/\(sessionID.uuidString.lowercased())/shots/\(shotID.uuidString.lowercased())/\(normalizedFilename)"
+    }
+
+    private func sanitizedStorageFilename(_ originalFilename: String, fallbackShotID: UUID) -> String {
+        let candidate = URL(fileURLWithPath: originalFilename).lastPathComponent
+        let fallback = "\(fallbackShotID.uuidString.lowercased()).heic"
+        let base = candidate.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? fallback : candidate
+        let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "._-"))
+        let sanitizedScalars = base.unicodeScalars.map { allowed.contains($0) ? Character($0) : "_" }
+        let sanitized = String(sanitizedScalars)
+        return sanitized.isEmpty ? fallback : sanitized
+    }
+
+    private func contentType(for fileURL: URL) -> String {
+        let fileExtension = fileURL.pathExtension.trimmingCharacters(in: .whitespacesAndNewlines)
+        #if canImport(UniformTypeIdentifiers)
+        if let type = UTType(filenameExtension: fileExtension),
+           let mimeType = type.preferredMIMEType {
+            return mimeType
+        }
+        #endif
+
+        switch fileExtension.lowercased() {
+        case "heic", "heif":
+            return "image/heic"
+        case "jpg", "jpeg":
+            return "image/jpeg"
+        case "png":
+            return "image/png"
+        default:
+            return "application/octet-stream"
+        }
+    }
+
+    private func sha256Hex(for data: Data) -> String {
+        SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+    }
+
+    private func beginSupabaseMediaOperation(_ key: String) -> Bool {
+        supabaseMediaOperationQueue.sync {
+            if inFlightSupabaseMediaOperations.contains(key) {
+                return false
+            }
+            inFlightSupabaseMediaOperations.insert(key)
+            return true
+        }
+    }
+
+    private func endSupabaseMediaOperation(_ key: String) {
+        _ = supabaseMediaOperationQueue.sync {
+            inFlightSupabaseMediaOperations.remove(key)
+        }
     }
 
     func loadIfNeeded() {

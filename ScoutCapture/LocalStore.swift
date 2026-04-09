@@ -11,7 +11,7 @@ private func verboseLog(_ message: @autoclosure () -> String) {
 }
 
 final class LocalStore {
-    private let currentSessionSchemaVersion = 11
+    private let currentSessionSchemaVersion = 12
     private let fileIOQueue = DispatchQueue(label: "ScoutCapture.LocalStore.fileIO")
     private let fileIOQueueKey = DispatchSpecificKey<UInt8>()
     private let fileIOQueueValue: UInt8 = 1
@@ -1292,6 +1292,13 @@ final class LocalStore {
                 originalFilename: shot.originalFilename,
                 originalRelativePath: shot.originalRelativePath,
                 originalByteSize: shot.originalByteSize,
+                storageBucket: shot.storageBucket,
+                storagePath: shot.storagePath,
+                checksumSHA256: shot.checksumSHA256,
+                byteSize: shot.byteSize,
+                uploadState: shot.uploadState,
+                uploadAttempts: shot.uploadAttempts,
+                lastUploadError: shot.lastUploadError,
                 stampedFilename: shot.stampedFilename,
                 stampedRelativePath: shot.stampedRelativePath,
                 captureMode: shot.captureMode,
@@ -1347,6 +1354,13 @@ final class LocalStore {
                 originalFilename: shot.originalFilename,
                 originalRelativePath: shot.originalRelativePath,
                 originalByteSize: shot.originalByteSize,
+                storageBucket: shot.storageBucket,
+                storagePath: shot.storagePath,
+                checksumSHA256: shot.checksumSHA256,
+                byteSize: shot.byteSize,
+                uploadState: shot.uploadState,
+                uploadAttempts: shot.uploadAttempts,
+                lastUploadError: shot.lastUploadError,
                 stampedFilename: shot.stampedFilename,
                 stampedRelativePath: shot.stampedRelativePath,
                 captureMode: shot.captureMode,
@@ -1367,6 +1381,20 @@ final class LocalStore {
             metadata.shots.append(shot)
         }
 
+        try saveSessionMetadataAtomically(propertyID: propertyID, sessionID: sessionID, metadata: metadata)
+    }
+
+    func updateShotStorageMetadata(
+        propertyID: UUID,
+        sessionID: UUID,
+        shotID: UUID,
+        update: (inout ShotMetadata) -> Void
+    ) throws {
+        var metadata = try loadSessionMetadata(propertyID: propertyID, sessionID: sessionID)
+        guard let index = metadata.shots.firstIndex(where: { $0.shotID == shotID }) else {
+            return
+        }
+        update(&metadata.shots[index])
         try saveSessionMetadataAtomically(propertyID: propertyID, sessionID: sessionID, metadata: metadata)
     }
 
@@ -3459,6 +3487,13 @@ final class LocalStore {
             originalFilename: normalizedFilename,
             originalRelativePath: normalizedRelativePath,
             originalByteSize: shot.originalByteSize,
+            storageBucket: shot.storageBucket,
+            storagePath: shot.storagePath,
+            checksumSHA256: shot.checksumSHA256,
+            byteSize: shot.byteSize ?? shot.originalByteSize,
+            uploadState: shot.uploadState,
+            uploadAttempts: shot.uploadAttempts,
+            lastUploadError: shot.lastUploadError,
             stampedFilename: normalizedStampedFilename,
             stampedRelativePath: normalizedStampedPath,
             captureMode: shot.captureMode,
@@ -3632,6 +3667,13 @@ final class LocalStore {
                     originalFilename: originalFilename,
                     originalRelativePath: originalRelativePath,
                     originalByteSize: originalByteSize,
+                    storageBucket: nil,
+                    storagePath: nil,
+                    checksumSHA256: nil,
+                    byteSize: originalByteSize,
+                    uploadState: "pending",
+                    uploadAttempts: 0,
+                    lastUploadError: nil,
                     stampedFilename: nil,
                     stampedRelativePath: nil,
                     captureMode: nil,
@@ -3958,6 +4000,13 @@ extension LocalStore {
             originalFilename: "",
             originalRelativePath: "",
             originalByteSize: nil,
+            storageBucket: nil,
+            storagePath: nil,
+            checksumSHA256: nil,
+            byteSize: nil,
+            uploadState: "pending",
+            uploadAttempts: 0,
+            lastUploadError: nil,
             stampedFilename: nil,
             stampedRelativePath: nil,
             captureMode: nil,

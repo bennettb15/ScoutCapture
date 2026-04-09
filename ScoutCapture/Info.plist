@@ -2,9 +2,21 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+	<key>SUPABASE_ANON_KEY</key>
+	<string>sb_publishable_WixxIYHzr8VB-rmZ8q8DiQ_adVqsd2x</string>
+	<key>SUPABASE_URL</key>
+	<string>https://chlvazmtucoszicehtnm.supabase.co</string>
 	<key>LSSupportsOpeningDocumentsInPlace</key>
 	<true/>
 	<key>UIFileSharingEnabled</key>
 	<true/>
+	<key>media_supabase_upload_enabled</key>
+	<false/>
+	<key>shadow_write_enabled</key>
+	<false/>
+	<key>supabase_enabled</key>
+	<false/>
+	<key>supabase_read_enabled</key>
+	<false/>
 </dict>
 </plist>

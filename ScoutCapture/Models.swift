@@ -466,6 +466,13 @@ struct ShotMetadata: Codable, Identifiable, Equatable {
     var originalFilename: String
     var originalRelativePath: String
     var originalByteSize: Int?
+    var storageBucket: String?
+    var storagePath: String?
+    var checksumSHA256: String?
+    var byteSize: Int?
+    var uploadState: String
+    var uploadAttempts: Int
+    var lastUploadError: String?
     var stampedFilename: String?
     var stampedRelativePath: String?
     var captureMode: String?
@@ -532,6 +539,18 @@ struct ShotMetadata: Codable, Identifiable, Equatable {
         case originalFilename
         case originalRelativePath
         case originalByteSize
+        case storageBucket
+        case storagePath
+        case checksumSHA256
+        case checksum_sha256
+        case byteSize
+        case byte_size
+        case uploadState
+        case upload_state
+        case uploadAttempts
+        case upload_attempts
+        case lastUploadError
+        case last_upload_error
         case stampedFilename
         case stampedRelativePath
         case captureMode
@@ -573,6 +592,13 @@ struct ShotMetadata: Codable, Identifiable, Equatable {
         originalFilename: String,
         originalRelativePath: String,
         originalByteSize: Int?,
+        storageBucket: String? = nil,
+        storagePath: String? = nil,
+        checksumSHA256: String? = nil,
+        byteSize: Int? = nil,
+        uploadState: String = "pending",
+        uploadAttempts: Int = 0,
+        lastUploadError: String? = nil,
         stampedFilename: String?,
         stampedRelativePath: String?,
         captureMode: String?,
@@ -609,6 +635,13 @@ struct ShotMetadata: Codable, Identifiable, Equatable {
         self.originalFilename = originalFilename
         self.originalRelativePath = originalRelativePath
         self.originalByteSize = originalByteSize
+        self.storageBucket = ShotMetadata.trimmedNonEmpty(storageBucket)
+        self.storagePath = ShotMetadata.trimmedNonEmpty(storagePath)
+        self.checksumSHA256 = ShotMetadata.trimmedNonEmpty(checksumSHA256)
+        self.byteSize = byteSize
+        self.uploadState = ShotMetadata.normalizedUploadState(uploadState)
+        self.uploadAttempts = max(0, uploadAttempts)
+        self.lastUploadError = ShotMetadata.trimmedNonEmpty(lastUploadError)
         self.stampedFilename = stampedFilename
         self.stampedRelativePath = stampedRelativePath
         self.captureMode = captureMode
@@ -663,6 +696,30 @@ struct ShotMetadata: Codable, Identifiable, Equatable {
             originalRelativePath = decodedRelative
         }
         originalByteSize = try c.decodeIfPresent(Int.self, forKey: .originalByteSize)
+        storageBucket = ShotMetadata.trimmedNonEmpty(try c.decodeIfPresent(String.self, forKey: .storageBucket))
+        storagePath = ShotMetadata.trimmedNonEmpty(try c.decodeIfPresent(String.self, forKey: .storagePath))
+        checksumSHA256 = ShotMetadata.trimmedNonEmpty(
+            try c.decodeIfPresent(String.self, forKey: .checksumSHA256)
+                ?? c.decodeIfPresent(String.self, forKey: .checksum_sha256)
+        )
+        byteSize = try c.decodeIfPresent(Int.self, forKey: .byteSize)
+            ?? c.decodeIfPresent(Int.self, forKey: .byte_size)
+            ?? originalByteSize
+        uploadState = ShotMetadata.normalizedUploadState(
+            try c.decodeIfPresent(String.self, forKey: .uploadState)
+                ?? c.decodeIfPresent(String.self, forKey: .upload_state)
+                ?? (storagePath == nil ? "pending" : "uploaded")
+        )
+        uploadAttempts = max(
+            0,
+            try c.decodeIfPresent(Int.self, forKey: .uploadAttempts)
+                ?? c.decodeIfPresent(Int.self, forKey: .upload_attempts)
+                ?? 0
+        )
+        lastUploadError = ShotMetadata.trimmedNonEmpty(
+            try c.decodeIfPresent(String.self, forKey: .lastUploadError)
+                ?? c.decodeIfPresent(String.self, forKey: .last_upload_error)
+        )
         stampedFilename = try c.decodeIfPresent(String.self, forKey: .stampedFilename)
         let decodedStampedRelative = try c.decodeIfPresent(String.self, forKey: .stampedRelativePath)?
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
@@ -711,6 +768,13 @@ struct ShotMetadata: Codable, Identifiable, Equatable {
         try c.encode(originalFilename, forKey: .originalFilename)
         try c.encode(originalRelativePath, forKey: .originalRelativePath)
         try c.encodeIfPresent(originalByteSize, forKey: .originalByteSize)
+        try c.encodeIfPresent(ShotMetadata.trimmedNonEmpty(storageBucket), forKey: .storageBucket)
+        try c.encodeIfPresent(ShotMetadata.trimmedNonEmpty(storagePath), forKey: .storagePath)
+        try c.encodeIfPresent(ShotMetadata.trimmedNonEmpty(checksumSHA256), forKey: .checksumSHA256)
+        try c.encodeIfPresent(byteSize ?? originalByteSize, forKey: .byteSize)
+        try c.encode(ShotMetadata.normalizedUploadState(uploadState), forKey: .uploadState)
+        try c.encode(max(0, uploadAttempts), forKey: .uploadAttempts)
+        try c.encodeIfPresent(ShotMetadata.trimmedNonEmpty(lastUploadError), forKey: .lastUploadError)
         try c.encodeIfPresent(stampedFilename, forKey: .stampedFilename)
         try c.encodeIfPresent(stampedRelativePath, forKey: .stampedRelativePath)
         try c.encodeIfPresent(captureMode, forKey: .captureMode)
@@ -761,6 +825,20 @@ struct ShotMetadata: Codable, Identifiable, Equatable {
         guard let value else { return nil }
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? nil : trimmed
+    }
+
+    private static func normalizedUploadState(_ value: String?) -> String {
+        let trimmed = trimmedNonEmpty(value)?.lowercased()
+        switch trimmed {
+        case "uploading":
+            return "uploading"
+        case "uploaded":
+            return "uploaded"
+        case "failed":
+            return "failed"
+        default:
+            return "pending"
+        }
     }
 
     private static func validExifOrientation(_ value: Int?) -> Int? {
