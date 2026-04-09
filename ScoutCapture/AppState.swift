@@ -103,7 +103,7 @@ final class AppState: ObservableObject {
     private var isStartupHydrationInProgress: Bool = false
     private var startupHydrationCompletedAt: Date?
     // Keep a short grace for non-empty in-memory states, but do not stall first-load empty hubs.
-    private let startupFallbackGraceWindow: TimeInterval = 2.0
+    private let startupFallbackGraceWindow: TimeInterval = 25.0
 
     var sharedLocalStore: LocalStore {
         localStore
@@ -331,7 +331,7 @@ final class AppState: ObservableObject {
                 if !fastHasProperties, withinStartupFallbackGraceWindow {
                     self.isLoading = false
                     self.isBackgroundRefreshInFlight = false
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
                         self.refreshPropertiesInBackground()
                     }
                     return
@@ -427,7 +427,7 @@ final class AppState: ObservableObject {
 
     private func makeRefreshPayloadForHubIndexOnly() throws -> PropertyRefreshPayload {
         let start = Date()
-        guard let state = try localStore.fetchPropertyAndOrganizationStateFromHubIndex(downloadTimeout: 0.80) else {
+        guard let state = try localStore.fetchPropertyAndOrganizationStateFromHubIndex(downloadTimeout: 2.0) else {
             let elapsedMs = Int(Date().timeIntervalSince(start) * 1000)
             logHubFetch(
                 phase: "background",
