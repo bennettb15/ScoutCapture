@@ -2741,13 +2741,12 @@ final class LocalStore {
     }
 
     private func normalizedOrganizations(_ organizations: [Organization]) -> [Organization] {
-        var seenNames = Set<String>()
+        var seenIDs = Set<UUID>()
         var output: [Organization] = []
         for organization in organizations {
             let trimmedName = organization.name.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !trimmedName.isEmpty else { continue }
-            let key = trimmedName.lowercased()
-            guard seenNames.insert(key).inserted else { continue }
+            guard seenIDs.insert(organization.id).inserted else { continue }
             output.append(Organization(
                 id: organization.id,
                 name: trimmedName,
@@ -2757,7 +2756,12 @@ final class LocalStore {
         return output.sorted { lhs, rhs in
             if lhs.name.caseInsensitiveCompare("Individual") == .orderedSame { return true }
             if rhs.name.caseInsensitiveCompare("Individual") == .orderedSame { return false }
-            return lhs.name.localizedCaseInsensitiveCompare(rhs.name) == .orderedAscending
+
+            let nameOrder = lhs.name.localizedCaseInsensitiveCompare(rhs.name)
+            if nameOrder != .orderedSame {
+                return nameOrder == .orderedAscending
+            }
+            return lhs.id.uuidString.lowercased() < rhs.id.uuidString.lowercased()
         }
     }
 

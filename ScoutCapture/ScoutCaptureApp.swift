@@ -443,6 +443,12 @@ private struct AppRootView: View {
                 )
             } else if appState.requiresAuthentication && !appState.isAuthenticated {
                 AuthView()
+            } else if appState.requiresAuthentication && !appState.isOrganizationContextReady {
+                LoadingView(
+                    progress: 0,
+                    showsProgressBar: false,
+                    showsLogo: true
+                )
             } else {
                 SessionHubView()
             }
@@ -1676,6 +1682,27 @@ struct SessionHubView: View {
                                 } else {
                                     Text(authenticatedSupabaseUser.id.uuidString)
                                         .font(.footnote.monospaced())
+                                }
+
+                                if appState.requiresAuthentication {
+                                    if let activeOrganization = appState.activeOrganization {
+                                        Picker("Active Organization", selection: Binding(
+                                            get: { activeOrganization.id.uuidString },
+                                            set: { newValue in
+                                                if let id = UUID(uuidString: newValue) {
+                                                    appState.setActiveOrganization(id: id)
+                                                }
+                                            }
+                                        )) {
+                                            ForEach(appState.organizationSelectionOptions) { organization in
+                                                Text(organization.name)
+                                                    .tag(organization.id.uuidString)
+                                            }
+                                        }
+                                    } else {
+                                        Text("No active organization")
+                                            .foregroundStyle(.secondary)
+                                    }
                                 }
 
                                 Button("Sign Out", role: .destructive) {
@@ -3502,9 +3529,18 @@ private struct HubAddPropertySheet: View {
     }
 
     private var selectedOrganizationName: String {
-        appState.organizations.first(where: { $0.id == selectedOrganizationID })?.name ?? "Organization"
+        appState.organizationSelectionOptions.first(where: { $0.id == selectedOrganizationID })?.name ?? "Organization"
     }
-    
+
+    private var resolvedDefaultOrganizationID: UUID? {
+        let options = appState.organizationSelectionOptions
+        if let activeOrganizationID = appState.activeOrganizationID,
+           options.contains(where: { $0.id == activeOrganizationID }) {
+            return activeOrganizationID
+        }
+        return options.first?.id
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             HStack(spacing: 10) {
@@ -3539,12 +3575,14 @@ private struct HubAddPropertySheet: View {
                 Form {
                     Section("Organization") {
                         Picker("Organization", selection: organizationSelectionToken) {
-                            ForEach(appState.organizations) { organization in
+                            ForEach(appState.organizationSelectionOptions) { organization in
                                 Text(organization.name)
                                     .tag(organization.id.uuidString)
                             }
-                            Text("Add new organization")
-                                .tag(addOrganizationToken)
+                            if !appState.requiresAuthentication {
+                                Text("Add new organization")
+                                    .tag(addOrganizationToken)
+                            }
                         }
                     }
 
@@ -3705,6 +3743,12 @@ private struct HubAddPropertySheet: View {
         .onChange(of: appState.organizations) { _, _ in
             syncSelectedOrganizationIfNeeded()
         }
+        .onChange(of: appState.activeOrganizationID) { _, _ in
+            syncSelectedOrganizationIfNeeded()
+        }
+        .onChange(of: appState.organizationSelectionOptions.map(\.id)) { _, _ in
+            syncSelectedOrganizationIfNeeded()
+        }
         .alert("Add Organization", isPresented: $showAddOrganizationPrompt) {
             TextField("Organization Name", text: $newOrganizationName)
             Button("Save") {
@@ -3734,7 +3778,7 @@ private struct HubAddPropertySheet: View {
 
     private var organizationSelectionToken: Binding<String> {
         Binding(
-            get: { selectedOrganizationID?.uuidString ?? appState.organizations.first?.id.uuidString ?? "" },
+            get: { selectedOrganizationID?.uuidString ?? "" },
             set: { newValue in
                 if newValue == addOrganizationToken {
                     showAddOrganizationPrompt = true
@@ -3817,7 +3861,7 @@ private struct HubAddPropertySheet: View {
             focusFirstInvalidField()
             return
         }
-        guard let selectedOrganizationID else {
+        guard let organizationID = selectedOrganizationID else {
             propertyCreationErrorMessage = "Select an organization."
             showPropertyCreationError = true
             return
@@ -3825,7 +3869,7 @@ private struct HubAddPropertySheet: View {
 
         do {
             let created = try appState.createProperty(
-                organizationID: selectedOrganizationID,
+                organizationID: organizationID,
                 clientName: clientName,
                 propertyName: propertyName,
                 address: addressForStorage,
@@ -3846,10 +3890,10 @@ private struct HubAddPropertySheet: View {
 
     private func syncSelectedOrganizationIfNeeded() {
         if let selectedOrganizationID,
-           appState.organizations.contains(where: { $0.id == selectedOrganizationID }) {
+           appState.organizationSelectionOptions.contains(where: { $0.id == selectedOrganizationID }) {
             return
         }
-        selectedOrganizationID = appState.organizations.first?.id
+        selectedOrganizationID = resolvedDefaultOrganizationID
     }
 
     private func saveOrganization() {
@@ -4032,7 +4076,7 @@ private struct EditContactSheet: View {
     }
 
     private var selectedOrganizationName: String {
-        appState.organizations.first(where: { $0.id == selectedOrganizationID })?.name ?? "Organization"
+        appState.organizationSelectionOptions.first(where: { $0.id == selectedOrganizationID })?.name ?? "Organization"
     }
 
     var body: some View {
@@ -4068,12 +4112,14 @@ private struct EditContactSheet: View {
             Form {
                 Section("Organization") {
                     Picker("Organization", selection: organizationSelectionToken) {
-                        ForEach(appState.organizations) { organization in
+                        ForEach(appState.organizationSelectionOptions) { organization in
                             Text(organization.name)
                                 .tag(organization.id.uuidString)
                         }
-                        Text("Add new organization")
-                            .tag(addOrganizationToken)
+                        if !appState.requiresAuthentication {
+                            Text("Add new organization")
+                                .tag(addOrganizationToken)
+                        }
                     }
                 }
 
@@ -4200,7 +4246,7 @@ private struct EditContactSheet: View {
             get: {
                 selectedOrganizationID?.uuidString
                     ?? property.orgId?.uuidString
-                    ?? appState.organizations.first?.id.uuidString
+                    ?? appState.organizationSelectionOptions.first?.id.uuidString
                     ?? ""
             },
             set: { newValue in
@@ -4248,7 +4294,7 @@ private struct EditContactSheet: View {
 
     private func loadFromProperty() {
         syncSelectedOrganizationIfNeeded()
-        selectedOrganizationID = property.orgId ?? appState.organizations.first?.id
+        selectedOrganizationID = property.orgId ?? appState.activeOrganizationID ?? appState.organizationSelectionOptions.first?.id
         propertyName = property.name
         clientName = property.clientName ?? ""
         clientEmail = property.clientEmail ?? ""
@@ -4269,10 +4315,10 @@ private struct EditContactSheet: View {
 
     private func syncSelectedOrganizationIfNeeded() {
         if let selectedOrganizationID,
-           appState.organizations.contains(where: { $0.id == selectedOrganizationID }) {
+           appState.organizationSelectionOptions.contains(where: { $0.id == selectedOrganizationID }) {
             return
         }
-        selectedOrganizationID = property.orgId ?? appState.organizations.first?.id
+        selectedOrganizationID = property.orgId ?? appState.activeOrganizationID ?? appState.organizationSelectionOptions.first?.id
     }
 
     private func saveOrganization() {

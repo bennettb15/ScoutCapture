@@ -70,6 +70,12 @@ struct AuthenticatedSupabaseUser: Equatable {
     let email: String?
 }
 
+struct ActiveOrganizationMembership: Equatable, Identifiable {
+    let id: UUID
+    let name: String
+    let role: String
+}
+
 enum AuthenticationFlowResult: Equatable {
     case signedIn
     case requiresEmailConfirmation
@@ -96,7 +102,7 @@ final class AppState: ObservableObject {
         }
     }
 
-    struct HubPropertyMeta {
+    struct HubPropertyMeta: Equatable {
         let clientLine: String?
         let addressLine: String?
         let normalizedNameToken: String
@@ -144,6 +150,30 @@ final class AppState: ObservableObject {
     private struct SupabaseOrgPayload: Encodable {
         let id: UUID
         let name: String
+    }
+
+    private struct SupabaseAccessibleOrgRecord: Decodable {
+        let id: UUID
+        let name: String
+        let deletedAt: String?
+
+        enum CodingKeys: String, CodingKey {
+            case id
+            case name
+            case deletedAt = "deleted_at"
+        }
+    }
+
+    private struct SupabaseOrgMembershipRecord: Decodable {
+        let orgID: UUID
+        let role: String
+        let deletedAt: String?
+
+        enum CodingKeys: String, CodingKey {
+            case orgID = "org_id"
+            case role
+            case deletedAt = "deleted_at"
+        }
     }
 
     private struct SupabasePropertyPayload: Encodable {
@@ -222,6 +252,9 @@ final class AppState: ObservableObject {
     @Published private(set) var isAuthenticating: Bool = false
     @Published private(set) var authenticatedSupabaseUser: AuthenticatedSupabaseUser?
     @Published var authenticationErrorMessage: String?
+    @Published private(set) var activeOrganizationID: UUID?
+    @Published private(set) var accessibleOrganizations: [ActiveOrganizationMembership] = []
+    @Published private(set) var isOrganizationContextReady: Bool = false
 
     @Published var selectedPropertyID: UUID? {
         didSet {
@@ -246,6 +279,7 @@ final class AppState: ObservableObject {
     private let userDefaults: UserDefaults
     private let cloudBackupManager: CloudBackupManager
     private let selectedPropertyDefaultsKey = "scoutcapture.selectedPropertyID"
+    private let activeOrganizationDefaultsKeyPrefix = "scoutcapture.activeOrganizationID"
     private let propertyActivationTimestampsDefaultsKey = "scoutcapture.propertyActivationTimestamps.v1"
     private let reExportWindowDays = 7
     private let sessionMediaOffloadCooldown: TimeInterval = 30 * 60
@@ -277,6 +311,12 @@ final class AppState: ObservableObject {
     private var inFlightSupabaseMediaOperations: Set<String> = []
     private var authStateChangesTask: Task<Void, Never>?
     private var lastEnsuredUserProfileID: UUID?
+    private var allProperties: [Property] = []
+    private var allOrganizations: [Organization] = []
+    private var allSessionIndexByProperty: [UUID: [Session]] = [:]
+    private var allDraftSessionByProperty: [UUID: Session] = [:]
+    private var allPendingExportSessionByProperty: [UUID: Session] = [:]
+    private var allHubMetaByProperty: [UUID: HubPropertyMeta] = [:]
 
     var requiresAuthentication: Bool {
         backendFeatureFlags.supabaseEnabled && supabaseClient != nil
@@ -288,6 +328,25 @@ final class AppState: ObservableObject {
 
     var sharedLocalStore: LocalStore {
         localStore
+    }
+
+    var activeOrganization: ActiveOrganizationMembership? {
+        guard let activeOrganizationID else { return nil }
+        return accessibleOrganizations.first { $0.id == activeOrganizationID }
+    }
+
+    var organizationSelectionOptions: [Organization] {
+        if requiresAuthentication {
+            return accessibleOrganizations.map { membership in
+                let localMatch = allOrganizations.first(where: { $0.id == membership.id })
+                return Organization(
+                    id: membership.id,
+                    name: membership.name,
+                    contacts: localMatch?.contacts ?? []
+                )
+            }
+        }
+        return organizations
     }
 
     func sessionArchiveSummaries() -> [LocalStore.SessionArchiveSummary] {
@@ -412,6 +471,7 @@ final class AppState: ObservableObject {
         guard backendFeatureFlags.supabaseEnabled else {
             supabaseClient = nil
             isAuthenticationReady = true
+            isOrganizationContextReady = true
             print("[Supabase] bootstrap skipped because supabase_enabled=false")
             return
         }
@@ -419,6 +479,7 @@ final class AppState: ObservableObject {
         guard supabaseConfiguration.isConfigured else {
             supabaseClient = nil
             isAuthenticationReady = true
+            isOrganizationContextReady = true
             print("[Supabase] bootstrap skipped because configuration is missing or invalid")
             return
         }
@@ -460,14 +521,17 @@ final class AppState: ObservableObject {
 
                 if event == .signedOut {
                     self.lastEnsuredUserProfileID = nil
+                    self.clearOrganizationContext()
                     continue
                 }
 
                 if [.initialSession, .signedIn, .tokenRefreshed, .userUpdated].contains(event) {
                     do {
                         try await self.ensureCurrentUserProfileIfNeeded(for: userID)
+                        try await self.refreshOrganizationContext(for: userID)
                     } catch {
                         print("[SupabaseAuth] ensure_current_user_profile failed: \(error.localizedDescription)")
+                        self.handleOrganizationRefreshFailure()
                     }
                 }
             }
@@ -476,12 +540,225 @@ final class AppState: ObservableObject {
 
     private func applyAuthenticationState(user: AuthenticatedSupabaseUser?, ready: Bool) {
         DispatchQueue.main.async {
-            self.authenticatedSupabaseUser = user
-            self.isAuthenticationReady = ready
+            if self.authenticatedSupabaseUser != user {
+                self.authenticatedSupabaseUser = user
+            }
+            if self.isAuthenticationReady != ready {
+                self.isAuthenticationReady = ready
+            }
             if user == nil {
                 self.authenticationErrorMessage = nil
             }
         }
+    }
+
+    private func applyOrganizationContext(
+        memberships: [ActiveOrganizationMembership],
+        activeOrganizationID: UUID?,
+        ready: Bool
+    ) {
+        DispatchQueue.main.async {
+            if self.accessibleOrganizations != memberships {
+                self.accessibleOrganizations = memberships
+            }
+            if self.activeOrganizationID != activeOrganizationID {
+                self.activeOrganizationID = activeOrganizationID
+                self.persistActiveOrganizationID()
+            }
+            if self.isOrganizationContextReady != ready {
+                self.isOrganizationContextReady = ready
+            }
+            self.applyTenantScopedState()
+        }
+    }
+
+    private func handleOrganizationRefreshFailure() {
+        DispatchQueue.main.async {
+            let hasUsableContext = self.isOrganizationContextReady
+                && self.activeOrganizationID != nil
+                && !self.accessibleOrganizations.isEmpty
+            guard !hasUsableContext else { return }
+            self.clearOrganizationContext()
+        }
+    }
+
+    private func clearOrganizationContext() {
+        applyOrganizationContext(memberships: [], activeOrganizationID: nil, ready: !requiresAuthentication)
+    }
+
+    private func refreshOrganizationContext(for userID: UUID?) async throws {
+        guard requiresAuthentication else {
+            clearOrganizationContext()
+            return
+        }
+
+        guard userID != nil, let client = supabaseClient else {
+            clearOrganizationContext()
+            return
+        }
+
+        await MainActor.run {
+            let hasUsableContext = self.isOrganizationContextReady
+                && self.activeOrganizationID != nil
+                && !self.accessibleOrganizations.isEmpty
+            if !hasUsableContext {
+                self.isOrganizationContextReady = false
+            }
+        }
+
+        let membershipRows = try await client
+            .from("org_memberships")
+            .select("org_id, role, deleted_at")
+            .execute()
+            .value as [SupabaseOrgMembershipRecord]
+
+        let orgRows = try await client
+            .from("orgs")
+            .select("id, name, deleted_at")
+            .execute()
+            .value as [SupabaseAccessibleOrgRecord]
+
+        let activeMemberships = membershipRows.filter { $0.deletedAt == nil }
+        let namesByID = Dictionary(
+            uniqueKeysWithValues: orgRows
+                .filter { $0.deletedAt == nil }
+                .map { ($0.id, $0.name) }
+        )
+
+        let memberships = activeMemberships
+            .compactMap { row -> ActiveOrganizationMembership? in
+                guard let name = namesByID[row.orgID] else { return nil }
+                return ActiveOrganizationMembership(id: row.orgID, name: name, role: row.role)
+            }
+            .sorted { lhs, rhs in
+                lhs.name.localizedCaseInsensitiveCompare(rhs.name) == .orderedAscending
+            }
+
+        let persistedID = persistedActiveOrganizationID(for: userID)
+        let resolvedActiveID: UUID?
+        if let persistedID,
+           memberships.contains(where: { $0.id == persistedID }) {
+            resolvedActiveID = persistedID
+        } else {
+            resolvedActiveID = memberships.first?.id
+        }
+
+        applyOrganizationContext(
+            memberships: memberships,
+            activeOrganizationID: resolvedActiveID,
+            ready: true
+        )
+    }
+
+    func setActiveOrganization(id: UUID) {
+        if requiresAuthentication {
+            guard accessibleOrganizations.contains(where: { $0.id == id }) else { return }
+        } else {
+            guard allOrganizations.contains(where: { $0.id == id }) else { return }
+        }
+
+        guard activeOrganizationID != id else { return }
+
+        activeOrganizationID = id
+        persistActiveOrganizationID()
+        applyTenantScopedState()
+    }
+
+    private func activeOrganizationDefaultsKey(for userID: UUID?) -> String {
+        guard let userID else { return activeOrganizationDefaultsKeyPrefix }
+        return "\(activeOrganizationDefaultsKeyPrefix).\(userID.uuidString.lowercased())"
+    }
+
+    private func persistedActiveOrganizationID(for userID: UUID?) -> UUID? {
+        let rawID = userDefaults.string(forKey: activeOrganizationDefaultsKey(for: userID))
+        return rawID.flatMap(UUID.init(uuidString:))
+    }
+
+    private func persistActiveOrganizationID() {
+        let key = activeOrganizationDefaultsKey(for: authenticatedSupabaseUser?.id)
+        if let activeOrganizationID {
+            userDefaults.set(activeOrganizationID.uuidString, forKey: key)
+        } else {
+            userDefaults.removeObject(forKey: key)
+        }
+    }
+
+    private func applyTenantScopedState() {
+        let scopedOrganizations = scopedOrganizations(from: allOrganizations)
+        let scopedProperties = scopedProperties(from: allProperties)
+        let scopedPropertyIDs = Set(scopedProperties.map(\.id))
+        let scopedSessionIndex = allSessionIndexByProperty.filter { scopedPropertyIDs.contains($0.key) }
+        let scopedDrafts = allDraftSessionByProperty.filter { scopedPropertyIDs.contains($0.key) }
+        let scopedPending = allPendingExportSessionByProperty.filter { scopedPropertyIDs.contains($0.key) }
+        let scopedMeta = allHubMetaByProperty.filter { scopedPropertyIDs.contains($0.key) }
+
+        if organizations != scopedOrganizations {
+            organizations = scopedOrganizations
+        }
+        if properties != scopedProperties {
+            properties = scopedProperties
+        }
+        if sessionIndexByProperty != scopedSessionIndex {
+            sessionIndexByProperty = scopedSessionIndex
+        }
+        if draftSessionByProperty != scopedDrafts {
+            draftSessionByProperty = scopedDrafts
+        }
+        if pendingExportSessionByProperty != scopedPending {
+            pendingExportSessionByProperty = scopedPending
+        }
+        if hubMetaByProperty != scopedMeta {
+            hubMetaByProperty = scopedMeta
+        }
+
+        if let selectedPropertyID,
+           !scopedPropertyIDs.contains(selectedPropertyID) {
+            self.selectedPropertyID = nil
+            if currentSession?.propertyID == selectedPropertyID {
+                clearCurrentSession()
+            }
+        }
+
+        if let currentSession,
+           !scopedPropertyIDs.contains(currentSession.propertyID) {
+            clearCurrentSession()
+        }
+    }
+
+    private func scopedOrganizations(from organizations: [Organization]) -> [Organization] {
+        guard requiresAuthentication else { return organizations }
+        guard let activeOrganizationID else { return [] }
+        return organizations.filter { $0.id == activeOrganizationID }
+    }
+
+    private func scopedProperties(from properties: [Property]) -> [Property] {
+        guard requiresAuthentication else { return properties }
+        guard let activeOrganizationID else { return [] }
+        return properties.filter { $0.orgId == activeOrganizationID }
+    }
+
+    private func canAccessOrganization(_ organizationID: UUID?) -> Bool {
+        guard let organizationID else { return !requiresAuthentication }
+        if requiresAuthentication {
+            return organizationID == activeOrganizationID
+        }
+        return allOrganizations.contains(where: { $0.id == organizationID })
+    }
+
+    private func canAccessProperty(_ propertyID: UUID) -> Bool {
+        properties.contains(where: { $0.id == propertyID })
+    }
+
+    private func ensureLocalOrganizationExists(for organizationID: UUID) throws {
+        guard !allOrganizations.contains(where: { $0.id == organizationID }) else { return }
+        guard let organization = organizationSelectionOptions.first(where: { $0.id == organizationID }) else {
+            throw PropertyCreationError.missingOrganization
+        }
+
+        _ = try localStore.createOrganization(
+            Organization(id: organization.id, name: organization.name, contacts: organization.contacts)
+        )
+        allOrganizations = (try? localStore.fetchOrganizations()) ?? allOrganizations
     }
 
     private func setAuthenticating(_ authenticating: Bool) {
@@ -639,6 +916,10 @@ final class AppState: ObservableObject {
               let shot = metadata.shots.first(where: { $0.shotID == shotID }) else {
             return
         }
+        guard canAccessProperty(propertyID) else {
+            print("[SupabaseMediaUpload] skipped reason=inactiveOrg propertyID=\(propertyID.uuidString)")
+            return
+        }
         let orgID = metadata.orgID ?? properties.first(where: { $0.id == propertyID })?.orgId
 
         let localFileURL: URL
@@ -767,6 +1048,10 @@ final class AppState: ObservableObject {
               let shot = metadata.shots.first(where: { $0.shotID == shotID }) else {
             return
         }
+        guard canAccessProperty(propertyID) else {
+            print("[SupabaseMediaDownload] skipped reason=inactiveOrg propertyID=\(propertyID.uuidString)")
+            return
+        }
 
         let resolvedShot = await resolveShotStorageMetadata(
             propertyID: propertyID,
@@ -853,6 +1138,11 @@ final class AppState: ObservableObject {
         orgID: UUID
     ) async throws {
         guard let client = supabaseClient else { return }
+        guard canAccessOrganization(orgID) else {
+            throw NSError(domain: "ScoutCapture.SupabaseMedia", code: 3, userInfo: [
+                NSLocalizedDescriptionKey: "Blocked Supabase session write outside the active organization."
+            ])
+        }
 
         let property = properties.first(where: { $0.id == propertyID })
         let organization = organizations.first(where: { $0.id == orgID })
@@ -925,6 +1215,11 @@ final class AppState: ObservableObject {
         lastUploadError: String?
     ) async throws {
         guard let client = supabaseClient else { return }
+        guard canAccessOrganization(orgID) else {
+            throw NSError(domain: "ScoutCapture.SupabaseMedia", code: 4, userInfo: [
+                NSLocalizedDescriptionKey: "Blocked Supabase shot metadata write outside the active organization."
+            ])
+        }
 
         let payload = SupabaseShotStoragePayload(
             id: shotID,
@@ -955,6 +1250,7 @@ final class AppState: ObservableObject {
         shotID: UUID
     ) async throws -> SupabaseShotStorageRecord? {
         guard let client = supabaseClient else { return nil }
+        guard let activeOrganizationID else { return nil }
 
         let rows = try await client
             .from("shots")
@@ -972,6 +1268,7 @@ final class AppState: ObservableObject {
             )
             .eq("id", value: shotID.uuidString.lowercased())
             .eq("session_id", value: sessionID.uuidString.lowercased())
+            .eq("org_id", value: activeOrganizationID.uuidString.lowercased())
             .limit(1)
             .execute()
             .value as [SupabaseShotStorageRecord]
@@ -1091,15 +1388,18 @@ final class AppState: ObservableObject {
         }
         didLoad = true
         isStartupHydrationInProgress = true
-        isLoading = properties.isEmpty
+        setLoadingState(allProperties.isEmpty)
 
-        if properties.isEmpty,
+        if allProperties.isEmpty,
            let localState = try? localStore.fetchPropertyAndOrganizationStateFromLocalHubIndexCache(),
            !localState.properties.isEmpty {
             let caches = makeHubCaches(for: localState.properties)
-            organizations = localState.organizations
-            applyHubCachePayload(properties: localState.properties, caches: caches)
-            isLoading = false
+            applyHubCachePayload(
+                properties: localState.properties,
+                organizations: localState.organizations,
+                caches: caches
+            )
+            setLoadingState(false)
             logHubFetch(
                 phase: "warmLaunch",
                 source: localState.source.rawValue,
@@ -1123,8 +1423,11 @@ final class AppState: ObservableObject {
                         elapsedMs: elapsedMs
                     )
                     let caches = self.makeHubCaches(for: fetchedState.properties)
-                    self.organizations = fetchedState.organizations
-                    self.applyHubCachePayload(properties: fetchedState.properties, caches: caches)
+                    self.applyHubCachePayload(
+                        properties: fetchedState.properties,
+                        organizations: fetchedState.organizations,
+                        caches: caches
+                    )
                 } else {
                     let elapsedMs = Int(Date().timeIntervalSince(start) * 1000)
                     self.logHubFetch(
@@ -1135,7 +1438,7 @@ final class AppState: ObservableObject {
                         elapsedMs: elapsedMs
                     )
                 }
-                self.isLoading = false
+                self.setLoadingState(false)
                 self.isStartupHydrationInProgress = false
                 self.startupHydrationCompletedAt = Date()
                 completion()
@@ -1145,7 +1448,7 @@ final class AppState: ObservableObject {
 
     func refreshProperties() {
         cloudBackupManager.refreshStatus()
-        isLoading = true
+        setLoadingState(true)
         do {
             let payload = try makeRefreshPayload()
             applyRefreshPayload(payload)
@@ -1153,7 +1456,7 @@ final class AppState: ObservableObject {
             // Preserve current in-memory view on transient iCloud read failures.
             print("[PropertiesRefresh] transient read failure: \(error.localizedDescription)")
         }
-        isLoading = false
+        setLoadingState(false)
     }
 
     func refreshPropertiesInBackground() {
@@ -1166,19 +1469,19 @@ final class AppState: ObservableObject {
         }
         let now = Date()
         if isBackgroundRefreshInFlight { return }
-        if !properties.isEmpty,
+        if !allProperties.isEmpty,
            let lastBackgroundRefreshStartedAt,
            now.timeIntervalSince(lastBackgroundRefreshStartedAt) < minimumBackgroundRefreshInterval {
             return
         }
         isBackgroundRefreshInFlight = true
         lastBackgroundRefreshStartedAt = now
-        isLoading = properties.isEmpty
+        setLoadingState(allProperties.isEmpty)
         DispatchQueue.global(qos: .userInitiated).async {
             let fastPayload = try? self.makeRefreshPayloadForHubIndexOnly()
             let fastHasProperties = (fastPayload?.properties.isEmpty == false)
             let withinStartupFallbackGraceWindow: Bool = {
-                guard self.properties.isEmpty,
+                guard self.allProperties.isEmpty,
                       let completedAt = self.startupHydrationCompletedAt else {
                     return false
                 }
@@ -1187,20 +1490,20 @@ final class AppState: ObservableObject {
             // When the hub is empty, start full fallback immediately to avoid long "syncing" dead time.
             let shouldRunFallback: Bool = {
                 if fastHasProperties { return false }
-                if self.properties.isEmpty { return true }
+                if self.allProperties.isEmpty { return true }
                 return !withinStartupFallbackGraceWindow
             }()
 
             DispatchQueue.main.async {
-                if let fastPayload, fastHasProperties || self.properties.isEmpty {
+                if let fastPayload, fastHasProperties || self.allProperties.isEmpty {
                     self.applyRefreshPayload(fastPayload)
                     self.scheduleOffloadEligibleSessionMedia(excludingSessionID: self.currentSession?.id)
                 }
-                if fastHasProperties || !self.properties.isEmpty {
-                    self.isLoading = false
+                if fastHasProperties || !self.allProperties.isEmpty {
+                    self.setLoadingState(false)
                 }
                 if !fastHasProperties, withinStartupFallbackGraceWindow {
-                    self.isLoading = false
+                    self.setLoadingState(false)
                     self.isBackgroundRefreshInFlight = false
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
                         self.refreshPropertiesInBackground()
@@ -1219,14 +1522,14 @@ final class AppState: ObservableObject {
                 DispatchQueue.main.async {
                     self.applyRefreshPayload(payload)
                     self.scheduleOffloadEligibleSessionMedia(excludingSessionID: self.currentSession?.id)
-                    self.isLoading = false
+                    self.setLoadingState(false)
                     self.isBackgroundRefreshInFlight = false
                 }
             } catch {
                 DispatchQueue.main.async {
                     // Preserve current in-memory view on transient iCloud read failures.
                     print("[PropertiesRefresh] transient read failure: \(error.localizedDescription)")
-                    self.isLoading = false
+                    self.setLoadingState(false)
                     self.isBackgroundRefreshInFlight = false
                 }
             }
@@ -1271,6 +1574,11 @@ final class AppState: ObservableObject {
         let organizations: [Organization]
         let caches: HubCachePayload
         let fingerprint: String
+    }
+
+    private func setLoadingState(_ loading: Bool) {
+        guard isLoading != loading else { return }
+        isLoading = loading
     }
 
 
@@ -1328,13 +1636,12 @@ final class AppState: ObservableObject {
     }
 
     private func applyRefreshPayload(_ payload: PropertyRefreshPayload) {
-        organizations = payload.organizations
-        applyHubCachePayload(properties: payload.properties, caches: payload.caches)
+        applyHubCachePayload(
+            properties: payload.properties,
+            organizations: payload.organizations,
+            caches: payload.caches
+        )
         lastLiveSyncFingerprint = payload.fingerprint
-
-        if let selectedPropertyID, properties.contains(where: { $0.id == selectedPropertyID }) == false {
-            self.selectedPropertyID = nil
-        }
     }
 
     private func markLiveSyncBurstWindow(seconds: TimeInterval) {
@@ -1365,9 +1672,10 @@ final class AppState: ObservableObject {
         let cleanedEmail = clientEmail.trimmingCharacters(in: .whitespacesAndNewlines)
 
         guard !cleanedName.isEmpty else { throw PropertyCreationError.missingPropertyName }
-        guard organizations.contains(where: { $0.id == organizationID }) else { throw PropertyCreationError.missingOrganization }
+        guard canAccessOrganization(organizationID) else { throw PropertyCreationError.missingOrganization }
 
         do {
+            try ensureLocalOrganizationExists(for: organizationID)
             let property = Property(
                 id: UUID(),
                 orgId: organizationID,
@@ -1382,17 +1690,21 @@ final class AppState: ObservableObject {
                 zip: cleanedZip.isEmpty ? nil : cleanedZip
             )
             let created = try localStore.createProperty(property)
-            properties.append(created)
-            organizations = (try? localStore.fetchOrganizations()) ?? organizations
-            sessionIndexByProperty[created.id] = []
-            draftSessionByProperty[created.id] = nil
-            pendingExportSessionByProperty[created.id] = nil
-            hubMetaByProperty[created.id] = makeHubMeta(for: created)
+            allProperties.append(created)
+            allOrganizations = (try? localStore.fetchOrganizations()) ?? allOrganizations
+            allSessionIndexByProperty[created.id] = []
+            allDraftSessionByProperty[created.id] = nil
+            allPendingExportSessionByProperty[created.id] = nil
+            allHubMetaByProperty[created.id] = makeHubMeta(for: created, organizations: allOrganizations)
+            applyTenantScopedState()
             if selectedPropertyID == nil {
                 selectedPropertyID = created.id
             }
             return created
         } catch {
+            if let propertyCreationError = error as? PropertyCreationError {
+                throw propertyCreationError
+            }
             if case LocalStore.StoreError.noAvailableFolderID = error {
                 throw PropertyCreationError.noAvailableFolderID
             }
@@ -1402,27 +1714,31 @@ final class AppState: ObservableObject {
 
     @discardableResult
     func createOrganization(name: String) -> Organization? {
+        guard !requiresAuthentication else { return nil }
         let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedName.isEmpty else { return nil }
         do {
             let created = try localStore.createOrganization(Organization(name: trimmedName))
-            organizations = (try? localStore.fetchOrganizations()) ?? organizations
+            allOrganizations = (try? localStore.fetchOrganizations()) ?? allOrganizations
+            applyTenantScopedState()
             return created
         } catch {
-            return organizations.first(where: { $0.name.trimmingCharacters(in: .whitespacesAndNewlines).caseInsensitiveCompare(trimmedName) == .orderedSame })
+            return allOrganizations.first(where: { $0.name.trimmingCharacters(in: .whitespacesAndNewlines).caseInsensitiveCompare(trimmedName) == .orderedSame })
         }
     }
 
     func organizationContacts(for organizationID: UUID?) -> [OrganizationContact] {
-        guard let organizationID else { return [] }
+        guard canAccessOrganization(organizationID), let organizationID else { return [] }
         return organizations.first(where: { $0.id == organizationID })?.contacts ?? []
     }
 
     @discardableResult
     func updateOrganizationContact(organizationID: UUID, contact: OrganizationContact) -> Bool {
+        guard canAccessOrganization(organizationID) else { return false }
         do {
             _ = try localStore.updateOrganizationContact(organizationID: organizationID, contact: contact)
-            organizations = (try? localStore.fetchOrganizations()) ?? organizations
+            allOrganizations = (try? localStore.fetchOrganizations()) ?? allOrganizations
+            applyTenantScopedState()
             return true
         } catch {
             return false
@@ -1431,9 +1747,11 @@ final class AppState: ObservableObject {
 
     @discardableResult
     func deleteOrganizationContact(organizationID: UUID, contactID: UUID) -> Bool {
+        guard canAccessOrganization(organizationID) else { return false }
         do {
             _ = try localStore.deleteOrganizationContact(organizationID: organizationID, contactID: contactID)
-            organizations = (try? localStore.fetchOrganizations()) ?? organizations
+            allOrganizations = (try? localStore.fetchOrganizations()) ?? allOrganizations
+            applyTenantScopedState()
             return true
         } catch {
             return false
@@ -1446,17 +1764,23 @@ final class AppState: ObservableObject {
     }
 
     func propertyHasBaseline(_ propertyID: UUID) -> Bool {
-        properties.first(where: { $0.id == propertyID })?.baselineSessionID != nil
+        guard canAccessProperty(propertyID) else { return false }
+        return properties.first(where: { $0.id == propertyID })?.baselineSessionID != nil
     }
 
     @discardableResult
     func setPropertyBaselineSession(propertyID: UUID, sessionID: UUID) -> Bool {
+        guard canAccessProperty(propertyID) else { return false }
         guard let index = properties.firstIndex(where: { $0.id == propertyID }) else { return false }
         var updated = properties[index]
         updated.baselineSessionID = sessionID
         do {
             let persisted = try localStore.updateProperty(updated)
-            properties[index] = persisted
+            if let rawIndex = allProperties.firstIndex(where: { $0.id == propertyID }) {
+                allProperties[rawIndex] = persisted
+            }
+            let caches = makeHubCaches(for: allProperties)
+            applyHubCachePayload(properties: allProperties, organizations: allOrganizations, caches: caches)
             return true
         } catch {
             return false
@@ -1465,20 +1789,21 @@ final class AppState: ObservableObject {
 
     @discardableResult
     func setPropertyArchived(id: UUID, archived: Bool) -> Bool {
+        guard canAccessProperty(id) else { return false }
         guard let property = properties.first(where: { $0.id == id }) else { return false }
         var updated = property
         updated.isArchived = archived
         do {
             let persisted = try localStore.updateProperty(updated)
-            if let idx = properties.firstIndex(where: { $0.id == id }) {
-                properties[idx] = persisted
+            if let idx = allProperties.firstIndex(where: { $0.id == id }) {
+                allProperties[idx] = persisted
             }
             if archived, selectedPropertyID == id {
                 clearCurrentSession()
                 selectedPropertyID = nil
             }
-            let caches = makeHubCaches(for: properties)
-            applyHubCachePayload(properties: properties, caches: caches)
+            let caches = makeHubCaches(for: allProperties)
+            applyHubCachePayload(properties: allProperties, organizations: allOrganizations, caches: caches)
             return true
         } catch {
             return false
@@ -1499,6 +1824,7 @@ final class AppState: ObservableObject {
         clientPhone: String?,
         clientEmail: String?
     ) -> Bool {
+        guard canAccessProperty(id) else { return false }
         guard let index = properties.firstIndex(where: { $0.id == id }) else { return false }
         var updated = properties[index]
         let cleanedName = propertyName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
@@ -1511,7 +1837,7 @@ final class AppState: ObservableObject {
         let digitsOnlyPhone = (clientPhone ?? "").filter(\.isNumber)
         let cleanedEmail = clientEmail?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
 
-        if let organizationID, organizations.contains(where: { $0.id == organizationID }) {
+        if let organizationID, canAccessOrganization(organizationID) {
             updated.orgId = organizationID
         }
         if !cleanedName.isEmpty {
@@ -1528,10 +1854,12 @@ final class AppState: ObservableObject {
 
         do {
             let persisted = try localStore.updateProperty(updated)
-            properties[index] = persisted
-            organizations = (try? localStore.fetchOrganizations()) ?? organizations
-            let caches = makeHubCaches(for: properties)
-            applyHubCachePayload(properties: properties, caches: caches)
+            if let rawIndex = allProperties.firstIndex(where: { $0.id == id }) {
+                allProperties[rawIndex] = persisted
+            }
+            allOrganizations = (try? localStore.fetchOrganizations()) ?? allOrganizations
+            let caches = makeHubCaches(for: allProperties)
+            applyHubCachePayload(properties: allProperties, organizations: allOrganizations, caches: caches)
             return true
         } catch {
             return false
@@ -1539,6 +1867,9 @@ final class AppState: ObservableObject {
     }
 
     func propertyDataCounts(for propertyID: UUID) -> PropertyDataCounts {
+        guard canAccessProperty(propertyID) else {
+            return PropertyDataCounts(sessions: 0, guided: 0, observations: 0)
+        }
         let sessions = (try? localStore.fetchSessions(propertyID: propertyID).count) ?? 0
         let guided = (try? localStore.fetchGuidedShots(propertyID: propertyID).count) ?? 0
         let observations = (try? localStore.fetchObservations(propertyID: propertyID).count) ?? 0
@@ -1547,13 +1878,14 @@ final class AppState: ObservableObject {
 
     @discardableResult
     func deletePropertyIfEmpty(id: UUID) -> Bool {
+        guard canAccessProperty(id) else { return false }
         let counts = propertyDataCounts(for: id)
         guard counts.isEmpty else { return false }
         do {
             try localStore.deleteProperty(id: id)
-            properties.removeAll { $0.id == id }
-            let caches = makeHubCaches(for: properties)
-            applyHubCachePayload(properties: properties, caches: caches)
+            allProperties.removeAll { $0.id == id }
+            let caches = makeHubCaches(for: allProperties)
+            applyHubCachePayload(properties: allProperties, organizations: allOrganizations, caches: caches)
             if selectedPropertyID == id {
                 selectedPropertyID = nil
                 clearCurrentSession()
@@ -1570,12 +1902,13 @@ final class AppState: ObservableObject {
 
     @discardableResult
     func deleteProperty(id: UUID) -> Bool {
+        guard canAccessProperty(id) else { return false }
         refreshProperties()
         do {
             try localStore.deleteProperty(id: id)
-            properties.removeAll { $0.id == id }
-            let caches = makeHubCaches(for: properties)
-            applyHubCachePayload(properties: properties, caches: caches)
+            allProperties.removeAll { $0.id == id }
+            let caches = makeHubCaches(for: allProperties)
+            applyHubCachePayload(properties: allProperties, organizations: allOrganizations, caches: caches)
             if selectedPropertyID == id {
                 selectedPropertyID = nil
                 clearCurrentSession()
@@ -1597,9 +1930,9 @@ final class AppState: ObservableObject {
 
         // Cross-device iCloud updates can remove a property on disk before this device's in-memory list refreshes.
         refreshProperties()
-        properties.removeAll { $0.id == id }
-        let caches = makeHubCaches(for: properties)
-        applyHubCachePayload(properties: properties, caches: caches)
+        allProperties.removeAll { $0.id == id }
+        let caches = makeHubCaches(for: allProperties)
+        applyHubCachePayload(properties: allProperties, organizations: allOrganizations, caches: caches)
         if selectedPropertyID == id {
             selectedPropertyID = nil
             clearCurrentSession()
@@ -1682,6 +2015,7 @@ final class AppState: ObservableObject {
     }
     
     func draftSession(for propertyID: UUID) -> Session? {
+        guard canAccessProperty(propertyID) else { return nil }
         if let cached = draftSessionByProperty[propertyID] {
             return cached
         }
@@ -1692,6 +2026,7 @@ final class AppState: ObservableObject {
     }
     
     func sessions(for propertyID: UUID) -> [Session] {
+        guard canAccessProperty(propertyID) else { return [] }
         if let cached = sessionIndexByProperty[propertyID] {
             return cached
         }
@@ -1704,6 +2039,7 @@ final class AppState: ObservableObject {
     }
 
     func latestPendingExportSession(for propertyID: UUID) -> Session? {
+        guard canAccessProperty(propertyID) else { return nil }
         if let cached = pendingExportSessionByProperty[propertyID] {
             return cached
         }
@@ -1790,6 +2126,7 @@ final class AppState: ObservableObject {
     }
     
     func loadDraftSession(for propertyID: UUID) -> Session? {
+        guard canAccessProperty(propertyID) else { return nil }
         guard let draft = draftSession(for: propertyID) else { return nil }
         selectedPropertyID = propertyID
         currentSession = draft
@@ -1811,6 +2148,7 @@ final class AppState: ObservableObject {
 
     @discardableResult
     func markSessionExported(propertyID: UUID, sessionID: UUID) -> Bool {
+        guard canAccessProperty(propertyID) else { return false }
         let allSessions = sessions(for: propertyID)
         guard var session = allSessions.first(where: { $0.id == sessionID }) else { return false }
         guard session.status == .completed else { return false }
@@ -1845,6 +2183,7 @@ final class AppState: ObservableObject {
         sessionID: UUID,
         triggerSafetyPause: Bool = true
     ) -> Bool {
+        guard canAccessProperty(propertyID) else { return false }
         do {
             try localStore.deleteSessionCascade(id: sessionID, propertyID: propertyID)
             if currentSession?.id == sessionID {
@@ -1876,11 +2215,13 @@ final class AppState: ObservableObject {
         clearAllUserDefaults()
         selectedPropertyID = nil
         clearCurrentSession()
-        properties = []
-        sessionIndexByProperty = [:]
-        draftSessionByProperty = [:]
-        pendingExportSessionByProperty = [:]
-        hubMetaByProperty = [:]
+        allProperties = []
+        allOrganizations = []
+        allSessionIndexByProperty = [:]
+        allDraftSessionByProperty = [:]
+        allPendingExportSessionByProperty = [:]
+        allHubMetaByProperty = [:]
+        applyTenantScopedState()
         refreshProperties()
         NotificationCenter.default.post(name: .scoutClearLocalUICache, object: nil)
     }
@@ -1888,11 +2229,12 @@ final class AppState: ObservableObject {
     func completeMigrationImport(restoredSelectedPropertyID: UUID?) {
         clearCurrentSession()
         selectedPropertyID = nil
-        properties = []
-        sessionIndexByProperty = [:]
-        draftSessionByProperty = [:]
-        pendingExportSessionByProperty = [:]
-        hubMetaByProperty = [:]
+        allProperties = []
+        allSessionIndexByProperty = [:]
+        allDraftSessionByProperty = [:]
+        allPendingExportSessionByProperty = [:]
+        allHubMetaByProperty = [:]
+        applyTenantScopedState()
         refreshProperties()
         if let restoredSelectedPropertyID,
            properties.contains(where: { $0.id == restoredSelectedPropertyID }) {
@@ -1974,6 +2316,7 @@ final class AppState: ObservableObject {
         } else {
             userDefaults.removeObject(forKey: selectedPropertyDefaultsKey)
             userDefaults.removeObject(forKey: propertyActivationTimestampsDefaultsKey)
+            userDefaults.removeObject(forKey: activeOrganizationDefaultsKey(for: authenticatedSupabaseUser?.id))
         }
     }
 
@@ -1988,12 +2331,30 @@ final class AppState: ObservableObject {
         let meta: [UUID: HubPropertyMeta]
     }
 
-    private func applyHubCachePayload(properties: [Property], caches: HubCachePayload) {
-        self.properties = properties
-        self.sessionIndexByProperty = caches.sessionIndex
-        self.draftSessionByProperty = caches.drafts
-        self.pendingExportSessionByProperty = caches.pending
-        self.hubMetaByProperty = caches.meta
+    private func applyHubCachePayload(
+        properties: [Property],
+        organizations: [Organization],
+        caches: HubCachePayload
+    ) {
+        if allProperties != properties {
+            allProperties = properties
+        }
+        if allOrganizations != organizations {
+            allOrganizations = organizations
+        }
+        if allSessionIndexByProperty != caches.sessionIndex {
+            allSessionIndexByProperty = caches.sessionIndex
+        }
+        if allDraftSessionByProperty != caches.drafts {
+            allDraftSessionByProperty = caches.drafts
+        }
+        if allPendingExportSessionByProperty != caches.pending {
+            allPendingExportSessionByProperty = caches.pending
+        }
+        if allHubMetaByProperty != caches.meta {
+            allHubMetaByProperty = caches.meta
+        }
+        applyTenantScopedState()
     }
 
     private func makeHubCaches(for properties: [Property]) -> HubCachePayload {
@@ -2001,6 +2362,7 @@ final class AppState: ObservableObject {
         var drafts: [UUID: Session] = [:]
         var pending: [UUID: Session] = [:]
         var meta: [UUID: HubPropertyMeta] = [:]
+        let lookupOrganizations = allOrganizations.isEmpty ? ((try? localStore.fetchOrganizations()) ?? []) : allOrganizations
 
         for property in properties {
             let sessions = loadAndNormalizeSessions(propertyID: property.id)
@@ -2017,7 +2379,7 @@ final class AppState: ObservableObject {
                 pending[property.id] = pendingSession
             }
 
-            meta[property.id] = makeHubMeta(for: property)
+            meta[property.id] = makeHubMeta(for: property, organizations: lookupOrganizations)
         }
 
         return HubCachePayload(
@@ -2028,9 +2390,10 @@ final class AppState: ObservableObject {
         )
     }
 
-    private func makeHubMeta(for property: Property) -> HubPropertyMeta {
+    private func makeHubMeta(for property: Property, organizations: [Organization]? = nil) -> HubPropertyMeta {
         let client = property.clientName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        let organization = organizations.first(where: { $0.id == property.orgId })?.name
+        let lookupOrganizations = organizations ?? self.organizations
+        let organization = lookupOrganizations.first(where: { $0.id == property.orgId })?.name
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         let address = normalizedAddressLine(property.address)
         let name = property.name.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -2062,14 +2425,23 @@ final class AppState: ObservableObject {
 
     private func reloadSessionCache(for propertyID: UUID) {
         let sessions = loadAndNormalizeSessions(propertyID: propertyID)
-        sessionIndexByProperty[propertyID] = sessions
+        if allSessionIndexByProperty[propertyID] != sessions {
+            allSessionIndexByProperty[propertyID] = sessions
+        }
 
-        draftSessionByProperty[propertyID] = latestVisibleDraft(in: sessions)
+        let latestDraft = latestVisibleDraft(in: sessions)
+        if allDraftSessionByProperty[propertyID] != latestDraft {
+            allDraftSessionByProperty[propertyID] = latestDraft
+        }
 
-        pendingExportSessionByProperty[propertyID] = sessions
+        let pendingSession = sessions
             .filter { isPendingDelivery($0) }
             .sorted { $0.startedAt > $1.startedAt }
             .first
+        if allPendingExportSessionByProperty[propertyID] != pendingSession {
+            allPendingExportSessionByProperty[propertyID] = pendingSession
+        }
+        applyTenantScopedState()
     }
 
     private func latestVisibleDraft(in sessions: [Session]) -> Session? {
