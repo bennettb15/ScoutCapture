@@ -156,6 +156,15 @@ final class LocalStore {
         self.fileIOQueue.setSpecific(key: fileIOQueueKey, value: fileIOQueueValue)
 
         try? createStorageDirectories(baseDirectoryURL: scoutRoot)
+
+        // Pre-fire the iCloud download request as early as possible so the daemon
+        // starts fetching hub-index.json before any polling loop begins.
+        let hubURL = hubIndexURL
+        DispatchQueue.global(qos: .userInitiated).async {
+            if !fileManager.fileExists(atPath: hubURL.path) {
+                try? fileManager.startDownloadingUbiquitousItem(at: hubURL)
+            }
+        }
     }
 
     func validateExport(_ metadata: SessionMetadata, phase: String) -> ExportValidationReport {
