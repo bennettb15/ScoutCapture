@@ -89,6 +89,7 @@ struct ScoutCaptureApp: App {
                 )
                     .environmentObject(appState)
             )
+                .ignoresSafeArea()
                 .onChange(of: scenePhase) { _, newValue in
                     if newValue == .background {
                         appState.setLiveSyncMonitoringActive(false)
