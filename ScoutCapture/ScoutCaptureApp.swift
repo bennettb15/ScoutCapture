@@ -446,7 +446,11 @@ private struct AppRootView: View {
                 sessionHubReady = true
                 minimumLaunchDelayMet = true
                 CameraManager.prewarm()
-                appState.warmLaunchReadiness { }
+                appState.warmLaunchReadiness {
+                    if appState.properties.isEmpty {
+                        appState.refreshPropertiesInBackground()
+                    }
+                }
                 AddPropertyWarmup.prewarm()
                 OptionalDetailNoteWarmup.prewarm()
                 return
@@ -553,7 +557,7 @@ struct SessionHubView: View {
 
     private let selectionHaptic = UIImpactFeedbackGenerator(style: .light)
     private let hiddenDebugTapWindow: TimeInterval = 1.5
-    private let startupPlaceholderHoldSeconds: TimeInterval = 20.0
+    private let startupPlaceholderHoldSeconds: TimeInterval = 8.0
 
     private enum HubRoute: Hashable {
         case propertySession(propertyID: UUID, resumeDraft: Bool)
