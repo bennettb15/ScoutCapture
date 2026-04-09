@@ -65,6 +65,16 @@ struct BackendFeatureFlags {
     }
 }
 
+struct AuthenticatedSupabaseUser: Equatable {
+    let id: UUID
+    let email: String?
+}
+
+enum AuthenticationFlowResult: Equatable {
+    case signedIn
+    case requiresEmailConfirmation
+}
+
 final class AppState: ObservableObject {
     enum PropertyCreationError: LocalizedError {
         case missingPropertyName
@@ -208,6 +218,10 @@ final class AppState: ObservableObject {
     @Published private(set) var cloudBackupStatus: CloudBackupStatus
     @Published private(set) var supabaseConfiguration: SupabaseRuntimeConfiguration
     @Published private(set) var backendFeatureFlags: BackendFeatureFlags
+    @Published private(set) var isAuthenticationReady: Bool = false
+    @Published private(set) var isAuthenticating: Bool = false
+    @Published private(set) var authenticatedSupabaseUser: AuthenticatedSupabaseUser?
+    @Published var authenticationErrorMessage: String?
 
     @Published var selectedPropertyID: UUID? {
         didSet {
@@ -261,6 +275,16 @@ final class AppState: ObservableObject {
     private let startupFallbackGraceWindow: TimeInterval = 25.0
     private let supabaseOperationalMediaBucket = "scoutcapture-originals"
     private var inFlightSupabaseMediaOperations: Set<String> = []
+    private var authStateChangesTask: Task<Void, Never>?
+    private var lastEnsuredUserProfileID: UUID?
+
+    var requiresAuthentication: Bool {
+        backendFeatureFlags.supabaseEnabled && supabaseClient != nil
+    }
+
+    var isAuthenticated: Bool {
+        authenticatedSupabaseUser != nil
+    }
 
     var sharedLocalStore: LocalStore {
         localStore
@@ -368,6 +392,10 @@ final class AppState: ObservableObject {
         prepareCollaborativeBackendBootstrap()
     }
 
+    deinit {
+        authStateChangesTask?.cancel()
+    }
+
     private static func loadSupabaseConfiguration(bundle: Bundle = .main) -> SupabaseRuntimeConfiguration {
         let rawURL = (bundle.object(forInfoDictionaryKey: "SUPABASE_URL") as? String)?
             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -383,12 +411,14 @@ final class AppState: ObservableObject {
     private func prepareCollaborativeBackendBootstrap() {
         guard backendFeatureFlags.supabaseEnabled else {
             supabaseClient = nil
+            isAuthenticationReady = true
             print("[Supabase] bootstrap skipped because supabase_enabled=false")
             return
         }
 
         guard supabaseConfiguration.isConfigured else {
             supabaseClient = nil
+            isAuthenticationReady = true
             print("[Supabase] bootstrap skipped because configuration is missing or invalid")
             return
         }
@@ -401,6 +431,131 @@ final class AppState: ObservableObject {
         )
         if let url = supabaseConfiguration.url, let anonKey = supabaseConfiguration.anonKey {
             supabaseClient = SupabaseClient(supabaseURL: url, supabaseKey: anonKey)
+            beginObservingAuthenticationState()
+        }
+    }
+
+    private func beginObservingAuthenticationState() {
+        authStateChangesTask?.cancel()
+
+        guard let client = supabaseClient else {
+            applyAuthenticationState(user: nil, ready: true)
+            return
+        }
+
+        applyAuthenticationState(user: nil, ready: false)
+
+        authStateChangesTask = Task { [weak self] in
+            guard let self else { return }
+
+            for await (event, authSession) in client.auth.authStateChanges {
+                if Task.isCancelled {
+                    return
+                }
+
+                let userID = authSession?.user.id
+                let email = authSession?.user.email
+                let user = userID.map { AuthenticatedSupabaseUser(id: $0, email: email) }
+                self.applyAuthenticationState(user: user, ready: true)
+
+                if event == .signedOut {
+                    self.lastEnsuredUserProfileID = nil
+                    continue
+                }
+
+                if [.initialSession, .signedIn, .tokenRefreshed, .userUpdated].contains(event) {
+                    do {
+                        try await self.ensureCurrentUserProfileIfNeeded(for: userID)
+                    } catch {
+                        print("[SupabaseAuth] ensure_current_user_profile failed: \(error.localizedDescription)")
+                    }
+                }
+            }
+        }
+    }
+
+    private func applyAuthenticationState(user: AuthenticatedSupabaseUser?, ready: Bool) {
+        DispatchQueue.main.async {
+            self.authenticatedSupabaseUser = user
+            self.isAuthenticationReady = ready
+            if user == nil {
+                self.authenticationErrorMessage = nil
+            }
+        }
+    }
+
+    private func setAuthenticating(_ authenticating: Bool) {
+        DispatchQueue.main.async {
+            self.isAuthenticating = authenticating
+        }
+    }
+
+    private func ensureCurrentUserProfileIfNeeded(for userID: UUID?, force: Bool = false) async throws {
+        guard let userID, let client = supabaseClient else { return }
+        guard force || lastEnsuredUserProfileID != userID else { return }
+
+        try await (try client.rpc("ensure_current_user_profile")).execute()
+        lastEnsuredUserProfileID = userID
+    }
+
+    func signIn(email: String, password: String) async throws {
+        guard let client = supabaseClient else { return }
+
+        let trimmedEmail = email.trimmingCharacters(in: .whitespacesAndNewlines)
+        setAuthenticating(true)
+        DispatchQueue.main.async {
+            self.authenticationErrorMessage = nil
+        }
+        defer { setAuthenticating(false) }
+
+        do {
+            let session = try await client.auth.signIn(email: trimmedEmail, password: password)
+            try await ensureCurrentUserProfileIfNeeded(for: session.user.id, force: true)
+        } catch {
+            DispatchQueue.main.async {
+                self.authenticationErrorMessage = error.localizedDescription
+            }
+            throw error
+        }
+    }
+
+    func signUp(email: String, password: String) async throws -> AuthenticationFlowResult {
+        guard let client = supabaseClient else { return .requiresEmailConfirmation }
+
+        let trimmedEmail = email.trimmingCharacters(in: .whitespacesAndNewlines)
+        setAuthenticating(true)
+        DispatchQueue.main.async {
+            self.authenticationErrorMessage = nil
+        }
+        defer { setAuthenticating(false) }
+
+        do {
+            let response = try await client.auth.signUp(email: trimmedEmail, password: password)
+            if let session = response.session {
+                try await ensureCurrentUserProfileIfNeeded(for: session.user.id, force: true)
+                return .signedIn
+            }
+            return .requiresEmailConfirmation
+        } catch {
+            DispatchQueue.main.async {
+                self.authenticationErrorMessage = error.localizedDescription
+            }
+            throw error
+        }
+    }
+
+    func signOut() async {
+        guard let client = supabaseClient else { return }
+
+        setAuthenticating(true)
+        defer { setAuthenticating(false) }
+
+        do {
+            try await client.auth.signOut(scope: .local)
+        } catch {
+            DispatchQueue.main.async {
+                self.authenticationErrorMessage = error.localizedDescription
+            }
         }
     }
 

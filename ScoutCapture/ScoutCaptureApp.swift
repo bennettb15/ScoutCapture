@@ -434,6 +434,14 @@ private struct AppRootView: View {
                     showsProgressBar: false,
                     showsLogo: true
                 )
+            } else if appState.requiresAuthentication && !appState.isAuthenticationReady {
+                LoadingView(
+                    progress: 0,
+                    showsProgressBar: false,
+                    showsLogo: true
+                )
+            } else if appState.requiresAuthentication && !appState.isAuthenticated {
+                AuthView()
             } else {
                 SessionHubView()
             }
@@ -1606,6 +1614,7 @@ struct SessionHubView: View {
     }
 
     private struct HubSettingsSheet: View {
+        @EnvironmentObject private var appState: AppState
         @Binding var showArchivedProperties: Bool
         let onOpenDebugTools: (() -> Void)?
         @Environment(\.dismiss) private var dismiss
@@ -1657,6 +1666,24 @@ struct SessionHubView: View {
                         Section("View") {
                             Toggle("Show Archived", isOn: $showArchivedProperties)
                                 .tint(.blue)
+                        }
+
+                        if let authenticatedSupabaseUser = appState.authenticatedSupabaseUser {
+                            Section("Account") {
+                                if let email = authenticatedSupabaseUser.email, !email.isEmpty {
+                                    Text(email)
+                                } else {
+                                    Text(authenticatedSupabaseUser.id.uuidString)
+                                        .font(.footnote.monospaced())
+                                }
+
+                                Button("Sign Out", role: .destructive) {
+                                    Task {
+                                        await appState.signOut()
+                                        dismiss()
+                                    }
+                                }
+                            }
                         }
 
                         if showDeveloperSection, let onOpenDebugTools {

@@ -15,7 +15,7 @@
 	<key>shadow_write_enabled</key>
 	<false/>
 	<key>supabase_enabled</key>
-	<false/>
+	<true/>
 	<key>supabase_read_enabled</key>
 	<false/>
 </dict>
