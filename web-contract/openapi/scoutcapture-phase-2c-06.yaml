@@ -1,0 +1,196 @@
+openapi: 3.1.0
+info:
+  title: ScoutCapture Web Contract
+  version: 0.1.0-phase-2c-06
+  summary: Minimal executable web contract for authenticated org-scoped reads.
+  description: |
+    Phase 2C-06 contract proving that a future web portal/client can integrate
+    against ScoutCapture's canonical Supabase-backed tenancy model.
+
+    This contract intentionally exposes a single authenticated read endpoint.
+    It assumes the caller presents a valid bearer token for a signed-in user and
+    selects an active organization context that the user belongs to.
+servers:
+  - url: http://127.0.0.1:8787
+    description: Local mock server
+tags:
+  - name: Properties
+    description: Org-scoped property reads
+security:
+  - bearerAuth: []
+paths:
+  /v1/properties:
+    get:
+      tags:
+        - Properties
+      operationId: listProperties
+      summary: List properties for the caller's active organization
+      description: |
+        Returns non-deleted properties belonging to the org identified by
+        `X-Scout-Org-Id`. The authenticated user must hold an active
+        `org_memberships` row for that org.
+      parameters:
+        - $ref: '#/components/parameters/ScoutOrgId'
+        - name: limit
+          in: query
+          description: Maximum number of properties to return.
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 200
+            default: 50
+      responses:
+        '200':
+          description: Org-scoped property list
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PropertyListResponse'
+              examples:
+                success:
+                  value:
+                    data:
+                      - id: 30000000-0000-0000-0000-000000000001
+                        org_id: 10000000-0000-0000-0000-000000000001
+                        name: Property One
+                        address_line1: 123 Test Street
+                        city: Raleigh
+                        state: NC
+                        postal_code: "27601"
+                        country_code: US
+                        updated_at: "2026-04-09T13:00:00Z"
+                        revision: 3
+                    meta:
+                      org_id: 10000000-0000-0000-0000-000000000001
+                      count: 1
+                      limit: 50
+        '400':
+          description: Missing or invalid active org header
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Missing or invalid bearer token
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Authenticated user is not an active member of the requested org
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        Supabase access token representing the signed-in user. Server-side auth
+        resolves the caller identity from the token and applies org membership
+        checks before querying canonical tables.
+  parameters:
+    ScoutOrgId:
+      name: X-Scout-Org-Id
+      in: header
+      required: true
+      description: |
+        Active organization context selected by the client. Must match an org
+        where the authenticated user has a non-deleted membership.
+      schema:
+        type: string
+        format: uuid
+  schemas:
+    Property:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - org_id
+        - name
+        - updated_at
+        - revision
+      properties:
+        id:
+          type: string
+          format: uuid
+        org_id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        address_line1:
+          type:
+            - string
+            - "null"
+        city:
+          type:
+            - string
+            - "null"
+        state:
+          type:
+            - string
+            - "null"
+        postal_code:
+          type:
+            - string
+            - "null"
+        country_code:
+          type:
+            - string
+            - "null"
+        updated_at:
+          type: string
+          format: date-time
+        revision:
+          type: integer
+          minimum: 1
+    PropertyListResponse:
+      type: object
+      additionalProperties: false
+      required:
+        - data
+        - meta
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/Property'
+        meta:
+          type: object
+          additionalProperties: false
+          required:
+            - org_id
+            - count
+            - limit
+          properties:
+            org_id:
+              type: string
+              format: uuid
+            count:
+              type: integer
+              minimum: 0
+            limit:
+              type: integer
+              minimum: 1
+    ErrorResponse:
+      type: object
+      additionalProperties: false
+      required:
+        - error
+      properties:
+        error:
+          type: object
+          additionalProperties: false
+          required:
+            - code
+            - message
+          properties:
+            code:
+              type: string
+            message:
+              type: string

@@ -1,0 +1,49 @@
+{
+  "tokens": {
+    "owner-token": "00000000-0000-0000-0000-000000000001",
+    "viewer-token": "00000000-0000-0000-0000-000000000004",
+    "outsider-token": "00000000-0000-0000-0000-000000000005"
+  },
+  "memberships": [
+    {
+      "org_id": "10000000-0000-0000-0000-000000000001",
+      "user_id": "00000000-0000-0000-0000-000000000001",
+      "role": "owner",
+      "deleted_at": null
+    },
+    {
+      "org_id": "10000000-0000-0000-0000-000000000001",
+      "user_id": "00000000-0000-0000-0000-000000000004",
+      "role": "viewer",
+      "deleted_at": null
+    }
+  ],
+  "properties": [
+    {
+      "id": "30000000-0000-0000-0000-000000000001",
+      "org_id": "10000000-0000-0000-0000-000000000001",
+      "name": "Property One",
+      "address_line1": "123 Test Street",
+      "city": "Raleigh",
+      "state": "NC",
+      "postal_code": "27601",
+      "country_code": "US",
+      "updated_at": "2026-04-09T13:00:00Z",
+      "revision": 3,
+      "deleted_at": null
+    },
+    {
+      "id": "30000000-0000-0000-0000-000000000002",
+      "org_id": "10000000-0000-0000-0000-000000000001",
+      "name": "Deleted Property",
+      "address_line1": "9 Old Lane",
+      "city": "Raleigh",
+      "state": "NC",
+      "postal_code": "27602",
+      "country_code": "US",
+      "updated_at": "2026-04-08T13:00:00Z",
+      "revision": 2,
+      "deleted_at": "2026-04-09T12:00:00Z"
+    }
+  ]
+}
