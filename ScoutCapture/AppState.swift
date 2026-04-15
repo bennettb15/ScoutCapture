@@ -21,11 +21,89 @@ struct SupabaseRuntimeConfiguration {
     }
 }
 
+enum CutoverPhase: String, CaseIterable {
+    case phaseA = "phase_a"
+    case phaseB = "phase_b"
+    case phaseC = "phase_c"
+
+    var displayName: String {
+        switch self {
+        case .phaseA:
+            return "Phase A"
+        case .phaseB:
+            return "Phase B"
+        case .phaseC:
+            return "Phase C"
+        }
+    }
+
+    var summary: String {
+        switch self {
+        case .phaseA:
+            return "iCloud read/write"
+        case .phaseB:
+            return "iCloud read/write + Supabase metadata shadow-write"
+        case .phaseC:
+            return "Supabase canonical read/write + iCloud passive cache/DR"
+        }
+    }
+
+    var logDescription: String {
+        "\(displayName) (\(summary))"
+    }
+}
+
+// 2C-08 rollback is operator-driven and restart-based. This catalog is only used to
+// make the intended rollback posture explicit in startup logs.
+enum CutoverRollbackTrigger: String, CaseIterable {
+    case operatorFlagRollback = "operator_flag_rollback"
+    case phaseBShadowWriteInstability = "phase_b_shadow_write_instability"
+    case phaseCCanonicalPathInstability = "phase_c_canonical_path_instability"
+    case unexpectedRemoteMetadataDivergence = "unexpected_remote_metadata_divergence"
+
+    var summary: String {
+        switch self {
+        case .operatorFlagRollback:
+            return "Operator changes cutover flags and restarts the app"
+        case .phaseBShadowWriteInstability:
+            return "Phase B metadata shadow-write failures or instability"
+        case .phaseCCanonicalPathInstability:
+            return "Phase C canonical Supabase read/write instability"
+        case .unexpectedRemoteMetadataDivergence:
+            return "Unexpected remote metadata divergence during cutover"
+        }
+    }
+
+    static var restartCatalogForLogs: String {
+        allCases.map { "\($0.rawValue)=\($0.summary)" }.joined(separator: " | ")
+    }
+}
+
 struct BackendFeatureFlags {
     let supabaseEnabled: Bool
     let shadowWriteEnabled: Bool
     let supabaseReadEnabled: Bool
+    let supabasePropertyReadEnabled: Bool
     let mediaSupabaseUploadEnabled: Bool
+
+    // The cutover phase is derived from the existing backend flags. Property-list
+    // remote reads remain separately controlled by `supabase_property_read_enabled`
+    // so the stabilized 2C-07 property refresh behavior is not coupled to phase.
+    // `supabase_enabled` only indicates backend availability/bootstrap posture.
+    // The actual A/B/C cutover meaning comes from `shadow_write_enabled` and
+    // `supabase_read_enabled`.
+    var cutoverPhase: CutoverPhase {
+        if !supabaseEnabled {
+            return .phaseA
+        }
+        if supabaseReadEnabled {
+            return .phaseC
+        }
+        if shadowWriteEnabled {
+            return .phaseB
+        }
+        return .phaseA
+    }
 
     static func load(
         bundle: Bundle = .main,
@@ -35,6 +113,7 @@ struct BackendFeatureFlags {
             supabaseEnabled: Self.boolValue(for: "supabase_enabled", bundle: bundle, userDefaults: userDefaults),
             shadowWriteEnabled: Self.boolValue(for: "shadow_write_enabled", bundle: bundle, userDefaults: userDefaults),
             supabaseReadEnabled: Self.boolValue(for: "supabase_read_enabled", bundle: bundle, userDefaults: userDefaults),
+            supabasePropertyReadEnabled: Self.boolValue(for: "supabase_property_read_enabled", bundle: bundle, userDefaults: userDefaults),
             mediaSupabaseUploadEnabled: Self.boolValue(for: "media_supabase_upload_enabled", bundle: bundle, userDefaults: userDefaults)
         )
     }
@@ -82,6 +161,26 @@ enum AuthenticationFlowResult: Equatable {
 }
 
 final class AppState: ObservableObject {
+    typealias PropertyShadowWriteOverride = (Property) async throws -> Void
+    typealias SessionShadowWriteOverride = (Property, Session, SessionMetadata) async throws -> Void
+
+    struct PendingSupabaseMediaBackfillCandidate: Equatable {
+        let propertyID: UUID
+        let sessionID: UUID
+        let shotID: UUID
+        let uploadState: String
+        let uploadAttempts: Int
+    }
+
+    struct SupabaseMediaBackfillRunSummary: Equatable {
+        let didStart: Bool
+        let reason: String
+        let discoveredCount: Int
+        let excludedInFlightCount: Int
+        let skippedRetryCapCount: Int
+        let attemptedCount: Int
+    }
+
     enum PropertyCreationError: LocalizedError {
         case missingPropertyName
         case missingOrganization
@@ -238,6 +337,213 @@ final class AppState: ObservableObject {
         }
     }
 
+    private struct SupabasePropertyIdentityRecord: Decodable {
+        let id: UUID
+        let orgID: UUID
+        let name: String
+
+        enum CodingKeys: String, CodingKey {
+            case id
+            case orgID = "org_id"
+            case name
+        }
+    }
+
+    private struct RemotePropertyRecord: Decodable {
+        let id: UUID
+        let orgID: UUID
+        let folderID: String?
+        let clientName: String?
+        let clientEmail: String?
+        let clientPhone: String?
+        let name: String
+        let addressLine1: String
+        let city: String
+        let state: String
+        let postalCode: String
+        let baselineSessionID: UUID?
+        let isArchived: Bool
+        let createdAt: Date?
+        let updatedAt: Date
+
+        enum CodingKeys: String, CodingKey {
+            case id
+            case orgID = "org_id"
+            case folderID = "folder_id"
+            case clientName = "client_name"
+            case clientEmail = "client_email"
+            case clientPhone = "client_phone"
+            case name
+            case addressLine1 = "address_line1"
+            case city
+            case state
+            case postalCode = "postal_code"
+            case baselineSessionID = "baseline_session_id"
+            case isArchived = "is_archived"
+            case createdAt = "created_at"
+            case updatedAt = "updated_at"
+        }
+    }
+
+    private struct SupabaseOrgIdentityRecord: Decodable {
+        let id: UUID
+    }
+
+    private enum RemotePropertyFetchError: LocalizedError {
+        case missingClient
+        case missingActiveOrganization
+        case timedOut
+        case emptyResponseRejected(localCacheCount: Int)
+        case orgScopeMismatch(expected: UUID, actual: UUID, propertyID: UUID)
+        case duplicatePropertyID(UUID)
+        case invalidPropertyName(UUID)
+        case invalidAddressLine1(UUID)
+        case invalidCity(UUID)
+        case invalidState(UUID)
+        case invalidPostalCode(UUID)
+        case invalidUpdatedAt(UUID)
+        case invalidCreatedAt(UUID)
+        case missingLocalCreatedAtFallback(UUID)
+
+        var errorDescription: String? {
+            switch self {
+            case .missingClient:
+                return "Supabase client is unavailable for remote property fetch."
+            case .missingActiveOrganization:
+                return "An active organization is required for remote property fetch."
+            case .timedOut:
+                return "Remote property fetch timed out after 3 seconds."
+            case let .emptyResponseRejected(localCacheCount):
+                return "Rejected empty remote property response because local cache contains \(localCacheCount) records."
+            case let .orgScopeMismatch(expected, actual, propertyID):
+                return "Rejected remote property \(propertyID.uuidString) because org scope \(actual.uuidString) did not match active org \(expected.uuidString)."
+            case let .duplicatePropertyID(propertyID):
+                return "Rejected remote property response because duplicate property ID \(propertyID.uuidString) was detected."
+            case let .invalidPropertyName(propertyID):
+                return "Rejected remote property \(propertyID.uuidString) because name was empty."
+            case let .invalidAddressLine1(propertyID):
+                return "Rejected remote property \(propertyID.uuidString) because address_line1 was empty."
+            case let .invalidCity(propertyID):
+                return "Rejected remote property \(propertyID.uuidString) because city was empty."
+            case let .invalidState(propertyID):
+                return "Rejected remote property \(propertyID.uuidString) because state was empty."
+            case let .invalidPostalCode(propertyID):
+                return "Rejected remote property \(propertyID.uuidString) because postal_code was empty."
+            case let .invalidUpdatedAt(propertyID):
+                return "Rejected remote property \(propertyID.uuidString) because updated_at was invalid or unexpected."
+            case let .invalidCreatedAt(propertyID):
+                return "Rejected remote property \(propertyID.uuidString) because created_at was invalid or unexpected."
+            case let .missingLocalCreatedAtFallback(propertyID):
+                return "Rejected remote property \(propertyID.uuidString) because created_at was null and no local createdAt fallback existed."
+            }
+        }
+    }
+
+    private struct SupabaseSessionIdentityRecord: Decodable {
+        let id: UUID
+        let orgID: UUID
+        let propertyID: UUID
+        let title: String?
+        let status: String
+        let startedAt: String
+
+        enum CodingKeys: String, CodingKey {
+            case id
+            case orgID = "org_id"
+            case propertyID = "property_id"
+            case title
+            case status
+            case startedAt = "started_at"
+        }
+    }
+
+    private struct SupabaseShotIdentityRecord: Decodable {
+        let id: UUID
+        let orgID: UUID
+        let sessionID: UUID
+        let storageBucket: String?
+        let storagePath: String?
+        let checksumSHA256: String?
+        let uploadState: String
+
+        enum CodingKeys: String, CodingKey {
+            case id
+            case orgID = "org_id"
+            case sessionID = "session_id"
+            case storageBucket = "storage_bucket"
+            case storagePath = "storage_path"
+            case checksumSHA256 = "checksum_sha256"
+            case uploadState = "upload_state"
+        }
+    }
+
+    private struct SupabaseShotFinalizeReadinessRecord: Decodable {
+        let id: UUID
+        let orgID: UUID
+        let sessionID: UUID
+        let storageBucket: String?
+        let storagePath: String?
+        let checksumSHA256: String?
+        let byteSize: Int?
+        let uploadState: String
+
+        enum CodingKeys: String, CodingKey {
+            case id
+            case orgID = "org_id"
+            case sessionID = "session_id"
+            case storageBucket = "storage_bucket"
+            case storagePath = "storage_path"
+            case checksumSHA256 = "checksum_sha256"
+            case byteSize = "byte_size"
+            case uploadState = "upload_state"
+        }
+    }
+
+    struct LegacyMigrationPreflightResult {
+        let generatedAt: Date
+        let activeOrganizationID: UUID
+        let ledgerURL: URL
+        let reportURL: URL
+        let summary: LegacyMigrationPreflightLedger.Summary
+    }
+
+    struct LegacyMigrationStep2AResult {
+        let runID: UUID
+        let activeOrganizationID: UUID
+        let ledgerURL: URL
+        let verifiedPropertyCount: Int
+        let verifiedSessionCount: Int
+    }
+
+    struct LegacyMigrationStep2BSlice1Result {
+        let runID: UUID
+        let activeOrganizationID: UUID
+        let ledgerURL: URL
+        let verifiedShotCount: Int
+    }
+
+    struct LegacyMigrationStep2BSlice2AResult {
+        let runID: UUID
+        let activeOrganizationID: UUID
+        let ledgerURL: URL
+        let uploadedMediaCount: Int
+    }
+
+    struct LegacyMigrationStep2BSlice2BReadinessResult {
+        let runID: UUID
+        let activeOrganizationID: UUID
+        let ledgerURL: URL
+        let verifiedMediaCount: Int
+        let readyForFinalizeCount: Int
+    }
+
+    struct LegacyMigrationStep2BSlice2BFinalizeResult {
+        let runID: UUID
+        let activeOrganizationID: UUID
+        let ledgerURL: URL
+        let verifiedMediaCount: Int
+    }
+
     @Published var properties: [Property] = []
     @Published var organizations: [Organization] = []
     @Published private(set) var isLoading: Bool = true
@@ -278,6 +584,8 @@ final class AppState: ObservableObject {
     private var supabaseClient: SupabaseClient?
     private let userDefaults: UserDefaults
     private let cloudBackupManager: CloudBackupManager
+    private let propertyShadowWriteOverride: PropertyShadowWriteOverride?
+    private let sessionShadowWriteOverride: SessionShadowWriteOverride?
     private let selectedPropertyDefaultsKey = "scoutcapture.selectedPropertyID"
     private let activeOrganizationDefaultsKeyPrefix = "scoutcapture.activeOrganizationID"
     private let propertyActivationTimestampsDefaultsKey = "scoutcapture.propertyActivationTimestamps.v1"
@@ -296,6 +604,8 @@ final class AppState: ObservableObject {
     private var cancellables: Set<AnyCancellable> = []
     private var liveSyncTimer: Timer?
     private var lastLiveSyncFingerprint: String?
+    private var lastBackgroundRemoteFingerprint: String?
+    private var lastBackgroundRemoteAttemptCompletedAt: Date?
     private var liveSyncBurstUntil: Date?
     private var lastLiveSyncRefreshAt: Date?
     private var isBackgroundRefreshInFlight: Bool = false
@@ -308,7 +618,10 @@ final class AppState: ObservableObject {
     // Keep a short grace for non-empty in-memory states, but do not stall first-load empty hubs.
     private let startupFallbackGraceWindow: TimeInterval = 25.0
     private let supabaseOperationalMediaBucket = "scoutcapture-originals"
+    private let maximumSupabaseMediaUploadAttempts = 5
+    private let failedSupabaseMediaRetryCooldown: TimeInterval = 30
     private var inFlightSupabaseMediaOperations: Set<String> = []
+    private var isSupabaseMediaBackfillInProgress: Bool = false
     private var authStateChangesTask: Task<Void, Never>?
     private var lastEnsuredUserProfileID: UUID?
     private var allProperties: [Property] = []
@@ -320,6 +633,10 @@ final class AppState: ObservableObject {
 
     var requiresAuthentication: Bool {
         backendFeatureFlags.supabaseEnabled && supabaseClient != nil
+    }
+
+    var cutoverPhase: CutoverPhase {
+        backendFeatureFlags.cutoverPhase
     }
 
     var isAuthenticated: Bool {
@@ -416,12 +733,16 @@ final class AppState: ObservableObject {
 
     init(
         localStore: LocalStore? = nil,
-        userDefaults: UserDefaults = .standard
+        userDefaults: UserDefaults = .standard,
+        propertyShadowWriteOverride: PropertyShadowWriteOverride? = nil,
+        sessionShadowWriteOverride: SessionShadowWriteOverride? = nil
     ) {
         self.injectedLocalStore = localStore
         self.userDefaults = userDefaults
         self.cloudBackupManager = CloudBackupManager(userDefaults: userDefaults)
         self.cloudBackupStatus = cloudBackupManager.status
+        self.propertyShadowWriteOverride = propertyShadowWriteOverride
+        self.sessionShadowWriteOverride = sessionShadowWriteOverride
         self.supabaseConfiguration = AppState.loadSupabaseConfiguration()
         self.backendFeatureFlags = BackendFeatureFlags.load(userDefaults: userDefaults)
 
@@ -448,6 +769,7 @@ final class AppState: ObservableObject {
             }
             .store(in: &cancellables)
 
+        logCutoverConfiguration()
         prepareCollaborativeBackendBootstrap()
     }
 
@@ -465,6 +787,53 @@ final class AppState: ObservableObject {
             url: rawURL.flatMap(URL.init(string:)),
             anonKey: rawAnonKey
         )
+    }
+
+    static func cutoverConfigurationWarnings(for flags: BackendFeatureFlags) -> [String] {
+        var warnings: [String] = []
+
+        if !flags.supabaseEnabled && flags.shadowWriteEnabled {
+            warnings.append("shadow_write_enabled is ignored while supabase_enabled=false; restart rollback lands in Phase A.")
+        }
+        if !flags.supabaseEnabled && flags.supabaseReadEnabled {
+            warnings.append("supabase_read_enabled is ignored while supabase_enabled=false; operational Supabase reads stay off until restart with supabase_enabled=true.")
+        }
+        if !flags.supabaseEnabled && flags.supabasePropertyReadEnabled {
+            warnings.append("supabase_property_read_enabled is ignored while supabase_enabled=false; property-list remote reads remain local/iCloud only.")
+        }
+        if !flags.supabaseEnabled && flags.mediaSupabaseUploadEnabled {
+            warnings.append("media_supabase_upload_enabled is ignored while supabase_enabled=false; captures stay in the existing local pending state until restart into a Supabase-enabled phase.")
+        }
+        if flags.supabaseEnabled && !flags.shadowWriteEnabled && !flags.supabaseReadEnabled {
+            warnings.append("supabase_enabled=true while shadow_write_enabled=false and supabase_read_enabled=false leaves the app in an effective Phase A posture with backend bootstrap only.")
+        }
+        if flags.supabaseEnabled && flags.supabaseReadEnabled && !flags.shadowWriteEnabled {
+            warnings.append("supabase_read_enabled=true while shadow_write_enabled=false selects Phase C directly; confirm this intentional skip past Phase B shadow-write.")
+        }
+        if flags.supabaseEnabled && flags.supabaseReadEnabled && flags.shadowWriteEnabled {
+            warnings.append("supabase_read_enabled=true and shadow_write_enabled=true resolves to Phase C; shadow-write remains enabled but no longer defines the canonical phase.")
+        }
+
+        return warnings
+    }
+
+    private func logCutoverConfiguration() {
+        print(
+            "[Cutover] phase=\(cutoverPhase.rawValue) " +
+            "summary=\"\(cutoverPhase.summary)\" " +
+            "restartRollback=true " +
+            "propertyReadSeparate=\(backendFeatureFlags.supabasePropertyReadEnabled)"
+        )
+        print("[Cutover] rollback_catalog=\(CutoverRollbackTrigger.restartCatalogForLogs)")
+
+        let warnings = AppState.cutoverConfigurationWarnings(for: backendFeatureFlags)
+        if warnings.isEmpty {
+            print("[Cutover] validation=ok")
+        } else {
+            for warning in warnings {
+                print("[Cutover][warning] \(warning)")
+            }
+        }
     }
 
     private func prepareCollaborativeBackendBootstrap() {
@@ -488,6 +857,7 @@ final class AppState: ObservableObject {
             "[Supabase] dev bootstrap enabled " +
             "shadowWrite=\(backendFeatureFlags.shadowWriteEnabled) " +
             "read=\(backendFeatureFlags.supabaseReadEnabled) " +
+            "propertyRead=\(backendFeatureFlags.supabasePropertyReadEnabled) " +
             "mediaUpload=\(backendFeatureFlags.mediaSupabaseUploadEnabled)"
         )
         if let url = supabaseConfiguration.url, let anonKey = supabaseConfiguration.anonKey {
@@ -569,8 +939,32 @@ final class AppState: ObservableObject {
                 self.isOrganizationContextReady = ready
             }
             self.applyTenantScopedState()
+            if ready, activeOrganizationID != nil {
+                self.queuePendingSupabaseMediaBackfillIfNeeded(reason: "org_context_ready")
+            }
         }
     }
+
+#if DEBUG
+    @MainActor
+    func _debugSetOrganizationContextForTests(
+        memberships: [ActiveOrganizationMembership],
+        activeOrganizationID: UUID?,
+        ready: Bool
+    ) {
+        if accessibleOrganizations != memberships {
+            accessibleOrganizations = memberships
+        }
+        if self.activeOrganizationID != activeOrganizationID {
+            self.activeOrganizationID = activeOrganizationID
+            persistActiveOrganizationID()
+        }
+        if isOrganizationContextReady != ready {
+            isOrganizationContextReady = ready
+        }
+        applyTenantScopedState()
+    }
+#endif
 
     private func handleOrganizationRefreshFailure() {
         DispatchQueue.main.async {
@@ -841,6 +1235,20 @@ final class AppState: ObservableObject {
         sessionID: UUID,
         shotID: UUID
     ) {
+        // 2C-08 keeps the existing local pending shot state when immediate media
+        // upload is disabled; no alternate uploadState is introduced here.
+        if backendFeatureFlags.cutoverPhase == .phaseB,
+           backendFeatureFlags.supabaseEnabled,
+           !backendFeatureFlags.mediaSupabaseUploadEnabled {
+            print(
+                "[CutoverMedia] result=skipped " +
+                "reason=media_upload_disabled " +
+                "phase=\(cutoverPhase.rawValue) " +
+                "state_remains=pending " +
+                "shotID=\(shotID.uuidString)"
+            )
+        }
+
         guard backendFeatureFlags.supabaseEnabled,
               backendFeatureFlags.mediaSupabaseUploadEnabled,
               supabaseClient != nil else {
@@ -858,6 +1266,164 @@ final class AppState: ObservableObject {
                 shotID: shotID
             )
         }
+    }
+
+    private func queuePendingSupabaseMediaBackfillIfNeeded(reason: String) {
+        guard backendFeatureFlags.supabaseEnabled,
+              backendFeatureFlags.mediaSupabaseUploadEnabled,
+              supabaseClient != nil else {
+            return
+        }
+        if requiresAuthentication &&
+            (!isAuthenticationReady || !isOrganizationContextReady || activeOrganizationID == nil) {
+            return
+        }
+
+        Task(priority: .utility) { [weak self] in
+            _ = await self?.runPendingSupabaseMediaBackfill(reason: reason)
+        }
+    }
+
+    @discardableResult
+    private func runPendingSupabaseMediaBackfill(reason: String) async -> SupabaseMediaBackfillRunSummary {
+        guard beginSupabaseMediaBackfillRun() else {
+            print("[SupabaseMediaBackfill] skipped reason=in_progress trigger=\(reason)")
+            return SupabaseMediaBackfillRunSummary(
+                didStart: false,
+                reason: reason,
+                discoveredCount: 0,
+                excludedInFlightCount: 0,
+                skippedRetryCapCount: 0,
+                attemptedCount: 0
+            )
+        }
+        defer { endSupabaseMediaBackfillRun() }
+
+        let discovery = discoverPendingSupabaseMediaBackfillCandidates()
+        print(
+            "[SupabaseMediaBackfill] result=start " +
+            "trigger=\(reason) " +
+            "discovered=\(discovery.candidates.count) " +
+            "excludedInFlight=\(discovery.excludedInFlightCount)"
+        )
+
+        var skippedRetryCapCount = 0
+        var attemptedCount = 0
+
+        for candidate in discovery.candidates {
+            if candidate.uploadAttempts >= maximumSupabaseMediaUploadAttempts {
+                skippedRetryCapCount += 1
+                print(
+                    "[SupabaseMediaBackfill] result=skipped " +
+                    "reason=retry_cap " +
+                    "shotID=\(candidate.shotID.uuidString) " +
+                    "attempts=\(candidate.uploadAttempts) " +
+                    "cap=\(maximumSupabaseMediaUploadAttempts)"
+                )
+                continue
+            }
+
+            let operationKey = supabaseUploadOperationKey(
+                sessionID: candidate.sessionID,
+                shotID: candidate.shotID
+            )
+            guard beginSupabaseMediaOperation(operationKey) else { continue }
+
+            attemptedCount += 1
+            print(
+                "[SupabaseMediaBackfill] result=dispatch " +
+                "shotID=\(candidate.shotID.uuidString) " +
+                "state=\(candidate.uploadState) " +
+                "attempts=\(candidate.uploadAttempts)"
+            )
+
+            await performOperationalMediaUpload(
+                propertyID: candidate.propertyID,
+                sessionID: candidate.sessionID,
+                shotID: candidate.shotID
+            )
+            endSupabaseMediaOperation(operationKey)
+        }
+
+        print(
+            "[SupabaseMediaBackfill] result=complete " +
+            "trigger=\(reason) " +
+            "discovered=\(discovery.candidates.count) " +
+            "excludedInFlight=\(discovery.excludedInFlightCount) " +
+            "skippedRetryCap=\(skippedRetryCapCount) " +
+            "attempted=\(attemptedCount)"
+        )
+
+        return SupabaseMediaBackfillRunSummary(
+            didStart: true,
+            reason: reason,
+            discoveredCount: discovery.candidates.count,
+            excludedInFlightCount: discovery.excludedInFlightCount,
+            skippedRetryCapCount: skippedRetryCapCount,
+            attemptedCount: attemptedCount
+        )
+    }
+
+    private func discoverPendingSupabaseMediaBackfillCandidates() -> (candidates: [PendingSupabaseMediaBackfillCandidate], excludedInFlightCount: Int) {
+        let inFlightOperations = snapshotInFlightSupabaseMediaOperations()
+        let properties = ((try? localStore.fetchProperties()) ?? [])
+            .sorted { $0.id.uuidString < $1.id.uuidString }
+
+        var candidates: [PendingSupabaseMediaBackfillCandidate] = []
+        var excludedInFlightCount = 0
+
+        for property in properties {
+            guard canAccessOrganization(property.orgId) else { continue }
+
+            let sessions = ((try? localStore.fetchSessions(propertyID: property.id)) ?? [])
+                .sorted {
+                    if $0.startedAt != $1.startedAt { return $0.startedAt < $1.startedAt }
+                    return $0.id.uuidString < $1.id.uuidString
+                }
+
+            for session in sessions {
+                guard let metadata = try? localStore.loadSessionMetadata(propertyID: property.id, sessionID: session.id) else {
+                    continue
+                }
+
+                let orderedShots = metadata.shots.sorted {
+                    if $0.createdAt != $1.createdAt { return $0.createdAt < $1.createdAt }
+                    return $0.shotID.uuidString < $1.shotID.uuidString
+                }
+
+                for shot in orderedShots {
+                    let isEligibleFailedRetry =
+                        shot.uploadState == "failed" &&
+                        Date().timeIntervalSince(shot.updatedAt) >= failedSupabaseMediaRetryCooldown
+                    guard shot.uploadState == "pending" ||
+                            shot.uploadState == "uploading" ||
+                            isEligibleFailedRetry else {
+                        continue
+                    }
+
+                    let operationKey = supabaseUploadOperationKey(
+                        sessionID: session.id,
+                        shotID: shot.shotID
+                    )
+                    if inFlightOperations.contains(operationKey) {
+                        excludedInFlightCount += 1
+                        continue
+                    }
+
+                    candidates.append(
+                        PendingSupabaseMediaBackfillCandidate(
+                            propertyID: property.id,
+                            sessionID: session.id,
+                            shotID: shot.shotID,
+                            uploadState: shot.uploadState,
+                            uploadAttempts: shot.uploadAttempts
+                        )
+                    )
+                }
+            }
+        }
+
+        return (candidates, excludedInFlightCount)
     }
 
     func ensureOperationalMediaAvailable(
@@ -903,6 +1469,117 @@ final class AppState: ObservableObject {
                 sessionID: sessionID,
                 shotID: shot.shotID
             )
+        }
+    }
+
+    private var isPhaseBMetadataShadowWriteEnabled: Bool {
+        backendFeatureFlags.cutoverPhase == .phaseB &&
+        backendFeatureFlags.shadowWriteEnabled
+    }
+
+    private func schedulePhaseBPropertyShadowWrite(for property: Property) {
+        guard isPhaseBMetadataShadowWriteEnabled else { return }
+        guard let orgID = property.orgId else {
+            print("[CutoverShadowWrite] skipped entity=property propertyID=\(property.id.uuidString) reason=missing_org_id")
+            return
+        }
+        guard canAccessOrganization(orgID) else {
+            print("[CutoverShadowWrite] skipped entity=property propertyID=\(property.id.uuidString) reason=inactive_org")
+            return
+        }
+        guard supabaseClient != nil else {
+            print("[CutoverShadowWrite] skipped entity=property propertyID=\(property.id.uuidString) reason=missing_client")
+            return
+        }
+
+        Task(priority: .utility) { [weak self] in
+            guard let self else { return }
+            do {
+                if let propertyShadowWriteOverride = self.propertyShadowWriteOverride {
+                    try await propertyShadowWriteOverride(property)
+                } else {
+                    let payload = self.makeSupabasePropertyPayload(
+                        propertyID: property.id,
+                        orgID: orgID,
+                        property: property,
+                        metadata: nil
+                    )
+                    try await self.upsertPropertyRowToSupabase(payload)
+                }
+
+                print(
+                    "[CutoverShadowWrite] result=success entity=property " +
+                    "phase=\(self.cutoverPhase.rawValue) propertyID=\(property.id.uuidString)"
+                )
+            } catch {
+                print(
+                    "[CutoverShadowWrite] result=failed entity=property " +
+                    "phase=\(self.cutoverPhase.rawValue) propertyID=\(property.id.uuidString) " +
+                    "error=\(error.localizedDescription)"
+                )
+            }
+        }
+    }
+
+    private func schedulePhaseBSessionShadowWrite(for session: Session) {
+        guard isPhaseBMetadataShadowWriteEnabled else { return }
+        guard let property = allProperties.first(where: { $0.id == session.propertyID }) ??
+            properties.first(where: { $0.id == session.propertyID }) else {
+            print("[CutoverShadowWrite] skipped entity=session sessionID=\(session.id.uuidString) reason=missing_property")
+            return
+        }
+        guard let orgID = property.orgId else {
+            print("[CutoverShadowWrite] skipped entity=session sessionID=\(session.id.uuidString) reason=missing_org_id")
+            return
+        }
+        guard canAccessOrganization(orgID) else {
+            print("[CutoverShadowWrite] skipped entity=session sessionID=\(session.id.uuidString) reason=inactive_org")
+            return
+        }
+        guard let metadata = try? localStore.loadSessionMetadata(propertyID: session.propertyID, sessionID: session.id) else {
+            print("[CutoverShadowWrite] skipped entity=session sessionID=\(session.id.uuidString) reason=missing_metadata")
+            return
+        }
+        guard supabaseClient != nil else {
+            print("[CutoverShadowWrite] skipped entity=session sessionID=\(session.id.uuidString) reason=missing_client")
+            return
+        }
+
+        Task(priority: .utility) { [weak self] in
+            guard let self else { return }
+            do {
+                if let sessionShadowWriteOverride = self.sessionShadowWriteOverride {
+                    try await sessionShadowWriteOverride(property, session, metadata)
+                } else {
+                    let propertyPayload = self.makeSupabasePropertyPayload(
+                        propertyID: property.id,
+                        orgID: orgID,
+                        property: property,
+                        metadata: metadata
+                    )
+                    let sessionPayload = self.makeSupabaseSessionPayload(
+                        sessionID: session.id,
+                        propertyID: property.id,
+                        orgID: orgID,
+                        property: property,
+                        metadata: metadata
+                    )
+                    try await self.upsertPropertyRowToSupabase(propertyPayload)
+                    try await self.upsertSessionRowToSupabase(sessionPayload)
+                }
+
+                print(
+                    "[CutoverShadowWrite] result=success entity=session " +
+                    "phase=\(self.cutoverPhase.rawValue) propertyID=\(property.id.uuidString) " +
+                    "sessionID=\(session.id.uuidString)"
+                )
+            } catch {
+                print(
+                    "[CutoverShadowWrite] result=failed entity=session " +
+                    "phase=\(self.cutoverPhase.rawValue) propertyID=\(property.id.uuidString) " +
+                    "sessionID=\(session.id.uuidString) error=\(error.localizedDescription)"
+                )
+            }
         }
     }
 
@@ -961,6 +1638,7 @@ final class AppState: ObservableObject {
                 shot.uploadState = "uploading"
                 shot.uploadAttempts += 1
                 shot.lastUploadError = nil
+                shot.updatedAt = Date()
             }
 
             failurePhase = "blobUpload"
@@ -1009,6 +1687,7 @@ final class AppState: ObservableObject {
                 shot.byteSize = byteSize
                 shot.uploadState = "uploaded"
                 shot.lastUploadError = nil
+                shot.updatedAt = Date()
             }
 
             print(
@@ -1025,6 +1704,7 @@ final class AppState: ObservableObject {
                 shot.byteSize = byteSize
                 shot.uploadState = "failed"
                 shot.lastUploadError = "Supabase \(failurePhase) error: \(error.localizedDescription)"
+                shot.updatedAt = Date()
             }
 
             print(
@@ -1145,49 +1825,24 @@ final class AppState: ObservableObject {
         }
 
         let property = properties.first(where: { $0.id == propertyID })
-        let organization = organizations.first(where: { $0.id == orgID })
-        let orgName = normalizedSupabaseText(
-            organization?.name ?? metadata.orgNameAtCapture
-        ) ?? "Organization \(orgID.uuidString)"
-        let propertyName = normalizedSupabaseText(
-            property?.name ?? metadata.propertyNameAtCapture
-        ) ?? "Property \(propertyID.uuidString)"
-
-        let propertyPayload = SupabasePropertyPayload(
-            id: propertyID,
+        let propertyPayload = makeSupabasePropertyPayload(
+            propertyID: propertyID,
             orgID: orgID,
-            name: propertyName,
-            addressLine1: normalizedSupabaseText(property?.address ?? metadata.propertyAddressAtCapture),
-            city: normalizedSupabaseText(property?.city ?? metadata.propertyCityAtCapture),
-            state: normalizedSupabaseText(property?.state ?? metadata.propertyStateAtCapture),
-            postalCode: normalizedSupabaseText(property?.zip ?? metadata.propertyZipAtCapture)
+            property: property,
+            metadata: metadata
         )
 
-        let sessionPayload = SupabaseSessionPayload(
-            id: sessionID,
-            orgID: orgID,
+        let sessionPayload = makeSupabaseSessionPayload(
+            sessionID: sessionID,
             propertyID: propertyID,
-            title: normalizedSupabaseText(metadata.propertyNameAtCapture ?? property?.name),
-            status: metadata.status.rawValue,
-            startedAt: metadata.startedAt.ISO8601Format(),
-            completedAt: metadata.endedAt?.ISO8601Format()
+            orgID: orgID,
+            property: property,
+            metadata: metadata
         )
 
         do {
-            try await client
-                .from("orgs")
-                .upsert(SupabaseOrgPayload(id: orgID, name: orgName), onConflict: "id", returning: .minimal)
-                .execute()
-
-            try await client
-                .from("properties")
-                .upsert(propertyPayload, onConflict: "id", returning: .minimal)
-                .execute()
-
-            try await client
-                .from("sessions")
-                .upsert(sessionPayload, onConflict: "id", returning: .minimal)
-                .execute()
+            try await upsertPropertyRowToSupabase(propertyPayload)
+            try await upsertSessionRowToSupabase(sessionPayload)
         } catch {
             print(
                 "[SupabaseSessionEnsure] result=failed " +
@@ -1197,7 +1852,7 @@ final class AppState: ObservableObject {
                 "error=\(error.localizedDescription)"
             )
             throw NSError(domain: "ScoutCapture.SupabaseMedia", code: 2, userInfo: [
-                NSLocalizedDescriptionKey: "Failed to ensure org/property/session rows before shot metadata write: \(error.localizedDescription)"
+                NSLocalizedDescriptionKey: "Failed to ensure property/session rows before shot metadata write: \(error.localizedDescription)"
             ])
         }
     }
@@ -1240,9 +1895,2573 @@ final class AppState: ObservableObject {
             .execute()
     }
 
+    private func makeSupabasePropertyPayload(
+        propertyID: UUID,
+        orgID: UUID,
+        property: Property?,
+        metadata: SessionMetadata?
+    ) -> SupabasePropertyPayload {
+        let propertyName = normalizedSupabaseText(
+            property?.name ?? metadata?.propertyNameAtCapture
+        ) ?? "Property \(propertyID.uuidString)"
+
+        return SupabasePropertyPayload(
+            id: propertyID,
+            orgID: orgID,
+            name: propertyName,
+            addressLine1: normalizedSupabaseText(property?.address ?? metadata?.propertyAddressAtCapture),
+            city: normalizedSupabaseText(property?.city ?? metadata?.propertyCityAtCapture),
+            state: normalizedSupabaseText(property?.state ?? metadata?.propertyStateAtCapture),
+            postalCode: normalizedSupabaseText(property?.zip ?? metadata?.propertyZipAtCapture)
+        )
+    }
+
+    private func makeSupabaseSessionPayload(
+        sessionID: UUID,
+        propertyID: UUID,
+        orgID: UUID,
+        property: Property?,
+        metadata: SessionMetadata
+    ) -> SupabaseSessionPayload {
+        SupabaseSessionPayload(
+            id: sessionID,
+            orgID: orgID,
+            propertyID: propertyID,
+            title: normalizedSupabaseText(metadata.propertyNameAtCapture ?? property?.name),
+            status: metadata.status.rawValue,
+            startedAt: metadata.startedAt.ISO8601Format(),
+            completedAt: metadata.endedAt?.ISO8601Format()
+        )
+    }
+
+    private func upsertPropertyRowToSupabase(_ payload: SupabasePropertyPayload) async throws {
+        guard let client = supabaseClient else { return }
+        try await client
+            .from("properties")
+            .upsert(payload, onConflict: "id", returning: .minimal)
+            .execute()
+    }
+
+    private func upsertSessionRowToSupabase(_ payload: SupabaseSessionPayload) async throws {
+        guard let client = supabaseClient else { return }
+        try await client
+            .from("sessions")
+            .upsert(payload, onConflict: "id", returning: .minimal)
+            .execute()
+    }
+
     private func normalizedSupabaseText(_ value: String?) -> String? {
         let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         return trimmed.isEmpty ? nil : trimmed
+    }
+
+    private struct RemoteLegacyMigrationSnapshot {
+        let properties: [SupabasePropertyIdentityRecord]
+        let sessions: [SupabaseSessionIdentityRecord]
+        let shots: [SupabaseShotIdentityRecord]
+    }
+
+    enum LegacyMigrationPreflightError: LocalizedError {
+        case missingSupabaseClient
+        case missingActiveOrganization
+
+        var errorDescription: String? {
+            switch self {
+            case .missingSupabaseClient:
+                return "Supabase must be configured before running the migration preflight."
+            case .missingActiveOrganization:
+                return "An active organization must be selected before running the migration preflight."
+            }
+        }
+    }
+
+    enum LegacyMigrationStep2AError: LocalizedError {
+        case missingSupabaseClient
+        case missingActiveOrganization
+        case missingLedger
+        case unsupportedLedgerSchema(Int)
+        case activeOrgDrift(expected: UUID, actual: UUID)
+        case missingRemoteActiveOrg(UUID)
+        case localPropertyMissing(UUID)
+        case localSessionMissing(UUID)
+        case localSessionMetadataMissing(UUID)
+        case localShotMissing(UUID)
+        case verificationFailed(String)
+
+        var errorDescription: String? {
+            switch self {
+            case .missingSupabaseClient:
+                return "Supabase must be configured before running Step 2A."
+            case .missingActiveOrganization:
+                return "An active organization must be selected before running Step 2A."
+            case .missingLedger:
+                return "Run the legacy migration preflight before Step 2A."
+            case .unsupportedLedgerSchema(let version):
+                return "Legacy migration ledger schema version \(version) is not supported by this app."
+            case .activeOrgDrift(let expected, let actual):
+                return "Legacy migration ledger is pinned to org \(expected.uuidString), but the active org is \(actual.uuidString)."
+            case .missingRemoteActiveOrg(let orgID):
+                return "Remote active org \(orgID.uuidString) does not exist. Step 2A cannot proceed."
+            case .localPropertyMissing(let propertyID):
+                return "Local property \(propertyID.uuidString) could not be loaded for Step 2A."
+            case .localSessionMissing(let sessionID):
+                return "Local session \(sessionID.uuidString) could not be loaded for Step 2A."
+            case .localSessionMetadataMissing(let sessionID):
+                return "Local session metadata \(sessionID.uuidString) could not be loaded for Step 2A."
+            case .localShotMissing(let shotID):
+                return "Local shot \(shotID.uuidString) could not be loaded for Step 2B Slice 1."
+            case .verificationFailed(let description):
+                return description
+            }
+        }
+    }
+
+    func runLegacyMigrationPreflight() async throws -> LegacyMigrationPreflightResult {
+        guard let client = supabaseClient else {
+            throw LegacyMigrationPreflightError.missingSupabaseClient
+        }
+        guard let activeOrganizationID else {
+            throw LegacyMigrationPreflightError.missingActiveOrganization
+        }
+
+        let generatedAt = Date()
+        let remoteSnapshot = try await fetchLegacyMigrationRemoteSnapshot(
+            client: client,
+            activeOrganizationID: activeOrganizationID
+        )
+        let remotePropertiesByID = Dictionary(uniqueKeysWithValues: remoteSnapshot.properties.map { ($0.id, $0) })
+        let remoteSessionsByID = Dictionary(uniqueKeysWithValues: remoteSnapshot.sessions.map { ($0.id, $0) })
+        let remoteShotsByID = Dictionary(uniqueKeysWithValues: remoteSnapshot.shots.map { ($0.id, $0) })
+        let remotePropertiesByName = Dictionary(grouping: remoteSnapshot.properties, by: { legacyMigrationToken($0.name) })
+        let remoteSessionsByProperty = Dictionary(grouping: remoteSnapshot.sessions, by: \.propertyID)
+        let remoteShotsBySession = Dictionary(grouping: remoteSnapshot.shots, by: \.sessionID)
+
+        let localProperties = try localStore.fetchProperties()
+            .sorted { $0.createdAt < $1.createdAt }
+
+        var propertyEntries: [LegacyMigrationPreflightLedger.EntityEntry] = []
+        var sessionEntries: [LegacyMigrationPreflightLedger.EntityEntry] = []
+        var shotEntries: [LegacyMigrationPreflightLedger.EntityEntry] = []
+        var mediaEntries: [LegacyMigrationPreflightLedger.MediaEntry] = []
+
+        let iso8601 = ISO8601DateFormatter()
+
+        for property in localProperties {
+            let propertyName = normalizedSupabaseText(property.name) ?? ""
+            var propertyReasons: [String] = []
+            if property.orgId != activeOrganizationID {
+                propertyReasons.append("propertyOrgMismatch")
+            }
+            if propertyName.isEmpty {
+                propertyReasons.append("propertyNameMissing")
+            }
+
+            let propertyB1Remote = remotePropertiesByID[property.id]
+            let propertyB2WarningIDs: [UUID] = {
+                guard propertyB1Remote == nil else { return [] }
+                return (remotePropertiesByName[legacyMigrationToken(property.name)] ?? [])
+                    .map(\.id)
+                    .filter { $0 != property.id }
+                    .sorted { $0.uuidString < $1.uuidString }
+            }()
+            if !propertyB2WarningIDs.isEmpty {
+                propertyReasons.append("possibleRemoteDuplicateByExactName")
+            }
+
+            let propertyEligible = propertyReasons.isEmpty
+            propertyEntries.append(
+                LegacyMigrationPreflightLedger.EntityEntry(
+                    entityType: "property",
+                    localID: property.id,
+                    parentLocalID: nil,
+                    propertyID: property.id,
+                    sessionID: nil,
+                    activeOrganizationID: activeOrganizationID,
+                    eligible: propertyEligible,
+                    b1RemoteExists: propertyB1Remote != nil,
+                    b2WarningRemoteIDs: propertyB2WarningIDs,
+                    reasons: propertyReasons.sorted(),
+                    attributes: [
+                        "name": propertyName,
+                        "folderID": property.folderId ?? "",
+                        "address": normalizedSupabaseText(property.address) ?? "",
+                        "city": normalizedSupabaseText(property.city) ?? "",
+                        "state": normalizedSupabaseText(property.state) ?? "",
+                        "postalCode": normalizedSupabaseText(property.zip) ?? ""
+                    ]
+                )
+            )
+
+            guard property.orgId == activeOrganizationID else {
+                continue
+            }
+
+            let localSessions = try localStore.fetchSessions(propertyID: property.id)
+                .sorted { $0.startedAt < $1.startedAt }
+            for session in localSessions {
+                let metadata = try localStore.loadSessionMetadata(propertyID: property.id, sessionID: session.id)
+                let sessionTitle = normalizedSupabaseText(metadata.propertyNameAtCapture ?? property.name) ?? ""
+                var sessionReasons: [String] = []
+                if !propertyEligible {
+                    sessionReasons.append("parentPropertyIneligible")
+                }
+                if session.propertyID != property.id {
+                    sessionReasons.append("sessionPropertyMismatch")
+                }
+                if metadata.propertyID != property.id {
+                    sessionReasons.append("sessionMetadataPropertyMismatch")
+                }
+                if metadata.sessionID != session.id {
+                    sessionReasons.append("sessionMetadataIDMismatch")
+                }
+                if let metadataOrgID = metadata.orgID, metadataOrgID != activeOrganizationID {
+                    sessionReasons.append("sessionMetadataOrgMismatch")
+                }
+
+                let sessionB1Remote = remoteSessionsByID[session.id]
+                let sessionB2WarningIDs: [UUID] = {
+                    guard sessionB1Remote == nil else { return [] }
+                    let localStartedAt = session.startedAt
+                    return (remoteSessionsByProperty[property.id] ?? [])
+                        .filter { remote in
+                            remote.status == session.status.rawValue &&
+                            legacyMigrationToken(remote.title) == legacyMigrationToken(sessionTitle) &&
+                            legacyMigrationDate(from: remote.startedAt) == localStartedAt
+                        }
+                        .map(\.id)
+                        .filter { $0 != session.id }
+                        .sorted { $0.uuidString < $1.uuidString }
+                }()
+                if !sessionB2WarningIDs.isEmpty {
+                    sessionReasons.append("possibleRemoteDuplicateByExactStartedAtStatusTitle")
+                }
+                if let remoteSession = sessionB1Remote, remoteSession.propertyID != property.id {
+                    sessionReasons.append("remoteSessionParentMismatch")
+                }
+
+                let sessionEligible = sessionReasons.isEmpty
+                sessionEntries.append(
+                    LegacyMigrationPreflightLedger.EntityEntry(
+                        entityType: "session",
+                        localID: session.id,
+                        parentLocalID: property.id,
+                        propertyID: property.id,
+                        sessionID: session.id,
+                        activeOrganizationID: activeOrganizationID,
+                        eligible: sessionEligible,
+                        b1RemoteExists: sessionB1Remote != nil,
+                        b2WarningRemoteIDs: sessionB2WarningIDs,
+                        reasons: sessionReasons.sorted(),
+                        attributes: [
+                            "title": sessionTitle,
+                            "status": session.status.rawValue,
+                            "startedAt": iso8601.string(from: session.startedAt),
+                            "completedAt": session.endedAt.map { iso8601.string(from: $0) } ?? ""
+                        ]
+                    )
+                )
+
+                for shot in metadata.shots {
+                    let trimmedOriginalPath = shot.originalRelativePath.trimmingCharacters(in: .whitespacesAndNewlines)
+                    let resolvedOriginalURL = localStore.resolveSessionRelativeFileURL(
+                        propertyID: property.id,
+                        sessionID: session.id,
+                        relativePath: trimmedOriginalPath
+                    )
+                    let fileExists = resolvedOriginalURL.map { FileManager.default.fileExists(atPath: $0.path) } ?? false
+
+                    var checksumSHA256: String?
+                    var fileSizeBytes: Int64?
+                    if let resolvedOriginalURL, fileExists {
+                        if let attributes = try? FileManager.default.attributesOfItem(atPath: resolvedOriginalURL.path),
+                           let fileSize = attributes[.size] as? NSNumber {
+                            fileSizeBytes = fileSize.int64Value
+                        }
+                        if let data = try? Data(contentsOf: resolvedOriginalURL, options: [.mappedIfSafe]) {
+                            checksumSHA256 = sha256Hex(for: data)
+                        }
+                    }
+
+                    var shotReasons: [String] = []
+                    if !sessionEligible {
+                        shotReasons.append("parentSessionIneligible")
+                    }
+                    if shot.propertyID != property.id {
+                        shotReasons.append("shotPropertyMismatch")
+                    }
+                    if shot.sessionID != session.id {
+                        shotReasons.append("shotSessionMismatch")
+                    }
+                    if trimmedOriginalPath.isEmpty {
+                        shotReasons.append("shotOriginalRelativePathMissing")
+                    }
+
+                    let shotB1Remote = remoteShotsByID[shot.shotID]
+                    let shotB2WarningIDs: [UUID] = {
+                        guard shotB1Remote == nil else { return [] }
+                        return (remoteShotsBySession[session.id] ?? [])
+                            .filter { remote in
+                                if let checksumSHA256 {
+                                    return remote.checksumSHA256?.lowercased() == checksumSHA256.lowercased()
+                                }
+                                if let localStoragePath = normalizedSupabaseText(shot.storagePath) {
+                                    return legacyMigrationToken(remote.storagePath) == legacyMigrationToken(localStoragePath)
+                                }
+                                return false
+                            }
+                            .map(\.id)
+                            .filter { $0 != shot.shotID }
+                            .sorted { $0.uuidString < $1.uuidString }
+                    }()
+                    if !shotB2WarningIDs.isEmpty {
+                        shotReasons.append("possibleRemoteDuplicateByExactChecksumOrStoragePath")
+                    }
+                    if let remoteShot = shotB1Remote, remoteShot.sessionID != session.id {
+                        shotReasons.append("remoteShotParentMismatch")
+                    }
+
+                    let shotEligible = shotReasons.isEmpty
+                    shotEntries.append(
+                        LegacyMigrationPreflightLedger.EntityEntry(
+                            entityType: "shot",
+                            localID: shot.shotID,
+                            parentLocalID: session.id,
+                            propertyID: property.id,
+                            sessionID: session.id,
+                            activeOrganizationID: activeOrganizationID,
+                            eligible: shotEligible,
+                            b1RemoteExists: shotB1Remote != nil,
+                            b2WarningRemoteIDs: shotB2WarningIDs,
+                            reasons: shotReasons.sorted(),
+                            attributes: [
+                                "shotKey": shot.shotKey,
+                                "building": shot.building,
+                                "elevation": shot.elevation,
+                                "detailType": shot.detailType,
+                                "angleIndex": String(shot.angleIndex),
+                                "uploadState": shot.uploadState
+                            ]
+                        )
+                    )
+
+                    var mediaReasons: [String] = []
+                    if !shotEligible {
+                        mediaReasons.append("parentShotIneligible")
+                    }
+                    if trimmedOriginalPath.isEmpty {
+                        mediaReasons.append("originalRelativePathMissing")
+                    }
+                    if !fileExists {
+                        mediaReasons.append("originalFileMissing")
+                    }
+                    let remoteMediaReady = normalizedSupabaseText(shotB1Remote?.storageBucket) != nil &&
+                        normalizedSupabaseText(shotB1Remote?.storagePath) != nil
+                    let mediaEligible = mediaReasons.isEmpty
+                    mediaEntries.append(
+                        LegacyMigrationPreflightLedger.MediaEntry(
+                            shotID: shot.shotID,
+                            propertyID: property.id,
+                            sessionID: session.id,
+                            activeOrganizationID: activeOrganizationID,
+                            originalRelativePath: trimmedOriginalPath,
+                            resolvedFilePath: resolvedOriginalURL?.path,
+                            fileExists: fileExists,
+                            fileSizeBytes: fileSizeBytes,
+                            checksumSHA256: checksumSHA256,
+                            b1RemoteExists: remoteMediaReady,
+                            b2WarningRemoteIDs: shotB2WarningIDs,
+                            eligible: mediaEligible,
+                            reasons: mediaReasons.sorted(),
+                            attributes: [
+                                "originalFilename": shot.originalFilename,
+                                "storageBucket": shot.storageBucket ?? "",
+                                "storagePath": shot.storagePath ?? "",
+                                "uploadState": shot.uploadState
+                            ]
+                        )
+                    )
+                }
+            }
+        }
+
+        let summary = LegacyMigrationPreflightLedger.Summary(
+            propertyCount: propertyEntries.count,
+            sessionCount: sessionEntries.count,
+            shotCount: shotEntries.count,
+            mediaCount: mediaEntries.count,
+            eligiblePropertyCount: propertyEntries.filter(\.eligible).count,
+            eligibleSessionCount: sessionEntries.filter(\.eligible).count,
+            eligibleShotCount: shotEntries.filter(\.eligible).count,
+            eligibleMediaCount: mediaEntries.filter(\.eligible).count,
+            b1PropertyCount: propertyEntries.filter(\.b1RemoteExists).count,
+            b1SessionCount: sessionEntries.filter(\.b1RemoteExists).count,
+            b1ShotCount: shotEntries.filter(\.b1RemoteExists).count,
+            b2WarningPropertyCount: propertyEntries.filter { !$0.b2WarningRemoteIDs.isEmpty }.count,
+            b2WarningSessionCount: sessionEntries.filter { !$0.b2WarningRemoteIDs.isEmpty }.count,
+            b2WarningShotCount: shotEntries.filter { !$0.b2WarningRemoteIDs.isEmpty }.count,
+            missingMediaCount: mediaEntries.filter { !$0.fileExists }.count
+        )
+        let ledger = LegacyMigrationPreflightLedger(
+            schemaVersion: 1,
+            generatedAt: generatedAt,
+            activeOrganizationID: activeOrganizationID,
+            authenticatedUserID: authenticatedSupabaseUser?.id,
+            summary: summary,
+            properties: propertyEntries,
+            sessions: sessionEntries,
+            shots: shotEntries,
+            media: mediaEntries
+        )
+        let reportText = makeLegacyMigrationPreflightReport(
+            generatedAt: generatedAt,
+            activeOrganizationID: activeOrganizationID,
+            summary: summary,
+            propertyEntries: propertyEntries,
+            sessionEntries: sessionEntries,
+            shotEntries: shotEntries,
+            mediaEntries: mediaEntries
+        )
+        let artifacts = try localStore.writeLegacyMigrationPreflightArtifacts(
+            ledger: ledger,
+            reportText: reportText
+        )
+
+        return LegacyMigrationPreflightResult(
+            generatedAt: generatedAt,
+            activeOrganizationID: activeOrganizationID,
+            ledgerURL: artifacts.ledgerURL,
+            reportURL: artifacts.reportURL,
+            summary: summary
+        )
+    }
+
+    private func fetchLegacyMigrationRemoteSnapshot(
+        client: SupabaseClient,
+        activeOrganizationID: UUID
+    ) async throws -> RemoteLegacyMigrationSnapshot {
+        let properties = try await client
+            .from("properties")
+            .select("id, org_id, name")
+            .eq("org_id", value: activeOrganizationID.uuidString.lowercased())
+            .execute()
+            .value as [SupabasePropertyIdentityRecord]
+
+        let sessions = try await client
+            .from("sessions")
+            .select("id, org_id, property_id, title, status, started_at")
+            .eq("org_id", value: activeOrganizationID.uuidString.lowercased())
+            .execute()
+            .value as [SupabaseSessionIdentityRecord]
+
+        let shots = try await client
+            .from("shots")
+            .select("id, org_id, session_id, storage_bucket, storage_path, checksum_sha256, upload_state")
+            .eq("org_id", value: activeOrganizationID.uuidString.lowercased())
+            .execute()
+            .value as [SupabaseShotIdentityRecord]
+
+        return RemoteLegacyMigrationSnapshot(
+            properties: properties,
+            sessions: sessions,
+            shots: shots
+        )
+    }
+
+    private func makeLegacyMigrationPreflightReport(
+        generatedAt: Date,
+        activeOrganizationID: UUID,
+        summary: LegacyMigrationPreflightLedger.Summary,
+        propertyEntries: [LegacyMigrationPreflightLedger.EntityEntry],
+        sessionEntries: [LegacyMigrationPreflightLedger.EntityEntry],
+        shotEntries: [LegacyMigrationPreflightLedger.EntityEntry],
+        mediaEntries: [LegacyMigrationPreflightLedger.MediaEntry]
+    ) -> String {
+        var lines: [String] = []
+        let iso8601 = ISO8601DateFormatter()
+        lines.append("ScoutCapture Legacy Migration Preflight")
+        lines.append("generatedAt: \(iso8601.string(from: generatedAt))")
+        lines.append("activeOrganizationID: \(activeOrganizationID.uuidString)")
+        lines.append("")
+        lines.append("Counts")
+        lines.append("properties: \(summary.propertyCount) eligible=\(summary.eligiblePropertyCount) b1=\(summary.b1PropertyCount) b2Warnings=\(summary.b2WarningPropertyCount)")
+        lines.append("sessions: \(summary.sessionCount) eligible=\(summary.eligibleSessionCount) b1=\(summary.b1SessionCount) b2Warnings=\(summary.b2WarningSessionCount)")
+        lines.append("shots: \(summary.shotCount) eligible=\(summary.eligibleShotCount) b1=\(summary.b1ShotCount) b2Warnings=\(summary.b2WarningShotCount)")
+        lines.append("media: \(summary.mediaCount) eligible=\(summary.eligibleMediaCount) missingFiles=\(summary.missingMediaCount)")
+
+        appendLegacyMigrationReportSection(
+            title: "Ineligible Properties",
+            entries: propertyEntries.filter { !$0.eligible },
+            lines: &lines
+        )
+        appendLegacyMigrationReportSection(
+            title: "B2 Property Warnings",
+            entries: propertyEntries.filter { !$0.b2WarningRemoteIDs.isEmpty },
+            lines: &lines
+        )
+        appendLegacyMigrationReportSection(
+            title: "Ineligible Sessions",
+            entries: sessionEntries.filter { !$0.eligible },
+            lines: &lines
+        )
+        appendLegacyMigrationReportSection(
+            title: "B2 Session Warnings",
+            entries: sessionEntries.filter { !$0.b2WarningRemoteIDs.isEmpty },
+            lines: &lines
+        )
+        appendLegacyMigrationReportSection(
+            title: "Ineligible Shots",
+            entries: shotEntries.filter { !$0.eligible },
+            lines: &lines
+        )
+        appendLegacyMigrationReportSection(
+            title: "B2 Shot Warnings",
+            entries: shotEntries.filter { !$0.b2WarningRemoteIDs.isEmpty },
+            lines: &lines
+        )
+
+        let missingMediaEntries = mediaEntries.filter { !$0.fileExists }
+        lines.append("")
+        lines.append("Missing Original Media")
+        if missingMediaEntries.isEmpty {
+            lines.append("none")
+        } else {
+            for entry in missingMediaEntries {
+                lines.append(
+                    "shot=\(entry.shotID.uuidString) session=\(entry.sessionID.uuidString) property=\(entry.propertyID.uuidString) path=\(entry.originalRelativePath)"
+                )
+            }
+        }
+
+        return lines.joined(separator: "\n")
+    }
+
+    private func appendLegacyMigrationReportSection(
+        title: String,
+        entries: [LegacyMigrationPreflightLedger.EntityEntry],
+        lines: inout [String]
+    ) {
+        lines.append("")
+        lines.append(title)
+        if entries.isEmpty {
+            lines.append("none")
+            return
+        }
+
+        for entry in entries.sorted(by: { $0.localID.uuidString < $1.localID.uuidString }) {
+            let reasons = entry.reasons.joined(separator: ",")
+            let b2Warnings = entry.b2WarningRemoteIDs.map(\.uuidString).joined(separator: ",")
+            lines.append(
+                "id=\(entry.localID.uuidString) parent=\(entry.parentLocalID?.uuidString ?? "-") b1=\(entry.b1RemoteExists) reasons=\(reasons) b2=\(b2Warnings)"
+            )
+        }
+    }
+
+    private func legacyMigrationToken(_ value: String?) -> String {
+        normalizedSupabaseText(value)?.lowercased() ?? ""
+    }
+
+    private func legacyMigrationDate(from value: String?) -> Date? {
+        let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !trimmed.isEmpty else { return nil }
+
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+
+        if let date = formatter.date(from: trimmed) {
+            return date
+        }
+
+        let fallbackFormatter = ISO8601DateFormatter()
+        fallbackFormatter.formatOptions = [.withInternetDateTime]
+        return fallbackFormatter.date(from: trimmed)
+    }
+
+    func runLegacyMigrationStep2A() async throws -> LegacyMigrationStep2AResult {
+        guard let client = supabaseClient else {
+            throw LegacyMigrationStep2AError.missingSupabaseClient
+        }
+        guard let activeOrganizationID else {
+            throw LegacyMigrationStep2AError.missingActiveOrganization
+        }
+
+        let runID = UUID()
+        let now = Date()
+        var ledger: LegacyMigrationPreflightLedger
+
+        do {
+            ledger = try localStore.loadLegacyMigrationLedger()
+        } catch {
+            throw LegacyMigrationStep2AError.missingLedger
+        }
+
+        guard ledger.schemaVersion <= LegacyMigrationPreflightLedger.currentSchemaVersion else {
+            ledger.mutationRun = LegacyMigrationPreflightLedger.MutationRunStatus(
+                currentRunID: runID,
+                state: LegacyMigrationPreflightLedger.MutationState.failedTerminal.rawValue,
+                startedAt: now,
+                completedAt: Date(),
+                lastErrorCategory: "unsupported_ledger_schema",
+                lastErrorMessage: LegacyMigrationStep2AError.unsupportedLedgerSchema(ledger.schemaVersion).localizedDescription
+            )
+            try localStore.writeLegacyMigrationLedger(ledger)
+            throw LegacyMigrationStep2AError.unsupportedLedgerSchema(ledger.schemaVersion)
+        }
+
+        guard ledger.activeOrganizationID == activeOrganizationID else {
+            ledger.mutationRun = LegacyMigrationPreflightLedger.MutationRunStatus(
+                currentRunID: runID,
+                state: LegacyMigrationPreflightLedger.MutationState.failedTerminal.rawValue,
+                startedAt: now,
+                completedAt: Date(),
+                lastErrorCategory: "active_org_drift",
+                lastErrorMessage: LegacyMigrationStep2AError.activeOrgDrift(
+                    expected: ledger.activeOrganizationID,
+                    actual: activeOrganizationID
+                ).localizedDescription
+            )
+            try localStore.writeLegacyMigrationLedger(ledger)
+            throw LegacyMigrationStep2AError.activeOrgDrift(
+                expected: ledger.activeOrganizationID,
+                actual: activeOrganizationID
+            )
+        }
+
+        ledger.schemaVersion = LegacyMigrationPreflightLedger.currentSchemaVersion
+        ledger.mutationRun = LegacyMigrationPreflightLedger.MutationRunStatus(
+            currentRunID: runID,
+            state: "in_progress",
+            startedAt: now,
+            completedAt: nil,
+            lastErrorCategory: nil,
+            lastErrorMessage: nil
+        )
+        try localStore.writeLegacyMigrationLedger(ledger)
+
+        let propertyIndexByID = Dictionary(uniqueKeysWithValues: ledger.properties.enumerated().map { ($0.element.localID, $0.offset) })
+        let sessionIndexByID = Dictionary(uniqueKeysWithValues: ledger.sessions.enumerated().map { ($0.element.localID, $0.offset) })
+        let localProperties = try localStore.fetchProperties()
+        let localPropertiesByID = Dictionary(uniqueKeysWithValues: localProperties.map { ($0.id, $0) })
+
+        do {
+            let remoteOrgExists = try await verifyRemoteActiveOrganizationExists(
+                client: client,
+                activeOrganizationID: activeOrganizationID
+            )
+            guard remoteOrgExists else {
+                throw LegacyMigrationStep2AError.missingRemoteActiveOrg(activeOrganizationID)
+            }
+
+            for propertyID in ledger.properties.map(\.localID) {
+                guard let index = propertyIndexByID[propertyID] else { continue }
+                guard ledger.properties[index].activeOrganizationID == activeOrganizationID else { continue }
+                guard ledger.properties[index].eligible else { continue }
+                guard ledger.properties[index].b2WarningRemoteIDs.isEmpty else { continue }
+                guard ledger.properties[index].mutation.state != .verified else { continue }
+
+                if ledger.properties[index].b1RemoteExists {
+                    try await verifyExistingPropertyEntry(
+                        client: client,
+                        activeOrganizationID: activeOrganizationID,
+                        ledger: &ledger,
+                        propertyIndex: index,
+                        runID: runID
+                    )
+                    continue
+                }
+
+                guard let localProperty = localPropertiesByID[propertyID] else {
+                    let message = LegacyMigrationStep2AError.localPropertyMissing(propertyID).localizedDescription
+                    try markEntityFailure(
+                        ledger: &ledger,
+                        entityType: "property",
+                        index: index,
+                        state: .failedTerminal,
+                        category: "local_property_missing",
+                        message: message,
+                        runID: runID
+                    )
+                    throw LegacyMigrationStep2AError.localPropertyMissing(propertyID)
+                }
+
+                try markEntityMutationState(
+                    ledger: &ledger,
+                    entityType: "property",
+                    index: index,
+                    state: .rowUpsertStarted,
+                    runID: runID
+                )
+
+                let payload = makeSupabasePropertyPayload(
+                    propertyID: localProperty.id,
+                    orgID: activeOrganizationID,
+                    property: localProperty,
+                    metadata: nil
+                )
+
+                do {
+                    try await upsertPropertyRowToSupabase(payload)
+                } catch {
+                    let category = legacyMigrationStep2AErrorCategory(for: error, fallback: "property_row_upsert_failed")
+                    let state: LegacyMigrationPreflightLedger.MutationState = category == "transient_transport_failure" ? .failedRetryable : .failedTerminal
+                    try markEntityFailure(
+                        ledger: &ledger,
+                        entityType: "property",
+                        index: index,
+                        state: state,
+                        category: category,
+                        message: error.localizedDescription,
+                        runID: runID
+                    )
+                    throw error
+                }
+
+                try markEntityMutationState(
+                    ledger: &ledger,
+                    entityType: "property",
+                    index: index,
+                    state: .rowUpsertSucceeded,
+                    runID: runID
+                )
+
+                let propertyVerified = try await verifyRemoteProperty(
+                    client: client,
+                    propertyID: localProperty.id,
+                    activeOrganizationID: activeOrganizationID
+                )
+                guard propertyVerified else {
+                    let message = "Property \(localProperty.id.uuidString) could not be verified remotely after upsert."
+                    try markEntityFailure(
+                        ledger: &ledger,
+                        entityType: "property",
+                        index: index,
+                        state: .failedTerminal,
+                        category: "property_verify_after_upsert_failed",
+                        message: message,
+                        runID: runID
+                    )
+                    throw LegacyMigrationStep2AError.verificationFailed(message)
+                }
+
+                try markEntityVerified(
+                    ledger: &ledger,
+                    entityType: "property",
+                    index: index,
+                    runID: runID
+                )
+            }
+
+            for sessionID in ledger.sessions.map(\.localID) {
+                guard let index = sessionIndexByID[sessionID] else { continue }
+                let sessionEntry = ledger.sessions[index]
+                guard sessionEntry.activeOrganizationID == activeOrganizationID else { continue }
+                guard sessionEntry.eligible else { continue }
+                guard sessionEntry.b2WarningRemoteIDs.isEmpty else { continue }
+                guard sessionEntry.mutation.state != .verified else { continue }
+                guard let propertyID = sessionEntry.propertyID else {
+                    let message = "Session \(sessionID.uuidString) is missing property linkage in the ledger."
+                    try markEntityFailure(
+                        ledger: &ledger,
+                        entityType: "session",
+                        index: index,
+                        state: .failedTerminal,
+                        category: "session_missing_property_linkage",
+                        message: message,
+                        runID: runID
+                    )
+                    throw LegacyMigrationStep2AError.verificationFailed(message)
+                }
+                guard let parentPropertyIndex = propertyIndexByID[propertyID],
+                      ledger.properties[parentPropertyIndex].mutation.state == .verified else {
+                    continue
+                }
+
+                if sessionEntry.b1RemoteExists {
+                    try await verifyExistingSessionEntry(
+                        client: client,
+                        activeOrganizationID: activeOrganizationID,
+                        propertyID: propertyID,
+                        ledger: &ledger,
+                        sessionIndex: index,
+                        runID: runID
+                    )
+                    continue
+                }
+
+                guard let localProperty = localPropertiesByID[propertyID] else {
+                    let message = LegacyMigrationStep2AError.localPropertyMissing(propertyID).localizedDescription
+                    try markEntityFailure(
+                        ledger: &ledger,
+                        entityType: "session",
+                        index: index,
+                        state: .failedTerminal,
+                        category: "local_property_missing",
+                        message: message,
+                        runID: runID
+                    )
+                    throw LegacyMigrationStep2AError.localPropertyMissing(propertyID)
+                }
+
+                let localSessions = try localStore.fetchSessions(propertyID: propertyID)
+                guard let localSession = localSessions.first(where: { $0.id == sessionID }) else {
+                    let message = LegacyMigrationStep2AError.localSessionMissing(sessionID).localizedDescription
+                    try markEntityFailure(
+                        ledger: &ledger,
+                        entityType: "session",
+                        index: index,
+                        state: .failedTerminal,
+                        category: "local_session_missing",
+                        message: message,
+                        runID: runID
+                    )
+                    throw LegacyMigrationStep2AError.localSessionMissing(sessionID)
+                }
+                guard let metadata = try? localStore.loadSessionMetadata(propertyID: propertyID, sessionID: sessionID) else {
+                    throw LegacyMigrationStep2AError.localSessionMetadataMissing(sessionID)
+                }
+
+                try markEntityMutationState(
+                    ledger: &ledger,
+                    entityType: "session",
+                    index: index,
+                    state: .rowUpsertStarted,
+                    runID: runID
+                )
+
+                let payload = makeSupabaseSessionPayload(
+                    sessionID: localSession.id,
+                    propertyID: propertyID,
+                    orgID: activeOrganizationID,
+                    property: localProperty,
+                    metadata: metadata
+                )
+
+                do {
+                    try await upsertSessionRowToSupabase(payload)
+                } catch {
+                    let category = legacyMigrationStep2AErrorCategory(for: error, fallback: "session_row_upsert_failed")
+                    let state: LegacyMigrationPreflightLedger.MutationState = category == "transient_transport_failure" ? .failedRetryable : .failedTerminal
+                    try markEntityFailure(
+                        ledger: &ledger,
+                        entityType: "session",
+                        index: index,
+                        state: state,
+                        category: category,
+                        message: error.localizedDescription,
+                        runID: runID
+                    )
+                    throw error
+                }
+
+                try markEntityMutationState(
+                    ledger: &ledger,
+                    entityType: "session",
+                    index: index,
+                    state: .rowUpsertSucceeded,
+                    runID: runID
+                )
+
+                let sessionVerified = try await verifyRemoteSession(
+                    client: client,
+                    sessionID: localSession.id,
+                    propertyID: propertyID,
+                    activeOrganizationID: activeOrganizationID
+                )
+                guard sessionVerified else {
+                    let message = "Session \(localSession.id.uuidString) could not be verified remotely after upsert."
+                    try markEntityFailure(
+                        ledger: &ledger,
+                        entityType: "session",
+                        index: index,
+                        state: .failedTerminal,
+                        category: "session_verify_after_upsert_failed",
+                        message: message,
+                        runID: runID
+                    )
+                    throw LegacyMigrationStep2AError.verificationFailed(message)
+                }
+
+                try markEntityVerified(
+                    ledger: &ledger,
+                    entityType: "session",
+                    index: index,
+                    runID: runID
+                )
+            }
+
+            ledger.mutationRun.state = "completed"
+            ledger.mutationRun.completedAt = Date()
+            ledger.mutationRun.lastErrorCategory = nil
+            ledger.mutationRun.lastErrorMessage = nil
+            try localStore.writeLegacyMigrationLedger(ledger)
+
+            return LegacyMigrationStep2AResult(
+                runID: runID,
+                activeOrganizationID: activeOrganizationID,
+                ledgerURL: localStore.legacyMigrationLedgerURL(),
+                verifiedPropertyCount: ledger.properties.filter { $0.mutation.state == .verified }.count,
+                verifiedSessionCount: ledger.sessions.filter { $0.mutation.state == .verified }.count
+            )
+        } catch {
+            if ledger.mutationRun.currentRunID == runID {
+                if ledger.mutationRun.lastErrorCategory == nil {
+                    ledger.mutationRun.lastErrorCategory = legacyMigrationStep2AErrorCategory(
+                        for: error,
+                        fallback: "step2a_failed"
+                    )
+                }
+                ledger.mutationRun.lastErrorMessage = error.localizedDescription
+                if ledger.mutationRun.state == "in_progress" {
+                    let terminal = legacyMigrationStep2AIsTerminalError(error)
+                    ledger.mutationRun.state = terminal
+                        ? LegacyMigrationPreflightLedger.MutationState.failedTerminal.rawValue
+                        : LegacyMigrationPreflightLedger.MutationState.failedRetryable.rawValue
+                }
+                ledger.mutationRun.completedAt = Date()
+                try? localStore.writeLegacyMigrationLedger(ledger)
+            }
+            throw error
+        }
+    }
+
+    func runLegacyMigrationStep2BSlice1() async throws -> LegacyMigrationStep2BSlice1Result {
+        guard let client = supabaseClient else {
+            throw LegacyMigrationStep2AError.missingSupabaseClient
+        }
+        guard let activeOrganizationID else {
+            throw LegacyMigrationStep2AError.missingActiveOrganization
+        }
+
+        let runID = UUID()
+        let now = Date()
+        var ledger: LegacyMigrationPreflightLedger
+
+        do {
+            ledger = try localStore.loadLegacyMigrationLedger()
+        } catch {
+            throw LegacyMigrationStep2AError.missingLedger
+        }
+
+        guard ledger.schemaVersion <= LegacyMigrationPreflightLedger.currentSchemaVersion else {
+            ledger.mutationRun = LegacyMigrationPreflightLedger.MutationRunStatus(
+                currentRunID: runID,
+                state: LegacyMigrationPreflightLedger.MutationState.failedTerminal.rawValue,
+                startedAt: now,
+                completedAt: Date(),
+                lastErrorCategory: "unsupported_ledger_schema",
+                lastErrorMessage: LegacyMigrationStep2AError.unsupportedLedgerSchema(ledger.schemaVersion).localizedDescription
+            )
+            try localStore.writeLegacyMigrationLedger(ledger)
+            throw LegacyMigrationStep2AError.unsupportedLedgerSchema(ledger.schemaVersion)
+        }
+
+        guard ledger.activeOrganizationID == activeOrganizationID else {
+            ledger.mutationRun = LegacyMigrationPreflightLedger.MutationRunStatus(
+                currentRunID: runID,
+                state: LegacyMigrationPreflightLedger.MutationState.failedTerminal.rawValue,
+                startedAt: now,
+                completedAt: Date(),
+                lastErrorCategory: "active_org_drift",
+                lastErrorMessage: LegacyMigrationStep2AError.activeOrgDrift(
+                    expected: ledger.activeOrganizationID,
+                    actual: activeOrganizationID
+                ).localizedDescription
+            )
+            try localStore.writeLegacyMigrationLedger(ledger)
+            throw LegacyMigrationStep2AError.activeOrgDrift(
+                expected: ledger.activeOrganizationID,
+                actual: activeOrganizationID
+            )
+        }
+
+        ledger.schemaVersion = LegacyMigrationPreflightLedger.currentSchemaVersion
+        ledger.mutationRun = LegacyMigrationPreflightLedger.MutationRunStatus(
+            currentRunID: runID,
+            state: "in_progress",
+            startedAt: now,
+            completedAt: nil,
+            lastErrorCategory: nil,
+            lastErrorMessage: nil
+        )
+        try localStore.writeLegacyMigrationLedger(ledger)
+
+        let sessionIndexByID = Dictionary(uniqueKeysWithValues: ledger.sessions.enumerated().map { ($0.element.localID, $0.offset) })
+        let shotIndexByID = Dictionary(uniqueKeysWithValues: ledger.shots.enumerated().map { ($0.element.localID, $0.offset) })
+
+        do {
+            let remoteOrgExists = try await verifyRemoteActiveOrganizationExists(
+                client: client,
+                activeOrganizationID: activeOrganizationID
+            )
+            guard remoteOrgExists else {
+                throw LegacyMigrationStep2AError.missingRemoteActiveOrg(activeOrganizationID)
+            }
+
+            for shotID in ledger.shots.map(\.localID) {
+                guard let index = shotIndexByID[shotID] else { continue }
+                let shotEntry = ledger.shots[index]
+                guard shotEntry.activeOrganizationID == activeOrganizationID else { continue }
+                guard shotEntry.eligible else { continue }
+                guard shotEntry.b2WarningRemoteIDs.isEmpty else { continue }
+                guard shotEntry.mutation.state != .verified else { continue }
+                guard let sessionID = shotEntry.sessionID else {
+                    let message = "Shot \(shotID.uuidString) is missing session linkage in the ledger."
+                    try markEntityFailure(
+                        ledger: &ledger,
+                        entityType: "shot",
+                        index: index,
+                        state: .failedTerminal,
+                        category: "shot_missing_session_linkage",
+                        message: message,
+                        runID: runID
+                    )
+                    throw LegacyMigrationStep2AError.verificationFailed(message)
+                }
+                guard let parentSessionIndex = sessionIndexByID[sessionID],
+                      ledger.sessions[parentSessionIndex].mutation.state == .verified else {
+                    continue
+                }
+
+                if shotEntry.b1RemoteExists {
+                    try await verifyExistingShotEntry(
+                        client: client,
+                        activeOrganizationID: activeOrganizationID,
+                        sessionID: sessionID,
+                        ledger: &ledger,
+                        shotIndex: index,
+                        runID: runID
+                    )
+                    continue
+                }
+
+                guard let propertyID = shotEntry.propertyID else {
+                    let message = "Shot \(shotID.uuidString) is missing property linkage in the ledger."
+                    try markEntityFailure(
+                        ledger: &ledger,
+                        entityType: "shot",
+                        index: index,
+                        state: .failedTerminal,
+                        category: "shot_missing_property_linkage",
+                        message: message,
+                        runID: runID
+                    )
+                    throw LegacyMigrationStep2AError.verificationFailed(message)
+                }
+
+                guard let metadata = try? localStore.loadSessionMetadata(propertyID: propertyID, sessionID: sessionID) else {
+                    let message = LegacyMigrationStep2AError.localSessionMetadataMissing(sessionID).localizedDescription
+                    try markEntityFailure(
+                        ledger: &ledger,
+                        entityType: "shot",
+                        index: index,
+                        state: .failedTerminal,
+                        category: "local_session_metadata_missing",
+                        message: message,
+                        runID: runID
+                    )
+                    throw LegacyMigrationStep2AError.localSessionMetadataMissing(sessionID)
+                }
+
+                guard metadata.shots.contains(where: { $0.shotID == shotID }) else {
+                    let message = LegacyMigrationStep2AError.localShotMissing(shotID).localizedDescription
+                    try markEntityFailure(
+                        ledger: &ledger,
+                        entityType: "shot",
+                        index: index,
+                        state: .failedTerminal,
+                        category: "local_shot_missing",
+                        message: message,
+                        runID: runID
+                    )
+                    throw LegacyMigrationStep2AError.localShotMissing(shotID)
+                }
+
+                try markEntityMutationState(
+                    ledger: &ledger,
+                    entityType: "shot",
+                    index: index,
+                    state: .rowUpsertStarted,
+                    runID: runID
+                )
+
+                do {
+                    try await persistShotStorageMetadataToSupabase(
+                        orgID: ledger.activeOrganizationID,
+                        sessionID: sessionID,
+                        shotID: shotID,
+                        storageBucket: nil,
+                        storagePath: nil,
+                        checksumSHA256: nil,
+                        byteSize: nil,
+                        uploadState: "pending",
+                        uploadAttempts: 0,
+                        lastUploadError: nil
+                    )
+                } catch {
+                    let category = legacyMigrationStep2AErrorCategory(for: error, fallback: "shot_row_upsert_failed")
+                    let state: LegacyMigrationPreflightLedger.MutationState = category == "transient_transport_failure" ? .failedRetryable : .failedTerminal
+                    try markEntityFailure(
+                        ledger: &ledger,
+                        entityType: "shot",
+                        index: index,
+                        state: state,
+                        category: category,
+                        message: error.localizedDescription,
+                        runID: runID
+                    )
+                    throw error
+                }
+
+                try markEntityMutationState(
+                    ledger: &ledger,
+                    entityType: "shot",
+                    index: index,
+                    state: .rowUpsertSucceeded,
+                    runID: runID
+                )
+
+                let shotVerified = try await verifyRemoteShot(
+                    client: client,
+                    shotID: shotID,
+                    sessionID: sessionID,
+                    activeOrganizationID: activeOrganizationID
+                )
+                guard shotVerified else {
+                    let message = "Shot \(shotID.uuidString) could not be verified remotely after upsert."
+                    try markEntityFailure(
+                        ledger: &ledger,
+                        entityType: "shot",
+                        index: index,
+                        state: .failedTerminal,
+                        category: "shot_verify_after_upsert_failed",
+                        message: message,
+                        runID: runID
+                    )
+                    throw LegacyMigrationStep2AError.verificationFailed(message)
+                }
+
+                try markEntityVerified(
+                    ledger: &ledger,
+                    entityType: "shot",
+                    index: index,
+                    runID: runID
+                )
+            }
+
+            ledger.mutationRun.state = "completed"
+            ledger.mutationRun.completedAt = Date()
+            ledger.mutationRun.lastErrorCategory = nil
+            ledger.mutationRun.lastErrorMessage = nil
+            try localStore.writeLegacyMigrationLedger(ledger)
+
+            return LegacyMigrationStep2BSlice1Result(
+                runID: runID,
+                activeOrganizationID: activeOrganizationID,
+                ledgerURL: localStore.legacyMigrationLedgerURL(),
+                verifiedShotCount: ledger.shots.filter { $0.mutation.state == .verified }.count
+            )
+        } catch {
+            if ledger.mutationRun.currentRunID == runID {
+                if ledger.mutationRun.lastErrorCategory == nil {
+                    ledger.mutationRun.lastErrorCategory = legacyMigrationStep2AErrorCategory(
+                        for: error,
+                        fallback: "step2b_slice1_failed"
+                    )
+                }
+                ledger.mutationRun.lastErrorMessage = error.localizedDescription
+                if ledger.mutationRun.state == "in_progress" {
+                    let terminal = legacyMigrationStep2AIsTerminalError(error)
+                    ledger.mutationRun.state = terminal
+                        ? LegacyMigrationPreflightLedger.MutationState.failedTerminal.rawValue
+                        : LegacyMigrationPreflightLedger.MutationState.failedRetryable.rawValue
+                }
+                ledger.mutationRun.completedAt = Date()
+                try? localStore.writeLegacyMigrationLedger(ledger)
+            }
+            throw error
+        }
+    }
+
+    func runLegacyMigrationStep2BSlice2A() async throws -> LegacyMigrationStep2BSlice2AResult {
+        guard let client = supabaseClient else {
+            throw LegacyMigrationStep2AError.missingSupabaseClient
+        }
+        guard let activeOrganizationID else {
+            throw LegacyMigrationStep2AError.missingActiveOrganization
+        }
+
+        let runID = UUID()
+        let now = Date()
+        var ledger: LegacyMigrationPreflightLedger
+
+        do {
+            ledger = try localStore.loadLegacyMigrationLedger()
+        } catch {
+            throw LegacyMigrationStep2AError.missingLedger
+        }
+
+        guard ledger.schemaVersion <= LegacyMigrationPreflightLedger.currentSchemaVersion else {
+            ledger.mutationRun = LegacyMigrationPreflightLedger.MutationRunStatus(
+                currentRunID: runID,
+                state: LegacyMigrationPreflightLedger.MutationState.failedTerminal.rawValue,
+                startedAt: now,
+                completedAt: Date(),
+                lastErrorCategory: "unsupported_ledger_schema",
+                lastErrorMessage: LegacyMigrationStep2AError.unsupportedLedgerSchema(ledger.schemaVersion).localizedDescription
+            )
+            try localStore.writeLegacyMigrationLedger(ledger)
+            throw LegacyMigrationStep2AError.unsupportedLedgerSchema(ledger.schemaVersion)
+        }
+
+        guard ledger.activeOrganizationID == activeOrganizationID else {
+            ledger.mutationRun = LegacyMigrationPreflightLedger.MutationRunStatus(
+                currentRunID: runID,
+                state: LegacyMigrationPreflightLedger.MutationState.failedTerminal.rawValue,
+                startedAt: now,
+                completedAt: Date(),
+                lastErrorCategory: "active_org_drift",
+                lastErrorMessage: LegacyMigrationStep2AError.activeOrgDrift(
+                    expected: ledger.activeOrganizationID,
+                    actual: activeOrganizationID
+                ).localizedDescription
+            )
+            try localStore.writeLegacyMigrationLedger(ledger)
+            throw LegacyMigrationStep2AError.activeOrgDrift(
+                expected: ledger.activeOrganizationID,
+                actual: activeOrganizationID
+            )
+        }
+
+        ledger.schemaVersion = LegacyMigrationPreflightLedger.currentSchemaVersion
+        ledger.mutationRun = LegacyMigrationPreflightLedger.MutationRunStatus(
+            currentRunID: runID,
+            state: "in_progress",
+            startedAt: now,
+            completedAt: nil,
+            lastErrorCategory: nil,
+            lastErrorMessage: nil
+        )
+        try localStore.writeLegacyMigrationLedger(ledger)
+
+        let sessionIndexByID = Dictionary(uniqueKeysWithValues: ledger.sessions.enumerated().map { ($0.element.localID, $0.offset) })
+        let shotIndexByID = Dictionary(uniqueKeysWithValues: ledger.shots.enumerated().map { ($0.element.localID, $0.offset) })
+        let mediaIndexByShotID = Dictionary(uniqueKeysWithValues: ledger.media.enumerated().map { ($0.element.shotID, $0.offset) })
+
+        do {
+            let remoteOrgExists = try await verifyRemoteActiveOrganizationExists(
+                client: client,
+                activeOrganizationID: activeOrganizationID
+            )
+            guard remoteOrgExists else {
+                throw LegacyMigrationStep2AError.missingRemoteActiveOrg(activeOrganizationID)
+            }
+
+            for shotID in ledger.media.map(\.shotID) {
+                guard let index = mediaIndexByShotID[shotID] else { continue }
+                let mediaEntry = ledger.media[index]
+                guard mediaEntry.activeOrganizationID == activeOrganizationID else { continue }
+                guard mediaEntry.eligible else { continue }
+                guard mediaEntry.b2WarningRemoteIDs.isEmpty else { continue }
+                guard mediaEntry.mutation.state != .mediaUploadSucceeded else { continue }
+                guard mediaEntry.mutation.state != .verified else { continue }
+
+                guard let parentSessionIndex = sessionIndexByID[mediaEntry.sessionID],
+                      ledger.sessions[parentSessionIndex].mutation.state == .verified else {
+                    continue
+                }
+                guard let parentShotIndex = shotIndexByID[mediaEntry.shotID],
+                      ledger.shots[parentShotIndex].mutation.state == .verified else {
+                    continue
+                }
+
+                let operationKey = "upload|\(mediaEntry.sessionID.uuidString.lowercased())|\(mediaEntry.shotID.uuidString.lowercased())"
+                guard beginSupabaseMediaOperation(operationKey) else {
+                    let message = "Shot \(mediaEntry.shotID.uuidString) already has an in-flight media operation."
+                    try markEntityFailure(
+                        ledger: &ledger,
+                        entityType: "media",
+                        index: index,
+                        state: .failedTerminal,
+                        category: "concurrent_media_operation",
+                        message: message,
+                        runID: runID
+                    )
+                    throw LegacyMigrationStep2AError.verificationFailed(message)
+                }
+
+                do {
+                    defer { endSupabaseMediaOperation(operationKey) }
+
+                    let localFileURL = try resolveLegacyMigrationMediaFileURL(for: mediaEntry)
+                    let fileData = try Data(contentsOf: localFileURL, options: [.mappedIfSafe])
+                    let recomputedChecksum = sha256Hex(for: fileData)
+                    if let preflightChecksum = normalizedSupabaseText(mediaEntry.checksumSHA256),
+                       preflightChecksum.lowercased() != recomputedChecksum.lowercased() {
+                        let message = "Shot \(mediaEntry.shotID.uuidString) checksum changed since preflight."
+                        try markEntityFailure(
+                            ledger: &ledger,
+                            entityType: "media",
+                            index: index,
+                            state: .failedTerminal,
+                            category: "checksum_mismatch_since_preflight",
+                            message: message,
+                            runID: runID
+                        )
+                        throw LegacyMigrationStep2AError.verificationFailed(message)
+                    }
+
+                    guard let metadata = try? localStore.loadSessionMetadata(
+                        propertyID: mediaEntry.propertyID,
+                        sessionID: mediaEntry.sessionID
+                    ),
+                    let shot = metadata.shots.first(where: { $0.shotID == mediaEntry.shotID }) else {
+                        let message = LegacyMigrationStep2AError.localShotMissing(mediaEntry.shotID).localizedDescription
+                        try markEntityFailure(
+                            ledger: &ledger,
+                            entityType: "media",
+                            index: index,
+                            state: .failedTerminal,
+                            category: "local_shot_missing",
+                            message: message,
+                            runID: runID
+                        )
+                        throw LegacyMigrationStep2AError.localShotMissing(mediaEntry.shotID)
+                    }
+
+                    let storagePath = operationalMediaStoragePath(
+                        sessionID: mediaEntry.sessionID,
+                        shotID: mediaEntry.shotID,
+                        originalFilename: shot.originalFilename
+                    )
+
+                    try markEntityMutationState(
+                        ledger: &ledger,
+                        entityType: "media",
+                        index: index,
+                        state: .mediaUploadStarted,
+                        runID: runID
+                    )
+
+                    do {
+                        _ = try await client.storage.from(supabaseOperationalMediaBucket).upload(
+                            storagePath,
+                            fileURL: localFileURL,
+                            options: FileOptions(
+                                cacheControl: "31536000",
+                                contentType: contentType(for: localFileURL),
+                                upsert: true
+                            )
+                        )
+                    } catch {
+                        let category = legacyMigrationStep2AErrorCategory(for: error, fallback: "media_upload_failed")
+                        let state: LegacyMigrationPreflightLedger.MutationState = category == "transient_transport_failure" ? .failedRetryable : .failedTerminal
+                        try markEntityFailure(
+                            ledger: &ledger,
+                            entityType: "media",
+                            index: index,
+                            state: state,
+                            category: category,
+                            message: error.localizedDescription,
+                            runID: runID
+                        )
+                        throw error
+                    }
+
+                    try markEntityMutationState(
+                        ledger: &ledger,
+                        entityType: "media",
+                        index: index,
+                        state: .mediaUploadSucceeded,
+                        runID: runID
+                    )
+                } catch {
+                    throw error
+                }
+            }
+
+            ledger.mutationRun.state = "completed"
+            ledger.mutationRun.completedAt = Date()
+            ledger.mutationRun.lastErrorCategory = nil
+            ledger.mutationRun.lastErrorMessage = nil
+            try localStore.writeLegacyMigrationLedger(ledger)
+
+            return LegacyMigrationStep2BSlice2AResult(
+                runID: runID,
+                activeOrganizationID: activeOrganizationID,
+                ledgerURL: localStore.legacyMigrationLedgerURL(),
+                uploadedMediaCount: ledger.media.filter { $0.mutation.state == .mediaUploadSucceeded || $0.mutation.state == .verified }.count
+            )
+        } catch {
+            if ledger.mutationRun.currentRunID == runID {
+                if ledger.mutationRun.lastErrorCategory == nil {
+                    ledger.mutationRun.lastErrorCategory = legacyMigrationStep2AErrorCategory(
+                        for: error,
+                        fallback: "step2b_slice2a_failed"
+                    )
+                }
+                ledger.mutationRun.lastErrorMessage = error.localizedDescription
+                if ledger.mutationRun.state == "in_progress" {
+                    let terminal = legacyMigrationStep2AIsTerminalError(error)
+                    ledger.mutationRun.state = terminal
+                        ? LegacyMigrationPreflightLedger.MutationState.failedTerminal.rawValue
+                        : LegacyMigrationPreflightLedger.MutationState.failedRetryable.rawValue
+                }
+                ledger.mutationRun.completedAt = Date()
+                try? localStore.writeLegacyMigrationLedger(ledger)
+            }
+            throw error
+        }
+    }
+
+    func runLegacyMigrationStep2BSlice2BReadiness() async throws -> LegacyMigrationStep2BSlice2BReadinessResult {
+        guard let client = supabaseClient else {
+            throw LegacyMigrationStep2AError.missingSupabaseClient
+        }
+        guard let activeOrganizationID else {
+            throw LegacyMigrationStep2AError.missingActiveOrganization
+        }
+
+        let runID = UUID()
+        let now = Date()
+        var ledger: LegacyMigrationPreflightLedger
+
+        do {
+            ledger = try localStore.loadLegacyMigrationLedger()
+        } catch {
+            throw LegacyMigrationStep2AError.missingLedger
+        }
+
+        guard ledger.schemaVersion <= LegacyMigrationPreflightLedger.currentSchemaVersion else {
+            ledger.mutationRun = LegacyMigrationPreflightLedger.MutationRunStatus(
+                currentRunID: runID,
+                state: LegacyMigrationPreflightLedger.MutationState.failedTerminal.rawValue,
+                startedAt: now,
+                completedAt: Date(),
+                lastErrorCategory: "unsupported_ledger_schema",
+                lastErrorMessage: LegacyMigrationStep2AError.unsupportedLedgerSchema(ledger.schemaVersion).localizedDescription
+            )
+            try localStore.writeLegacyMigrationLedger(ledger)
+            throw LegacyMigrationStep2AError.unsupportedLedgerSchema(ledger.schemaVersion)
+        }
+
+        guard ledger.activeOrganizationID == activeOrganizationID else {
+            ledger.mutationRun = LegacyMigrationPreflightLedger.MutationRunStatus(
+                currentRunID: runID,
+                state: LegacyMigrationPreflightLedger.MutationState.failedTerminal.rawValue,
+                startedAt: now,
+                completedAt: Date(),
+                lastErrorCategory: "active_org_drift",
+                lastErrorMessage: LegacyMigrationStep2AError.activeOrgDrift(
+                    expected: ledger.activeOrganizationID,
+                    actual: activeOrganizationID
+                ).localizedDescription
+            )
+            try localStore.writeLegacyMigrationLedger(ledger)
+            throw LegacyMigrationStep2AError.activeOrgDrift(
+                expected: ledger.activeOrganizationID,
+                actual: activeOrganizationID
+            )
+        }
+
+        ledger.schemaVersion = LegacyMigrationPreflightLedger.currentSchemaVersion
+        ledger.mutationRun = LegacyMigrationPreflightLedger.MutationRunStatus(
+            currentRunID: runID,
+            state: "in_progress",
+            startedAt: now,
+            completedAt: nil,
+            lastErrorCategory: nil,
+            lastErrorMessage: nil
+        )
+        try localStore.writeLegacyMigrationLedger(ledger)
+
+        let sessionIndexByID = Dictionary(uniqueKeysWithValues: ledger.sessions.enumerated().map { ($0.element.localID, $0.offset) })
+        let shotIndexByID = Dictionary(uniqueKeysWithValues: ledger.shots.enumerated().map { ($0.element.localID, $0.offset) })
+        let mediaIndexByShotID = Dictionary(uniqueKeysWithValues: ledger.media.enumerated().map { ($0.element.shotID, $0.offset) })
+
+        do {
+            let remoteOrgExists = try await verifyRemoteActiveOrganizationExists(
+                client: client,
+                activeOrganizationID: activeOrganizationID
+            )
+            guard remoteOrgExists else {
+                throw LegacyMigrationStep2AError.missingRemoteActiveOrg(activeOrganizationID)
+            }
+
+            for shotID in ledger.media.map(\.shotID) {
+                guard let index = mediaIndexByShotID[shotID] else { continue }
+                let mediaEntry = ledger.media[index]
+                guard mediaEntry.activeOrganizationID == activeOrganizationID else { continue }
+                guard mediaEntry.eligible else { continue }
+                guard mediaEntry.b2WarningRemoteIDs.isEmpty else { continue }
+                guard mediaEntry.mutation.state == .mediaUploadSucceeded || mediaEntry.mutation.state == .verified else { continue }
+
+                guard let parentSessionIndex = sessionIndexByID[mediaEntry.sessionID],
+                      ledger.sessions[parentSessionIndex].mutation.state == .verified else {
+                    continue
+                }
+                guard let parentShotIndex = shotIndexByID[mediaEntry.shotID],
+                      ledger.shots[parentShotIndex].mutation.state == .verified else {
+                    continue
+                }
+
+                guard let metadata = try? localStore.loadSessionMetadata(
+                    propertyID: mediaEntry.propertyID,
+                    sessionID: mediaEntry.sessionID
+                ),
+                let shot = metadata.shots.first(where: { $0.shotID == mediaEntry.shotID }) else {
+                    let message = LegacyMigrationStep2AError.localShotMissing(mediaEntry.shotID).localizedDescription
+                    try markEntityFailure(
+                        ledger: &ledger,
+                        entityType: "media",
+                        index: index,
+                        state: .failedTerminal,
+                        category: "local_shot_missing",
+                        message: message,
+                        runID: runID
+                    )
+                    throw LegacyMigrationStep2AError.localShotMissing(mediaEntry.shotID)
+                }
+
+                guard let expectedChecksum = normalizedSupabaseText(mediaEntry.checksumSHA256) else {
+                    let message = "Media entry \(mediaEntry.shotID.uuidString) is missing expected checksum for finalize readiness."
+                    try markEntityFailure(
+                        ledger: &ledger,
+                        entityType: "media",
+                        index: index,
+                        state: .failedTerminal,
+                        category: "missing_expected_checksum",
+                        message: message,
+                        runID: runID
+                    )
+                    throw LegacyMigrationStep2AError.verificationFailed(message)
+                }
+
+                guard let expectedByteSize = mediaEntry.fileSizeBytes else {
+                    let message = "Media entry \(mediaEntry.shotID.uuidString) is missing expected byte size for finalize readiness."
+                    try markEntityFailure(
+                        ledger: &ledger,
+                        entityType: "media",
+                        index: index,
+                        state: .failedTerminal,
+                        category: "missing_expected_byte_size",
+                        message: message,
+                        runID: runID
+                    )
+                    throw LegacyMigrationStep2AError.verificationFailed(message)
+                }
+
+                let expectedStoragePath = operationalMediaStoragePath(
+                    sessionID: mediaEntry.sessionID,
+                    shotID: mediaEntry.shotID,
+                    originalFilename: shot.originalFilename
+                )
+                let readinessRecord = try await fetchShotFinalizeReadinessRecord(
+                    client: client,
+                    shotID: mediaEntry.shotID,
+                    sessionID: mediaEntry.sessionID,
+                    activeOrganizationID: activeOrganizationID
+                )
+
+                guard let readinessRecord else {
+                    let message = "Shot \(mediaEntry.shotID.uuidString) could not be loaded for finalize readiness."
+                    try markEntityFailure(
+                        ledger: &ledger,
+                        entityType: "media",
+                        index: index,
+                        state: .failedRetryable,
+                        category: "finalize_readback_missing",
+                        message: message,
+                        runID: runID
+                    )
+                    throw LegacyMigrationStep2AError.verificationFailed(message)
+                }
+
+                let hasMatchingFinalizedState =
+                    readinessRecord.id == mediaEntry.shotID &&
+                    readinessRecord.orgID == activeOrganizationID &&
+                    readinessRecord.sessionID == mediaEntry.sessionID &&
+                    normalizedSupabaseText(readinessRecord.storageBucket) == supabaseOperationalMediaBucket &&
+                    normalizedSupabaseText(readinessRecord.storagePath) == expectedStoragePath &&
+                    normalizedSupabaseText(readinessRecord.checksumSHA256)?.lowercased() == expectedChecksum.lowercased() &&
+                    Int64(readinessRecord.byteSize ?? -1) == expectedByteSize &&
+                    readinessRecord.uploadState == "uploaded"
+
+                if hasMatchingFinalizedState {
+                    try markEntityVerified(
+                        ledger: &ledger,
+                        entityType: "media",
+                        index: index,
+                        runID: runID
+                    )
+                    continue
+                }
+
+                let hasConflictingStorageState =
+                    (normalizedSupabaseText(readinessRecord.storageBucket) != nil && normalizedSupabaseText(readinessRecord.storageBucket) != supabaseOperationalMediaBucket) ||
+                    (normalizedSupabaseText(readinessRecord.storagePath) != nil && normalizedSupabaseText(readinessRecord.storagePath) != expectedStoragePath) ||
+                    (normalizedSupabaseText(readinessRecord.checksumSHA256) != nil && normalizedSupabaseText(readinessRecord.checksumSHA256)?.lowercased() != expectedChecksum.lowercased()) ||
+                    (readinessRecord.byteSize != nil && Int64(readinessRecord.byteSize ?? -1) != expectedByteSize)
+
+                if hasConflictingStorageState {
+                    let message = "Shot \(mediaEntry.shotID.uuidString) has conflicting remote storage metadata and is not ready for finalize."
+                    try markEntityFailure(
+                        ledger: &ledger,
+                        entityType: "media",
+                        index: index,
+                        state: .failedTerminal,
+                        category: "conflicting_remote_storage_state",
+                        message: message,
+                        runID: runID
+                    )
+                    throw LegacyMigrationStep2AError.verificationFailed(message)
+                }
+
+                try markMediaReadyForFinalize(
+                    ledger: &ledger,
+                    index: index,
+                    runID: runID
+                )
+            }
+
+            ledger.mutationRun.state = "completed"
+            ledger.mutationRun.completedAt = Date()
+            ledger.mutationRun.lastErrorCategory = nil
+            ledger.mutationRun.lastErrorMessage = nil
+            try localStore.writeLegacyMigrationLedger(ledger)
+
+            return LegacyMigrationStep2BSlice2BReadinessResult(
+                runID: runID,
+                activeOrganizationID: activeOrganizationID,
+                ledgerURL: localStore.legacyMigrationLedgerURL(),
+                verifiedMediaCount: ledger.media.filter { $0.mutation.state == .verified }.count,
+                readyForFinalizeCount: ledger.media.filter { $0.mutation.isReadyForFinalize }.count
+            )
+        } catch {
+            if ledger.mutationRun.currentRunID == runID {
+                if ledger.mutationRun.lastErrorCategory == nil {
+                    ledger.mutationRun.lastErrorCategory = legacyMigrationStep2AErrorCategory(
+                        for: error,
+                        fallback: "step2b_slice2b_readiness_failed"
+                    )
+                }
+                ledger.mutationRun.lastErrorMessage = error.localizedDescription
+                if ledger.mutationRun.state == "in_progress" {
+                    let terminal = legacyMigrationStep2AIsTerminalError(error)
+                    ledger.mutationRun.state = terminal
+                        ? LegacyMigrationPreflightLedger.MutationState.failedTerminal.rawValue
+                        : LegacyMigrationPreflightLedger.MutationState.failedRetryable.rawValue
+                }
+                ledger.mutationRun.completedAt = Date()
+                try? localStore.writeLegacyMigrationLedger(ledger)
+            }
+            throw error
+        }
+    }
+
+    func runLegacyMigrationStep2BSlice2BFinalize() async throws -> LegacyMigrationStep2BSlice2BFinalizeResult {
+        guard let client = supabaseClient else {
+            throw LegacyMigrationStep2AError.missingSupabaseClient
+        }
+        guard let activeOrganizationID else {
+            throw LegacyMigrationStep2AError.missingActiveOrganization
+        }
+
+        let runID = UUID()
+        let now = Date()
+        var ledger: LegacyMigrationPreflightLedger
+
+        do {
+            ledger = try localStore.loadLegacyMigrationLedger()
+        } catch {
+            throw LegacyMigrationStep2AError.missingLedger
+        }
+
+        guard ledger.schemaVersion <= LegacyMigrationPreflightLedger.currentSchemaVersion else {
+            ledger.mutationRun = LegacyMigrationPreflightLedger.MutationRunStatus(
+                currentRunID: runID,
+                state: LegacyMigrationPreflightLedger.MutationState.failedTerminal.rawValue,
+                startedAt: now,
+                completedAt: Date(),
+                lastErrorCategory: "unsupported_ledger_schema",
+                lastErrorMessage: LegacyMigrationStep2AError.unsupportedLedgerSchema(ledger.schemaVersion).localizedDescription
+            )
+            try localStore.writeLegacyMigrationLedger(ledger)
+            throw LegacyMigrationStep2AError.unsupportedLedgerSchema(ledger.schemaVersion)
+        }
+
+        guard ledger.activeOrganizationID == activeOrganizationID else {
+            ledger.mutationRun = LegacyMigrationPreflightLedger.MutationRunStatus(
+                currentRunID: runID,
+                state: LegacyMigrationPreflightLedger.MutationState.failedTerminal.rawValue,
+                startedAt: now,
+                completedAt: Date(),
+                lastErrorCategory: "active_org_drift",
+                lastErrorMessage: LegacyMigrationStep2AError.activeOrgDrift(
+                    expected: ledger.activeOrganizationID,
+                    actual: activeOrganizationID
+                ).localizedDescription
+            )
+            try localStore.writeLegacyMigrationLedger(ledger)
+            throw LegacyMigrationStep2AError.activeOrgDrift(
+                expected: ledger.activeOrganizationID,
+                actual: activeOrganizationID
+            )
+        }
+
+        guard !hasInFlightSupabaseUploadOperations() else {
+            ledger.mutationRun = LegacyMigrationPreflightLedger.MutationRunStatus(
+                currentRunID: runID,
+                state: LegacyMigrationPreflightLedger.MutationState.failedTerminal.rawValue,
+                startedAt: now,
+                completedAt: Date(),
+                lastErrorCategory: "concurrent_live_upload_activity",
+                lastErrorMessage: "Finalize cannot run while live upload activity is in flight for this app."
+            )
+            try localStore.writeLegacyMigrationLedger(ledger)
+            throw LegacyMigrationStep2AError.verificationFailed("Finalize cannot run while live upload activity is in flight for this app.")
+        }
+
+        ledger.schemaVersion = LegacyMigrationPreflightLedger.currentSchemaVersion
+        ledger.mutationRun = LegacyMigrationPreflightLedger.MutationRunStatus(
+            currentRunID: runID,
+            state: "in_progress",
+            startedAt: now,
+            completedAt: nil,
+            lastErrorCategory: nil,
+            lastErrorMessage: nil
+        )
+        try localStore.writeLegacyMigrationLedger(ledger)
+
+        let sessionIndexByID = Dictionary(uniqueKeysWithValues: ledger.sessions.enumerated().map { ($0.element.localID, $0.offset) })
+        let shotIndexByID = Dictionary(uniqueKeysWithValues: ledger.shots.enumerated().map { ($0.element.localID, $0.offset) })
+        let mediaIndexByShotID = Dictionary(uniqueKeysWithValues: ledger.media.enumerated().map { ($0.element.shotID, $0.offset) })
+
+        do {
+            let remoteOrgExists = try await verifyRemoteActiveOrganizationExists(
+                client: client,
+                activeOrganizationID: activeOrganizationID
+            )
+            guard remoteOrgExists else {
+                throw LegacyMigrationStep2AError.missingRemoteActiveOrg(activeOrganizationID)
+            }
+
+            for shotID in ledger.media.map(\.shotID) {
+                guard let index = mediaIndexByShotID[shotID] else { continue }
+                let mediaEntry = ledger.media[index]
+                guard mediaEntry.activeOrganizationID == activeOrganizationID else { continue }
+                guard mediaEntry.eligible else { continue }
+                guard mediaEntry.b2WarningRemoteIDs.isEmpty else { continue }
+
+                guard let parentSessionIndex = sessionIndexByID[mediaEntry.sessionID],
+                      ledger.sessions[parentSessionIndex].mutation.state == .verified else {
+                    continue
+                }
+                guard let parentShotIndex = shotIndexByID[mediaEntry.shotID],
+                      ledger.shots[parentShotIndex].mutation.state == .verified else {
+                    continue
+                }
+
+                let isUploadComplete = mediaEntry.mutation.state == .mediaUploadSucceeded
+                let isAlreadyVerified = mediaEntry.mutation.state == .verified
+                guard isUploadComplete || isAlreadyVerified else { continue }
+
+                guard let metadata = try? localStore.loadSessionMetadata(
+                    propertyID: mediaEntry.propertyID,
+                    sessionID: mediaEntry.sessionID
+                ),
+                let shot = metadata.shots.first(where: { $0.shotID == mediaEntry.shotID }) else {
+                    let message = LegacyMigrationStep2AError.localShotMissing(mediaEntry.shotID).localizedDescription
+                    try markEntityFailure(
+                        ledger: &ledger,
+                        entityType: "media",
+                        index: index,
+                        state: .failedTerminal,
+                        category: "local_shot_missing",
+                        message: message,
+                        runID: runID
+                    )
+                    throw LegacyMigrationStep2AError.localShotMissing(mediaEntry.shotID)
+                }
+
+                guard let expectedChecksum = normalizedSupabaseText(mediaEntry.checksumSHA256) else {
+                    let message = "Media entry \(mediaEntry.shotID.uuidString) is missing expected checksum for finalize."
+                    try markEntityFailure(
+                        ledger: &ledger,
+                        entityType: "media",
+                        index: index,
+                        state: .failedTerminal,
+                        category: "missing_expected_checksum",
+                        message: message,
+                        runID: runID
+                    )
+                    throw LegacyMigrationStep2AError.verificationFailed(message)
+                }
+
+                guard let expectedByteSize = mediaEntry.fileSizeBytes else {
+                    let message = "Media entry \(mediaEntry.shotID.uuidString) is missing expected byte size for finalize."
+                    try markEntityFailure(
+                        ledger: &ledger,
+                        entityType: "media",
+                        index: index,
+                        state: .failedTerminal,
+                        category: "missing_expected_byte_size",
+                        message: message,
+                        runID: runID
+                    )
+                    throw LegacyMigrationStep2AError.verificationFailed(message)
+                }
+
+                let expectedStoragePath = operationalMediaStoragePath(
+                    sessionID: mediaEntry.sessionID,
+                    shotID: mediaEntry.shotID,
+                    originalFilename: shot.originalFilename
+                )
+                let expectedBucket = supabaseOperationalMediaBucket
+
+                let preFinalizeRecord = try await fetchShotFinalizeReadinessRecord(
+                    client: client,
+                    shotID: mediaEntry.shotID,
+                    sessionID: mediaEntry.sessionID,
+                    activeOrganizationID: activeOrganizationID
+                )
+
+                guard let preFinalizeRecord else {
+                    let message = "Shot \(mediaEntry.shotID.uuidString) could not be loaded before finalize."
+                    try markEntityFailure(
+                        ledger: &ledger,
+                        entityType: "media",
+                        index: index,
+                        state: .failedRetryable,
+                        category: "finalize_precheck_missing",
+                        message: message,
+                        runID: runID
+                    )
+                    throw LegacyMigrationStep2AError.verificationFailed(message)
+                }
+
+                let alreadyFinalized = shotFinalizeRecord(
+                    preFinalizeRecord,
+                    matchesShotID: mediaEntry.shotID,
+                    activeOrganizationID: activeOrganizationID,
+                    sessionID: mediaEntry.sessionID,
+                    storageBucket: expectedBucket,
+                    storagePath: expectedStoragePath,
+                    checksumSHA256: expectedChecksum,
+                    byteSize: expectedByteSize,
+                    uploadState: "uploaded"
+                )
+
+                if alreadyFinalized {
+                    try markEntityVerified(
+                        ledger: &ledger,
+                        entityType: "media",
+                        index: index,
+                        runID: runID
+                    )
+                    continue
+                }
+
+                guard mediaEntry.mutation.isReadyForFinalize else {
+                    let message = "Media entry \(mediaEntry.shotID.uuidString) is not marked ready for finalize."
+                    try markEntityFailure(
+                        ledger: &ledger,
+                        entityType: "media",
+                        index: index,
+                        state: .failedTerminal,
+                        category: "media_not_ready_for_finalize",
+                        message: message,
+                        runID: runID
+                    )
+                    throw LegacyMigrationStep2AError.verificationFailed(message)
+                }
+
+                let conflictingPreFinalizeState =
+                    (normalizedSupabaseText(preFinalizeRecord.storageBucket) != nil && normalizedSupabaseText(preFinalizeRecord.storageBucket) != expectedBucket) ||
+                    (normalizedSupabaseText(preFinalizeRecord.storagePath) != nil && normalizedSupabaseText(preFinalizeRecord.storagePath) != expectedStoragePath) ||
+                    (normalizedSupabaseText(preFinalizeRecord.checksumSHA256) != nil && normalizedSupabaseText(preFinalizeRecord.checksumSHA256)?.lowercased() != expectedChecksum.lowercased()) ||
+                    (preFinalizeRecord.byteSize != nil && Int64(preFinalizeRecord.byteSize ?? -1) != expectedByteSize)
+
+                if conflictingPreFinalizeState {
+                    let message = "Shot \(mediaEntry.shotID.uuidString) has conflicting remote storage metadata and cannot be finalized."
+                    try markEntityFailure(
+                        ledger: &ledger,
+                        entityType: "media",
+                        index: index,
+                        state: .failedTerminal,
+                        category: "conflicting_remote_storage_state",
+                        message: message,
+                        runID: runID
+                    )
+                    throw LegacyMigrationStep2AError.verificationFailed(message)
+                }
+
+                do {
+                    try await persistShotStorageMetadataToSupabase(
+                        orgID: ledger.activeOrganizationID,
+                        sessionID: mediaEntry.sessionID,
+                        shotID: mediaEntry.shotID,
+                        storageBucket: expectedBucket,
+                        storagePath: expectedStoragePath,
+                        checksumSHA256: expectedChecksum,
+                        byteSize: Int(exactly: expectedByteSize),
+                        uploadState: "uploaded",
+                        uploadAttempts: mediaEntry.mutation.attemptCount,
+                        lastUploadError: nil
+                    )
+                } catch {
+                    if let postgrestError = error as? PostgrestError,
+                       postgrestError.code == "23505" {
+                        let pathOwner = try await fetchShotFinalizeReadinessRecordByStoragePath(
+                            client: client,
+                            storageBucket: expectedBucket,
+                            storagePath: expectedStoragePath,
+                            activeOrganizationID: activeOrganizationID
+                        )
+
+                        if let pathOwner,
+                           pathOwner.id == mediaEntry.shotID,
+                           pathOwner.orgID == activeOrganizationID,
+                           pathOwner.sessionID == mediaEntry.sessionID {
+                            // Treat as idempotent conflict and proceed to strict verification.
+                        } else {
+                            let message = "Storage path conflict for shot \(mediaEntry.shotID.uuidString) is owned by a different shot."
+                            try markEntityFailure(
+                                ledger: &ledger,
+                                entityType: "media",
+                                index: index,
+                                state: .failedTerminal,
+                                category: "storage_path_conflict_with_different_shot",
+                                message: message,
+                                runID: runID
+                            )
+                            throw LegacyMigrationStep2AError.verificationFailed(message)
+                        }
+                    } else {
+                        let category = legacyMigrationStep2AErrorCategory(for: error, fallback: "media_finalize_failed")
+                        let state: LegacyMigrationPreflightLedger.MutationState = category == "transient_transport_failure" ? .failedRetryable : .failedTerminal
+                        try markEntityFailure(
+                            ledger: &ledger,
+                            entityType: "media",
+                            index: index,
+                            state: state,
+                            category: category,
+                            message: error.localizedDescription,
+                            runID: runID
+                        )
+                        throw error
+                    }
+                }
+
+                let strictRecord = try await fetchShotFinalizeReadinessRecord(
+                    client: client,
+                    shotID: mediaEntry.shotID,
+                    sessionID: mediaEntry.sessionID,
+                    activeOrganizationID: activeOrganizationID
+                )
+
+                guard let strictRecord,
+                      shotFinalizeRecord(
+                        strictRecord,
+                        matchesShotID: mediaEntry.shotID,
+                        activeOrganizationID: activeOrganizationID,
+                        sessionID: mediaEntry.sessionID,
+                        storageBucket: expectedBucket,
+                        storagePath: expectedStoragePath,
+                        checksumSHA256: expectedChecksum,
+                        byteSize: expectedByteSize,
+                        uploadState: "uploaded"
+                      ) else {
+                    let message = "Strict finalize verification failed for shot \(mediaEntry.shotID.uuidString)."
+                    try markEntityFailure(
+                        ledger: &ledger,
+                        entityType: "media",
+                        index: index,
+                        state: .failedTerminal,
+                        category: "media_finalize_verification_failed",
+                        message: message,
+                        runID: runID
+                    )
+                    throw LegacyMigrationStep2AError.verificationFailed(message)
+                }
+
+                try markEntityVerified(
+                    ledger: &ledger,
+                    entityType: "media",
+                    index: index,
+                    runID: runID
+                )
+            }
+
+            ledger.mutationRun.state = "completed"
+            ledger.mutationRun.completedAt = Date()
+            ledger.mutationRun.lastErrorCategory = nil
+            ledger.mutationRun.lastErrorMessage = nil
+            try localStore.writeLegacyMigrationLedger(ledger)
+
+            return LegacyMigrationStep2BSlice2BFinalizeResult(
+                runID: runID,
+                activeOrganizationID: activeOrganizationID,
+                ledgerURL: localStore.legacyMigrationLedgerURL(),
+                verifiedMediaCount: ledger.media.filter { $0.mutation.state == .verified }.count
+            )
+        } catch {
+            if ledger.mutationRun.currentRunID == runID {
+                if ledger.mutationRun.lastErrorCategory == nil {
+                    ledger.mutationRun.lastErrorCategory = legacyMigrationStep2AErrorCategory(
+                        for: error,
+                        fallback: "step2b_slice2b_finalize_failed"
+                    )
+                }
+                ledger.mutationRun.lastErrorMessage = error.localizedDescription
+                if ledger.mutationRun.state == "in_progress" {
+                    let terminal = legacyMigrationStep2AIsTerminalError(error)
+                    ledger.mutationRun.state = terminal
+                        ? LegacyMigrationPreflightLedger.MutationState.failedTerminal.rawValue
+                        : LegacyMigrationPreflightLedger.MutationState.failedRetryable.rawValue
+                }
+                ledger.mutationRun.completedAt = Date()
+                try? localStore.writeLegacyMigrationLedger(ledger)
+            }
+            throw error
+        }
+    }
+
+    private func verifyRemoteActiveOrganizationExists(
+        client: SupabaseClient,
+        activeOrganizationID: UUID
+    ) async throws -> Bool {
+        let rows = try await client
+            .from("orgs")
+            .select("id")
+            .eq("id", value: activeOrganizationID.uuidString.lowercased())
+            .limit(1)
+            .execute()
+            .value as [SupabaseOrgIdentityRecord]
+
+        return rows.first?.id == activeOrganizationID
+    }
+
+    private func verifyRemoteProperty(
+        client: SupabaseClient,
+        propertyID: UUID,
+        activeOrganizationID: UUID
+    ) async throws -> Bool {
+        let rows = try await client
+            .from("properties")
+            .select("id, org_id, name")
+            .eq("id", value: propertyID.uuidString.lowercased())
+            .eq("org_id", value: activeOrganizationID.uuidString.lowercased())
+            .limit(1)
+            .execute()
+            .value as [SupabasePropertyIdentityRecord]
+
+        guard let row = rows.first else { return false }
+        return row.id == propertyID && row.orgID == activeOrganizationID
+    }
+
+    private func verifyRemoteSession(
+        client: SupabaseClient,
+        sessionID: UUID,
+        propertyID: UUID,
+        activeOrganizationID: UUID
+    ) async throws -> Bool {
+        let rows = try await client
+            .from("sessions")
+            .select("id, org_id, property_id, title, status, started_at")
+            .eq("id", value: sessionID.uuidString.lowercased())
+            .eq("org_id", value: activeOrganizationID.uuidString.lowercased())
+            .eq("property_id", value: propertyID.uuidString.lowercased())
+            .limit(1)
+            .execute()
+            .value as [SupabaseSessionIdentityRecord]
+
+        guard let row = rows.first else { return false }
+        return row.id == sessionID && row.orgID == activeOrganizationID && row.propertyID == propertyID
+    }
+
+    private func verifyRemoteShot(
+        client: SupabaseClient,
+        shotID: UUID,
+        sessionID: UUID,
+        activeOrganizationID: UUID
+    ) async throws -> Bool {
+        let rows = try await client
+            .from("shots")
+            .select("id, org_id, session_id, storage_bucket, storage_path, checksum_sha256, upload_state")
+            .eq("id", value: shotID.uuidString.lowercased())
+            .eq("org_id", value: activeOrganizationID.uuidString.lowercased())
+            .eq("session_id", value: sessionID.uuidString.lowercased())
+            .limit(1)
+            .execute()
+            .value as [SupabaseShotIdentityRecord]
+
+        guard let row = rows.first else { return false }
+        return row.id == shotID && row.orgID == activeOrganizationID && row.sessionID == sessionID
+    }
+
+    private func verifyExistingPropertyEntry(
+        client: SupabaseClient,
+        activeOrganizationID: UUID,
+        ledger: inout LegacyMigrationPreflightLedger,
+        propertyIndex: Int,
+        runID: UUID
+    ) async throws {
+        let propertyID = ledger.properties[propertyIndex].localID
+        let verified = try await verifyRemoteProperty(
+            client: client,
+            propertyID: propertyID,
+            activeOrganizationID: activeOrganizationID
+        )
+
+        guard verified else {
+            let message = "Property \(propertyID.uuidString) was marked B1 but remote verification failed."
+            try markEntityFailure(
+                ledger: &ledger,
+                entityType: "property",
+                index: propertyIndex,
+                state: .failedTerminal,
+                category: "property_b1_verification_failed",
+                message: message,
+                runID: runID
+            )
+            throw LegacyMigrationStep2AError.verificationFailed(message)
+        }
+
+        try markEntityVerified(
+            ledger: &ledger,
+            entityType: "property",
+            index: propertyIndex,
+            runID: runID
+        )
+    }
+
+    private func verifyExistingSessionEntry(
+        client: SupabaseClient,
+        activeOrganizationID: UUID,
+        propertyID: UUID,
+        ledger: inout LegacyMigrationPreflightLedger,
+        sessionIndex: Int,
+        runID: UUID
+    ) async throws {
+        let sessionID = ledger.sessions[sessionIndex].localID
+        let verified = try await verifyRemoteSession(
+            client: client,
+            sessionID: sessionID,
+            propertyID: propertyID,
+            activeOrganizationID: activeOrganizationID
+        )
+
+        guard verified else {
+            let message = "Session \(sessionID.uuidString) was marked B1 but remote verification failed."
+            try markEntityFailure(
+                ledger: &ledger,
+                entityType: "session",
+                index: sessionIndex,
+                state: .failedTerminal,
+                category: "session_b1_verification_failed",
+                message: message,
+                runID: runID
+            )
+            throw LegacyMigrationStep2AError.verificationFailed(message)
+        }
+
+        try markEntityVerified(
+            ledger: &ledger,
+            entityType: "session",
+            index: sessionIndex,
+            runID: runID
+        )
+    }
+
+    private func verifyExistingShotEntry(
+        client: SupabaseClient,
+        activeOrganizationID: UUID,
+        sessionID: UUID,
+        ledger: inout LegacyMigrationPreflightLedger,
+        shotIndex: Int,
+        runID: UUID
+    ) async throws {
+        let shotID = ledger.shots[shotIndex].localID
+        let verified = try await verifyRemoteShot(
+            client: client,
+            shotID: shotID,
+            sessionID: sessionID,
+            activeOrganizationID: activeOrganizationID
+        )
+
+        guard verified else {
+            let message = "Shot \(shotID.uuidString) was marked B1 but remote verification failed."
+            try markEntityFailure(
+                ledger: &ledger,
+                entityType: "shot",
+                index: shotIndex,
+                state: .failedTerminal,
+                category: "shot_b1_verification_failed",
+                message: message,
+                runID: runID
+            )
+            throw LegacyMigrationStep2AError.verificationFailed(message)
+        }
+
+        try markEntityVerified(
+            ledger: &ledger,
+            entityType: "shot",
+            index: shotIndex,
+            runID: runID
+        )
+    }
+
+    private func resolveLegacyMigrationMediaFileURL(
+        for mediaEntry: LegacyMigrationPreflightLedger.MediaEntry
+    ) throws -> URL {
+        if let resolvedFilePath = normalizedSupabaseText(mediaEntry.resolvedFilePath) {
+            let directURL = URL(fileURLWithPath: resolvedFilePath)
+            if FileManager.default.fileExists(atPath: directURL.path) {
+                return directURL
+            }
+        }
+
+        if let resolved = localStore.resolveSessionRelativeFileURL(
+            propertyID: mediaEntry.propertyID,
+            sessionID: mediaEntry.sessionID,
+            relativePath: mediaEntry.originalRelativePath
+        ), FileManager.default.fileExists(atPath: resolved.path) {
+            return resolved
+        }
+
+        let fallbackURL = localStore
+            .sessionFolderURL(propertyID: mediaEntry.propertyID, sessionID: mediaEntry.sessionID)
+            .appendingPathComponent(mediaEntry.originalRelativePath, isDirectory: false)
+        if FileManager.default.fileExists(atPath: fallbackURL.path) {
+            return fallbackURL
+        }
+
+        throw NSError(
+            domain: "ScoutCapture.LegacyMigration",
+            code: 404,
+            userInfo: [NSLocalizedDescriptionKey: "Original media file is missing for shot \(mediaEntry.shotID.uuidString)."]
+        )
+    }
+
+    private func fetchShotFinalizeReadinessRecord(
+        client: SupabaseClient,
+        shotID: UUID,
+        sessionID: UUID,
+        activeOrganizationID: UUID
+    ) async throws -> SupabaseShotFinalizeReadinessRecord? {
+        let rows = try await client
+            .from("shots")
+            .select("id, org_id, session_id, storage_bucket, storage_path, checksum_sha256, byte_size, upload_state")
+            .eq("id", value: shotID.uuidString.lowercased())
+            .eq("org_id", value: activeOrganizationID.uuidString.lowercased())
+            .eq("session_id", value: sessionID.uuidString.lowercased())
+            .limit(1)
+            .execute()
+            .value as [SupabaseShotFinalizeReadinessRecord]
+
+        return rows.first
+    }
+
+    private func markMediaReadyForFinalize(
+        ledger: inout LegacyMigrationPreflightLedger,
+        index: Int,
+        runID: UUID
+    ) throws {
+        ledger.media[index].mutation.lastRunID = runID
+        ledger.media[index].mutation.lastErrorCategory = nil
+        ledger.media[index].mutation.lastErrorMessage = nil
+        ledger.media[index].mutation.isReadyForFinalize = true
+        try localStore.writeLegacyMigrationLedger(ledger)
+    }
+
+    private func fetchShotFinalizeReadinessRecordByStoragePath(
+        client: SupabaseClient,
+        storageBucket: String,
+        storagePath: String,
+        activeOrganizationID: UUID
+    ) async throws -> SupabaseShotFinalizeReadinessRecord? {
+        let rows = try await client
+            .from("shots")
+            .select("id, org_id, session_id, storage_bucket, storage_path, checksum_sha256, byte_size, upload_state")
+            .eq("org_id", value: activeOrganizationID.uuidString.lowercased())
+            .eq("storage_bucket", value: storageBucket)
+            .eq("storage_path", value: storagePath)
+            .limit(1)
+            .execute()
+            .value as [SupabaseShotFinalizeReadinessRecord]
+
+        return rows.first
+    }
+
+    private func shotFinalizeRecord(
+        _ record: SupabaseShotFinalizeReadinessRecord,
+        matchesShotID shotID: UUID,
+        activeOrganizationID: UUID,
+        sessionID: UUID,
+        storageBucket: String,
+        storagePath: String,
+        checksumSHA256: String,
+        byteSize: Int64,
+        uploadState: String
+    ) -> Bool {
+        record.id == shotID &&
+        record.orgID == activeOrganizationID &&
+        record.sessionID == sessionID &&
+        normalizedSupabaseText(record.storageBucket) == storageBucket &&
+        normalizedSupabaseText(record.storagePath) == storagePath &&
+        normalizedSupabaseText(record.checksumSHA256)?.lowercased() == checksumSHA256.lowercased() &&
+        Int64(record.byteSize ?? -1) == byteSize &&
+        record.uploadState == uploadState
+    }
+
+    private func hasInFlightSupabaseUploadOperations() -> Bool {
+        supabaseMediaOperationQueue.sync {
+            inFlightSupabaseMediaOperations.contains { $0.hasPrefix("upload|") }
+        }
+    }
+
+    private func markEntityMutationState(
+        ledger: inout LegacyMigrationPreflightLedger,
+        entityType: String,
+        index: Int,
+        state: LegacyMigrationPreflightLedger.MutationState,
+        runID: UUID
+    ) throws {
+        let now = Date()
+        switch entityType {
+        case "property":
+            ledger.properties[index].mutation.state = state
+            ledger.properties[index].mutation.lastRunID = runID
+            ledger.properties[index].mutation.lastAttemptedAt = now
+            if state == .rowUpsertStarted || state == .mediaUploadStarted {
+                ledger.properties[index].mutation.attemptCount += 1
+            }
+            ledger.properties[index].mutation.lastErrorCategory = nil
+            ledger.properties[index].mutation.lastErrorMessage = nil
+        case "session":
+            ledger.sessions[index].mutation.state = state
+            ledger.sessions[index].mutation.lastRunID = runID
+            ledger.sessions[index].mutation.lastAttemptedAt = now
+            if state == .rowUpsertStarted || state == .mediaUploadStarted {
+                ledger.sessions[index].mutation.attemptCount += 1
+            }
+            ledger.sessions[index].mutation.lastErrorCategory = nil
+            ledger.sessions[index].mutation.lastErrorMessage = nil
+        case "shot":
+            ledger.shots[index].mutation.state = state
+            ledger.shots[index].mutation.lastRunID = runID
+            ledger.shots[index].mutation.lastAttemptedAt = now
+            if state == .rowUpsertStarted || state == .mediaUploadStarted {
+                ledger.shots[index].mutation.attemptCount += 1
+            }
+            ledger.shots[index].mutation.lastErrorCategory = nil
+            ledger.shots[index].mutation.lastErrorMessage = nil
+        case "media":
+            ledger.media[index].mutation.state = state
+            ledger.media[index].mutation.lastRunID = runID
+            ledger.media[index].mutation.lastAttemptedAt = now
+            if state == .rowUpsertStarted || state == .mediaUploadStarted {
+                ledger.media[index].mutation.attemptCount += 1
+            }
+            ledger.media[index].mutation.lastErrorCategory = nil
+            ledger.media[index].mutation.lastErrorMessage = nil
+            ledger.media[index].mutation.isReadyForFinalize = false
+        default:
+            return
+        }
+        try localStore.writeLegacyMigrationLedger(ledger)
+    }
+
+    private func markEntityVerified(
+        ledger: inout LegacyMigrationPreflightLedger,
+        entityType: String,
+        index: Int,
+        runID: UUID
+    ) throws {
+        let now = Date()
+        switch entityType {
+        case "property":
+            ledger.properties[index].mutation.state = .verified
+            ledger.properties[index].mutation.lastRunID = runID
+            ledger.properties[index].mutation.lastVerifiedAt = now
+            ledger.properties[index].mutation.lastErrorCategory = nil
+            ledger.properties[index].mutation.lastErrorMessage = nil
+        case "session":
+            ledger.sessions[index].mutation.state = .verified
+            ledger.sessions[index].mutation.lastRunID = runID
+            ledger.sessions[index].mutation.lastVerifiedAt = now
+            ledger.sessions[index].mutation.lastErrorCategory = nil
+            ledger.sessions[index].mutation.lastErrorMessage = nil
+        case "shot":
+            ledger.shots[index].mutation.state = .verified
+            ledger.shots[index].mutation.lastRunID = runID
+            ledger.shots[index].mutation.lastVerifiedAt = now
+            ledger.shots[index].mutation.lastErrorCategory = nil
+            ledger.shots[index].mutation.lastErrorMessage = nil
+        case "media":
+            ledger.media[index].mutation.state = .verified
+            ledger.media[index].mutation.lastRunID = runID
+            ledger.media[index].mutation.lastVerifiedAt = now
+            ledger.media[index].mutation.lastErrorCategory = nil
+            ledger.media[index].mutation.lastErrorMessage = nil
+            ledger.media[index].mutation.isReadyForFinalize = false
+        default:
+            return
+        }
+        try localStore.writeLegacyMigrationLedger(ledger)
+    }
+
+    private func markEntityFailure(
+        ledger: inout LegacyMigrationPreflightLedger,
+        entityType: String,
+        index: Int,
+        state: LegacyMigrationPreflightLedger.MutationState,
+        category: String,
+        message: String,
+        runID: UUID
+    ) throws {
+        switch entityType {
+        case "property":
+            ledger.properties[index].mutation.state = state
+            ledger.properties[index].mutation.lastRunID = runID
+            ledger.properties[index].mutation.lastErrorCategory = category
+            ledger.properties[index].mutation.lastErrorMessage = message
+        case "session":
+            ledger.sessions[index].mutation.state = state
+            ledger.sessions[index].mutation.lastRunID = runID
+            ledger.sessions[index].mutation.lastErrorCategory = category
+            ledger.sessions[index].mutation.lastErrorMessage = message
+        case "shot":
+            ledger.shots[index].mutation.state = state
+            ledger.shots[index].mutation.lastRunID = runID
+            ledger.shots[index].mutation.lastErrorCategory = category
+            ledger.shots[index].mutation.lastErrorMessage = message
+        case "media":
+            ledger.media[index].mutation.state = state
+            ledger.media[index].mutation.lastRunID = runID
+            ledger.media[index].mutation.lastErrorCategory = category
+            ledger.media[index].mutation.lastErrorMessage = message
+            ledger.media[index].mutation.isReadyForFinalize = false
+        default:
+            return
+        }
+        ledger.mutationRun.lastErrorCategory = category
+        ledger.mutationRun.lastErrorMessage = message
+        ledger.mutationRun.state = state.rawValue
+        ledger.mutationRun.completedAt = Date()
+        try localStore.writeLegacyMigrationLedger(ledger)
+    }
+
+    private func legacyMigrationStep2AErrorCategory(for error: Error, fallback: String) -> String {
+        if let step2Error = error as? LegacyMigrationStep2AError {
+            switch step2Error {
+            case .missingRemoteActiveOrg:
+                return "missing_remote_active_org"
+            case .activeOrgDrift:
+                return "active_org_drift"
+            case .unsupportedLedgerSchema:
+                return "unsupported_ledger_schema"
+            case .missingLedger:
+                return "missing_ledger"
+            case .localPropertyMissing:
+                return "local_property_missing"
+            case .localSessionMissing:
+                return "local_session_missing"
+            case .localSessionMetadataMissing:
+                return "local_session_metadata_missing"
+            case .localShotMissing:
+                return "local_shot_missing"
+            case .verificationFailed:
+                return "verification_failed"
+            case .missingSupabaseClient:
+                return "missing_supabase_client"
+            case .missingActiveOrganization:
+                return "missing_active_org"
+            }
+        }
+
+        if let httpError = error as? HTTPError {
+            switch httpError.response.statusCode {
+            case 408, 425, 429:
+                return "transient_transport_failure"
+            case 500 ... 599:
+                return "transient_transport_failure"
+            case 401, 403:
+                return "permission_denied"
+            case 400 ... 499:
+                return "request_rejected"
+            default:
+                return fallback
+            }
+        }
+
+        if let postgrestError = error as? PostgrestError {
+            let code = postgrestError.code?.uppercased() ?? ""
+            let message = postgrestError.message.lowercased()
+
+            if code == "42501" {
+                return "permission_denied"
+            }
+            if code == "57014" || code == "57P03" || code == "53300" || code == "53400" || code == "40001" || code == "40P01" || code.hasPrefix("08") {
+                return "transient_transport_failure"
+            }
+            if message.contains("timeout")
+                || message.contains("timed out")
+                || message.contains("temporar")
+                || message.contains("try again")
+                || message.contains("rate limit")
+                || message.contains("too many requests")
+                || message.contains("connection") && message.contains("closed")
+            {
+                return "transient_transport_failure"
+            }
+            if code.hasPrefix("22") || code.hasPrefix("23") || code.hasPrefix("42") {
+                return "request_rejected"
+            }
+            return fallback
+        }
+
+        if let storageError = error as? StorageError {
+            if let statusCode = Int(storageError.statusCode ?? "") {
+                switch statusCode {
+                case 408, 425, 429:
+                    return "transient_transport_failure"
+                case 500 ... 599:
+                    return "transient_transport_failure"
+                case 401, 403:
+                    return "permission_denied"
+                case 400 ... 499:
+                    return "request_rejected"
+                default:
+                    break
+                }
+            }
+
+            let message = storageError.message.lowercased()
+            if message.contains("timeout")
+                || message.contains("temporar")
+                || message.contains("try again")
+                || message.contains("rate limit")
+                || message.contains("too many requests")
+            {
+                return "transient_transport_failure"
+            }
+            return fallback
+        }
+
+        let nsError = error as NSError
+        let domain = nsError.domain.lowercased()
+        if domain.contains("url") || domain.contains("network") || domain.contains("nsurl") {
+            return "transient_transport_failure"
+        }
+        return fallback
+    }
+
+    private func legacyMigrationStep2AIsTerminalError(_ error: Error) -> Bool {
+        if error is LegacyMigrationStep2AError {
+            return true
+        }
+        let category = legacyMigrationStep2AErrorCategory(for: error, fallback: "unknown")
+        return category != "transient_transport_failure"
     }
 
     private func fetchShotStorageMetadataFromSupabase(
@@ -1359,6 +4578,10 @@ final class AppState: ObservableObject {
         SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
     }
 
+    private func supabaseUploadOperationKey(sessionID: UUID, shotID: UUID) -> String {
+        "upload|\(sessionID.uuidString.lowercased())|\(shotID.uuidString.lowercased())"
+    }
+
     private func beginSupabaseMediaOperation(_ key: String) -> Bool {
         supabaseMediaOperationQueue.sync {
             if inFlightSupabaseMediaOperations.contains(key) {
@@ -1370,8 +4593,396 @@ final class AppState: ObservableObject {
     }
 
     private func endSupabaseMediaOperation(_ key: String) {
-        _ = supabaseMediaOperationQueue.sync {
+        let _: Void = supabaseMediaOperationQueue.sync {
             inFlightSupabaseMediaOperations.remove(key)
+        }
+    }
+
+    private func snapshotInFlightSupabaseMediaOperations() -> Set<String> {
+        supabaseMediaOperationQueue.sync {
+            inFlightSupabaseMediaOperations
+        }
+    }
+
+    private func beginSupabaseMediaBackfillRun() -> Bool {
+        supabaseMediaOperationQueue.sync {
+            if isSupabaseMediaBackfillInProgress {
+                return false
+            }
+            isSupabaseMediaBackfillInProgress = true
+            return true
+        }
+    }
+
+    private func endSupabaseMediaBackfillRun() {
+        let _: Void = supabaseMediaOperationQueue.sync {
+            isSupabaseMediaBackfillInProgress = false
+        }
+    }
+
+    private func fetchRemotePropertyList(activeOrganizationID: UUID) async throws -> [RemotePropertyRecord] {
+        guard let client = supabaseClient else {
+            throw RemotePropertyFetchError.missingClient
+        }
+
+        return try await withThrowingTaskGroup(of: [RemotePropertyRecord].self) { group in
+            group.addTask {
+                try await client
+                    .from("properties")
+                    .select(
+                        """
+                        id,
+                        org_id,
+                        folder_id,
+                        client_name,
+                        client_email,
+                        client_phone,
+                        name,
+                        address_line1,
+                        city,
+                        state,
+                        postal_code,
+                        baseline_session_id,
+                        is_archived,
+                        created_at,
+                        updated_at
+                        """
+                    )
+                    .eq("org_id", value: activeOrganizationID.uuidString.lowercased())
+                    .execute()
+                    .value as [RemotePropertyRecord]
+            }
+
+            group.addTask {
+                try await Task.sleep(nanoseconds: 3_000_000_000)
+                throw RemotePropertyFetchError.timedOut
+            }
+
+            guard let firstResult = try await group.next() else {
+                throw RemotePropertyFetchError.timedOut
+            }
+            group.cancelAll()
+            return firstResult
+        }
+    }
+
+    private func validateRemotePropertyResponse(
+        records: [RemotePropertyRecord],
+        localCacheCount: Int,
+        activeOrganizationID: UUID
+    ) throws -> [RemotePropertyRecord] {
+        if localCacheCount > 0 && records.isEmpty {
+            throw RemotePropertyFetchError.emptyResponseRejected(localCacheCount: localCacheCount)
+        }
+
+        var seenIDs = Set<UUID>()
+        for record in records {
+            let trimmedName = record.name.trimmingCharacters(in: .whitespacesAndNewlines)
+            let trimmedAddressLine1 = record.addressLine1.trimmingCharacters(in: .whitespacesAndNewlines)
+            let trimmedCity = record.city.trimmingCharacters(in: .whitespacesAndNewlines)
+            let trimmedState = record.state.trimmingCharacters(in: .whitespacesAndNewlines)
+            let trimmedPostalCode = record.postalCode.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmedName.isEmpty else {
+                throw RemotePropertyFetchError.invalidPropertyName(record.id)
+            }
+            guard !trimmedAddressLine1.isEmpty else {
+                throw RemotePropertyFetchError.invalidAddressLine1(record.id)
+            }
+            guard !trimmedCity.isEmpty else {
+                throw RemotePropertyFetchError.invalidCity(record.id)
+            }
+            guard !trimmedState.isEmpty else {
+                throw RemotePropertyFetchError.invalidState(record.id)
+            }
+            guard !trimmedPostalCode.isEmpty else {
+                throw RemotePropertyFetchError.invalidPostalCode(record.id)
+            }
+            guard record.orgID == activeOrganizationID else {
+                throw RemotePropertyFetchError.orgScopeMismatch(
+                    expected: activeOrganizationID,
+                    actual: record.orgID,
+                    propertyID: record.id
+                )
+            }
+            guard seenIDs.insert(record.id).inserted else {
+                throw RemotePropertyFetchError.duplicatePropertyID(record.id)
+            }
+            guard remotePropertyDateIsValid(record.updatedAt) else {
+                logRemotePropertyTimestampIssue(
+                    kind: "updated_at",
+                    propertyID: record.id,
+                    orgID: record.orgID,
+                    value: record.updatedAt
+                )
+                throw RemotePropertyFetchError.invalidUpdatedAt(record.id)
+            }
+            if let createdAt = record.createdAt,
+               !remotePropertyDateIsValid(createdAt) {
+                logRemotePropertyTimestampIssue(
+                    kind: "created_at",
+                    propertyID: record.id,
+                    orgID: record.orgID,
+                    value: createdAt
+                )
+                throw RemotePropertyFetchError.invalidCreatedAt(record.id)
+            }
+        }
+
+        return records
+    }
+
+    private func makeRemotePropertyRefreshPayload(
+        validatedRecords: [RemotePropertyRecord],
+        requestedOrganizationID: UUID
+    ) throws -> PropertyRefreshPayload {
+        let normalizedRecords = try normalizedRemotePropertyRecordsForPayload(
+            validatedRecords,
+            requestedOrganizationID: requestedOrganizationID
+        )
+        let properties: [Property] = try normalizedRecords.map { record in
+            let trimmedAddressLine1 = record.addressLine1.trimmingCharacters(in: .whitespacesAndNewlines)
+            let trimmedCity = record.city.trimmingCharacters(in: .whitespacesAndNewlines)
+            let trimmedState = record.state.trimmingCharacters(in: .whitespacesAndNewlines)
+            let trimmedPostalCode = record.postalCode.trimmingCharacters(in: .whitespacesAndNewlines)
+            let createdAt = try resolvedRemotePropertyCreatedAt(for: record)
+            let address = "\(trimmedAddressLine1), \(trimmedCity), \(trimmedState) \(trimmedPostalCode)"
+            return Property(
+                id: record.id,
+                orgId: record.orgID,
+                folderId: normalizedRemotePropertyText(record.folderID),
+                clientName: normalizedRemotePropertyText(record.clientName),
+                clientPhone: normalizedRemotePropertyText(record.clientPhone),
+                clientEmail: normalizedRemotePropertyText(record.clientEmail),
+                name: record.name.trimmingCharacters(in: .whitespacesAndNewlines),
+                address: address,
+                street: trimmedAddressLine1,
+                city: trimmedCity,
+                state: trimmedState,
+                zip: trimmedPostalCode,
+                baselineSessionID: record.baselineSessionID,
+                isArchived: record.isArchived,
+                createdAt: createdAt,
+                updatedAt: record.updatedAt
+            )
+        }.sorted { lhs, rhs in
+            if lhs.createdAt == rhs.createdAt {
+                return lhs.id.uuidString.lowercased() < rhs.id.uuidString.lowercased()
+            }
+            return lhs.createdAt < rhs.createdAt
+        }
+        let organizations = allOrganizations.isEmpty ? organizations : allOrganizations
+        let caches = makeHubCaches(for: properties)
+        let fingerprint = try remotePropertyFingerprint(
+            for: normalizedRecords,
+            activeOrganizationID: requestedOrganizationID
+        )
+        return PropertyRefreshPayload(
+            properties: properties,
+            organizations: organizations,
+            caches: caches,
+            fingerprint: fingerprint
+        )
+    }
+
+    private func normalizedRemotePropertyRecordsForPayload(
+        _ records: [RemotePropertyRecord],
+        requestedOrganizationID: UUID
+    ) throws -> [RemotePropertyRecord] {
+        let sortedRecords = records.sorted { lhs, rhs in
+            lhs.id.uuidString.lowercased() < rhs.id.uuidString.lowercased()
+        }
+        for record in sortedRecords {
+            guard record.orgID == requestedOrganizationID else {
+                throw RemotePropertyFetchError.orgScopeMismatch(
+                    expected: requestedOrganizationID,
+                    actual: record.orgID,
+                    propertyID: record.id
+                )
+            }
+            guard remotePropertyDateIsValid(record.updatedAt) else {
+                logRemotePropertyTimestampIssue(
+                    kind: "updated_at",
+                    propertyID: record.id,
+                    orgID: record.orgID,
+                    value: record.updatedAt
+                )
+                throw RemotePropertyFetchError.invalidUpdatedAt(record.id)
+            }
+            if let createdAt = record.createdAt,
+               !remotePropertyDateIsValid(createdAt) {
+                logRemotePropertyTimestampIssue(
+                    kind: "created_at",
+                    propertyID: record.id,
+                    orgID: record.orgID,
+                    value: createdAt
+                )
+                throw RemotePropertyFetchError.invalidCreatedAt(record.id)
+            }
+            _ = try resolvedRemotePropertyCreatedAt(for: record)
+        }
+        return sortedRecords
+    }
+
+    private func remotePropertyDateIsValid(_ value: Date) -> Bool {
+        let interval = value.timeIntervalSince1970
+        guard interval.isFinite else { return false }
+        guard interval > 0 else { return false }
+        let minimum = Date(timeIntervalSince1970: 946684800) // 2000-01-01T00:00:00Z
+        let maximum = Date(timeIntervalSince1970: 4_102_444_800) // 2100-01-01T00:00:00Z
+        return value >= minimum && value <= maximum
+    }
+
+    private func resolvedRemotePropertyCreatedAt(for record: RemotePropertyRecord) throws -> Date {
+        if let createdAt = record.createdAt {
+            return createdAt
+        }
+        if let localCreatedAt = allProperties.first(where: { $0.id == record.id })?.createdAt
+            ?? properties.first(where: { $0.id == record.id })?.createdAt {
+            print(
+                "[RemotePropertyFetch] " +
+                "outcome=used_local_createdAt_fallback " +
+                "propertyID=\(record.id.uuidString) " +
+                "orgID=\(record.orgID.uuidString)"
+            )
+            return localCreatedAt
+        }
+        throw RemotePropertyFetchError.missingLocalCreatedAtFallback(record.id)
+    }
+
+    private func normalizedRemotePropertyText(_ value: String?) -> String? {
+        guard let value else { return nil }
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    private func logRemotePropertyTimestampIssue(
+        kind: String,
+        propertyID: UUID,
+        orgID: UUID,
+        value: Date
+    ) {
+        let formatter = ISO8601DateFormatter()
+        print(
+            "[RemotePropertyFetch] " +
+            "outcome=invalid_timestamp " +
+            "field=\(kind) " +
+            "propertyID=\(propertyID.uuidString) " +
+            "orgID=\(orgID.uuidString) " +
+            "value=\(formatter.string(from: value))"
+        )
+    }
+
+    private func remotePropertyFingerprint(
+        for records: [RemotePropertyRecord],
+        activeOrganizationID: UUID
+    ) throws -> String {
+        let formatter = ISO8601DateFormatter()
+        formatter.timeZone = TimeZone(secondsFromGMT: 0)
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let normalizedRecords = records.sorted { lhs, rhs in
+            lhs.id.uuidString.lowercased() < rhs.id.uuidString.lowercased()
+        }
+        let joined = try normalizedRecords.map { record in
+            [
+                activeOrganizationID.uuidString.lowercased(),
+                record.id.uuidString.lowercased(),
+                record.orgID.uuidString.lowercased(),
+                normalizedRemotePropertyText(record.folderID) ?? "",
+                normalizedRemotePropertyText(record.clientName) ?? "",
+                normalizedRemotePropertyText(record.clientEmail) ?? "",
+                normalizedRemotePropertyText(record.clientPhone) ?? "",
+                record.name.trimmingCharacters(in: .whitespacesAndNewlines),
+                record.addressLine1.trimmingCharacters(in: .whitespacesAndNewlines),
+                record.city.trimmingCharacters(in: .whitespacesAndNewlines),
+                record.state.trimmingCharacters(in: .whitespacesAndNewlines),
+                record.postalCode.trimmingCharacters(in: .whitespacesAndNewlines),
+                record.baselineSessionID?.uuidString.lowercased() ?? "",
+                record.isArchived ? "true" : "false",
+                formatter.string(from: try resolvedRemotePropertyCreatedAt(for: record)),
+                formatter.string(from: record.updatedAt)
+            ].joined(separator: "|")
+        }.joined(separator: "\n")
+        let digest = SHA256.hash(data: Data(joined.utf8))
+        return digest.map { String(format: "%02x", $0) }.joined()
+    }
+
+    private func logRemotePropertyFetchResult(
+        outcome: String,
+        recordCount: Int?,
+        error: Error?,
+        fingerprint: String? = nil
+    ) {
+        let countText = recordCount.map(String.init) ?? "nil"
+        let errorText = error?.localizedDescription ?? "nil"
+        let fingerprintText = fingerprint ?? "nil"
+        print(
+            "[RemotePropertyFetch] " +
+            "outcome=\(outcome) " +
+            "recordCount=\(countText) " +
+            "fingerprint=\(fingerprintText) " +
+            "error=\(errorText)"
+        )
+    }
+
+    private func testFetchRemoteProperties() async {
+        guard backendFeatureFlags.supabaseEnabled,
+              backendFeatureFlags.supabaseReadEnabled else {
+            logRemotePropertyFetchResult(
+                outcome: "skipped_gate_disabled",
+                recordCount: nil,
+                error: nil
+            )
+            return
+        }
+
+        guard supabaseClient != nil else {
+            logRemotePropertyFetchResult(
+                outcome: "skipped_missing_client",
+                recordCount: nil,
+                error: RemotePropertyFetchError.missingClient
+            )
+            return
+        }
+
+        guard let activeOrganizationID else {
+            logRemotePropertyFetchResult(
+                outcome: "skipped_missing_active_org",
+                recordCount: nil,
+                error: RemotePropertyFetchError.missingActiveOrganization
+            )
+            return
+        }
+
+        do {
+            let records = try await fetchRemotePropertyList(activeOrganizationID: activeOrganizationID)
+            let validated = try validateRemotePropertyResponse(
+                records: records,
+                localCacheCount: properties.count,
+                activeOrganizationID: activeOrganizationID
+            )
+            let payload = try makeRemotePropertyRefreshPayload(
+                validatedRecords: validated,
+                requestedOrganizationID: activeOrganizationID
+            )
+            logRemotePropertyFetchResult(
+                outcome: "success",
+                recordCount: payload.properties.count,
+                error: nil,
+                fingerprint: payload.fingerprint
+            )
+        } catch {
+            let outcome: String
+            if let remoteError = error as? RemotePropertyFetchError,
+               case .timedOut = remoteError {
+                outcome = "timeout"
+            } else {
+                outcome = "rejected"
+            }
+            logRemotePropertyFetchResult(
+                outcome: outcome,
+                recordCount: nil,
+                error: error
+            )
         }
     }
 
@@ -1449,14 +5060,16 @@ final class AppState: ObservableObject {
     func refreshProperties() {
         cloudBackupManager.refreshStatus()
         setLoadingState(true)
-        do {
-            let payload = try makeRefreshPayload()
-            applyRefreshPayload(payload)
-        } catch {
-            // Preserve current in-memory view on transient iCloud read failures.
-            print("[PropertiesRefresh] transient read failure: \(error.localizedDescription)")
+        guard isRemotePropertyRefreshEnabled else {
+            performLocalPropertyRefreshFallback()
+            setLoadingState(false)
+            return
         }
-        setLoadingState(false)
+
+        Task { @MainActor in
+            defer { self.setLoadingState(false) }
+            await self.performForegroundRemotePropertyRefresh()
+        }
     }
 
     func refreshPropertiesInBackground() {
@@ -1511,7 +5124,13 @@ final class AppState: ObservableObject {
                     return
                 }
                 if !shouldRunFallback {
-                    self.isBackgroundRefreshInFlight = false
+                    if self.isRemotePropertyRefreshEnabled {
+                        Task { @MainActor in
+                            await self.performBackgroundRemotePropertyRefresh()
+                        }
+                    } else {
+                        self.isBackgroundRefreshInFlight = false
+                    }
                 }
             }
 
@@ -1523,7 +5142,13 @@ final class AppState: ObservableObject {
                     self.applyRefreshPayload(payload)
                     self.scheduleOffloadEligibleSessionMedia(excludingSessionID: self.currentSession?.id)
                     self.setLoadingState(false)
-                    self.isBackgroundRefreshInFlight = false
+                    if self.isRemotePropertyRefreshEnabled {
+                        Task { @MainActor in
+                            await self.performBackgroundRemotePropertyRefresh()
+                        }
+                    } else {
+                        self.isBackgroundRefreshInFlight = false
+                    }
                 }
             } catch {
                 DispatchQueue.main.async {
@@ -1576,9 +5201,151 @@ final class AppState: ObservableObject {
         let fingerprint: String
     }
 
+    private var isRemotePropertyRefreshEnabled: Bool {
+        backendFeatureFlags.supabaseEnabled &&
+        backendFeatureFlags.supabasePropertyReadEnabled &&
+        supabaseClient != nil &&
+        activeOrganizationID != nil &&
+        isOrganizationContextReady
+    }
+
     private func setLoadingState(_ loading: Bool) {
         guard isLoading != loading else { return }
         isLoading = loading
+    }
+
+    @MainActor
+    private func performForegroundRemotePropertyRefresh() async {
+        guard let requestedOrganizationID = activeOrganizationID else {
+            performLocalPropertyRefreshFallback()
+            return
+        }
+
+        logRemotePropertyFetchResult(
+            outcome: "foreground_fetch_started",
+            recordCount: properties.count,
+            error: nil
+        )
+
+        do {
+            let records = try await fetchRemotePropertyList(activeOrganizationID: requestedOrganizationID)
+            let validated = try validateRemotePropertyResponse(
+                records: records,
+                localCacheCount: properties.count,
+                activeOrganizationID: requestedOrganizationID
+            )
+            guard activeOrganizationID == requestedOrganizationID else {
+                throw RemotePropertyFetchError.missingActiveOrganization
+            }
+            let payload = try makeRemotePropertyRefreshPayload(
+                validatedRecords: validated,
+                requestedOrganizationID: requestedOrganizationID
+            )
+            try localStore.replacePropertyListCacheAtomically(
+                properties: payload.properties,
+                organizations: payload.organizations
+            )
+            applyRefreshPayload(payload)
+            lastLiveSyncFingerprint = localStore.propertiesLedgerFingerprint()
+            logRemotePropertyFetchResult(
+                outcome: "foreground_success",
+                recordCount: payload.properties.count,
+                error: nil,
+                fingerprint: payload.fingerprint
+            )
+        } catch {
+            logRemotePropertyFetchResult(
+                outcome: "foreground_fallback_local",
+                recordCount: nil,
+                error: error
+            )
+            performLocalPropertyRefreshFallback()
+        }
+    }
+
+    @MainActor
+    private func performBackgroundRemotePropertyRefresh() async {
+        defer { isBackgroundRefreshInFlight = false }
+
+        guard let requestedOrganizationID = activeOrganizationID else {
+            logRemotePropertyFetchResult(
+                outcome: "background_rejected",
+                recordCount: nil,
+                error: RemotePropertyFetchError.missingActiveOrganization
+            )
+            return
+        }
+
+        if let lastCompletedAt = lastBackgroundRemoteAttemptCompletedAt,
+           Date().timeIntervalSince(lastCompletedAt) < 60 {
+            return
+        }
+
+        logRemotePropertyFetchResult(
+            outcome: "background_fetch_started",
+            recordCount: properties.count,
+            error: nil
+        )
+
+        do {
+            let records = try await fetchRemotePropertyList(activeOrganizationID: requestedOrganizationID)
+            let validated = try validateRemotePropertyResponse(
+                records: records,
+                localCacheCount: properties.count,
+                activeOrganizationID: requestedOrganizationID
+            )
+            guard activeOrganizationID == requestedOrganizationID else {
+                throw RemotePropertyFetchError.missingActiveOrganization
+            }
+            let payload = try makeRemotePropertyRefreshPayload(
+                validatedRecords: validated,
+                requestedOrganizationID: requestedOrganizationID
+            )
+            let mergedPayload = mergedBackingRefreshPayload(
+                replacingOrganizationID: requestedOrganizationID,
+                with: payload
+            )
+            if lastBackgroundRemoteFingerprint == mergedPayload.fingerprint {
+                lastBackgroundRemoteAttemptCompletedAt = Date()
+                return
+            }
+            guard wouldApplyRefreshPayloadChangeBackingState(mergedPayload) else {
+                lastBackgroundRemoteFingerprint = mergedPayload.fingerprint
+                lastBackgroundRemoteAttemptCompletedAt = Date()
+                return
+            }
+            try localStore.replacePropertyListCacheAtomically(
+                properties: mergedPayload.properties,
+                organizations: mergedPayload.organizations
+            )
+            applyRefreshPayload(mergedPayload)
+            lastBackgroundRemoteFingerprint = mergedPayload.fingerprint
+            lastBackgroundRemoteAttemptCompletedAt = Date()
+            lastLiveSyncFingerprint = localStore.propertiesLedgerFingerprint()
+            scheduleOffloadEligibleSessionMedia(excludingSessionID: currentSession?.id)
+            logRemotePropertyFetchResult(
+                outcome: "background_success",
+                recordCount: mergedPayload.properties.count,
+                error: nil,
+                fingerprint: mergedPayload.fingerprint
+            )
+        } catch {
+            logRemotePropertyFetchResult(
+                outcome: "background_rejected",
+                recordCount: nil,
+                error: error
+            )
+        }
+    }
+
+    private func performLocalPropertyRefreshFallback() {
+        do {
+            let payload = try makeRefreshPayload()
+            applyRefreshPayload(payload)
+        } catch {
+            // Preserve current in-memory view on transient iCloud read failures.
+            print("[PropertiesRefresh] transient read failure: \(error.localizedDescription)")
+        }
     }
 
 
@@ -1644,6 +5411,146 @@ final class AppState: ObservableObject {
         lastLiveSyncFingerprint = payload.fingerprint
     }
 
+    private func wouldApplyRefreshPayloadChangeBackingState(_ payload: PropertyRefreshPayload) -> Bool {
+        if !propertiesMatchForNoOpDecision(allProperties, payload.properties) {
+            return true
+        }
+        if allOrganizations != payload.organizations {
+            return true
+        }
+        if allSessionIndexByProperty != payload.caches.sessionIndex {
+            return true
+        }
+        if allDraftSessionByProperty != payload.caches.drafts {
+            return true
+        }
+        if allPendingExportSessionByProperty != payload.caches.pending {
+            return true
+        }
+        if allHubMetaByProperty != payload.caches.meta {
+            return true
+        }
+        return false
+    }
+
+    private func propertiesMatchForNoOpDecision(_ lhs: [Property], _ rhs: [Property]) -> Bool {
+        guard lhs.count == rhs.count else { return false }
+        for (left, right) in zip(lhs, rhs) {
+            guard propertyMatchesForNoOpDecision(left, right) else {
+                return false
+            }
+        }
+        return true
+    }
+
+    private func propertyMatchesForNoOpDecision(_ lhs: Property, _ rhs: Property) -> Bool {
+        lhs.id == rhs.id &&
+        lhs.orgId == rhs.orgId &&
+        lhs.name == rhs.name &&
+        lhs.address == rhs.address &&
+        lhs.street == rhs.street &&
+        lhs.city == rhs.city &&
+        lhs.state == rhs.state &&
+        lhs.zip == rhs.zip &&
+        lhs.clientName == rhs.clientName &&
+        lhs.clientEmail == rhs.clientEmail &&
+        lhs.clientPhone == rhs.clientPhone &&
+        lhs.baselineSessionID == rhs.baselineSessionID &&
+        lhs.isArchived == rhs.isArchived
+    }
+
+    private func mergedBackingRefreshPayload(
+        replacingOrganizationID organizationID: UUID,
+        with payload: PropertyRefreshPayload
+    ) -> PropertyRefreshPayload {
+        let mergedProperties = mergedBackingProperties(
+            replacingOrganizationID: organizationID,
+            with: payload.properties
+        )
+        let mergedOrganizations = mergedBackingOrganizations(
+            replacingOrganizationID: organizationID,
+            with: payload.organizations
+        )
+        let mergedCaches = mergedBackingCaches(
+            replacingOrganizationID: organizationID,
+            mergedProperties: mergedProperties,
+            remoteCaches: payload.caches
+        )
+        return PropertyRefreshPayload(
+            properties: mergedProperties,
+            organizations: mergedOrganizations,
+            caches: mergedCaches,
+            fingerprint: payload.fingerprint
+        )
+    }
+
+    private func mergedBackingProperties(
+        replacingOrganizationID organizationID: UUID,
+        with remoteProperties: [Property]
+    ) -> [Property] {
+        let preserved = allProperties.filter { $0.orgId != organizationID }
+        return (preserved + remoteProperties).sorted { lhs, rhs in
+            if lhs.createdAt == rhs.createdAt {
+                return lhs.id.uuidString.lowercased() < rhs.id.uuidString.lowercased()
+            }
+            return lhs.createdAt < rhs.createdAt
+        }
+    }
+
+    private func mergedBackingOrganizations(
+        replacingOrganizationID organizationID: UUID,
+        with remoteOrganizations: [Organization]
+    ) -> [Organization] {
+        var merged = allOrganizations
+        guard let replacement = remoteOrganizations.first(where: { $0.id == organizationID }) else {
+            return merged
+        }
+        if let index = merged.firstIndex(where: { $0.id == organizationID }) {
+            merged[index] = replacement
+        } else {
+            merged.append(replacement)
+        }
+        return merged
+    }
+
+    private func mergedBackingCaches(
+        replacingOrganizationID organizationID: UUID,
+        mergedProperties: [Property],
+        remoteCaches: HubCachePayload
+    ) -> HubCachePayload {
+        let currentActivePropertyIDs = Set(
+            allProperties
+                .filter { $0.orgId == organizationID }
+                .map(\.id)
+        )
+        let remoteActivePropertyIDs = Set(
+            mergedProperties
+                .filter { $0.orgId == organizationID }
+                .map(\.id)
+        )
+        let replacedPropertyIDs = currentActivePropertyIDs.union(remoteActivePropertyIDs)
+
+        let sessionIndex = allSessionIndexByProperty
+            .filter { !replacedPropertyIDs.contains($0.key) }
+            .merging(remoteCaches.sessionIndex) { _, new in new }
+        let drafts = allDraftSessionByProperty
+            .filter { !replacedPropertyIDs.contains($0.key) }
+            .merging(remoteCaches.drafts) { _, new in new }
+        let pending = allPendingExportSessionByProperty
+            .filter { !replacedPropertyIDs.contains($0.key) }
+            .merging(remoteCaches.pending) { _, new in new }
+        let meta = allHubMetaByProperty
+            .filter { !replacedPropertyIDs.contains($0.key) }
+            .merging(remoteCaches.meta) { _, new in new }
+
+        return HubCachePayload(
+            sessionIndex: sessionIndex,
+            drafts: drafts,
+            pending: pending,
+            meta: meta
+        )
+    }
+
     private func markLiveSyncBurstWindow(seconds: TimeInterval) {
         liveSyncBurstUntil = Date().addingTimeInterval(max(seconds, 1))
     }
@@ -1700,6 +5607,7 @@ final class AppState: ObservableObject {
             if selectedPropertyID == nil {
                 selectedPropertyID = created.id
             }
+            schedulePhaseBPropertyShadowWrite(for: created)
             return created
         } catch {
             if let propertyCreationError = error as? PropertyCreationError {
@@ -1781,6 +5689,7 @@ final class AppState: ObservableObject {
             }
             let caches = makeHubCaches(for: allProperties)
             applyHubCachePayload(properties: allProperties, organizations: allOrganizations, caches: caches)
+            schedulePhaseBPropertyShadowWrite(for: persisted)
             return true
         } catch {
             return false
@@ -1804,6 +5713,7 @@ final class AppState: ObservableObject {
             }
             let caches = makeHubCaches(for: allProperties)
             applyHubCachePayload(properties: allProperties, organizations: allOrganizations, caches: caches)
+            schedulePhaseBPropertyShadowWrite(for: persisted)
             return true
         } catch {
             return false
@@ -1860,6 +5770,7 @@ final class AppState: ObservableObject {
             allOrganizations = (try? localStore.fetchOrganizations()) ?? allOrganizations
             let caches = makeHubCaches(for: allProperties)
             applyHubCachePayload(properties: allProperties, organizations: allOrganizations, caches: caches)
+            schedulePhaseBPropertyShadowWrite(for: persisted)
             return true
         } catch {
             return false
@@ -1966,10 +5877,12 @@ final class AppState: ObservableObject {
         let session = Session(propertyID: selectedPropertyID, startedAt: Date(), status: .draft, endedAt: nil, exportedAt: nil)
         currentSession = session
         print("[StartSession] propertyID=\(selectedPropertyID.uuidString) blockedReason=none pendingDeliveryExists=\(pendingDeliveryExists) reExportEligibleExists=\(reExportEligibleExists)")
-        _ = try? localStore.upsertSession(session)
+        let persisted = (try? localStore.upsertSession(session)) ?? session
+        currentSession = persisted
         cloudBackupManager.setCaptureModeActive(true)
         reloadSessionCache(for: selectedPropertyID)
-        return session
+        schedulePhaseBSessionShadowWrite(for: persisted)
+        return persisted
     }
 
     func saveDraftCurrentSession() {
@@ -1981,8 +5894,10 @@ final class AppState: ObservableObject {
             session.isSealed = false
         }
         currentSession = session
-        _ = try? localStore.upsertSession(session)
+        let persisted = (try? localStore.upsertSession(session)) ?? session
+        currentSession = persisted
         reloadSessionCache(for: session.propertyID)
+        schedulePhaseBSessionShadowWrite(for: persisted)
     }
 
     func completeCurrentSession(markExported: Bool) {
@@ -2001,8 +5916,10 @@ final class AppState: ObservableObject {
             }
         }
         currentSession = session
-        _ = try? localStore.upsertSession(session)
-        reloadSessionCache(for: session.propertyID)
+        let persisted = (try? localStore.upsertSession(session)) ?? session
+        currentSession = persisted
+        reloadSessionCache(for: persisted.propertyID)
+        schedulePhaseBSessionShadowWrite(for: persisted)
         scheduleOffloadEligibleSessionMedia(excludingSessionID: currentSession?.id)
         cloudBackupManager.setCaptureModeActive(false)
         triggerBackupForLifecycleEvent()
@@ -2082,9 +5999,11 @@ final class AppState: ObservableObject {
         }
         applyDeliverySuccess(to: &session, deliveredAt: now)
         currentSession = session
-        _ = try? localStore.upsertSession(session)
-        reloadSessionCache(for: session.propertyID)
-        scheduleSessionArchiveSnapshot(session, trigger: "markCurrentSessionExported")
+        let persisted = (try? localStore.upsertSession(session)) ?? session
+        currentSession = persisted
+        reloadSessionCache(for: persisted.propertyID)
+        schedulePhaseBSessionShadowWrite(for: persisted)
+        scheduleSessionArchiveSnapshot(persisted, trigger: "markCurrentSessionExported")
         scheduleOffloadEligibleSessionMedia(excludingSessionID: currentSession?.id)
         cloudBackupManager.setCaptureModeActive(false)
         triggerBackupForLifecycleEvent()
@@ -2100,9 +6019,11 @@ final class AppState: ObservableObject {
         session.isSealed = true
         print("[ExportSeal] action=export_later sessionID=\(session.id.uuidString) isSealed=true firstDeliveredAt=nil reExportExpiresAt=nil")
         currentSession = session
-        _ = try? localStore.upsertSession(session)
-        reloadSessionCache(for: session.propertyID)
-        scheduleSessionArchiveSnapshot(session, trigger: "sealCurrentSessionForExportLater")
+        let persisted = (try? localStore.upsertSession(session)) ?? session
+        currentSession = persisted
+        reloadSessionCache(for: persisted.propertyID)
+        schedulePhaseBSessionShadowWrite(for: persisted)
+        scheduleSessionArchiveSnapshot(persisted, trigger: "sealCurrentSessionForExportLater")
         scheduleOffloadEligibleSessionMedia(excludingSessionID: currentSession?.id)
         cloudBackupManager.setCaptureModeActive(false)
         triggerBackupForLifecycleEvent()
@@ -2117,9 +6038,11 @@ final class AppState: ObservableObject {
         session.isSealed = true
         print("[ExportSeal] action=export_now sessionID=\(session.id.uuidString) isSealed=true")
         currentSession = session
-        _ = try? localStore.upsertSession(session)
-        reloadSessionCache(for: session.propertyID)
-        scheduleSessionArchiveSnapshot(session, trigger: "sealCurrentSessionForExportNow")
+        let persisted = (try? localStore.upsertSession(session)) ?? session
+        currentSession = persisted
+        reloadSessionCache(for: persisted.propertyID)
+        schedulePhaseBSessionShadowWrite(for: persisted)
+        scheduleSessionArchiveSnapshot(persisted, trigger: "sealCurrentSessionForExportNow")
         scheduleOffloadEligibleSessionMedia(excludingSessionID: currentSession?.id)
         cloudBackupManager.setCaptureModeActive(false)
         triggerBackupForLifecycleEvent()
@@ -2165,9 +6088,13 @@ final class AppState: ObservableObject {
             currentSession = session
         }
         do {
-            _ = try localStore.upsertSession(session)
+            let persisted = try localStore.upsertSession(session)
+            if currentSession?.id == sessionID {
+                currentSession = persisted
+            }
             reloadSessionCache(for: propertyID)
-            scheduleSessionArchiveSnapshot(session, trigger: "markSessionExported")
+            schedulePhaseBSessionShadowWrite(for: persisted)
+            scheduleSessionArchiveSnapshot(persisted, trigger: "markSessionExported")
             scheduleOffloadEligibleSessionMedia(excludingSessionID: currentSession?.id)
             cloudBackupManager.setCaptureModeActive(false)
             triggerBackupForLifecycleEvent()
@@ -2300,6 +6227,10 @@ final class AppState: ObservableObject {
         cloudBackupManager.scheduleAutomaticBackup(after: 0)
     }
 
+    func handleSceneDidBecomeActive() {
+        queuePendingSupabaseMediaBackfillIfNeeded(reason: "scene_active")
+    }
+
     private func persistSelectedPropertyID() {
         if let selectedPropertyID {
             userDefaults.set(selectedPropertyID.uuidString, forKey: selectedPropertyDefaultsKey)
@@ -2356,6 +6287,32 @@ final class AppState: ObservableObject {
         }
         applyTenantScopedState()
     }
+
+#if DEBUG
+    func _debugDiscoverPendingSupabaseMediaBackfillCandidates() -> [PendingSupabaseMediaBackfillCandidate] {
+        discoverPendingSupabaseMediaBackfillCandidates().candidates
+    }
+
+    func _debugSetInFlightSupabaseMediaOperationsForTests(_ keys: Set<String>) {
+        let _: Void = supabaseMediaOperationQueue.sync {
+            inFlightSupabaseMediaOperations = keys
+        }
+    }
+
+    func _debugSetSupabaseMediaBackfillInProgressForTests(_ inProgress: Bool) {
+        let _: Void = supabaseMediaOperationQueue.sync {
+            isSupabaseMediaBackfillInProgress = inProgress
+        }
+    }
+
+    func _debugSupabaseUploadOperationKeyForTests(sessionID: UUID, shotID: UUID) -> String {
+        supabaseUploadOperationKey(sessionID: sessionID, shotID: shotID)
+    }
+
+    func _debugRunPendingSupabaseMediaBackfillForTests(reason: String = "test") async -> SupabaseMediaBackfillRunSummary {
+        await runPendingSupabaseMediaBackfill(reason: reason)
+    }
+#endif
 
     private func makeHubCaches(for properties: [Property]) -> HubCachePayload {
         var sessionIndex: [UUID: [Session]] = [:]

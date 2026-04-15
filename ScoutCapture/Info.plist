@@ -11,12 +11,14 @@
 	<key>UIFileSharingEnabled</key>
 	<true/>
 	<key>media_supabase_upload_enabled</key>
-	<false/>
+	<true/>
 	<key>shadow_write_enabled</key>
-	<false/>
+	<true/>
 	<key>supabase_enabled</key>
 	<true/>
 	<key>supabase_read_enabled</key>
 	<false/>
+	<key>supabase_property_read_enabled</key>
+	<true/>
 </dict>
 </plist>

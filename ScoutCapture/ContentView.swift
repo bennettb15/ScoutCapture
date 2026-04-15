@@ -1008,13 +1008,32 @@ final class ReportLibraryModel: ObservableObject {
         let uiImage = UIImage(cgImage: image, scale: 1.0, orientation: uiOrientation)
         let size = uiImage.size
         guard size.width > 0, size.height > 0 else { return image }
-        let format = UIGraphicsImageRendererFormat.default()
-        format.scale = 1
-        format.opaque = true
-        let rendered = UIGraphicsImageRenderer(size: size, format: format).image { _ in
-            uiImage.draw(in: CGRect(origin: .zero, size: size))
+        let width = Int(size.width.rounded(.up))
+        let height = Int(size.height.rounded(.up))
+        guard width > 0, height > 0,
+              let context = CGContext(
+                data: nil,
+                width: width,
+                height: height,
+                bitsPerComponent: 8,
+                bytesPerRow: 0,
+                space: CGColorSpaceCreateDeviceRGB(),
+                bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue
+              ) else {
+            return image
         }
-        return rendered.cgImage ?? image
+
+        context.interpolationQuality = .high
+        context.setFillColor(UIColor.black.cgColor)
+        context.fill(CGRect(x: 0, y: 0, width: width, height: height))
+        context.translateBy(x: 0, y: CGFloat(height))
+        context.scaleBy(x: 1, y: -1)
+
+        UIGraphicsPushContext(context)
+        uiImage.draw(in: CGRect(origin: .zero, size: CGSize(width: width, height: height)))
+        UIGraphicsPopContext()
+
+        return context.makeImage() ?? image
     }
 
     private static let exifTimestampFormatter: DateFormatter = {
@@ -8890,6 +8909,9 @@ extension ContentView {
                             capturedExifOrientation: Int(capturedExifOrientationRawAtShutter),
                             reservedAngleIndexAtCapture: reservedAngleIndexAtCapture
                         )
+                        if !wasGuidedRetakeCapture {
+                            reportLibrary.reloadSessionAssets(propertyID: propertyID, sessionID: sessionID)
+                        }
                         refreshActiveIssues()
                         refreshGuidedShots()
                         if wasGuidedRetakeCapture {
@@ -13185,8 +13207,10 @@ extension ContentView {
                 let h = geo.size.height
                 
                 // When we rotate content inside a portrait locked app, swap the content frame.
-                let contentW = isLandscape ? h : w
-                let contentH = isLandscape ? w : h
+                let rawContentW = isLandscape ? h : w
+                let rawContentH = isLandscape ? w : h
+                let contentW: CGFloat = rawContentW.isFinite ? max(0, rawContentW) : 0
+                let contentH: CGFloat = rawContentH.isFinite ? max(0, rawContentH) : 0
                 
                 // Grid config
                 let columnsCount: Int = isLandscape ? 5 : 3
@@ -13198,7 +13222,8 @@ extension ContentView {
                 let horizontalPadding: CGFloat = isLandscape ? 0 : 2
                 
                 let totalSpacing = CGFloat(max(0, columnsCount - 1)) * spacing
-                let side = (contentW - (horizontalPadding * 2) - totalSpacing) / CGFloat(columnsCount)
+                let rawSide = (contentW - (horizontalPadding * 2) - totalSpacing) / CGFloat(columnsCount)
+                let side: CGFloat = rawSide.isFinite ? max(0, rawSide) : 0
                 let headerH: CGFloat = 80
                 
                 ZStack {
@@ -18362,34 +18387,34 @@ extension ContentView {
         @Published var isLevel: Bool = false
         
         private let motion = CMMotionManager()
-        
+
         // Filtering + hysteresis
         private var filteredDegrees: Double = 0
         private let alpha: Double = 0.18
         private let levelOnThreshold: Double = 1.0
         private let levelOffThreshold: Double = 1.4
-        
+
         private(set) var isRunning: Bool = false
-        
+
         func start() {
             guard !isRunning else { return }
             guard motion.isDeviceMotionAvailable else { return }
-            
+
             isRunning = true
             motion.deviceMotionUpdateInterval = 1.0 / 60.0
-            
+
             motion.startDeviceMotionUpdates(using: .xArbitraryZVertical, to: .main) { [weak self] m, _ in
                 guard let self else { return }
                 guard let m else { return }
-                
+
                 let gx = m.gravity.x
                 let gy = m.gravity.y
-                
+
                 // Decide portrait vs landscape from gravity (NOT UIDevice.orientation)
                 let usePortraitAxis = abs(gy) >= abs(gx)
-                
+
                 var angleRad: Double
-                
+
                 if usePortraitAxis {
                     angleRad = m.attitude.roll
                     if gy < 0 { angleRad = -angleRad }
@@ -18397,9 +18422,9 @@ extension ContentView {
                     angleRad = m.attitude.pitch
                     if gx > 0 { angleRad = -angleRad }
                 }
-                
+
                 var deg = angleRad * 180.0 / .pi
-                
+
                 if deg > 90 { deg = 90 }
                 if deg < -90 { deg = -90 }
                 

@@ -100,6 +100,7 @@ struct ScoutCaptureApp: App {
                         appState.setLiveSyncMonitoringActive(true)
                         appState.refreshPropertiesInBackground()
                         appState.refreshBackupStatus()
+                        appState.handleSceneDidBecomeActive()
                         if appState.properties.isEmpty {
                             DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
                                 appState.refreshPropertiesInBackground()
@@ -4407,6 +4408,218 @@ private struct EditContactSheet: View {
     }
 }
 
+private struct DebugLocalOrgRepairView: View {
+    @EnvironmentObject private var appState: AppState
+    @Environment(\.dismiss) private var dismiss
+
+    private let localStore = LocalStore()
+
+    @State private var candidates: [Property] = []
+    @State private var selectedPropertyIDs: Set<UUID> = []
+    @State private var isLoading: Bool = true
+    @State private var isSaving: Bool = false
+    @State private var statusMessage: String? = nil
+    @State private var errorMessage: String? = nil
+    @State private var showError: Bool = false
+
+    private var activeOrganizationID: UUID? {
+        appState.activeOrganizationID
+    }
+
+    var body: some View {
+        NavigationStack {
+            Group {
+                if isLoading {
+                    VStack(spacing: 12) {
+                        ProgressView()
+                        Text("Loading mismatched local properties...")
+                            .font(.system(size: 14, weight: .medium))
+                            .foregroundColor(.secondary)
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else if let activeOrganizationID {
+                    List {
+                        Section {
+                            Text("Active org: \(activeOrganizationID.uuidString)")
+                                .font(.system(size: 12, weight: .medium, design: .monospaced))
+                                .foregroundColor(.secondary)
+                            if let statusMessage {
+                                Text(statusMessage)
+                                    .font(.system(size: 13, weight: .medium))
+                                    .foregroundColor(.secondary)
+                            }
+                        }
+
+                        if candidates.isEmpty {
+                            Section {
+                                Text("No mismatched local properties found.")
+                                    .font(.system(size: 14, weight: .medium))
+                                    .foregroundColor(.secondary)
+                            }
+                        } else {
+                            Section("Mismatched Local Properties") {
+                                ForEach(candidates) { property in
+                                    Button {
+                                        toggleSelection(for: property.id)
+                                    } label: {
+                                        HStack(alignment: .top, spacing: 12) {
+                                            Image(systemName: selectedPropertyIDs.contains(property.id) ? "checkmark.circle.fill" : "circle")
+                                                .foregroundColor(selectedPropertyIDs.contains(property.id) ? .green : .secondary)
+                                            VStack(alignment: .leading, spacing: 4) {
+                                                Text(property.name)
+                                                    .font(.system(size: 15, weight: .semibold))
+                                                    .foregroundColor(.primary)
+                                                if let folderID = property.folderId, !folderID.isEmpty {
+                                                    Text("Folder: \(folderID)")
+                                                        .font(.system(size: 13, weight: .medium))
+                                                        .foregroundColor(.secondary)
+                                                }
+                                                if let address = property.address,
+                                                   !address.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                                                    Text(address)
+                                                        .font(.system(size: 13, weight: .medium))
+                                                        .foregroundColor(.secondary)
+                                                }
+                                                Text("Current orgId: \(property.orgId?.uuidString ?? "nil")")
+                                                    .font(.system(size: 12, weight: .medium, design: .monospaced))
+                                                    .foregroundColor(.secondary)
+                                            }
+                                            Spacer(minLength: 0)
+                                        }
+                                    }
+                                    .buttonStyle(.plain)
+                                }
+                            }
+                        }
+                    }
+                    .listStyle(.insetGrouped)
+                } else {
+                    VStack(spacing: 12) {
+                        Text("No active organization selected.")
+                            .font(.system(size: 15, weight: .semibold))
+                            .foregroundColor(.primary)
+                        Text("Select an active organization before using local org repair.")
+                            .font(.system(size: 13, weight: .medium))
+                            .foregroundColor(.secondary)
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .padding(24)
+                }
+            }
+            .navigationTitle("Local Org Repair")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button("Done") {
+                        dismiss()
+                    }
+                }
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button(isSaving ? "Saving..." : "Apply") {
+                        applySelectedRepairs()
+                    }
+                    .disabled(
+                        isSaving ||
+                        activeOrganizationID == nil ||
+                        selectedPropertyIDs.isEmpty
+                    )
+                }
+            }
+        }
+        .task {
+            loadCandidates()
+        }
+        .alert("Local Org Repair Failed", isPresented: $showError) {
+            Button("OK", role: .cancel) { }
+        } message: {
+            Text(errorMessage ?? "Unable to repair local property organization assignments.")
+        }
+    }
+
+    private func loadCandidates() {
+        isLoading = true
+        selectedPropertyIDs = []
+        statusMessage = nil
+
+        guard let activeOrganizationID else {
+            candidates = []
+            isLoading = false
+            return
+        }
+
+        let allProperties = (try? localStore.fetchProperties()) ?? []
+        candidates = allProperties
+            .filter { $0.orgId != activeOrganizationID }
+            .sorted { lhs, rhs in
+                if lhs.createdAt != rhs.createdAt {
+                    return lhs.createdAt < rhs.createdAt
+                }
+                return lhs.name.localizedCaseInsensitiveCompare(rhs.name) == .orderedAscending
+            }
+        isLoading = false
+    }
+
+    private func toggleSelection(for propertyID: UUID) {
+        if selectedPropertyIDs.contains(propertyID) {
+            selectedPropertyIDs.remove(propertyID)
+        } else {
+            selectedPropertyIDs.insert(propertyID)
+        }
+    }
+
+    private func applySelectedRepairs() {
+        guard let activeOrganizationID else { return }
+        guard !selectedPropertyIDs.isEmpty else { return }
+
+        isSaving = true
+        statusMessage = nil
+        errorMessage = nil
+        showError = false
+
+        do {
+            try ensureActiveOrganizationExistsLocally(activeOrganizationID: activeOrganizationID)
+            let selectedProperties = candidates.filter { selectedPropertyIDs.contains($0.id) }
+            for property in selectedProperties {
+                var updated = property
+                updated.orgId = activeOrganizationID
+                _ = try localStore.updateProperty(updated)
+            }
+
+            appState.refreshProperties()
+            let repairedCount = selectedProperties.count
+            statusMessage = repairedCount == 1
+                ? "Reassigned 1 local property to the active organization."
+                : "Reassigned \(repairedCount) local properties to the active organization."
+            loadCandidates()
+            isSaving = false
+        } catch {
+            isSaving = false
+            errorMessage = error.localizedDescription
+            showError = true
+        }
+    }
+
+    private func ensureActiveOrganizationExistsLocally(activeOrganizationID: UUID) throws {
+        let localOrganizations = (try? localStore.fetchOrganizations()) ?? []
+        if localOrganizations.contains(where: { $0.id == activeOrganizationID }) {
+            return
+        }
+
+        let organizationName =
+            appState.organizationSelectionOptions.first(where: { $0.id == activeOrganizationID })?.name
+            ?? appState.organizations.first(where: { $0.id == activeOrganizationID })?.name
+            ?? "Organization \(activeOrganizationID.uuidString)"
+
+        _ = try localStore.createOrganization(
+            Organization(
+                id: activeOrganizationID,
+                name: organizationName,
+                contacts: []
+            )
+        )
+    }
+}
+
 private struct OrganizationContactPickerSheet: View {
     @EnvironmentObject private var appState: AppState
     @Environment(\.dismiss) private var dismiss
@@ -5015,6 +5228,25 @@ private struct DebugToolsView: View {
     private let localStore = LocalStore()
     @State private var showNuclearConfirm: Bool = false
     @State private var showClearCacheConfirm: Bool = false
+    @State private var isRunningMigrationPreflight: Bool = false
+    @State private var isRunningMigrationStep2A: Bool = false
+    @State private var isRunningMigrationStep2BSlice1: Bool = false
+    @State private var isRunningMigrationStep2BSlice2A: Bool = false
+    @State private var isRunningMigrationStep2BSlice2BReadiness: Bool = false
+    @State private var isRunningMigrationStep2BSlice2BFinalize: Bool = false
+    @State private var migrationPreflightStatusMessage: String? = nil
+    @State private var migrationStep2AStatusMessage: String? = nil
+    @State private var migrationStep2BSlice1StatusMessage: String? = nil
+    @State private var migrationStep2BSlice2AStatusMessage: String? = nil
+    @State private var migrationStep2BSlice2BReadinessStatusMessage: String? = nil
+    @State private var migrationStep2BSlice2BFinalizeStatusMessage: String? = nil
+    @State private var isRunningForegroundPropertyRefresh: Bool = false
+    @State private var foregroundPropertyRefreshStatusMessage: String? = nil
+    @State private var migrationPreflightErrorMessage: String? = nil
+    @State private var showMigrationPreflightError: Bool = false
+    @State private var preflightReportText: String = ""
+    @State private var showPreflightReportSheet: Bool = false
+    @State private var showLocalOrgRepairSheet: Bool = false
 
     private var buttonFill: Color {
         colorScheme == .light ? Color.white.opacity(0.90) : Color.black.opacity(0.55)
@@ -5107,6 +5339,285 @@ private struct DebugToolsView: View {
                         }
 
                         debugActionCard(
+                            title: "Run Legacy Migration Preflight",
+                            detail: "Manually runs Step 1 preflight only. Enumerates local legacy candidates, checks current-org eligibility, runs read-only B1 checks, records conservative B2 warnings, and writes the ledger/report. Does NOT mutate Supabase, upload media, or change local records.",
+                            role: .normal,
+                            buttonTitle: isRunningMigrationPreflight ? "Running Preflight..." : "Run Preflight"
+                        ) {
+                            guard !isRunningMigrationPreflight else { return }
+                            isRunningMigrationPreflight = true
+                            migrationPreflightStatusMessage = nil
+                            migrationPreflightErrorMessage = nil
+                            showMigrationPreflightError = false
+
+                            Task {
+                                do {
+                                    let result = try await appState.runLegacyMigrationPreflight()
+                                    await MainActor.run {
+                                        isRunningMigrationPreflight = false
+                                        migrationPreflightStatusMessage =
+                                            "Preflight complete. Ledger: \(result.ledgerURL.lastPathComponent), Report: \(result.reportURL.lastPathComponent)"
+                                    }
+                                } catch {
+                                    await MainActor.run {
+                                        isRunningMigrationPreflight = false
+                                        migrationPreflightErrorMessage = error.localizedDescription
+                                        showMigrationPreflightError = true
+                                    }
+                                }
+                            }
+                        }
+
+                        debugActionCard(
+                            title: "Run Legacy Migration Step 2A",
+                            detail: "Runs Step 2A mutation. Upserts eligible properties and sessions to Supabase, verifies results, and updates the migration ledger. Does NOT process shots or media.",
+                            role: .normal,
+                            buttonTitle: isRunningMigrationStep2A ? "Running Step 2A..." : "Run Step 2A"
+                        ) {
+                            guard !isRunningMigrationStep2A else { return }
+                            isRunningMigrationStep2A = true
+                            migrationStep2AStatusMessage = nil
+                            migrationPreflightErrorMessage = nil
+                            showMigrationPreflightError = false
+
+                            Task {
+                                do {
+                                    let result = try await appState.runLegacyMigrationStep2A()
+                                    await MainActor.run {
+                                        isRunningMigrationStep2A = false
+                                        migrationStep2AStatusMessage =
+                                            "Step 2A complete. Verified properties: \(result.verifiedPropertyCount), sessions: \(result.verifiedSessionCount)"
+                                    }
+                                } catch {
+                                    await MainActor.run {
+                                        isRunningMigrationStep2A = false
+                                        migrationPreflightErrorMessage = error.localizedDescription
+                                        showMigrationPreflightError = true
+                                    }
+                                }
+                            }
+                        }
+
+                        debugActionCard(
+                            title: "Run Legacy Migration Step 2B Slice 1",
+                            detail: "Runs Step 2B Slice 1 only. Creates or verifies eligible shot rows in Supabase and updates the migration ledger. Does NOT upload media or finalize storage metadata.",
+                            role: .normal,
+                            buttonTitle: isRunningMigrationStep2BSlice1 ? "Running Step 2B Slice 1..." : "Run Step 2B Slice 1"
+                        ) {
+                            guard !isRunningMigrationStep2BSlice1 else { return }
+                            isRunningMigrationStep2BSlice1 = true
+                            migrationStep2BSlice1StatusMessage = nil
+                            migrationPreflightErrorMessage = nil
+                            showMigrationPreflightError = false
+
+                            Task {
+                                do {
+                                    let result = try await appState.runLegacyMigrationStep2BSlice1()
+                                    await MainActor.run {
+                                        isRunningMigrationStep2BSlice1 = false
+                                        migrationStep2BSlice1StatusMessage =
+                                            "Step 2B Slice 1 complete. Verified shots: \(result.verifiedShotCount)"
+                                    }
+                                } catch {
+                                    await MainActor.run {
+                                        isRunningMigrationStep2BSlice1 = false
+                                        migrationPreflightErrorMessage = error.localizedDescription
+                                        showMigrationPreflightError = true
+                                    }
+                                }
+                            }
+                        }
+
+                        debugActionCard(
+                            title: "Run Legacy Migration Step 2B Slice 2A",
+                            detail: "Runs Step 2B Slice 2A only. Validates eligible media entries, recomputes checksum, compares against preflight checksum, derives deterministic storage path, uploads original media to Supabase Storage, and updates the migration ledger. Does NOT finalize shot storage metadata yet.",
+                            role: .normal,
+                            buttonTitle: isRunningMigrationStep2BSlice2A ? "Running Step 2B Slice 2A..." : "Run Step 2B Slice 2A"
+                        ) {
+                            guard !isRunningMigrationStep2BSlice2A else { return }
+                            isRunningMigrationStep2BSlice2A = true
+                            migrationStep2BSlice2AStatusMessage = nil
+                            migrationPreflightErrorMessage = nil
+                            showMigrationPreflightError = false
+
+                            Task {
+                                do {
+                                    let result = try await appState.runLegacyMigrationStep2BSlice2A()
+                                    await MainActor.run {
+                                        isRunningMigrationStep2BSlice2A = false
+                                        migrationStep2BSlice2AStatusMessage =
+                                            "Step 2B Slice 2A complete. Uploaded media entries: \(result.uploadedMediaCount)"
+                                    }
+                                } catch {
+                                    await MainActor.run {
+                                        isRunningMigrationStep2BSlice2A = false
+                                        migrationPreflightErrorMessage = error.localizedDescription
+                                        showMigrationPreflightError = true
+                                    }
+                                }
+                            }
+                        }
+
+                        debugActionCard(
+                            title: "Run Legacy Migration Step 2B Slice 2B Readiness",
+                            detail: "Runs Step 2B Slice 2B Readiness only. Performs finalize candidate gating and pre-finalize remote read-back to classify media entries as already verified, ready for finalize, or failed. Does NOT perform finalize write.",
+                            role: .normal,
+                            buttonTitle: isRunningMigrationStep2BSlice2BReadiness ? "Running Step 2B Slice 2B Readiness..." : "Run Step 2B Slice 2B Readiness"
+                        ) {
+                            guard !isRunningMigrationStep2BSlice2BReadiness else { return }
+                            isRunningMigrationStep2BSlice2BReadiness = true
+                            migrationStep2BSlice2BReadinessStatusMessage = nil
+                            migrationPreflightErrorMessage = nil
+                            showMigrationPreflightError = false
+
+                            Task {
+                                do {
+                                    let result = try await appState.runLegacyMigrationStep2BSlice2BReadiness()
+                                    await MainActor.run {
+                                        isRunningMigrationStep2BSlice2BReadiness = false
+                                        migrationStep2BSlice2BReadinessStatusMessage =
+                                            "Step 2B Slice 2B Readiness complete. Verified media: \(result.verifiedMediaCount), ready for finalize: \(result.readyForFinalizeCount)"
+                                    }
+                                } catch {
+                                    await MainActor.run {
+                                        isRunningMigrationStep2BSlice2BReadiness = false
+                                        migrationPreflightErrorMessage = error.localizedDescription
+                                        showMigrationPreflightError = true
+                                    }
+                                }
+                            }
+                        }
+
+                        debugActionCard(
+                            title: "Run Legacy Migration Step 2B Slice 2B Finalize",
+                            detail: "Runs Step 2B Slice 2B Finalize. Writes storage metadata to Supabase for ready media entries, performs strict read-back verification, and marks entries verified.",
+                            role: .normal,
+                            buttonTitle: isRunningMigrationStep2BSlice2BFinalize ? "Running Step 2B Slice 2B Finalize..." : "Run Step 2B Slice 2B Finalize"
+                        ) {
+                            guard !isRunningMigrationStep2BSlice2BFinalize else { return }
+                            isRunningMigrationStep2BSlice2BFinalize = true
+                            migrationStep2BSlice2BFinalizeStatusMessage = nil
+                            migrationPreflightErrorMessage = nil
+                            showMigrationPreflightError = false
+
+                            Task {
+                                do {
+                                    let result = try await appState.runLegacyMigrationStep2BSlice2BFinalize()
+                                    await MainActor.run {
+                                        isRunningMigrationStep2BSlice2BFinalize = false
+                                        migrationStep2BSlice2BFinalizeStatusMessage =
+                                            "Step 2B Slice 2B Finalize complete. Verified media entries: \(result.verifiedMediaCount)"
+                                    }
+                                } catch {
+                                    await MainActor.run {
+                                        isRunningMigrationStep2BSlice2BFinalize = false
+                                        migrationPreflightErrorMessage = error.localizedDescription
+                                        showMigrationPreflightError = true
+                                    }
+                                }
+                            }
+                        }
+
+                        debugActionCard(
+                            title: "Open Last Preflight Report",
+                            detail: "Loads the current summary-report.txt written by Step 1 preflight and displays it in-app. Does NOT rerun preflight or change any data.",
+                            role: .normal,
+                            buttonTitle: "Open Last Preflight Report"
+                        ) {
+                            let reportURL = localStore
+                                .legacyMigrationPreflightDirectoryURL()
+                                .appendingPathComponent("summary-report.txt", isDirectory: false)
+
+                            guard FileManager.default.fileExists(atPath: reportURL.path) else {
+                                migrationPreflightErrorMessage = "Preflight report not found at: \(reportURL.path)"
+                                showMigrationPreflightError = true
+                                return
+                            }
+
+                            do {
+                                preflightReportText = try String(contentsOf: reportURL, encoding: .utf8)
+                                showPreflightReportSheet = true
+                            } catch {
+                                migrationPreflightErrorMessage = "Unable to open preflight report: \(error.localizedDescription)"
+                                showMigrationPreflightError = true
+                            }
+                        }
+
+                        debugActionCard(
+                            title: "Repair Local Property Org",
+                            detail: "Lists only local properties whose orgId does not match the current active organization and lets you manually select specific properties to reassign locally. Does NOT touch Supabase or upload anything.",
+                            role: .normal,
+                            buttonTitle: "Open Org Repair"
+                        ) {
+                            showLocalOrgRepairSheet = true
+                        }
+
+                        debugActionCard(
+                            title: "Run Foreground Property Refresh",
+                            detail: "Manually runs AppState.refreshProperties() so the new foreground remote property-list path can be tested directly without changing the normal hub startup flow.",
+                            role: .normal,
+                            buttonTitle: isRunningForegroundPropertyRefresh ? "Running Foreground Property Refresh..." : "Run Foreground Property Refresh"
+                        ) {
+                            guard !isRunningForegroundPropertyRefresh else { return }
+                            isRunningForegroundPropertyRefresh = true
+                            foregroundPropertyRefreshStatusMessage = nil
+                            Task { @MainActor in
+                                appState.refreshProperties()
+                                isRunningForegroundPropertyRefresh = false
+                                foregroundPropertyRefreshStatusMessage = "Foreground property refresh triggered."
+                            }
+                        }
+
+                        if let migrationPreflightStatusMessage {
+                            Text(migrationPreflightStatusMessage)
+                                .font(.system(size: 13, weight: .medium))
+                                .foregroundColor(.secondary)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+
+                        if let migrationStep2AStatusMessage {
+                            Text(migrationStep2AStatusMessage)
+                                .font(.system(size: 13, weight: .medium))
+                                .foregroundColor(.secondary)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+
+                        if let migrationStep2BSlice1StatusMessage {
+                            Text(migrationStep2BSlice1StatusMessage)
+                                .font(.system(size: 13, weight: .medium))
+                                .foregroundColor(.secondary)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+
+                        if let migrationStep2BSlice2AStatusMessage {
+                            Text(migrationStep2BSlice2AStatusMessage)
+                                .font(.system(size: 13, weight: .medium))
+                                .foregroundColor(.secondary)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+
+                        if let migrationStep2BSlice2BReadinessStatusMessage {
+                            Text(migrationStep2BSlice2BReadinessStatusMessage)
+                                .font(.system(size: 13, weight: .medium))
+                                .foregroundColor(.secondary)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+
+                        if let migrationStep2BSlice2BFinalizeStatusMessage {
+                            Text(migrationStep2BSlice2BFinalizeStatusMessage)
+                                .font(.system(size: 13, weight: .medium))
+                                .foregroundColor(.secondary)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+
+                        if let foregroundPropertyRefreshStatusMessage {
+                            Text(foregroundPropertyRefreshStatusMessage)
+                                .font(.system(size: 13, weight: .medium))
+                                .foregroundColor(.secondary)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+
+                        debugActionCard(
                             title: "Print Metadata Schema",
                             detail: "Prints SessionMetadata and ShotMetadata field names to the Xcode console.",
                             role: .normal,
@@ -5154,6 +5665,35 @@ private struct DebugToolsView: View {
             Button("Cancel", role: .cancel) { }
         } message: {
             Text("This clears local UI/image cache only and reloads from local SCOUT storage. It does not delete Originals, Stamped, session.json, or iCloud Drive data.")
+        }
+        .alert("Migration Preflight Failed", isPresented: $showMigrationPreflightError) {
+            Button("OK", role: .cancel) { }
+        } message: {
+            Text(migrationPreflightErrorMessage ?? "Unable to run legacy migration preflight.")
+        }
+        .sheet(isPresented: $showPreflightReportSheet) {
+            NavigationStack {
+                ScrollView {
+                    Text(preflightReportText)
+                        .font(.system(size: 13, weight: .regular, design: .monospaced))
+                        .foregroundColor(.primary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(16)
+                }
+                .navigationTitle("Preflight Report")
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    ToolbarItem(placement: .topBarTrailing) {
+                        Button("Done") {
+                            showPreflightReportSheet = false
+                        }
+                    }
+                }
+            }
+        }
+        .sheet(isPresented: $showLocalOrgRepairSheet) {
+            DebugLocalOrgRepairView()
+                .environmentObject(appState)
         }
     }
 

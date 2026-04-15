@@ -10,6 +10,349 @@ private func verboseLog(_ message: @autoclosure () -> String) {
     print(message())
 }
 
+struct LegacyMigrationPreflightLedger: Codable {
+    static let currentSchemaVersion = 3
+
+    enum MutationState: String, Codable {
+        case pending
+        case rowUpsertStarted = "row_upsert_started"
+        case rowUpsertSucceeded = "row_upsert_succeeded"
+        case mediaUploadStarted = "media_upload_started"
+        case mediaUploadSucceeded = "media_upload_succeeded"
+        case verified
+        case failedRetryable = "failed_retryable"
+        case failedTerminal = "failed_terminal"
+    }
+
+    struct MutationStatus: Codable {
+        var state: MutationState
+        var attemptCount: Int
+        var lastAttemptedAt: Date?
+        var lastVerifiedAt: Date?
+        var lastErrorCategory: String?
+        var lastErrorMessage: String?
+        var lastRunID: UUID?
+        var isReadyForFinalize: Bool
+
+        private enum CodingKeys: String, CodingKey {
+            case state
+            case attemptCount
+            case lastAttemptedAt
+            case lastVerifiedAt
+            case lastErrorCategory
+            case lastErrorMessage
+            case lastRunID
+            case isReadyForFinalize
+        }
+
+        init(
+            state: MutationState = .pending,
+            attemptCount: Int = 0,
+            lastAttemptedAt: Date? = nil,
+            lastVerifiedAt: Date? = nil,
+            lastErrorCategory: String? = nil,
+            lastErrorMessage: String? = nil,
+            lastRunID: UUID? = nil,
+            isReadyForFinalize: Bool = false
+        ) {
+            self.state = state
+            self.attemptCount = attemptCount
+            self.lastAttemptedAt = lastAttemptedAt
+            self.lastVerifiedAt = lastVerifiedAt
+            self.lastErrorCategory = lastErrorCategory
+            self.lastErrorMessage = lastErrorMessage
+            self.lastRunID = lastRunID
+            self.isReadyForFinalize = isReadyForFinalize
+        }
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            state = try container.decodeIfPresent(MutationState.self, forKey: .state) ?? .pending
+            attemptCount = try container.decodeIfPresent(Int.self, forKey: .attemptCount) ?? 0
+            lastAttemptedAt = try container.decodeIfPresent(Date.self, forKey: .lastAttemptedAt)
+            lastVerifiedAt = try container.decodeIfPresent(Date.self, forKey: .lastVerifiedAt)
+            lastErrorCategory = try container.decodeIfPresent(String.self, forKey: .lastErrorCategory)
+            lastErrorMessage = try container.decodeIfPresent(String.self, forKey: .lastErrorMessage)
+            lastRunID = try container.decodeIfPresent(UUID.self, forKey: .lastRunID)
+            isReadyForFinalize = try container.decodeIfPresent(Bool.self, forKey: .isReadyForFinalize) ?? false
+        }
+    }
+
+    struct MutationRunStatus: Codable {
+        var currentRunID: UUID?
+        var state: String
+        var startedAt: Date?
+        var completedAt: Date?
+        var lastErrorCategory: String?
+        var lastErrorMessage: String?
+
+        init(
+            currentRunID: UUID? = nil,
+            state: String = "idle",
+            startedAt: Date? = nil,
+            completedAt: Date? = nil,
+            lastErrorCategory: String? = nil,
+            lastErrorMessage: String? = nil
+        ) {
+            self.currentRunID = currentRunID
+            self.state = state
+            self.startedAt = startedAt
+            self.completedAt = completedAt
+            self.lastErrorCategory = lastErrorCategory
+            self.lastErrorMessage = lastErrorMessage
+        }
+    }
+
+    struct Summary: Codable {
+        let propertyCount: Int
+        let sessionCount: Int
+        let shotCount: Int
+        let mediaCount: Int
+        let eligiblePropertyCount: Int
+        let eligibleSessionCount: Int
+        let eligibleShotCount: Int
+        let eligibleMediaCount: Int
+        let b1PropertyCount: Int
+        let b1SessionCount: Int
+        let b1ShotCount: Int
+        let b2WarningPropertyCount: Int
+        let b2WarningSessionCount: Int
+        let b2WarningShotCount: Int
+        let missingMediaCount: Int
+    }
+
+    struct EntityEntry: Codable {
+        let entityType: String
+        let localID: UUID
+        let parentLocalID: UUID?
+        let propertyID: UUID?
+        let sessionID: UUID?
+        let activeOrganizationID: UUID
+        let eligible: Bool
+        let b1RemoteExists: Bool
+        let b2WarningRemoteIDs: [UUID]
+        let reasons: [String]
+        let attributes: [String: String]
+        var mutation: MutationStatus
+
+        private enum CodingKeys: String, CodingKey {
+            case entityType
+            case localID
+            case parentLocalID
+            case propertyID
+            case sessionID
+            case activeOrganizationID
+            case eligible
+            case b1RemoteExists
+            case b2WarningRemoteIDs
+            case reasons
+            case attributes
+            case mutation
+        }
+
+        init(
+            entityType: String,
+            localID: UUID,
+            parentLocalID: UUID?,
+            propertyID: UUID?,
+            sessionID: UUID?,
+            activeOrganizationID: UUID,
+            eligible: Bool,
+            b1RemoteExists: Bool,
+            b2WarningRemoteIDs: [UUID],
+            reasons: [String],
+            attributes: [String: String],
+            mutation: MutationStatus = MutationStatus()
+        ) {
+            self.entityType = entityType
+            self.localID = localID
+            self.parentLocalID = parentLocalID
+            self.propertyID = propertyID
+            self.sessionID = sessionID
+            self.activeOrganizationID = activeOrganizationID
+            self.eligible = eligible
+            self.b1RemoteExists = b1RemoteExists
+            self.b2WarningRemoteIDs = b2WarningRemoteIDs
+            self.reasons = reasons
+            self.attributes = attributes
+            self.mutation = mutation
+        }
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            entityType = try container.decode(String.self, forKey: .entityType)
+            localID = try container.decode(UUID.self, forKey: .localID)
+            parentLocalID = try container.decodeIfPresent(UUID.self, forKey: .parentLocalID)
+            propertyID = try container.decodeIfPresent(UUID.self, forKey: .propertyID)
+            sessionID = try container.decodeIfPresent(UUID.self, forKey: .sessionID)
+            activeOrganizationID = try container.decode(UUID.self, forKey: .activeOrganizationID)
+            eligible = try container.decode(Bool.self, forKey: .eligible)
+            b1RemoteExists = try container.decode(Bool.self, forKey: .b1RemoteExists)
+            b2WarningRemoteIDs = try container.decodeIfPresent([UUID].self, forKey: .b2WarningRemoteIDs) ?? []
+            reasons = try container.decodeIfPresent([String].self, forKey: .reasons) ?? []
+            attributes = try container.decodeIfPresent([String: String].self, forKey: .attributes) ?? [:]
+            mutation = try container.decodeIfPresent(MutationStatus.self, forKey: .mutation) ?? MutationStatus()
+        }
+    }
+
+    struct MediaEntry: Codable {
+        let shotID: UUID
+        let propertyID: UUID
+        let sessionID: UUID
+        let activeOrganizationID: UUID
+        let originalRelativePath: String
+        let resolvedFilePath: String?
+        let fileExists: Bool
+        let fileSizeBytes: Int64?
+        let checksumSHA256: String?
+        let b1RemoteExists: Bool
+        let b2WarningRemoteIDs: [UUID]
+        let eligible: Bool
+        let reasons: [String]
+        let attributes: [String: String]
+        var mutation: MutationStatus
+
+        private enum CodingKeys: String, CodingKey {
+            case shotID
+            case propertyID
+            case sessionID
+            case activeOrganizationID
+            case originalRelativePath
+            case resolvedFilePath
+            case fileExists
+            case fileSizeBytes
+            case checksumSHA256
+            case b1RemoteExists
+            case b2WarningRemoteIDs
+            case eligible
+            case reasons
+            case attributes
+            case mutation
+        }
+
+        init(
+            shotID: UUID,
+            propertyID: UUID,
+            sessionID: UUID,
+            activeOrganizationID: UUID,
+            originalRelativePath: String,
+            resolvedFilePath: String?,
+            fileExists: Bool,
+            fileSizeBytes: Int64?,
+            checksumSHA256: String?,
+            b1RemoteExists: Bool,
+            b2WarningRemoteIDs: [UUID],
+            eligible: Bool,
+            reasons: [String],
+            attributes: [String: String],
+            mutation: MutationStatus = MutationStatus()
+        ) {
+            self.shotID = shotID
+            self.propertyID = propertyID
+            self.sessionID = sessionID
+            self.activeOrganizationID = activeOrganizationID
+            self.originalRelativePath = originalRelativePath
+            self.resolvedFilePath = resolvedFilePath
+            self.fileExists = fileExists
+            self.fileSizeBytes = fileSizeBytes
+            self.checksumSHA256 = checksumSHA256
+            self.b1RemoteExists = b1RemoteExists
+            self.b2WarningRemoteIDs = b2WarningRemoteIDs
+            self.eligible = eligible
+            self.reasons = reasons
+            self.attributes = attributes
+            self.mutation = mutation
+        }
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            shotID = try container.decode(UUID.self, forKey: .shotID)
+            propertyID = try container.decode(UUID.self, forKey: .propertyID)
+            sessionID = try container.decode(UUID.self, forKey: .sessionID)
+            activeOrganizationID = try container.decode(UUID.self, forKey: .activeOrganizationID)
+            originalRelativePath = try container.decode(String.self, forKey: .originalRelativePath)
+            resolvedFilePath = try container.decodeIfPresent(String.self, forKey: .resolvedFilePath)
+            fileExists = try container.decode(Bool.self, forKey: .fileExists)
+            fileSizeBytes = try container.decodeIfPresent(Int64.self, forKey: .fileSizeBytes)
+            checksumSHA256 = try container.decodeIfPresent(String.self, forKey: .checksumSHA256)
+            b1RemoteExists = try container.decode(Bool.self, forKey: .b1RemoteExists)
+            b2WarningRemoteIDs = try container.decodeIfPresent([UUID].self, forKey: .b2WarningRemoteIDs) ?? []
+            eligible = try container.decode(Bool.self, forKey: .eligible)
+            reasons = try container.decodeIfPresent([String].self, forKey: .reasons) ?? []
+            attributes = try container.decodeIfPresent([String: String].self, forKey: .attributes) ?? [:]
+            mutation = try container.decodeIfPresent(MutationStatus.self, forKey: .mutation) ?? MutationStatus()
+        }
+    }
+
+    var schemaVersion: Int
+    let generatedAt: Date
+    let activeOrganizationID: UUID
+    let authenticatedUserID: UUID?
+    let summary: Summary
+    var properties: [EntityEntry]
+    var sessions: [EntityEntry]
+    var shots: [EntityEntry]
+    var media: [MediaEntry]
+    var mutationRun: MutationRunStatus
+
+    private enum CodingKeys: String, CodingKey {
+        case schemaVersion
+        case generatedAt
+        case activeOrganizationID
+        case authenticatedUserID
+        case summary
+        case properties
+        case sessions
+        case shots
+        case media
+        case mutationRun
+    }
+
+    init(
+        schemaVersion: Int = LegacyMigrationPreflightLedger.currentSchemaVersion,
+        generatedAt: Date,
+        activeOrganizationID: UUID,
+        authenticatedUserID: UUID?,
+        summary: Summary,
+        properties: [EntityEntry],
+        sessions: [EntityEntry],
+        shots: [EntityEntry],
+        media: [MediaEntry],
+        mutationRun: MutationRunStatus = MutationRunStatus()
+    ) {
+        self.schemaVersion = schemaVersion
+        self.generatedAt = generatedAt
+        self.activeOrganizationID = activeOrganizationID
+        self.authenticatedUserID = authenticatedUserID
+        self.summary = summary
+        self.properties = properties
+        self.sessions = sessions
+        self.shots = shots
+        self.media = media
+        self.mutationRun = mutationRun
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        schemaVersion = try container.decodeIfPresent(Int.self, forKey: .schemaVersion) ?? 1
+        generatedAt = try container.decode(Date.self, forKey: .generatedAt)
+        activeOrganizationID = try container.decode(UUID.self, forKey: .activeOrganizationID)
+        authenticatedUserID = try container.decodeIfPresent(UUID.self, forKey: .authenticatedUserID)
+        summary = try container.decode(Summary.self, forKey: .summary)
+        properties = try container.decodeIfPresent([EntityEntry].self, forKey: .properties) ?? []
+        sessions = try container.decodeIfPresent([EntityEntry].self, forKey: .sessions) ?? []
+        shots = try container.decodeIfPresent([EntityEntry].self, forKey: .shots) ?? []
+        media = try container.decodeIfPresent([MediaEntry].self, forKey: .media) ?? []
+        mutationRun = try container.decodeIfPresent(MutationRunStatus.self, forKey: .mutationRun) ?? MutationRunStatus()
+    }
+}
+
+struct LegacyMigrationPreflightArtifacts {
+    let directoryURL: URL
+    let ledgerURL: URL
+    let reportURL: URL
+}
+
 final class LocalStore {
     private let currentSessionSchemaVersion = 12
     private let fileIOQueue = DispatchQueue(label: "ScoutCapture.LocalStore.fileIO")
@@ -31,6 +374,11 @@ final class LocalStore {
         let properties: [Property]
         let organizations: [Organization]
         let source: HubFetchSource
+    }
+
+    private struct PropertyListCacheArtifactSnapshot {
+        let url: URL
+        let data: Data?
     }
  
     enum StoreError: Error {
@@ -165,6 +513,39 @@ final class LocalStore {
                 try? fileManager.startDownloadingUbiquitousItem(at: hubURL)
             }
         }
+    }
+
+    init(testStorageRootURL: URL, fileManager: FileManager = .default) {
+        self.fileManager = fileManager
+
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        encoder.dateEncodingStrategy = .iso8601
+        self.encoder = encoder
+
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        self.decoder = decoder
+
+        let appRoot = testStorageRootURL
+        let scoutRoot = appRoot.appendingPathComponent("SCOUT", isDirectory: true)
+        self.activeRootURL = appRoot
+        self.scoutRootURL = scoutRoot
+        self.propertiesURL = scoutRoot.appendingPathComponent("properties.json")
+        self.organizationsURL = scoutRoot.appendingPathComponent("organizations.json")
+        self.hubIndexURL = scoutRoot.appendingPathComponent("hub-index.json")
+        self.localHubIndexCacheURL = appRoot.appendingPathComponent("local-hub-index.json")
+        self.propertyTombstonesURL = scoutRoot.appendingPathComponent("property-tombstones.json")
+        self.propertySyncEventsDirectoryURL = scoutRoot
+            .appendingPathComponent("sync-events", isDirectory: true)
+            .appendingPathComponent("properties", isDirectory: true)
+        self.propertyFoldersURL = scoutRoot.appendingPathComponent("Properties", isDirectory: true)
+        self.observationsDirectoryURL = scoutRoot.appendingPathComponent("observations", isDirectory: true)
+        self.guidedShotsDirectoryURL = scoutRoot.appendingPathComponent("guided-shots", isDirectory: true)
+        self.sessionsDirectoryURL = scoutRoot.appendingPathComponent("sessions", isDirectory: true)
+        self.fileIOQueue.setSpecific(key: fileIOQueueKey, value: fileIOQueueValue)
+
+        try? createStorageDirectories(baseDirectoryURL: scoutRoot)
     }
 
     func validateExport(_ metadata: SessionMetadata, phase: String) -> ExportValidationReport {
@@ -906,6 +1287,33 @@ final class LocalStore {
         }
     }
 
+    func replacePropertyListCacheAtomically(
+        properties: [Property],
+        organizations: [Organization]
+    ) throws {
+        try performFileIOSync {
+            let artifactURLs = [
+                propertiesURL,
+                organizationsURL,
+                hubIndexURL,
+                localHubIndexCacheURL
+            ]
+            let snapshots = try snapshotPropertyListCacheArtifacts(at: artifactURLs)
+
+            do {
+                try writeOrganizations(organizations)
+                try writeProperties(properties)
+                try writeHubIndexForAtomicReplacement(
+                    properties: properties,
+                    organizations: organizations
+                )
+            } catch {
+                try restorePropertyListCacheArtifacts(from: snapshots)
+                throw error
+            }
+        }
+    }
+
     @discardableResult
     func createOrganization(_ organization: Organization) throws -> Organization {
         try performFileIOSync {
@@ -1583,6 +1991,94 @@ final class LocalStore {
 
     func guidedReferencesDirectoryURL() -> URL {
         scoutRootURL.appendingPathComponent("guided-references", isDirectory: true)
+    }
+
+    func legacyMigrationPreflightDirectoryURL() -> URL {
+        scoutRootURL
+            .appendingPathComponent("migrations", isDirectory: true)
+            .appendingPathComponent("supabase-legacy-v1", isDirectory: true)
+    }
+
+    func legacyMigrationLedgerURL() -> URL {
+        legacyMigrationPreflightDirectoryURL()
+            .appendingPathComponent("ledger.json", isDirectory: false)
+    }
+
+    func legacyMigrationSummaryReportURL() -> URL {
+        legacyMigrationPreflightDirectoryURL()
+            .appendingPathComponent("summary-report.txt", isDirectory: false)
+    }
+
+    func loadLegacyMigrationLedger() throws -> LegacyMigrationPreflightLedger {
+        try performFileIOSync {
+            let ledgerURL = legacyMigrationLedgerURL()
+            let data = try Data(contentsOf: ledgerURL)
+            return try decoder.decode(LegacyMigrationPreflightLedger.self, from: data)
+        }
+    }
+
+    func writeLegacyMigrationLedger(_ ledger: LegacyMigrationPreflightLedger) throws {
+        try performFileIOSync {
+            let directoryURL = legacyMigrationPreflightDirectoryURL()
+            if !fileManager.fileExists(atPath: directoryURL.path) {
+                try fileManager.createDirectory(at: directoryURL, withIntermediateDirectories: true)
+            }
+            let ledgerURL = legacyMigrationLedgerURL()
+            let ledgerData = try encoder.encode(ledger)
+            try atomicWriteFileData(ledgerData, to: ledgerURL)
+        }
+    }
+
+    @discardableResult
+    func writeLegacyMigrationPreflightArtifacts(
+        ledger: LegacyMigrationPreflightLedger,
+        reportText: String
+    ) throws -> LegacyMigrationPreflightArtifacts {
+        try performFileIOSync {
+            let directoryURL = legacyMigrationPreflightDirectoryURL()
+            if !fileManager.fileExists(atPath: directoryURL.path) {
+                try fileManager.createDirectory(at: directoryURL, withIntermediateDirectories: true)
+            }
+
+            let ledgerURL = legacyMigrationLedgerURL()
+            let reportURL = legacyMigrationSummaryReportURL()
+            print("[LegacyMigrationPreflight] directoryURL.path=\(directoryURL.path)")
+            print("[LegacyMigrationPreflight] ledgerURL.path=\(ledgerURL.path)")
+            print("[LegacyMigrationPreflight] reportURL.path=\(reportURL.path)")
+            let ledgerData = try encoder.encode(ledger)
+            let reportData = Data(reportText.utf8)
+            try atomicWriteFileData(ledgerData, to: ledgerURL)
+            try atomicWriteFileData(reportData, to: reportURL)
+
+            return LegacyMigrationPreflightArtifacts(
+                directoryURL: directoryURL,
+                ledgerURL: ledgerURL,
+                reportURL: reportURL
+            )
+        }
+    }
+
+    private func atomicWriteFileData(_ data: Data, to destinationURL: URL) throws {
+        let directoryURL = destinationURL.deletingLastPathComponent()
+        if !fileManager.fileExists(atPath: directoryURL.path) {
+            try fileManager.createDirectory(at: directoryURL, withIntermediateDirectories: true)
+        }
+
+        let tempURL = directoryURL.appendingPathComponent("\(destinationURL.lastPathComponent).tmp-\(UUID().uuidString)")
+        try data.write(to: tempURL, options: .atomic)
+
+        do {
+            if fileManager.fileExists(atPath: destinationURL.path) {
+                _ = try fileManager.replaceItemAt(destinationURL, withItemAt: tempURL, backupItemName: nil, options: [.usingNewMetadataOnly])
+            } else {
+                try fileManager.moveItem(at: tempURL, to: destinationURL)
+            }
+        } catch {
+            if fileManager.fileExists(atPath: tempURL.path) {
+                try? fileManager.removeItem(at: tempURL)
+            }
+            throw error
+        }
     }
 
     func sessionJSONURL(propertyID: UUID, sessionID: UUID) -> URL {
@@ -2608,6 +3104,21 @@ final class LocalStore {
     }
 
     private func writeHubIndex(properties: [Property], organizations: [Organization]) throws {
+        let data = try hubIndexData(properties: properties, organizations: organizations)
+        try data.write(to: hubIndexURL, options: .atomic)
+        try? data.write(to: localHubIndexCacheURL, options: .atomic)
+    }
+
+    private func writeHubIndexForAtomicReplacement(
+        properties: [Property],
+        organizations: [Organization]
+    ) throws {
+        let data = try hubIndexData(properties: properties, organizations: organizations)
+        try atomicWriteFileData(data, to: hubIndexURL)
+        try atomicWriteFileData(data, to: localHubIndexCacheURL)
+    }
+
+    private func hubIndexData(properties: [Property], organizations: [Organization]) throws -> Data {
         let payload = HubIndex(
             schemaVersion: 1,
             generatedAt: Date(),
@@ -2635,9 +3146,26 @@ final class LocalStore {
                 HubIndex.OrganizationRow(id: org.id, name: org.name)
             }
         )
-        let data = try encoder.encode(payload)
-        try data.write(to: hubIndexURL, options: .atomic)
-        try? data.write(to: localHubIndexCacheURL, options: .atomic)
+        return try encoder.encode(payload)
+    }
+
+    private func snapshotPropertyListCacheArtifacts(at urls: [URL]) throws -> [PropertyListCacheArtifactSnapshot] {
+        try urls.map { url in
+            let data = fileManager.fileExists(atPath: url.path) ? try Data(contentsOf: url) : nil
+            return PropertyListCacheArtifactSnapshot(url: url, data: data)
+        }
+    }
+
+    private func restorePropertyListCacheArtifacts(
+        from snapshots: [PropertyListCacheArtifactSnapshot]
+    ) throws {
+        for snapshot in snapshots {
+            if let data = snapshot.data {
+                try atomicWriteFileData(data, to: snapshot.url)
+            } else if fileManager.fileExists(atPath: snapshot.url.path) {
+                try fileManager.removeItem(at: snapshot.url)
+            }
+        }
     }
 
     private func readLocalHubIndexCacheRaw() throws -> HubIndex? {
