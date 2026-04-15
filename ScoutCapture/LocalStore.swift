@@ -380,6 +380,16 @@ final class LocalStore {
         let url: URL
         let data: Data?
     }
+
+    private struct PropertySyncEventArtifactSnapshot {
+        let filename: String
+        let data: Data
+    }
+
+    private struct PropertySyncEventDirectorySnapshot {
+        let directoryExisted: Bool
+        let files: [PropertySyncEventArtifactSnapshot]
+    }
  
     enum StoreError: Error {
         case propertyNotFound(UUID)
@@ -1299,6 +1309,7 @@ final class LocalStore {
                 localHubIndexCacheURL
             ]
             let snapshots = try snapshotPropertyListCacheArtifacts(at: artifactURLs)
+            let propertySyncEventSnapshot = try snapshotPropertySyncEventArtifacts()
 
             do {
                 try writeOrganizations(organizations)
@@ -1307,8 +1318,10 @@ final class LocalStore {
                     properties: properties,
                     organizations: organizations
                 )
+                try overwritePropertySyncEvents(with: properties)
             } catch {
                 try restorePropertyListCacheArtifacts(from: snapshots)
+                try restorePropertySyncEventArtifacts(from: propertySyncEventSnapshot)
                 throw error
             }
         }
@@ -3156,6 +3169,28 @@ final class LocalStore {
         }
     }
 
+    private func snapshotPropertySyncEventArtifacts() throws -> PropertySyncEventDirectorySnapshot {
+        guard fileManager.fileExists(atPath: propertySyncEventsDirectoryURL.path) else {
+            return PropertySyncEventDirectorySnapshot(directoryExisted: false, files: [])
+        }
+
+        let urls = try fileManager.contentsOfDirectory(
+            at: propertySyncEventsDirectoryURL,
+            includingPropertiesForKeys: [.isDirectoryKey],
+            options: [.skipsHiddenFiles]
+        )
+        let files = try urls.compactMap { url -> PropertySyncEventArtifactSnapshot? in
+            let values = try url.resourceValues(forKeys: [.isDirectoryKey])
+            guard values.isDirectory != true else { return nil }
+            return PropertySyncEventArtifactSnapshot(
+                filename: url.lastPathComponent,
+                data: try Data(contentsOf: url)
+            )
+        }
+
+        return PropertySyncEventDirectorySnapshot(directoryExisted: true, files: files)
+    }
+
     private func restorePropertyListCacheArtifacts(
         from snapshots: [PropertyListCacheArtifactSnapshot]
     ) throws {
@@ -3165,6 +3200,42 @@ final class LocalStore {
             } else if fileManager.fileExists(atPath: snapshot.url.path) {
                 try fileManager.removeItem(at: snapshot.url)
             }
+        }
+    }
+
+    private func restorePropertySyncEventArtifacts(
+        from snapshot: PropertySyncEventDirectorySnapshot
+    ) throws {
+        if fileManager.fileExists(atPath: propertySyncEventsDirectoryURL.path) {
+            try fileManager.removeItem(at: propertySyncEventsDirectoryURL)
+        }
+
+        guard snapshot.directoryExisted || !snapshot.files.isEmpty else {
+            return
+        }
+
+        try fileManager.createDirectory(at: propertySyncEventsDirectoryURL, withIntermediateDirectories: true)
+        for file in snapshot.files {
+            try file.data.write(
+                to: propertySyncEventsDirectoryURL.appendingPathComponent(file.filename, isDirectory: false),
+                options: .atomic
+            )
+        }
+    }
+
+    private func overwritePropertySyncEvents(with properties: [Property]) throws {
+        if fileManager.fileExists(atPath: propertySyncEventsDirectoryURL.path) {
+            try fileManager.removeItem(at: propertySyncEventsDirectoryURL)
+        }
+        guard !properties.isEmpty else { return }
+        try fileManager.createDirectory(at: propertySyncEventsDirectoryURL, withIntermediateDirectories: true)
+        for property in properties {
+            try appendPropertySyncEvent(
+                propertyID: property.id,
+                operation: .upsert,
+                property: property,
+                occurredAt: property.updatedAt
+            )
         }
     }
 

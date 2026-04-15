@@ -85,6 +85,7 @@ struct BackendFeatureFlags {
     let supabaseReadEnabled: Bool
     let supabasePropertyReadEnabled: Bool
     let mediaSupabaseUploadEnabled: Bool
+    let syncDeltaEnabled: Bool
 
     // The cutover phase is derived from the existing backend flags. Property-list
     // remote reads remain separately controlled by `supabase_property_read_enabled`
@@ -114,7 +115,8 @@ struct BackendFeatureFlags {
             shadowWriteEnabled: Self.boolValue(for: "shadow_write_enabled", bundle: bundle, userDefaults: userDefaults),
             supabaseReadEnabled: Self.boolValue(for: "supabase_read_enabled", bundle: bundle, userDefaults: userDefaults),
             supabasePropertyReadEnabled: Self.boolValue(for: "supabase_property_read_enabled", bundle: bundle, userDefaults: userDefaults),
-            mediaSupabaseUploadEnabled: Self.boolValue(for: "media_supabase_upload_enabled", bundle: bundle, userDefaults: userDefaults)
+            mediaSupabaseUploadEnabled: Self.boolValue(for: "media_supabase_upload_enabled", bundle: bundle, userDefaults: userDefaults),
+            syncDeltaEnabled: Self.boolValue(for: "sync_delta_enabled", bundle: bundle, userDefaults: userDefaults)
         )
     }
 
@@ -180,6 +182,39 @@ final class AppState: ObservableObject {
         let skippedRetryCapCount: Int
         let attemptedCount: Int
     }
+
+#if DEBUG
+    struct DebugRemotePropertyDeltaInput {
+        let id: UUID
+        let orgID: UUID
+        let folderID: String?
+        let clientName: String?
+        let clientEmail: String?
+        let clientPhone: String?
+        let name: String
+        let addressLine1: String?
+        let city: String?
+        let state: String?
+        let postalCode: String?
+        let baselineSessionID: UUID?
+        let isArchived: Bool
+        let createdAt: Date
+        let updatedAt: Date
+        let deletedAt: Date?
+    }
+
+    struct DebugRemoteSessionDeltaInput {
+        let id: UUID
+        let orgID: UUID
+        let propertyID: UUID
+        let title: String?
+        let status: String
+        let startedAt: String
+        let completedAt: String?
+        let updatedAt: Date
+        let deletedAt: Date?
+    }
+#endif
 
     enum PropertyCreationError: LocalizedError {
         case missingPropertyName
@@ -349,6 +384,44 @@ final class AppState: ObservableObject {
         }
     }
 
+    private struct RemotePropertyDeltaRecord: Decodable {
+        let id: UUID
+        let orgID: UUID
+        let folderID: String?
+        let clientName: String?
+        let clientEmail: String?
+        let clientPhone: String?
+        let name: String
+        let addressLine1: String?
+        let city: String?
+        let state: String?
+        let postalCode: String?
+        let baselineSessionID: UUID?
+        let isArchived: Bool
+        let createdAt: Date
+        let updatedAt: Date
+        let deletedAt: Date?
+
+        enum CodingKeys: String, CodingKey {
+            case id
+            case orgID = "org_id"
+            case folderID = "folder_id"
+            case clientName = "client_name"
+            case clientEmail = "client_email"
+            case clientPhone = "client_phone"
+            case name
+            case addressLine1 = "address_line1"
+            case city
+            case state
+            case postalCode = "postal_code"
+            case baselineSessionID = "baseline_session_id"
+            case isArchived = "is_archived"
+            case createdAt = "created_at"
+            case updatedAt = "updated_at"
+            case deletedAt = "deleted_at"
+        }
+    }
+
     private struct RemotePropertyRecord: Decodable {
         let id: UUID
         let orgID: UUID
@@ -454,6 +527,40 @@ final class AppState: ObservableObject {
             case title
             case status
             case startedAt = "started_at"
+        }
+    }
+
+    private struct RemoteSessionDeltaRecord: Decodable {
+        let id: UUID
+        let orgID: UUID
+        let propertyID: UUID
+        let title: String?
+        let status: String
+        let startedAt: String
+        let completedAt: String?
+        let updatedAt: Date
+        let deletedAt: Date?
+
+        enum CodingKeys: String, CodingKey {
+            case id
+            case orgID = "org_id"
+            case propertyID = "property_id"
+            case title
+            case status
+            case startedAt = "started_at"
+            case completedAt = "completed_at"
+            case updatedAt = "updated_at"
+            case deletedAt = "deleted_at"
+        }
+    }
+
+    private struct SupabaseRowUpdatedAtRecord: Decodable {
+        let id: UUID
+        let updatedAt: Date
+
+        enum CodingKeys: String, CodingKey {
+            case id
+            case updatedAt = "updated_at"
         }
     }
 
@@ -622,6 +729,7 @@ final class AppState: ObservableObject {
     private let failedSupabaseMediaRetryCooldown: TimeInterval = 30
     private var inFlightSupabaseMediaOperations: Set<String> = []
     private var isSupabaseMediaBackfillInProgress: Bool = false
+    private var isSyncDeltaPullInFlight: Bool = false
     private var authStateChangesTask: Task<Void, Never>?
     private var lastEnsuredUserProfileID: UUID?
     private var allProperties: [Property] = []
@@ -928,6 +1036,9 @@ final class AppState: ObservableObject {
         ready: Bool
     ) {
         DispatchQueue.main.async {
+            let previousReady = self.isOrganizationContextReady
+            let previousActiveOrganizationID = self.activeOrganizationID
+
             if self.accessibleOrganizations != memberships {
                 self.accessibleOrganizations = memberships
             }
@@ -941,6 +1052,11 @@ final class AppState: ObservableObject {
             self.applyTenantScopedState()
             if ready, activeOrganizationID != nil {
                 self.queuePendingSupabaseMediaBackfillIfNeeded(reason: "org_context_ready")
+                if !previousReady {
+                    Task { @MainActor in
+                        await self.performSyncDeltaPull(source: "launch")
+                    }
+                }
             }
         }
     }
@@ -952,6 +1068,8 @@ final class AppState: ObservableObject {
         activeOrganizationID: UUID?,
         ready: Bool
     ) {
+        // Test-only hook for delta apply/unit coverage. Keep this path state-only so
+        // tests can control scheduling explicitly instead of inheriting app triggers.
         if accessibleOrganizations != memberships {
             accessibleOrganizations = memberships
         }
@@ -1056,6 +1174,11 @@ final class AppState: ObservableObject {
         activeOrganizationID = id
         persistActiveOrganizationID()
         applyTenantScopedState()
+        if isOrganizationContextReady {
+            Task { @MainActor in
+                await performSyncDeltaPull(source: "org_switch")
+            }
+        }
     }
 
     private func activeOrganizationDefaultsKey(for userID: UUID?) -> String {
@@ -1218,11 +1341,16 @@ final class AppState: ObservableObject {
     func signOut() async {
         guard let client = supabaseClient else { return }
 
+        let orgIDsToClear = Set(accessibleOrganizations.map(\.id)).union(activeOrganizationID.map { [$0] } ?? [])
+
         setAuthenticating(true)
         defer { setAuthenticating(false) }
 
         do {
             try await client.auth.signOut(scope: .local)
+            for orgID in orgIDsToClear {
+                clearSyncCursors(orgID: orgID)
+            }
         } catch {
             DispatchQueue.main.async {
                 self.authenticationErrorMessage = error.localizedDescription
@@ -1477,6 +1605,467 @@ final class AppState: ObservableObject {
         backendFeatureFlags.shadowWriteEnabled
     }
 
+    private func syncCursorDefaultsKey(entity: String, orgID: UUID) -> String {
+        "scoutcapture.syncCursor.\(entity).\(orgID.uuidString.lowercased())"
+    }
+
+    private func readSyncCursor(entity: String, orgID: UUID) -> Date? {
+        let key = syncCursorDefaultsKey(entity: entity, orgID: orgID)
+        guard userDefaults.object(forKey: key) != nil else { return nil }
+        return Date(timeIntervalSinceReferenceDate: userDefaults.double(forKey: key))
+    }
+
+    private func writeSyncCursor(entity: String, orgID: UUID, date: Date) {
+        let key = syncCursorDefaultsKey(entity: entity, orgID: orgID)
+        userDefaults.set(date.timeIntervalSinceReferenceDate, forKey: key)
+    }
+
+    private func clearSyncCursors(orgID: UUID) {
+        userDefaults.removeObject(forKey: syncCursorDefaultsKey(entity: "properties", orgID: orgID))
+        userDefaults.removeObject(forKey: syncCursorDefaultsKey(entity: "sessions", orgID: orgID))
+    }
+
+    private func advanceSyncCursor(entity: String, orgID: UUID, updatedAts: [Date]) {
+        guard let batchMax = updatedAts.max() else { return }
+        let current = readSyncCursor(entity: entity, orgID: orgID) ?? .distantPast
+        writeSyncCursor(entity: entity, orgID: orgID, date: max(current, batchMax))
+    }
+
+    private func supabaseTimestampString(_ date: Date) -> String {
+        let formatter = ISO8601DateFormatter()
+        formatter.timeZone = TimeZone(secondsFromGMT: 0)
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter.string(from: date)
+    }
+
+    private func parseSupabaseDateString(_ value: String) -> Date? {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+
+        let formatter = ISO8601DateFormatter()
+        formatter.timeZone = TimeZone(secondsFromGMT: 0)
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let parsed = formatter.date(from: trimmed) {
+            return parsed
+        }
+
+        let fallbackFormatter = ISO8601DateFormatter()
+        fallbackFormatter.timeZone = TimeZone(secondsFromGMT: 0)
+        fallbackFormatter.formatOptions = [.withInternetDateTime]
+        return fallbackFormatter.date(from: trimmed)
+    }
+
+    private func propertyFromSyncDeltaRecord(
+        _ record: RemotePropertyDeltaRecord,
+        createdAt: Date
+    ) -> Property {
+        let trimmedAddressLine1 = normalizedRemotePropertyText(record.addressLine1)
+        let trimmedCity = normalizedRemotePropertyText(record.city)
+        let trimmedState = normalizedRemotePropertyText(record.state)
+        let trimmedPostalCode = normalizedRemotePropertyText(record.postalCode)
+        let addressParts = [
+            trimmedAddressLine1,
+            [trimmedCity, trimmedState].compactMap { $0 }.joined(separator: ", "),
+            trimmedPostalCode
+        ].compactMap { value -> String? in
+            let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            return trimmed.isEmpty ? nil : trimmed
+        }
+
+        return Property(
+            id: record.id,
+            orgId: record.orgID,
+            folderId: normalizedRemotePropertyText(record.folderID),
+            clientName: normalizedRemotePropertyText(record.clientName),
+            clientPhone: normalizedRemotePropertyText(record.clientPhone),
+            clientEmail: normalizedRemotePropertyText(record.clientEmail),
+            name: record.name.trimmingCharacters(in: .whitespacesAndNewlines),
+            address: addressParts.joined(separator: ", "),
+            street: trimmedAddressLine1,
+            city: trimmedCity,
+            state: trimmedState,
+            zip: trimmedPostalCode,
+            baselineSessionID: record.baselineSessionID,
+            isArchived: record.deletedAt != nil ? true : record.isArchived,
+            createdAt: createdAt,
+            updatedAt: record.updatedAt
+        )
+    }
+
+    private func fetchSyncDelta(
+        orgID: UUID,
+        propertyCursor: Date?,
+        sessionCursor: Date?
+    ) async throws -> ([RemotePropertyDeltaRecord], [RemoteSessionDeltaRecord]) {
+        guard let client = supabaseClient else {
+            return ([], [])
+        }
+
+        let orgValue = orgID.uuidString.lowercased()
+
+        async let propertyFetch: [RemotePropertyDeltaRecord] = {
+            var query = client
+                .from("properties")
+                .select("id, org_id, folder_id, client_name, client_email, client_phone, name, address_line1, city, state, postal_code, baseline_session_id, is_archived, created_at, updated_at, deleted_at")
+                .eq("org_id", value: orgValue)
+            if let propertyCursor {
+                query = query.gt("updated_at", value: supabaseTimestampString(propertyCursor))
+            }
+            return try await query
+                .order("updated_at", ascending: true)
+                .limit(500)
+                .execute()
+                .value as [RemotePropertyDeltaRecord]
+        }()
+
+        async let sessionFetch: [RemoteSessionDeltaRecord] = {
+            var query = client
+                .from("sessions")
+                .select("id, org_id, property_id, title, status, started_at, completed_at, updated_at, deleted_at")
+                .eq("org_id", value: orgValue)
+            if let sessionCursor {
+                query = query.gt("updated_at", value: supabaseTimestampString(sessionCursor))
+            }
+            return try await query
+                .order("updated_at", ascending: true)
+                .limit(500)
+                .execute()
+                .value as [RemoteSessionDeltaRecord]
+        }()
+
+        return try await (propertyFetch, sessionFetch)
+    }
+
+    @discardableResult
+    private func applySyncDeltaProperties(
+        records: [RemotePropertyDeltaRecord],
+        orgID: UUID
+    ) -> (applied: Int, skipped: Int) {
+        guard !records.isEmpty else { return (0, 0) }
+
+        var applied = 0
+        var skipped = 0
+        var didMutateProperties = false
+
+        for record in records where record.orgID == orgID {
+            let existingIndex = allProperties.firstIndex(where: { $0.id == record.id })
+            let existingProperty = existingIndex.flatMap { allProperties[$0] }
+            if let existingProperty,
+               existingProperty.updatedAt >= record.updatedAt {
+                skipped += 1
+                if existingProperty.updatedAt > record.updatedAt {
+                    print(
+                        "[SyncApply] conflictsDetected=1 " +
+                        "reason=local_property_newer " +
+                        "propertyID=\(record.id.uuidString) " +
+                        "orgID=\(orgID.uuidString)"
+                    )
+                }
+                continue
+            }
+
+            let createdAt = existingProperty?.createdAt ?? record.createdAt
+            let candidate = propertyFromSyncDeltaRecord(record, createdAt: createdAt)
+
+            do {
+                let persisted: Property
+                if existingProperty != nil {
+                    persisted = try localStore.updateProperty(candidate)
+                } else {
+                    persisted = try localStore.createProperty(candidate)
+                }
+
+                var canonical = persisted
+                canonical.orgId = candidate.orgId
+                canonical.folderId = candidate.folderId
+                canonical.clientName = candidate.clientName
+                canonical.clientPhone = candidate.clientPhone
+                canonical.clientEmail = candidate.clientEmail
+                canonical.name = candidate.name
+                canonical.address = candidate.address
+                canonical.street = candidate.street
+                canonical.city = candidate.city
+                canonical.state = candidate.state
+                canonical.zip = candidate.zip
+                canonical.baselineSessionID = candidate.baselineSessionID
+                canonical.isArchived = candidate.isArchived
+                canonical.createdAt = candidate.createdAt
+                canonical.updatedAt = candidate.updatedAt
+
+                if let existingIndex {
+                    allProperties[existingIndex] = canonical
+                } else {
+                    allProperties.append(canonical)
+                }
+
+                applied += 1
+                didMutateProperties = true
+            } catch LocalStore.StoreError.propertyNotFound {
+                do {
+                    let persisted = try localStore.createProperty(candidate)
+                    var canonical = persisted
+                    canonical.createdAt = candidate.createdAt
+                    canonical.updatedAt = candidate.updatedAt
+                    allProperties.append(canonical)
+                    applied += 1
+                    didMutateProperties = true
+                } catch {
+                    skipped += 1
+                    print(
+                        "[SyncApply] action=property_upsert_failed " +
+                        "propertyID=\(record.id.uuidString) " +
+                        "orgID=\(orgID.uuidString) " +
+                        "reason=\(error.localizedDescription)"
+                    )
+                }
+            } catch {
+                skipped += 1
+                print(
+                    "[SyncApply] action=property_upsert_failed " +
+                    "propertyID=\(record.id.uuidString) " +
+                    "orgID=\(orgID.uuidString) " +
+                    "reason=\(error.localizedDescription)"
+                )
+            }
+        }
+
+        guard didMutateProperties else {
+            return (applied, skipped)
+        }
+
+        allProperties.sort(by: Self.propertyIsOrderedBefore)
+        allOrganizations = (try? localStore.fetchOrganizations()) ?? allOrganizations
+
+        // `LocalStore.updateProperty()` rewrites updatedAt to "now"; repair the
+        // persisted property list once per batch so future delta comparisons remain deterministic.
+        do {
+            try localStore.replacePropertyListCacheAtomically(
+                properties: allProperties,
+                organizations: allOrganizations
+            )
+        } catch {
+            print(
+                "[SyncApply] action=property_batch_repair_failed " +
+                "orgID=\(orgID.uuidString) " +
+                "reason=\(error.localizedDescription)"
+            )
+        }
+
+        return (applied, skipped)
+    }
+
+    @discardableResult
+    private func applySyncDeltaSessions(
+        records: [RemoteSessionDeltaRecord],
+        orgID: UUID
+    ) -> (applied: Int, skipped: Int) {
+        guard !records.isEmpty else { return (0, 0) }
+
+        var applied = 0
+        var skipped = 0
+
+        for record in records where record.orgID == orgID {
+            guard allProperties.contains(where: { $0.id == record.propertyID }) else {
+                skipped += 1
+                print(
+                    "[SyncApply] action=session_skipped " +
+                    "sessionID=\(record.id.uuidString) " +
+                    "reason=unknown_property"
+                )
+                continue
+            }
+            guard record.deletedAt == nil else {
+                skipped += 1
+                print(
+                    "[SyncApply] action=session_skipped " +
+                    "sessionID=\(record.id.uuidString) " +
+                    "reason=soft_deleted"
+                )
+                continue
+            }
+            guard let startedAt = parseSupabaseDateString(record.startedAt) else {
+                skipped += 1
+                print(
+                    "[SyncApply] action=session_skipped " +
+                    "sessionID=\(record.id.uuidString) " +
+                    "reason=invalid_started_at"
+                )
+                continue
+            }
+
+            let endedAt = record.completedAt.flatMap(parseSupabaseDateString)
+            let normalizedStatus = record.status.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            let session = Session(
+                id: record.id,
+                propertyID: record.propertyID,
+                startedAt: startedAt,
+                status: Session.Status(rawValue: normalizedStatus) ?? .draft,
+                endedAt: endedAt
+            )
+
+            do {
+                _ = try localStore.upsertSession(session)
+                applied += 1
+            } catch {
+                skipped += 1
+                print(
+                    "[SyncApply] action=session_upsert_failed " +
+                    "sessionID=\(record.id.uuidString) " +
+                    "reason=\(error.localizedDescription)"
+                )
+            }
+        }
+
+        return (applied, skipped)
+    }
+
+    @MainActor
+    private func performSyncDeltaPull(source: String) async {
+        guard isSyncDeltaEnabled else { return }
+        guard !isSyncDeltaPullInFlight else {
+            print("[SyncDeltaPull] skipped source=\(source) reason=in_flight")
+            return
+        }
+        guard let orgID = activeOrganizationID else { return }
+
+        isSyncDeltaPullInFlight = true
+        let startedAt = Date()
+        defer { isSyncDeltaPullInFlight = false }
+
+        let propertyCursor = readSyncCursor(entity: "properties", orgID: orgID)
+        let sessionCursor = readSyncCursor(entity: "sessions", orgID: orgID)
+
+        print(
+            "[SyncDeltaPull] start " +
+            "source=\(source) " +
+            "orgID=\(orgID.uuidString) " +
+            "propertyCursor=\(propertyCursor.map { supabaseTimestampString($0) } ?? "nil") " +
+            "sessionCursor=\(sessionCursor.map { supabaseTimestampString($0) } ?? "nil")"
+        )
+        print(
+            "[SyncConvergence] start " +
+            "source=\(source) " +
+            "orgID=\(orgID.uuidString)"
+        )
+
+        let propertyRecords: [RemotePropertyDeltaRecord]
+        let sessionRecords: [RemoteSessionDeltaRecord]
+        do {
+            (propertyRecords, sessionRecords) = try await fetchSyncDelta(
+                orgID: orgID,
+                propertyCursor: propertyCursor,
+                sessionCursor: sessionCursor
+            )
+        } catch {
+            print("[SyncDeltaPull] error source=\(source) error=\(error.localizedDescription)")
+            return
+        }
+
+        let propertyResult = applySyncDeltaProperties(records: propertyRecords, orgID: orgID)
+        let sessionResult = applySyncDeltaSessions(records: sessionRecords, orgID: orgID)
+        let totalApplied = propertyResult.applied + sessionResult.applied
+
+        if totalApplied > 0 {
+            let caches = makeHubCaches(for: allProperties)
+            applyHubCachePayload(
+                properties: allProperties,
+                organizations: allOrganizations,
+                caches: caches
+            )
+        }
+
+        advanceSyncCursor(entity: "properties", orgID: orgID, updatedAts: propertyRecords.map(\.updatedAt))
+        advanceSyncCursor(entity: "sessions", orgID: orgID, updatedAts: sessionRecords.map(\.updatedAt))
+
+        if propertyRecords.isEmpty && sessionRecords.isEmpty {
+            print("[SyncDeltaPull] no_op source=\(source)")
+        }
+
+        let elapsedMs = Int(Date().timeIntervalSince(startedAt) * 1000)
+        print(
+            "[SyncDeltaPull] complete " +
+            "source=\(source) " +
+            "orgID=\(orgID.uuidString) " +
+            "propertyCount=\(propertyRecords.count) " +
+            "sessionCount=\(sessionRecords.count) " +
+            "applied=\(totalApplied) " +
+            "skipped=\(propertyResult.skipped + sessionResult.skipped) " +
+            "elapsedMs=\(elapsedMs)"
+        )
+        print(
+            "[SyncConvergence] end " +
+            "source=\(source) " +
+            "orgID=\(orgID.uuidString) " +
+            "elapsedMs=\(elapsedMs)"
+        )
+    }
+
+    private func reconcilePropertyShadowWrite(
+        propertyID: UUID,
+        orgID: UUID,
+        localUpdatedAt: Date
+    ) async {
+        guard let client = supabaseClient else { return }
+
+        do {
+            let rows = try await client
+                .from("properties")
+                .select("id, updated_at")
+                .eq("id", value: propertyID.uuidString.lowercased())
+                .eq("org_id", value: orgID.uuidString.lowercased())
+                .limit(1)
+                .execute()
+                .value as [SupabaseRowUpdatedAtRecord]
+
+            if let remote = rows.first,
+               remote.updatedAt < localUpdatedAt {
+                print("[SyncApply] conflictsDetected=1 reason=post_write_divergence")
+            }
+        } catch {
+            // Intentionally fire-and-forget with no retries or UI.
+        }
+    }
+
+    private func localSessionShadowWriteTimestamp(_ session: Session) -> Date {
+        [
+            session.startedAt,
+            session.endedAt,
+            session.exportedAt,
+            session.firstDeliveredAt,
+            session.reExportExpiresAt
+        ]
+        .compactMap { $0 }
+        .max() ?? session.startedAt
+    }
+
+    private func reconcileSessionShadowWrite(
+        sessionID: UUID,
+        propertyID: UUID,
+        orgID: UUID,
+        localUpdatedAt: Date
+    ) async {
+        guard let client = supabaseClient else { return }
+
+        do {
+            let rows = try await client
+                .from("sessions")
+                .select("id, updated_at")
+                .eq("id", value: sessionID.uuidString.lowercased())
+                .eq("org_id", value: orgID.uuidString.lowercased())
+                .eq("property_id", value: propertyID.uuidString.lowercased())
+                .limit(1)
+                .execute()
+                .value as [SupabaseRowUpdatedAtRecord]
+
+            if let remote = rows.first,
+               remote.updatedAt < localUpdatedAt {
+                print("[SyncApply] conflictsDetected=1 reason=post_write_divergence")
+            }
+        } catch {
+            // Intentionally fire-and-forget with no retries or UI.
+        }
+    }
+
     private func schedulePhaseBPropertyShadowWrite(for property: Property) {
         guard isPhaseBMetadataShadowWriteEnabled else { return }
         guard let orgID = property.orgId else {
@@ -1511,6 +2100,14 @@ final class AppState: ObservableObject {
                     "[CutoverShadowWrite] result=success entity=property " +
                     "phase=\(self.cutoverPhase.rawValue) propertyID=\(property.id.uuidString)"
                 )
+
+                Task(priority: .background) { [weak self] in
+                    await self?.reconcilePropertyShadowWrite(
+                        propertyID: property.id,
+                        orgID: orgID,
+                        localUpdatedAt: property.updatedAt
+                    )
+                }
             } catch {
                 print(
                     "[CutoverShadowWrite] result=failed entity=property " +
@@ -1573,6 +2170,15 @@ final class AppState: ObservableObject {
                     "phase=\(self.cutoverPhase.rawValue) propertyID=\(property.id.uuidString) " +
                     "sessionID=\(session.id.uuidString)"
                 )
+
+                Task(priority: .background) { [weak self] in
+                    await self?.reconcileSessionShadowWrite(
+                        sessionID: session.id,
+                        propertyID: property.id,
+                        orgID: orgID,
+                        localUpdatedAt: self?.localSessionShadowWriteTimestamp(session) ?? session.startedAt
+                    )
+                }
             } catch {
                 print(
                     "[CutoverShadowWrite] result=failed entity=session " +
@@ -4764,12 +5370,7 @@ final class AppState: ObservableObject {
                 createdAt: createdAt,
                 updatedAt: record.updatedAt
             )
-        }.sorted { lhs, rhs in
-            if lhs.createdAt == rhs.createdAt {
-                return lhs.id.uuidString.lowercased() < rhs.id.uuidString.lowercased()
-            }
-            return lhs.createdAt < rhs.createdAt
-        }
+        }.sorted(by: Self.propertyIsOrderedBefore)
         let organizations = allOrganizations.isEmpty ? organizations : allOrganizations
         let caches = makeHubCaches(for: properties)
         let fingerprint = try remotePropertyFingerprint(
@@ -5209,6 +5810,13 @@ final class AppState: ObservableObject {
         isOrganizationContextReady
     }
 
+    private var isSyncDeltaEnabled: Bool {
+        backendFeatureFlags.supabaseEnabled &&
+        backendFeatureFlags.syncDeltaEnabled &&
+        supabaseClient != nil &&
+        activeOrganizationID != nil
+    }
+
     private func setLoadingState(_ loading: Bool) {
         guard isLoading != loading else { return }
         isLoading = loading
@@ -5459,6 +6067,13 @@ final class AppState: ObservableObject {
         lhs.isArchived == rhs.isArchived
     }
 
+    private static func propertyIsOrderedBefore(_ lhs: Property, _ rhs: Property) -> Bool {
+        if lhs.createdAt == rhs.createdAt {
+            return lhs.id.uuidString.lowercased() < rhs.id.uuidString.lowercased()
+        }
+        return lhs.createdAt < rhs.createdAt
+    }
+
     private func mergedBackingRefreshPayload(
         replacingOrganizationID organizationID: UUID,
         with payload: PropertyRefreshPayload
@@ -5489,12 +6104,7 @@ final class AppState: ObservableObject {
         with remoteProperties: [Property]
     ) -> [Property] {
         let preserved = allProperties.filter { $0.orgId != organizationID }
-        return (preserved + remoteProperties).sorted { lhs, rhs in
-            if lhs.createdAt == rhs.createdAt {
-                return lhs.id.uuidString.lowercased() < rhs.id.uuidString.lowercased()
-            }
-            return lhs.createdAt < rhs.createdAt
-        }
+        return (preserved + remoteProperties).sorted(by: Self.propertyIsOrderedBefore)
     }
 
     private func mergedBackingOrganizations(
@@ -6229,6 +6839,9 @@ final class AppState: ObservableObject {
 
     func handleSceneDidBecomeActive() {
         queuePendingSupabaseMediaBackfillIfNeeded(reason: "scene_active")
+        Task { @MainActor in
+            await performSyncDeltaPull(source: "foreground")
+        }
     }
 
     private func persistSelectedPropertyID() {
@@ -6311,6 +6924,117 @@ final class AppState: ObservableObject {
 
     func _debugRunPendingSupabaseMediaBackfillForTests(reason: String = "test") async -> SupabaseMediaBackfillRunSummary {
         await runPendingSupabaseMediaBackfill(reason: reason)
+    }
+
+    @MainActor
+    func _debugReadSyncCursorForTests(entity: String, orgID: UUID) -> Date? {
+        readSyncCursor(entity: entity, orgID: orgID)
+    }
+
+    @MainActor
+    func _debugWriteSyncCursorForTests(entity: String, orgID: UUID, date: Date) {
+        writeSyncCursor(entity: entity, orgID: orgID, date: date)
+    }
+
+    @MainActor
+    func _debugAdvanceSyncCursorForTests(entity: String, orgID: UUID, updatedAts: [Date]) {
+        advanceSyncCursor(entity: entity, orgID: orgID, updatedAts: updatedAts)
+    }
+
+    @MainActor
+    func _debugClearSyncCursorsForTests(orgID: UUID) {
+        clearSyncCursors(orgID: orgID)
+    }
+
+    @MainActor
+    func _debugIsSyncDeltaEnabledForTests() -> Bool {
+        isSyncDeltaEnabled
+    }
+
+    @MainActor
+    func _debugSetSyncDeltaEnvironmentForTests(
+        activeOrganizationID: UUID?,
+        ready: Bool = true,
+        clientConfigured: Bool = true
+    ) {
+        self.activeOrganizationID = activeOrganizationID
+        self.isOrganizationContextReady = ready
+        self.supabaseClient = clientConfigured
+            ? SupabaseClient(
+                supabaseURL: URL(string: "https://example.supabase.co")!,
+                supabaseKey: "debug-anon-key"
+            )
+            : nil
+    }
+
+    func _debugSetSyncDeltaPullInFlightForTests(_ inFlight: Bool) {
+        isSyncDeltaPullInFlight = inFlight
+    }
+
+    func _debugIsSyncDeltaPullInFlightForTests() -> Bool {
+        isSyncDeltaPullInFlight
+    }
+
+    func _debugAllPropertiesForTests() -> [Property] {
+        allProperties
+    }
+
+    @MainActor
+    func _debugApplySyncDeltaPropertiesForTests(
+        records: [DebugRemotePropertyDeltaInput],
+        orgID: UUID
+    ) -> (applied: Int, skipped: Int) {
+        applySyncDeltaProperties(
+            records: records.map {
+                RemotePropertyDeltaRecord(
+                    id: $0.id,
+                    orgID: $0.orgID,
+                    folderID: $0.folderID,
+                    clientName: $0.clientName,
+                    clientEmail: $0.clientEmail,
+                    clientPhone: $0.clientPhone,
+                    name: $0.name,
+                    addressLine1: $0.addressLine1,
+                    city: $0.city,
+                    state: $0.state,
+                    postalCode: $0.postalCode,
+                    baselineSessionID: $0.baselineSessionID,
+                    isArchived: $0.isArchived,
+                    createdAt: $0.createdAt,
+                    updatedAt: $0.updatedAt,
+                    deletedAt: $0.deletedAt
+                )
+            },
+            orgID: orgID
+        )
+    }
+
+    @MainActor
+    func _debugApplySyncDeltaSessionsForTests(
+        records: [DebugRemoteSessionDeltaInput],
+        orgID: UUID
+    ) -> (applied: Int, skipped: Int) {
+        applySyncDeltaSessions(
+            records: records.map {
+                RemoteSessionDeltaRecord(
+                    id: $0.id,
+                    orgID: $0.orgID,
+                    propertyID: $0.propertyID,
+                    title: $0.title,
+                    status: $0.status,
+                    startedAt: $0.startedAt,
+                    completedAt: $0.completedAt,
+                    updatedAt: $0.updatedAt,
+                    deletedAt: $0.deletedAt
+                )
+            },
+            orgID: orgID
+        )
+    }
+
+    @MainActor
+    func _debugPerformSyncDeltaPullForTests(source: String = "test") async {
+        await performSyncDeltaPull(source: source)
     }
 #endif
 

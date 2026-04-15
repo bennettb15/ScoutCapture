@@ -22,7 +22,8 @@ final class Phase2C08CutoverTests: XCTestCase {
             shadowWriteEnabled: false,
             supabaseReadEnabled: false,
             supabasePropertyReadEnabled: true,
-            mediaSupabaseUploadEnabled: false
+            mediaSupabaseUploadEnabled: false,
+            syncDeltaEnabled: false
         )
 
         XCTAssertEqual(flags.cutoverPhase, .phaseA)
@@ -34,7 +35,8 @@ final class Phase2C08CutoverTests: XCTestCase {
             shadowWriteEnabled: true,
             supabaseReadEnabled: false,
             supabasePropertyReadEnabled: true,
-            mediaSupabaseUploadEnabled: false
+            mediaSupabaseUploadEnabled: false,
+            syncDeltaEnabled: false
         )
 
         XCTAssertEqual(flags.cutoverPhase, .phaseB)
@@ -46,7 +48,8 @@ final class Phase2C08CutoverTests: XCTestCase {
             shadowWriteEnabled: false,
             supabaseReadEnabled: true,
             supabasePropertyReadEnabled: true,
-            mediaSupabaseUploadEnabled: true
+            mediaSupabaseUploadEnabled: true,
+            syncDeltaEnabled: false
         )
 
         XCTAssertEqual(flags.cutoverPhase, .phaseC)
@@ -88,7 +91,8 @@ final class Phase2C08CutoverTests: XCTestCase {
             shadowWriteEnabled: true,
             supabaseReadEnabled: true,
             supabasePropertyReadEnabled: true,
-            mediaSupabaseUploadEnabled: true
+            mediaSupabaseUploadEnabled: true,
+            syncDeltaEnabled: false
         )
 
         let warnings = AppState.cutoverConfigurationWarnings(for: flags)
@@ -105,7 +109,8 @@ final class Phase2C08CutoverTests: XCTestCase {
             shadowWriteEnabled: false,
             supabaseReadEnabled: false,
             supabasePropertyReadEnabled: false,
-            mediaSupabaseUploadEnabled: false
+            mediaSupabaseUploadEnabled: false,
+            syncDeltaEnabled: false
         )
 
         let backendOnlyWarnings = AppState.cutoverConfigurationWarnings(for: backendOnlyFlags)
@@ -116,7 +121,8 @@ final class Phase2C08CutoverTests: XCTestCase {
             shadowWriteEnabled: false,
             supabaseReadEnabled: true,
             supabasePropertyReadEnabled: false,
-            mediaSupabaseUploadEnabled: false
+            mediaSupabaseUploadEnabled: false,
+            syncDeltaEnabled: false
         )
 
         let directPhaseCWarnings = AppState.cutoverConfigurationWarnings(for: directPhaseCFlags)
@@ -129,7 +135,8 @@ final class Phase2C08CutoverTests: XCTestCase {
             shadowWriteEnabled: true,
             supabaseReadEnabled: false,
             supabasePropertyReadEnabled: false,
-            mediaSupabaseUploadEnabled: false
+            mediaSupabaseUploadEnabled: false,
+            syncDeltaEnabled: false
         )
         XCTAssertEqual(flags.cutoverPhase, .phaseB)
 
