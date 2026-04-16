@@ -165,6 +165,13 @@ enum AuthenticationFlowResult: Equatable {
 final class AppState: ObservableObject {
     typealias PropertyShadowWriteOverride = (Property) async throws -> Void
     typealias SessionShadowWriteOverride = (Property, Session, SessionMetadata) async throws -> Void
+#if DEBUG
+    private typealias SyncDeltaFetchOverride = (
+        UUID,
+        Date?,
+        Date?
+    ) async throws -> ([RemotePropertyDeltaRecord], [RemoteSessionDeltaRecord])
+#endif
 
     struct PendingSupabaseMediaBackfillCandidate: Equatable {
         let propertyID: UUID
@@ -730,6 +737,10 @@ final class AppState: ObservableObject {
     private var inFlightSupabaseMediaOperations: Set<String> = []
     private var isSupabaseMediaBackfillInProgress: Bool = false
     private var isSyncDeltaPullInFlight: Bool = false
+    private var lastForegroundSyncDeltaCompletedAt: Date?
+#if DEBUG
+    private var syncDeltaFetchOverride: SyncDeltaFetchOverride?
+#endif
     private var authStateChangesTask: Task<Void, Never>?
     private var lastEnsuredUserProfileID: UUID?
     private var allProperties: [Property] = []
@@ -1926,6 +1937,12 @@ final class AppState: ObservableObject {
             print("[SyncDeltaPull] skipped source=\(source) reason=in_flight")
             return
         }
+        if source == "foreground",
+           let lastForegroundSyncDeltaCompletedAt,
+           Date().timeIntervalSince(lastForegroundSyncDeltaCompletedAt) < 30 {
+            print("[SyncDeltaPull] skipped source=\(source) reason=cooldown")
+            return
+        }
         guard let orgID = activeOrganizationID else { return }
 
         isSyncDeltaPullInFlight = true
@@ -1951,11 +1968,27 @@ final class AppState: ObservableObject {
         let propertyRecords: [RemotePropertyDeltaRecord]
         let sessionRecords: [RemoteSessionDeltaRecord]
         do {
+            #if DEBUG
+            if let syncDeltaFetchOverride {
+                (propertyRecords, sessionRecords) = try await syncDeltaFetchOverride(
+                    orgID,
+                    propertyCursor,
+                    sessionCursor
+                )
+            } else {
+                (propertyRecords, sessionRecords) = try await fetchSyncDelta(
+                    orgID: orgID,
+                    propertyCursor: propertyCursor,
+                    sessionCursor: sessionCursor
+                )
+            }
+            #else
             (propertyRecords, sessionRecords) = try await fetchSyncDelta(
                 orgID: orgID,
                 propertyCursor: propertyCursor,
                 sessionCursor: sessionCursor
             )
+            #endif
         } catch {
             print("[SyncDeltaPull] error source=\(source) error=\(error.localizedDescription)")
             return
@@ -1976,6 +2009,9 @@ final class AppState: ObservableObject {
 
         advanceSyncCursor(entity: "properties", orgID: orgID, updatedAts: propertyRecords.map(\.updatedAt))
         advanceSyncCursor(entity: "sessions", orgID: orgID, updatedAts: sessionRecords.map(\.updatedAt))
+        if source == "foreground" {
+            lastForegroundSyncDeltaCompletedAt = Date()
+        }
 
         if propertyRecords.isEmpty && sessionRecords.isEmpty {
             print("[SyncDeltaPull] no_op source=\(source)")
@@ -6839,6 +6875,7 @@ final class AppState: ObservableObject {
 
     func handleSceneDidBecomeActive() {
         queuePendingSupabaseMediaBackfillIfNeeded(reason: "scene_active")
+        guard isOrganizationContextReady else { return }
         Task { @MainActor in
             await performSyncDeltaPull(source: "foreground")
         }
@@ -6973,6 +7010,57 @@ final class AppState: ObservableObject {
 
     func _debugIsSyncDeltaPullInFlightForTests() -> Bool {
         isSyncDeltaPullInFlight
+    }
+
+    func _debugSetLastForegroundSyncDeltaCompletedAtForTests(_ date: Date?) {
+        lastForegroundSyncDeltaCompletedAt = date
+    }
+
+    func _debugReadLastForegroundSyncDeltaCompletedAtForTests() -> Date? {
+        lastForegroundSyncDeltaCompletedAt
+    }
+
+    func _debugSetSyncDeltaFetchResultForTests(
+        propertyRecords: [DebugRemotePropertyDeltaInput] = [],
+        sessionRecords: [DebugRemoteSessionDeltaInput] = []
+    ) {
+        syncDeltaFetchOverride = { orgID, _, _ in
+            (
+                propertyRecords.map {
+                    RemotePropertyDeltaRecord(
+                        id: $0.id,
+                        orgID: $0.orgID == orgID ? $0.orgID : orgID,
+                        folderID: $0.folderID,
+                        clientName: $0.clientName,
+                        clientEmail: $0.clientEmail,
+                        clientPhone: $0.clientPhone,
+                        name: $0.name,
+                        addressLine1: $0.addressLine1,
+                        city: $0.city,
+                        state: $0.state,
+                        postalCode: $0.postalCode,
+                        baselineSessionID: $0.baselineSessionID,
+                        isArchived: $0.isArchived,
+                        createdAt: $0.createdAt,
+                        updatedAt: $0.updatedAt,
+                        deletedAt: $0.deletedAt
+                    )
+                },
+                sessionRecords.map {
+                    RemoteSessionDeltaRecord(
+                        id: $0.id,
+                        orgID: $0.orgID == orgID ? $0.orgID : orgID,
+                        propertyID: $0.propertyID,
+                        title: $0.title,
+                        status: $0.status,
+                        startedAt: $0.startedAt,
+                        completedAt: $0.completedAt,
+                        updatedAt: $0.updatedAt,
+                        deletedAt: $0.deletedAt
+                    )
+                }
+            )
+        }
     }
 
     func _debugAllPropertiesForTests() -> [Property] {

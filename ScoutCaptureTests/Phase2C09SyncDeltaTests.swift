@@ -638,4 +638,118 @@ final class Phase2C09SyncDeltaTests: XCTestCase {
         let stillInFlight = fixture.appState._debugIsSyncDeltaPullInFlightForTests()
         XCTAssertTrue(stillInFlight)
     }
+
+    func testForegroundCooldownSkipsPullWithinThirtySeconds() async throws {
+        let fixture = try makeFixture(supabaseEnabled: true, syncDeltaEnabled: true)
+        defer { tearDownFixture(fixture) }
+        let orgID = UUID()
+        let originalCursor = Date(timeIntervalSinceReferenceDate: 100)
+        let seededCooldown = Date().addingTimeInterval(-5)
+
+        await MainActor.run {
+            fixture.appState._debugSetSyncDeltaEnvironmentForTests(
+                activeOrganizationID: orgID,
+                ready: true,
+                clientConfigured: true
+            )
+            fixture.appState._debugWriteSyncCursorForTests(
+                entity: "properties",
+                orgID: orgID,
+                date: originalCursor
+            )
+            fixture.appState._debugSetLastForegroundSyncDeltaCompletedAtForTests(seededCooldown)
+            fixture.appState._debugSetSyncDeltaFetchResultForTests()
+        }
+
+        await fixture.appState._debugPerformSyncDeltaPullForTests(source: "foreground")
+
+        let timestampAfter = await MainActor.run {
+            fixture.appState._debugReadLastForegroundSyncDeltaCompletedAtForTests()
+        }
+        let cursorAfter = await MainActor.run {
+            fixture.appState._debugReadSyncCursorForTests(entity: "properties", orgID: orgID)
+        }
+
+        XCTAssertEqual(timestampAfter, seededCooldown)
+        XCTAssertEqual(cursorAfter, originalCursor)
+    }
+
+    func testLaunchBypassesForegroundCooldown() async throws {
+        let fixture = try makeFixture(supabaseEnabled: true, syncDeltaEnabled: true)
+        defer { tearDownFixture(fixture) }
+        let orgID = UUID()
+        let seededCooldown = Date(timeIntervalSinceReferenceDate: 1_000)
+        let advancedCursor = Date(timeIntervalSinceReferenceDate: 2_000)
+
+        await MainActor.run {
+            fixture.appState._debugSetSyncDeltaEnvironmentForTests(
+                activeOrganizationID: orgID,
+                ready: true,
+                clientConfigured: true
+            )
+            fixture.appState._debugSetLastForegroundSyncDeltaCompletedAtForTests(seededCooldown)
+            fixture.appState._debugSetSyncDeltaFetchResultForTests(
+                propertyRecords: [
+                    makePropertyDelta(
+                        orgID: orgID,
+                        name: "Launch Delta",
+                        createdAt: Date(timeIntervalSinceReferenceDate: 500),
+                        updatedAt: advancedCursor
+                    )
+                ]
+            )
+        }
+
+        await fixture.appState._debugPerformSyncDeltaPullForTests(source: "launch")
+
+        let cursorAfter = await MainActor.run {
+            fixture.appState._debugReadSyncCursorForTests(entity: "properties", orgID: orgID)
+        }
+        let timestampAfter = await MainActor.run {
+            fixture.appState._debugReadLastForegroundSyncDeltaCompletedAtForTests()
+        }
+
+        XCTAssertEqual(cursorAfter, advancedCursor)
+        XCTAssertEqual(timestampAfter, seededCooldown)
+    }
+
+    func testOrgSwitchBypassesForegroundCooldown() async throws {
+        let fixture = try makeFixture(supabaseEnabled: true, syncDeltaEnabled: true)
+        defer { tearDownFixture(fixture) }
+        let orgID = UUID()
+        let seededCooldown = Date(timeIntervalSinceReferenceDate: 1_500)
+        let advancedCursor = Date(timeIntervalSinceReferenceDate: 2_500)
+
+        await MainActor.run {
+            fixture.appState._debugSetSyncDeltaEnvironmentForTests(
+                activeOrganizationID: orgID,
+                ready: true,
+                clientConfigured: true
+            )
+            fixture.appState._debugSetLastForegroundSyncDeltaCompletedAtForTests(seededCooldown)
+            fixture.appState._debugSetSyncDeltaFetchResultForTests(
+                sessionRecords: [
+                    makeSessionDelta(
+                        orgID: orgID,
+                        propertyID: UUID(),
+                        startedAt: Date(timeIntervalSinceReferenceDate: 2_000),
+                        completedAt: Date(timeIntervalSinceReferenceDate: 2_100),
+                        updatedAt: advancedCursor
+                    )
+                ]
+            )
+        }
+
+        await fixture.appState._debugPerformSyncDeltaPullForTests(source: "org_switch")
+
+        let cursorAfter = await MainActor.run {
+            fixture.appState._debugReadSyncCursorForTests(entity: "sessions", orgID: orgID)
+        }
+        let timestampAfter = await MainActor.run {
+            fixture.appState._debugReadLastForegroundSyncDeltaCompletedAtForTests()
+        }
+
+        XCTAssertEqual(cursorAfter, advancedCursor)
+        XCTAssertEqual(timestampAfter, seededCooldown)
+    }
 }
