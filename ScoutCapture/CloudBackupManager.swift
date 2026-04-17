@@ -183,6 +183,7 @@ final class CloudBackupManager: ObservableObject {
     private let stateLock = NSLock()
     private var scheduledBackupWorkItem: DispatchWorkItem?
     private var scheduledBackupDeadline: Date?
+    private var isShuttingDown = false
     private var isRunning = false
     private var isCaptureModeActive = false
     private var progressPhase: String?
@@ -234,6 +235,7 @@ final class CloudBackupManager: ObservableObject {
     }
 
     func refreshStatus() {
+        guard !isShuttingDown else { return }
         let cloudAvailable = StorageRoot.cloudBackupRootURL() != nil
         let hasBackup = hasRestorableLatestBackup
         let localRevision = userDefaults.string(forKey: Constants.localRevisionKey)
@@ -307,7 +309,37 @@ final class CloudBackupManager: ObservableObject {
         if Thread.isMainThread {
             apply()
         } else {
-            DispatchQueue.main.async(execute: apply)
+            DispatchQueue.main.async { [weak self] in
+                guard let self, !self.isShuttingDown else { return }
+                self.status = CloudBackupStatus(
+                    state: state,
+                    isRunning: runtime.isRunning,
+                    lastSuccessfulBackupAt: lastSuccessfulBackupAt,
+                    lastFailureMessage: lastFailureMessage,
+                    iCloudAvailable: cloudAvailable,
+                    hasBackup: hasBackup,
+                    progressPhase: runtime.progressPhase,
+                    progressCompleted: runtime.progressCompleted,
+                    progressTotal: runtime.progressTotal,
+                    snapshotFileCount: snapshotMetrics?.fileCount,
+                    snapshotByteCount: snapshotMetrics?.byteCount,
+                    lastRunChangedCount: lastRunChangedCount,
+                    lastRunUnchangedCount: lastRunUnchangedCount,
+                    lastRunChangedByteCount: lastRunChangedByteCount,
+                    lastRunAddedCount: lastRunAddedCount,
+                    lastRunUpdatedCount: lastRunUpdatedCount,
+                    lastRunSourceFileCount: lastRunSourceFileCount,
+                    lastRunPrunedCount: lastRunPrunedCount,
+                    lastRunNewBlobsWrittenCount: lastRunNewBlobsWrittenCount,
+                    lastRunReusedBlobsReferencedCount: lastRunReusedBlobsReferencedCount,
+                    lastRunBlobBytesWritten: lastRunBlobBytesWritten,
+                    lastRunBlobBytesReused: lastRunBlobBytesReused,
+                    lastRunChangedPathsSample: lastRunChangedPathsSample,
+                    lastRunPrunedPathsSample: lastRunPrunedPathsSample,
+                    safetyPauseUntil: safetyPauseUntil,
+                    safetyPauseReason: safetyPauseReason
+                )
+            }
         }
     }
 
@@ -319,6 +351,7 @@ final class CloudBackupManager: ObservableObject {
     }
 
     func scheduleAutomaticBackup(after delay: TimeInterval = 0) {
+        guard !isShuttingDown else { return }
         guard automaticBackupsEnabled else { return }
         guard !isCaptureModeActive else { return }
         guard !isSafetyPauseActive else {
@@ -345,6 +378,14 @@ final class CloudBackupManager: ObservableObject {
         scheduledBackupWorkItem = workItem
         scheduledBackupDeadline = requestedDeadline
         DispatchQueue.main.asyncAfter(deadline: .now() + normalizedDelay, execute: workItem)
+    }
+
+    func shutdown() {
+        isShuttingDown = true
+        let existingWorkItem = scheduledBackupWorkItem
+        scheduledBackupWorkItem = nil
+        scheduledBackupDeadline = nil
+        existingWorkItem?.cancel()
     }
 
     func backupNow() {
@@ -385,6 +426,7 @@ final class CloudBackupManager: ObservableObject {
     }
 
     private func performBackup(trigger: String) {
+        guard !isShuttingDown else { return }
         if trigger == "automatic", isCaptureModeActive {
             return
         }

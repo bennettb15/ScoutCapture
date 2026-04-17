@@ -69,6 +69,9 @@ private struct PortraitLockedRootView<Content: View>: UIViewControllerRepresenta
 @main
 struct ScoutCaptureApp: App {
     private static let firstLaunchCompletedKey = "scoutcapture.firstLaunchCompleted"
+    private static var isRunningUnderXCTest: Bool {
+        ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
+    }
     @UIApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
     @State private var appState: AppState
     @State private var hasCompletedFirstLaunch: Bool
@@ -77,7 +80,15 @@ struct ScoutCaptureApp: App {
     init() {
         let hasCompleted = UserDefaults.standard.bool(forKey: Self.firstLaunchCompletedKey)
         _hasCompletedFirstLaunch = State(initialValue: hasCompleted)
+        #if DEBUG
+        if Self.isRunningUnderXCTest {
+            _appState = State(initialValue: AppState(disableCloudBackupForTests: true))
+        } else {
+            _appState = State(initialValue: AppState())
+        }
+        #else
         _appState = State(initialValue: AppState())
+        #endif
     }
 
     var body: some Scene {

@@ -1,0 +1,33 @@
+{
+  "configurations" : [
+    {
+      "id" : "388166F3-F756-461B-AEE5-EB3F0C893BB2",
+      "name" : "Test Scheme Action",
+      "options" : {
+
+      }
+    }
+  ],
+  "defaultOptions" : {
+    "addressSanitizer" : {
+      "enabled" : true
+    },
+    "performanceAntipatternCheckerEnabled" : true,
+    "targetForVariableExpansion" : {
+      "containerPath" : "container:ScoutCapture.xcodeproj",
+      "identifier" : "D35FBC522F324104009057B0",
+      "name" : "ScoutCapture"
+    }
+  },
+  "testTargets" : [
+    {
+      "parallelizable" : true,
+      "target" : {
+        "containerPath" : "container:ScoutCapture.xcodeproj",
+        "identifier" : "E54A7A7524D14C26A9A7B104",
+        "name" : "ScoutCaptureTests"
+      }
+    }
+  ],
+  "version" : 1
+}

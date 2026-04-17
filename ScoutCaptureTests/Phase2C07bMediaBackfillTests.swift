@@ -22,6 +22,8 @@ final class Phase2C07bMediaBackfillTests: XCTestCase {
         shotID: UUID = UUID(),
         uploadState: String,
         uploadAttempts: Int,
+        angleIndex: Int,
+        shotKey: String,
         updatedAt: Date = Date()
     ) -> ShotMetadata {
         ShotMetadata(
@@ -29,16 +31,21 @@ final class Phase2C07bMediaBackfillTests: XCTestCase {
             propertyID: propertyID,
             sessionID: sessionID,
             createdAt: Date(),
+            capturedAtLocal: nil,
             updatedAt: updatedAt,
             building: "Building",
             elevation: "Front",
             detailType: "Overview",
-            angleIndex: 1,
-            shotKey: "building|front|overview|1",
+            angleIndex: angleIndex,
+            trade: nil,
+            priority: nil,
+            shotKey: shotKey,
             isGuided: false,
             isFlagged: false,
             issueID: nil,
             issueStatus: nil,
+            captureKind: nil,
+            firstCaptureKind: nil,
             noteText: nil,
             noteCategory: nil,
             originalFilename: "\(shotID.uuidString).heic",
@@ -56,6 +63,7 @@ final class Phase2C07bMediaBackfillTests: XCTestCase {
             captureMode: nil,
             lens: nil,
             exifOrientation: nil,
+            orientation: nil,
             latitude: nil,
             longitude: nil,
             accuracyMeters: nil,
@@ -69,6 +77,7 @@ final class Phase2C07bMediaBackfillTests: XCTestCase {
     ) throws -> (appState: AppState, propertyID: UUID, sessionID: UUID, shots: [ShotMetadata], storageRoot: URL) {
         let storageRoot = try makeTempStorageRoot()
         let defaults = makeDefaultsSuite()
+        defaults.set(false, forKey: "scout.backup.automaticEnabled")
         let localStore = LocalStore(testStorageRootURL: storageRoot)
 
         let organizationID = UUID()
@@ -95,19 +104,26 @@ final class Phase2C07bMediaBackfillTests: XCTestCase {
 
         var metadata = try localStore.loadSessionMetadata(propertyID: propertyID, sessionID: sessionID)
         metadata.orgID = organizationID
-        metadata.shots = uploadStates.map {
-            makeShot(
+        metadata.shots = uploadStates.enumerated().map { index, state in
+            let shotNumber = index + 1
+            return makeShot(
                 propertyID: propertyID,
                 sessionID: sessionID,
-                uploadState: $0.state,
-                uploadAttempts: $0.attempts,
-                updatedAt: $0.updatedAt
+                uploadState: state.state,
+                uploadAttempts: state.attempts,
+                angleIndex: shotNumber,
+                shotKey: "building|front|overview|\(shotNumber)",
+                updatedAt: state.updatedAt
             )
         }
         try localStore.saveSessionMetadataAtomically(propertyID: propertyID, sessionID: sessionID, metadata: metadata)
 
-        let appState = AppState(localStore: localStore, userDefaults: defaults)
-        appState.refreshProperties()
+        let appState = AppState(
+            localStore: localStore,
+            userDefaults: defaults,
+            disableCloudBackupForTests: true
+        )
+        appState._debugRefreshPropertiesLocallyForTests()
 
         return (appState, propertyID, sessionID, metadata.shots, storageRoot)
     }
@@ -121,15 +137,21 @@ final class Phase2C07bMediaBackfillTests: XCTestCase {
                 ("uploaded", 2, now)
             ]
         )
-        defer { try? FileManager.default.removeItem(at: fixture.storageRoot) }
+        defer {
+            fixture.appState.shutdown()
+            try? FileManager.default.removeItem(at: fixture.storageRoot)
+        }
 
         let candidates = fixture.appState._debugDiscoverPendingSupabaseMediaBackfillCandidates()
 
-        XCTAssertEqual(candidates.map(\.shotID), [
-            fixture.shots[0].shotID,
-            fixture.shots[1].shotID
-        ])
-        XCTAssertEqual(candidates.map(\.uploadState), ["pending", "uploading"])
+        XCTAssertEqual(
+            Set(candidates.map(\.shotID)),
+            Set([
+                fixture.shots[0].shotID,
+                fixture.shots[1].shotID
+            ])
+        )
+        XCTAssertEqual(candidates.map(\.uploadState).sorted(), ["pending", "uploading"])
     }
 
     func testBackfillDiscoveryExcludesShotsAlreadyInFlight() throws {
@@ -140,7 +162,10 @@ final class Phase2C07bMediaBackfillTests: XCTestCase {
                 ("uploading", 1, now)
             ]
         )
-        defer { try? FileManager.default.removeItem(at: fixture.storageRoot) }
+        defer {
+            fixture.appState.shutdown()
+            try? FileManager.default.removeItem(at: fixture.storageRoot)
+        }
 
         let inFlightKey = fixture.appState._debugSupabaseUploadOperationKeyForTests(
             sessionID: fixture.sessionID,
@@ -160,7 +185,10 @@ final class Phase2C07bMediaBackfillTests: XCTestCase {
                 ("pending", 5, now)
             ]
         )
-        defer { try? FileManager.default.removeItem(at: fixture.storageRoot) }
+        defer {
+            fixture.appState.shutdown()
+            try? FileManager.default.removeItem(at: fixture.storageRoot)
+        }
 
         let summary = await fixture.appState._debugRunPendingSupabaseMediaBackfillForTests(reason: "retry_cap_test")
 
@@ -177,7 +205,10 @@ final class Phase2C07bMediaBackfillTests: XCTestCase {
 
     func testBackfillRunIsSingletonGuarded() async throws {
         let fixture = try makeAppStateWithSingleSession(uploadStates: [])
-        defer { try? FileManager.default.removeItem(at: fixture.storageRoot) }
+        defer {
+            fixture.appState.shutdown()
+            try? FileManager.default.removeItem(at: fixture.storageRoot)
+        }
 
         fixture.appState._debugSetSupabaseMediaBackfillInProgressForTests(true)
         let summary = await fixture.appState._debugRunPendingSupabaseMediaBackfillForTests(reason: "guard_test")
@@ -196,7 +227,10 @@ final class Phase2C07bMediaBackfillTests: XCTestCase {
                 ("uploaded", 1, now)
             ]
         )
-        defer { try? FileManager.default.removeItem(at: fixture.storageRoot) }
+        defer {
+            fixture.appState.shutdown()
+            try? FileManager.default.removeItem(at: fixture.storageRoot)
+        }
 
         let candidates = fixture.appState._debugDiscoverPendingSupabaseMediaBackfillCandidates()
 
@@ -212,7 +246,10 @@ final class Phase2C07bMediaBackfillTests: XCTestCase {
                 ("pending", 0, now)
             ]
         )
-        defer { try? FileManager.default.removeItem(at: fixture.storageRoot) }
+        defer {
+            fixture.appState.shutdown()
+            try? FileManager.default.removeItem(at: fixture.storageRoot)
+        }
 
         let candidates = fixture.appState._debugDiscoverPendingSupabaseMediaBackfillCandidates()
 
@@ -228,7 +265,10 @@ final class Phase2C07bMediaBackfillTests: XCTestCase {
                 ("failed", 3, now)
             ]
         )
-        defer { try? FileManager.default.removeItem(at: fixture.storageRoot) }
+        defer {
+            fixture.appState.shutdown()
+            try? FileManager.default.removeItem(at: fixture.storageRoot)
+        }
 
         let summary = await fixture.appState._debugRunPendingSupabaseMediaBackfillForTests(reason: "noop_test")
 

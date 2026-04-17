@@ -3,6 +3,14 @@ import CryptoKit
 @testable import ScoutCapture
 
 final class CloudBackupRestoreRegressionTests: XCTestCase {
+    private var managedBackupManagers: [CloudBackupManager] = []
+
+    override func tearDown() {
+        managedBackupManagers.forEach { $0.shutdown() }
+        managedBackupManagers.removeAll()
+        super.tearDown()
+    }
+
     private func makeTempDirectory() throws -> URL {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("ScoutCaptureTests-\(UUID().uuidString)", isDirectory: true)
@@ -57,7 +65,10 @@ final class CloudBackupRestoreRegressionTests: XCTestCase {
         let suite = "CloudBackupRestoreRegressionTests-\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suite) ?? .standard
         defaults.removePersistentDomain(forName: suite)
-        return CloudBackupManager(userDefaults: defaults)
+        defaults.set(false, forKey: "scout.backup.automaticEnabled")
+        let manager = CloudBackupManager(userDefaults: defaults)
+        managedBackupManagers.append(manager)
+        return manager
     }
 
     func testRestoreMaterializationUsesBlobContentPathForSchemaV2() throws {
@@ -207,6 +218,7 @@ final class CloudBackupRestoreRegressionTests: XCTestCase {
         )
 
         let manager = makeBackupManager()
+        defer { manager.shutdown() }
         let preflight = try manager._debug_buildRestorePreflight(localStorageRoot: localRoot, backupStorageRoot: backupRoot)
 
         XCTAssertEqual(preflight.localPropertyCount, 2)
@@ -254,6 +266,7 @@ final class CloudBackupRestoreRegressionTests: XCTestCase {
         try Data("[]".utf8).write(to: sessionIndexURL, options: .atomic)
 
         let manager = makeBackupManager()
+        defer { manager.shutdown() }
         let preflight = try manager._debug_mergeMissingProperties(from: backupRoot, into: localRoot)
         XCTAssertEqual(preflight.missingLocalPropertyIDs, [missingProperty.id])
 
@@ -305,6 +318,7 @@ final class CloudBackupRestoreRegressionTests: XCTestCase {
         try writeTombstones([TombstoneDTO(propertyID: deleted.id, deletedAt: Date())], to: backupRoot)
 
         let manager = makeBackupManager()
+        defer { manager.shutdown() }
         _ = try manager._debug_mergeMissingProperties(from: backupRoot, into: localRoot)
 
         let merged = try manager._debug_loadProperties(in: localRoot)

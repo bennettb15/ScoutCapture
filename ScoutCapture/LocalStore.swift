@@ -354,10 +354,77 @@ struct LegacyMigrationPreflightArtifacts {
 }
 
 final class LocalStore {
+    struct QueuedMutation: Codable, Equatable, Identifiable {
+        enum Status: String, Codable {
+            case pending
+            case inFlight = "in_flight"
+            case failed
+            case completed
+        }
+
+        let id: UUID
+        var entityType: String
+        var entityID: UUID
+        var organizationID: UUID
+        var propertyID: UUID?
+        var sessionID: UUID?
+        var operation: String
+        var payloadData: Data
+        var idempotencyKey: String
+        var createdAt: Date
+        var updatedAt: Date
+        var attemptCount: Int
+        var lastAttemptAt: Date?
+        var nextAttemptAt: Date?
+        var lastError: String?
+        var status: Status
+
+        init(
+            id: UUID = UUID(),
+            entityType: String,
+            entityID: UUID,
+            organizationID: UUID,
+            propertyID: UUID? = nil,
+            sessionID: UUID? = nil,
+            operation: String,
+            payloadData: Data,
+            idempotencyKey: String,
+            createdAt: Date = Date(),
+            updatedAt: Date = Date(),
+            attemptCount: Int = 0,
+            lastAttemptAt: Date? = nil,
+            nextAttemptAt: Date? = nil,
+            lastError: String? = nil,
+            status: Status = .pending
+        ) {
+            self.id = id
+            self.entityType = entityType
+            self.entityID = entityID
+            self.organizationID = organizationID
+            self.propertyID = propertyID
+            self.sessionID = sessionID
+            self.operation = operation
+            self.payloadData = payloadData
+            self.idempotencyKey = idempotencyKey
+            self.createdAt = createdAt
+            self.updatedAt = updatedAt
+            self.attemptCount = attemptCount
+            self.lastAttemptAt = lastAttemptAt
+            self.nextAttemptAt = nextAttemptAt
+            self.lastError = lastError
+            self.status = status
+        }
+    }
+
     private let currentSessionSchemaVersion = 12
     private let fileIOQueue = DispatchQueue(label: "ScoutCapture.LocalStore.fileIO")
     private let fileIOQueueKey = DispatchSpecificKey<UInt8>()
     private let fileIOQueueValue: UInt8 = 1
+    private var isShuttingDown = false
+
+    deinit {
+        print("[LocalStoreDiag] deinit \(ObjectIdentifier(self)) thread=\(Thread.current)")
+    }
 
     enum ShotUpsertMatchMode {
         case append
@@ -392,6 +459,7 @@ final class LocalStore {
     }
  
     enum StoreError: Error {
+        case shuttingDown
         case propertyNotFound(UUID)
         case organizationNotFound(UUID)
         case observationNotFound(UUID)
@@ -474,6 +542,7 @@ final class LocalStore {
     private let organizationsURL: URL
     private let hubIndexURL: URL
     private let localHubIndexCacheURL: URL
+    private let queuedMutationsURL: URL
     private let propertyTombstonesURL: URL
     private let propertySyncEventsDirectoryURL: URL
     private let propertyFoldersURL: URL
@@ -503,6 +572,7 @@ final class LocalStore {
         let localAppSupportRoot = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("ScoutCapture", isDirectory: true)
         self.localHubIndexCacheURL = localAppSupportRoot.appendingPathComponent("local-hub-index.json")
+        self.queuedMutationsURL = scoutRoot.appendingPathComponent("queued_mutations.json")
         self.propertyTombstonesURL = scoutRoot.appendingPathComponent("property-tombstones.json")
         self.propertySyncEventsDirectoryURL = scoutRoot
             .appendingPathComponent("sync-events", isDirectory: true)
@@ -545,6 +615,7 @@ final class LocalStore {
         self.organizationsURL = scoutRoot.appendingPathComponent("organizations.json")
         self.hubIndexURL = scoutRoot.appendingPathComponent("hub-index.json")
         self.localHubIndexCacheURL = appRoot.appendingPathComponent("local-hub-index.json")
+        self.queuedMutationsURL = scoutRoot.appendingPathComponent("queued_mutations.json")
         self.propertyTombstonesURL = scoutRoot.appendingPathComponent("property-tombstones.json")
         self.propertySyncEventsDirectoryURL = scoutRoot
             .appendingPathComponent("sync-events", isDirectory: true)
@@ -1220,13 +1291,136 @@ final class LocalStore {
         return String(value)
     }
 
-    func performFileIOSync<T>(_ work: () throws -> T) rethrows -> T {
-        if DispatchQueue.getSpecific(key: fileIOQueueKey) == fileIOQueueValue {
-            return try work()
+    func performFileIOSync(_ work: () throws -> Void) rethrows {
+        print("[LocalStoreDiag] performFileIOSync enter shuttingDown=\(isShuttingDown) thread=\(Thread.current)")
+        if isShuttingDown {
+            return
         }
-        return try fileIOQueue.sync {
+        if DispatchQueue.getSpecific(key: fileIOQueueKey) == fileIOQueueValue {
+            try work()
+            return
+        }
+        try fileIOQueue.sync {
+            print("[LocalStoreDiag] fileIOQueue executing thread=\(Thread.current)")
+            if self.isShuttingDown {
+                return
+            }
             try work()
         }
+    }
+
+    func performFileIOSync<T>(_ work: () throws -> T) throws -> T {
+        print("[LocalStoreDiag] performFileIOSync enter shuttingDown=\(isShuttingDown) thread=\(Thread.current)")
+        if DispatchQueue.getSpecific(key: fileIOQueueKey) == fileIOQueueValue {
+            if isShuttingDown {
+                throw StoreError.shuttingDown
+            }
+            return try work()
+        }
+        if isShuttingDown {
+            throw StoreError.shuttingDown
+        }
+        return try fileIOQueue.sync {
+            print("[LocalStoreDiag] fileIOQueue executing thread=\(Thread.current)")
+            return try work()
+        }
+    }
+
+    func shutdown() {
+        isShuttingDown = true
+        if DispatchQueue.getSpecific(key: fileIOQueueKey) == fileIOQueueValue {
+            return
+        }
+        fileIOQueue.sync { }
+    }
+
+    func fetchQueuedMutations() throws -> [QueuedMutation] {
+        try performFileIOSync {
+            try readQueuedMutations()
+        }
+    }
+
+    @discardableResult
+    func appendQueuedMutation(_ mutation: QueuedMutation) throws -> QueuedMutation {
+        try performFileIOSync {
+            var queued = try readQueuedMutations()
+            if let index = queued.firstIndex(where: {
+                $0.idempotencyKey == mutation.idempotencyKey && $0.status != .completed
+            }) {
+                let existing = queued[index]
+                queued[index] = QueuedMutation(
+                    id: existing.id,
+                    entityType: mutation.entityType,
+                    entityID: mutation.entityID,
+                    organizationID: mutation.organizationID,
+                    propertyID: mutation.propertyID,
+                    sessionID: mutation.sessionID,
+                    operation: mutation.operation,
+                    payloadData: mutation.payloadData,
+                    idempotencyKey: mutation.idempotencyKey,
+                    createdAt: existing.createdAt,
+                    updatedAt: mutation.updatedAt,
+                    attemptCount: existing.attemptCount,
+                    lastAttemptAt: existing.lastAttemptAt,
+                    nextAttemptAt: nil,
+                    lastError: nil,
+                    status: .pending
+                )
+                try writeQueuedMutations(queued)
+                NotificationCenter.default.post(name: .scoutPersistentDataDidChange, object: nil)
+                return queued[index]
+            }
+
+            queued.append(mutation)
+            try writeQueuedMutations(queued)
+            NotificationCenter.default.post(name: .scoutPersistentDataDidChange, object: nil)
+            return mutation
+        }
+    }
+
+    @discardableResult
+    func updateQueuedMutation(_ mutation: QueuedMutation) throws -> QueuedMutation {
+        try performFileIOSync {
+            var queued = try readQueuedMutations()
+            guard let index = queued.firstIndex(where: { $0.id == mutation.id }) else {
+                throw NSError(
+                    domain: "LocalStore.QueuedMutations",
+                    code: 1,
+                    userInfo: [NSLocalizedDescriptionKey: "Queued mutation not found: \(mutation.id.uuidString)"]
+                )
+            }
+            queued[index] = mutation
+            try writeQueuedMutations(queued)
+            NotificationCenter.default.post(name: .scoutPersistentDataDidChange, object: nil)
+            return mutation
+        }
+    }
+
+    func removeQueuedMutation(id: UUID) throws {
+        try performFileIOSync {
+            var queued = try readQueuedMutations()
+            queued.removeAll { $0.id == id }
+            try writeQueuedMutations(queued)
+            NotificationCenter.default.post(name: .scoutPersistentDataDidChange, object: nil)
+        }
+    }
+
+    private func readQueuedMutations() throws -> [QueuedMutation] {
+        guard fileManager.fileExists(atPath: queuedMutationsURL.path) else { return [] }
+        let data = try Data(contentsOf: queuedMutationsURL)
+        return try decoder.decode([QueuedMutation].self, from: data)
+    }
+
+    private func writeQueuedMutations(_ queuedMutations: [QueuedMutation]) throws {
+        if queuedMutations.isEmpty {
+            if fileManager.fileExists(atPath: queuedMutationsURL.path) {
+                try fileManager.removeItem(at: queuedMutationsURL)
+            }
+            return
+        }
+
+        let data = try encoder.encode(queuedMutations)
+        try atomicWriteFileData(data, to: queuedMutationsURL)
     }
 
     // MARK: - Properties CRUD
@@ -1963,7 +2157,7 @@ final class LocalStore {
     }
 
     func propertiesLedgerFingerprint() -> String {
-        performFileIOSync {
+        (try? performFileIOSync {
             let fileURL = propertiesURL
             if !fileManager.fileExists(atPath: fileURL.path) {
                 _ = ensureUbiquitousItemAvailable(at: fileURL, timeout: 0.8)
@@ -1975,7 +2169,7 @@ final class LocalStore {
             let size = (attrs[.size] as? NSNumber)?.int64Value ?? -1
             let modified = (attrs[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0
             return "\(size)|\(modified)"
-        }
+        }) ?? "missing"
     }
 
     func propertyFolderURL(propertyID: UUID) -> URL {
@@ -2135,14 +2329,14 @@ final class LocalStore {
 
     @discardableResult
     func offloadSessionMediaAssets(propertyID: UUID, sessionID: UUID) -> Int {
-        performFileIOSync {
+        (try? performFileIOSync {
             let originals = originalsFolderURL(propertyID: propertyID, sessionID: sessionID)
             let stamped = stampedFolderURL(propertyID: propertyID, sessionID: sessionID)
             var offloaded = 0
             offloaded += offloadUbiquitousFiles(in: originals)
             offloaded += offloadUbiquitousFiles(in: stamped)
             return offloaded
-        }
+        }) ?? 0
     }
 
     @discardableResult

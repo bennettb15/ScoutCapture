@@ -162,6 +162,12 @@ enum AuthenticationFlowResult: Equatable {
     case requiresEmailConfirmation
 }
 
+private enum AppStateTestEnvironment {
+    static var isRunningUnderXCTest: Bool {
+        ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
+    }
+}
+
 final class AppState: ObservableObject {
     typealias PropertyShadowWriteOverride = (Property) async throws -> Void
     typealias SessionShadowWriteOverride = (Property, Session, SessionMetadata) async throws -> Void
@@ -188,6 +194,26 @@ final class AppState: ObservableObject {
         let excludedInFlightCount: Int
         let skippedRetryCapCount: Int
         let attemptedCount: Int
+    }
+
+    struct OfflineReplayRunSummary: Equatable {
+        let didStart: Bool
+        let source: String
+        let discoveredCount: Int
+        let normalizedInFlightCount: Int
+        let skippedBackoffCount: Int
+        let attemptedCount: Int
+        let succeededCount: Int
+        let failedCount: Int
+    }
+
+    private struct QueuedPropertyMutationPayload: Codable {
+        let property: SupabasePropertyPayload
+    }
+
+    private struct QueuedSessionMutationPayload: Codable {
+        let property: SupabasePropertyPayload
+        let session: SupabaseSessionPayload
     }
 
 #if DEBUG
@@ -317,7 +343,7 @@ final class AppState: ObservableObject {
         }
     }
 
-    private struct SupabasePropertyPayload: Encodable {
+    private struct SupabasePropertyPayload: Codable {
         let id: UUID
         let orgID: UUID
         let name: String
@@ -337,7 +363,7 @@ final class AppState: ObservableObject {
         }
     }
 
-    private struct SupabaseSessionPayload: Encodable {
+    private struct SupabaseSessionPayload: Codable {
         let id: UUID
         let orgID: UUID
         let propertyID: UUID
@@ -697,7 +723,7 @@ final class AppState: ObservableObject {
     private lazy var localStore: LocalStore = injectedLocalStore ?? LocalStore()
     private var supabaseClient: SupabaseClient?
     private let userDefaults: UserDefaults
-    private let cloudBackupManager: CloudBackupManager
+    private let cloudBackupManager: CloudBackupManager?
     private let propertyShadowWriteOverride: PropertyShadowWriteOverride?
     private let sessionShadowWriteOverride: SessionShadowWriteOverride?
     private let selectedPropertyDefaultsKey = "scoutcapture.selectedPropertyID"
@@ -710,6 +736,7 @@ final class AppState: ObservableObject {
     private let archiveSnapshotQueue = DispatchQueue(label: "ScoutCapture.AppState.archiveSnapshot", qos: .utility)
     private let logThrottleQueue = DispatchQueue(label: "ScoutCapture.AppState.logThrottle")
     private let supabaseMediaOperationQueue = DispatchQueue(label: "ScoutCapture.AppState.supabaseMediaOperations")
+    private let offlineReplayStateQueue = DispatchQueue(label: "ScoutCapture.AppState.offlineReplay")
     private var lastHubFetchLogSignature: String?
     private var lastHubFetchLogAt: Date?
     private var lastSessionOffloadLogSignature: String?
@@ -737,6 +764,7 @@ final class AppState: ObservableObject {
     private var inFlightSupabaseMediaOperations: Set<String> = []
     private var isSupabaseMediaBackfillInProgress: Bool = false
     private var isSyncDeltaPullInFlight: Bool = false
+    private var isOfflineReplayInFlight: Bool = false
     private var lastForegroundSyncDeltaCompletedAt: Date?
 #if DEBUG
     private var syncDeltaFetchOverride: SyncDeltaFetchOverride?
@@ -756,6 +784,37 @@ final class AppState: ObservableObject {
 
     var cutoverPhase: CutoverPhase {
         backendFeatureFlags.cutoverPhase
+    }
+
+    private static var unavailableCloudBackupStatus: CloudBackupStatus {
+        CloudBackupStatus(
+            state: .unavailable,
+            isRunning: false,
+            lastSuccessfulBackupAt: nil,
+            lastFailureMessage: nil,
+            iCloudAvailable: false,
+            hasBackup: false,
+            progressPhase: nil,
+            progressCompleted: nil,
+            progressTotal: nil,
+            snapshotFileCount: nil,
+            snapshotByteCount: nil,
+            lastRunChangedCount: nil,
+            lastRunUnchangedCount: nil,
+            lastRunChangedByteCount: nil,
+            lastRunAddedCount: nil,
+            lastRunUpdatedCount: nil,
+            lastRunSourceFileCount: nil,
+            lastRunPrunedCount: nil,
+            lastRunNewBlobsWrittenCount: nil,
+            lastRunReusedBlobsReferencedCount: nil,
+            lastRunBlobBytesWritten: nil,
+            lastRunBlobBytesReused: nil,
+            lastRunChangedPathsSample: nil,
+            lastRunPrunedPathsSample: nil,
+            safetyPauseUntil: nil,
+            safetyPauseReason: nil
+        )
     }
 
     var isAuthenticated: Bool {
@@ -854,12 +913,21 @@ final class AppState: ObservableObject {
         localStore: LocalStore? = nil,
         userDefaults: UserDefaults = .standard,
         propertyShadowWriteOverride: PropertyShadowWriteOverride? = nil,
-        sessionShadowWriteOverride: SessionShadowWriteOverride? = nil
+        sessionShadowWriteOverride: SessionShadowWriteOverride? = nil,
+        disableCloudBackupForTests: Bool = false
     ) {
         self.injectedLocalStore = localStore
         self.userDefaults = userDefaults
+        #if DEBUG
+        if disableCloudBackupForTests || AppStateTestEnvironment.isRunningUnderXCTest {
+            self.cloudBackupManager = nil
+        } else {
+            self.cloudBackupManager = CloudBackupManager(userDefaults: userDefaults)
+        }
+        #else
         self.cloudBackupManager = CloudBackupManager(userDefaults: userDefaults)
-        self.cloudBackupStatus = cloudBackupManager.status
+        #endif
+        self.cloudBackupStatus = cloudBackupManager?.status ?? Self.unavailableCloudBackupStatus
         self.propertyShadowWriteOverride = propertyShadowWriteOverride
         self.sessionShadowWriteOverride = sessionShadowWriteOverride
         self.supabaseConfiguration = AppState.loadSupabaseConfiguration()
@@ -873,27 +941,32 @@ final class AppState: ObservableObject {
 
         self.currentSession = nil
 
-        cloudBackupManager.$status
-            .receive(on: DispatchQueue.main)
-            .sink { [weak self] status in
-                self?.cloudBackupStatus = status
-            }
-            .store(in: &cancellables)
+        if let cloudBackupManager {
+            cloudBackupManager.$status
+                .receive(on: DispatchQueue.main)
+                .sink { [weak self] status in
+                    print("[AppStateDiag] cloudBackupStatus_sink")
+                    self?.cloudBackupStatus = status
+                }
+                .store(in: &cancellables)
+        }
 
         NotificationCenter.default.publisher(for: .scoutPersistentDataDidChange)
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in
+                print("[AppStateDiag] scoutPersistentDataDidChange_sink")
                 self?.markLiveSyncBurstWindow(seconds: 20)
-                self?.cloudBackupManager.markDataChanged()
+                self?.cloudBackupManager?.markDataChanged(scheduleBackupAfter: 30)
             }
             .store(in: &cancellables)
 
+        print("[AppStateDiag] init")
         logCutoverConfiguration()
         prepareCollaborativeBackendBootstrap()
     }
 
     deinit {
-        authStateChangesTask?.cancel()
+        print("[AppStateDiag] deinit_enter")
     }
 
     private static func loadSupabaseConfiguration(bundle: Bundle = .main) -> SupabaseRuntimeConfiguration {
@@ -957,6 +1030,7 @@ final class AppState: ObservableObject {
 
     private func prepareCollaborativeBackendBootstrap() {
         guard backendFeatureFlags.supabaseEnabled else {
+            stopAllObservers()
             supabaseClient = nil
             isAuthenticationReady = true
             isOrganizationContextReady = true
@@ -965,6 +1039,7 @@ final class AppState: ObservableObject {
         }
 
         guard supabaseConfiguration.isConfigured else {
+            stopAllObservers()
             supabaseClient = nil
             isAuthenticationReady = true
             isOrganizationContextReady = true
@@ -985,8 +1060,29 @@ final class AppState: ObservableObject {
         }
     }
 
+    func stopAuthenticationObservation() {
+        print("[AppStateDiag] stopAuthenticationObservation")
+        let existingTask = authStateChangesTask
+        authStateChangesTask = nil
+        existingTask?.cancel()
+    }
+
+    func stopAllObservers() {
+        print("[AppStateDiag] stopAllObservers")
+        stopAuthenticationObservation()
+        cancellables.removeAll()
+    }
+
+    func shutdown() {
+        print("[AppStateDiag] shutdown_start")
+        stopAllObservers()
+        cloudBackupManager?.shutdown()
+        localStore.shutdown()
+        print("[AppStateDiag] shutdown_after_fileio_sync")
+    }
+
     private func beginObservingAuthenticationState() {
-        authStateChangesTask?.cancel()
+        stopAuthenticationObservation()
 
         guard let client = supabaseClient else {
             applyAuthenticationState(user: nil, ready: true)
@@ -996,31 +1092,40 @@ final class AppState: ObservableObject {
         applyAuthenticationState(user: nil, ready: false)
 
         authStateChangesTask = Task { [weak self] in
-            guard let self else { return }
-
             for await (event, authSession) in client.auth.authStateChanges {
                 if Task.isCancelled {
                     return
                 }
 
+                guard let self else { return }
+
                 let userID = authSession?.user.id
                 let email = authSession?.user.email
                 let user = userID.map { AuthenticatedSupabaseUser(id: $0, email: email) }
-                self.applyAuthenticationState(user: user, ready: true)
+                await MainActor.run {
+                    self.applyAuthenticationState(user: user, ready: true)
+                }
 
                 if event == .signedOut {
-                    self.lastEnsuredUserProfileID = nil
-                    self.clearOrganizationContext()
+                    await MainActor.run {
+                        self.lastEnsuredUserProfileID = nil
+                        self.clearOrganizationContext()
+                    }
                     continue
                 }
 
                 if [.initialSession, .signedIn, .tokenRefreshed, .userUpdated].contains(event) {
                     do {
                         try await self.ensureCurrentUserProfileIfNeeded(for: userID)
+                        if Task.isCancelled {
+                            return
+                        }
                         try await self.refreshOrganizationContext(for: userID)
                     } catch {
                         print("[SupabaseAuth] ensure_current_user_profile failed: \(error.localizedDescription)")
-                        self.handleOrganizationRefreshFailure()
+                        await MainActor.run {
+                            self.handleOrganizationRefreshFailure()
+                        }
                     }
                 }
             }
@@ -1028,7 +1133,8 @@ final class AppState: ObservableObject {
     }
 
     private func applyAuthenticationState(user: AuthenticatedSupabaseUser?, ready: Bool) {
-        DispatchQueue.main.async {
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
             if self.authenticatedSupabaseUser != user {
                 self.authenticatedSupabaseUser = user
             }
@@ -1046,7 +1152,8 @@ final class AppState: ObservableObject {
         activeOrganizationID: UUID?,
         ready: Bool
     ) {
-        DispatchQueue.main.async {
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
             let previousReady = self.isOrganizationContextReady
             let previousActiveOrganizationID = self.activeOrganizationID
 
@@ -1064,8 +1171,9 @@ final class AppState: ObservableObject {
             if ready, activeOrganizationID != nil {
                 self.queuePendingSupabaseMediaBackfillIfNeeded(reason: "org_context_ready")
                 if !previousReady {
-                    Task { @MainActor in
-                        await self.performSyncDeltaPull(source: "launch")
+                    Task { @MainActor [weak self] in
+                        guard let self else { return }
+                        await self.performRemoteConvergenceCycle(source: "launch")
                     }
                 }
             }
@@ -1093,10 +1201,15 @@ final class AppState: ObservableObject {
         }
         applyTenantScopedState()
     }
+
+    func _debugRefreshPropertiesLocallyForTests() {
+        performLocalPropertyRefreshFallback()
+    }
 #endif
 
     private func handleOrganizationRefreshFailure() {
-        DispatchQueue.main.async {
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
             let hasUsableContext = self.isOrganizationContextReady
                 && self.activeOrganizationID != nil
                 && !self.accessibleOrganizations.isEmpty
@@ -1186,8 +1299,9 @@ final class AppState: ObservableObject {
         persistActiveOrganizationID()
         applyTenantScopedState()
         if isOrganizationContextReady {
-            Task { @MainActor in
-                await performSyncDeltaPull(source: "org_switch")
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                await performRemoteConvergenceCycle(source: "org_switch")
             }
         }
     }
@@ -1290,17 +1404,21 @@ final class AppState: ObservableObject {
     }
 
     private func setAuthenticating(_ authenticating: Bool) {
-        DispatchQueue.main.async {
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
             self.isAuthenticating = authenticating
         }
     }
 
     private func ensureCurrentUserProfileIfNeeded(for userID: UUID?, force: Bool = false) async throws {
         guard let userID, let client = supabaseClient else { return }
+        let lastEnsuredUserProfileID = await MainActor.run { self.lastEnsuredUserProfileID }
         guard force || lastEnsuredUserProfileID != userID else { return }
 
         try await (try client.rpc("ensure_current_user_profile")).execute()
-        lastEnsuredUserProfileID = userID
+        await MainActor.run {
+            self.lastEnsuredUserProfileID = userID
+        }
     }
 
     func signIn(email: String, password: String) async throws {
@@ -1308,7 +1426,8 @@ final class AppState: ObservableObject {
 
         let trimmedEmail = email.trimmingCharacters(in: .whitespacesAndNewlines)
         setAuthenticating(true)
-        DispatchQueue.main.async {
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
             self.authenticationErrorMessage = nil
         }
         defer { setAuthenticating(false) }
@@ -1317,7 +1436,8 @@ final class AppState: ObservableObject {
             let session = try await client.auth.signIn(email: trimmedEmail, password: password)
             try await ensureCurrentUserProfileIfNeeded(for: session.user.id, force: true)
         } catch {
-            DispatchQueue.main.async {
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
                 self.authenticationErrorMessage = error.localizedDescription
             }
             throw error
@@ -1329,7 +1449,8 @@ final class AppState: ObservableObject {
 
         let trimmedEmail = email.trimmingCharacters(in: .whitespacesAndNewlines)
         setAuthenticating(true)
-        DispatchQueue.main.async {
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
             self.authenticationErrorMessage = nil
         }
         defer { setAuthenticating(false) }
@@ -1342,7 +1463,8 @@ final class AppState: ObservableObject {
             }
             return .requiresEmailConfirmation
         } catch {
-            DispatchQueue.main.async {
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
                 self.authenticationErrorMessage = error.localizedDescription
             }
             throw error
@@ -1363,7 +1485,8 @@ final class AppState: ObservableObject {
                 clearSyncCursors(orgID: orgID)
             }
         } catch {
-            DispatchQueue.main.async {
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
                 self.authenticationErrorMessage = error.localizedDescription
             }
         }
@@ -1512,7 +1635,12 @@ final class AppState: ObservableObject {
         var excludedInFlightCount = 0
 
         for property in properties {
-            guard canAccessOrganization(property.orgId) else { continue }
+            if requiresAuthentication,
+               isOrganizationContextReady,
+               let activeOrganizationID,
+               property.orgId != activeOrganizationID {
+                continue
+            }
 
             let sessions = ((try? localStore.fetchSessions(propertyID: property.id)) ?? [])
                 .sorted {
@@ -2036,6 +2164,294 @@ final class AppState: ObservableObject {
         )
     }
 
+    @MainActor
+    private func performRemoteConvergenceCycle(source: String) async {
+        _ = await performOfflineReplay(source: source)
+        await performSyncDeltaPull(source: source)
+    }
+
+    private func offlineReplayNotReadySummary(source: String, reason: String) -> OfflineReplayRunSummary {
+        print("[OfflineReplay] skipped source=\(source) reason=not_ready detail=\(reason)")
+        return OfflineReplayRunSummary(
+            didStart: false,
+            source: source,
+            discoveredCount: 0,
+            normalizedInFlightCount: 0,
+            skippedBackoffCount: 0,
+            attemptedCount: 0,
+            succeededCount: 0,
+            failedCount: 0
+        )
+    }
+
+    @MainActor
+    private func performOfflineReplay(source: String) async -> OfflineReplayRunSummary {
+        guard isPhaseBMetadataShadowWriteEnabled,
+              backendFeatureFlags.supabaseEnabled,
+              backendFeatureFlags.shadowWriteEnabled else {
+            return offlineReplayNotReadySummary(source: source, reason: "disabled")
+        }
+        guard isOrganizationContextReady else {
+            return offlineReplayNotReadySummary(source: source, reason: "organization_context")
+        }
+        guard let orgID = activeOrganizationID else {
+            return offlineReplayNotReadySummary(source: source, reason: "missing_org")
+        }
+        guard supabaseClient != nil else {
+            return offlineReplayNotReadySummary(source: source, reason: "missing_client")
+        }
+        if requiresAuthentication && (!isAuthenticationReady || authenticatedSupabaseUser == nil) {
+            return offlineReplayNotReadySummary(source: source, reason: "authentication")
+        }
+        guard beginOfflineReplayRun() else {
+            print("[OfflineReplay] skipped source=\(source) reason=in_flight")
+            return OfflineReplayRunSummary(
+                didStart: false,
+                source: source,
+                discoveredCount: 0,
+                normalizedInFlightCount: 0,
+                skippedBackoffCount: 0,
+                attemptedCount: 0,
+                succeededCount: 0,
+                failedCount: 0
+            )
+        }
+
+        let startedAt = Date()
+        defer { endOfflineReplayRun() }
+
+        var normalizedInFlightCount = 0
+        do {
+            let queuedMutations = try localStore.fetchQueuedMutations()
+            for item in queuedMutations where item.status == .inFlight {
+                var normalized = item
+                normalized.status = .pending
+                normalized.updatedAt = Date()
+                normalizedInFlightCount += 1
+                try localStore.updateQueuedMutation(normalized)
+            }
+        } catch {
+            print("[OfflineReplay] skipped source=\(source) reason=queue_read_failed error=\(error.localizedDescription)")
+            return OfflineReplayRunSummary(
+                didStart: false,
+                source: source,
+                discoveredCount: 0,
+                normalizedInFlightCount: 0,
+                skippedBackoffCount: 0,
+                attemptedCount: 0,
+                succeededCount: 0,
+                failedCount: 0
+            )
+        }
+
+        let queuedMutations: [LocalStore.QueuedMutation]
+        do {
+            queuedMutations = try localStore.fetchQueuedMutations()
+        } catch {
+            print("[OfflineReplay] skipped source=\(source) reason=queue_read_failed error=\(error.localizedDescription)")
+            return OfflineReplayRunSummary(
+                didStart: false,
+                source: source,
+                discoveredCount: 0,
+                normalizedInFlightCount: normalizedInFlightCount,
+                skippedBackoffCount: 0,
+                attemptedCount: 0,
+                succeededCount: 0,
+                failedCount: 0
+            )
+        }
+
+        let orgMutations = queuedMutations.filter { $0.organizationID == orgID && $0.status != .completed }
+        let now = Date()
+        var skippedBackoffCount = 0
+        let replayable = orgMutations.filter { mutation in
+            if mutation.status == .failed,
+               let nextAttemptAt = mutation.nextAttemptAt,
+               now < nextAttemptAt {
+                skippedBackoffCount += 1
+                return false
+            }
+            return shouldReplayMutation(mutation, now: now)
+        }
+        .sorted { lhs, rhs in
+            if lhs.createdAt != rhs.createdAt {
+                return lhs.createdAt < rhs.createdAt
+            }
+            return lhs.id.uuidString < rhs.id.uuidString
+        }
+
+        print(
+            "[OfflineReplay] start " +
+            "source=\(source) " +
+            "orgID=\(orgID.uuidString) " +
+            "discoveredCount=\(orgMutations.count) " +
+            "eligibleCount=\(replayable.count) " +
+            "normalizedInFlightCount=\(normalizedInFlightCount)"
+        )
+
+        var attemptedCount = 0
+        var succeededCount = 0
+        var failedCount = 0
+
+        for item in replayable {
+            var inFlightItem = item
+            inFlightItem.status = .inFlight
+            inFlightItem.updatedAt = Date()
+
+            do {
+                try localStore.updateQueuedMutation(inFlightItem)
+            } catch {
+                print(
+                    "[OfflineReplay] item_failure " +
+                    "source=\(source) " +
+                    "queueItemID=\(item.id.uuidString) " +
+                    "entityType=\(item.entityType) " +
+                    "entityID=\(item.entityID.uuidString) " +
+                    "operation=\(item.operation) " +
+                    "error=\(error.localizedDescription)"
+                )
+                failedCount += 1
+                continue
+            }
+
+            attemptedCount += 1
+            print(
+                "[OfflineReplay] item_dispatch " +
+                "source=\(source) " +
+                "orgID=\(orgID.uuidString) " +
+                "queueItemID=\(item.id.uuidString) " +
+                "entityType=\(item.entityType) " +
+                "entityID=\(item.entityID.uuidString) " +
+                "operation=\(item.operation) " +
+                "attemptCount=\(item.attemptCount)"
+            )
+
+            let attemptStartedAt = Date()
+            do {
+                switch item.operation {
+                case "upsert_property":
+                    let decodedPayload = try JSONDecoder().decode(
+                        QueuedPropertyMutationPayload.self,
+                        from: item.payloadData
+                    )
+                    let payload = canonicalQueuedPropertyPayload(
+                        decodedPayload.property,
+                        queueItem: item
+                    )
+                    let property = queuedPropertyFromPayload(payload.property, queueItem: item)
+                    try await performQueuedPropertyRemoteWrite(property: property, payload: payload.property)
+                    await reconcilePropertyShadowWrite(
+                        propertyID: property.id,
+                        orgID: property.orgId ?? item.organizationID,
+                        localUpdatedAt: property.updatedAt
+                    )
+                case "upsert_session":
+                    let payload = try JSONDecoder().decode(
+                        QueuedSessionMutationPayload.self,
+                        from: item.payloadData
+                    )
+                    let property = queuedPropertyFromPayload(payload.property, queueItem: item)
+                    let session = queuedSessionFromPayload(payload, queueItem: item)
+                    let metadata = queuedSessionMetadataFromPayload(payload, session: session)
+                    try await performQueuedSessionRemoteWrite(
+                        property: property,
+                        session: session,
+                        metadata: metadata,
+                        payload: payload
+                    )
+                    await reconcileSessionShadowWrite(
+                        sessionID: session.id,
+                        propertyID: session.propertyID,
+                        orgID: property.orgId ?? item.organizationID,
+                        localUpdatedAt: localSessionShadowWriteTimestamp(session)
+                    )
+                default:
+                    throw NSError(
+                        domain: "ScoutCapture.OfflineReplay",
+                        code: 1,
+                        userInfo: [NSLocalizedDescriptionKey: "Unsupported queued operation: \(item.operation)"]
+                    )
+                }
+
+                try localStore.removeQueuedMutation(id: item.id)
+                succeededCount += 1
+                let elapsedMs = Int(Date().timeIntervalSince(attemptStartedAt) * 1000)
+                print(
+                    "[OfflineReplay] item_success " +
+                    "source=\(source) " +
+                    "queueItemID=\(item.id.uuidString) " +
+                    "entityType=\(item.entityType) " +
+                    "entityID=\(item.entityID.uuidString) " +
+                    "operation=\(item.operation) " +
+                    "elapsedMs=\(elapsedMs)"
+                )
+                print(
+                    "[OfflineQueue] result=removed_after_success " +
+                    "queueItemID=\(item.id.uuidString) " +
+                    "entityType=\(item.entityType) " +
+                    "entityID=\(item.entityID.uuidString) " +
+                    "operation=\(item.operation)"
+                )
+            } catch {
+                failedCount += 1
+                var failedItem = inFlightItem
+                failedItem.attemptCount += 1
+                failedItem.lastAttemptAt = Date()
+                failedItem.nextAttemptAt = failedItem.lastAttemptAt?.addingTimeInterval(
+                    offlineReplayBackoffInterval(forAttemptCount: failedItem.attemptCount)
+                )
+                failedItem.lastError = error.localizedDescription
+                failedItem.status = .failed
+                failedItem.updatedAt = Date()
+                try? localStore.updateQueuedMutation(failedItem)
+                print(
+                    "[OfflineReplay] item_failure " +
+                    "source=\(source) " +
+                    "queueItemID=\(item.id.uuidString) " +
+                    "entityType=\(item.entityType) " +
+                    "entityID=\(item.entityID.uuidString) " +
+                    "operation=\(item.operation) " +
+                    "attemptCount=\(failedItem.attemptCount) " +
+                    "nextAttemptAt=\(failedItem.nextAttemptAt.map { supabaseTimestampString($0) } ?? "nil") " +
+                    "error=\(error.localizedDescription)"
+                )
+                print(
+                    "[OfflineQueue] result=failed " +
+                    "queueItemID=\(item.id.uuidString) " +
+                    "entityType=\(item.entityType) " +
+                    "entityID=\(item.entityID.uuidString) " +
+                    "operation=\(item.operation) " +
+                    "nextAttemptAt=\(failedItem.nextAttemptAt.map { supabaseTimestampString($0) } ?? "nil")"
+                )
+            }
+        }
+
+        let elapsedMs = Int(Date().timeIntervalSince(startedAt) * 1000)
+        print(
+            "[OfflineReplay] complete " +
+            "source=\(source) " +
+            "orgID=\(orgID.uuidString) " +
+            "discoveredCount=\(orgMutations.count) " +
+            "normalizedInFlightCount=\(normalizedInFlightCount) " +
+            "skippedBackoffCount=\(skippedBackoffCount) " +
+            "attemptedCount=\(attemptedCount) " +
+            "succeededCount=\(succeededCount) " +
+            "failedCount=\(failedCount) " +
+            "elapsedMs=\(elapsedMs)"
+        )
+
+        return OfflineReplayRunSummary(
+            didStart: true,
+            source: source,
+            discoveredCount: orgMutations.count,
+            normalizedInFlightCount: normalizedInFlightCount,
+            skippedBackoffCount: skippedBackoffCount,
+            attemptedCount: attemptedCount,
+            succeededCount: succeededCount,
+            failedCount: failedCount
+        )
+    }
+
     private func reconcilePropertyShadowWrite(
         propertyID: UUID,
         orgID: UUID,
@@ -2102,6 +2518,319 @@ final class AppState: ObservableObject {
         }
     }
 
+    private func propertyReplayIdempotencyKey(for property: Property) -> String? {
+        guard let orgID = property.orgId else { return nil }
+        let updatedAt = property.updatedAt.timeIntervalSinceReferenceDate
+        return "property:\(orgID.uuidString.lowercased()):\(property.id.uuidString.lowercased()):\(updatedAt)"
+    }
+
+    private func sessionReplayIdempotencyKey(
+        session: Session,
+        metadata: SessionMetadata,
+        orgID: UUID
+    ) -> String {
+        let shadowTimestamp = localSessionShadowWriteTimestamp(session).timeIntervalSinceReferenceDate
+        return [
+            "session",
+            orgID.uuidString.lowercased(),
+            session.id.uuidString.lowercased(),
+            String(session.startedAt.timeIntervalSinceReferenceDate),
+            metadata.status.rawValue,
+            String(shadowTimestamp)
+        ]
+        .joined(separator: ":")
+    }
+
+    private func makeQueuedPropertyMutation(for property: Property) throws -> LocalStore.QueuedMutation? {
+        guard let orgID = property.orgId,
+              let idempotencyKey = propertyReplayIdempotencyKey(for: property) else {
+            return nil
+        }
+
+        let payload = QueuedPropertyMutationPayload(
+            property: makeSupabasePropertyPayload(
+                propertyID: property.id,
+                orgID: orgID,
+                property: property,
+                metadata: nil
+            )
+        )
+
+        return LocalStore.QueuedMutation(
+            entityType: "property",
+            entityID: property.id,
+            organizationID: orgID,
+            propertyID: property.id,
+            sessionID: nil,
+            operation: "upsert_property",
+            payloadData: try JSONEncoder().encode(payload),
+            idempotencyKey: idempotencyKey
+        )
+    }
+
+    private func makeQueuedSessionMutation(
+        property: Property,
+        session: Session,
+        metadata: SessionMetadata
+    ) throws -> LocalStore.QueuedMutation? {
+        guard let orgID = property.orgId else { return nil }
+
+        let payload = QueuedSessionMutationPayload(
+            property: makeSupabasePropertyPayload(
+                propertyID: property.id,
+                orgID: orgID,
+                property: property,
+                metadata: metadata
+            ),
+            session: makeSupabaseSessionPayload(
+                sessionID: session.id,
+                propertyID: property.id,
+                orgID: orgID,
+                property: property,
+                metadata: metadata
+            )
+        )
+
+        return LocalStore.QueuedMutation(
+            entityType: "session",
+            entityID: session.id,
+            organizationID: orgID,
+            propertyID: property.id,
+            sessionID: session.id,
+            operation: "upsert_session",
+            payloadData: try JSONEncoder().encode(payload),
+            idempotencyKey: sessionReplayIdempotencyKey(session: session, metadata: metadata, orgID: orgID)
+        )
+    }
+
+    private func enqueueOfflineMutation(
+        _ mutation: LocalStore.QueuedMutation,
+        reason: String
+    ) {
+        do {
+            let beforeCount = try localStore.fetchQueuedMutations().count
+            let persisted = try localStore.appendQueuedMutation(mutation)
+            let afterCount = try localStore.fetchQueuedMutations().count
+            let result = afterCount == beforeCount ? "deduplicated" : "enqueued"
+            print(
+                "[OfflineQueue] result=\(result) " +
+                "reason=\(reason) " +
+                "orgID=\(persisted.organizationID.uuidString) " +
+                "queueItemID=\(persisted.id.uuidString) " +
+                "entityType=\(persisted.entityType) " +
+                "entityID=\(persisted.entityID.uuidString) " +
+                "operation=\(persisted.operation) " +
+                "idempotencyKey=\(persisted.idempotencyKey)"
+            )
+        } catch {
+            print(
+                "[OfflineQueue] result=failed " +
+                "reason=\(reason) " +
+                "entityType=\(mutation.entityType) " +
+                "entityID=\(mutation.entityID.uuidString) " +
+                "operation=\(mutation.operation) " +
+                "error=\(error.localizedDescription)"
+            )
+        }
+    }
+
+    private func removeQueuedMutationIfPresent(
+        idempotencyKey: String,
+        reason: String
+    ) {
+        do {
+            let queuedMutations = try localStore.fetchQueuedMutations()
+            guard let existing = queuedMutations.first(where: {
+                $0.idempotencyKey == idempotencyKey && $0.status != .completed
+            }) else {
+                return
+            }
+
+            try localStore.removeQueuedMutation(id: existing.id)
+            print(
+                "[OfflineQueue] result=removed_after_direct_success " +
+                "reason=\(reason) " +
+                "queueItemID=\(existing.id.uuidString) " +
+                "entityType=\(existing.entityType) " +
+                "entityID=\(existing.entityID.uuidString) " +
+                "operation=\(existing.operation) " +
+                "idempotencyKey=\(existing.idempotencyKey)"
+            )
+        } catch {
+            print(
+                "[OfflineQueue] result=remove_failed " +
+                "reason=\(reason) " +
+                "idempotencyKey=\(idempotencyKey) " +
+                "error=\(error.localizedDescription)"
+            )
+        }
+    }
+
+    private func remoteMutationPathAvailable(for orgID: UUID) -> Bool {
+        guard isPhaseBMetadataShadowWriteEnabled,
+              backendFeatureFlags.supabaseEnabled,
+              backendFeatureFlags.shadowWriteEnabled,
+              supabaseClient != nil,
+              isOrganizationContextReady,
+              activeOrganizationID == orgID else {
+            return false
+        }
+
+        if requiresAuthentication {
+            return isAuthenticationReady && authenticatedSupabaseUser != nil
+        }
+
+        return true
+    }
+
+    private func offlineReplayBackoffInterval(forAttemptCount attemptCount: Int) -> TimeInterval {
+        switch attemptCount {
+        case ...0:
+            return 0
+        case 1:
+            return 30
+        case 2:
+            return 120
+        case 3:
+            return 600
+        default:
+            return 1800
+        }
+    }
+
+    private func beginOfflineReplayRun() -> Bool {
+        offlineReplayStateQueue.sync {
+            if isOfflineReplayInFlight {
+                return false
+            }
+            isOfflineReplayInFlight = true
+            return true
+        }
+    }
+
+    private func endOfflineReplayRun() {
+        let _: Void = offlineReplayStateQueue.sync {
+            isOfflineReplayInFlight = false
+        }
+    }
+
+    private func shouldReplayMutation(_ mutation: LocalStore.QueuedMutation, now: Date) -> Bool {
+        switch mutation.status {
+        case .pending:
+            return true
+        case .failed:
+            return mutation.nextAttemptAt.map { now >= $0 } ?? true
+        case .inFlight, .completed:
+            return false
+        }
+    }
+
+    private func performQueuedPropertyRemoteWrite(
+        property: Property,
+        payload: SupabasePropertyPayload
+    ) async throws {
+        if let propertyShadowWriteOverride {
+            try await propertyShadowWriteOverride(property)
+        } else {
+            try await upsertPropertyRowToSupabase(payload)
+        }
+    }
+
+    private func performQueuedSessionRemoteWrite(
+        property: Property,
+        session: Session,
+        metadata: SessionMetadata,
+        payload: QueuedSessionMutationPayload
+    ) async throws {
+        if let sessionShadowWriteOverride {
+            try await sessionShadowWriteOverride(property, session, metadata)
+        } else {
+            try await upsertPropertyRowToSupabase(payload.property)
+            try await upsertSessionRowToSupabase(payload.session)
+        }
+    }
+
+    private func queuedPropertyFromPayload(
+        _ payload: SupabasePropertyPayload,
+        queueItem: LocalStore.QueuedMutation
+    ) -> Property {
+        return Property(
+            id: payload.id,
+            orgId: queueItem.organizationID,
+            folderId: nil,
+            clientName: nil,
+            clientPhone: nil,
+            clientEmail: nil,
+            name: payload.name,
+            address: payload.addressLine1,
+            street: payload.addressLine1,
+            city: payload.city,
+            state: payload.state,
+            zip: payload.postalCode,
+            baselineSessionID: nil,
+            isArchived: false,
+            createdAt: queueItem.createdAt,
+            updatedAt: queueItem.updatedAt
+        )
+    }
+
+    private func canonicalQueuedPropertyPayload(
+        _ payload: SupabasePropertyPayload,
+        queueItem: LocalStore.QueuedMutation
+    ) -> QueuedPropertyMutationPayload {
+        QueuedPropertyMutationPayload(
+            property: SupabasePropertyPayload(
+                id: queueItem.entityID,
+                orgID: queueItem.organizationID,
+                name: payload.name,
+                addressLine1: payload.addressLine1,
+                city: payload.city,
+                state: payload.state,
+                postalCode: payload.postalCode
+            )
+        )
+    }
+
+    private func queuedSessionFromPayload(
+        _ payload: QueuedSessionMutationPayload,
+        queueItem: LocalStore.QueuedMutation
+    ) -> Session {
+        Session(
+            id: queueItem.sessionID ?? queueItem.entityID,
+            propertyID: queueItem.propertyID ?? payload.session.propertyID,
+            startedAt: parseSupabaseDateString(payload.session.startedAt) ?? Date(),
+            status: Session.Status(rawValue: payload.session.status) ?? .draft,
+            endedAt: payload.session.completedAt.flatMap(parseSupabaseDateString),
+            exportedAt: nil,
+            isSealed: payload.session.status == Session.Status.completed.rawValue
+        )
+    }
+
+    private func queuedSessionMetadataFromPayload(
+        _ payload: QueuedSessionMutationPayload,
+        session: Session
+    ) -> SessionMetadata {
+        SessionMetadata(
+            schemaVersion: 12,
+            propertyID: payload.session.propertyID,
+            sessionID: payload.session.id,
+            orgID: payload.property.orgID,
+            propertyNameAtCapture: payload.property.name,
+            propertyNameAtExport: nil,
+            startedAt: session.startedAt,
+            endedAt: session.endedAt,
+            status: session.status,
+            isBaselineSession: false,
+            exportedAt: nil,
+            isSealed: session.isSealed,
+            appVersion: "offline-replay",
+            deviceModel: "offline-replay",
+            osVersion: "offline-replay",
+            shots: [],
+            issues: []
+        )
+    }
+
     private func schedulePhaseBPropertyShadowWrite(for property: Property) {
         guard isPhaseBMetadataShadowWriteEnabled else { return }
         guard let orgID = property.orgId else {
@@ -2112,29 +2841,48 @@ final class AppState: ObservableObject {
             print("[CutoverShadowWrite] skipped entity=property propertyID=\(property.id.uuidString) reason=inactive_org")
             return
         }
-        guard supabaseClient != nil else {
-            print("[CutoverShadowWrite] skipped entity=property propertyID=\(property.id.uuidString) reason=missing_client")
-            return
-        }
-
         Task(priority: .utility) { [weak self] in
             guard let self else { return }
+            let queuedMutation: LocalStore.QueuedMutation
             do {
-                if let propertyShadowWriteOverride = self.propertyShadowWriteOverride {
-                    try await propertyShadowWriteOverride(property)
-                } else {
-                    let payload = self.makeSupabasePropertyPayload(
-                        propertyID: property.id,
-                        orgID: orgID,
-                        property: property,
-                        metadata: nil
-                    )
-                    try await self.upsertPropertyRowToSupabase(payload)
+                guard let built = try self.makeQueuedPropertyMutation(for: property) else {
+                    print("[OfflineQueue] skipped entityType=property entityID=\(property.id.uuidString) reason=payload_build_failed")
+                    return
                 }
+                queuedMutation = built
+            } catch {
+                print(
+                    "[OfflineQueue] skipped entityType=property entityID=\(property.id.uuidString) " +
+                    "reason=payload_encode_failed error=\(error.localizedDescription)"
+                )
+                return
+            }
+
+            let canAttemptRemoteWrite =
+                self.propertyShadowWriteOverride != nil ||
+                self.remoteMutationPathAvailable(for: orgID)
+            guard canAttemptRemoteWrite else {
+                self.enqueueOfflineMutation(queuedMutation, reason: "remote_unavailable")
+                return
+            }
+
+            do {
+                let payload = try JSONDecoder().decode(
+                    QueuedPropertyMutationPayload.self,
+                    from: queuedMutation.payloadData
+                )
+                try await self.performQueuedPropertyRemoteWrite(
+                    property: property,
+                    payload: payload.property
+                )
 
                 print(
                     "[CutoverShadowWrite] result=success entity=property " +
                     "phase=\(self.cutoverPhase.rawValue) propertyID=\(property.id.uuidString)"
+                )
+                self.removeQueuedMutationIfPresent(
+                    idempotencyKey: queuedMutation.idempotencyKey,
+                    reason: "direct_property_success"
                 )
 
                 Task(priority: .background) { [weak self] in
@@ -2150,6 +2898,7 @@ final class AppState: ObservableObject {
                     "phase=\(self.cutoverPhase.rawValue) propertyID=\(property.id.uuidString) " +
                     "error=\(error.localizedDescription)"
                 )
+                self.enqueueOfflineMutation(queuedMutation, reason: "remote_write_failed")
             }
         }
     }
@@ -2173,38 +2922,53 @@ final class AppState: ObservableObject {
             print("[CutoverShadowWrite] skipped entity=session sessionID=\(session.id.uuidString) reason=missing_metadata")
             return
         }
-        guard supabaseClient != nil else {
-            print("[CutoverShadowWrite] skipped entity=session sessionID=\(session.id.uuidString) reason=missing_client")
-            return
-        }
 
         Task(priority: .utility) { [weak self] in
             guard let self else { return }
+            let queuedMutation: LocalStore.QueuedMutation
             do {
-                if let sessionShadowWriteOverride = self.sessionShadowWriteOverride {
-                    try await sessionShadowWriteOverride(property, session, metadata)
-                } else {
-                    let propertyPayload = self.makeSupabasePropertyPayload(
-                        propertyID: property.id,
-                        orgID: orgID,
-                        property: property,
-                        metadata: metadata
-                    )
-                    let sessionPayload = self.makeSupabaseSessionPayload(
-                        sessionID: session.id,
-                        propertyID: property.id,
-                        orgID: orgID,
-                        property: property,
-                        metadata: metadata
-                    )
-                    try await self.upsertPropertyRowToSupabase(propertyPayload)
-                    try await self.upsertSessionRowToSupabase(sessionPayload)
+                guard let built = try self.makeQueuedSessionMutation(
+                    property: property,
+                    session: session,
+                    metadata: metadata
+                ) else {
+                    print("[OfflineQueue] skipped entityType=session entityID=\(session.id.uuidString) reason=payload_build_failed")
+                    return
                 }
+                queuedMutation = built
+            } catch {
+                print(
+                    "[OfflineQueue] skipped entityType=session entityID=\(session.id.uuidString) " +
+                    "reason=payload_encode_failed error=\(error.localizedDescription)"
+                )
+                return
+            }
+
+            guard self.remoteMutationPathAvailable(for: orgID) else {
+                self.enqueueOfflineMutation(queuedMutation, reason: "remote_unavailable")
+                return
+            }
+
+            do {
+                let payload = try JSONDecoder().decode(
+                    QueuedSessionMutationPayload.self,
+                    from: queuedMutation.payloadData
+                )
+                try await self.performQueuedSessionRemoteWrite(
+                    property: property,
+                    session: session,
+                    metadata: metadata,
+                    payload: payload
+                )
 
                 print(
                     "[CutoverShadowWrite] result=success entity=session " +
                     "phase=\(self.cutoverPhase.rawValue) propertyID=\(property.id.uuidString) " +
                     "sessionID=\(session.id.uuidString)"
+                )
+                self.removeQueuedMutationIfPresent(
+                    idempotencyKey: queuedMutation.idempotencyKey,
+                    reason: "direct_session_success"
                 )
 
                 Task(priority: .background) { [weak self] in
@@ -2221,6 +2985,7 @@ final class AppState: ObservableObject {
                     "phase=\(self.cutoverPhase.rawValue) propertyID=\(property.id.uuidString) " +
                     "sessionID=\(session.id.uuidString) error=\(error.localizedDescription)"
                 )
+                self.enqueueOfflineMutation(queuedMutation, reason: "remote_write_failed")
             }
         }
     }
@@ -2431,7 +3196,8 @@ final class AppState: ObservableObject {
                 }
             }
 
-            DispatchQueue.main.async {
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
                 NotificationCenter.default.post(name: .scoutClearLocalUICache, object: nil)
             }
 
@@ -5660,7 +6426,8 @@ final class AppState: ObservableObject {
         DispatchQueue.global(qos: .utility).async {
             let start = Date()
             let fetchedState = try? self.localStore.fetchPropertyAndOrganizationStateFromHubIndex(downloadTimeout: self.startupHubIndexTimeout)
-            DispatchQueue.main.async {
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
                 if let fetchedState, !fetchedState.properties.isEmpty {
                     let elapsedMs = Int(Date().timeIntervalSince(start) * 1000)
                     self.logHubFetch(
@@ -5695,7 +6462,7 @@ final class AppState: ObservableObject {
     }
 
     func refreshProperties() {
-        cloudBackupManager.refreshStatus()
+        cloudBackupManager?.refreshStatus()
         setLoadingState(true)
         guard isRemotePropertyRefreshEnabled else {
             performLocalPropertyRefreshFallback()
@@ -5703,14 +6470,15 @@ final class AppState: ObservableObject {
             return
         }
 
-        Task { @MainActor in
+        Task { @MainActor [weak self] in
+            guard let self else { return }
             defer { self.setLoadingState(false) }
             await self.performForegroundRemotePropertyRefresh()
         }
     }
 
     func refreshPropertiesInBackground() {
-        cloudBackupManager.refreshStatus()
+        cloudBackupManager?.refreshStatus()
         if isStartupHydrationInProgress {
             return
         }
@@ -5744,7 +6512,8 @@ final class AppState: ObservableObject {
                 return !withinStartupFallbackGraceWindow
             }()
 
-            DispatchQueue.main.async {
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
                 if let fastPayload, fastHasProperties || self.allProperties.isEmpty {
                     self.applyRefreshPayload(fastPayload)
                     self.scheduleOffloadEligibleSessionMedia(excludingSessionID: self.currentSession?.id)
@@ -5755,14 +6524,16 @@ final class AppState: ObservableObject {
                 if !fastHasProperties, withinStartupFallbackGraceWindow {
                     self.setLoadingState(false)
                     self.isBackgroundRefreshInFlight = false
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
+                        guard let self else { return }
                         self.refreshPropertiesInBackground()
                     }
                     return
                 }
                 if !shouldRunFallback {
                     if self.isRemotePropertyRefreshEnabled {
-                        Task { @MainActor in
+                        Task { @MainActor [weak self] in
+                            guard let self else { return }
                             await self.performBackgroundRemotePropertyRefresh()
                         }
                     } else {
@@ -5775,12 +6546,14 @@ final class AppState: ObservableObject {
 
             do {
                 let payload = try self.makeRefreshPayload()
-                DispatchQueue.main.async {
+                DispatchQueue.main.async { [weak self] in
+                    guard let self else { return }
                     self.applyRefreshPayload(payload)
                     self.scheduleOffloadEligibleSessionMedia(excludingSessionID: self.currentSession?.id)
                     self.setLoadingState(false)
                     if self.isRemotePropertyRefreshEnabled {
-                        Task { @MainActor in
+                        Task { @MainActor [weak self] in
+                            guard let self else { return }
                             await self.performBackgroundRemotePropertyRefresh()
                         }
                     } else {
@@ -5788,7 +6561,8 @@ final class AppState: ObservableObject {
                     }
                 }
             } catch {
-                DispatchQueue.main.async {
+                DispatchQueue.main.async { [weak self] in
+                    guard let self else { return }
                     // Preserve current in-memory view on transient iCloud read failures.
                     print("[PropertiesRefresh] transient read failure: \(error.localizedDescription)")
                     self.setLoadingState(false)
@@ -6447,7 +7221,7 @@ final class AppState: ObservableObject {
                 selectedPropertyID = nil
                 clearCurrentSession()
             }
-            cloudBackupManager.markDataChanged(scheduleBackupAfter: 0)
+            cloudBackupManager?.markDataChanged(scheduleBackupAfter: 0)
             return true
         } catch {
             if handleDeletePropertyNotFound(id: id, error: error) {
@@ -6470,7 +7244,7 @@ final class AppState: ObservableObject {
                 selectedPropertyID = nil
                 clearCurrentSession()
             }
-            cloudBackupManager.markDataChanged(scheduleBackupAfter: 0)
+            cloudBackupManager?.markDataChanged(scheduleBackupAfter: 0)
             return true
         } catch {
             if handleDeletePropertyNotFound(id: id, error: error) {
@@ -6506,7 +7280,7 @@ final class AppState: ObservableObject {
         if let currentSession, currentSession.status == .draft, currentSession.propertyID == selectedPropertyID {
             print("[StartSession] propertyID=\(selectedPropertyID.uuidString) blockedReason=none pendingDeliveryExists=\(pendingDeliveryExists) reExportEligibleExists=\(reExportEligibleExists)")
             logActiveSession(currentSession)
-            cloudBackupManager.setCaptureModeActive(true)
+            cloudBackupManager?.setCaptureModeActive(true)
             return currentSession
         }
         
@@ -6516,7 +7290,7 @@ final class AppState: ObservableObject {
             .first {
             currentSession = draft
             print("[StartSession] propertyID=\(selectedPropertyID.uuidString) blockedReason=none pendingDeliveryExists=\(pendingDeliveryExists) reExportEligibleExists=\(reExportEligibleExists)")
-            cloudBackupManager.setCaptureModeActive(true)
+            cloudBackupManager?.setCaptureModeActive(true)
             return draft
         }
 
@@ -6525,7 +7299,7 @@ final class AppState: ObservableObject {
         print("[StartSession] propertyID=\(selectedPropertyID.uuidString) blockedReason=none pendingDeliveryExists=\(pendingDeliveryExists) reExportEligibleExists=\(reExportEligibleExists)")
         let persisted = (try? localStore.upsertSession(session)) ?? session
         currentSession = persisted
-        cloudBackupManager.setCaptureModeActive(true)
+        cloudBackupManager?.setCaptureModeActive(true)
         reloadSessionCache(for: selectedPropertyID)
         schedulePhaseBSessionShadowWrite(for: persisted)
         return persisted
@@ -6567,14 +7341,14 @@ final class AppState: ObservableObject {
         reloadSessionCache(for: persisted.propertyID)
         schedulePhaseBSessionShadowWrite(for: persisted)
         scheduleOffloadEligibleSessionMedia(excludingSessionID: currentSession?.id)
-        cloudBackupManager.setCaptureModeActive(false)
+        cloudBackupManager?.setCaptureModeActive(false)
         triggerBackupForLifecycleEvent()
     }
     
     func clearCurrentSession() {
         scheduleOffloadEligibleSessionMedia(excludingSessionID: currentSession?.id)
         currentSession = nil
-        cloudBackupManager.setCaptureModeActive(false)
+        cloudBackupManager?.setCaptureModeActive(false)
     }
     
     func draftSession(for propertyID: UUID) -> Session? {
@@ -6651,7 +7425,7 @@ final class AppState: ObservableObject {
         schedulePhaseBSessionShadowWrite(for: persisted)
         scheduleSessionArchiveSnapshot(persisted, trigger: "markCurrentSessionExported")
         scheduleOffloadEligibleSessionMedia(excludingSessionID: currentSession?.id)
-        cloudBackupManager.setCaptureModeActive(false)
+        cloudBackupManager?.setCaptureModeActive(false)
         triggerBackupForLifecycleEvent()
     }
 
@@ -6671,7 +7445,7 @@ final class AppState: ObservableObject {
         schedulePhaseBSessionShadowWrite(for: persisted)
         scheduleSessionArchiveSnapshot(persisted, trigger: "sealCurrentSessionForExportLater")
         scheduleOffloadEligibleSessionMedia(excludingSessionID: currentSession?.id)
-        cloudBackupManager.setCaptureModeActive(false)
+        cloudBackupManager?.setCaptureModeActive(false)
         triggerBackupForLifecycleEvent()
     }
 
@@ -6690,7 +7464,7 @@ final class AppState: ObservableObject {
         schedulePhaseBSessionShadowWrite(for: persisted)
         scheduleSessionArchiveSnapshot(persisted, trigger: "sealCurrentSessionForExportNow")
         scheduleOffloadEligibleSessionMedia(excludingSessionID: currentSession?.id)
-        cloudBackupManager.setCaptureModeActive(false)
+        cloudBackupManager?.setCaptureModeActive(false)
         triggerBackupForLifecycleEvent()
     }
     
@@ -6699,7 +7473,7 @@ final class AppState: ObservableObject {
         guard let draft = draftSession(for: propertyID) else { return nil }
         selectedPropertyID = propertyID
         currentSession = draft
-        cloudBackupManager.setCaptureModeActive(true)
+        cloudBackupManager?.setCaptureModeActive(true)
         return draft
     }
 
@@ -6742,7 +7516,7 @@ final class AppState: ObservableObject {
             schedulePhaseBSessionShadowWrite(for: persisted)
             scheduleSessionArchiveSnapshot(persisted, trigger: "markSessionExported")
             scheduleOffloadEligibleSessionMedia(excludingSessionID: currentSession?.id)
-            cloudBackupManager.setCaptureModeActive(false)
+            cloudBackupManager?.setCaptureModeActive(false)
             triggerBackupForLifecycleEvent()
             return true
         } catch {
@@ -6763,7 +7537,7 @@ final class AppState: ObservableObject {
                 clearCurrentSession()
             }
             reloadSessionCache(for: propertyID)
-            cloudBackupManager.markDataChanged(scheduleBackupAfter: 0)
+            cloudBackupManager?.markDataChanged(scheduleBackupAfter: 0)
             return true
         } catch {
             return false
@@ -6813,16 +7587,16 @@ final class AppState: ObservableObject {
            properties.contains(where: { $0.id == restoredSelectedPropertyID }) {
             selectedPropertyID = restoredSelectedPropertyID
         }
-        cloudBackupManager.refreshStatus()
+        cloudBackupManager?.refreshStatus()
         NotificationCenter.default.post(name: .scoutClearLocalUICache, object: nil)
     }
 
     func backupNow() {
-        cloudBackupManager.backupNow()
+        cloudBackupManager?.backupNow()
     }
 
     func refreshBackupStatus() {
-        cloudBackupManager.refreshStatus()
+        cloudBackupManager?.refreshStatus()
     }
 
     func backupStatusSubtitle() -> String {
@@ -6836,7 +7610,11 @@ final class AppState: ObservableObject {
     }
 
     func restoreLatestBackup(completion: @escaping (String?) -> Void) {
-        cloudBackupManager.refreshStatus()
+        cloudBackupManager?.refreshStatus()
+        guard let cloudBackupManager else {
+            completion("No restorable backup is available yet.")
+            return
+        }
         let status = cloudBackupStatus
         guard status.iCloudAvailable else {
             completion("iCloud is unavailable.")
@@ -6850,14 +7628,16 @@ final class AppState: ObservableObject {
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self else { return }
             do {
-                let restoredSelectedPropertyID = try self.cloudBackupManager.restoreLatestBackup(mode: .mergeMissingPropertiesOnly)
-                DispatchQueue.main.async {
+                let restoredSelectedPropertyID = try cloudBackupManager.restoreLatestBackup(mode: .mergeMissingPropertiesOnly)
+                DispatchQueue.main.async { [weak self] in
+                    guard let self else { return }
                     self.completeMigrationImport(restoredSelectedPropertyID: restoredSelectedPropertyID)
                     completion(nil)
                 }
             } catch {
-                DispatchQueue.main.async {
-                    self.cloudBackupManager.refreshStatus()
+                DispatchQueue.main.async { [weak self] in
+                    guard let self else { return }
+                    self.cloudBackupManager?.refreshStatus()
                     completion(error.localizedDescription)
                 }
             }
@@ -6865,19 +7645,20 @@ final class AppState: ObservableObject {
     }
 
     func triggerBackupForLifecycleEvent() {
-        cloudBackupManager.setCaptureModeActive(false)
-        cloudBackupManager.markDataChanged(scheduleBackupAfter: 0)
+        cloudBackupManager?.setCaptureModeActive(false)
+        cloudBackupManager?.markDataChanged(scheduleBackupAfter: 0)
     }
 
     func handleSceneDidEnterBackground() {
-        cloudBackupManager.scheduleAutomaticBackup(after: 0)
+        cloudBackupManager?.scheduleAutomaticBackup(after: 0)
     }
 
     func handleSceneDidBecomeActive() {
         queuePendingSupabaseMediaBackfillIfNeeded(reason: "scene_active")
         guard isOrganizationContextReady else { return }
-        Task { @MainActor in
-            await performSyncDeltaPull(source: "foreground")
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            await performRemoteConvergenceCycle(source: "foreground")
         }
     }
 
@@ -6961,6 +7742,43 @@ final class AppState: ObservableObject {
 
     func _debugRunPendingSupabaseMediaBackfillForTests(reason: String = "test") async -> SupabaseMediaBackfillRunSummary {
         await runPendingSupabaseMediaBackfill(reason: reason)
+    }
+
+    func _debugSetOfflineReplayInFlightForTests(_ inFlight: Bool) {
+        let _: Void = offlineReplayStateQueue.sync {
+            isOfflineReplayInFlight = inFlight
+        }
+    }
+
+    func _debugIsOfflineReplayInFlightForTests() -> Bool {
+        offlineReplayStateQueue.sync { isOfflineReplayInFlight }
+    }
+
+    @MainActor
+    func _debugSetOfflineReplayEnvironmentForTests(
+        activeOrganizationID: UUID?,
+        ready: Bool = true,
+        clientConfigured: Bool = true,
+        authenticated: Bool = true,
+        authenticationReady: Bool = true
+    ) {
+        self.activeOrganizationID = activeOrganizationID
+        self.isOrganizationContextReady = ready
+        self.supabaseClient = clientConfigured
+            ? SupabaseClient(
+                supabaseURL: URL(string: "https://example.supabase.co")!,
+                supabaseKey: "debug-anon-key"
+            )
+            : nil
+        self.isAuthenticationReady = authenticationReady
+        self.authenticatedSupabaseUser = authenticated
+            ? AuthenticatedSupabaseUser(id: UUID(), email: "debug@example.com")
+            : nil
+    }
+
+    @MainActor
+    func _debugPerformOfflineReplayForTests(source: String = "test") async -> OfflineReplayRunSummary {
+        await performOfflineReplay(source: source)
     }
 
     @MainActor

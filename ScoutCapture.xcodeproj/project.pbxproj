@@ -21,6 +21,7 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
+		D303564F2F91C96200147CA7 /* ScoutCapture.xctestplan */ = {isa = PBXFileReference; lastKnownFileType = file; path = ScoutCapture.xctestplan; sourceTree = "<group>"; };
 		D35FBC532F324104009057B0 /* ScoutCapture.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = ScoutCapture.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		E54A7A7524D14C26A9A7B101 /* ScoutCaptureTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = ScoutCaptureTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
@@ -73,6 +74,7 @@
 		D35FBC4A2F324104009057B0 = {
 			isa = PBXGroup;
 			children = (
+				D303564F2F91C96200147CA7 /* ScoutCapture.xctestplan */,
 				D35FBC552F324104009057B0 /* ScoutCapture */,
 				E54A7A7524D14C26A9A7B102 /* ScoutCaptureTests */,
 				D35FBC542F324104009057B0 /* Products */,
