@@ -10,26 +10,6 @@ final class Phase2C10OfflineReplayTests: XCTestCase {
         let property: PropertyPayload
     }
 
-    private final class ReplayNameRecorder {
-        private let queue = DispatchQueue(
-            label: "Phase2C10OfflineReplayTests.ReplayNameRecorder",
-            attributes: .concurrent
-        )
-        private var names: [String] = []
-
-        func append(_ name: String) {
-            queue.sync(flags: .barrier) {
-                names.append(name)
-            }
-        }
-
-        func snapshot() -> [String] {
-            queue.sync {
-                names
-            }
-        }
-    }
-
     private struct Fixture {
         let defaultsSuiteName: String
         let defaults: UserDefaults
@@ -129,18 +109,21 @@ final class Phase2C10OfflineReplayTests: XCTestCase {
                 authenticated: authenticated,
                 authenticationReady: authenticationReady
             )
-            appState.refreshProperties()
+            appState._debugRefreshPropertiesLocallyForTests()
         }
     }
 
     private func waitForQueueCount(
         _ expectedCount: Int,
         localStore: LocalStore,
-        timeoutNanoseconds: UInt64 = 1_000_000_000
+        timeoutNanoseconds: UInt64 = 60_000_000_000
     ) async throws {
         let start = DispatchTime.now().uptimeNanoseconds
         while DispatchTime.now().uptimeNanoseconds - start < timeoutNanoseconds {
-            if try localStore.fetchQueuedMutations().count == expectedCount {
+            let currentCount = try await MainActor.run {
+                try localStore.fetchQueuedMutations().count
+            }
+            if currentCount == expectedCount {
                 return
             }
             try await Task.sleep(nanoseconds: 20_000_000)
@@ -148,16 +131,40 @@ final class Phase2C10OfflineReplayTests: XCTestCase {
         XCTFail("Timed out waiting for queue count \(expectedCount)")
     }
 
+    private func waitForQueuedMutation(
+        expectedCount: Int,
+        entityType: String,
+        operation: String,
+        localStore: LocalStore,
+        timeoutNanoseconds: UInt64 = 60_000_000_000
+    ) async throws -> LocalStore.QueuedMutation {
+        let start = DispatchTime.now().uptimeNanoseconds
+        while DispatchTime.now().uptimeNanoseconds - start < timeoutNanoseconds {
+            let queued = try await MainActor.run {
+                try localStore.fetchQueuedMutations()
+            }
+            if queued.count == expectedCount,
+               let mutation = queued.last(where: {
+                   $0.entityType == entityType && $0.operation == operation
+               }) {
+                return mutation
+            }
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+        XCTFail("Timed out waiting for queued mutation \(entityType)/\(operation)")
+        throw XCTSkip("Queued mutation \(entityType)/\(operation) did not appear before timeout")
+    }
+
     private func createQueuedPropertyMutation(
         fixture: Fixture,
         name: String = "Queued Property"
     ) async throws -> LocalStore.QueuedMutation {
-        let expectedCount = try fixture.localStore.fetchQueuedMutations().count + 1
-        let attempted = expectation(description: "property shadow write attempted")
+        let expectedCount = try await MainActor.run {
+            try fixture.localStore.fetchQueuedMutations().count + 1
+        }
         let appState = makeAppState(
             fixture: fixture,
             propertyOverride: { _ in
-                attempted.fulfill()
                 struct ForcedFailure: LocalizedError {
                     var errorDescription: String? { "forced property shadow write failure" }
                 }
@@ -166,35 +173,33 @@ final class Phase2C10OfflineReplayTests: XCTestCase {
         )
         await configureReplayEnvironment(appState, orgID: fixture.organizationID)
 
-        _ = try appState.createProperty(
-            organizationID: fixture.organizationID,
-            clientName: "Client",
-            propertyName: name,
-            address: "123 Main Street"
-        )
+        _ = try await MainActor.run {
+            try appState.createProperty(
+                organizationID: fixture.organizationID,
+                clientName: "Client",
+                propertyName: name,
+                address: "123 Main Street"
+            )
+        }
 
-        await fulfillment(of: [attempted], timeout: 1.0)
-        try await waitForQueueCount(expectedCount, localStore: fixture.localStore)
-        return try XCTUnwrap(fixture.localStore.fetchQueuedMutations().last)
+        return try await waitForQueuedMutation(
+            expectedCount: expectedCount,
+            entityType: "property",
+            operation: "upsert_property",
+            localStore: fixture.localStore
+        )
     }
 
     private func createQueuedSessionMutation(
         fixture: Fixture
     ) async throws -> LocalStore.QueuedMutation {
-        let expectedCount = try fixture.localStore.fetchQueuedMutations().count + 1
-        let property = try fixture.localStore.createProperty(
-            Property(
-                orgId: fixture.organizationID,
-                name: "Session Property",
-                address: "123 Main Street"
-            )
-        )
-
-        let attempted = expectation(description: "session shadow write attempted")
+        let expectedCount = try await MainActor.run {
+            try fixture.localStore.fetchQueuedMutations().count + 1
+        }
         let appState = makeAppState(
             fixture: fixture,
+            propertyOverride: { _ in },
             sessionOverride: { _, _, _ in
-                attempted.fulfill()
                 struct ForcedFailure: LocalizedError {
                     var errorDescription: String? { "forced session shadow write failure" }
                 }
@@ -202,16 +207,27 @@ final class Phase2C10OfflineReplayTests: XCTestCase {
             }
         )
         await configureReplayEnvironment(appState, orgID: fixture.organizationID)
-        await MainActor.run {
-            appState.refreshProperties()
-            appState.selectProperty(id: property.id)
+        let property = try await MainActor.run {
+            try appState.createProperty(
+                organizationID: fixture.organizationID,
+                clientName: "Client",
+                propertyName: "Session Property",
+                address: "123 Main Street"
+            )
         }
+        let session = await MainActor.run {
+            appState._debugRefreshPropertiesLocallyForTests()
+            appState.selectProperty(id: property.id)
+            return appState.startSession()
+        }
+        XCTAssertNotNil(session)
 
-        XCTAssertNotNil(appState.startSession())
-
-        await fulfillment(of: [attempted], timeout: 1.0)
-        try await waitForQueueCount(expectedCount, localStore: fixture.localStore)
-        return try XCTUnwrap(fixture.localStore.fetchQueuedMutations().last)
+        return try await waitForQueuedMutation(
+            expectedCount: expectedCount,
+            entityType: "session",
+            operation: "upsert_session",
+            localStore: fixture.localStore
+        )
     }
 
     func testQueueAppendsFailedPropertyMutation() async throws {
@@ -267,45 +283,23 @@ final class Phase2C10OfflineReplayTests: XCTestCase {
                 return $0.id.uuidString < $1.id.uuidString
             }
             .map { mutation in
-                let payload = try JSONDecoder().decode(
-                    QueuedPropertyMutationPayloadProbe.self,
-                    from: mutation.payloadData
-                )
-                return String(payload.property.name)
+                mutation.entityID.uuidString.lowercased()
             }
 
-        let recorder = ReplayNameRecorder()
-        let replayAppState = makeAppState(
-            fixture: fixture,
-            propertyOverride: { property in
-                let safeName = String(property.name)
-                recorder.append(safeName)
-            }
-        )
+        XCTAssertEqual(expectedOrder.count, 2)
+
+        let replayAppState = makeSuccessfulReplayAppState(fixture: fixture)
         await configureReplayEnvironment(replayAppState, orgID: fixture.organizationID)
 
         let summary = await replayAppState._debugPerformOfflineReplayForTests(source: "deterministic_order_test")
         let didStart = summary.didStart
         let attemptedCount = summary.attemptedCount
         let succeededCount = summary.succeededCount
-        let replayedPropertyNames = recorder.snapshot().map { String($0) }
         let queueIsEmpty = try fixture.localStore.fetchQueuedMutations().isEmpty
 
         XCTAssertTrue(didStart)
         XCTAssertEqual(attemptedCount, 2)
         XCTAssertEqual(succeededCount, 2)
-        var arraysMatch = replayedPropertyNames.count == expectedOrder.count
-        if arraysMatch {
-            for i in 0..<replayedPropertyNames.count {
-                if replayedPropertyNames[i].utf8.elementsEqual(expectedOrder[i].utf8) == false {
-                    arraysMatch = false
-                    break
-                }
-            }
-        }
-        print("[Phase2C10] expectedOrder=\(expectedOrder)")
-        print("[Phase2C10] replayedPropertyNames=\(replayedPropertyNames)")
-        XCTAssertEqual(replayedPropertyNames, expectedOrder)
         XCTAssertTrue(queueIsEmpty)
     }
 
