@@ -5876,6 +5876,8 @@ struct PropertySessionView: View {
     @State private var didStartOpenFlow: Bool = false
     @State private var openFlowToken: Int = 0
     @State private var hasSessionReadyForProperty: Bool = false
+    @State private var isCheckingSessionCoordination: Bool = false
+    @State private var sessionEntryBlock: AppState.SessionEntryCoordinationBlock? = nil
 
     private let camera = CameraManager.shared
     private let timeoutSeconds: Double = 4.0
@@ -5911,11 +5913,11 @@ struct PropertySessionView: View {
                     _ = appState.startSession()
                 }
                 refreshSessionReadiness()
-                beginOpenFlow()
+                beginSessionCoordinationFlow()
             }
             .onChange(of: appState.currentSession?.id) { _, _ in
                 refreshSessionReadiness()
-                if camera.isPreviewRunning && didStartOpenFlow && hasSessionReadyForProperty {
+                if sessionEntryBlock == nil && camera.isPreviewRunning && didStartOpenFlow && hasSessionReadyForProperty {
                     completeOpenFlow()
                 }
             }
@@ -5968,8 +5970,54 @@ struct PropertySessionView: View {
                         }
                         .buttonStyle(.plain)
                     }
+                } else if let sessionEntryBlock {
+                    Text("Session Locked")
+                        .font(.system(size: 24, weight: .bold))
+                        .foregroundColor(.white)
+
+                    Text(lockMessage(for: sessionEntryBlock))
+                        .font(.system(size: 14, weight: .medium))
+                        .foregroundColor(.white.opacity(0.86))
+                        .multilineTextAlignment(.center)
+
+                    HStack(spacing: 10) {
+                        Button {
+                            claimBlockedSession()
+                        } label: {
+                            Text(isCheckingSessionCoordination ? "Claiming..." : "Claim Session")
+                                .font(.system(size: 16, weight: .semibold))
+                                .foregroundColor(.white)
+                                .frame(maxWidth: .infinity)
+                                .frame(height: 44)
+                                .background(Color.blue)
+                                .clipShape(Capsule())
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(isCheckingSessionCoordination)
+
+                        Button {
+                            Task {
+                                await appState.releaseCurrentSessionCoordinationLockIfOwned()
+                                dismiss()
+                            }
+                        } label: {
+                            Text("Back")
+                                .font(.system(size: 16, weight: .semibold))
+                                .foregroundColor(.white)
+                                .frame(maxWidth: .infinity)
+                                .frame(height: 44)
+                                .background(Color.white.opacity(0.08))
+                                .clipShape(Capsule())
+                                .overlay(
+                                    Capsule()
+                                        .stroke(Color.white.opacity(0.24), lineWidth: 1)
+                                )
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(isCheckingSessionCoordination)
+                    }
                 } else {
-                    Text("Opening camera...")
+                    Text(isCheckingSessionCoordination ? "Checking session..." : "Opening camera...")
                         .font(.system(size: 24, weight: .bold))
                         .foregroundColor(.white)
                     ProgressView()
@@ -6034,5 +6082,63 @@ struct PropertySessionView: View {
     private func refreshSessionReadiness() {
         let session = appState.currentSession
         hasSessionReadyForProperty = session?.propertyID == propertyID && session?.status == .draft
+    }
+
+    private func beginSessionCoordinationFlow(forceClaim: Bool = false) {
+        print(
+            "[SessionCoordinationUI] event=begin " +
+            "propertyID=\(propertyID.uuidString) " +
+            "forceClaim=\(forceClaim) " +
+            "currentSessionID=\(appState.currentSession?.id.uuidString ?? "nil") " +
+            "currentSessionStatus=\(appState.currentSession?.status.rawValue ?? "nil")"
+        )
+        guard let sessionID = appState.currentSession?.id else {
+            beginOpenFlow(forceRetry: true)
+            return
+        }
+        isCheckingSessionCoordination = true
+        sessionEntryBlock = nil
+        Task {
+            let status = await appState.evaluateSessionEntryCoordination(
+                propertyID: propertyID,
+                sessionID: sessionID,
+                forceClaim: forceClaim
+            )
+            switch status {
+            case .allowed:
+                print("[SessionCoordinationUI] event=result result=allowed")
+            case .blocked(let block):
+                let lockedAt = block.lockedAt.map { ISO8601DateFormatter().string(from: $0) } ?? "nil"
+                print(
+                    "[SessionCoordinationUI] event=result result=blocked " +
+                    "ownerDescription=\(block.ownerDescription) " +
+                    "lockedAt=\(lockedAt)"
+                )
+            }
+            await MainActor.run {
+                isCheckingSessionCoordination = false
+                switch status {
+                case .allowed:
+                    sessionEntryBlock = nil
+                    beginOpenFlow(forceRetry: true)
+                case .blocked(let block):
+                    sessionEntryBlock = block
+                }
+            }
+        }
+    }
+
+    private func claimBlockedSession() {
+        beginSessionCoordinationFlow(forceClaim: true)
+    }
+
+    private func lockMessage(for block: AppState.SessionEntryCoordinationBlock) -> String {
+        let formatter = DateFormatter()
+        formatter.dateStyle = .medium
+        formatter.timeStyle = .short
+        if let lockedAt = block.lockedAt {
+            return "Locked by \(block.ownerDescription) since \(formatter.string(from: lockedAt))."
+        }
+        return "Locked by \(block.ownerDescription)."
     }
 }

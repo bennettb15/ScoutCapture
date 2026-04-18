@@ -86,6 +86,7 @@ struct BackendFeatureFlags {
     let supabasePropertyReadEnabled: Bool
     let mediaSupabaseUploadEnabled: Bool
     let syncDeltaEnabled: Bool
+    let sessionCoordinationEnabled: Bool
 
     // The cutover phase is derived from the existing backend flags. Property-list
     // remote reads remain separately controlled by `supabase_property_read_enabled`
@@ -116,7 +117,8 @@ struct BackendFeatureFlags {
             supabaseReadEnabled: Self.boolValue(for: "supabase_read_enabled", bundle: bundle, userDefaults: userDefaults),
             supabasePropertyReadEnabled: Self.boolValue(for: "supabase_property_read_enabled", bundle: bundle, userDefaults: userDefaults),
             mediaSupabaseUploadEnabled: Self.boolValue(for: "media_supabase_upload_enabled", bundle: bundle, userDefaults: userDefaults),
-            syncDeltaEnabled: Self.boolValue(for: "sync_delta_enabled", bundle: bundle, userDefaults: userDefaults)
+            syncDeltaEnabled: Self.boolValue(for: "sync_delta_enabled", bundle: bundle, userDefaults: userDefaults),
+            sessionCoordinationEnabled: Self.boolValue(for: "session_coordination_enabled", bundle: bundle, userDefaults: userDefaults)
         )
     }
 
@@ -177,6 +179,11 @@ final class AppState: ObservableObject {
         Date?,
         Date?
     ) async throws -> ([RemotePropertyDeltaRecord], [RemoteSessionDeltaRecord])
+    private typealias SessionCoordinationFetchOverride = (
+        UUID,
+        UUID,
+        UUID
+    ) async throws -> RemoteSessionCoordinationRecord?
 #endif
 
     struct PendingSupabaseMediaBackfillCandidate: Equatable {
@@ -216,6 +223,45 @@ final class AppState: ObservableObject {
         let session: SupabaseSessionPayload
     }
 
+    struct SessionCoordinationDiff: Equatable, Identifiable {
+        let id: String
+        let label: String
+        let remoteValue: String
+        let localValue: String
+    }
+
+    struct SessionCoordinationConflictReview: Equatable {
+        let sessionID: UUID
+        let diffs: [SessionCoordinationDiff]
+    }
+
+    struct SessionEntryCoordinationBlock: Equatable {
+        let ownerDescription: String
+        let lockedAt: Date?
+    }
+
+    enum SessionEntryCoordinationStatus: Equatable {
+        case allowed
+        case blocked(SessionEntryCoordinationBlock)
+    }
+
+    private struct SessionCoordinationTier1Snapshot: Codable, Equatable {
+        struct Entry: Codable, Equatable {
+            let id: UUID
+            let value: String
+        }
+
+        let priorities: [Entry]
+        let trades: [Entry]
+        let flaggedReasons: [Entry]
+    }
+
+    private struct SessionCoordinationState: Equatable {
+        var lockedByUserID: UUID?
+        var lockedByDeviceID: String?
+        var lockedAt: Date?
+    }
+
 #if DEBUG
     struct DebugRemotePropertyDeltaInput {
         let id: UUID
@@ -246,6 +292,17 @@ final class AppState: ObservableObject {
         let completedAt: String?
         let updatedAt: Date
         let deletedAt: Date?
+    }
+
+    struct DebugSessionCoordinationRemoteInput {
+        let sessionID: UUID
+        let orgID: UUID
+        let propertyID: UUID
+        let lockedByUserID: UUID?
+        let lockedByDeviceID: String?
+        let lockedAt: String?
+        let coordinationTier1Snapshot: String?
+        let updatedAt: Date?
     }
 #endif
 
@@ -371,6 +428,10 @@ final class AppState: ObservableObject {
         let status: String
         let startedAt: String
         let completedAt: String?
+        let lockedByUserID: UUID?
+        let lockedByDeviceID: String?
+        let lockedAt: String?
+        let coordinationTier1Snapshot: String?
 
         enum CodingKeys: String, CodingKey {
             case id
@@ -380,6 +441,32 @@ final class AppState: ObservableObject {
             case status
             case startedAt = "started_at"
             case completedAt = "completed_at"
+            case lockedByUserID = "locked_by_user_id"
+            case lockedByDeviceID = "locked_by_device_id"
+            case lockedAt = "locked_at"
+            case coordinationTier1Snapshot = "coordination_tier1_snapshot"
+        }
+    }
+
+    private struct RemoteSessionCoordinationRecord: Decodable {
+        let id: UUID
+        let orgID: UUID
+        let propertyID: UUID
+        let lockedByUserID: UUID?
+        let lockedByDeviceID: String?
+        let lockedAt: String?
+        let coordinationTier1Snapshot: String?
+        let updatedAt: Date?
+
+        enum CodingKeys: String, CodingKey {
+            case id
+            case orgID = "org_id"
+            case propertyID = "property_id"
+            case lockedByUserID = "locked_by_user_id"
+            case lockedByDeviceID = "locked_by_device_id"
+            case lockedAt = "locked_at"
+            case coordinationTier1Snapshot = "coordination_tier1_snapshot"
+            case updatedAt = "updated_at"
         }
     }
 
@@ -729,6 +816,7 @@ final class AppState: ObservableObject {
     private let selectedPropertyDefaultsKey = "scoutcapture.selectedPropertyID"
     private let activeOrganizationDefaultsKeyPrefix = "scoutcapture.activeOrganizationID"
     private let propertyActivationTimestampsDefaultsKey = "scoutcapture.propertyActivationTimestamps.v1"
+    private let deviceIdentifierDefaultsKey = "scoutcapture.deviceIdentifier.v1"
     private let reExportWindowDays = 7
     private let sessionMediaOffloadCooldown: TimeInterval = 30 * 60
     private let activatedPropertyRetentionWindow: TimeInterval = 7 * 24 * 60 * 60
@@ -765,9 +853,13 @@ final class AppState: ObservableObject {
     private var isSupabaseMediaBackfillInProgress: Bool = false
     private var isSyncDeltaPullInFlight: Bool = false
     private var isOfflineReplayInFlight: Bool = false
+    private var sessionCoordinationStateBySessionID: [UUID: SessionCoordinationState] = [:]
+    private var sessionCoordinationEntrySnapshotBySessionID: [UUID: String] = [:]
     private var lastForegroundSyncDeltaCompletedAt: Date?
 #if DEBUG
     private var syncDeltaFetchOverride: SyncDeltaFetchOverride?
+    private var sessionCoordinationFetchOverride: SessionCoordinationFetchOverride?
+    private var sessionCoordinationDebugRemoteRecords: [UUID: RemoteSessionCoordinationRecord] = [:]
 #endif
     private var authStateChangesTask: Task<Void, Never>?
     private var lastEnsuredUserProfileID: UUID?
@@ -2742,11 +2834,35 @@ final class AppState: ObservableObject {
         metadata: SessionMetadata,
         payload: QueuedSessionMutationPayload
     ) async throws {
+        print(
+            "[SessionCoordinationWrite] event=begin " +
+            "entityType=session " +
+            "entityID=\(session.id.uuidString) " +
+            "operation=upsert_session " +
+            "orgID=\(property.orgId?.uuidString ?? "nil")"
+        )
         if let sessionShadowWriteOverride {
             try await sessionShadowWriteOverride(property, session, metadata)
         } else {
-            try await upsertPropertyRowToSupabase(payload.property)
-            try await upsertSessionRowToSupabase(payload.session)
+            do {
+                try await upsertPropertyRowToSupabase(payload.property)
+                print(
+                    "[SessionCoordinationWrite] event=session_upsert_attempt " +
+                    "entityID=\(session.id.uuidString)"
+                )
+                try await upsertSessionRowToSupabase(payload.session)
+                print(
+                    "[SessionCoordinationWrite] event=session_upsert_success " +
+                    "entityID=\(session.id.uuidString)"
+                )
+            } catch {
+                print(
+                    "[SessionCoordinationWrite] event=failed " +
+                    "entityID=\(session.id.uuidString) " +
+                    "error=\(error.localizedDescription)"
+                )
+                throw error
+            }
         }
     }
 
@@ -3331,14 +3447,19 @@ final class AppState: ObservableObject {
         property: Property?,
         metadata: SessionMetadata
     ) -> SupabaseSessionPayload {
-        SupabaseSessionPayload(
+        let coordinationState = sessionCoordinationStateBySessionID[sessionID]
+        return SupabaseSessionPayload(
             id: sessionID,
             orgID: orgID,
             propertyID: propertyID,
             title: normalizedSupabaseText(metadata.propertyNameAtCapture ?? property?.name),
             status: metadata.status.rawValue,
             startedAt: metadata.startedAt.ISO8601Format(),
-            completedAt: metadata.endedAt?.ISO8601Format()
+            completedAt: metadata.endedAt?.ISO8601Format(),
+            lockedByUserID: coordinationState?.lockedByUserID,
+            lockedByDeviceID: normalizedSupabaseText(coordinationState?.lockedByDeviceID),
+            lockedAt: coordinationState?.lockedAt?.ISO8601Format(),
+            coordinationTier1Snapshot: sessionCoordinationTier1SnapshotString(metadata: metadata)
         )
     }
 
@@ -3358,9 +3479,534 @@ final class AppState: ObservableObject {
             .execute()
     }
 
+    private func fetchRemoteSessionCoordinationRecord(
+        orgID: UUID,
+        propertyID: UUID,
+        sessionID: UUID
+    ) async throws -> RemoteSessionCoordinationRecord? {
+#if DEBUG
+        if let cached = sessionCoordinationDebugRemoteRecords[sessionID],
+           cached.propertyID == propertyID {
+            return cached
+        }
+        if let sessionCoordinationFetchOverride {
+            return try await sessionCoordinationFetchOverride(orgID, propertyID, sessionID)
+        }
+        if AppStateTestEnvironment.isRunningUnderXCTest {
+            return nil
+        }
+#endif
+        guard let client = supabaseClient else { return nil }
+
+        let rows = try await client
+            .from("sessions")
+            .select("id, org_id, property_id, locked_by_user_id, locked_by_device_id, locked_at, coordination_tier1_snapshot, updated_at")
+            .eq("org_id", value: orgID.uuidString.lowercased())
+            .eq("property_id", value: propertyID.uuidString.lowercased())
+            .eq("id", value: sessionID.uuidString.lowercased())
+            .limit(1)
+            .execute()
+            .value as [RemoteSessionCoordinationRecord]
+
+        return rows.first
+    }
+
+    private func ownerDescription(
+        for lockedByUserID: UUID?,
+        lockedByDeviceID: String?
+    ) async -> String {
+        if let lockedByUserID, lockedByUserID == authenticatedSupabaseUser?.id {
+            return "You"
+        }
+        guard let lockedByUserID else {
+            if normalizedSupabaseText(lockedByDeviceID) != nil {
+                return "Another device"
+            }
+            return "Another user"
+        }
+        guard let client = supabaseClient else {
+            return "User \(lockedByUserID.uuidString.prefix(8))"
+        }
+
+        struct OwnerRecord: Decodable {
+            let fullName: String?
+            let email: String?
+
+            enum CodingKeys: String, CodingKey {
+                case fullName = "full_name"
+                case email
+            }
+        }
+
+        let rows: [OwnerRecord]
+        do {
+            rows = try await client
+                .from("users_profile")
+                .select("full_name, email")
+                .eq("id", value: lockedByUserID.uuidString.lowercased())
+                .limit(1)
+                .execute()
+                .value
+        } catch {
+            rows = []
+        }
+        if let first = rows.first {
+            if let fullName = normalizedSupabaseText(first.fullName) {
+                return fullName
+            }
+            if let email = normalizedSupabaseText(first.email) {
+                return email
+            }
+        }
+
+        return "User \(lockedByUserID.uuidString.prefix(8))"
+    }
+
+    private func setSessionCoordinationState(
+        sessionID: UUID,
+        lockedByUserID: UUID?,
+        lockedByDeviceID: String?,
+        lockedAt: Date?
+    ) {
+        sessionCoordinationStateBySessionID[sessionID] = SessionCoordinationState(
+            lockedByUserID: lockedByUserID,
+            lockedByDeviceID: lockedByDeviceID,
+            lockedAt: lockedAt
+        )
+    }
+
+    private func persistSessionCoordinationMutation(
+        property: Property,
+        session: Session,
+        metadata: SessionMetadata,
+        desiredState: SessionCoordinationState
+    ) async -> Bool {
+        print(
+            "[SessionCoordinationPersist] event=begin " +
+            "sessionID=\(session.id.uuidString) " +
+            "lockedByUserID=\(desiredState.lockedByUserID?.uuidString ?? "nil") " +
+            "lockedByDeviceID=\(desiredState.lockedByDeviceID ?? "nil") " +
+            "lockedAt=\(desiredState.lockedAt?.ISO8601Format() ?? "nil")"
+        )
+        setSessionCoordinationState(
+            sessionID: session.id,
+            lockedByUserID: desiredState.lockedByUserID,
+            lockedByDeviceID: desiredState.lockedByDeviceID,
+            lockedAt: desiredState.lockedAt
+        )
+#if DEBUG
+        sessionCoordinationDebugRemoteRecords[session.id] = RemoteSessionCoordinationRecord(
+            id: session.id,
+            orgID: property.orgId ?? UUID(),
+            propertyID: property.id,
+            lockedByUserID: desiredState.lockedByUserID,
+            lockedByDeviceID: desiredState.lockedByDeviceID,
+            lockedAt: desiredState.lockedAt?.ISO8601Format(),
+            coordinationTier1Snapshot: sessionCoordinationTier1SnapshotString(metadata: metadata),
+            updatedAt: Date()
+        )
+#endif
+
+        let queuedMutation: LocalStore.QueuedMutation
+        do {
+            guard let built = try makeQueuedSessionMutation(property: property, session: session, metadata: metadata) else {
+                return false
+            }
+            queuedMutation = built
+        } catch {
+            return false
+        }
+
+        do {
+            let payload = try JSONDecoder().decode(QueuedSessionMutationPayload.self, from: queuedMutation.payloadData)
+            print(
+                "[SessionCoordinationPersist] event=remote_write_attempt " +
+                "sessionID=\(session.id.uuidString)"
+            )
+            try await performQueuedSessionRemoteWrite(
+                property: property,
+                session: session,
+                metadata: metadata,
+                payload: payload
+            )
+            print(
+                "[SessionCoordinationPersist] event=remote_write_success " +
+                "sessionID=\(session.id.uuidString)"
+            )
+            removeQueuedMutationIfPresent(
+                idempotencyKey: queuedMutation.idempotencyKey,
+                reason: "session_coordination_direct_success"
+            )
+            return true
+        } catch {
+            print(
+                "[SessionCoordinationPersist] event=remote_write_failed " +
+                "sessionID=\(session.id.uuidString) " +
+                "error=\(error.localizedDescription)"
+            )
+            enqueueOfflineMutation(queuedMutation, reason: "session_coordination_write_failed")
+            return false
+        }
+    }
+
+    @MainActor
+    func evaluateSessionEntryCoordination(
+        propertyID: UUID,
+        sessionID: UUID,
+        forceClaim: Bool = false
+    ) async -> SessionEntryCoordinationStatus {
+        let property = properties.first(where: { $0.id == propertyID }) ?? allProperties.first(where: { $0.id == propertyID })
+        let session = sessions(for: propertyID).first(where: { $0.id == sessionID }) ?? currentSession
+        let metadata = try? localStore.loadSessionMetadata(propertyID: propertyID, sessionID: sessionID)
+        print(
+            "[SessionCoordinationEval] event=begin " +
+            "propertyID=\(propertyID.uuidString) " +
+            "sessionID=\(sessionID.uuidString) " +
+            "sessionStatus=\(session?.status.rawValue ?? "nil") " +
+            "sessionCoordinationEnabled=\(backendFeatureFlags.sessionCoordinationEnabled) " +
+            "supabaseEnabled=\(backendFeatureFlags.supabaseEnabled) " +
+            "shadowWriteEnabled=\(backendFeatureFlags.shadowWriteEnabled) " +
+            "propertyFound=\(property != nil) " +
+            "sessionFound=\(session != nil) " +
+            "metadataLoaded=\(metadata != nil) " +
+            "authenticated=\(authenticatedSupabaseUser != nil) " +
+            "clientAvailable=\(supabaseClient != nil)"
+        )
+        guard backendFeatureFlags.sessionCoordinationEnabled,
+              backendFeatureFlags.supabaseEnabled,
+              backendFeatureFlags.shadowWriteEnabled,
+              let property,
+              let orgID = property.orgId,
+              let session,
+              let metadata else {
+            print("[SessionCoordinationEval] event=early_return result=allowed reason=prereq_guard_failed")
+            return .allowed
+        }
+
+        guard authenticatedSupabaseUser != nil,
+              supabaseClient != nil else {
+            print("[SessionCoordinationEval] event=early_return result=blocked reason=coordination_unavailable ownerDescription=Session coordination unavailable lockedAt=nil")
+            return .blocked(
+                SessionEntryCoordinationBlock(
+                    ownerDescription: "Session coordination unavailable",
+                    lockedAt: nil
+                )
+            )
+        }
+
+        let currentUserID = authenticatedSupabaseUser?.id
+        let currentDeviceID = currentDeviceIdentifier()
+        print(
+            "[SessionCoordinationEval] event=fetch_remote " +
+            "propertyID=\(propertyID.uuidString) " +
+            "sessionID=\(sessionID.uuidString)"
+        )
+        let remoteRecord = try? await fetchRemoteSessionCoordinationRecord(
+            orgID: orgID,
+            propertyID: propertyID,
+            sessionID: sessionID
+        )
+        print(
+            "[SessionCoordinationEval] event=fetch_result " +
+            "found=\(remoteRecord != nil) " +
+            "lockedByUserID=\(remoteRecord?.lockedByUserID?.uuidString ?? "nil") " +
+            "lockedByDeviceID=\(remoteRecord?.lockedByDeviceID ?? "nil") " +
+            "lockedAt=\(remoteRecord?.lockedAt ?? "nil")"
+        )
+
+        if let remoteRecord,
+           remoteRecord.lockedByUserID != nil || normalizedSupabaseText(remoteRecord.lockedByDeviceID) != nil {
+            let isOwnedByCurrentActor =
+                remoteRecord.lockedByUserID == currentUserID &&
+                normalizedSupabaseText(remoteRecord.lockedByDeviceID) == currentDeviceID
+
+            if !forceClaim && !isOwnedByCurrentActor {
+                let owner = await ownerDescription(
+                    for: remoteRecord.lockedByUserID,
+                    lockedByDeviceID: remoteRecord.lockedByDeviceID
+                )
+                let blockedAt = remoteRecord.lockedAt ?? "nil"
+                print(
+                    "[SessionCoordinationEval] event=return result=blocked " +
+                    "reason=other_owner_lock ownerDescription=\(owner) lockedAt=\(blockedAt)"
+                )
+                return .blocked(
+                    SessionEntryCoordinationBlock(
+                        ownerDescription: owner,
+                        lockedAt: remoteRecord.lockedAt.flatMap(parseSupabaseDateString)
+                    )
+                )
+            }
+        }
+
+        let baselineSnapshot = remoteRecord?.coordinationTier1Snapshot ?? sessionCoordinationTier1SnapshotString(metadata: metadata) ?? ""
+        sessionCoordinationEntrySnapshotBySessionID[sessionID] = baselineSnapshot
+
+        let desiredState = SessionCoordinationState(
+            lockedByUserID: currentUserID,
+            lockedByDeviceID: currentDeviceID,
+            lockedAt: Date()
+        )
+        print(
+            "[SessionCoordinationEval] event=persist_claim " +
+            "sessionID=\(sessionID.uuidString) " +
+            "lockedByUserID=\(currentUserID?.uuidString ?? "nil") " +
+            "lockedByDeviceID=\(currentDeviceID) " +
+            "lockedAt=\(desiredState.lockedAt?.ISO8601Format() ?? "nil")"
+        )
+        _ = await persistSessionCoordinationMutation(
+            property: property,
+            session: session,
+            metadata: metadata,
+            desiredState: desiredState
+        )
+        print("[SessionCoordinationEval] event=return result=allowed sessionID=\(sessionID.uuidString)")
+        return .allowed
+    }
+
+    @MainActor
+    func preCompletionConflictReview(
+        propertyID: UUID,
+        sessionID: UUID
+    ) async -> SessionCoordinationConflictReview? {
+        guard backendFeatureFlags.sessionCoordinationEnabled,
+              backendFeatureFlags.supabaseEnabled,
+              let property = properties.first(where: { $0.id == propertyID }) ?? allProperties.first(where: { $0.id == propertyID }),
+              let orgID = property.orgId,
+              let baselineSnapshot = sessionCoordinationEntrySnapshotBySessionID[sessionID],
+              let metadata = try? localStore.loadSessionMetadata(propertyID: propertyID, sessionID: sessionID) else {
+            return nil
+        }
+
+        guard let remoteRecord = try? await fetchRemoteSessionCoordinationRecord(
+            orgID: orgID,
+            propertyID: propertyID,
+            sessionID: sessionID
+        ) else {
+            return nil
+        }
+
+        guard normalizedSupabaseText(remoteRecord.coordinationTier1Snapshot) != normalizedSupabaseText(baselineSnapshot) else {
+            return nil
+        }
+
+        let diffs = sessionCoordinationDiffs(
+            remoteSnapshotString: remoteRecord.coordinationTier1Snapshot,
+            localMetadata: metadata
+        )
+        guard !diffs.isEmpty else { return nil }
+        return SessionCoordinationConflictReview(sessionID: sessionID, diffs: diffs)
+    }
+
+    @MainActor
+    func releaseCurrentSessionCoordinationLockIfOwned() async {
+        guard backendFeatureFlags.sessionCoordinationEnabled,
+              let propertyID = selectedPropertyID,
+              let session = currentSession,
+              let property = properties.first(where: { $0.id == propertyID }) ?? allProperties.first(where: { $0.id == propertyID }),
+              let metadata = try? localStore.loadSessionMetadata(propertyID: propertyID, sessionID: session.id) else {
+            return
+        }
+
+        let sessionID = session.id
+        let releasedSession = session
+        let clearedState = SessionCoordinationState(
+            lockedByUserID: nil,
+            lockedByDeviceID: nil,
+            lockedAt: nil
+        )
+
+        let state = sessionCoordinationStateBySessionID[sessionID]
+        let lockedByDeviceID = state?.lockedByDeviceID ?? nil
+        let ownsByAuthenticatedUser =
+            state?.lockedByUserID == authenticatedSupabaseUser?.id &&
+            normalizedSupabaseText(lockedByDeviceID) == currentDeviceIdentifier()
+#if DEBUG
+        let ownsByCurrentTestProcess =
+            AppStateTestEnvironment.isRunningUnderXCTest &&
+            normalizedSupabaseText(lockedByDeviceID) == currentDeviceIdentifier()
+        #else
+        let ownsByCurrentTestProcess = false
+        #endif
+        guard ownsByAuthenticatedUser || ownsByCurrentTestProcess else {
+            return
+        }
+
+        if currentSession?.id == sessionID {
+            currentSession = releasedSession
+        }
+        if var indexedSessions = sessionIndexByProperty[propertyID],
+           let index = indexedSessions.firstIndex(where: { $0.id == sessionID }) {
+            indexedSessions[index] = releasedSession
+            sessionIndexByProperty[propertyID] = indexedSessions
+        }
+        if var indexedSessions = allSessionIndexByProperty[propertyID],
+           let index = indexedSessions.firstIndex(where: { $0.id == sessionID }) {
+            indexedSessions[index] = releasedSession
+            allSessionIndexByProperty[propertyID] = indexedSessions
+        }
+
+        setSessionCoordinationState(
+            sessionID: sessionID,
+            lockedByUserID: clearedState.lockedByUserID,
+            lockedByDeviceID: clearedState.lockedByDeviceID,
+            lockedAt: clearedState.lockedAt
+        )
+#if DEBUG
+        let cached = sessionCoordinationDebugRemoteRecords[sessionID]
+        sessionCoordinationDebugRemoteRecords[sessionID] = RemoteSessionCoordinationRecord(
+            id: sessionID,
+            orgID: cached?.orgID ?? property.orgId ?? UUID(),
+            propertyID: cached?.propertyID ?? property.id,
+            lockedByUserID: clearedState.lockedByUserID,
+            lockedByDeviceID: clearedState.lockedByDeviceID,
+            lockedAt: clearedState.lockedAt?.ISO8601Format(),
+            coordinationTier1Snapshot: cached?.coordinationTier1Snapshot ?? sessionCoordinationTier1SnapshotString(metadata: metadata),
+            updatedAt: Date()
+        )
+        if AppStateTestEnvironment.isRunningUnderXCTest {
+            return
+        }
+#endif
+
+        _ = await persistSessionCoordinationMutation(
+            property: property,
+            session: session,
+            metadata: metadata,
+            desiredState: clearedState
+        )
+        setSessionCoordinationState(
+            sessionID: sessionID,
+            lockedByUserID: clearedState.lockedByUserID,
+            lockedByDeviceID: clearedState.lockedByDeviceID,
+            lockedAt: clearedState.lockedAt
+        )
+    }
+
     private func normalizedSupabaseText(_ value: String?) -> String? {
         let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         return trimmed.isEmpty ? nil : trimmed
+    }
+
+    private func currentDeviceIdentifier() -> String {
+        if let existing = normalizedSupabaseText(userDefaults.string(forKey: deviceIdentifierDefaultsKey)) {
+            return existing
+        }
+        let generated = UUID().uuidString.lowercased()
+        userDefaults.set(generated, forKey: deviceIdentifierDefaultsKey)
+        return generated
+    }
+
+    private func sessionCoordinationTier1Snapshot(metadata: SessionMetadata) -> SessionCoordinationTier1Snapshot {
+        let priorities = metadata.shots
+            .compactMap { shot -> SessionCoordinationTier1Snapshot.Entry? in
+                guard let value = normalizedSessionPriority(shot.priority) else { return nil }
+                return SessionCoordinationTier1Snapshot.Entry(id: shot.shotID, value: value)
+            }
+            .sorted { $0.id.uuidString < $1.id.uuidString }
+
+        let trades = metadata.shots
+            .compactMap { shot -> SessionCoordinationTier1Snapshot.Entry? in
+                guard let value = normalizedSupabaseText(shot.trade) else { return nil }
+                return SessionCoordinationTier1Snapshot.Entry(id: shot.shotID, value: value)
+            }
+            .sorted { $0.id.uuidString < $1.id.uuidString }
+
+        let flaggedReasons = metadata.flaggedIssues
+            .compactMap { issue -> SessionCoordinationTier1Snapshot.Entry? in
+                guard let value = normalizedSupabaseText(issue.currentReason) else { return nil }
+                return SessionCoordinationTier1Snapshot.Entry(id: issue.issueID, value: value)
+            }
+            .sorted { $0.id.uuidString < $1.id.uuidString }
+
+        return SessionCoordinationTier1Snapshot(
+            priorities: priorities,
+            trades: trades,
+            flaggedReasons: flaggedReasons
+        )
+    }
+
+    private func normalizedSessionPriority(_ value: String?) -> String? {
+        let trimmed = normalizedSupabaseText(value)
+        switch trimmed?.lowercased() {
+        case "low":
+            return "Low"
+        case "medium":
+            return "Medium"
+        case "high":
+            return "High"
+        case "critical":
+            return "Critical"
+        default:
+            return nil
+        }
+    }
+
+    private func sessionCoordinationTier1SnapshotString(metadata: SessionMetadata) -> String? {
+        let snapshot = sessionCoordinationTier1Snapshot(metadata: metadata)
+        guard !snapshot.priorities.isEmpty || !snapshot.trades.isEmpty || !snapshot.flaggedReasons.isEmpty else {
+            return nil
+        }
+        let encoder = JSONEncoder()
+        guard let data = try? encoder.encode(snapshot) else { return nil }
+        return String(data: data, encoding: .utf8)
+    }
+
+    private func decodeSessionCoordinationTier1Snapshot(_ value: String?) -> SessionCoordinationTier1Snapshot? {
+        guard let value = normalizedSupabaseText(value), let data = value.data(using: .utf8) else { return nil }
+        return try? JSONDecoder().decode(SessionCoordinationTier1Snapshot.self, from: data)
+    }
+
+    private func sessionCoordinationDiffs(
+        remoteSnapshotString: String?,
+        localMetadata: SessionMetadata
+    ) -> [SessionCoordinationDiff] {
+        guard let remote = decodeSessionCoordinationTier1Snapshot(remoteSnapshotString) else { return [] }
+        let local = sessionCoordinationTier1Snapshot(metadata: localMetadata)
+
+        let remotePriorities = Dictionary(uniqueKeysWithValues: remote.priorities.map { ($0.id, $0.value) })
+        let localPriorities = Dictionary(uniqueKeysWithValues: local.priorities.map { ($0.id, $0.value) })
+        let remoteTrades = Dictionary(uniqueKeysWithValues: remote.trades.map { ($0.id, $0.value) })
+        let localTrades = Dictionary(uniqueKeysWithValues: local.trades.map { ($0.id, $0.value) })
+        let remoteReasons = Dictionary(uniqueKeysWithValues: remote.flaggedReasons.map { ($0.id, $0.value) })
+        let localReasons = Dictionary(uniqueKeysWithValues: local.flaggedReasons.map { ($0.id, $0.value) })
+
+        var diffs: [SessionCoordinationDiff] = []
+        for id in Set(remotePriorities.keys).union(localPriorities.keys).sorted(by: { $0.uuidString < $1.uuidString }) {
+            let remoteValue = remotePriorities[id] ?? ""
+            let localValue = localPriorities[id] ?? ""
+            guard remoteValue != localValue else { continue }
+            diffs.append(SessionCoordinationDiff(
+                id: "priority|\(id.uuidString)",
+                label: "Priority \(id.uuidString.prefix(8))",
+                remoteValue: remoteValue,
+                localValue: localValue
+            ))
+        }
+        for id in Set(remoteTrades.keys).union(localTrades.keys).sorted(by: { $0.uuidString < $1.uuidString }) {
+            let remoteValue = remoteTrades[id] ?? ""
+            let localValue = localTrades[id] ?? ""
+            guard remoteValue != localValue else { continue }
+            diffs.append(SessionCoordinationDiff(
+                id: "trade|\(id.uuidString)",
+                label: "Trade \(id.uuidString.prefix(8))",
+                remoteValue: remoteValue,
+                localValue: localValue
+            ))
+        }
+        for id in Set(remoteReasons.keys).union(localReasons.keys).sorted(by: { $0.uuidString < $1.uuidString }) {
+            let remoteValue = remoteReasons[id] ?? ""
+            let localValue = localReasons[id] ?? ""
+            guard remoteValue != localValue else { continue }
+            diffs.append(SessionCoordinationDiff(
+                id: "reason|\(id.uuidString)",
+                label: "Flagged Reason \(id.uuidString.prefix(8))",
+                remoteValue: remoteValue,
+                localValue: localValue
+            ))
+        }
+
+        return diffs
     }
 
     private struct RemoteLegacyMigrationSnapshot {
@@ -7347,6 +7993,10 @@ final class AppState: ObservableObject {
     
     func clearCurrentSession() {
         scheduleOffloadEligibleSessionMedia(excludingSessionID: currentSession?.id)
+        if let sessionID = currentSession?.id {
+            sessionCoordinationStateBySessionID.removeValue(forKey: sessionID)
+            sessionCoordinationEntrySnapshotBySessionID.removeValue(forKey: sessionID)
+        }
         currentSession = nil
         cloudBackupManager?.setCaptureModeActive(false)
     }
@@ -7760,7 +8410,8 @@ final class AppState: ObservableObject {
         ready: Bool = true,
         clientConfigured: Bool = true,
         authenticated: Bool = true,
-        authenticationReady: Bool = true
+        authenticationReady: Bool = true,
+        authenticatedUserID: UUID? = nil
     ) {
         self.activeOrganizationID = activeOrganizationID
         self.isOrganizationContextReady = ready
@@ -7772,7 +8423,7 @@ final class AppState: ObservableObject {
             : nil
         self.isAuthenticationReady = authenticationReady
         self.authenticatedSupabaseUser = authenticated
-            ? AuthenticatedSupabaseUser(id: UUID(), email: "debug@example.com")
+            ? AuthenticatedSupabaseUser(id: authenticatedUserID ?? UUID(), email: "debug@example.com")
             : nil
     }
 
@@ -7879,6 +8530,97 @@ final class AppState: ObservableObject {
                 }
             )
         }
+    }
+
+    func _debugSetSessionCoordinationFetchResultForTests(
+        _ record: DebugSessionCoordinationRemoteInput?
+    ) {
+        if let record {
+            sessionCoordinationDebugRemoteRecords[record.sessionID] = RemoteSessionCoordinationRecord(
+                id: record.sessionID,
+                orgID: record.orgID,
+                propertyID: record.propertyID,
+                lockedByUserID: record.lockedByUserID,
+                lockedByDeviceID: record.lockedByDeviceID,
+                lockedAt: record.lockedAt,
+                coordinationTier1Snapshot: record.coordinationTier1Snapshot,
+                updatedAt: record.updatedAt
+            )
+        } else {
+            sessionCoordinationDebugRemoteRecords.removeAll()
+        }
+        sessionCoordinationFetchOverride = { orgID, propertyID, sessionID in
+            guard let record,
+                  record.sessionID == sessionID,
+                  record.propertyID == propertyID else {
+                return nil
+            }
+            return RemoteSessionCoordinationRecord(
+                id: sessionID,
+                orgID: record.orgID == orgID ? record.orgID : orgID,
+                propertyID: propertyID,
+                lockedByUserID: record.lockedByUserID,
+                lockedByDeviceID: record.lockedByDeviceID,
+                lockedAt: record.lockedAt,
+                coordinationTier1Snapshot: record.coordinationTier1Snapshot,
+                updatedAt: record.updatedAt
+            )
+        }
+    }
+
+    func _debugSetSessionCoordinationStateForTests(
+        sessionID: UUID,
+        lockedByUserID: UUID?,
+        lockedByDeviceID: String?,
+        lockedAt: Date?
+    ) {
+        sessionCoordinationStateBySessionID[sessionID] = SessionCoordinationState(
+            lockedByUserID: lockedByUserID,
+            lockedByDeviceID: lockedByDeviceID,
+            lockedAt: lockedAt
+        )
+        if var cached = sessionCoordinationDebugRemoteRecords[sessionID] {
+            cached = RemoteSessionCoordinationRecord(
+                id: cached.id,
+                orgID: cached.orgID,
+                propertyID: cached.propertyID,
+                lockedByUserID: lockedByUserID,
+                lockedByDeviceID: lockedByDeviceID,
+                lockedAt: lockedAt?.ISO8601Format(),
+                coordinationTier1Snapshot: cached.coordinationTier1Snapshot,
+                updatedAt: Date()
+            )
+            sessionCoordinationDebugRemoteRecords[sessionID] = cached
+        }
+    }
+
+    func _debugReadSessionCoordinationStateForTests(
+        sessionID: UUID
+    ) -> (lockedByUserID: UUID?, lockedByDeviceID: String?, lockedAt: Date?) {
+#if DEBUG
+        if let cached = sessionCoordinationDebugRemoteRecords[sessionID] {
+            return (
+                cached.lockedByUserID,
+                cached.lockedByDeviceID,
+                cached.lockedAt.flatMap(parseSupabaseDateString)
+            )
+        }
+#endif
+        let state = sessionCoordinationStateBySessionID[sessionID]
+        return (state?.lockedByUserID, state?.lockedByDeviceID, state?.lockedAt)
+    }
+
+    func _debugSetSessionCoordinationEntrySnapshotForTests(
+        sessionID: UUID,
+        snapshot: String?
+    ) {
+        sessionCoordinationEntrySnapshotBySessionID[sessionID] = snapshot ?? ""
+    }
+
+    func _debugSessionCoordinationSnapshotStringForTests(
+        metadata: SessionMetadata
+    ) -> String? {
+        sessionCoordinationTier1SnapshotString(metadata: metadata)
     }
 
     func _debugAllPropertiesForTests() -> [Property] {

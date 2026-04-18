@@ -3412,6 +3412,8 @@ struct ContentView: View {
     @State private var awaitingSessionExportDismiss: Bool = false
     @State private var showSessionExportErrorPopup: Bool = false
     @State private var sessionExportErrorMessage: String? = nil
+    @State private var isCheckingSessionCompletionConflicts: Bool = false
+    @State private var sessionCoordinationConflictReview: AppState.SessionCoordinationConflictReview? = nil
     @State private var didTriggerExitToHubForMissingSession: Bool = false
     private var sheetTheme: SheetControlTheme { .forScheme(colorScheme) }
 
@@ -5343,7 +5345,12 @@ struct ContentView: View {
                 guard oldValue != nil, newValue == nil, awaitingSessionExportDismiss else { return }
                 awaitingSessionExportDismiss = false
                 appState.refreshPropertiesInBackground()
-                onExitToHub?()
+                Task {
+                    await appState.releaseCurrentSessionCoordinationLockIfOwned()
+                    await MainActor.run {
+                        onExitToHub?()
+                    }
+                }
             }
             .fullScreenCover(item: $armedReferenceViewerState) { state in
                 let assets = Self.reportAsset(from: state.localIdentifier).map { [$0] } ?? []
@@ -5530,10 +5537,10 @@ struct ContentView: View {
                         handleSaveDraftAndExit(summary: summary)
                     },
                     onExportNow: {
-                        startExportNowFlow()
+                        attemptStartExportNowFlow()
                     },
                     onExportLater: {
-                        handleExportLaterAndExit(summary: summary)
+                        attemptExportLaterAndExit(summary: summary)
                     }
                 )
                 .zIndex(500)
@@ -5559,6 +5566,22 @@ struct ContentView: View {
                     }
                 )
                 .zIndex(710)
+            }
+
+            if let sessionCoordinationConflictReview {
+                ExportErrorOverlay(
+                    title: "Review Portal Changes",
+                    message: sessionCoordinationConflictMessage(review: sessionCoordinationConflictReview),
+                    retryTitle: "Return to Session",
+                    cancelTitle: "Dismiss",
+                    onRetry: {
+                        self.sessionCoordinationConflictReview = nil
+                    },
+                    onCancel: {
+                        self.sessionCoordinationConflictReview = nil
+                    }
+                )
+                .zIndex(715)
             }
 
             if showCoreElevationChecklist {
@@ -10834,6 +10857,30 @@ extension ContentView {
         }
     }
 
+    private func attemptStartExportNowFlow() {
+        guard let propertyID = appState.selectedPropertyID,
+              let sessionID = appState.currentSession?.id else {
+            startExportNowFlow()
+            return
+        }
+        guard !isCheckingSessionCompletionConflicts else { return }
+        isCheckingSessionCompletionConflicts = true
+        Task {
+            let review = await appState.preCompletionConflictReview(
+                propertyID: propertyID,
+                sessionID: sessionID
+            )
+            await MainActor.run {
+                isCheckingSessionCompletionConflicts = false
+                if let review {
+                    sessionCoordinationConflictReview = review
+                    return
+                }
+                startExportNowFlow()
+            }
+        }
+    }
+
     private func handleSaveDraftAndExit(summary: SessionActionsSummary) {
         resetSelectionForSwitch()
         camera.updateDetailNoteActive(false)
@@ -10850,7 +10897,12 @@ extension ContentView {
         }
         appState.refreshPropertiesInBackground()
         showSessionActionsSheet = false
-        onExitToHub?()
+        Task {
+            await appState.releaseCurrentSessionCoordinationLockIfOwned()
+            await MainActor.run {
+                onExitToHub?()
+            }
+        }
     }
 
     private func handleExportLaterAndExit(summary: SessionActionsSummary) {
@@ -10858,7 +10910,45 @@ extension ContentView {
         appState.sealCurrentSessionForExportLater()
         appState.refreshPropertiesInBackground()
         showSessionActionsSheet = false
-        onExitToHub?()
+        Task {
+            await appState.releaseCurrentSessionCoordinationLockIfOwned()
+            await MainActor.run {
+                onExitToHub?()
+            }
+        }
+    }
+
+    private func attemptExportLaterAndExit(summary: SessionActionsSummary) {
+        guard let propertyID = appState.selectedPropertyID,
+              let sessionID = appState.currentSession?.id else {
+            handleExportLaterAndExit(summary: summary)
+            return
+        }
+        guard !isCheckingSessionCompletionConflicts else { return }
+        isCheckingSessionCompletionConflicts = true
+        Task {
+            let review = await appState.preCompletionConflictReview(
+                propertyID: propertyID,
+                sessionID: sessionID
+            )
+            await MainActor.run {
+                isCheckingSessionCompletionConflicts = false
+                if let review {
+                    sessionCoordinationConflictReview = review
+                    return
+                }
+                handleExportLaterAndExit(summary: summary)
+            }
+        }
+    }
+
+    private func sessionCoordinationConflictMessage(
+        review: AppState.SessionCoordinationConflictReview
+    ) -> String {
+        review.diffs
+            .prefix(3)
+            .map { "\($0.label): portal='\($0.remoteValue)' session='\($0.localValue)'" }
+            .joined(separator: "\n")
     }
 
     private func ensureGuidedReferencePaths(propertyID: UUID) {

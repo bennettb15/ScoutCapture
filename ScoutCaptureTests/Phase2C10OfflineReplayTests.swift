@@ -1,6 +1,7 @@
 import XCTest
 @testable import ScoutCapture
 
+@MainActor
 final class Phase2C10OfflineReplayTests: XCTestCase {
     private struct QueuedPropertyMutationPayloadProbe: Decodable {
         struct PropertyPayload: Decodable {
