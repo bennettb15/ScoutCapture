@@ -345,6 +345,30 @@ struct SessionMetadata: Codable {
     }
 }
 
+extension SessionMetadata {
+    static var empty: SessionMetadata {
+        SessionMetadata(
+            schemaVersion: 1,
+            propertyID: UUID(),
+            sessionID: UUID(),
+            propertyNameAtCapture: nil,
+            propertyNameAtExport: nil,
+            startedAt: Date(),
+            endedAt: nil,
+            status: .draft,
+            isBaselineSession: false,
+            exportedAt: nil,
+            isSealed: false,
+            appVersion: "",
+            deviceModel: "",
+            osVersion: "",
+            shots: [],
+            issues: [],
+            guidedShots: []
+        )
+    }
+}
+
 struct Organization: Codable, Identifiable, Equatable {
     let id: UUID
     var name: String

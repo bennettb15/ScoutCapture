@@ -223,6 +223,14 @@ final class Phase2C10BSessionCoordinationTests: XCTestCase {
                 updatedAt: Date()
             )
         )
+        fixture.appState._debugSetOfflineReplayEnvironmentForTests(
+            activeOrganizationID: fixture.organizationID,
+            ready: true,
+            clientConfigured: true,
+            authenticated: true,
+            authenticationReady: true,
+            authenticatedUserID: fixture.userID
+        )
 
         let result = await fixture.appState.evaluateSessionEntryCoordination(
             propertyID: fixture.property.id,
@@ -323,6 +331,25 @@ final class Phase2C10BSessionCoordinationTests: XCTestCase {
             sessionID: fixture.session.id
         )
         await fixture.appState.releaseCurrentSessionCoordinationLockIfOwned()
+
+        let state = fixture.appState._debugReadSessionCoordinationStateForTests(sessionID: fixture.session.id)
+        XCTAssertNil(state.lockedByUserID)
+        XCTAssertNil(state.lockedByDeviceID)
+        XCTAssertNil(state.lockedAt)
+    }
+
+    func testUntouchedExitReleasesOwnedLock() async throws {
+        let fixture = try makeFixture()
+        defer { tearDownFixture(fixture) }
+
+        _ = await fixture.appState.evaluateSessionEntryCoordination(
+            propertyID: fixture.property.id,
+            sessionID: fixture.session.id
+        )
+        await fixture.appState.releaseSessionCoordinationLockIfOwned(
+            propertyID: fixture.property.id,
+            sessionID: fixture.session.id
+        )
 
         let state = fixture.appState._debugReadSessionCoordinationStateForTests(sessionID: fixture.session.id)
         XCTAssertNil(state.lockedByUserID)

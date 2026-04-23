@@ -194,6 +194,12 @@ final class AppState: ObservableObject {
         let uploadAttempts: Int
     }
 
+    struct OperationalMediaHydrationRequest: Hashable {
+        let propertyID: UUID
+        let sessionID: UUID
+        let shotID: UUID
+    }
+
     struct SupabaseMediaBackfillRunSummary: Equatable {
         let didStart: Bool
         let reason: String
@@ -260,6 +266,12 @@ final class AppState: ObservableObject {
         var lockedByUserID: UUID?
         var lockedByDeviceID: String?
         var lockedAt: Date?
+    }
+
+    private struct PropertySessionOccupancyState: Equatable {
+        var occupiedByUserID: UUID?
+        var occupiedByDeviceID: String?
+        var occupiedAt: Date?
     }
 
 #if DEBUG
@@ -403,6 +415,9 @@ final class AppState: ObservableObject {
     private struct SupabasePropertyPayload: Codable {
         let id: UUID
         let orgID: UUID
+        let clientName: String?
+        let clientEmail: String?
+        let clientPhone: String?
         let name: String
         let addressLine1: String?
         let city: String?
@@ -412,6 +427,9 @@ final class AppState: ObservableObject {
         enum CodingKeys: String, CodingKey {
             case id
             case orgID = "org_id"
+            case clientName = "client_name"
+            case clientEmail = "client_email"
+            case clientPhone = "client_phone"
             case name
             case addressLine1 = "address_line1"
             case city
@@ -467,6 +485,40 @@ final class AppState: ObservableObject {
             case lockedAt = "locked_at"
             case coordinationTier1Snapshot = "coordination_tier1_snapshot"
             case updatedAt = "updated_at"
+        }
+    }
+
+    private struct PropertySessionOccupancyPayload: Codable {
+        let propertyID: UUID
+        let orgID: UUID
+        let occupiedByUserID: UUID?
+        let occupiedByDeviceID: String?
+        let occupiedAt: String?
+        let updatedBy: UUID?
+
+        enum CodingKeys: String, CodingKey {
+            case propertyID = "property_id"
+            case orgID = "org_id"
+            case occupiedByUserID = "occupied_by_user_id"
+            case occupiedByDeviceID = "occupied_by_device_id"
+            case occupiedAt = "occupied_at"
+            case updatedBy = "updated_by"
+        }
+    }
+
+    private struct RemotePropertySessionOccupancyRecord: Decodable {
+        let propertyID: UUID
+        let orgID: UUID
+        let occupiedByUserID: UUID?
+        let occupiedByDeviceID: String?
+        let occupiedAt: String?
+
+        enum CodingKeys: String, CodingKey {
+            case propertyID = "property_id"
+            case orgID = "org_id"
+            case occupiedByUserID = "occupied_by_user_id"
+            case occupiedByDeviceID = "occupied_by_device_id"
+            case occupiedAt = "occupied_at"
         }
     }
 
@@ -785,6 +837,8 @@ final class AppState: ObservableObject {
     @Published private(set) var isAuthenticating: Bool = false
     @Published private(set) var authenticatedSupabaseUser: AuthenticatedSupabaseUser?
     @Published var authenticationErrorMessage: String?
+    @Published var locallyLockedPropertyIDs: Set<UUID> = []
+    @Published private var propertySessionOccupancyByPropertyID: [UUID: PropertySessionOccupancyState] = [:]
     @Published private(set) var activeOrganizationID: UUID?
     @Published private(set) var accessibleOrganizations: [ActiveOrganizationMembership] = []
     @Published private(set) var isOrganizationContextReady: Bool = false
@@ -825,6 +879,10 @@ final class AppState: ObservableObject {
     private let logThrottleQueue = DispatchQueue(label: "ScoutCapture.AppState.logThrottle")
     private let supabaseMediaOperationQueue = DispatchQueue(label: "ScoutCapture.AppState.supabaseMediaOperations")
     private let offlineReplayStateQueue = DispatchQueue(label: "ScoutCapture.AppState.offlineReplay")
+    private var cloudBackupLogRunOpen: Bool = false
+    private var cloudBackupLogHasPrintedStart: Bool = false
+    private var cloudBackupLogHasPrintedTerminal: Bool = false
+    private var cloudBackupLogHasPrintedClose: Bool = false
     private var lastHubFetchLogSignature: String?
     private var lastHubFetchLogAt: Date?
     private var lastSessionOffloadLogSignature: String?
@@ -851,10 +909,15 @@ final class AppState: ObservableObject {
     private let failedSupabaseMediaRetryCooldown: TimeInterval = 30
     private var inFlightSupabaseMediaOperations: Set<String> = []
     private var isSupabaseMediaBackfillInProgress: Bool = false
+    private var lastSupabaseMediaBackfillTriggerAt: Date?
+    private var lastSupabaseMediaBackfillTriggerReason: String?
     private var isSyncDeltaPullInFlight: Bool = false
     private var isOfflineReplayInFlight: Bool = false
     private var sessionCoordinationStateBySessionID: [UUID: SessionCoordinationState] = [:]
     private var sessionCoordinationEntrySnapshotBySessionID: [UUID: String] = [:]
+#if DEBUG
+    private var propertySessionOccupancyDebugRemoteRecords: [UUID: RemotePropertySessionOccupancyRecord] = [:]
+#endif
     private var lastForegroundSyncDeltaCompletedAt: Date?
 #if DEBUG
     private var syncDeltaFetchOverride: SyncDeltaFetchOverride?
@@ -1037,7 +1100,7 @@ final class AppState: ObservableObject {
             cloudBackupManager.$status
                 .receive(on: DispatchQueue.main)
                 .sink { [weak self] status in
-                    print("[AppStateDiag] cloudBackupStatus_sink")
+                    self?.logCloudBackupStatusSink(status)
                     self?.cloudBackupStatus = status
                 }
                 .store(in: &cancellables)
@@ -1047,7 +1110,6 @@ final class AppState: ObservableObject {
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in
                 print("[AppStateDiag] scoutPersistentDataDidChange_sink")
-                self?.markLiveSyncBurstWindow(seconds: 20)
                 self?.cloudBackupManager?.markDataChanged(scheduleBackupAfter: 30)
             }
             .store(in: &cancellables)
@@ -1633,6 +1695,18 @@ final class AppState: ObservableObject {
             return
         }
 
+        let now = Date()
+        let launchAdjacentReasons: Set<String> = ["org_context_ready", "scene_active"]
+        if launchAdjacentReasons.contains(reason),
+           let previousAt = lastSupabaseMediaBackfillTriggerAt,
+           let previousReason = lastSupabaseMediaBackfillTriggerReason,
+           launchAdjacentReasons.contains(previousReason),
+           now.timeIntervalSince(previousAt) < 3.0 {
+            return
+        }
+        lastSupabaseMediaBackfillTriggerAt = now
+        lastSupabaseMediaBackfillTriggerReason = reason
+
         Task(priority: .utility) { [weak self] in
             _ = await self?.runPendingSupabaseMediaBackfill(reason: reason)
         }
@@ -1790,18 +1864,8 @@ final class AppState: ObservableObject {
         sessionID: UUID,
         shotID: UUID
     ) {
-        guard backendFeatureFlags.supabaseEnabled,
-              backendFeatureFlags.supabaseReadEnabled,
-              supabaseClient != nil else {
-            return
-        }
-
-        let operationKey = "download|\(sessionID.uuidString.lowercased())|\(shotID.uuidString.lowercased())"
-        guard beginSupabaseMediaOperation(operationKey) else { return }
-
         Task(priority: .utility) { [weak self] in
-            defer { self?.endSupabaseMediaOperation(operationKey) }
-            await self?.performOperationalMediaHydration(
+            _ = await self?.ensureOperationalMediaAvailableIfNeeded(
                 propertyID: propertyID,
                 sessionID: sessionID,
                 shotID: shotID
@@ -1829,6 +1893,58 @@ final class AppState: ObservableObject {
                 shotID: shot.shotID
             )
         }
+    }
+
+    func ensureOperationalMediaAvailableForRequests(
+        _ requests: [OperationalMediaHydrationRequest]
+    ) async -> Bool {
+        let uniqueRequests = Array(Set(requests))
+        guard !uniqueRequests.isEmpty else { return false }
+
+        var startedAny = false
+        await withTaskGroup(of: Bool.self) { group in
+            for request in uniqueRequests {
+                group.addTask { [weak self] in
+                    guard let self else { return false }
+                    return await self.ensureOperationalMediaAvailableIfNeeded(
+                        propertyID: request.propertyID,
+                        sessionID: request.sessionID,
+                        shotID: request.shotID
+                    )
+                }
+            }
+
+            for await didStart in group {
+                if didStart {
+                    startedAny = true
+                }
+            }
+        }
+
+        return startedAny
+    }
+
+    private func ensureOperationalMediaAvailableIfNeeded(
+        propertyID: UUID,
+        sessionID: UUID,
+        shotID: UUID
+    ) async -> Bool {
+        guard backendFeatureFlags.supabaseEnabled,
+              backendFeatureFlags.supabaseReadEnabled,
+              supabaseClient != nil else {
+            return false
+        }
+
+        let operationKey = "download|\(sessionID.uuidString.lowercased())|\(shotID.uuidString.lowercased())"
+        guard beginSupabaseMediaOperation(operationKey) else { return false }
+        defer { endSupabaseMediaOperation(operationKey) }
+
+        await performOperationalMediaHydration(
+            propertyID: propertyID,
+            sessionID: sessionID,
+            shotID: shotID
+        )
+        return true
     }
 
     private var isPhaseBMetadataShadowWriteEnabled: Bool {
@@ -2866,6 +2982,19 @@ final class AppState: ObservableObject {
         }
     }
 
+    private func performSessionCoordinationRemoteWrite(
+        property: Property,
+        session: Session,
+        metadata: SessionMetadata,
+        payload: SupabaseSessionPayload
+    ) async throws {
+        if let sessionShadowWriteOverride {
+            try await sessionShadowWriteOverride(property, session, metadata)
+        } else {
+            try await upsertSessionRowToSupabase(payload)
+        }
+    }
+
     private func queuedPropertyFromPayload(
         _ payload: SupabasePropertyPayload,
         queueItem: LocalStore.QueuedMutation
@@ -2898,6 +3027,9 @@ final class AppState: ObservableObject {
             property: SupabasePropertyPayload(
                 id: queueItem.entityID,
                 orgID: queueItem.organizationID,
+                clientName: payload.clientName,
+                clientEmail: payload.clientEmail,
+                clientPhone: payload.clientPhone,
                 name: payload.name,
                 addressLine1: payload.addressLine1,
                 city: payload.city,
@@ -3432,8 +3564,11 @@ final class AppState: ObservableObject {
         return SupabasePropertyPayload(
             id: propertyID,
             orgID: orgID,
+            clientName: normalizedSupabaseText(property?.clientName),
+            clientEmail: normalizedSupabaseText(property?.clientEmail),
+            clientPhone: normalizedSupabaseText(property?.clientPhone),
             name: propertyName,
-            addressLine1: normalizedSupabaseText(property?.address ?? metadata?.propertyAddressAtCapture),
+            addressLine1: normalizedSupabaseText(property?.street ?? metadata?.propertyStreetAtCapture),
             city: normalizedSupabaseText(property?.city ?? metadata?.propertyCityAtCapture),
             state: normalizedSupabaseText(property?.state ?? metadata?.propertyStateAtCapture),
             postalCode: normalizedSupabaseText(property?.zip ?? metadata?.propertyZipAtCapture)
@@ -3479,6 +3614,27 @@ final class AppState: ObservableObject {
             .execute()
     }
 
+    private func upsertPropertySessionOccupancyRowToSupabase(_ payload: PropertySessionOccupancyPayload) async throws {
+        guard let client = supabaseClient else { return }
+        try await client
+            .from("property_session_occupancy")
+            .upsert(payload, onConflict: "property_id", returning: .minimal)
+            .execute()
+    }
+
+    private func deletePropertySessionOccupancyRowFromSupabase(
+        orgID: UUID,
+        propertyID: UUID
+    ) async throws {
+        guard let client = supabaseClient else { return }
+        try await client
+            .from("property_session_occupancy")
+            .delete(returning: .minimal)
+            .eq("org_id", value: orgID.uuidString.lowercased())
+            .eq("property_id", value: propertyID.uuidString.lowercased())
+            .execute()
+    }
+
     private func fetchRemoteSessionCoordinationRecord(
         orgID: UUID,
         propertyID: UUID,
@@ -3509,6 +3665,51 @@ final class AppState: ObservableObject {
             .value as [RemoteSessionCoordinationRecord]
 
         return rows.first
+    }
+
+    private func fetchRemotePropertySessionOccupancyRecord(
+        orgID: UUID,
+        propertyID: UUID
+    ) async throws -> RemotePropertySessionOccupancyRecord? {
+#if DEBUG
+        if let cached = propertySessionOccupancyDebugRemoteRecords[propertyID],
+           cached.propertyID == propertyID {
+            return cached
+        }
+        if AppStateTestEnvironment.isRunningUnderXCTest {
+            return nil
+        }
+#endif
+        guard let client = supabaseClient else { return nil }
+
+        let rows = try await client
+            .from("property_session_occupancy")
+            .select("property_id, org_id, occupied_by_user_id, occupied_by_device_id, occupied_at")
+            .eq("org_id", value: orgID.uuidString.lowercased())
+            .eq("property_id", value: propertyID.uuidString.lowercased())
+            .limit(1)
+            .execute()
+            .value as [RemotePropertySessionOccupancyRecord]
+
+        return rows.first
+    }
+
+    private func fetchRemotePropertySessionOccupancyRecords(
+        activeOrganizationID: UUID
+    ) async throws -> [RemotePropertySessionOccupancyRecord] {
+#if DEBUG
+        if AppStateTestEnvironment.isRunningUnderXCTest {
+            return Array(propertySessionOccupancyDebugRemoteRecords.values)
+        }
+#endif
+        guard let client = supabaseClient else { return [] }
+
+        return try await client
+            .from("property_session_occupancy")
+            .select("property_id, org_id, occupied_by_user_id, occupied_by_device_id, occupied_at")
+            .eq("org_id", value: activeOrganizationID.uuidString.lowercased())
+            .execute()
+            .value
     }
 
     private func ownerDescription(
@@ -3575,6 +3776,162 @@ final class AppState: ObservableObject {
         )
     }
 
+    private func setPropertySessionOccupancyState(
+        propertyID: UUID,
+        occupiedByUserID: UUID?,
+        occupiedByDeviceID: String?,
+        occupiedAt: Date?
+    ) {
+        if occupiedByUserID == nil,
+           normalizedSupabaseText(occupiedByDeviceID) == nil,
+           occupiedAt == nil {
+            propertySessionOccupancyByPropertyID.removeValue(forKey: propertyID)
+            return
+        }
+
+        propertySessionOccupancyByPropertyID[propertyID] = PropertySessionOccupancyState(
+            occupiedByUserID: occupiedByUserID,
+            occupiedByDeviceID: occupiedByDeviceID,
+            occupiedAt: occupiedAt
+        )
+    }
+
+    private func refreshRemotePropertySessionOccupancyState(
+        orgID: UUID
+    ) async throws {
+        let records = try await fetchRemotePropertySessionOccupancyRecords(activeOrganizationID: orgID)
+        var nextState: [UUID: PropertySessionOccupancyState] = [:]
+        for record in records {
+            nextState[record.propertyID] = PropertySessionOccupancyState(
+                occupiedByUserID: record.occupiedByUserID,
+                occupiedByDeviceID: normalizedSupabaseText(record.occupiedByDeviceID),
+                occupiedAt: record.occupiedAt.flatMap(parseSupabaseDateString)
+            )
+        }
+        propertySessionOccupancyByPropertyID = nextState
+    }
+
+    private func hydratePreTapLockVisibility(
+        orgID: UUID,
+        propertyIDs: [UUID]
+    ) async {
+        try? await refreshRemotePropertySessionOccupancyState(orgID: orgID)
+
+        for propertyID in propertyIDs {
+            guard let session = canonicalLockSession(for: propertyID) else { continue }
+
+            let remoteRecord = try? await fetchRemoteSessionCoordinationRecord(
+                orgID: orgID,
+                propertyID: propertyID,
+                sessionID: session.id
+            )
+            let remoteLockedAt = remoteRecord?.lockedAt.flatMap(parseSupabaseDateString)
+            let remoteHasLockFields =
+                remoteRecord?.lockedByUserID != nil ||
+                normalizedSupabaseText(remoteRecord?.lockedByDeviceID) != nil
+
+            if remoteRecord != nil, remoteHasLockFields {
+                setSessionCoordinationState(
+                    sessionID: session.id,
+                    lockedByUserID: remoteRecord?.lockedByUserID,
+                    lockedByDeviceID: normalizedSupabaseText(remoteRecord?.lockedByDeviceID),
+                    lockedAt: remoteLockedAt
+                )
+            } else {
+                setSessionCoordinationState(
+                    sessionID: session.id,
+                    lockedByUserID: nil,
+                    lockedByDeviceID: nil,
+                    lockedAt: nil
+                )
+            }
+        }
+    }
+
+    private func persistPropertySessionOccupancyMutation(
+        propertyID: UUID,
+        orgID: UUID,
+        desiredState: PropertySessionOccupancyState
+    ) async -> Bool {
+        setPropertySessionOccupancyState(
+            propertyID: propertyID,
+            occupiedByUserID: desiredState.occupiedByUserID,
+            occupiedByDeviceID: desiredState.occupiedByDeviceID,
+            occupiedAt: desiredState.occupiedAt
+        )
+#if DEBUG
+        propertySessionOccupancyDebugRemoteRecords[propertyID] = RemotePropertySessionOccupancyRecord(
+            propertyID: propertyID,
+            orgID: orgID,
+            occupiedByUserID: desiredState.occupiedByUserID,
+            occupiedByDeviceID: desiredState.occupiedByDeviceID,
+            occupiedAt: desiredState.occupiedAt?.ISO8601Format()
+        )
+        if AppStateTestEnvironment.isRunningUnderXCTest {
+            return true
+        }
+#endif
+
+        let payload = PropertySessionOccupancyPayload(
+            propertyID: propertyID,
+            orgID: orgID,
+            occupiedByUserID: desiredState.occupiedByUserID,
+            occupiedByDeviceID: normalizedSupabaseText(desiredState.occupiedByDeviceID),
+            occupiedAt: desiredState.occupiedAt?.ISO8601Format(),
+            updatedBy: authenticatedSupabaseUser?.id
+        )
+
+        do {
+            try await upsertPropertySessionOccupancyRowToSupabase(payload)
+            return true
+        } catch {
+            setPropertySessionOccupancyState(
+                propertyID: propertyID,
+                occupiedByUserID: nil,
+                occupiedByDeviceID: nil,
+                occupiedAt: nil
+            )
+#if DEBUG
+            propertySessionOccupancyDebugRemoteRecords.removeValue(forKey: propertyID)
+#endif
+            return false
+        }
+    }
+
+    private func releasePropertySessionOccupancyIfOwned(propertyID: UUID) async {
+        guard backendFeatureFlags.sessionCoordinationEnabled,
+              let property = properties.first(where: { $0.id == propertyID }) ?? allProperties.first(where: { $0.id == propertyID }),
+              let orgID = property.orgId else {
+            return
+        }
+
+        let state = propertySessionOccupancyByPropertyID[propertyID]
+        let currentUserID = authenticatedSupabaseUser?.id
+        let currentDeviceID = currentDeviceIdentifier()
+        let ownsOccupancy =
+            state?.occupiedByUserID == currentUserID &&
+            normalizedSupabaseText(state?.occupiedByDeviceID) == currentDeviceID
+        guard ownsOccupancy else { return }
+
+        setPropertySessionOccupancyState(
+            propertyID: propertyID,
+            occupiedByUserID: nil,
+            occupiedByDeviceID: nil,
+            occupiedAt: nil
+        )
+#if DEBUG
+        propertySessionOccupancyDebugRemoteRecords.removeValue(forKey: propertyID)
+        if AppStateTestEnvironment.isRunningUnderXCTest {
+            return
+        }
+#endif
+
+        try? await deletePropertySessionOccupancyRowFromSupabase(
+            orgID: orgID,
+            propertyID: propertyID
+        )
+    }
+
     private func persistSessionCoordinationMutation(
         property: Property,
         session: Session,
@@ -3623,11 +3980,11 @@ final class AppState: ObservableObject {
                 "[SessionCoordinationPersist] event=remote_write_attempt " +
                 "sessionID=\(session.id.uuidString)"
             )
-            try await performQueuedSessionRemoteWrite(
+            try await performSessionCoordinationRemoteWrite(
                 property: property,
                 session: session,
                 metadata: metadata,
-                payload: payload
+                payload: payload.session
             )
             print(
                 "[SessionCoordinationPersist] event=remote_write_success " +
@@ -3672,16 +4029,15 @@ final class AppState: ObservableObject {
             "authenticated=\(authenticatedSupabaseUser != nil) " +
             "clientAvailable=\(supabaseClient != nil)"
         )
-        guard backendFeatureFlags.sessionCoordinationEnabled,
-              backendFeatureFlags.supabaseEnabled,
-              backendFeatureFlags.shadowWriteEnabled,
-              let property,
-              let orgID = property.orgId,
-              let session,
-              let metadata else {
-            print("[SessionCoordinationEval] event=early_return result=allowed reason=prereq_guard_failed")
-            return .allowed
-        }
+    guard backendFeatureFlags.sessionCoordinationEnabled,
+          backendFeatureFlags.supabaseEnabled,
+          backendFeatureFlags.shadowWriteEnabled,
+          let property,
+          let orgID = property.orgId,
+          let session else {
+        print("[SessionCoordinationEval] event=early_return result=allowed reason=prereq_guard_failed")
+        return .allowed
+    }
 
         guard authenticatedSupabaseUser != nil,
               supabaseClient != nil else {
@@ -3696,6 +4052,16 @@ final class AppState: ObservableObject {
 
         let currentUserID = authenticatedSupabaseUser?.id
         let currentDeviceID = currentDeviceIdentifier()
+        let propertyOccupancy = try? await fetchRemotePropertySessionOccupancyRecord(
+            orgID: orgID,
+            propertyID: propertyID
+        )
+        setPropertySessionOccupancyState(
+            propertyID: propertyID,
+            occupiedByUserID: propertyOccupancy?.occupiedByUserID,
+            occupiedByDeviceID: normalizedSupabaseText(propertyOccupancy?.occupiedByDeviceID),
+            occupiedAt: propertyOccupancy?.occupiedAt.flatMap(parseSupabaseDateString)
+        )
         print(
             "[SessionCoordinationEval] event=fetch_remote " +
             "propertyID=\(propertyID.uuidString) " +
@@ -3713,6 +4079,34 @@ final class AppState: ObservableObject {
             "lockedByDeviceID=\(remoteRecord?.lockedByDeviceID ?? "nil") " +
             "lockedAt=\(remoteRecord?.lockedAt ?? "nil")"
         )
+        if remoteRecord == nil {
+            print("[SessionCoordinationEval] DEBUG: remoteRecord is NIL")
+        } else if remoteRecord?.lockedByUserID == nil && normalizedSupabaseText(remoteRecord?.lockedByDeviceID) == nil {
+            print("[SessionCoordinationEval] DEBUG: remoteRecord has NO LOCK")
+        } else {
+            print("[SessionCoordinationEval] DEBUG: remoteRecord HAS LOCK")
+        }
+
+        if let propertyOccupancy,
+           propertyOccupancy.occupiedByUserID != nil || normalizedSupabaseText(propertyOccupancy.occupiedByDeviceID) != nil {
+            let isOwnedByCurrentActor =
+                propertyOccupancy.occupiedByUserID == currentUserID &&
+                normalizedSupabaseText(propertyOccupancy.occupiedByDeviceID) == currentDeviceID
+
+            if !forceClaim && !isOwnedByCurrentActor {
+                let owner = await ownerDescription(
+                    for: propertyOccupancy.occupiedByUserID,
+                    lockedByDeviceID: propertyOccupancy.occupiedByDeviceID
+                )
+                self.locallyLockedPropertyIDs.insert(propertyID)
+                return .blocked(
+                    SessionEntryCoordinationBlock(
+                        ownerDescription: owner,
+                        lockedAt: propertyOccupancy.occupiedAt.flatMap(parseSupabaseDateString)
+                    )
+                )
+            }
+        }
 
         if let remoteRecord,
            remoteRecord.lockedByUserID != nil || normalizedSupabaseText(remoteRecord.lockedByDeviceID) != nil {
@@ -3725,6 +4119,7 @@ final class AppState: ObservableObject {
                     for: remoteRecord.lockedByUserID,
                     lockedByDeviceID: remoteRecord.lockedByDeviceID
                 )
+                self.locallyLockedPropertyIDs.insert(propertyID)
                 let blockedAt = remoteRecord.lockedAt ?? "nil"
                 print(
                     "[SessionCoordinationEval] event=return result=blocked " +
@@ -3739,8 +4134,49 @@ final class AppState: ObservableObject {
             }
         }
 
-        let baselineSnapshot = remoteRecord?.coordinationTier1Snapshot ?? sessionCoordinationTier1SnapshotString(metadata: metadata) ?? ""
+        let baselineSnapshot = remoteRecord?.coordinationTier1Snapshot ??
+            (metadata != nil ? sessionCoordinationTier1SnapshotString(metadata: metadata!) : "") ?? ""
         sessionCoordinationEntrySnapshotBySessionID[sessionID] = baselineSnapshot
+
+        let isMateriallyRealSession = sessionHasCaptures(session)
+        if remoteRecord == nil && !isMateriallyRealSession {
+            let desiredState = SessionCoordinationState(
+                lockedByUserID: currentUserID,
+                lockedByDeviceID: currentDeviceID,
+                lockedAt: Date()
+            )
+            setSessionCoordinationState(
+                sessionID: sessionID,
+                lockedByUserID: desiredState.lockedByUserID,
+                lockedByDeviceID: desiredState.lockedByDeviceID,
+                lockedAt: desiredState.lockedAt
+            )
+            let didPersistOccupancy = await persistPropertySessionOccupancyMutation(
+                propertyID: propertyID,
+                orgID: orgID,
+                desiredState: PropertySessionOccupancyState(
+                    occupiedByUserID: desiredState.lockedByUserID,
+                    occupiedByDeviceID: desiredState.lockedByDeviceID,
+                    occupiedAt: desiredState.lockedAt
+                )
+            )
+            guard didPersistOccupancy else {
+                setSessionCoordinationState(
+                    sessionID: sessionID,
+                    lockedByUserID: nil,
+                    lockedByDeviceID: nil,
+                    lockedAt: nil
+                )
+                return .blocked(
+                    SessionEntryCoordinationBlock(
+                        ownerDescription: "Session coordination unavailable",
+                        lockedAt: nil
+                    )
+                )
+            }
+            print("[SessionCoordinationEval] event=return result=allowed reason=untouched_local_session_occupancy_claimed")
+            return .allowed
+        }
 
         let desiredState = SessionCoordinationState(
             lockedByUserID: currentUserID,
@@ -3754,12 +4190,21 @@ final class AppState: ObservableObject {
             "lockedByDeviceID=\(currentDeviceID) " +
             "lockedAt=\(desiredState.lockedAt?.ISO8601Format() ?? "nil")"
         )
-        _ = await persistSessionCoordinationMutation(
+        let didPersistClaim = await persistSessionCoordinationMutation(
             property: property,
             session: session,
-            metadata: metadata,
+            metadata: metadata ?? SessionMetadata.empty,
             desiredState: desiredState
         )
+        guard didPersistClaim else {
+            print("[SessionCoordinationEval] event=return result=blocked reason=claim_persist_failed ownerDescription=Session coordination unavailable lockedAt=nil")
+            return .blocked(
+                SessionEntryCoordinationBlock(
+                    ownerDescription: "Session coordination unavailable",
+                    lockedAt: nil
+                )
+            )
+        }
         print("[SessionCoordinationEval] event=return result=allowed sessionID=\(sessionID.uuidString)")
         return .allowed
     }
@@ -3800,11 +4245,34 @@ final class AppState: ObservableObject {
 
     @MainActor
     func releaseCurrentSessionCoordinationLockIfOwned() async {
+        guard let propertyID = selectedPropertyID,
+              let sessionID = currentSession?.id else {
+            return
+        }
+        await releasePropertySessionOccupancyIfOwned(propertyID: propertyID)
+        await releaseSessionCoordinationLockIfOwned(propertyID: propertyID, sessionID: sessionID)
+    }
+
+    @MainActor
+    func releaseSessionCoordinationLockIfOwned(
+        propertyID: UUID,
+        sessionID: UUID
+    ) async {
+        let persistedSession = sessions(for: propertyID).first(where: { $0.id == sessionID })
+        if persistedSession == nil {
+            setSessionCoordinationState(
+                sessionID: sessionID,
+                lockedByUserID: nil,
+                lockedByDeviceID: nil,
+                lockedAt: nil
+            )
+            return
+        }
+
         guard backendFeatureFlags.sessionCoordinationEnabled,
-              let propertyID = selectedPropertyID,
-              let session = currentSession,
+              let session = persistedSession,
               let property = properties.first(where: { $0.id == propertyID }) ?? allProperties.first(where: { $0.id == propertyID }),
-              let metadata = try? localStore.loadSessionMetadata(propertyID: propertyID, sessionID: session.id) else {
+              let metadata = try? localStore.loadSessionMetadata(propertyID: propertyID, sessionID: sessionID) else {
             return
         }
 
@@ -7123,6 +7591,20 @@ final class AppState: ObservableObject {
         }
     }
 
+    @MainActor
+    func refreshPropertiesAwaitingForegroundRefresh() async {
+        cloudBackupManager?.refreshStatus()
+        setLoadingState(true)
+        defer { setLoadingState(false) }
+
+        guard isRemotePropertyRefreshEnabled else {
+            performLocalPropertyRefreshFallback()
+            return
+        }
+
+        await performForegroundRemotePropertyRefresh()
+    }
+
     func refreshPropertiesInBackground() {
         cloudBackupManager?.refreshStatus()
         if isStartupHydrationInProgress {
@@ -7218,6 +7700,101 @@ final class AppState: ObservableObject {
         }
     }
 
+    func refreshPropertySessionState(propertyID: UUID) {
+        guard canAccessProperty(propertyID) else { return }
+        reloadSessionCache(for: propertyID)
+    }
+
+    func canonicalLockSession(for propertyID: UUID) -> Session? {
+        sessions(for: propertyID)
+            .sorted { $0.startedAt > $1.startedAt }
+            .first
+    }
+
+    func isPropertyOccupiedByOther(propertyID: UUID) -> Bool {
+        guard let occupancy = propertySessionOccupancyByPropertyID[propertyID] else { return false }
+        let currentUserID = authenticatedSupabaseUser?.id
+        let currentDeviceID = currentDeviceIdentifier()
+        let isOwnedByCurrentActor =
+            occupancy.occupiedByUserID == currentUserID &&
+            normalizedSupabaseText(occupancy.occupiedByDeviceID) == currentDeviceID
+        let hasOccupancy =
+            occupancy.occupiedByUserID != nil ||
+            normalizedSupabaseText(occupancy.occupiedByDeviceID) != nil
+        return hasOccupancy && !isOwnedByCurrentActor
+    }
+
+    func clearLocalLocks() {
+        locallyLockedPropertyIDs.removeAll()
+    }
+
+    func reconcileLocalLocksAfterRefresh() async {
+        var stillLocked: Set<UUID> = []
+
+        for propertyID in locallyLockedPropertyIDs {
+            guard let session = canonicalLockSession(for: propertyID) else { continue }
+            guard let property = properties.first(where: { $0.id == propertyID }),
+                  let orgID = property.orgId else { continue }
+
+            let remoteRecord = try? await fetchRemoteSessionCoordinationRecord(
+                orgID: orgID,
+                propertyID: propertyID,
+                sessionID: session.id
+            )
+            let remoteLockedAt = remoteRecord?.lockedAt.flatMap(parseSupabaseDateString)
+            let remoteHasLockFields =
+                remoteRecord?.lockedByUserID != nil ||
+                normalizedSupabaseText(remoteRecord?.lockedByDeviceID) != nil
+
+            if remoteRecord != nil, remoteHasLockFields {
+                setSessionCoordinationState(
+                    sessionID: session.id,
+                    lockedByUserID: remoteRecord?.lockedByUserID,
+                    lockedByDeviceID: normalizedSupabaseText(remoteRecord?.lockedByDeviceID),
+                    lockedAt: remoteLockedAt
+                )
+            } else {
+                setSessionCoordinationState(
+                    sessionID: session.id,
+                    lockedByUserID: nil,
+                    lockedByDeviceID: nil,
+                    lockedAt: nil
+                )
+            }
+
+            let currentUserID = authenticatedSupabaseUser?.id
+            let currentDeviceID = currentDeviceIdentifier()
+
+            let isStillLocked: Bool = {
+                guard let remote = remoteRecord else { return false }
+
+                let hasLock =
+                    remote.lockedByUserID != nil ||
+                    normalizedSupabaseText(remote.lockedByDeviceID) != nil
+
+                let isOwnedByCurrentActor =
+                    remote.lockedByUserID == currentUserID &&
+                    normalizedSupabaseText(remote.lockedByDeviceID) == currentDeviceID
+
+                return hasLock && !isOwnedByCurrentActor
+            }()
+
+            if isStillLocked {
+                stillLocked.insert(propertyID)
+            }
+        }
+
+        await MainActor.run {
+            self.locallyLockedPropertyIDs = stillLocked
+        }
+    }
+
+    func isSessionLockedByOther(sessionID: UUID) -> Bool {
+        guard let coord = sessionCoordinationStateBySessionID[sessionID] else { return false }
+        guard let lockedByUser = coord.lockedByUserID else { return false }
+        return lockedByUser != authenticatedSupabaseUser?.id
+    }
+
     func setLiveSyncMonitoringActive(_ active: Bool) {
         if active {
             guard liveSyncTimer == nil else { return }
@@ -7238,11 +7815,6 @@ final class AppState: ObservableObject {
                 }
             }
             liveSyncTimer?.tolerance = 1.0
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
-                guard let self else { return }
-                if self.isLoading { return }
-                self.refreshPropertiesInBackground()
-            }
         } else {
             liveSyncTimer?.invalidate()
             liveSyncTimer = nil
@@ -7310,6 +7882,11 @@ final class AppState: ObservableObject {
                 organizations: payload.organizations
             )
             applyRefreshPayload(payload)
+            await hydratePreTapLockVisibility(
+                orgID: requestedOrganizationID,
+                propertyIDs: payload.properties.map(\.id)
+            )
+            await reconcileLocalLocksAfterRefresh()
             lastLiveSyncFingerprint = localStore.propertiesLedgerFingerprint()
             logRemotePropertyFetchResult(
                 outcome: "foreground_success",
@@ -7383,6 +7960,10 @@ final class AppState: ObservableObject {
                 organizations: mergedPayload.organizations
             )
             applyRefreshPayload(mergedPayload)
+            await hydratePreTapLockVisibility(
+                orgID: requestedOrganizationID,
+                propertyIDs: mergedPayload.properties.map(\.id)
+            )
             lastBackgroundRemoteFingerprint = mergedPayload.fingerprint
             lastBackgroundRemoteAttemptCompletedAt = Date()
             lastLiveSyncFingerprint = localStore.propertiesLedgerFingerprint()
@@ -7524,10 +8105,14 @@ final class AppState: ObservableObject {
     }
 
     private static func propertyIsOrderedBefore(_ lhs: Property, _ rhs: Property) -> Bool {
-        if lhs.createdAt == rhs.createdAt {
-            return lhs.id.uuidString.lowercased() < rhs.id.uuidString.lowercased()
+        if lhs.createdAt != rhs.createdAt {
+            return lhs.createdAt < rhs.createdAt
         }
-        return lhs.createdAt < rhs.createdAt
+        let nameOrder = lhs.name.localizedCaseInsensitiveCompare(rhs.name)
+        if nameOrder != .orderedSame {
+            return nameOrder == .orderedAscending
+        }
+        return lhs.id.uuidString.lowercased() < rhs.id.uuidString.lowercased()
     }
 
     private func mergedBackingRefreshPayload(
@@ -7929,11 +8514,8 @@ final class AppState: ObservableObject {
             cloudBackupManager?.setCaptureModeActive(true)
             return currentSession
         }
-        
-        if let draft = sessionsForProperty
-            .filter({ $0.status == .draft })
-            .sorted(by: { $0.startedAt > $1.startedAt })
-            .first {
+
+        if let draft = canonicalDraftSession(for: selectedPropertyID, requireCaptures: false) {
             currentSession = draft
             print("[StartSession] propertyID=\(selectedPropertyID.uuidString) blockedReason=none pendingDeliveryExists=\(pendingDeliveryExists) reExportEligibleExists=\(reExportEligibleExists)")
             cloudBackupManager?.setCaptureModeActive(true)
@@ -7943,16 +8525,25 @@ final class AppState: ObservableObject {
         let session = Session(propertyID: selectedPropertyID, startedAt: Date(), status: .draft, endedAt: nil, exportedAt: nil)
         currentSession = session
         print("[StartSession] propertyID=\(selectedPropertyID.uuidString) blockedReason=none pendingDeliveryExists=\(pendingDeliveryExists) reExportEligibleExists=\(reExportEligibleExists)")
+        cloudBackupManager?.setCaptureModeActive(true)
+        return session
+    }
+
+    @discardableResult
+    func ensureCurrentSessionPersisted() -> Session? {
+        guard let session = currentSession else { return nil }
+        let alreadyPersisted = sessions(for: session.propertyID).contains { $0.id == session.id }
+        guard !alreadyPersisted else { return session }
+
         let persisted = (try? localStore.upsertSession(session)) ?? session
         currentSession = persisted
-        cloudBackupManager?.setCaptureModeActive(true)
-        reloadSessionCache(for: selectedPropertyID)
-        schedulePhaseBSessionShadowWrite(for: persisted)
+        reloadSessionCache(for: session.propertyID)
         return persisted
     }
 
-    func saveDraftCurrentSession() {
-        guard var session = currentSession else { return }
+    @discardableResult
+    func saveDraftCurrentSession(scheduleShadowWrite: Bool = true) -> Session? {
+        guard var session = currentSession else { return nil }
         session.status = .draft
         session.endedAt = nil
         session.exportedAt = nil
@@ -7963,7 +8554,14 @@ final class AppState: ObservableObject {
         let persisted = (try? localStore.upsertSession(session)) ?? session
         currentSession = persisted
         reloadSessionCache(for: session.propertyID)
-        schedulePhaseBSessionShadowWrite(for: persisted)
+        if scheduleShadowWrite {
+            schedulePhaseBSessionShadowWrite(for: persisted)
+        }
+        return persisted
+    }
+
+    func scheduleSessionShadowWriteAfterCoordinationRelease(for session: Session) {
+        schedulePhaseBSessionShadowWrite(for: session)
     }
 
     func completeCurrentSession(markExported: Bool) {
@@ -8003,13 +8601,7 @@ final class AppState: ObservableObject {
     
     func draftSession(for propertyID: UUID) -> Session? {
         guard canAccessProperty(propertyID) else { return nil }
-        if let cached = draftSessionByProperty[propertyID] {
-            return cached
-        }
-        guard let draft = try? localStore.latestDraftSession(propertyID: propertyID) else {
-            return nil
-        }
-        return sessionHasCaptures(draft) ? draft : nil
+        return canonicalDraftSession(for: propertyID, requireCaptures: true)
     }
     
     func sessions(for propertyID: UUID) -> [Session] {
@@ -8120,7 +8712,7 @@ final class AppState: ObservableObject {
     
     func loadDraftSession(for propertyID: UUID) -> Session? {
         guard canAccessProperty(propertyID) else { return nil }
-        guard let draft = draftSession(for: propertyID) else { return nil }
+        guard let draft = canonicalDraftSession(for: propertyID, requireCaptures: false) else { return nil }
         selectedPropertyID = propertyID
         currentSession = draft
         cloudBackupManager?.setCaptureModeActive(true)
@@ -8190,6 +8782,19 @@ final class AppState: ObservableObject {
             cloudBackupManager?.markDataChanged(scheduleBackupAfter: 0)
             return true
         } catch {
+            if case LocalStore.StoreError.sessionNotFound = error {
+                do {
+                    try localStore.deleteSession(id: sessionID, propertyID: propertyID)
+                } catch {
+                    return false
+                }
+                if currentSession?.id == sessionID {
+                    clearCurrentSession()
+                }
+                reloadSessionCache(for: propertyID)
+                cloudBackupManager?.markDataChanged(scheduleBackupAfter: 0)
+                return true
+            }
             return false
         }
     }
@@ -8296,7 +8901,7 @@ final class AppState: ObservableObject {
 
     func triggerBackupForLifecycleEvent() {
         cloudBackupManager?.setCaptureModeActive(false)
-        cloudBackupManager?.markDataChanged(scheduleBackupAfter: 0)
+        cloudBackupManager?.scheduleAutomaticBackup(after: 0)
     }
 
     func handleSceneDidEnterBackground() {
@@ -8348,11 +8953,13 @@ final class AppState: ObservableObject {
         organizations: [Organization],
         caches: HubCachePayload
     ) {
-        if allProperties != properties {
-            allProperties = properties
+        let canonicalProperties = properties.sorted(by: Self.propertyIsOrderedBefore)
+        let preservedOrganizations = mergeOrganizationContacts(into: organizations)
+        if allProperties != canonicalProperties {
+            allProperties = canonicalProperties
         }
-        if allOrganizations != organizations {
-            allOrganizations = organizations
+        if allOrganizations != preservedOrganizations {
+            allOrganizations = preservedOrganizations
         }
         if allSessionIndexByProperty != caches.sessionIndex {
             allSessionIndexByProperty = caches.sessionIndex
@@ -8367,6 +8974,27 @@ final class AppState: ObservableObject {
             allHubMetaByProperty = caches.meta
         }
         applyTenantScopedState()
+    }
+
+    private func mergeOrganizationContacts(into organizations: [Organization]) -> [Organization] {
+        let existingOrganizations = ((try? localStore.fetchOrganizations()) ?? allOrganizations)
+        let existingContactsByOrganizationID = Dictionary(
+            uniqueKeysWithValues: existingOrganizations.map { ($0.id, $0.contacts) }
+        )
+
+        return organizations.map { organization in
+            guard organization.contacts.isEmpty,
+                  let preservedContacts = existingContactsByOrganizationID[organization.id],
+                  !preservedContacts.isEmpty else {
+                return organization
+            }
+
+            return Organization(
+                id: organization.id,
+                name: organization.name,
+                contacts: preservedContacts
+            )
+        }
     }
 
 #if DEBUG
@@ -8780,6 +9408,18 @@ final class AppState: ObservableObject {
             .first
     }
 
+    private func canonicalDraftSession(for propertyID: UUID, requireCaptures: Bool) -> Session? {
+        let drafts = sessions(for: propertyID)
+            .filter { $0.status == .draft }
+            .sorted { $0.startedAt > $1.startedAt }
+
+        guard requireCaptures else {
+            return drafts.first
+        }
+
+        return drafts.first(where: { sessionHasCaptures($0) })
+    }
+
     private func sessionHasCaptures(_ session: Session) -> Bool {
         guard let metadata = try? localStore.loadSessionMetadata(propertyID: session.propertyID, sessionID: session.id) else {
             return false
@@ -8883,6 +9523,43 @@ final class AppState: ObservableObject {
         }
         guard shouldLog else { return }
         print("[HubFetch] phase=\(phase) source=\(source) properties=\(properties) orgs=\(orgs) ms=\(elapsedMs)")
+    }
+
+    private func logCloudBackupStatusSink(_ status: CloudBackupStatus) {
+        let terminalAppeared =
+            status.lastFailureMessage != nil ||
+            (status.state == .backedUp && !status.isRunning)
+
+        let shouldLog = logThrottleQueue.sync { () -> Bool in
+            if !status.isRunning {
+                guard cloudBackupLogRunOpen else { return false }
+                guard cloudBackupLogHasPrintedTerminal else { return false }
+                guard !cloudBackupLogHasPrintedClose else { return false }
+
+                cloudBackupLogHasPrintedClose = true
+                cloudBackupLogRunOpen = false
+                return true
+            }
+
+            if !cloudBackupLogRunOpen {
+                cloudBackupLogRunOpen = true
+                cloudBackupLogHasPrintedStart = true
+                cloudBackupLogHasPrintedTerminal = false
+                cloudBackupLogHasPrintedClose = false
+                return true
+            }
+
+            guard !cloudBackupLogHasPrintedTerminal else { return false }
+
+            if terminalAppeared {
+                cloudBackupLogHasPrintedTerminal = true
+                return true
+            }
+
+            return false
+        }
+        guard shouldLog else { return }
+        print("[AppStateDiag] cloudBackupStatus_sink")
     }
 
     private func logSessionOffload(

@@ -109,17 +109,8 @@ struct ScoutCaptureApp: App {
                         appState.setLiveSyncMonitoringActive(false)
                     } else if newValue == .active {
                         appState.setLiveSyncMonitoringActive(true)
-                        appState.refreshPropertiesInBackground()
                         appState.refreshBackupStatus()
                         appState.handleSceneDidBecomeActive()
-                        if appState.properties.isEmpty {
-                            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-                                appState.refreshPropertiesInBackground()
-                            }
-                            DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
-                                appState.refreshPropertiesInBackground()
-                            }
-                        }
                     }
                 }
         }
@@ -731,6 +722,9 @@ struct SessionHubView: View {
                             }
                         }
                     }
+.refreshable {
+    await appState.refreshPropertiesAwaitingForegroundRefresh()
+}
                     .listStyle(.plain)
                 }
             }
@@ -819,9 +813,6 @@ struct SessionHubView: View {
                 } else {
                     placeholderHoldUntil = nil
                 }
-                if appState.properties.isEmpty {
-                    appState.refreshPropertiesInBackground()
-                }
                 appState.triggerBackupForLifecycleEvent()
                 selectionHaptic.prepare()
             }
@@ -832,8 +823,12 @@ struct SessionHubView: View {
                     beginStartupPlaceholderHoldWindow()
                 }
             }
-            .onChange(of: path.count) { _, newCount in
-                if newCount == 0 {
+            .onChange(of: path) { oldPath, newPath in
+                if case let .propertySession(propertyID, _) = oldPath.last,
+                   newPath.isEmpty {
+                    appState.refreshPropertySessionState(propertyID: propertyID)
+                }
+                if newPath.isEmpty {
                     isOpeningProperty = false
                     pressedPropertyID = nil
                 }
@@ -990,6 +985,11 @@ struct SessionHubView: View {
         let hasMapsButton = mapsAddressQuery(for: property) != nil
         let hasPhoneActions = hasValidPhoneNumber(property)
         let hasStatusRow = draft != nil || hasPendingExport || hasReExportGlyph
+        let isOccupiedByOther = appState.isPropertyOccupiedByOther(propertyID: property.id)
+        let isLockedByOther: Bool = {
+            guard let session = appState.canonicalLockSession(for: property.id) else { return false }
+            return appState.isSessionLockedByOther(sessionID: session.id)
+        }()
         HStack(alignment: .top, spacing: 10) {
             VStack(alignment: .leading, spacing: 4) {
                 HStack(alignment: .firstTextBaseline, spacing: 6) {
@@ -997,6 +997,11 @@ struct SessionHubView: View {
                         Image(systemName: "arrow.clockwise.circle")
                             .font(.system(size: 18, weight: .semibold))
                             .foregroundColor(Color.green.opacity(0.92))
+                    }
+                    if isOccupiedByOther || isLockedByOther || appState.locallyLockedPropertyIDs.contains(property.id) {
+                        Image(systemName: "lock.fill")
+                            .font(.system(size: 14, weight: .semibold))
+                            .foregroundColor(.red)
                     }
                     Text(property.name)
                         .font(.system(size: 18, weight: .semibold))
@@ -6117,16 +6122,17 @@ struct PropertySessionView: View {
             }
             await MainActor.run {
                 isCheckingSessionCoordination = false
-                switch status {
-                case .allowed:
-                    sessionEntryBlock = nil
-                    beginOpenFlow(forceRetry: true)
-                case .blocked(let block):
-                    sessionEntryBlock = block
-                }
+            switch status {
+            case .allowed:
+                sessionEntryBlock = nil
+                beginOpenFlow(forceRetry: true)
+            case .blocked(let block):
+                sessionEntryBlock = block
+                appState.locallyLockedPropertyIDs.insert(propertyID)
             }
         }
     }
+}
 
     private func claimBlockedSession() {
         beginSessionCoordinationFlow(forceClaim: true)

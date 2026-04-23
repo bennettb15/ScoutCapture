@@ -3608,21 +3608,16 @@ final class LocalStore {
     }
 
     private func organizationContactMatches(_ lhs: OrganizationContact, _ rhs: OrganizationContact) -> Bool {
-        let lhsEmail = trimmedNonEmpty(lhs.email)?.lowercased()
-        let rhsEmail = trimmedNonEmpty(rhs.email)?.lowercased()
-        if let lhsEmail, let rhsEmail, lhsEmail == rhsEmail {
-            return true
-        }
-
-        let lhsPhone = normalizedPropertyPhone(lhs.phone)
-        let rhsPhone = normalizedPropertyPhone(rhs.phone)
-        if let lhsPhone, let rhsPhone, lhsPhone == rhsPhone {
-            return true
-        }
-
         let lhsName = trimmedNonEmpty(lhs.name)?.lowercased()
         let rhsName = trimmedNonEmpty(rhs.name)?.lowercased()
-        return lhsName != nil && lhsName == rhsName
+        let lhsPhone = normalizedPropertyPhone(lhs.phone)
+        let rhsPhone = normalizedPropertyPhone(rhs.phone)
+        let lhsEmail = trimmedNonEmpty(lhs.email)?.lowercased()
+        let rhsEmail = trimmedNonEmpty(rhs.email)?.lowercased()
+
+        return lhsName == rhsName &&
+            lhsPhone == rhsPhone &&
+            lhsEmail == rhsEmail
     }
 
     private func defaultOrganization(in organizations: inout [Organization]) -> Organization {

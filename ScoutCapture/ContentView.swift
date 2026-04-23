@@ -3249,6 +3249,8 @@ struct ContentView: View {
     @State private var retakeContext: RetakeContext? = nil
     @State private var guidedReferenceAssetLocalID: String? = nil
     @State private var guidedReferenceThumbnail: UIImage? = nil
+    @State private var guidedHistoricalHydrationSignature: String? = nil
+    @State private var guidedHistoricalHydrationSessionID: UUID? = nil
     @State private var showGuidedAlignmentOverlay: Bool = false
     @State private var referenceOverlayOpacity: Double = 0.45
     @State private var armedUpdateObservationID: UUID? = nil
@@ -3700,6 +3702,198 @@ struct ContentView: View {
         return loaded
     }
 
+    private func mostRecentHistoricalGuidedThumbnailResolution(
+        propertyID: UUID,
+        currentSession: Session?,
+        baselineSessionID: UUID?,
+        guidedShot: GuidedShot,
+        orderedSessions: [Session],
+        metadataCache: inout [UUID: SessionMetadata]
+    ) -> GuidedSessionThumbnailResolution? {
+        let key = guidedKey(for: guidedShot)
+
+        let priorSessions: [Session] = {
+            guard let currentSession else { return [] }
+            return orderedSessions
+                .filter { $0.id != currentSession.id && $0.startedAt < currentSession.startedAt }
+                .sorted { $0.startedAt > $1.startedAt }
+        }()
+
+        func firstUsableResolution(
+            in session: Session,
+            source: GuidedThumbSource
+        ) -> GuidedSessionThumbnailResolution? {
+            guard let metadata = metadataForSession(propertyID: propertyID, sessionID: session.id, cache: &metadataCache) else {
+                return nil
+            }
+
+            for snapshot in metadata.guidedShots where guidedSnapshot(snapshot, matches: guidedShot, guidedKey: key) {
+                if let path = resolvedGuidedSnapshotImagePath(snapshot) {
+                    return GuidedSessionThumbnailResolution(source: source, sessionID: session.id, path: path, exists: true)
+                }
+            }
+
+            let matchingShots = metadata.shots
+                .filter { shotMetadata($0, matches: guidedShot, guidedKey: key) }
+                .sorted { lhs, rhs in
+                    if lhs.updatedAt != rhs.updatedAt { return lhs.updatedAt > rhs.updatedAt }
+                    return lhs.createdAt > rhs.createdAt
+                }
+
+            for shot in matchingShots {
+                let resolved = resolvedSessionImagePath(
+                    for: shot,
+                    propertyID: propertyID,
+                    sessionID: session.id
+                )
+                if let path = resolved.absolutePath, resolved.exists {
+                    return GuidedSessionThumbnailResolution(source: source, sessionID: session.id, path: path, exists: true)
+                }
+            }
+
+            return nil
+        }
+
+        for prior in priorSessions where prior.id != baselineSessionID {
+            if let resolved = firstUsableResolution(in: prior, source: .prior) {
+                return resolved
+            }
+        }
+
+        if let baselineSessionID,
+           let baselineSession = orderedSessions.first(where: { $0.id == baselineSessionID }),
+           baselineSession.id != currentSession?.id,
+           let resolved = firstUsableResolution(in: baselineSession, source: .baseline) {
+            return resolved
+        }
+
+        return nil
+    }
+
+    private func missingHistoricalGuidedHydrationRequest(
+        propertyID: UUID,
+        currentSession: Session?,
+        baselineSessionID: UUID?,
+        guidedShot: GuidedShot,
+        orderedSessions: [Session],
+        metadataCache: inout [UUID: SessionMetadata]
+    ) -> AppState.OperationalMediaHydrationRequest? {
+        let key = guidedKey(for: guidedShot)
+
+        let priorSessions: [Session] = {
+            guard let currentSession else { return [] }
+            return orderedSessions
+                .filter { $0.id != currentSession.id && $0.startedAt < currentSession.startedAt }
+                .sorted { $0.startedAt > $1.startedAt }
+        }()
+
+        func requestForBestHistoricalShot(in session: Session) -> AppState.OperationalMediaHydrationRequest? {
+            guard let metadata = metadataForSession(propertyID: propertyID, sessionID: session.id, cache: &metadataCache) else {
+                return nil
+            }
+
+            for snapshot in metadata.guidedShots where guidedSnapshot(snapshot, matches: guidedShot, guidedKey: key) {
+                if resolvedGuidedSnapshotImagePath(snapshot) != nil {
+                    return nil
+                }
+            }
+
+            let matchingShots = metadata.shots
+                .filter { shotMetadata($0, matches: guidedShot, guidedKey: key) }
+                .sorted { lhs, rhs in
+                    if lhs.updatedAt != rhs.updatedAt { return lhs.updatedAt > rhs.updatedAt }
+                    return lhs.createdAt > rhs.createdAt
+                }
+
+            for shot in matchingShots {
+                let resolved = resolvedSessionImagePath(
+                    for: shot,
+                    propertyID: propertyID,
+                    sessionID: session.id
+                )
+                if resolved.exists {
+                    return nil
+                }
+                if resolved.absolutePath != nil {
+                    return AppState.OperationalMediaHydrationRequest(
+                        propertyID: propertyID,
+                        sessionID: session.id,
+                        shotID: shot.shotID
+                    )
+                }
+            }
+
+            return nil
+        }
+
+        for prior in priorSessions where prior.id != baselineSessionID {
+            if let request = requestForBestHistoricalShot(in: prior) {
+                return request
+            }
+        }
+
+        if let baselineSessionID,
+           let baselineSession = orderedSessions.first(where: { $0.id == baselineSessionID }),
+           baselineSession.id != currentSession?.id,
+           let request = requestForBestHistoricalShot(in: baselineSession) {
+            return request
+        }
+
+        return nil
+    }
+
+    private func scheduleGuidedHistoricalHydrationIfNeeded(
+        propertyID: UUID,
+        currentSession: Session?,
+        baselineSessionID: UUID?,
+        guidedShots: [GuidedShot],
+        orderedSessions: [Session],
+        metadataCache: inout [UUID: SessionMetadata]
+    ) {
+        let activeSessionID = currentSession?.id
+        if guidedHistoricalHydrationSessionID != activeSessionID {
+            guidedHistoricalHydrationSessionID = activeSessionID
+            guidedHistoricalHydrationSignature = nil
+        }
+
+        let requests = Array(Set(guidedShots.compactMap { guidedShot in
+            missingHistoricalGuidedHydrationRequest(
+                propertyID: propertyID,
+                currentSession: currentSession,
+                baselineSessionID: baselineSessionID,
+                guidedShot: guidedShot,
+                orderedSessions: orderedSessions,
+                metadataCache: &metadataCache
+            )
+        }))
+
+        guard !requests.isEmpty else {
+            guidedHistoricalHydrationSignature = nil
+            return
+        }
+
+        let signature = requests
+            .sorted {
+                if $0.sessionID != $1.sessionID {
+                    return $0.sessionID.uuidString < $1.sessionID.uuidString
+                }
+                return $0.shotID.uuidString < $1.shotID.uuidString
+            }
+            .map { "\($0.sessionID.uuidString.lowercased())|\($0.shotID.uuidString.lowercased())" }
+            .joined(separator: ",")
+
+        guard signature != guidedHistoricalHydrationSignature else {
+            return
+        }
+        guidedHistoricalHydrationSignature = signature
+
+        Task { @MainActor in
+            let started = await appState.ensureOperationalMediaAvailableForRequests(requests)
+            guard started else { return }
+            refreshGuidedShots()
+        }
+    }
+
     private func shotMetadataMatchKind(
         _ shot: ShotMetadata,
         observation: Observation,
@@ -3882,33 +4076,16 @@ struct ContentView: View {
             }
         }
 
-        let priorSessions: [Session] = {
-            guard let currentSession else { return [] }
-            return orderedSessions
-                .filter { $0.id != currentSession.id && $0.startedAt < currentSession.startedAt }
-                .sorted { $0.startedAt > $1.startedAt }
-        }()
-
-        for prior in priorSessions where prior.id != baselineSessionID {
-            guard let priorMeta = metadataForSession(propertyID: propertyID, sessionID: prior.id, cache: &metadataCache) else {
-                continue
-            }
-            if let priorGuidedSnapshot = priorMeta.guidedShots.first(where: { guidedSnapshot($0, matches: guidedShot, guidedKey: key) }),
-               let path = resolvedGuidedSnapshotImagePath(priorGuidedSnapshot) {
-                verboseLog("[GuidedThumbResolve] propertyID=\(propertyID.uuidString) currentSessionID=\(currentSessionID?.uuidString ?? "NONE") guidedKey=\(key) chosenSource=prior chosenSessionID=\(prior.id.uuidString) chosenPath=\(path) exists=true")
-                return GuidedSessionThumbnailResolution(source: .prior, sessionID: prior.id, path: path, exists: true)
-            }
-            if let priorShot = priorMeta.shots.first(where: { shotMetadata($0, matches: guidedShot, guidedKey: key) }) {
-                let resolved = resolvedSessionImagePath(
-                    for: priorShot,
-                    propertyID: propertyID,
-                    sessionID: prior.id
-                )
-                if let path = resolved.absolutePath {
-                    verboseLog("[GuidedThumbResolve] propertyID=\(propertyID.uuidString) currentSessionID=\(currentSessionID?.uuidString ?? "NONE") guidedKey=\(key) chosenSource=prior chosenSessionID=\(prior.id.uuidString) chosenPath=\(path) exists=true")
-                    return GuidedSessionThumbnailResolution(source: .prior, sessionID: prior.id, path: path, exists: true)
-                }
-            }
+        if let historical = mostRecentHistoricalGuidedThumbnailResolution(
+            propertyID: propertyID,
+            currentSession: currentSession,
+            baselineSessionID: baselineSessionID,
+            guidedShot: guidedShot,
+            orderedSessions: orderedSessions,
+            metadataCache: &metadataCache
+        ) {
+            verboseLog("[GuidedThumbResolve] propertyID=\(propertyID.uuidString) currentSessionID=\(currentSessionID?.uuidString ?? "NONE") guidedKey=\(key) chosenSource=\(historical.source.rawValue) chosenSessionID=\(historical.sessionID?.uuidString ?? "NONE") chosenPath=\(historical.path ?? "NONE") exists=\(historical.exists)")
+            return historical
         }
 
         let fallbackReference = [
@@ -3920,26 +4097,6 @@ struct ContentView: View {
         if let fallbackReference {
             verboseLog("[GuidedThumbResolve] propertyID=\(propertyID.uuidString) currentSessionID=\(currentSessionID?.uuidString ?? "NONE") guidedKey=\(key) chosenSource=reference chosenSessionID=NONE chosenPath=\(fallbackReference) exists=true")
             return GuidedSessionThumbnailResolution(source: .reference, sessionID: nil, path: fallbackReference, exists: true)
-        }
-
-        if let baselineSessionID,
-           let baselineMeta = metadataForSession(propertyID: propertyID, sessionID: baselineSessionID, cache: &metadataCache) {
-            if let baselineGuidedSnapshot = baselineMeta.guidedShots.first(where: { guidedSnapshot($0, matches: guidedShot, guidedKey: key) }),
-               let path = resolvedGuidedSnapshotImagePath(baselineGuidedSnapshot) {
-                verboseLog("[GuidedThumbResolve] propertyID=\(propertyID.uuidString) currentSessionID=\(currentSessionID?.uuidString ?? "NONE") guidedKey=\(key) chosenSource=baseline chosenSessionID=\(baselineSessionID.uuidString) chosenPath=\(path) exists=true")
-                return GuidedSessionThumbnailResolution(source: .baseline, sessionID: baselineSessionID, path: path, exists: true)
-            }
-            if let baselineShot = baselineMeta.shots.first(where: { shotMetadata($0, matches: guidedShot, guidedKey: key) }) {
-                let resolved = resolvedSessionImagePath(
-                    for: baselineShot,
-                    propertyID: propertyID,
-                    sessionID: baselineSessionID
-                )
-                if let path = resolved.absolutePath {
-                    verboseLog("[GuidedThumbResolve] propertyID=\(propertyID.uuidString) currentSessionID=\(currentSessionID?.uuidString ?? "NONE") guidedKey=\(key) chosenSource=baseline chosenSessionID=\(baselineSessionID.uuidString) chosenPath=\(path) exists=true")
-                    return GuidedSessionThumbnailResolution(source: .baseline, sessionID: baselineSessionID, path: path, exists: true)
-                }
-            }
         }
 
         verboseLog("[GuidedThumbResolve] propertyID=\(propertyID.uuidString) currentSessionID=\(currentSessionID?.uuidString ?? "NONE") guidedKey=\(key) chosenSource=none chosenSessionID=NONE chosenPath=NONE exists=false")
@@ -4042,53 +4199,15 @@ struct ContentView: View {
         orderedSessions: [Session],
         metadataCache: inout [UUID: SessionMetadata]
     ) -> GuidedSessionThumbnailResolution {
-        let currentSessionID = currentSession?.id
-        let key = guidedKey(for: guidedShot)
-
-        let priorSessions: [Session] = {
-            guard let currentSession else { return [] }
-            return orderedSessions
-                .filter { $0.id != currentSession.id && $0.startedAt < currentSession.startedAt }
-                .sorted { $0.startedAt > $1.startedAt }
-        }()
-
-        for prior in priorSessions where prior.id != baselineSessionID {
-            guard let priorMeta = metadataForSession(propertyID: propertyID, sessionID: prior.id, cache: &metadataCache) else {
-                continue
-            }
-            if let priorGuidedSnapshot = priorMeta.guidedShots.first(where: { guidedSnapshot($0, matches: guidedShot, guidedKey: key) }),
-               let path = resolvedGuidedSnapshotImagePath(priorGuidedSnapshot) {
-                return GuidedSessionThumbnailResolution(source: .prior, sessionID: prior.id, path: path, exists: true)
-            }
-            if let priorShot = priorMeta.shots.first(where: { shotMetadata($0, matches: guidedShot, guidedKey: key) }) {
-                let resolved = resolvedSessionImagePath(
-                    for: priorShot,
-                    propertyID: propertyID,
-                    sessionID: prior.id
-                )
-                if let path = resolved.absolutePath {
-                    return GuidedSessionThumbnailResolution(source: .prior, sessionID: prior.id, path: path, exists: true)
-                }
-            }
-        }
-
-        if let baselineSessionID,
-           baselineSessionID != currentSessionID,
-           let baselineMeta = metadataForSession(propertyID: propertyID, sessionID: baselineSessionID, cache: &metadataCache) {
-            if let baselineGuidedSnapshot = baselineMeta.guidedShots.first(where: { guidedSnapshot($0, matches: guidedShot, guidedKey: key) }),
-               let path = resolvedGuidedSnapshotImagePath(baselineGuidedSnapshot) {
-                return GuidedSessionThumbnailResolution(source: .baseline, sessionID: baselineSessionID, path: path, exists: true)
-            }
-            if let baselineShot = baselineMeta.shots.first(where: { shotMetadata($0, matches: guidedShot, guidedKey: key) }) {
-                let resolved = resolvedSessionImagePath(
-                    for: baselineShot,
-                    propertyID: propertyID,
-                    sessionID: baselineSessionID
-                )
-                if let path = resolved.absolutePath {
-                    return GuidedSessionThumbnailResolution(source: .baseline, sessionID: baselineSessionID, path: path, exists: true)
-                }
-            }
+        if let historical = mostRecentHistoricalGuidedThumbnailResolution(
+            propertyID: propertyID,
+            currentSession: currentSession,
+            baselineSessionID: baselineSessionID,
+            guidedShot: guidedShot,
+            orderedSessions: orderedSessions,
+            metadataCache: &metadataCache
+        ) {
+            return historical
         }
 
         let fallbackReference = [
@@ -6044,7 +6163,6 @@ struct ContentView: View {
             captureProfile = storedProfile
         } else if let inheritedProfile {
             captureProfile = inheritedProfile
-            persistCaptureProfileToCurrentSession()
         }
 
         sessionCaptureProfileLocked = !isCaptureProfileUnlockAllowed(
@@ -6054,7 +6172,14 @@ struct ContentView: View {
         )
     }
 
-    private func persistCaptureProfileToCurrentSession(lockStateOverride: Bool? = nil) {
+    private func persistCaptureProfileToCurrentSession(
+        lockStateOverride: Bool? = nil,
+        persistSessionIfNeeded: Bool = false
+    ) {
+        if persistSessionIfNeeded {
+            _ = appState.ensureCurrentSessionPersisted()
+        }
+
         guard let propertyID = appState.selectedPropertyID,
               let sessionID = appState.currentSession?.id,
               var metadata = try? localStore.loadSessionMetadata(propertyID: propertyID, sessionID: sessionID) else {
@@ -6063,6 +6188,7 @@ struct ContentView: View {
 
         metadata.captureProfile = captureProfile.rawValue
         try? localStore.saveSessionMetadataAtomically(propertyID: propertyID, sessionID: sessionID, metadata: metadata)
+        syncGuidedShotsToCurrentSessionMetadataIfPersisted(propertyID: propertyID, sessionID: sessionID)
         persistPropertyCaptureProfile(captureProfile, for: propertyID)
 
         if let lockStateOverride {
@@ -6096,12 +6222,15 @@ struct ContentView: View {
         }
 
         captureProfile = captureProfile == .residential ? .commercial : .residential
-        persistCaptureProfileToCurrentSession()
+        persistCaptureProfileToCurrentSession(persistSessionIfNeeded: true)
     }
 
     private func confirmCaptureProfileSwitch() {
         captureProfile = captureProfile == .residential ? .commercial : .residential
-        persistCaptureProfileToCurrentSession(lockStateOverride: sessionCaptureProfileLocked)
+        persistCaptureProfileToCurrentSession(
+            lockStateOverride: sessionCaptureProfileLocked,
+            persistSessionIfNeeded: true
+        )
         showHDToast("\(captureProfile.title) applied to session")
     }
 
@@ -9037,7 +9166,11 @@ extension ContentView {
         reservedAngleIndexAtCapture: Int?
     ) {
         guard let propertyID = appState.selectedPropertyID else { return }
-        guard let session = appState.currentSession else { return }
+        guard let session = appState.ensureCurrentSessionPersisted() ?? appState.currentSession else { return }
+        syncGuidedShotsToCurrentSessionMetadataIfPersisted(
+            propertyID: propertyID,
+            sessionID: session.id
+        )
 
         let imageSize = UIImage(data: imageData)?.size
         let width = imageSize.map { Int($0.width) }
@@ -9550,6 +9683,15 @@ extension ContentView {
                 }
                 fetchedGuidedShots[index] = guided
             }
+
+            scheduleGuidedHistoricalHydrationIfNeeded(
+                propertyID: propertyID,
+                currentSession: currentSession,
+                baselineSessionID: baselineState.baselineSessionID,
+                guidedShots: fetchedGuidedShots,
+                orderedSessions: orderedSessions,
+                metadataCache: &metadataCache
+            )
         }
         activeSessionShotIDs = sessionShotIDs
         guidedShots = fetchedGuidedShots
@@ -9587,13 +9729,11 @@ extension ContentView {
             if normalized != existing {
                 try? localStore.saveGuidedShots(normalized, propertyID: propertyID)
             }
-            if let sessionID {
-                try? localStore.syncGuidedShotsToSessionMetadata(
-                    propertyID: propertyID,
-                    sessionID: sessionID,
-                    guidedShots: normalized
-                )
-            }
+            syncGuidedShotsToCurrentSessionMetadataIfPersisted(
+                propertyID: propertyID,
+                sessionID: sessionID,
+                guidedShots: normalized
+            )
             return visibleGuidedShots(from: normalized)
         }
 
@@ -9662,7 +9802,7 @@ extension ContentView {
         let normalizedSeeded = Self.normalizedGuidedShotsWithStableAngles(seeded)
         if !normalizedSeeded.isEmpty {
             try? localStore.saveGuidedShots(normalizedSeeded, propertyID: propertyID)
-            try? localStore.syncGuidedShotsToSessionMetadata(
+            syncGuidedShotsToCurrentSessionMetadataIfPersisted(
                 propertyID: propertyID,
                 sessionID: sessionID,
                 guidedShots: normalizedSeeded
@@ -10452,14 +10592,32 @@ extension ContentView {
     private func saveNormalizedGuidedShots(_ guidedShots: [GuidedShot], propertyID: UUID) throws -> [GuidedShot] {
         let normalized = Self.normalizedGuidedShotsWithStableAngles(guidedShots)
         try localStore.saveGuidedShots(normalized, propertyID: propertyID)
-        if let sessionID = appState.currentSession?.id {
-            try? localStore.syncGuidedShotsToSessionMetadata(
-                propertyID: propertyID,
-                sessionID: sessionID,
-                guidedShots: normalized
-            )
-        }
+        syncGuidedShotsToCurrentSessionMetadataIfPersisted(
+            propertyID: propertyID,
+            sessionID: appState.currentSession?.id,
+            guidedShots: normalized
+        )
         return normalized
+    }
+
+    private func currentSessionIsPersisted(propertyID: UUID, sessionID: UUID) -> Bool {
+        ((try? localStore.fetchSessions(propertyID: propertyID)) ?? []).contains { $0.id == sessionID }
+    }
+
+    private func syncGuidedShotsToCurrentSessionMetadataIfPersisted(
+        propertyID: UUID,
+        sessionID: UUID?,
+        guidedShots: [GuidedShot]? = nil
+    ) {
+        guard let sessionID, currentSessionIsPersisted(propertyID: propertyID, sessionID: sessionID) else {
+            return
+        }
+        let source = guidedShots ?? self.guidedShots
+        try? localStore.syncGuidedShotsToSessionMetadata(
+            propertyID: propertyID,
+            sessionID: sessionID,
+            guidedShots: source
+        )
     }
 
     private func writeGuidedReferenceImage(data: Data, guidedShotID: UUID) -> String? {
@@ -10885,23 +11043,36 @@ extension ContentView {
         resetSelectionForSwitch()
         camera.updateDetailNoteActive(false)
         if summary.hasCaptures {
-            appState.saveDraftCurrentSession()
+            let persistedDraft = appState.saveDraftCurrentSession(scheduleShadowWrite: false)
             appState.triggerBackupForLifecycleEvent()
+            appState.refreshPropertiesInBackground()
+            showSessionActionsSheet = false
+            Task {
+                await appState.releaseCurrentSessionCoordinationLockIfOwned()
+                if let persistedDraft {
+                    appState.scheduleSessionShadowWriteAfterCoordinationRelease(for: persistedDraft)
+                }
+                await MainActor.run {
+                    onExitToHub?()
+                }
+            }
+            return
         } else if let propertyID = appState.selectedPropertyID,
                   let sessionID = appState.currentSession?.id {
-            _ = appState.deleteSession(
-                propertyID: propertyID,
-                sessionID: sessionID,
-                triggerSafetyPause: false
-            )
-        }
-        appState.refreshPropertiesInBackground()
-        showSessionActionsSheet = false
-        Task {
-            await appState.releaseCurrentSessionCoordinationLockIfOwned()
-            await MainActor.run {
-                onExitToHub?()
+            showSessionActionsSheet = false
+            Task {
+                await appState.releaseCurrentSessionCoordinationLockIfOwned()
+                _ = appState.deleteSession(
+                    propertyID: propertyID,
+                    sessionID: sessionID,
+                    triggerSafetyPause: false
+                )
+                appState.refreshPropertiesInBackground()
+                await MainActor.run {
+                    onExitToHub?()
+                }
             }
+            return
         }
     }
 

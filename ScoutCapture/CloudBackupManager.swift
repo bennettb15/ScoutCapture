@@ -183,12 +183,17 @@ final class CloudBackupManager: ObservableObject {
     private let stateLock = NSLock()
     private var scheduledBackupWorkItem: DispatchWorkItem?
     private var scheduledBackupDeadline: Date?
+    private var scheduledAutomaticRevision: String?
+    private var inFlightRevision: String?
     private var isShuttingDown = false
     private var isRunning = false
     private var isCaptureModeActive = false
     private var progressPhase: String?
     private var progressCompleted: Int?
     private var progressTotal: Int?
+    private var lastPublishedProgressPhase: String?
+    private var lastPublishedProgressCompleted: Int?
+    private var lastPublishedProgressTotal: Int?
 
     init(
         fileManager: FileManager = .default,
@@ -276,69 +281,46 @@ final class CloudBackupManager: ObservableObject {
             state = .backedUp
         }
 
+        let nextStatus = CloudBackupStatus(
+            state: state,
+            isRunning: runtime.isRunning,
+            lastSuccessfulBackupAt: lastSuccessfulBackupAt,
+            lastFailureMessage: lastFailureMessage,
+            iCloudAvailable: cloudAvailable,
+            hasBackup: hasBackup,
+            progressPhase: runtime.progressPhase,
+            progressCompleted: runtime.progressCompleted,
+            progressTotal: runtime.progressTotal,
+            snapshotFileCount: snapshotMetrics?.fileCount,
+            snapshotByteCount: snapshotMetrics?.byteCount,
+            lastRunChangedCount: lastRunChangedCount,
+            lastRunUnchangedCount: lastRunUnchangedCount,
+            lastRunChangedByteCount: lastRunChangedByteCount,
+            lastRunAddedCount: lastRunAddedCount,
+            lastRunUpdatedCount: lastRunUpdatedCount,
+            lastRunSourceFileCount: lastRunSourceFileCount,
+            lastRunPrunedCount: lastRunPrunedCount,
+            lastRunNewBlobsWrittenCount: lastRunNewBlobsWrittenCount,
+            lastRunReusedBlobsReferencedCount: lastRunReusedBlobsReferencedCount,
+            lastRunBlobBytesWritten: lastRunBlobBytesWritten,
+            lastRunBlobBytesReused: lastRunBlobBytesReused,
+            lastRunChangedPathsSample: lastRunChangedPathsSample,
+            lastRunPrunedPathsSample: lastRunPrunedPathsSample,
+            safetyPauseUntil: safetyPauseUntil,
+            safetyPauseReason: safetyPauseReason
+        )
+
         let apply = {
-            self.status = CloudBackupStatus(
-                state: state,
-                isRunning: runtime.isRunning,
-                lastSuccessfulBackupAt: lastSuccessfulBackupAt,
-                lastFailureMessage: lastFailureMessage,
-                iCloudAvailable: cloudAvailable,
-                hasBackup: hasBackup,
-                progressPhase: runtime.progressPhase,
-                progressCompleted: runtime.progressCompleted,
-                progressTotal: runtime.progressTotal,
-                snapshotFileCount: snapshotMetrics?.fileCount,
-                snapshotByteCount: snapshotMetrics?.byteCount,
-                lastRunChangedCount: lastRunChangedCount,
-                lastRunUnchangedCount: lastRunUnchangedCount,
-                lastRunChangedByteCount: lastRunChangedByteCount,
-                lastRunAddedCount: lastRunAddedCount,
-                lastRunUpdatedCount: lastRunUpdatedCount,
-                lastRunSourceFileCount: lastRunSourceFileCount,
-                lastRunPrunedCount: lastRunPrunedCount,
-                lastRunNewBlobsWrittenCount: lastRunNewBlobsWrittenCount,
-                lastRunReusedBlobsReferencedCount: lastRunReusedBlobsReferencedCount,
-                lastRunBlobBytesWritten: lastRunBlobBytesWritten,
-                lastRunBlobBytesReused: lastRunBlobBytesReused,
-                lastRunChangedPathsSample: lastRunChangedPathsSample,
-                lastRunPrunedPathsSample: lastRunPrunedPathsSample,
-                safetyPauseUntil: safetyPauseUntil,
-                safetyPauseReason: safetyPauseReason
-            )
+            guard self.status != nextStatus else { return }
+            self.status = nextStatus
         }
         if Thread.isMainThread {
             apply()
         } else {
             DispatchQueue.main.async { [weak self] in
                 guard let self, !self.isShuttingDown else { return }
-                self.status = CloudBackupStatus(
-                    state: state,
-                    isRunning: runtime.isRunning,
-                    lastSuccessfulBackupAt: lastSuccessfulBackupAt,
-                    lastFailureMessage: lastFailureMessage,
-                    iCloudAvailable: cloudAvailable,
-                    hasBackup: hasBackup,
-                    progressPhase: runtime.progressPhase,
-                    progressCompleted: runtime.progressCompleted,
-                    progressTotal: runtime.progressTotal,
-                    snapshotFileCount: snapshotMetrics?.fileCount,
-                    snapshotByteCount: snapshotMetrics?.byteCount,
-                    lastRunChangedCount: lastRunChangedCount,
-                    lastRunUnchangedCount: lastRunUnchangedCount,
-                    lastRunChangedByteCount: lastRunChangedByteCount,
-                    lastRunAddedCount: lastRunAddedCount,
-                    lastRunUpdatedCount: lastRunUpdatedCount,
-                    lastRunSourceFileCount: lastRunSourceFileCount,
-                    lastRunPrunedCount: lastRunPrunedCount,
-                    lastRunNewBlobsWrittenCount: lastRunNewBlobsWrittenCount,
-                    lastRunReusedBlobsReferencedCount: lastRunReusedBlobsReferencedCount,
-                    lastRunBlobBytesWritten: lastRunBlobBytesWritten,
-                    lastRunBlobBytesReused: lastRunBlobBytesReused,
-                    lastRunChangedPathsSample: lastRunChangedPathsSample,
-                    lastRunPrunedPathsSample: lastRunPrunedPathsSample,
-                    safetyPauseUntil: safetyPauseUntil,
-                    safetyPauseReason: safetyPauseReason
-                )
+                guard self.status != nextStatus else { return }
+                self.status = nextStatus
             }
         }
     }
@@ -358,10 +340,12 @@ final class CloudBackupManager: ObservableObject {
             refreshStatus()
             return
         }
-        guard hasPendingBackup else {
+        guard let pendingRevision = pendingBackupRevision else {
             refreshStatus()
             return
         }
+        guard scheduledAutomaticRevision != pendingRevision else { return }
+        guard inFlightRevision != pendingRevision else { return }
         let normalizedDelay = max(0, delay)
         let requestedDeadline = Date().addingTimeInterval(normalizedDelay)
         if let existingDeadline = scheduledBackupDeadline,
@@ -370,10 +354,17 @@ final class CloudBackupManager: ObservableObject {
             return
         }
         scheduledBackupWorkItem?.cancel()
+        scheduledAutomaticRevision = pendingRevision
         let workItem = DispatchWorkItem { [weak self] in
-            self?.scheduledBackupWorkItem = nil
-            self?.scheduledBackupDeadline = nil
-            self?.performBackup(trigger: "automatic")
+            guard let self else { return }
+            let scheduledRevision = self.scheduledAutomaticRevision
+            self.scheduledBackupWorkItem = nil
+            self.scheduledBackupDeadline = nil
+            self.scheduledAutomaticRevision = nil
+            if let scheduledRevision {
+                self.inFlightRevision = scheduledRevision
+            }
+            self.performBackup(trigger: "automatic")
         }
         scheduledBackupWorkItem = workItem
         scheduledBackupDeadline = requestedDeadline
@@ -385,6 +376,7 @@ final class CloudBackupManager: ObservableObject {
         let existingWorkItem = scheduledBackupWorkItem
         scheduledBackupWorkItem = nil
         scheduledBackupDeadline = nil
+        scheduledAutomaticRevision = nil
         existingWorkItem?.cancel()
     }
 
@@ -392,6 +384,7 @@ final class CloudBackupManager: ObservableObject {
         scheduledBackupWorkItem?.cancel()
         scheduledBackupWorkItem = nil
         scheduledBackupDeadline = nil
+        scheduledAutomaticRevision = nil
         clearSafetyPause()
         performBackup(trigger: "manual")
     }
@@ -408,6 +401,7 @@ final class CloudBackupManager: ObservableObject {
         scheduledBackupWorkItem?.cancel()
         scheduledBackupWorkItem = nil
         scheduledBackupDeadline = nil
+        scheduledAutomaticRevision = nil
         return try executeOnBackupQueueSync {
             let selectedPropertyID = try restoreLatestBackupSync(mode: mode)
             refreshStatus()
@@ -422,6 +416,7 @@ final class CloudBackupManager: ObservableObject {
         scheduledBackupWorkItem?.cancel()
         scheduledBackupWorkItem = nil
         scheduledBackupDeadline = nil
+        scheduledAutomaticRevision = nil
         refreshStatus()
     }
 
@@ -450,6 +445,15 @@ final class CloudBackupManager: ObservableObject {
         return localRevision == nil || localRevision != backedUpRevision
     }
 
+    private var pendingBackupRevision: String? {
+        let localRevision = userDefaults.string(forKey: Constants.localRevisionKey)
+        let backedUpRevision = userDefaults.string(forKey: Constants.backedUpRevisionKey)
+        guard localRevision == nil || localRevision != backedUpRevision else {
+            return nil
+        }
+        return localRevision
+    }
+
     private var isSafetyPauseActive: Bool {
         guard let until = userDefaults.object(forKey: Constants.safetyPauseUntilKey) as? Date else {
             return false
@@ -472,9 +476,11 @@ final class CloudBackupManager: ObservableObject {
             return
         }
         guard !withStateLock({ isRunning }) else { return }
+        let localRevision = userDefaults.string(forKey: Constants.localRevisionKey) ?? bumpLocalRevision()
 
         withStateLock {
             isRunning = true
+            inFlightRevision = localRevision
             progressPhase = "Preparing backup"
             progressCompleted = 0
             progressTotal = nil
@@ -483,6 +489,9 @@ final class CloudBackupManager: ObservableObject {
         defer {
             withStateLock {
                 isRunning = false
+                if inFlightRevision == localRevision {
+                    inFlightRevision = nil
+                }
                 progressPhase = nil
                 progressCompleted = nil
                 progressTotal = nil
@@ -490,7 +499,6 @@ final class CloudBackupManager: ObservableObject {
             refreshStatus()
         }
 
-        let localRevision = userDefaults.string(forKey: Constants.localRevisionKey) ?? bumpLocalRevision()
         let sourceRoot = StorageRoot.prepareStorage()
         guard hasAnyProperties(in: sourceRoot) else {
             if let backedUpRevision = userDefaults.string(forKey: Constants.backedUpRevisionKey) {
@@ -733,7 +741,28 @@ final class CloudBackupManager: ObservableObject {
             progressCompleted = completed
             progressTotal = max(total, 1)
         }
-        refreshStatus()
+        let normalizedTotal = max(total, 1)
+        let shouldPublish: Bool = withStateLock {
+            let phaseChanged = lastPublishedProgressPhase != phase
+            let isInitial = lastPublishedProgressCompleted == nil || lastPublishedProgressTotal == nil
+            let isComplete = completed >= normalizedTotal
+            let publishedBucket = lastPublishedProgressCompleted.map { ($0 * 20) / max(lastPublishedProgressTotal ?? normalizedTotal, 1) } ?? -1
+            let nextBucket = (completed * 20) / normalizedTotal
+            let bucketChanged = nextBucket != publishedBucket
+
+            guard phaseChanged || isInitial || isComplete || bucketChanged else {
+                return false
+            }
+
+            lastPublishedProgressPhase = phase
+            lastPublishedProgressCompleted = completed
+            lastPublishedProgressTotal = normalizedTotal
+            return true
+        }
+
+        if shouldPublish {
+            refreshStatus()
+        }
     }
 
     private func withStateLock<T>(_ operation: () -> T) -> T {
