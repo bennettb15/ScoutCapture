@@ -343,6 +343,7 @@ final class AssetImageCache: ObservableObject {
 // MARK: - Report Library Model (SCOUT file storage per property/session)
 
 final class ReportLibraryModel: ObservableObject {
+    typealias MediaHydrationHandler = @Sendable ([AppState.OperationalMediaHydrationRequest]) async -> Bool
     enum SavePhotoError: Error {
         case missingCGImage
         case imageDestinationCreateFailed
@@ -441,6 +442,9 @@ final class ReportLibraryModel: ObservableObject {
     private let fileManager = FileManager.default
     private var propertyID: UUID?
     private var sessionID: UUID?
+    private var mediaHydrationHandler: MediaHydrationHandler?
+    private var pendingHydrationSignature: String?
+    private var pendingHydrationSessionID: UUID?
 
     static func imageDimensions(at url: URL) -> (width: Int, height: Int) {
         guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
@@ -503,10 +507,30 @@ final class ReportLibraryModel: ObservableObject {
         reloadAssets()
     }
 
+    func setMediaHydrationHandler(_ handler: MediaHydrationHandler?) {
+        mediaHydrationHandler = handler
+    }
+
+    private func galleryRelativePath(for shot: ShotMetadata) -> String {
+        let existing = shot.originalRelativePath.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !existing.isEmpty {
+            return existing
+        }
+        let originalFilename = shot.originalFilename.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !originalFilename.isEmpty {
+            return "Originals/\(originalFilename)"
+        }
+        return "Originals/\(shot.shotID.uuidString).heic"
+    }
+
     func reloadAssets() {
         guard let propertyID, let sessionID else {
             assets = []
             return
+        }
+        if pendingHydrationSessionID != sessionID {
+            pendingHydrationSessionID = sessionID
+            pendingHydrationSignature = nil
         }
         let sessionFolder = localStore.sessionFolderURL(propertyID: propertyID, sessionID: sessionID)
         let originals = localStore.originalsDirectoryURL(propertyID: propertyID, sessionID: sessionID)
@@ -522,6 +546,7 @@ final class ReportLibraryModel: ObservableObject {
         var out: [ReportAsset] = []
         if let metadata = try? localStore.loadSessionMetadata(propertyID: propertyID, sessionID: sessionID),
            !metadata.shots.isEmpty {
+            var missingRequests: [AppState.OperationalMediaHydrationRequest] = []
             out = metadata.shots
                 .sorted { lhs, rhs in
                     if lhs.createdAt != rhs.createdAt { return lhs.createdAt < rhs.createdAt }
@@ -533,10 +558,20 @@ final class ReportLibraryModel: ObservableObject {
                         if shot.createdAt < window.start { return nil }
                         if let end = window.end, shot.createdAt > end { return nil }
                     }
-                    let relative = shot.originalRelativePath.trimmingCharacters(in: .whitespacesAndNewlines)
+                    let relative = self.galleryRelativePath(for: shot)
                     guard !relative.isEmpty else { return nil }
                     let url = sessionFolder.appendingPathComponent(relative, isDirectory: false)
-                    guard fileManager.fileExists(atPath: url.path) else { return nil }
+                    guard fileManager.fileExists(atPath: url.path) else {
+                        missingRequests.append(
+                            AppState.OperationalMediaHydrationRequest(
+                                propertyID: propertyID,
+                                sessionID: sessionID,
+                                shotID: shot.shotID,
+                                relativePathOverride: relative
+                            )
+                        )
+                        return nil
+                    }
                     let filename = shot.originalFilename.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                         ? url.lastPathComponent
                         : shot.originalFilename
@@ -549,6 +584,35 @@ final class ReportLibraryModel: ObservableObject {
                         originalFilename: filename
                     )
                 }
+
+            let requests = Array(Set(missingRequests))
+            if requests.isEmpty {
+                pendingHydrationSignature = nil
+            } else {
+                let signature = requests
+                    .sorted {
+                        if $0.sessionID != $1.sessionID {
+                            return $0.sessionID.uuidString < $1.sessionID.uuidString
+                        }
+                        return $0.shotID.uuidString < $1.shotID.uuidString
+                    }
+                    .map { "\($0.sessionID.uuidString.lowercased())|\($0.shotID.uuidString.lowercased())" }
+                    .joined(separator: ",")
+                if signature != pendingHydrationSignature, let mediaHydrationHandler {
+                    pendingHydrationSignature = signature
+                    Task { @MainActor [weak self] in
+                        let started = await mediaHydrationHandler(requests)
+                        guard let self else { return }
+                        if started {
+                            if self.propertyID == propertyID, self.sessionID == sessionID {
+                                self.reloadAssets()
+                            }
+                        } else {
+                            self.pendingHydrationSignature = nil
+                        }
+                    }
+                }
+            }
         }
 
         // Fallback for older/missing metadata: enumerate originals folder, still avoiding dimension reads.
@@ -1718,6 +1782,7 @@ private struct ReportPhotoViewer: View {
     @State private var orientationResetToken: Int = 0
     @State private var shotMetadataByKey: [String: ShotMetadata] = [:]
     @State private var shotMetadataByShotID: [UUID: ShotMetadata] = [:]
+    @State private var previousMetadataReady: Bool = false
 
     // Per-page zoom reset tokens.
     // When you swipe away from a page, we increment that page's token so returning to it is back at fit.
@@ -1895,6 +1960,16 @@ private struct ReportPhotoViewer: View {
             ? (appState.selectedProperty?.name.trimmingCharacters(in: .whitespacesAndNewlines) ?? "")
             : title
 
+        if isPreviousMetadataMode && !previousMetadataReady {
+            let photoCount = "Photo \(index + 1) of \(max(assets.count, 1))"
+            return HeaderMeta(
+                propertyName: propertyName,
+                shotLabel: "Loading...",
+                flaggedNote: "",
+                photoCount: photoCount
+            )
+        }
+
         let metadata = metadataForAsset(asset)
         let shotLabel: String = {
             if isPreviousMetadataMode, let metadata {
@@ -2010,10 +2085,12 @@ private struct ReportPhotoViewer: View {
     }
 
     private func loadShotMetadataCache() {
+        previousMetadataReady = false
         guard let propertyID = metadataPropertyID ?? appState.selectedPropertyID,
               let sessionID = metadataSessionID ?? appState.currentSession?.id else {
             shotMetadataByKey = [:]
             shotMetadataByShotID = [:]
+            previousMetadataReady = true
             return
         }
 
@@ -2040,6 +2117,7 @@ private struct ReportPhotoViewer: View {
         }
         shotMetadataByKey = map
         shotMetadataByShotID = idMap
+        previousMetadataReady = true
         if isPreviousMetadataMode {
             print("[PrevHeader] loaded previous shots count=\(entries.count)")
         }
@@ -2054,6 +2132,9 @@ private struct ReportPhotoViewer: View {
     }
 
     private func metadataForAsset(_ asset: ReportAsset) -> ShotMetadata? {
+        if isPreviousMetadataMode && !previousMetadataReady {
+            return nil
+        }
         let itemKey = URL(fileURLWithPath: asset.localIdentifier).lastPathComponent
         if let shotID = shotIDFromAsset(asset), let entry = shotMetadataByShotID[shotID] {
             if isPreviousMetadataMode {
@@ -3251,6 +3332,10 @@ struct ContentView: View {
     @State private var guidedReferenceThumbnail: UIImage? = nil
     @State private var guidedHistoricalHydrationSignature: String? = nil
     @State private var guidedHistoricalHydrationSessionID: UUID? = nil
+    @State private var guidedHistoricalHydrationAttemptedRequestKeys: Set<String> = []
+    @State private var flaggedHistoricalHydrationSignature: String? = nil
+    @State private var flaggedHistoricalHydrationSessionID: UUID? = nil
+    @State private var flaggedHistoricalHydrationAttemptedRequestKeys: Set<String> = []
     @State private var showGuidedAlignmentOverlay: Bool = false
     @State private var referenceOverlayOpacity: Double = 0.45
     @State private var armedUpdateObservationID: UUID? = nil
@@ -3526,6 +3611,10 @@ struct ContentView: View {
     }
 
     private func ensureReferenceResolutionReady() {
+        print(
+            "[GuidedHydration] event=ensure_reference_resolution_ready " +
+            "allowReferenceThumbnailResolution=\(allowReferenceThumbnailResolution)"
+        )
         guard !allowReferenceThumbnailResolution else { return }
         referenceResolutionToken += 1
         allowReferenceThumbnailResolution = true
@@ -3576,7 +3665,13 @@ struct ContentView: View {
                     orderedSessions: orderedSessions,
                     metadataCache: &metadataCache
                 )
-                if resolved.exists {
+                let shouldCountAsReference =
+                    resolved.exists ||
+                    (
+                        resolved.path != nil &&
+                        (resolved.source == .prior || resolved.source == .baseline)
+                    )
+                if shouldCountAsReference {
                     newGuidedReferenceKeys.insert(guidedKey(for: guidedShot))
                 }
             }
@@ -3702,6 +3797,53 @@ struct ContentView: View {
         return loaded
     }
 
+    private func guidedHistoricalRelativePath(for shot: ShotMetadata) -> String {
+        let existing = shot.originalRelativePath.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !existing.isEmpty {
+            return existing
+        }
+        let originalFilename = shot.originalFilename.trimmingCharacters(in: .whitespacesAndNewlines)
+        if originalFilename.isEmpty {
+            return "Originals/\(shot.shotID.uuidString).heic"
+        }
+        return "Originals/\(originalFilename)"
+    }
+
+    private func guidedHistoricalResolvedSessionImagePath(
+        for shot: ShotMetadata,
+        propertyID: UUID,
+        sessionID: UUID
+    ) -> (absolutePath: String?, source: String, relativePath: String, exists: Bool) {
+        let resolved = resolvedSessionImagePath(
+            for: shot,
+            propertyID: propertyID,
+            sessionID: sessionID,
+            suppressAutoHydration: true
+        )
+        if resolved.absolutePath != nil || !resolved.relativePath.isEmpty {
+            return resolved
+        }
+
+        let fallbackRelativePath = guidedHistoricalRelativePath(for: shot)
+        guard !fallbackRelativePath.isEmpty else {
+            return resolved
+        }
+
+        if let originalURL = localStore.resolveSessionRelativeFileURL(
+            propertyID: propertyID,
+            sessionID: sessionID,
+            relativePath: fallbackRelativePath
+        ) {
+            return (originalURL.path, "original_derived", fallbackRelativePath, true)
+        }
+
+        let derivedPath = localStore
+            .sessionFolderURL(propertyID: propertyID, sessionID: sessionID)
+            .appendingPathComponent(fallbackRelativePath, isDirectory: false)
+            .path
+        return (derivedPath, "original_derived", fallbackRelativePath, false)
+    }
+
     private func mostRecentHistoricalGuidedThumbnailResolution(
         propertyID: UUID,
         currentSession: Session?,
@@ -3727,12 +3869,6 @@ struct ContentView: View {
                 return nil
             }
 
-            for snapshot in metadata.guidedShots where guidedSnapshot(snapshot, matches: guidedShot, guidedKey: key) {
-                if let path = resolvedGuidedSnapshotImagePath(snapshot) {
-                    return GuidedSessionThumbnailResolution(source: source, sessionID: session.id, path: path, exists: true)
-                }
-            }
-
             let matchingShots = metadata.shots
                 .filter { shotMetadata($0, matches: guidedShot, guidedKey: key) }
                 .sorted { lhs, rhs in
@@ -3740,13 +3876,38 @@ struct ContentView: View {
                     return lhs.createdAt > rhs.createdAt
                 }
 
+            let hasMatchingShots = !matchingShots.isEmpty
             for shot in matchingShots {
-                let resolved = resolvedSessionImagePath(
+                let resolved = guidedHistoricalResolvedSessionImagePath(
                     for: shot,
                     propertyID: propertyID,
                     sessionID: session.id
                 )
                 if let path = resolved.absolutePath, resolved.exists {
+                    return GuidedSessionThumbnailResolution(source: source, sessionID: session.id, path: path, exists: true)
+                }
+                if let path = resolved.absolutePath {
+                    let hydrationKey = guidedHistoricalHydrationRequestKey(
+                        sessionID: session.id,
+                        shotID: shot.shotID
+                    )
+                    if !guidedHistoricalHydrationAttemptedRequestKeys.contains(hydrationKey) {
+                        return GuidedSessionThumbnailResolution(
+                            source: source,
+                            sessionID: session.id,
+                            path: path,
+                            exists: false
+                        )
+                    }
+                }
+            }
+
+            guard !hasMatchingShots else {
+                return nil
+            }
+
+            for snapshot in metadata.guidedShots where guidedSnapshot(snapshot, matches: guidedShot, guidedKey: key) {
+                if let path = resolvedGuidedSnapshotImagePath(snapshot) {
                     return GuidedSessionThumbnailResolution(source: source, sessionID: session.id, path: path, exists: true)
                 }
             }
@@ -3779,6 +3940,7 @@ struct ContentView: View {
         metadataCache: inout [UUID: SessionMetadata]
     ) -> AppState.OperationalMediaHydrationRequest? {
         let key = guidedKey(for: guidedShot)
+        print("[GuidedHydration] event=request_enter guidedID=\(guidedShot.id.uuidString) guidedKey=\(key)")
 
         let priorSessions: [Session] = {
             guard let currentSession else { return [] }
@@ -3789,13 +3951,8 @@ struct ContentView: View {
 
         func requestForBestHistoricalShot(in session: Session) -> AppState.OperationalMediaHydrationRequest? {
             guard let metadata = metadataForSession(propertyID: propertyID, sessionID: session.id, cache: &metadataCache) else {
+                print("[GuidedHydration] event=request_nil reason=missing_metadata guidedKey=\(key) sessionID=\(session.id.uuidString)")
                 return nil
-            }
-
-            for snapshot in metadata.guidedShots where guidedSnapshot(snapshot, matches: guidedShot, guidedKey: key) {
-                if resolvedGuidedSnapshotImagePath(snapshot) != nil {
-                    return nil
-                }
             }
 
             let matchingShots = metadata.shots
@@ -3805,24 +3962,73 @@ struct ContentView: View {
                     return lhs.createdAt > rhs.createdAt
                 }
 
+            print(
+                "[GuidedHydration] event=request_matching_shots " +
+                "guidedKey=\(key) " +
+                "sessionID=\(session.id.uuidString) " +
+                "count=\(matchingShots.count)"
+            )
+
+            let hasMatchingShots = !matchingShots.isEmpty
             for shot in matchingShots {
-                let resolved = resolvedSessionImagePath(
+                let originalRelativePath = shot.originalRelativePath.trimmingCharacters(in: .whitespacesAndNewlines)
+                let originalFilename = shot.originalFilename.trimmingCharacters(in: .whitespacesAndNewlines)
+                let derivedRelativePath = guidedHistoricalRelativePath(for: shot)
+                let resolved = guidedHistoricalResolvedSessionImagePath(
                     for: shot,
                     propertyID: propertyID,
                     sessionID: session.id
                 )
+                print(
+                    "[GuidedHydration] event=request_candidate " +
+                    "guidedKey=\(key) " +
+                    "sessionID=\(session.id.uuidString) " +
+                    "shotID=\(shot.shotID.uuidString) " +
+                    "originalRelativePath=\(originalRelativePath.isEmpty ? "NONE" : originalRelativePath) " +
+                    "originalFilename=\(originalFilename.isEmpty ? "NONE" : originalFilename) " +
+                    "derivedRelativePath=\(derivedRelativePath.isEmpty ? "NONE" : derivedRelativePath) " +
+                    "resolvedAbsolutePath=\(resolved.absolutePath ?? "NONE") " +
+                    "exists=\(resolved.exists)"
+                )
                 if resolved.exists {
+                    print(
+                        "[GuidedHydration] event=request_nil " +
+                        "reason=already_local " +
+                        "guidedKey=\(key) " +
+                        "sessionID=\(session.id.uuidString) " +
+                        "shotID=\(shot.shotID.uuidString)"
+                    )
                     return nil
                 }
                 if resolved.absolutePath != nil {
+                    print(
+                        "[GuidedHydration] event=request_created " +
+                        "guidedKey=\(key) " +
+                        "sessionID=\(session.id.uuidString) " +
+                        "shotID=\(shot.shotID.uuidString)"
+                    )
                     return AppState.OperationalMediaHydrationRequest(
                         propertyID: propertyID,
                         sessionID: session.id,
-                        shotID: shot.shotID
+                        shotID: shot.shotID,
+                        relativePathOverride: resolved.relativePath.isEmpty ? nil : resolved.relativePath
                     )
                 }
             }
 
+            guard !hasMatchingShots else {
+                print("[GuidedHydration] event=request_nil reason=matching_shots_but_no_absolute_path guidedKey=\(key) sessionID=\(session.id.uuidString)")
+                return nil
+            }
+
+            for snapshot in metadata.guidedShots where guidedSnapshot(snapshot, matches: guidedShot, guidedKey: key) {
+                if resolvedGuidedSnapshotImagePath(snapshot) != nil {
+                    print("[GuidedHydration] event=request_nil reason=snapshot_exists guidedKey=\(key) sessionID=\(session.id.uuidString)")
+                    return nil
+                }
+            }
+
+            print("[GuidedHydration] event=request_nil reason=no_matching_shots guidedKey=\(key) sessionID=\(session.id.uuidString)")
             return nil
         }
 
@@ -3850,10 +4056,17 @@ struct ContentView: View {
         orderedSessions: [Session],
         metadataCache: inout [UUID: SessionMetadata]
     ) {
+        print(
+            "[GuidedHydration] event=schedule_enter " +
+            "propertyID=\(propertyID.uuidString) " +
+            "sessionID=\(currentSession?.id.uuidString ?? "NONE") " +
+            "guidedCount=\(guidedShots.count)"
+        )
         let activeSessionID = currentSession?.id
         if guidedHistoricalHydrationSessionID != activeSessionID {
             guidedHistoricalHydrationSessionID = activeSessionID
             guidedHistoricalHydrationSignature = nil
+            guidedHistoricalHydrationAttemptedRequestKeys = []
         }
 
         let requests = Array(Set(guidedShots.compactMap { guidedShot in
@@ -3867,7 +4080,10 @@ struct ContentView: View {
             )
         }))
 
+        print("[GuidedHydration] event=schedule_requests count=\(requests.count)")
+
         guard !requests.isEmpty else {
+            print("[GuidedHydration] event=schedule_exit reason=no_requests")
             guidedHistoricalHydrationSignature = nil
             return
         }
@@ -3883,15 +4099,33 @@ struct ContentView: View {
             .joined(separator: ",")
 
         guard signature != guidedHistoricalHydrationSignature else {
+            print("[GuidedHydration] event=schedule_exit reason=duplicate_signature signature=\(signature)")
             return
         }
         guidedHistoricalHydrationSignature = signature
+        let requestKeys = requests.map {
+            guidedHistoricalHydrationRequestKey(sessionID: $0.sessionID, shotID: $0.shotID)
+        }
+        guidedHistoricalHydrationAttemptedRequestKeys.formUnion(requestKeys)
 
         Task { @MainActor in
-            let started = await appState.ensureOperationalMediaAvailableForRequests(requests)
-            guard started else { return }
+            print("[GuidedHydration] event=ensure_called requestCount=\(requests.count)")
+            let started = await appState.ensureGuidedHistoricalMediaAvailableForRequests(requests)
+            guard started else {
+                print("[GuidedHydration] event=schedule_exit reason=ensure_not_started")
+                guidedHistoricalHydrationSignature = nil
+                for key in requestKeys {
+                    guidedHistoricalHydrationAttemptedRequestKeys.remove(key)
+                }
+                return
+            }
+            print("[GuidedHydration] event=ensure_started requestCount=\(requests.count)")
             refreshGuidedShots()
         }
+    }
+
+    private func guidedHistoricalHydrationRequestKey(sessionID: UUID, shotID: UUID) -> String {
+        "\(sessionID.uuidString.lowercased())|\(shotID.uuidString.lowercased())"
     }
 
     private func shotMetadataMatchKind(
@@ -3908,6 +4142,363 @@ struct ContentView: View {
         return nil
     }
 
+    private struct FlaggedShotResolutionCandidate {
+        let shot: ShotMetadata
+        let matchBy: String
+        let sessionID: UUID
+        let resolution: GuidedSessionThumbnailResolution
+        let relativePath: String
+    }
+
+    private func mostRecentMatchingFlaggedShot(
+        in metadata: SessionMetadata?,
+        observation: Observation,
+        observationShotIDs: Set<UUID>
+    ) -> (shot: ShotMetadata, matchBy: String)? {
+        guard let metadata else { return nil }
+        return metadata.shots
+            .compactMap { shot -> (ShotMetadata, String)? in
+                guard let matchBy = shotMetadataMatchKind(shot, observation: observation, observationShotIDs: observationShotIDs) else {
+                    return nil
+                }
+                return (shot, matchBy)
+            }
+            .sorted { lhs, rhs in
+                lhs.0.updatedAt > rhs.0.updatedAt
+            }
+            .first
+    }
+
+    private func flaggedHistoricalRelativePath(for shot: ShotMetadata) -> String {
+        let existing = shot.originalRelativePath.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !existing.isEmpty {
+            return existing
+        }
+        let originalFilename = shot.originalFilename.trimmingCharacters(in: .whitespacesAndNewlines)
+        if originalFilename.isEmpty {
+            return "Originals/\(shot.shotID.uuidString).heic"
+        }
+        return "Originals/\(originalFilename)"
+    }
+
+    private func flaggedResolvedSessionImagePath(
+        for shot: ShotMetadata,
+        propertyID: UUID,
+        sessionID: UUID
+    ) -> (absolutePath: String?, source: String, relativePath: String, exists: Bool) {
+        let resolved = resolvedSessionImagePath(
+            for: shot,
+            propertyID: propertyID,
+            sessionID: sessionID,
+            suppressAutoHydration: true
+        )
+        if resolved.absolutePath != nil || !resolved.relativePath.isEmpty {
+            return resolved
+        }
+
+        let fallbackRelativePath = flaggedHistoricalRelativePath(for: shot)
+        guard !fallbackRelativePath.isEmpty else {
+            return resolved
+        }
+
+        if let originalURL = localStore.resolveSessionRelativeFileURL(
+            propertyID: propertyID,
+            sessionID: sessionID,
+            relativePath: fallbackRelativePath
+        ) {
+            return (originalURL.path, "original_derived", fallbackRelativePath, true)
+        }
+
+        let derivedPath = localStore
+            .sessionFolderURL(propertyID: propertyID, sessionID: sessionID)
+            .appendingPathComponent(fallbackRelativePath, isDirectory: false)
+            .path
+        return (derivedPath, "original_derived", fallbackRelativePath, false)
+    }
+
+    private func flaggedResolutionCandidate(
+        propertyID: UUID,
+        sessionID: UUID,
+        source: GuidedThumbSource,
+        match: (shot: ShotMetadata, matchBy: String)?
+    ) -> FlaggedShotResolutionCandidate? {
+        guard let match else { return nil }
+        let resolved = flaggedResolvedSessionImagePath(
+            for: match.shot,
+            propertyID: propertyID,
+            sessionID: sessionID
+        )
+        guard let path = resolved.absolutePath else { return nil }
+        return FlaggedShotResolutionCandidate(
+            shot: match.shot,
+            matchBy: match.matchBy,
+            sessionID: sessionID,
+            resolution: GuidedSessionThumbnailResolution(
+                source: source,
+                sessionID: sessionID,
+                path: path,
+                exists: resolved.exists
+            ),
+            relativePath: resolved.relativePath
+        )
+    }
+
+    private func bestFlaggedResolutionCandidate(
+        propertyID: UUID,
+        currentSession: Session?,
+        baselineSessionID: UUID?,
+        observation: Observation,
+        currentSessionMetadata: SessionMetadata?,
+        orderedSessions: [Session],
+        metadataCache: inout [UUID: SessionMetadata],
+        includeCurrentSession: Bool
+    ) -> FlaggedShotResolutionCandidate? {
+        let currentSessionID = currentSession?.id
+        let observationShotIDs = Set(observation.shots.map(\.id))
+
+        if includeCurrentSession,
+           let currentSessionID,
+           let currentCandidate = flaggedResolutionCandidate(
+                propertyID: propertyID,
+                sessionID: currentSessionID,
+                source: .current,
+                match: mostRecentMatchingFlaggedShot(
+                    in: currentSessionMetadata,
+                    observation: observation,
+                    observationShotIDs: observationShotIDs
+                )
+           ) {
+            return currentCandidate
+        }
+
+        let priorSessions: [Session] = {
+            guard let currentSession else { return [] }
+            return orderedSessions
+                .filter { $0.id != currentSession.id && $0.startedAt < currentSession.startedAt }
+                .sorted { $0.startedAt > $1.startedAt }
+        }()
+
+        for prior in priorSessions where prior.id != baselineSessionID {
+            let match = mostRecentMatchingFlaggedShot(
+                in: metadataForSession(propertyID: propertyID, sessionID: prior.id, cache: &metadataCache),
+                observation: observation,
+                observationShotIDs: observationShotIDs
+            )
+            if let candidate = flaggedResolutionCandidate(
+                propertyID: propertyID,
+                sessionID: prior.id,
+                source: .prior,
+                match: match
+            ) {
+                return candidate
+            }
+        }
+
+        if let baselineSessionID,
+           baselineSessionID != currentSessionID,
+           let candidate = flaggedResolutionCandidate(
+                propertyID: propertyID,
+                sessionID: baselineSessionID,
+                source: .baseline,
+                match: mostRecentMatchingFlaggedShot(
+                    in: metadataForSession(propertyID: propertyID, sessionID: baselineSessionID, cache: &metadataCache),
+                    observation: observation,
+                    observationShotIDs: observationShotIDs
+                )
+           ) {
+            return candidate
+        }
+
+        return nil
+    }
+
+    private func missingFlaggedHistoricalHydrationRequest(
+        propertyID: UUID,
+        currentSession: Session?,
+        baselineSessionID: UUID?,
+        observation: Observation,
+        currentSessionMetadata: SessionMetadata?,
+        orderedSessions: [Session],
+        metadataCache: inout [UUID: SessionMetadata]
+    ) -> AppState.OperationalMediaHydrationRequest? {
+        let observationShotIDs = Set(observation.shots.map(\.id))
+        print(
+            "[FlaggedHydration] event=request_enter " +
+            "observationID=\(observation.id.uuidString) " +
+            "matchingShotIDs=\(observationShotIDs.map { $0.uuidString.lowercased() }.sorted().joined(separator: ","))"
+        )
+        let candidates = [
+            bestFlaggedResolutionCandidate(
+                propertyID: propertyID,
+                currentSession: currentSession,
+                baselineSessionID: baselineSessionID,
+                observation: observation,
+                currentSessionMetadata: currentSessionMetadata,
+                orderedSessions: orderedSessions,
+                metadataCache: &metadataCache,
+                includeCurrentSession: true
+            ),
+            bestFlaggedResolutionCandidate(
+                propertyID: propertyID,
+                currentSession: currentSession,
+                baselineSessionID: baselineSessionID,
+                observation: observation,
+                currentSessionMetadata: currentSessionMetadata,
+                orderedSessions: orderedSessions,
+                metadataCache: &metadataCache,
+                includeCurrentSession: false
+            )
+        ].compactMap { $0 }
+
+        print(
+            "[FlaggedHydration] event=request_candidates " +
+            "observationID=\(observation.id.uuidString) " +
+            "count=\(candidates.count)"
+        )
+
+        for candidate in candidates {
+            let path = candidate.resolution.path?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            print(
+                "[FlaggedHydration] event=request_candidate " +
+                "observationID=\(observation.id.uuidString) " +
+                "sessionID=\(candidate.sessionID.uuidString) " +
+                "shotID=\(candidate.shot.shotID.uuidString) " +
+                "relativePath=\(candidate.relativePath.isEmpty ? "NONE" : candidate.relativePath) " +
+                "resolvedPath=\(path.isEmpty ? "NONE" : path) " +
+                "exists=\(candidate.resolution.exists)"
+            )
+            guard let path = candidate.resolution.path?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !path.isEmpty else {
+                print(
+                    "[FlaggedHydration] event=request_nil " +
+                    "reason=missing_resolved_path " +
+                    "observationID=\(observation.id.uuidString) " +
+                    "shotID=\(candidate.shot.shotID.uuidString)"
+                )
+                continue
+            }
+            guard !candidate.resolution.exists else {
+                print(
+                    "[FlaggedHydration] event=request_nil " +
+                    "reason=already_local " +
+                    "observationID=\(observation.id.uuidString) " +
+                    "shotID=\(candidate.shot.shotID.uuidString)"
+                )
+                continue
+            }
+            let hydrationKey = guidedHistoricalHydrationRequestKey(
+                sessionID: candidate.sessionID,
+                shotID: candidate.shot.shotID
+            )
+            guard !flaggedHistoricalHydrationAttemptedRequestKeys.contains(hydrationKey) else {
+                print(
+                    "[FlaggedHydration] event=request_nil " +
+                    "reason=already_attempted " +
+                    "observationID=\(observation.id.uuidString) " +
+                    "shotID=\(candidate.shot.shotID.uuidString)"
+                )
+                continue
+            }
+            print(
+                "[FlaggedHydration] event=request_created " +
+                "observationID=\(observation.id.uuidString) " +
+                "sessionID=\(candidate.sessionID.uuidString) " +
+                "shotID=\(candidate.shot.shotID.uuidString)"
+            )
+            return AppState.OperationalMediaHydrationRequest(
+                propertyID: propertyID,
+                sessionID: candidate.sessionID,
+                shotID: candidate.shot.shotID,
+                relativePathOverride: candidate.relativePath.isEmpty ? nil : candidate.relativePath
+            )
+        }
+
+        print(
+            "[FlaggedHydration] event=request_nil " +
+            "reason=no_missing_candidates " +
+            "observationID=\(observation.id.uuidString)"
+        )
+        return nil
+    }
+
+    private func scheduleFlaggedHistoricalHydrationIfNeeded(
+        propertyID: UUID,
+        currentSession: Session?,
+        baselineSessionID: UUID?,
+        observations: [Observation],
+        currentSessionMetadata: SessionMetadata?,
+        orderedSessions: [Session],
+        metadataCache: inout [UUID: SessionMetadata]
+    ) {
+        print(
+            "[FlaggedHydration] event=schedule_enter " +
+            "propertyID=\(propertyID.uuidString) " +
+            "sessionID=\(currentSession?.id.uuidString ?? "NONE") " +
+            "observationCount=\(observations.count)"
+        )
+        let activeSessionID = currentSession?.id
+        if flaggedHistoricalHydrationSessionID != activeSessionID {
+            flaggedHistoricalHydrationSessionID = activeSessionID
+            flaggedHistoricalHydrationSignature = nil
+            flaggedHistoricalHydrationAttemptedRequestKeys = []
+        }
+
+        let requests = Array(Set(observations.compactMap { observation in
+            missingFlaggedHistoricalHydrationRequest(
+                propertyID: propertyID,
+                currentSession: currentSession,
+                baselineSessionID: baselineSessionID,
+                observation: observation,
+                currentSessionMetadata: currentSessionMetadata,
+                orderedSessions: orderedSessions,
+                metadataCache: &metadataCache
+            )
+        }))
+
+        print("[FlaggedHydration] event=schedule_requests count=\(requests.count)")
+        guard !requests.isEmpty else {
+            print("[FlaggedHydration] event=schedule_exit reason=no_requests")
+            flaggedHistoricalHydrationSignature = nil
+            return
+        }
+
+        let signature = requests
+            .sorted {
+                if $0.sessionID != $1.sessionID {
+                    return $0.sessionID.uuidString < $1.sessionID.uuidString
+                }
+                return $0.shotID.uuidString < $1.shotID.uuidString
+            }
+            .map { "\($0.sessionID.uuidString.lowercased())|\($0.shotID.uuidString.lowercased())" }
+            .joined(separator: ",")
+
+        guard signature != flaggedHistoricalHydrationSignature else {
+            print("[FlaggedHydration] event=schedule_exit reason=duplicate_signature signature=\(signature)")
+            return
+        }
+
+        flaggedHistoricalHydrationSignature = signature
+        let requestKeys = requests.map {
+            guidedHistoricalHydrationRequestKey(sessionID: $0.sessionID, shotID: $0.shotID)
+        }
+        flaggedHistoricalHydrationAttemptedRequestKeys.formUnion(requestKeys)
+
+        Task { @MainActor in
+            print("[FlaggedHydration] event=ensure_called requestCount=\(requests.count)")
+            let started = await appState.ensureFlaggedHistoricalMediaAvailableForRequests(requests)
+            guard started else {
+                print("[FlaggedHydration] event=schedule_exit reason=ensure_not_started")
+                flaggedHistoricalHydrationSignature = nil
+                for key in requestKeys {
+                    flaggedHistoricalHydrationAttemptedRequestKeys.remove(key)
+                }
+                return
+            }
+            print("[FlaggedHydration] event=ensure_started requestCount=\(requests.count)")
+            refreshActiveIssues()
+        }
+    }
+
     private func resolveFlaggedThumbnailForDisplay(
         propertyID: UUID,
         currentSession: Session?,
@@ -3919,74 +4510,18 @@ struct ContentView: View {
     ) -> GuidedSessionThumbnailResolution {
         let currentSessionID = currentSession?.id
         let target = observation.id.uuidString
-        let observationShotIDs = Set(observation.shots.map(\.id))
-
-        func mostRecentMatchingShot(
-            in metadata: SessionMetadata?
-        ) -> (shot: ShotMetadata, matchBy: String)? {
-            guard let metadata else { return nil }
-            return metadata.shots
-                .compactMap { shot -> (ShotMetadata, String)? in
-                    guard let matchBy = shotMetadataMatchKind(shot, observation: observation, observationShotIDs: observationShotIDs) else {
-                        return nil
-                    }
-                    return (shot, matchBy)
-                }
-                .sorted { lhs, rhs in
-                    lhs.0.updatedAt > rhs.0.updatedAt
-                }
-                .first
-        }
-
-        if let currentSessionID,
-           let currentMatch = mostRecentMatchingShot(in: currentSessionMetadata) {
-            let resolved = resolvedSessionImagePath(
-                for: currentMatch.shot,
-                propertyID: propertyID,
-                sessionID: currentSessionID
-            )
-            if let path = resolved.absolutePath {
-                verboseLog("[FlagThumbResolve] matchBy=\(currentMatch.matchBy) target=\(target) chosenShotID=\(currentMatch.shot.shotID.uuidString) chosenSession=\(currentSessionID.uuidString) reason=matched source=\(resolved.source) pathExists=true")
-                return GuidedSessionThumbnailResolution(source: .current, sessionID: currentSessionID, path: path, exists: true)
-            }
-        }
-
-        let priorSessions: [Session] = {
-            guard let currentSession else { return [] }
-            return orderedSessions
-                .filter { $0.id != currentSession.id && $0.startedAt < currentSession.startedAt }
-                .sorted { $0.startedAt > $1.startedAt }
-        }()
-
-        for prior in priorSessions where prior.id != baselineSessionID {
-            guard let priorMeta = metadataForSession(propertyID: propertyID, sessionID: prior.id, cache: &metadataCache),
-                  let priorMatch = mostRecentMatchingShot(in: priorMeta) else {
-                continue
-            }
-            let resolved = resolvedSessionImagePath(
-                for: priorMatch.shot,
-                propertyID: propertyID,
-                sessionID: prior.id
-            )
-            if let path = resolved.absolutePath {
-                verboseLog("[FlagThumbResolve] matchBy=\(priorMatch.matchBy) target=\(target) chosenShotID=\(priorMatch.shot.shotID.uuidString) chosenSession=\(prior.id.uuidString) reason=matched source=\(resolved.source) pathExists=true")
-                return GuidedSessionThumbnailResolution(source: .prior, sessionID: prior.id, path: path, exists: true)
-            }
-        }
-
-        if let baselineSessionID,
-           baselineSessionID != currentSessionID,
-           let baselineMeta = metadataForSession(propertyID: propertyID, sessionID: baselineSessionID, cache: &metadataCache),
-           let baselineMatch = mostRecentMatchingShot(in: baselineMeta) {
-            let resolved = resolvedSessionImagePath(
-                for: baselineMatch.shot,
-                propertyID: propertyID,
-                sessionID: baselineSessionID
-            )
-            if let path = resolved.absolutePath {
-                verboseLog("[FlagThumbResolve] matchBy=\(baselineMatch.matchBy) target=\(target) chosenShotID=\(baselineMatch.shot.shotID.uuidString) chosenSession=\(baselineSessionID.uuidString) reason=matched source=\(resolved.source) pathExists=true")
-                return GuidedSessionThumbnailResolution(source: .baseline, sessionID: baselineSessionID, path: path, exists: true)
-            }
+        if let candidate = bestFlaggedResolutionCandidate(
+            propertyID: propertyID,
+            currentSession: currentSession,
+            baselineSessionID: baselineSessionID,
+            observation: observation,
+            currentSessionMetadata: currentSessionMetadata,
+            orderedSessions: orderedSessions,
+            metadataCache: &metadataCache,
+            includeCurrentSession: true
+        ) {
+            verboseLog("[FlagThumbResolve] matchBy=\(candidate.matchBy) target=\(target) chosenShotID=\(candidate.shot.shotID.uuidString) chosenSession=\(candidate.sessionID.uuidString) reason=matched source=\(candidate.resolution.source.rawValue) pathExists=\(candidate.resolution.exists)")
+            return candidate.resolution
         }
 
         let fallbackReference = observation.shots
@@ -4108,7 +4643,7 @@ struct ContentView: View {
         observation: Observation,
         currentSession: Session?,
         baselineSessionID: UUID?
-    ) -> String? {
+    ) -> GuidedSessionThumbnailResolution {
         let orderedSessions = ((try? localStore.fetchSessions(propertyID: propertyID)) ?? []).sorted { $0.startedAt < $1.startedAt }
         let currentSessionMetadata = sessionMetadataForActiveSession(propertyID: propertyID, sessionID: currentSession?.id)
         var metadataCache: [UUID: SessionMetadata] = [:]
@@ -4117,59 +4652,17 @@ struct ContentView: View {
         }
 
         let currentSessionID = currentSession?.id
-        let observationShotIDs = Set(observation.shots.map(\.id))
-
-        func mostRecentMatchingShot(
-            in metadata: SessionMetadata?
-        ) -> ShotMetadata? {
-            guard let metadata else { return nil }
-            return metadata.shots
-                .compactMap { shot -> ShotMetadata? in
-                    guard shotMetadataMatchKind(shot, observation: observation, observationShotIDs: observationShotIDs) != nil else {
-                        return nil
-                    }
-                    return shot
-                }
-                .sorted { lhs, rhs in
-                    lhs.updatedAt > rhs.updatedAt
-                }
-                .first
-        }
-
-        let priorSessions: [Session] = {
-            guard let currentSession else { return [] }
-            return orderedSessions
-                .filter { $0.id != currentSession.id && $0.startedAt < currentSession.startedAt }
-                .sorted { $0.startedAt > $1.startedAt }
-        }()
-
-        for prior in priorSessions where prior.id != baselineSessionID {
-            guard let priorMeta = metadataForSession(propertyID: propertyID, sessionID: prior.id, cache: &metadataCache),
-                  let priorMatch = mostRecentMatchingShot(in: priorMeta) else {
-                continue
-            }
-            let resolved = resolvedSessionImagePath(
-                for: priorMatch,
-                propertyID: propertyID,
-                sessionID: prior.id
-            )
-            if let path = resolved.absolutePath {
-                return path
-            }
-        }
-
-        if let baselineSessionID,
-           baselineSessionID != currentSessionID,
-           let baselineMeta = metadataForSession(propertyID: propertyID, sessionID: baselineSessionID, cache: &metadataCache),
-           let baselineMatch = mostRecentMatchingShot(in: baselineMeta) {
-            let resolved = resolvedSessionImagePath(
-                for: baselineMatch,
-                propertyID: propertyID,
-                sessionID: baselineSessionID
-            )
-            if let path = resolved.absolutePath {
-                return path
-            }
+        if let candidate = bestFlaggedResolutionCandidate(
+            propertyID: propertyID,
+            currentSession: currentSession,
+            baselineSessionID: baselineSessionID,
+            observation: observation,
+            currentSessionMetadata: currentSessionMetadata,
+            orderedSessions: orderedSessions,
+            metadataCache: &metadataCache,
+            includeCurrentSession: false
+        ) {
+            return candidate.resolution
         }
 
         let fallbackReference = observation.shots
@@ -4185,10 +4678,15 @@ struct ContentView: View {
             .imageLocalIdentifier?
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         if !fallbackReference.isEmpty, FileManager.default.fileExists(atPath: fallbackReference) {
-            return fallbackReference
+            return GuidedSessionThumbnailResolution(
+                source: .reference,
+                sessionID: nil,
+                path: fallbackReference,
+                exists: true
+            )
         }
 
-        return nil
+        return GuidedSessionThumbnailResolution(source: .none, sessionID: nil, path: nil, exists: false)
     }
 
     private func resolveGuidedRetakeReferenceForDisplay(
@@ -5549,6 +6047,9 @@ struct ContentView: View {
 
                 locationManager.start()
 
+                reportLibrary.setMediaHydrationHandler { requests in
+                    await appState.ensureGalleryMediaAvailableForRequests(requests)
+                }
                 reportLibrary.warmUpAlbumIfAuthorized()
                 reportLibrary.setSessionContext(
                     propertyID: appState.selectedPropertyID,
@@ -5575,6 +6076,9 @@ struct ContentView: View {
                 UIDevice.current.endGeneratingDeviceOrientationNotifications()
             }
             .onChange(of: appState.selectedPropertyID) { _, _ in
+                reportLibrary.setMediaHydrationHandler { requests in
+                    await appState.ensureGalleryMediaAvailableForRequests(requests)
+                }
                 reportLibrary.setSessionContext(
                     propertyID: appState.selectedPropertyID,
                     sessionID: appState.currentSession?.id
@@ -5588,6 +6092,9 @@ struct ContentView: View {
             }
             .onChange(of: appState.currentSession?.id) { previousSessionID, nextSessionID in
                 reservedAngleByContextKey = [:]
+                reportLibrary.setMediaHydrationHandler { requests in
+                    await appState.ensureGalleryMediaAvailableForRequests(requests)
+                }
                 reportLibrary.setSessionContext(
                     propertyID: appState.selectedPropertyID,
                     sessionID: appState.currentSession?.id
@@ -9545,6 +10052,12 @@ extension ContentView {
     }
 
     private func refreshGuidedShots() {
+        print(
+            "[GuidedHydration] event=refresh_guided_shots_enter " +
+            "selectedPropertyID=\(appState.selectedPropertyID?.uuidString ?? "NONE") " +
+            "sessionID=\(appState.currentSession?.id.uuidString ?? "NONE") " +
+            "allowReferenceThumbnailResolution=\(allowReferenceThumbnailResolution)"
+        )
         guard let propertyID = appState.selectedPropertyID else {
             guidedShots = []
             guidedResolvedThumbnailPathByID = [:]
@@ -9673,7 +10186,8 @@ extension ContentView {
                 )
 
                 if let resolvedPath = resolved.path?.trimmingCharacters(in: .whitespacesAndNewlines),
-                   !resolvedPath.isEmpty {
+                   !resolvedPath.isEmpty,
+                   resolved.exists {
                     resolvedMap[guided.id] = resolvedPath
                     if resolved.source != .current {
                         referenceMap[guided.id] = resolvedPath
@@ -10947,7 +11461,8 @@ extension ContentView {
     private func resolvedSessionImagePath(
         for shot: ShotMetadata,
         propertyID: UUID,
-        sessionID: UUID
+        sessionID: UUID,
+        suppressAutoHydration: Bool = false
     ) -> (absolutePath: String?, source: String, relativePath: String, exists: Bool) {
         let sessionFolder = localStore.sessionFolderURL(propertyID: propertyID, sessionID: sessionID)
         let originalRelative = shot.originalRelativePath.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -10959,11 +11474,13 @@ extension ContentView {
             ) {
                 return (originalURL.path, "original", originalRelative, true)
             }
-            appState.ensureOperationalMediaAvailable(
-                propertyID: propertyID,
-                sessionID: sessionID,
-                shotID: shot.shotID
-            )
+            if !suppressAutoHydration {
+                appState.ensureOperationalMediaAvailable(
+                    propertyID: propertyID,
+                    sessionID: sessionID,
+                    shotID: shot.shotID
+                )
+            }
             let originalPath = sessionFolder.appendingPathComponent(originalRelative, isDirectory: false).path
             return (originalPath, "original", originalRelative, false)
         }
@@ -12783,23 +13300,56 @@ extension ContentView {
             var referenceMap: [UUID: String] = [:]
             var angleMap: [UUID: Int] = [:]
             if allowReferenceThumbnailResolution {
-                let fm = FileManager.default
+                let baselineState = persistedBaselineState(propertyID: propertyID)
+                let orderedSessions = ((try? localStore.fetchSessions(propertyID: propertyID)) ?? []).sorted { $0.startedAt < $1.startedAt }
+                let currentSession = orderedSessions.first(where: { $0.id == currentSessionID }) ?? appState.currentSession
+                let currentSessionMetadata = sessionMetadataForActiveSession(propertyID: propertyID, sessionID: currentSessionID)
+                var metadataCache: [UUID: SessionMetadata] = [:]
+                if let currentSessionMetadata, let currentSessionID {
+                    metadataCache[currentSessionID] = currentSessionMetadata
+                }
+
                 for observation in activeObservations {
-                    let sortedShots = observation.shots.sorted { $0.capturedAt > $1.capturedAt }
-                    let candidatePaths = sortedShots.compactMap { shot in
-                        shot.imageLocalIdentifier?.trimmingCharacters(in: .whitespacesAndNewlines)
+                    let resolved = resolveFlaggedThumbnailForDisplay(
+                        propertyID: propertyID,
+                        currentSession: currentSession,
+                        baselineSessionID: baselineState.baselineSessionID,
+                        observation: observation,
+                        currentSessionMetadata: currentSessionMetadata,
+                        orderedSessions: orderedSessions,
+                        metadataCache: &metadataCache
+                    )
+                    if let resolvedPath = resolved.path?.trimmingCharacters(in: .whitespacesAndNewlines),
+                       !resolvedPath.isEmpty,
+                       resolved.exists {
+                        resolvedMap[observation.id] = resolvedPath
                     }
-                    if let existing = candidatePaths.first(where: { !$0.isEmpty && fm.fileExists(atPath: $0) }) {
-                        resolvedMap[observation.id] = existing
-                        referenceMap[observation.id] = existing
-                    } else if let fallback = candidatePaths.first(where: { !$0.isEmpty }) {
-                        resolvedMap[observation.id] = fallback
-                        referenceMap[observation.id] = fallback
+
+                    let referenceResolved = resolveFlaggedReferencePathForDisplay(
+                        propertyID: propertyID,
+                        observation: observation,
+                        currentSession: currentSession,
+                        baselineSessionID: baselineState.baselineSessionID
+                    )
+                    if let referencePath = referenceResolved.path?.trimmingCharacters(in: .whitespacesAndNewlines),
+                       !referencePath.isEmpty,
+                       referenceResolved.exists {
+                        referenceMap[observation.id] = referencePath
                     }
                     if let persistedAngle = persistedAngleIndexForIssue(propertyID: propertyID, issueID: observation.id) {
                         angleMap[observation.id] = max(1, persistedAngle)
                     }
                 }
+
+                scheduleFlaggedHistoricalHydrationIfNeeded(
+                    propertyID: propertyID,
+                    currentSession: currentSession,
+                    baselineSessionID: baselineState.baselineSessionID,
+                    observations: activeObservations,
+                    currentSessionMetadata: currentSessionMetadata,
+                    orderedSessions: orderedSessions,
+                    metadataCache: &metadataCache
+                )
             }
             flaggedResolvedThumbnailPathByID = resolvedMap
             flaggedReferencePathByID = referenceMap
@@ -16618,6 +17168,11 @@ extension ContentView {
                 loadThumbnailIfNeeded()
             }
             .onChange(of: guidedShot.referenceImagePath ?? "") { _, _ in
+                loadThumbnailIfNeeded()
+            }
+            .onChange(of: resolvedThumbnailPath ?? "") { _, _ in
+                loadedID = ""
+                thumbnail = nil
                 loadThumbnailIfNeeded()
             }
             .onChange(of: currentSessionID) { _, _ in

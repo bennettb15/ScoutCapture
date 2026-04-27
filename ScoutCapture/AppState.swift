@@ -198,6 +198,7 @@ final class AppState: ObservableObject {
         let propertyID: UUID
         let sessionID: UUID
         let shotID: UUID
+        let relativePathOverride: String?
     }
 
     struct SupabaseMediaBackfillRunSummary: Equatable {
@@ -1701,7 +1702,7 @@ final class AppState: ObservableObject {
            let previousAt = lastSupabaseMediaBackfillTriggerAt,
            let previousReason = lastSupabaseMediaBackfillTriggerReason,
            launchAdjacentReasons.contains(previousReason),
-           now.timeIntervalSince(previousAt) < 3.0 {
+           now.timeIntervalSince(previousAt) < 15.0 {
             return
         }
         lastSupabaseMediaBackfillTriggerAt = now
@@ -1739,6 +1740,10 @@ final class AppState: ObservableObject {
         var attemptedCount = 0
 
         for candidate in discovery.candidates {
+            if await repairBackfillCandidateFromRemoteUploadedTruthIfNeeded(candidate) {
+                continue
+            }
+
             if candidate.uploadAttempts >= maximumSupabaseMediaUploadAttempts {
                 skippedRetryCapCount += 1
                 print(
@@ -1859,6 +1864,77 @@ final class AppState: ObservableObject {
         return (candidates, excludedInFlightCount)
     }
 
+    private func repairBackfillCandidateFromRemoteUploadedTruthIfNeeded(
+        _ candidate: PendingSupabaseMediaBackfillCandidate
+    ) async -> Bool {
+        print(
+            "[SupabaseMediaBackfill] event=remote_truth_check_enter " +
+            "shotID=\(candidate.shotID.uuidString) " +
+            "sessionID=\(candidate.sessionID.uuidString) " +
+            "localState=\(candidate.uploadState) " +
+            "localAttempts=\(candidate.uploadAttempts)"
+        )
+
+        guard let remote = try? await fetchShotStorageMetadataFromSupabaseForBackfillRepair(
+            shotID: candidate.shotID
+        ) else {
+            print(
+                "[SupabaseMediaBackfill] event=remote_truth_check_missing " +
+                "shotID=\(candidate.shotID.uuidString) " +
+                "sessionID=\(candidate.sessionID.uuidString)"
+            )
+            return false
+        }
+
+        let remoteBucket = normalizedSupabaseText(remote.storageBucket)
+        let remotePath = normalizedSupabaseText(remote.storagePath)
+        let isRemotelyResolved =
+            remoteBucket != nil &&
+            remotePath != nil
+        guard isRemotelyResolved else {
+            print(
+                "[SupabaseMediaBackfill] event=remote_truth_check_rejected " +
+                "shotID=\(candidate.shotID.uuidString) " +
+                "sessionID=\(candidate.sessionID.uuidString) " +
+                "remoteState=\(remote.uploadState) " +
+                "hasBucket=\(remoteBucket != nil) " +
+                "hasPath=\(remotePath != nil)"
+            )
+            return false
+        }
+
+        try? localStore.updateShotStorageMetadata(
+            propertyID: candidate.propertyID,
+            sessionID: candidate.sessionID,
+            shotID: candidate.shotID
+        ) { localShot in
+            localShot.storageBucket = remote.storageBucket
+            localShot.storagePath = remote.storagePath
+            localShot.checksumSHA256 = remote.checksumSHA256
+            localShot.byteSize = remote.byteSize
+            localShot.uploadState = "uploaded"
+            localShot.uploadAttempts = 0
+            localShot.lastUploadError = nil
+        }
+
+        print(
+            "[SupabaseMediaBackfill] event=remote_truth_check_repaired " +
+            "shotID=\(candidate.shotID.uuidString) " +
+            "sessionID=\(candidate.sessionID.uuidString) " +
+            "remoteState=\(remote.uploadState) " +
+            "hasBucket=\(remoteBucket != nil) " +
+            "hasPath=\(remotePath != nil)"
+        )
+        print(
+            "[SupabaseMediaBackfill] result=skipped " +
+            "reason=remote_already_uploaded " +
+            "shotID=\(candidate.shotID.uuidString) " +
+            "localState=\(candidate.uploadState) " +
+            "localAttempts=\(candidate.uploadAttempts)"
+        )
+        return true
+    }
+
     func ensureOperationalMediaAvailable(
         propertyID: UUID,
         sessionID: UUID,
@@ -1878,7 +1954,7 @@ final class AppState: ObservableObject {
         sessionID: UUID
     ) {
         guard backendFeatureFlags.supabaseEnabled,
-              backendFeatureFlags.supabaseReadEnabled else {
+              backendFeatureFlags.mediaSupabaseUploadEnabled else {
             return
         }
 
@@ -1909,7 +1985,114 @@ final class AppState: ObservableObject {
                     return await self.ensureOperationalMediaAvailableIfNeeded(
                         propertyID: request.propertyID,
                         sessionID: request.sessionID,
-                        shotID: request.shotID
+                        shotID: request.shotID,
+                        relativePathOverride: request.relativePathOverride
+                    )
+                }
+            }
+
+            for await didStart in group {
+                if didStart {
+                    startedAny = true
+                }
+            }
+        }
+
+        return startedAny
+    }
+
+    func ensureGuidedHistoricalMediaAvailableForRequests(
+        _ requests: [OperationalMediaHydrationRequest]
+    ) async -> Bool {
+        let uniqueRequests = Array(Set(requests))
+        print("[GuidedHydration] event=ensure_requests_received count=\(uniqueRequests.count)")
+        guard !uniqueRequests.isEmpty else { return false }
+
+        var startedAny = false
+        await withTaskGroup(of: Bool.self) { group in
+            for request in uniqueRequests {
+                print(
+                    "[GuidedHydration] event=ensure_request " +
+                    "propertyID=\(request.propertyID.uuidString) " +
+                    "sessionID=\(request.sessionID.uuidString) " +
+                    "shotID=\(request.shotID.uuidString) " +
+                    "relativePathOverride=\(request.relativePathOverride ?? "NONE")"
+                )
+                group.addTask { [weak self] in
+                    guard let self else { return false }
+                    return await self.ensureGuidedHistoricalMediaAvailableIfNeeded(
+                        propertyID: request.propertyID,
+                        sessionID: request.sessionID,
+                        shotID: request.shotID,
+                        relativePathOverride: request.relativePathOverride
+                    )
+                }
+            }
+
+            for await didStart in group {
+                if didStart {
+                    startedAny = true
+                }
+            }
+        }
+
+        return startedAny
+    }
+
+    func ensureGalleryMediaAvailableForRequests(
+        _ requests: [OperationalMediaHydrationRequest]
+    ) async -> Bool {
+        let uniqueRequests = Array(Set(requests))
+        guard !uniqueRequests.isEmpty else { return false }
+
+        var startedAny = false
+        await withTaskGroup(of: Bool.self) { group in
+            for request in uniqueRequests {
+                group.addTask { [weak self] in
+                    guard let self else { return false }
+                    return await self.ensureGalleryMediaAvailableIfNeeded(
+                        propertyID: request.propertyID,
+                        sessionID: request.sessionID,
+                        shotID: request.shotID,
+                        relativePathOverride: request.relativePathOverride
+                    )
+                }
+            }
+
+            for await didStart in group {
+                if didStart {
+                    startedAny = true
+                }
+            }
+        }
+
+        return startedAny
+    }
+
+    func ensureFlaggedHistoricalMediaAvailableForRequests(
+        _ requests: [OperationalMediaHydrationRequest]
+    ) async -> Bool {
+        let uniqueRequests = Array(Set(requests))
+        print("[FlaggedHydration] event=ensure_requests_received count=\(uniqueRequests.count)")
+        guard !uniqueRequests.isEmpty else { return false }
+
+        var startedAny = false
+        await withTaskGroup(of: Bool.self) { group in
+            for request in uniqueRequests {
+                print(
+                    "[FlaggedHydration] event=ensure_request " +
+                    "propertyID=\(request.propertyID.uuidString) " +
+                    "sessionID=\(request.sessionID.uuidString) " +
+                    "shotID=\(request.shotID.uuidString) " +
+                    "relativePathOverride=\(request.relativePathOverride ?? "NONE")"
+                )
+                group.addTask { [weak self] in
+                    guard let self else { return false }
+                    return await self.ensureFlaggedHistoricalMediaAvailableIfNeeded(
+                        propertyID: request.propertyID,
+                        sessionID: request.sessionID,
+                        shotID: request.shotID,
+                        relativePathOverride: request.relativePathOverride
                     )
                 }
             }
@@ -1927,10 +2110,11 @@ final class AppState: ObservableObject {
     private func ensureOperationalMediaAvailableIfNeeded(
         propertyID: UUID,
         sessionID: UUID,
-        shotID: UUID
+        shotID: UUID,
+        relativePathOverride: String? = nil
     ) async -> Bool {
         guard backendFeatureFlags.supabaseEnabled,
-              backendFeatureFlags.supabaseReadEnabled,
+              backendFeatureFlags.mediaSupabaseUploadEnabled,
               supabaseClient != nil else {
             return false
         }
@@ -1942,7 +2126,148 @@ final class AppState: ObservableObject {
         await performOperationalMediaHydration(
             propertyID: propertyID,
             sessionID: sessionID,
-            shotID: shotID
+            shotID: shotID,
+            relativePathOverride: relativePathOverride
+        )
+        return true
+    }
+
+    private func ensureGuidedHistoricalMediaAvailableIfNeeded(
+        propertyID: UUID,
+        sessionID: UUID,
+        shotID: UUID,
+        relativePathOverride: String? = nil
+    ) async -> Bool {
+        let clientAvailable = supabaseClient != nil
+        let operationKey = "download|\(sessionID.uuidString.lowercased())|\(shotID.uuidString.lowercased())"
+        print(
+            "[GuidedHydration] event=ensure_if_needed_enter " +
+            "propertyID=\(propertyID.uuidString) " +
+            "sessionID=\(sessionID.uuidString) " +
+            "shotID=\(shotID.uuidString) " +
+            "operationKey=\(operationKey) " +
+            "supabaseEnabled=\(backendFeatureFlags.supabaseEnabled) " +
+            "mediaSupabaseUploadEnabled=\(backendFeatureFlags.mediaSupabaseUploadEnabled) " +
+            "clientAvailable=\(clientAvailable)"
+        )
+        guard backendFeatureFlags.supabaseEnabled,
+              backendFeatureFlags.mediaSupabaseUploadEnabled,
+              clientAvailable else {
+            print(
+                "[GuidedHydration] event=ensure_if_needed_exit " +
+                "reason=feature_or_client_unavailable " +
+                "operationKey=\(operationKey)"
+            )
+            return false
+        }
+
+        let didBegin = beginSupabaseMediaOperation(operationKey)
+        print(
+            "[GuidedHydration] event=begin_operation " +
+            "operationKey=\(operationKey) " +
+            "accepted=\(didBegin)"
+        )
+        guard didBegin else {
+            print(
+                "[GuidedHydration] event=ensure_if_needed_exit " +
+                "reason=operation_in_flight " +
+                "operationKey=\(operationKey)"
+            )
+            return false
+        }
+        defer { endSupabaseMediaOperation(operationKey) }
+
+        await performOperationalMediaHydration(
+            propertyID: propertyID,
+            sessionID: sessionID,
+            shotID: shotID,
+            allowRelaxedRemoteLookupFallback: true,
+            relativePathOverride: relativePathOverride
+        )
+        return true
+    }
+
+    private func ensureGalleryMediaAvailableIfNeeded(
+        propertyID: UUID,
+        sessionID: UUID,
+        shotID: UUID,
+        relativePathOverride: String? = nil
+    ) async -> Bool {
+        guard backendFeatureFlags.supabaseEnabled,
+              backendFeatureFlags.mediaSupabaseUploadEnabled,
+              supabaseClient != nil else {
+            return false
+        }
+
+        let operationKey = "download|\(sessionID.uuidString.lowercased())|\(shotID.uuidString.lowercased())"
+        guard beginSupabaseMediaOperation(operationKey) else { return false }
+        defer { endSupabaseMediaOperation(operationKey) }
+
+        await performOperationalMediaHydration(
+            propertyID: propertyID,
+            sessionID: sessionID,
+            shotID: shotID,
+            allowRelaxedRemoteLookupFallback: true,
+            relativePathOverride: relativePathOverride
+        )
+        return true
+    }
+
+    private func ensureFlaggedHistoricalMediaAvailableIfNeeded(
+        propertyID: UUID,
+        sessionID: UUID,
+        shotID: UUID,
+        relativePathOverride: String? = nil
+    ) async -> Bool {
+        let clientAvailable = supabaseClient != nil
+        let operationKey = "download|\(sessionID.uuidString.lowercased())|\(shotID.uuidString.lowercased())"
+        print(
+            "[FlaggedHydration] event=ensure_if_needed_enter " +
+            "propertyID=\(propertyID.uuidString) " +
+            "sessionID=\(sessionID.uuidString) " +
+            "shotID=\(shotID.uuidString) " +
+            "operationKey=\(operationKey) " +
+            "supabaseEnabled=\(backendFeatureFlags.supabaseEnabled) " +
+            "mediaSupabaseUploadEnabled=\(backendFeatureFlags.mediaSupabaseUploadEnabled) " +
+            "clientAvailable=\(clientAvailable)"
+        )
+        guard backendFeatureFlags.supabaseEnabled,
+              backendFeatureFlags.mediaSupabaseUploadEnabled,
+              clientAvailable else {
+            print(
+                "[FlaggedHydration] event=ensure_if_needed_exit " +
+                "reason=feature_or_client_unavailable " +
+                "operationKey=\(operationKey)"
+            )
+            return false
+        }
+
+        let didBegin = beginSupabaseMediaOperation(operationKey)
+        print(
+            "[FlaggedHydration] event=begin_operation " +
+            "operationKey=\(operationKey) " +
+            "accepted=\(didBegin)"
+        )
+        guard didBegin else {
+            print(
+                "[FlaggedHydration] event=ensure_if_needed_exit " +
+                "reason=operation_in_flight " +
+                "operationKey=\(operationKey)"
+            )
+            return false
+        }
+        defer { endSupabaseMediaOperation(operationKey) }
+
+        await performOperationalMediaHydration(
+            propertyID: propertyID,
+            sessionID: sessionID,
+            shotID: shotID,
+            allowRelaxedRemoteLookupFallback: true,
+            relativePathOverride: relativePathOverride
+        )
+        print(
+            "[FlaggedHydration] event=hydrate_completed " +
+            "operationKey=\(operationKey)"
         )
         return true
     }
@@ -3376,7 +3701,9 @@ final class AppState: ObservableObject {
     private func performOperationalMediaHydration(
         propertyID: UUID,
         sessionID: UUID,
-        shotID: UUID
+        shotID: UUID,
+        allowRelaxedRemoteLookupFallback: Bool = false,
+        relativePathOverride: String? = nil
     ) async {
         guard let client = supabaseClient else { return }
         guard let metadata = try? localStore.loadSessionMetadata(propertyID: propertyID, sessionID: sessionID),
@@ -3391,15 +3718,49 @@ final class AppState: ObservableObject {
         let resolvedShot = await resolveShotStorageMetadata(
             propertyID: propertyID,
             sessionID: sessionID,
-            shot: shot
+            shot: shot,
+            allowRelaxedLookupFallback: allowRelaxedRemoteLookupFallback
         )
 
-        let relativePath = resolvedShot.originalRelativePath.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !relativePath.isEmpty,
-              let bucket = resolvedShot.storageBucket?.trimmingCharacters(in: .whitespacesAndNewlines),
-              let path = resolvedShot.storagePath?.trimmingCharacters(in: .whitespacesAndNewlines),
-              !bucket.isEmpty,
-              !path.isEmpty else {
+        let relativePath = {
+            let resolved = resolvedShot.originalRelativePath.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !resolved.isEmpty { return resolved }
+            return relativePathOverride?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        }()
+        let bucket = resolvedShot.storageBucket?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let path = resolvedShot.storagePath?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+
+        print(
+            "[GuidedHydration] event=resolved_storage " +
+            "shotID=\(shotID.uuidString) " +
+            "sessionID=\(sessionID.uuidString) " +
+            "allowRelaxed=\(allowRelaxedRemoteLookupFallback) " +
+            "relativePathPresent=\(!relativePath.isEmpty) " +
+            "bucketPresent=\(!bucket.isEmpty) " +
+            "pathPresent=\(!path.isEmpty)"
+        )
+
+        guard !relativePath.isEmpty else {
+            print(
+                "[GuidedHydration] event=skipped " +
+                "reason=missing_relative_path " +
+                "shotID=\(shotID.uuidString) " +
+                "sessionID=\(sessionID.uuidString) " +
+                "bucketPresent=\(!bucket.isEmpty) " +
+                "pathPresent=\(!path.isEmpty)"
+            )
+            return
+        }
+
+        guard !bucket.isEmpty, !path.isEmpty else {
+            print(
+                "[GuidedHydration] event=skipped " +
+                "reason=missing_remote_storage " +
+                "shotID=\(shotID.uuidString) " +
+                "sessionID=\(sessionID.uuidString) " +
+                "bucketPresent=\(!bucket.isEmpty) " +
+                "pathPresent=\(!path.isEmpty)"
+            )
             return
         }
 
@@ -3411,6 +3772,14 @@ final class AppState: ObservableObject {
         }
 
         do {
+            print(
+                "[GuidedHydration] event=download_start " +
+                "shotID=\(shotID.uuidString) " +
+                "sessionID=\(sessionID.uuidString) " +
+                "bucket=\(bucket) " +
+                "path=\(path) " +
+                "destination=\(destinationURL.path)"
+            )
             let data = try await client.storage.from(bucket).download(path: path)
 
             if let expectedChecksum = resolvedShot.checksumSHA256?.trimmingCharacters(in: .whitespacesAndNewlines),
@@ -7017,10 +7386,40 @@ final class AppState: ObservableObject {
         return rows.first
     }
 
+    private func fetchShotStorageMetadataFromSupabaseForBackfillRepair(
+        shotID: UUID
+    ) async throws -> SupabaseShotStorageRecord? {
+        guard let client = supabaseClient else { return nil }
+        guard let activeOrganizationID else { return nil }
+
+        let rows = try await client
+            .from("shots")
+            .select(
+                """
+                id,
+                storage_bucket,
+                storage_path,
+                checksum_sha256,
+                byte_size,
+                upload_state,
+                upload_attempts,
+                last_upload_error
+                """
+            )
+            .eq("id", value: shotID.uuidString.lowercased())
+            .eq("org_id", value: activeOrganizationID.uuidString.lowercased())
+            .limit(1)
+            .execute()
+            .value as [SupabaseShotStorageRecord]
+
+        return rows.first
+    }
+
     private func resolveShotStorageMetadata(
         propertyID: UUID,
         sessionID: UUID,
-        shot: ShotMetadata
+        shot: ShotMetadata,
+        allowRelaxedLookupFallback: Bool = false
     ) async -> ShotMetadata {
         let hasLocalBucket = shot.storageBucket?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
         let hasLocalPath = shot.storagePath?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
@@ -7028,10 +7427,23 @@ final class AppState: ObservableObject {
             return shot
         }
 
-        guard let remote = try? await fetchShotStorageMetadataFromSupabase(
+        let strictRemote = try? await fetchShotStorageMetadataFromSupabase(
             sessionID: sessionID,
             shotID: shot.shotID
-        ) else {
+        )
+
+        let remote: SupabaseShotStorageRecord?
+        if let strict = strictRemote {
+            remote = strict
+        } else if allowRelaxedLookupFallback {
+            remote = try? await fetchShotStorageMetadataFromSupabaseForBackfillRepair(
+                shotID: shot.shotID
+            )
+        } else {
+            remote = nil
+        }
+
+        guard let remote else {
             return shot
         }
 
