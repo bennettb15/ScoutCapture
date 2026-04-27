@@ -422,9 +422,7 @@ final class LocalStore {
     private let fileIOQueueValue: UInt8 = 1
     private var isShuttingDown = false
 
-    deinit {
-        print("[LocalStoreDiag] deinit \(ObjectIdentifier(self)) thread=\(Thread.current)")
-    }
+    deinit {}
 
     enum ShotUpsertMatchMode {
         case append
@@ -1292,7 +1290,6 @@ final class LocalStore {
     }
 
     func performFileIOSync(_ work: () throws -> Void) rethrows {
-        print("[LocalStoreDiag] performFileIOSync enter shuttingDown=\(isShuttingDown) thread=\(Thread.current)")
         if isShuttingDown {
             return
         }
@@ -1301,7 +1298,6 @@ final class LocalStore {
             return
         }
         try fileIOQueue.sync {
-            print("[LocalStoreDiag] fileIOQueue executing thread=\(Thread.current)")
             if self.isShuttingDown {
                 return
             }
@@ -1310,7 +1306,6 @@ final class LocalStore {
     }
 
     func performFileIOSync<T>(_ work: () throws -> T) throws -> T {
-        print("[LocalStoreDiag] performFileIOSync enter shuttingDown=\(isShuttingDown) thread=\(Thread.current)")
         if DispatchQueue.getSpecific(key: fileIOQueueKey) == fileIOQueueValue {
             if isShuttingDown {
                 throw StoreError.shuttingDown
@@ -1321,7 +1316,6 @@ final class LocalStore {
             throw StoreError.shuttingDown
         }
         return try fileIOQueue.sync {
-            print("[LocalStoreDiag] fileIOQueue executing thread=\(Thread.current)")
             return try work()
         }
     }

@@ -2005,19 +2005,11 @@ final class AppState: ObservableObject {
         _ requests: [OperationalMediaHydrationRequest]
     ) async -> Bool {
         let uniqueRequests = Array(Set(requests))
-        print("[GuidedHydration] event=ensure_requests_received count=\(uniqueRequests.count)")
         guard !uniqueRequests.isEmpty else { return false }
 
         var startedAny = false
         await withTaskGroup(of: Bool.self) { group in
             for request in uniqueRequests {
-                print(
-                    "[GuidedHydration] event=ensure_request " +
-                    "propertyID=\(request.propertyID.uuidString) " +
-                    "sessionID=\(request.sessionID.uuidString) " +
-                    "shotID=\(request.shotID.uuidString) " +
-                    "relativePathOverride=\(request.relativePathOverride ?? "NONE")"
-                )
                 group.addTask { [weak self] in
                     guard let self else { return false }
                     return await self.ensureGuidedHistoricalMediaAvailableIfNeeded(
@@ -2073,19 +2065,11 @@ final class AppState: ObservableObject {
         _ requests: [OperationalMediaHydrationRequest]
     ) async -> Bool {
         let uniqueRequests = Array(Set(requests))
-        print("[FlaggedHydration] event=ensure_requests_received count=\(uniqueRequests.count)")
         guard !uniqueRequests.isEmpty else { return false }
 
         var startedAny = false
         await withTaskGroup(of: Bool.self) { group in
             for request in uniqueRequests {
-                print(
-                    "[FlaggedHydration] event=ensure_request " +
-                    "propertyID=\(request.propertyID.uuidString) " +
-                    "sessionID=\(request.sessionID.uuidString) " +
-                    "shotID=\(request.shotID.uuidString) " +
-                    "relativePathOverride=\(request.relativePathOverride ?? "NONE")"
-                )
                 group.addTask { [weak self] in
                     guard let self else { return false }
                     return await self.ensureFlaggedHistoricalMediaAvailableIfNeeded(
@@ -2138,43 +2122,14 @@ final class AppState: ObservableObject {
         shotID: UUID,
         relativePathOverride: String? = nil
     ) async -> Bool {
-        let clientAvailable = supabaseClient != nil
         let operationKey = "download|\(sessionID.uuidString.lowercased())|\(shotID.uuidString.lowercased())"
-        print(
-            "[GuidedHydration] event=ensure_if_needed_enter " +
-            "propertyID=\(propertyID.uuidString) " +
-            "sessionID=\(sessionID.uuidString) " +
-            "shotID=\(shotID.uuidString) " +
-            "operationKey=\(operationKey) " +
-            "supabaseEnabled=\(backendFeatureFlags.supabaseEnabled) " +
-            "mediaSupabaseUploadEnabled=\(backendFeatureFlags.mediaSupabaseUploadEnabled) " +
-            "clientAvailable=\(clientAvailable)"
-        )
         guard backendFeatureFlags.supabaseEnabled,
               backendFeatureFlags.mediaSupabaseUploadEnabled,
-              clientAvailable else {
-            print(
-                "[GuidedHydration] event=ensure_if_needed_exit " +
-                "reason=feature_or_client_unavailable " +
-                "operationKey=\(operationKey)"
-            )
+              supabaseClient != nil else {
             return false
         }
 
-        let didBegin = beginSupabaseMediaOperation(operationKey)
-        print(
-            "[GuidedHydration] event=begin_operation " +
-            "operationKey=\(operationKey) " +
-            "accepted=\(didBegin)"
-        )
-        guard didBegin else {
-            print(
-                "[GuidedHydration] event=ensure_if_needed_exit " +
-                "reason=operation_in_flight " +
-                "operationKey=\(operationKey)"
-            )
-            return false
-        }
+        guard beginSupabaseMediaOperation(operationKey) else { return false }
         defer { endSupabaseMediaOperation(operationKey) }
 
         await performOperationalMediaHydration(
@@ -2219,43 +2174,14 @@ final class AppState: ObservableObject {
         shotID: UUID,
         relativePathOverride: String? = nil
     ) async -> Bool {
-        let clientAvailable = supabaseClient != nil
         let operationKey = "download|\(sessionID.uuidString.lowercased())|\(shotID.uuidString.lowercased())"
-        print(
-            "[FlaggedHydration] event=ensure_if_needed_enter " +
-            "propertyID=\(propertyID.uuidString) " +
-            "sessionID=\(sessionID.uuidString) " +
-            "shotID=\(shotID.uuidString) " +
-            "operationKey=\(operationKey) " +
-            "supabaseEnabled=\(backendFeatureFlags.supabaseEnabled) " +
-            "mediaSupabaseUploadEnabled=\(backendFeatureFlags.mediaSupabaseUploadEnabled) " +
-            "clientAvailable=\(clientAvailable)"
-        )
         guard backendFeatureFlags.supabaseEnabled,
               backendFeatureFlags.mediaSupabaseUploadEnabled,
-              clientAvailable else {
-            print(
-                "[FlaggedHydration] event=ensure_if_needed_exit " +
-                "reason=feature_or_client_unavailable " +
-                "operationKey=\(operationKey)"
-            )
+              supabaseClient != nil else {
             return false
         }
 
-        let didBegin = beginSupabaseMediaOperation(operationKey)
-        print(
-            "[FlaggedHydration] event=begin_operation " +
-            "operationKey=\(operationKey) " +
-            "accepted=\(didBegin)"
-        )
-        guard didBegin else {
-            print(
-                "[FlaggedHydration] event=ensure_if_needed_exit " +
-                "reason=operation_in_flight " +
-                "operationKey=\(operationKey)"
-            )
-            return false
-        }
+        guard beginSupabaseMediaOperation(operationKey) else { return false }
         defer { endSupabaseMediaOperation(operationKey) }
 
         await performOperationalMediaHydration(
@@ -2264,10 +2190,6 @@ final class AppState: ObservableObject {
             shotID: shotID,
             allowRelaxedRemoteLookupFallback: true,
             relativePathOverride: relativePathOverride
-        )
-        print(
-            "[FlaggedHydration] event=hydrate_completed " +
-            "operationKey=\(operationKey)"
         )
         return true
     }
@@ -3730,39 +3652,9 @@ final class AppState: ObservableObject {
         let bucket = resolvedShot.storageBucket?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         let path = resolvedShot.storagePath?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
 
-        print(
-            "[GuidedHydration] event=resolved_storage " +
-            "shotID=\(shotID.uuidString) " +
-            "sessionID=\(sessionID.uuidString) " +
-            "allowRelaxed=\(allowRelaxedRemoteLookupFallback) " +
-            "relativePathPresent=\(!relativePath.isEmpty) " +
-            "bucketPresent=\(!bucket.isEmpty) " +
-            "pathPresent=\(!path.isEmpty)"
-        )
+        guard !relativePath.isEmpty else { return }
 
-        guard !relativePath.isEmpty else {
-            print(
-                "[GuidedHydration] event=skipped " +
-                "reason=missing_relative_path " +
-                "shotID=\(shotID.uuidString) " +
-                "sessionID=\(sessionID.uuidString) " +
-                "bucketPresent=\(!bucket.isEmpty) " +
-                "pathPresent=\(!path.isEmpty)"
-            )
-            return
-        }
-
-        guard !bucket.isEmpty, !path.isEmpty else {
-            print(
-                "[GuidedHydration] event=skipped " +
-                "reason=missing_remote_storage " +
-                "shotID=\(shotID.uuidString) " +
-                "sessionID=\(sessionID.uuidString) " +
-                "bucketPresent=\(!bucket.isEmpty) " +
-                "pathPresent=\(!path.isEmpty)"
-            )
-            return
-        }
+        guard !bucket.isEmpty, !path.isEmpty else { return }
 
         let destinationURL = localStore
             .sessionFolderURL(propertyID: propertyID, sessionID: sessionID)
@@ -3772,14 +3664,6 @@ final class AppState: ObservableObject {
         }
 
         do {
-            print(
-                "[GuidedHydration] event=download_start " +
-                "shotID=\(shotID.uuidString) " +
-                "sessionID=\(sessionID.uuidString) " +
-                "bucket=\(bucket) " +
-                "path=\(path) " +
-                "destination=\(destinationURL.path)"
-            )
             let data = try await client.storage.from(bucket).download(path: path)
 
             if let expectedChecksum = resolvedShot.checksumSHA256?.trimmingCharacters(in: .whitespacesAndNewlines),

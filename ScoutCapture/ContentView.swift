@@ -2118,9 +2118,6 @@ private struct ReportPhotoViewer: View {
         shotMetadataByKey = map
         shotMetadataByShotID = idMap
         previousMetadataReady = true
-        if isPreviousMetadataMode {
-            print("[PrevHeader] loaded previous shots count=\(entries.count)")
-        }
     }
 
     private func shotIDFromAsset(_ asset: ReportAsset) -> UUID? {
@@ -2137,10 +2134,6 @@ private struct ReportPhotoViewer: View {
         }
         let itemKey = URL(fileURLWithPath: asset.localIdentifier).lastPathComponent
         if let shotID = shotIDFromAsset(asset), let entry = shotMetadataByShotID[shotID] {
-            if isPreviousMetadataMode {
-                let elevation = CanonicalElevation.normalize(entry.elevation) ?? entry.elevation
-                print("[PrevHeader] itemKey=\(itemKey) matched=true shotID=\(entry.shotID.uuidString) building=\(entry.building) elevation=\(elevation) detailType=\(entry.detailType) angle=\(entry.angleIndex)")
-            }
             return entry
         }
 
@@ -2158,15 +2151,8 @@ private struct ReportPhotoViewer: View {
 
         for key in candidates {
             if let entry = shotMetadataByKey[key] {
-                if isPreviousMetadataMode {
-                    let elevation = CanonicalElevation.normalize(entry.elevation) ?? entry.elevation
-                    print("[PrevHeader] itemKey=\(itemKey) matched=true shotID=\(entry.shotID.uuidString) building=\(entry.building) elevation=\(elevation) detailType=\(entry.detailType) angle=\(entry.angleIndex)")
-                }
                 return entry
             }
-        }
-        if isPreviousMetadataMode {
-            print("[PrevHeader] itemKey=\(itemKey) matched=false fallbackUsed=true")
         }
         return nil
     }
@@ -3611,10 +3597,6 @@ struct ContentView: View {
     }
 
     private func ensureReferenceResolutionReady() {
-        print(
-            "[GuidedHydration] event=ensure_reference_resolution_ready " +
-            "allowReferenceThumbnailResolution=\(allowReferenceThumbnailResolution)"
-        )
         guard !allowReferenceThumbnailResolution else { return }
         referenceResolutionToken += 1
         allowReferenceThumbnailResolution = true
@@ -3940,7 +3922,6 @@ struct ContentView: View {
         metadataCache: inout [UUID: SessionMetadata]
     ) -> AppState.OperationalMediaHydrationRequest? {
         let key = guidedKey(for: guidedShot)
-        print("[GuidedHydration] event=request_enter guidedID=\(guidedShot.id.uuidString) guidedKey=\(key)")
 
         let priorSessions: [Session] = {
             guard let currentSession else { return [] }
@@ -3951,7 +3932,6 @@ struct ContentView: View {
 
         func requestForBestHistoricalShot(in session: Session) -> AppState.OperationalMediaHydrationRequest? {
             guard let metadata = metadataForSession(propertyID: propertyID, sessionID: session.id, cache: &metadataCache) else {
-                print("[GuidedHydration] event=request_nil reason=missing_metadata guidedKey=\(key) sessionID=\(session.id.uuidString)")
                 return nil
             }
 
@@ -3962,51 +3942,17 @@ struct ContentView: View {
                     return lhs.createdAt > rhs.createdAt
                 }
 
-            print(
-                "[GuidedHydration] event=request_matching_shots " +
-                "guidedKey=\(key) " +
-                "sessionID=\(session.id.uuidString) " +
-                "count=\(matchingShots.count)"
-            )
-
             let hasMatchingShots = !matchingShots.isEmpty
             for shot in matchingShots {
-                let originalRelativePath = shot.originalRelativePath.trimmingCharacters(in: .whitespacesAndNewlines)
-                let originalFilename = shot.originalFilename.trimmingCharacters(in: .whitespacesAndNewlines)
-                let derivedRelativePath = guidedHistoricalRelativePath(for: shot)
                 let resolved = guidedHistoricalResolvedSessionImagePath(
                     for: shot,
                     propertyID: propertyID,
                     sessionID: session.id
                 )
-                print(
-                    "[GuidedHydration] event=request_candidate " +
-                    "guidedKey=\(key) " +
-                    "sessionID=\(session.id.uuidString) " +
-                    "shotID=\(shot.shotID.uuidString) " +
-                    "originalRelativePath=\(originalRelativePath.isEmpty ? "NONE" : originalRelativePath) " +
-                    "originalFilename=\(originalFilename.isEmpty ? "NONE" : originalFilename) " +
-                    "derivedRelativePath=\(derivedRelativePath.isEmpty ? "NONE" : derivedRelativePath) " +
-                    "resolvedAbsolutePath=\(resolved.absolutePath ?? "NONE") " +
-                    "exists=\(resolved.exists)"
-                )
                 if resolved.exists {
-                    print(
-                        "[GuidedHydration] event=request_nil " +
-                        "reason=already_local " +
-                        "guidedKey=\(key) " +
-                        "sessionID=\(session.id.uuidString) " +
-                        "shotID=\(shot.shotID.uuidString)"
-                    )
                     return nil
                 }
                 if resolved.absolutePath != nil {
-                    print(
-                        "[GuidedHydration] event=request_created " +
-                        "guidedKey=\(key) " +
-                        "sessionID=\(session.id.uuidString) " +
-                        "shotID=\(shot.shotID.uuidString)"
-                    )
                     return AppState.OperationalMediaHydrationRequest(
                         propertyID: propertyID,
                         sessionID: session.id,
@@ -4017,18 +3963,15 @@ struct ContentView: View {
             }
 
             guard !hasMatchingShots else {
-                print("[GuidedHydration] event=request_nil reason=matching_shots_but_no_absolute_path guidedKey=\(key) sessionID=\(session.id.uuidString)")
                 return nil
             }
 
             for snapshot in metadata.guidedShots where guidedSnapshot(snapshot, matches: guidedShot, guidedKey: key) {
                 if resolvedGuidedSnapshotImagePath(snapshot) != nil {
-                    print("[GuidedHydration] event=request_nil reason=snapshot_exists guidedKey=\(key) sessionID=\(session.id.uuidString)")
                     return nil
                 }
             }
 
-            print("[GuidedHydration] event=request_nil reason=no_matching_shots guidedKey=\(key) sessionID=\(session.id.uuidString)")
             return nil
         }
 
@@ -4056,12 +3999,6 @@ struct ContentView: View {
         orderedSessions: [Session],
         metadataCache: inout [UUID: SessionMetadata]
     ) {
-        print(
-            "[GuidedHydration] event=schedule_enter " +
-            "propertyID=\(propertyID.uuidString) " +
-            "sessionID=\(currentSession?.id.uuidString ?? "NONE") " +
-            "guidedCount=\(guidedShots.count)"
-        )
         let activeSessionID = currentSession?.id
         if guidedHistoricalHydrationSessionID != activeSessionID {
             guidedHistoricalHydrationSessionID = activeSessionID
@@ -4080,10 +4017,7 @@ struct ContentView: View {
             )
         }))
 
-        print("[GuidedHydration] event=schedule_requests count=\(requests.count)")
-
         guard !requests.isEmpty else {
-            print("[GuidedHydration] event=schedule_exit reason=no_requests")
             guidedHistoricalHydrationSignature = nil
             return
         }
@@ -4098,10 +4032,7 @@ struct ContentView: View {
             .map { "\($0.sessionID.uuidString.lowercased())|\($0.shotID.uuidString.lowercased())" }
             .joined(separator: ",")
 
-        guard signature != guidedHistoricalHydrationSignature else {
-            print("[GuidedHydration] event=schedule_exit reason=duplicate_signature signature=\(signature)")
-            return
-        }
+        guard signature != guidedHistoricalHydrationSignature else { return }
         guidedHistoricalHydrationSignature = signature
         let requestKeys = requests.map {
             guidedHistoricalHydrationRequestKey(sessionID: $0.sessionID, shotID: $0.shotID)
@@ -4109,17 +4040,14 @@ struct ContentView: View {
         guidedHistoricalHydrationAttemptedRequestKeys.formUnion(requestKeys)
 
         Task { @MainActor in
-            print("[GuidedHydration] event=ensure_called requestCount=\(requests.count)")
             let started = await appState.ensureGuidedHistoricalMediaAvailableForRequests(requests)
             guard started else {
-                print("[GuidedHydration] event=schedule_exit reason=ensure_not_started")
                 guidedHistoricalHydrationSignature = nil
                 for key in requestKeys {
                     guidedHistoricalHydrationAttemptedRequestKeys.remove(key)
                 }
                 return
             }
-            print("[GuidedHydration] event=ensure_started requestCount=\(requests.count)")
             refreshGuidedShots()
         }
     }
@@ -4321,12 +4249,6 @@ struct ContentView: View {
         orderedSessions: [Session],
         metadataCache: inout [UUID: SessionMetadata]
     ) -> AppState.OperationalMediaHydrationRequest? {
-        let observationShotIDs = Set(observation.shots.map(\.id))
-        print(
-            "[FlaggedHydration] event=request_enter " +
-            "observationID=\(observation.id.uuidString) " +
-            "matchingShotIDs=\(observationShotIDs.map { $0.uuidString.lowercased() }.sorted().joined(separator: ","))"
-        )
         let candidates = [
             bestFlaggedResolutionCandidate(
                 propertyID: propertyID,
@@ -4350,61 +4272,17 @@ struct ContentView: View {
             )
         ].compactMap { $0 }
 
-        print(
-            "[FlaggedHydration] event=request_candidates " +
-            "observationID=\(observation.id.uuidString) " +
-            "count=\(candidates.count)"
-        )
-
         for candidate in candidates {
-            let path = candidate.resolution.path?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            print(
-                "[FlaggedHydration] event=request_candidate " +
-                "observationID=\(observation.id.uuidString) " +
-                "sessionID=\(candidate.sessionID.uuidString) " +
-                "shotID=\(candidate.shot.shotID.uuidString) " +
-                "relativePath=\(candidate.relativePath.isEmpty ? "NONE" : candidate.relativePath) " +
-                "resolvedPath=\(path.isEmpty ? "NONE" : path) " +
-                "exists=\(candidate.resolution.exists)"
-            )
             guard let path = candidate.resolution.path?.trimmingCharacters(in: .whitespacesAndNewlines),
                   !path.isEmpty else {
-                print(
-                    "[FlaggedHydration] event=request_nil " +
-                    "reason=missing_resolved_path " +
-                    "observationID=\(observation.id.uuidString) " +
-                    "shotID=\(candidate.shot.shotID.uuidString)"
-                )
                 continue
             }
-            guard !candidate.resolution.exists else {
-                print(
-                    "[FlaggedHydration] event=request_nil " +
-                    "reason=already_local " +
-                    "observationID=\(observation.id.uuidString) " +
-                    "shotID=\(candidate.shot.shotID.uuidString)"
-                )
-                continue
-            }
+            guard !candidate.resolution.exists else { continue }
             let hydrationKey = guidedHistoricalHydrationRequestKey(
                 sessionID: candidate.sessionID,
                 shotID: candidate.shot.shotID
             )
-            guard !flaggedHistoricalHydrationAttemptedRequestKeys.contains(hydrationKey) else {
-                print(
-                    "[FlaggedHydration] event=request_nil " +
-                    "reason=already_attempted " +
-                    "observationID=\(observation.id.uuidString) " +
-                    "shotID=\(candidate.shot.shotID.uuidString)"
-                )
-                continue
-            }
-            print(
-                "[FlaggedHydration] event=request_created " +
-                "observationID=\(observation.id.uuidString) " +
-                "sessionID=\(candidate.sessionID.uuidString) " +
-                "shotID=\(candidate.shot.shotID.uuidString)"
-            )
+            guard !flaggedHistoricalHydrationAttemptedRequestKeys.contains(hydrationKey) else { continue }
             return AppState.OperationalMediaHydrationRequest(
                 propertyID: propertyID,
                 sessionID: candidate.sessionID,
@@ -4413,11 +4291,6 @@ struct ContentView: View {
             )
         }
 
-        print(
-            "[FlaggedHydration] event=request_nil " +
-            "reason=no_missing_candidates " +
-            "observationID=\(observation.id.uuidString)"
-        )
         return nil
     }
 
@@ -4430,12 +4303,6 @@ struct ContentView: View {
         orderedSessions: [Session],
         metadataCache: inout [UUID: SessionMetadata]
     ) {
-        print(
-            "[FlaggedHydration] event=schedule_enter " +
-            "propertyID=\(propertyID.uuidString) " +
-            "sessionID=\(currentSession?.id.uuidString ?? "NONE") " +
-            "observationCount=\(observations.count)"
-        )
         let activeSessionID = currentSession?.id
         if flaggedHistoricalHydrationSessionID != activeSessionID {
             flaggedHistoricalHydrationSessionID = activeSessionID
@@ -4455,9 +4322,7 @@ struct ContentView: View {
             )
         }))
 
-        print("[FlaggedHydration] event=schedule_requests count=\(requests.count)")
         guard !requests.isEmpty else {
-            print("[FlaggedHydration] event=schedule_exit reason=no_requests")
             flaggedHistoricalHydrationSignature = nil
             return
         }
@@ -4472,10 +4337,7 @@ struct ContentView: View {
             .map { "\($0.sessionID.uuidString.lowercased())|\($0.shotID.uuidString.lowercased())" }
             .joined(separator: ",")
 
-        guard signature != flaggedHistoricalHydrationSignature else {
-            print("[FlaggedHydration] event=schedule_exit reason=duplicate_signature signature=\(signature)")
-            return
-        }
+        guard signature != flaggedHistoricalHydrationSignature else { return }
 
         flaggedHistoricalHydrationSignature = signature
         let requestKeys = requests.map {
@@ -4484,17 +4346,14 @@ struct ContentView: View {
         flaggedHistoricalHydrationAttemptedRequestKeys.formUnion(requestKeys)
 
         Task { @MainActor in
-            print("[FlaggedHydration] event=ensure_called requestCount=\(requests.count)")
             let started = await appState.ensureFlaggedHistoricalMediaAvailableForRequests(requests)
             guard started else {
-                print("[FlaggedHydration] event=schedule_exit reason=ensure_not_started")
                 flaggedHistoricalHydrationSignature = nil
                 for key in requestKeys {
                     flaggedHistoricalHydrationAttemptedRequestKeys.remove(key)
                 }
                 return
             }
-            print("[FlaggedHydration] event=ensure_started requestCount=\(requests.count)")
             refreshActiveIssues()
         }
     }
@@ -10052,12 +9911,6 @@ extension ContentView {
     }
 
     private func refreshGuidedShots() {
-        print(
-            "[GuidedHydration] event=refresh_guided_shots_enter " +
-            "selectedPropertyID=\(appState.selectedPropertyID?.uuidString ?? "NONE") " +
-            "sessionID=\(appState.currentSession?.id.uuidString ?? "NONE") " +
-            "allowReferenceThumbnailResolution=\(allowReferenceThumbnailResolution)"
-        )
         guard let propertyID = appState.selectedPropertyID else {
             guidedShots = []
             guidedResolvedThumbnailPathByID = [:]
@@ -10436,7 +10289,6 @@ extension ContentView {
                 retakeReferenceSource = "none"
             }
         }
-        print("[RetakeRef] session=\(appState.currentSession?.id.uuidString ?? "NONE") guidedKey=\(guidedKey(for: guidedShot)) chosenSource=\(retakeReferenceSource) chosenPath=\(retakeReferencePath ?? "NONE") exists=\(retakeReferencePath != nil)")
         loadGuidedArmedThumbnail(for: guidedShot, forcedPath: retakeReferencePath)
         showGuidedAlignmentOverlay = false
         let rawPath = existingShot.imageLocalIdentifier?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
@@ -10459,12 +10311,6 @@ extension ContentView {
         let sessionIDText = appState.currentSession?.id.uuidString ?? "NONE"
         let chosenPath = (forcedPath ?? guidedResolvedThumbnailPathByID[guidedShot.id])?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         let chosenExists = !chosenPath.isEmpty && FileManager.default.fileExists(atPath: chosenPath)
-        let chosenSource = forcedPath == nil ? "resolved" : "retakeReference"
-        print(
-            "[SelectedThumbResolve] session=\(sessionIDText) guidedID=\(guidedShot.id.uuidString) " +
-            "chosenSource=\(chosenPath.isEmpty ? "none" : chosenSource) chosenPath=\(chosenPath.isEmpty ? "NONE" : chosenPath) exists=\(chosenExists)"
-        )
-
         guard !chosenPath.isEmpty, chosenExists, let image = UIImage(contentsOfFile: chosenPath) else {
             guidedReferenceAssetLocalID = nil
             guidedReferenceThumbnail = nil
