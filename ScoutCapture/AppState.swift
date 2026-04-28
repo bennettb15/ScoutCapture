@@ -2373,7 +2373,10 @@ final class AppState: ObservableObject {
             let existingIndex = allProperties.firstIndex(where: { $0.id == record.id })
             let existingProperty = existingIndex.flatMap { allProperties[$0] }
             if let existingProperty,
-               existingProperty.updatedAt >= record.updatedAt {
+               !LocalConflictRules.shouldApplyPropertyLastWriteWins(
+                currentUpdatedAt: existingProperty.updatedAt,
+                incomingUpdatedAt: record.updatedAt
+               ) {
                 skipped += 1
                 if existingProperty.updatedAt > record.updatedAt {
                     print(
@@ -3863,6 +3866,9 @@ final class AppState: ObservableObject {
         property: Property?,
         metadata: SessionMetadata
     ) -> SupabaseSessionPayload {
+        // Session lock fields remain owned by the 2C-10b coordination helpers.
+        // The generic 2C-11 local conflict reducers intentionally do not touch
+        // `locked_*` payload state.
         let coordinationState = sessionCoordinationStateBySessionID[sessionID]
         return SupabaseSessionPayload(
             id: sessionID,

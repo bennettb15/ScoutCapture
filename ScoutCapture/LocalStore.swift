@@ -1769,8 +1769,12 @@ final class LocalStore {
             throw StoreError.observationNotFound(observation.id)
         }
 
-        var updated = observation
-        updated.updatedAt = Date()
+        var incoming = observation
+        incoming.updatedAt = Date()
+        let updated = LocalConflictRules.reconcileObservationStatus(
+            current: observations[index],
+            incoming: incoming
+        )
         observations[index] = updated
         try writeObservations(observations, propertyID: observation.propertyID)
         NotificationCenter.default.post(name: .scoutPersistentDataDidChange, object: nil)
@@ -1798,7 +1802,8 @@ final class LocalStore {
 
     func saveGuidedShots(_ guidedShots: [GuidedShot], propertyID: UUID) throws {
         try ensurePropertyExists(propertyID)
-        try writeGuidedShots(guidedShots, propertyID: propertyID)
+        let normalized = LocalConflictRules.normalizeGuidedCompletionStates(guidedShots)
+        try writeGuidedShots(normalized, propertyID: propertyID)
         NotificationCenter.default.post(name: .scoutPersistentDataDidChange, object: nil)
     }
     
@@ -1864,7 +1869,7 @@ final class LocalStore {
         guidedShots: [GuidedShot]
     ) throws {
         var metadata = try loadSessionMetadata(propertyID: propertyID, sessionID: sessionID)
-        metadata.guidedShots = guidedShots
+        metadata.guidedShots = LocalConflictRules.normalizeGuidedCompletionStates(guidedShots)
         try saveSessionMetadataAtomically(propertyID: propertyID, sessionID: sessionID, metadata: metadata)
     }
 
@@ -1926,7 +1931,10 @@ final class LocalStore {
                 imageWidth: shot.imageWidth,
                 imageHeight: shot.imageHeight
             )
-            metadata.shots[index] = replacement
+            metadata.shots = LocalConflictRules.applyAppendOnlyMediaRef(
+                current: metadata.shots,
+                incoming: replacement
+            )
         } else if matchMode == .replaceGuidedKey,
                   shot.isGuided,
                   let index = metadata.shots.firstIndex(where: {
@@ -1993,7 +2001,10 @@ final class LocalStore {
             if matchMode == .replaceGuidedKey {
                 print("Retake upsert fallback append: guided key match not found for session \(sessionID)")
             }
-            metadata.shots.append(shot)
+            metadata.shots = LocalConflictRules.applyAppendOnlyMediaRef(
+                current: metadata.shots,
+                incoming: shot
+            )
         }
 
         try saveSessionMetadataAtomically(propertyID: propertyID, sessionID: sessionID, metadata: metadata)
