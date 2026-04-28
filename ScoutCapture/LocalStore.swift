@@ -1808,6 +1808,12 @@ final class LocalStore {
         try ensurePropertyExists(propertyID)
         return try readSessions(propertyID: propertyID)
     }
+
+    func fetchSessionsForCacheBuild(propertyID: UUID) throws -> [Session] {
+        try performFileIOSync {
+            try readSessions(propertyID: propertyID)
+        }
+    }
     
     @discardableResult
     func upsertSession(_ session: Session) throws -> Session {

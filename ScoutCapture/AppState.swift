@@ -831,11 +831,13 @@ final class AppState: ObservableObject {
     @Published private(set) var draftSessionByProperty: [UUID: Session] = [:]
     @Published private(set) var pendingExportSessionByProperty: [UUID: Session] = [:]
     @Published private(set) var hubMetaByProperty: [UUID: HubPropertyMeta] = [:]
+    @Published private(set) var hubRowRefreshToken: UUID = UUID()
     @Published private(set) var cloudBackupStatus: CloudBackupStatus
     @Published private(set) var supabaseConfiguration: SupabaseRuntimeConfiguration
     @Published private(set) var backendFeatureFlags: BackendFeatureFlags
     @Published private(set) var isAuthenticationReady: Bool = false
     @Published private(set) var isAuthenticating: Bool = false
+    @Published private(set) var isLoadingPropertiesForOrgSwitch: Bool = false
     @Published private(set) var authenticatedSupabaseUser: AuthenticatedSupabaseUser?
     @Published var authenticationErrorMessage: String?
     @Published var locallyLockedPropertyIDs: Set<UUID> = []
@@ -903,6 +905,7 @@ final class AppState: ObservableObject {
     private let startupHubIndexTimeout: TimeInterval = 1.25
     private var isStartupHydrationInProgress: Bool = false
     private var startupHydrationCompletedAt: Date?
+    private var pendingPropertyListLoadingOrganizationID: UUID?
     // Keep a short grace for non-empty in-memory states, but do not stall first-load empty hubs.
     private let startupFallbackGraceWindow: TimeInterval = 25.0
     private let supabaseOperationalMediaBucket = "scoutcapture-originals"
@@ -988,16 +991,29 @@ final class AppState: ObservableObject {
 
     var organizationSelectionOptions: [Organization] {
         if requiresAuthentication {
-            return accessibleOrganizations.map { membership in
-                let localMatch = allOrganizations.first(where: { $0.id == membership.id })
-                return Organization(
-                    id: membership.id,
-                    name: membership.name,
-                    contacts: localMatch?.contacts ?? []
-                )
-            }
+            return deduplicatedOrganizationsByIDPreservingOrder(
+                accessibleOrganizations.map { membership in
+                    let localMatch = allOrganizations.first(where: { $0.id == membership.id })
+                    return Organization(
+                        id: membership.id,
+                        name: membership.name,
+                        contacts: localMatch?.contacts ?? []
+                    )
+                }
+            )
         }
-        return organizations
+        return deduplicatedOrganizationsByIDPreservingOrder(organizations)
+    }
+
+    private func deduplicatedOrganizationsByIDPreservingOrder(_ organizations: [Organization]) -> [Organization] {
+        var seen = Set<UUID>()
+        var output: [Organization] = []
+        output.reserveCapacity(organizations.count)
+        for organization in organizations {
+            guard seen.insert(organization.id).inserted else { continue }
+            output.append(organization)
+        }
+        return output
     }
 
     func sessionArchiveSummaries() -> [LocalStore.SessionArchiveSummary] {
@@ -1322,6 +1338,9 @@ final class AppState: ObservableObject {
             if self.isOrganizationContextReady != ready {
                 self.isOrganizationContextReady = ready
             }
+            if activeOrganizationID == nil {
+                self.finishPropertyListLoadingForOrgSwitch()
+            }
             self.applyTenantScopedState()
             if ready, activeOrganizationID != nil {
                 self.queuePendingSupabaseMediaBackfillIfNeeded(reason: "org_context_ready")
@@ -1450,12 +1469,14 @@ final class AppState: ObservableObject {
 
         guard activeOrganizationID != id else { return }
 
+        beginPropertyListLoadingForOrgSwitch(organizationID: id)
         activeOrganizationID = id
         persistActiveOrganizationID()
         applyTenantScopedState()
         if isOrganizationContextReady {
             Task { @MainActor [weak self] in
                 guard let self else { return }
+                await refreshPropertiesForOrganizationSwitch(requestedOrganizationID: id)
                 await performRemoteConvergenceCycle(source: "org_switch")
             }
         }
@@ -1488,6 +1509,7 @@ final class AppState: ObservableObject {
         let scopedDrafts = allDraftSessionByProperty.filter { scopedPropertyIDs.contains($0.key) }
         let scopedPending = allPendingExportSessionByProperty.filter { scopedPropertyIDs.contains($0.key) }
         let scopedMeta = allHubMetaByProperty.filter { scopedPropertyIDs.contains($0.key) }
+        var didChangeScopedSessionDerivedCaches = false
 
         if organizations != scopedOrganizations {
             organizations = scopedOrganizations
@@ -1497,15 +1519,21 @@ final class AppState: ObservableObject {
         }
         if sessionIndexByProperty != scopedSessionIndex {
             sessionIndexByProperty = scopedSessionIndex
+            didChangeScopedSessionDerivedCaches = true
         }
         if draftSessionByProperty != scopedDrafts {
             draftSessionByProperty = scopedDrafts
+            didChangeScopedSessionDerivedCaches = true
         }
         if pendingExportSessionByProperty != scopedPending {
             pendingExportSessionByProperty = scopedPending
+            didChangeScopedSessionDerivedCaches = true
         }
         if hubMetaByProperty != scopedMeta {
             hubMetaByProperty = scopedMeta
+        }
+        if didChangeScopedSessionDerivedCaches {
+            hubRowRefreshToken = UUID()
         }
 
         if let selectedPropertyID,
@@ -8146,6 +8174,46 @@ final class AppState: ObservableObject {
         isLoading = loading
     }
 
+    private func beginPropertyListLoadingForOrgSwitch(organizationID: UUID) {
+        pendingPropertyListLoadingOrganizationID = organizationID
+        guard !isLoadingPropertiesForOrgSwitch else { return }
+        isLoadingPropertiesForOrgSwitch = true
+    }
+
+    private func finishPropertyListLoadingForOrgSwitch(requestedOrganizationID: UUID? = nil) {
+        if let requestedOrganizationID,
+           pendingPropertyListLoadingOrganizationID != requestedOrganizationID {
+            return
+        }
+        pendingPropertyListLoadingOrganizationID = nil
+        guard isLoadingPropertiesForOrgSwitch else { return }
+        isLoadingPropertiesForOrgSwitch = false
+    }
+
+    private func refreshPropertiesForOrganizationSwitch(requestedOrganizationID: UUID) async {
+        let firstPayload: PropertyRefreshPayload? = await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async {
+                let payload = (try? self.makeRefreshPayloadForHubIndexOnly())
+                    ?? (try? self.makeRefreshPayload())
+                continuation.resume(returning: payload)
+            }
+        }
+
+        guard activeOrganizationID == requestedOrganizationID else {
+            finishPropertyListLoadingForOrgSwitch(requestedOrganizationID: requestedOrganizationID)
+            return
+        }
+
+        if let firstPayload {
+            applyRefreshPayload(firstPayload)
+            scheduleOffloadEligibleSessionMedia(excludingSessionID: currentSession?.id)
+        }
+
+        await refreshPropertiesAwaitingForegroundRefresh()
+        hubRowRefreshToken = UUID()
+        finishPropertyListLoadingForOrgSwitch(requestedOrganizationID: requestedOrganizationID)
+    }
+
     @MainActor
     private func performForegroundRemotePropertyRefresh() async {
         guard let requestedOrganizationID = activeOrganizationID else {
@@ -9661,7 +9729,7 @@ final class AppState: ObservableObject {
     }
 
     private func loadAndNormalizeSessions(propertyID: UUID) -> [Session] {
-        let fetched = (try? localStore.fetchSessions(propertyID: propertyID)) ?? []
+        let fetched = (try? localStore.fetchSessionsForCacheBuild(propertyID: propertyID)) ?? []
         var uniqueByID: [UUID: Session] = [:]
         for session in fetched {
             uniqueByID[session.id] = session

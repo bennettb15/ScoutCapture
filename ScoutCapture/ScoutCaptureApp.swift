@@ -656,7 +656,7 @@ struct SessionHubView: View {
 
     private var shouldShowStartupPlaceholders: Bool {
         guard appState.properties.isEmpty else { return false }
-        if appState.isLoading {
+        if appState.isLoading || appState.isLoadingPropertiesForOrgSwitch {
             return true
         }
         if let holdUntil = placeholderHoldUntil, Date() < holdUntil {
@@ -722,6 +722,7 @@ struct SessionHubView: View {
                             }
                         }
                     }
+                    .id(appState.hubRowRefreshToken)
 .refreshable {
     await appState.refreshPropertiesAwaitingForegroundRefresh()
 }
