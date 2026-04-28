@@ -1996,7 +1996,11 @@ final class LocalStore {
                 imageWidth: shot.imageWidth,
                 imageHeight: shot.imageHeight
             )
-            metadata.shots[index] = replacement
+            metadata.shots.remove(at: index)
+            metadata.shots = LocalConflictRules.applyAppendOnlyMediaRef(
+                current: metadata.shots,
+                incoming: replacement
+            )
         } else {
             if matchMode == .replaceGuidedKey {
                 print("Retake upsert fallback append: guided key match not found for session \(sessionID)")
@@ -3702,7 +3706,17 @@ final class LocalStore {
     }
 
     private func writeObservations(_ observations: [Observation], propertyID: UUID) throws {
-        let data = try encoder.encode(observations)
+        let normalized = observations.map { observation in
+            var updated = observation
+            updated.historyEvents = LocalConflictRules.normalizeObservationHistoryEventsAppendOnly(
+                observation.historyEvents
+            )
+            updated.updateHistory = LocalConflictRules.normalizeObservationUpdateEntriesAppendOnly(
+                observation.updateHistory
+            )
+            return updated
+        }
+        let data = try encoder.encode(normalized)
         let fileURL = observationsFileURL(for: propertyID)
         try data.write(to: fileURL, options: .atomic)
     }
@@ -3718,7 +3732,8 @@ final class LocalStore {
     }
 
     private func writeGuidedShots(_ guidedShots: [GuidedShot], propertyID: UUID) throws {
-        let data = try encoder.encode(guidedShots)
+        let normalized = LocalConflictRules.normalizeGuidedCompletionStates(guidedShots)
+        let data = try encoder.encode(normalized)
         let fileURL = guidedShotsFileURL(for: propertyID)
         try data.write(to: fileURL, options: .atomic)
     }
