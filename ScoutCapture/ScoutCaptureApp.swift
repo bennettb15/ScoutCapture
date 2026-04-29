@@ -572,6 +572,9 @@ struct SessionHubView: View {
     @State private var pressedPropertyID: UUID? = nil
     @State private var isOpeningProperty: Bool = false
     @State private var placeholderHoldUntil: Date? = nil
+    @State private var dismissedPendingInvitationIDs: Set<UUID> = []
+    @State private var isPendingInviteActionInFlight: Bool = false
+    @State private var pendingInvitePromptErrorMessage: String? = nil
 
     private let selectionHaptic = UIImpactFeedbackGenerator(style: .light)
     private let hiddenDebugTapWindow: TimeInterval = 1.5
@@ -669,64 +672,86 @@ struct SessionHubView: View {
         (isSearchExpanded && isSearchFieldFocused) || !normalizedSearchQuery.isEmpty
     }
 
+    private var visiblePendingInvitationPrompt: PendingOrganizationInvitation? {
+        appState.pendingOrganizationInvitations.first { !dismissedPendingInvitationIDs.contains($0.id) }
+    }
+
     var body: some View {
         NavigationStack(path: $path) {
-            Group {
-                let showArchivedSection = showArchivedProperties
-                let hasNoMatches = filteredActiveProperties.isEmpty && (!showArchivedSection || filteredArchivedProperties.isEmpty)
-                let hasNoPropertiesAtAll = activeProperties.isEmpty && (!showArchivedSection || archivedProperties.isEmpty)
-                if shouldShowStartupPlaceholders {
-                    List {
-                        Section {
-                            ForEach(0..<4, id: \.self) { index in
-                                startupPlaceholderRow(index: index)
-                            }
-                        } header: {
-                            Text("Syncing Properties...")
-                                .font(.system(size: 13, weight: .semibold))
-                                .textCase(nil)
-                        }
-                    }
-                    .listStyle(.plain)
-                } else if hasNoPropertiesAtAll {
-                    ContentUnavailableView(
-                        "No Properties",
-                        systemImage: "house",
-                        description: Text("Add a property to start a session.")
-                    )
-                } else {
-                    List {
-                        if !filteredActiveProperties.isEmpty {
+            VStack(spacing: 0) {
+                if let invitation = visiblePendingInvitationPrompt {
+                    pendingInvitationPrompt(invitation)
+                }
+
+                Group {
+                    let showArchivedSection = showArchivedProperties
+                    let hasNoMatches = filteredActiveProperties.isEmpty && (!showArchivedSection || filteredArchivedProperties.isEmpty)
+                    let hasNoPropertiesAtAll = activeProperties.isEmpty && (!showArchivedSection || archivedProperties.isEmpty)
+                    if shouldShowStartupPlaceholders {
+                        List {
                             Section {
-                                ForEach(filteredActiveProperties) { property in
-                                    propertyRow(property)
+                                ForEach(0..<4, id: \.self) { index in
+                                    startupPlaceholderRow(index: index)
+                                }
+                            } header: {
+                                Text("Syncing Properties...")
+                                    .font(.system(size: 13, weight: .semibold))
+                                    .textCase(nil)
+                            }
+                        }
+                        .listStyle(.plain)
+                    } else if appState.requiresAuthentication && appState.activeOrganizationID == nil {
+                        ContentUnavailableView(
+                            "No Organization Access",
+                            systemImage: "building.2.crop.circle",
+                            description: Text("You don’t currently have access to any organizations.")
+                        )
+                    } else if hasNoPropertiesAtAll {
+                        ContentUnavailableView {
+                            Label("No Properties", systemImage: "house")
+                        } description: {
+                            Text("Add a property to start a session.")
+                        } actions: {
+                            Button("Retry Sync") {
+                                Task {
+                                    await appState.refreshPropertiesAwaitingForegroundRefresh()
                                 }
                             }
                         }
+                    } else {
+                        List {
+                            if !filteredActiveProperties.isEmpty {
+                                Section {
+                                    ForEach(filteredActiveProperties) { property in
+                                        propertyRow(property)
+                                    }
+                                }
+                            }
 
-                        if showArchivedSection && !filteredArchivedProperties.isEmpty {
-                            Section("Archived") {
-                                ForEach(filteredArchivedProperties) { property in
-                                    propertyRow(property)
+                            if showArchivedSection && !filteredArchivedProperties.isEmpty {
+                                Section("Archived") {
+                                    ForEach(filteredArchivedProperties) { property in
+                                        propertyRow(property)
+                                    }
+                                }
+                            }
+
+                            if hasNoMatches {
+                                Section {
+                                    Text("No matching properties")
+                                        .font(.system(size: 14, weight: .medium))
+                                        .foregroundColor(.secondary)
+                                        .frame(maxWidth: .infinity, alignment: .center)
+                                        .padding(.vertical, 10)
                                 }
                             }
                         }
-
-                        if hasNoMatches {
-                            Section {
-                                Text("No matching properties")
-                                    .font(.system(size: 14, weight: .medium))
-                                    .foregroundColor(.secondary)
-                                    .frame(maxWidth: .infinity, alignment: .center)
-                                    .padding(.vertical, 10)
-                            }
+                        .id(appState.hubRowRefreshToken)
+                        .refreshable {
+                            await appState.refreshPropertiesAwaitingForegroundRefresh()
                         }
+                        .listStyle(.plain)
                     }
-                    .id(appState.hubRowRefreshToken)
-.refreshable {
-    await appState.refreshPropertiesAwaitingForegroundRefresh()
-}
-                    .listStyle(.plain)
                 }
             }
             .navigationTitle("")
@@ -822,6 +847,12 @@ struct SessionHubView: View {
                     placeholderHoldUntil = nil
                 } else if placeholderHoldUntil == nil {
                     beginStartupPlaceholderHoldWindow()
+                }
+            }
+            .onChange(of: appState.pendingOrganizationInvitations.map(\.id)) { _, newIDs in
+                dismissedPendingInvitationIDs.formIntersection(Set(newIDs))
+                if !newIDs.contains(where: { dismissedPendingInvitationIDs.contains($0) }) {
+                    pendingInvitePromptErrorMessage = nil
                 }
             }
             .onChange(of: path) { oldPath, newPath in
@@ -940,6 +971,65 @@ struct SessionHubView: View {
         }
     }
 
+    @ViewBuilder
+    private func pendingInvitationPrompt(_ invitation: PendingOrganizationInvitation) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Organization Invitation")
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundColor(headerPrimaryLabel)
+
+            Text("You’ve been invited to join \(invitation.orgName) as \(invitation.role.capitalized).")
+                .font(.system(size: 14, weight: .medium))
+                .foregroundColor(.secondary)
+
+            if let pendingInvitePromptErrorMessage, !pendingInvitePromptErrorMessage.isEmpty {
+                Text(pendingInvitePromptErrorMessage)
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundColor(.red)
+            }
+
+            HStack(spacing: 10) {
+                Button(isPendingInviteActionInFlight ? "Accepting..." : "Accept Invite") {
+                    acceptPendingInvitation(invitation)
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(isPendingInviteActionInFlight)
+
+                Button("Ignore for Now") {
+                    dismissedPendingInvitationIDs.insert(invitation.id)
+                    pendingInvitePromptErrorMessage = nil
+                }
+                .buttonStyle(.bordered)
+                .disabled(isPendingInviteActionInFlight)
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.blue.opacity(colorScheme == .light ? 0.08 : 0.18))
+        .overlay(
+            Rectangle()
+                .frame(height: 1)
+                .foregroundColor(Color.blue.opacity(0.20)),
+            alignment: .bottom
+        )
+    }
+
+    private func acceptPendingInvitation(_ invitation: PendingOrganizationInvitation) {
+        pendingInvitePromptErrorMessage = nil
+        isPendingInviteActionInFlight = true
+
+        Task {
+            defer { isPendingInviteActionInFlight = false }
+            do {
+                try await appState.acceptOrganizationInvitation(invitationID: invitation.id)
+                dismissedPendingInvitationIDs.remove(invitation.id)
+            } catch {
+                pendingInvitePromptErrorMessage = error.localizedDescription
+            }
+        }
+    }
+
     private func beginStartupPlaceholderHoldWindow() {
         let holdUntil = Date().addingTimeInterval(startupPlaceholderHoldSeconds)
         placeholderHoldUntil = holdUntil
@@ -987,10 +1077,29 @@ struct SessionHubView: View {
         let hasPhoneActions = hasValidPhoneNumber(property)
         let hasStatusRow = draft != nil || hasPendingExport || hasReExportGlyph
         let isOccupiedByOther = appState.isPropertyOccupiedByOther(propertyID: property.id)
+        let canonicalLockSession = appState.canonicalLockSession(for: property.id)
+        let draftLockSession = appState.draftSession(for: property.id)
         let isLockedByOther: Bool = {
-            guard let session = appState.canonicalLockSession(for: property.id) else { return false }
+            guard let session = draftLockSession else { return false }
             return appState.isSessionLockedByOther(sessionID: session.id)
         }()
+        let locallyLocked = appState.locallyLockedPropertyIDs.contains(property.id)
+        let showLock = isOccupiedByOther || isLockedByOther || locallyLocked
+        let _ = print(
+            "[LockDisplayDiag] property_row " +
+            "propertyID=\(property.id.uuidString) " +
+            "locallyLocked=\(locallyLocked) " +
+            "occupancy=\(appState.debugPropertyOccupancyDescription(propertyID: property.id)) " +
+            "canonicalSessionID=\(canonicalLockSession?.id.uuidString ?? "nil") " +
+            "canonicalSessionStatus=\(canonicalLockSession?.status.rawValue ?? "nil") " +
+            "canonicalSessionCoordination=\(appState.debugSessionCoordinationDescription(sessionID: canonicalLockSession?.id)) " +
+            "draftSessionID=\(draftLockSession?.id.uuidString ?? "nil") " +
+            "draftSessionStatus=\(draftLockSession?.status.rawValue ?? "nil") " +
+            "draftSessionCoordination=\(appState.debugSessionCoordinationDescription(sessionID: draftLockSession?.id)) " +
+            "isOccupiedByOther=\(isOccupiedByOther) " +
+            "isLockedByOther=\(isLockedByOther) " +
+            "showLock=\(showLock)"
+        )
         HStack(alignment: .top, spacing: 10) {
             VStack(alignment: .leading, spacing: 4) {
                 HStack(alignment: .firstTextBaseline, spacing: 6) {
@@ -999,7 +1108,7 @@ struct SessionHubView: View {
                             .font(.system(size: 18, weight: .semibold))
                             .foregroundColor(Color.green.opacity(0.92))
                     }
-                    if isOccupiedByOther || isLockedByOther || appState.locallyLockedPropertyIDs.contains(property.id) {
+                    if showLock {
                         Image(systemName: "lock.fill")
                             .font(.system(size: 14, weight: .semibold))
                             .foregroundColor(.red)
@@ -1644,7 +1753,13 @@ struct SessionHubView: View {
         let onOpenDebugTools: (() -> Void)?
         @Environment(\.dismiss) private var dismiss
         @Environment(\.colorScheme) private var colorScheme
+        @State private var inviteEmail: String = ""
+        @State private var inviteRole: String = "viewer"
+        @State private var collaborationStatusMessage: String?
+        @State private var collaborationErrorMessage: String?
+        @State private var isCollaborationActionInFlight: Bool = false
         private let showDeveloperSection: Bool = false
+        private let inviteRoleOptions = ["viewer", "field", "manager", "owner"]
 
         private var buttonFill: Color {
             colorScheme == .light ? Color.white.opacity(0.90) : Color.black.opacity(0.65)
@@ -1656,6 +1771,10 @@ struct SessionHubView: View {
 
         private var buttonLabel: Color {
             colorScheme == .light ? Color.black.opacity(0.88) : .white
+        }
+
+        private var shouldShowCollaborationSection: Bool {
+            appState.requiresAuthentication && appState.isOwnerOfActiveOrganization
         }
 
         var body: some View {
@@ -1730,6 +1849,101 @@ struct SessionHubView: View {
                                     }
                                 }
                             }
+
+                            if appState.requiresAuthentication && !appState.pendingOrganizationInvitations.isEmpty {
+                                Section("Pending Invites") {
+                                    ForEach(appState.pendingOrganizationInvitations) { invitation in
+                                        VStack(alignment: .leading, spacing: 8) {
+                                            VStack(alignment: .leading, spacing: 2) {
+                                                Text(invitation.orgName)
+                                                    .font(.system(size: 15, weight: .semibold))
+                                                Text("\(invitation.role.capitalized) access")
+                                                    .font(.system(size: 13, weight: .medium))
+                                                    .foregroundStyle(.secondary)
+                                            }
+
+                                            Button(isCollaborationActionInFlight ? "Accepting..." : "Accept") {
+                                                accept(invitation: invitation)
+                                            }
+                                            .disabled(isCollaborationActionInFlight)
+                                        }
+                                        .padding(.vertical, 4)
+                                    }
+                                }
+                            }
+
+                            if shouldShowCollaborationSection,
+                               let activeOrganization = appState.activeOrganization {
+                                Section("Collaboration") {
+                                    Text("Manage access for \(activeOrganization.name)")
+                                        .font(.system(size: 13, weight: .medium))
+                                        .foregroundStyle(.secondary)
+
+                                    TextField("Invite by email", text: $inviteEmail)
+                                        .textInputAutocapitalization(.never)
+                                        .autocorrectionDisabled()
+                                        .keyboardType(.emailAddress)
+
+                                    Picker("Invite Role", selection: $inviteRole) {
+                                        ForEach(inviteRoleOptions, id: \.self) { role in
+                                            Text(role.capitalized).tag(role)
+                                        }
+                                    }
+
+                                    Button(isCollaborationActionInFlight ? "Inviting..." : "Send Invite") {
+                                        sendInvite()
+                                    }
+                                    .disabled(
+                                        isCollaborationActionInFlight ||
+                                        inviteEmail.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ||
+                                        appState.activeOrganizationID == nil
+                                    )
+
+                                    if let collaborationStatusMessage, !collaborationStatusMessage.isEmpty {
+                                        Text(collaborationStatusMessage)
+                                            .font(.system(size: 13, weight: .medium))
+                                            .foregroundStyle(.secondary)
+                                    }
+
+                                    if let collaborationErrorMessage, !collaborationErrorMessage.isEmpty {
+                                        Text(collaborationErrorMessage)
+                                            .font(.system(size: 13, weight: .medium))
+                                            .foregroundStyle(.red)
+                                    }
+
+                                    if appState.activeOrganizationMembers.isEmpty {
+                                        Text("No members found.")
+                                            .foregroundStyle(.secondary)
+                                    } else {
+                                        ForEach(appState.activeOrganizationMembers) { member in
+                                            HStack(alignment: .top, spacing: 12) {
+                                                VStack(alignment: .leading, spacing: 2) {
+                                                    Text(member.displayName)
+                                                        .font(.system(size: 15, weight: .semibold))
+                                                    if let email = member.email, !email.isEmpty, email != member.displayName {
+                                                        Text(email)
+                                                            .font(.system(size: 13, weight: .medium))
+                                                            .foregroundStyle(.secondary)
+                                                    }
+                                                    Text(member.role.capitalized)
+                                                        .font(.system(size: 12, weight: .medium))
+                                                        .foregroundStyle(.secondary)
+                                                }
+
+                                                Spacer(minLength: 0)
+
+                                                if member.role != "owner" {
+                                                    Button(isCollaborationActionInFlight ? "Revoking..." : "Revoke", role: .destructive) {
+                                                        revoke(member: member)
+                                                    }
+                                                    .disabled(isCollaborationActionInFlight)
+                                                }
+                                            }
+                                            .padding(.vertical, 2)
+                                        }
+                                    }
+                                }
+                            }
                         }
 
                         if showDeveloperSection, let onOpenDebugTools {
@@ -1746,6 +1960,76 @@ struct SessionHubView: View {
                         }
                     }
                     .listSectionSpacing(18)
+                }
+            }
+            .task {
+                await refreshCollaborationState()
+            }
+        }
+
+        private func refreshCollaborationState() async {
+            await appState.refreshPendingOrganizationInvitations()
+            await appState.refreshActiveOrganizationMembers()
+        }
+
+        private func sendInvite() {
+            guard let activeOrganizationID = appState.activeOrganizationID else { return }
+            let trimmedEmail = inviteEmail.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmedEmail.isEmpty else { return }
+
+            collaborationErrorMessage = nil
+            collaborationStatusMessage = nil
+            isCollaborationActionInFlight = true
+
+            Task {
+                defer { isCollaborationActionInFlight = false }
+                do {
+                    try await appState.inviteUserToOrganization(
+                        email: trimmedEmail,
+                        role: inviteRole,
+                        orgID: activeOrganizationID
+                    )
+                    inviteEmail = ""
+                    collaborationStatusMessage = "Invite sent."
+                } catch {
+                    collaborationErrorMessage = error.localizedDescription
+                }
+            }
+        }
+
+        private func accept(invitation: PendingOrganizationInvitation) {
+            collaborationErrorMessage = nil
+            collaborationStatusMessage = nil
+            isCollaborationActionInFlight = true
+
+            Task {
+                defer { isCollaborationActionInFlight = false }
+                do {
+                    try await appState.acceptOrganizationInvitation(invitationID: invitation.id)
+                    collaborationStatusMessage = "Access accepted."
+                } catch {
+                    collaborationErrorMessage = error.localizedDescription
+                }
+            }
+        }
+
+        private func revoke(member: OrganizationAccessMember) {
+            guard let activeOrganizationID = appState.activeOrganizationID else { return }
+
+            collaborationErrorMessage = nil
+            collaborationStatusMessage = nil
+            isCollaborationActionInFlight = true
+
+            Task {
+                defer { isCollaborationActionInFlight = false }
+                do {
+                    try await appState.revokeOrganizationMembership(
+                        userID: member.id,
+                        orgID: activeOrganizationID
+                    )
+                    collaborationStatusMessage = "Access revoked."
+                } catch {
+                    collaborationErrorMessage = error.localizedDescription
                 }
             }
         }

@@ -159,6 +159,38 @@ struct ActiveOrganizationMembership: Equatable, Identifiable {
     let role: String
 }
 
+struct OrganizationAccessMember: Equatable, Identifiable {
+    let id: UUID
+    let email: String?
+    let fullName: String?
+    let role: String
+
+    var displayName: String {
+        if let fullName = OrganizationAccessMember.normalizedText(fullName) {
+            return fullName
+        }
+        if let email = OrganizationAccessMember.normalizedText(email) {
+            return email
+        }
+        return id.uuidString
+    }
+
+    private static func normalizedText(_ value: String?) -> String? {
+        guard let value else { return nil }
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+}
+
+struct PendingOrganizationInvitation: Equatable, Identifiable {
+    let id: UUID
+    let orgID: UUID
+    let orgName: String
+    let inviteeEmail: String
+    let role: String
+    let createdAt: Date
+}
+
 enum AuthenticationFlowResult: Equatable {
     case signedIn
     case requiresEmailConfirmation
@@ -402,14 +434,90 @@ final class AppState: ObservableObject {
     }
 
     private struct SupabaseOrgMembershipRecord: Decodable {
+        let userID: UUID?
         let orgID: UUID
         let role: String
         let deletedAt: String?
 
         enum CodingKeys: String, CodingKey {
+            case userID = "user_id"
             case orgID = "org_id"
             case role
             case deletedAt = "deleted_at"
+        }
+    }
+
+    private struct SupabaseOrganizationMemberRecord: Decodable {
+        let userID: UUID
+        let role: String
+        let deletedAt: String?
+
+        enum CodingKeys: String, CodingKey {
+            case userID = "user_id"
+            case role
+            case deletedAt = "deleted_at"
+        }
+    }
+
+    private struct SupabaseUserProfileRecord: Decodable {
+        let id: UUID
+        let email: String?
+        let fullName: String?
+
+        enum CodingKeys: String, CodingKey {
+            case id
+            case email
+            case fullName = "full_name"
+        }
+    }
+
+    private struct SupabasePendingInvitationRecord: Decodable {
+        let id: UUID
+        let orgID: UUID
+        let orgName: String
+        let inviteeEmail: String
+        let role: String
+        let createdAt: Date
+
+        enum CodingKeys: String, CodingKey {
+            case id
+            case orgID = "org_id"
+            case orgName = "org_name"
+            case inviteeEmail = "invitee_email"
+            case role
+            case createdAt = "created_at"
+        }
+    }
+
+    private struct CreateOrgInvitationRPCPayload: Encodable {
+        let targetOrgID: UUID
+        let targetInviteeEmail: String
+        let targetRole: String
+
+        enum CodingKeys: String, CodingKey {
+            case targetOrgID = "target_org_id"
+            case targetInviteeEmail = "target_invitee_email"
+            case targetRole = "target_role"
+        }
+    }
+
+    private struct AcceptOrgInvitationRPCPayload: Encodable {
+        let targetInvitationID: UUID
+
+        enum CodingKeys: String, CodingKey {
+            case targetInvitationID = "target_invitation_id"
+        }
+    }
+
+    private struct RevokeOrgAccessRPCPayload: Encodable {
+        let targetOrgID: UUID
+        let targetUserID: UUID?
+        let targetInvitationID: UUID?
+
+        enum CodingKeys: String, CodingKey {
+            case targetOrgID = "target_org_id"
+            case targetUserID = "target_user_id"
+            case targetInvitationID = "target_invitation_id"
         }
     }
 
@@ -845,6 +953,8 @@ final class AppState: ObservableObject {
     @Published private(set) var activeOrganizationID: UUID?
     @Published private(set) var accessibleOrganizations: [ActiveOrganizationMembership] = []
     @Published private(set) var isOrganizationContextReady: Bool = false
+    @Published private(set) var activeOrganizationMembers: [OrganizationAccessMember] = []
+    @Published private(set) var pendingOrganizationInvitations: [PendingOrganizationInvitation] = []
 
     @Published var selectedPropertyID: UUID? {
         didSet {
@@ -929,6 +1039,11 @@ final class AppState: ObservableObject {
     private var sessionCoordinationDebugRemoteRecords: [UUID: RemoteSessionCoordinationRecord] = [:]
 #endif
     private var authStateChangesTask: Task<Void, Never>?
+    private var authAccessRebuildTask: Task<Void, Never>?
+    private var authenticatedAccessContextGeneration: UInt64 = 0
+    private var nextPropertyRefreshToken: UInt64 = 0
+    private var newestStartedPropertyRefreshByOrg: [UUID: PropertyRefreshAuthority] = [:]
+    private var lastAppliedPropertyRefreshByOrg: [UUID: AppliedPropertyRefreshState] = [:]
     private var lastEnsuredUserProfileID: UUID?
     private var allProperties: [Property] = []
     private var allOrganizations: [Organization] = []
@@ -989,6 +1104,24 @@ final class AppState: ObservableObject {
         return accessibleOrganizations.first { $0.id == activeOrganizationID }
     }
 
+    var activeOrganizationMembershipRole: String? {
+        guard let activeOrganizationID else { return nil }
+        return accessibleOrganizations
+            .first(where: { $0.id == activeOrganizationID })?
+            .role
+    }
+
+    var isOwnerOfActiveOrganization: Bool {
+        guard let role = activeOrganizationMembershipRole?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() else {
+            return false
+        }
+        return role == "owner"
+    }
+
+    var canManageActiveOrganizationAccess: Bool {
+        isOwnerOfActiveOrganization
+    }
+
     var organizationSelectionOptions: [Organization] {
         if requiresAuthentication {
             return deduplicatedOrganizationsByIDPreservingOrder(
@@ -1014,6 +1147,21 @@ final class AppState: ObservableObject {
             output.append(organization)
         }
         return output
+    }
+
+    private static func organizationRoleSortIndex(_ role: String) -> Int {
+        switch role.lowercased() {
+        case "owner":
+            return 0
+        case "manager":
+            return 1
+        case "field":
+            return 2
+        case "viewer":
+            return 3
+        default:
+            return 99
+        }
     }
 
     func sessionArchiveSummaries() -> [LocalStore.SessionArchiveSummary] {
@@ -1256,11 +1404,15 @@ final class AppState: ObservableObject {
         stopAuthenticationObservation()
 
         guard let client = supabaseClient else {
-            applyAuthenticationState(user: nil, ready: true)
+            Task { @MainActor [weak self] in
+                self?.applyAuthenticationStateNow(user: nil, ready: true)
+            }
             return
         }
 
-        applyAuthenticationState(user: nil, ready: false)
+        Task { @MainActor [weak self] in
+            self?.applyAuthenticationStateNow(user: nil, ready: false)
+        }
 
         authStateChangesTask = Task { [weak self] in
             for await (event, authSession) in client.auth.authStateChanges {
@@ -1273,19 +1425,41 @@ final class AppState: ObservableObject {
                 let userID = authSession?.user.id
                 let email = authSession?.user.email
                 let user = userID.map { AuthenticatedSupabaseUser(id: $0, email: email) }
+                let previousUserID = await MainActor.run { self.authenticatedSupabaseUser?.id }
                 await MainActor.run {
-                    self.applyAuthenticationState(user: user, ready: true)
+                    self.applyAuthenticationStateNow(user: user, ready: true)
                 }
 
                 if event == .signedOut {
                     await MainActor.run {
+                        self.authAccessRebuildTask?.cancel()
+                        self.authAccessRebuildTask = nil
                         self.lastEnsuredUserProfileID = nil
-                        self.clearOrganizationContext()
+                        self.hardResetAuthenticatedAccessContext(
+                            ready: !self.requiresAuthentication,
+                            persistActiveSelection: false
+                        )
                     }
                     continue
                 }
 
                 if [.initialSession, .signedIn, .tokenRefreshed, .userUpdated].contains(event) {
+                    guard let userID else { continue }
+                    let shouldRunFullRebuild =
+                        previousUserID != userID ||
+                        event == .initialSession ||
+                        event == .signedIn
+
+                    if shouldRunFullRebuild {
+                        await MainActor.run {
+                            self.authAccessRebuildTask?.cancel()
+                            self.authAccessRebuildTask = Task { [weak self] in
+                                await self?.runPostAuthenticationRebuild(for: userID)
+                            }
+                        }
+                        continue
+                    }
+
                     do {
                         try await self.ensureCurrentUserProfileIfNeeded(for: userID)
                         if Task.isCancelled {
@@ -1303,52 +1477,99 @@ final class AppState: ObservableObject {
         }
     }
 
-    private func applyAuthenticationState(user: AuthenticatedSupabaseUser?, ready: Bool) {
-        DispatchQueue.main.async { [weak self] in
-            guard let self else { return }
-            if self.authenticatedSupabaseUser != user {
-                self.authenticatedSupabaseUser = user
-            }
-            if self.isAuthenticationReady != ready {
-                self.isAuthenticationReady = ready
-            }
-            if user == nil {
-                self.authenticationErrorMessage = nil
-            }
+    @MainActor
+    private func applyAuthenticationStateNow(user: AuthenticatedSupabaseUser?, ready: Bool) {
+        let previousUserID = authenticatedSupabaseUser?.id
+        let incomingUserID = user?.id
+
+        if authenticatedSupabaseUser != user {
+            authenticatedSupabaseUser = user
+        }
+        if previousUserID != incomingUserID {
+            lastEnsuredUserProfileID = nil
+            hardResetAuthenticatedAccessContext(
+                ready: user == nil ? !requiresAuthentication : false,
+                persistActiveSelection: false
+            )
+        }
+        if isAuthenticationReady != ready {
+            isAuthenticationReady = ready
+        }
+        if user == nil {
+            authenticationErrorMessage = nil
         }
     }
 
     private func applyOrganizationContext(
         memberships: [ActiveOrganizationMembership],
         activeOrganizationID: UUID?,
-        ready: Bool
+        ready: Bool,
+        expectedAuthenticatedUserID: UUID? = nil,
+        persistActiveSelection: Bool = true
     ) {
-        DispatchQueue.main.async { [weak self] in
+        Task { @MainActor [weak self] in
             guard let self else { return }
-            let previousReady = self.isOrganizationContextReady
-            let previousActiveOrganizationID = self.activeOrganizationID
+            self.applyOrganizationContextNow(
+                memberships: memberships,
+                activeOrganizationID: activeOrganizationID,
+                ready: ready,
+                expectedAuthenticatedUserID: expectedAuthenticatedUserID,
+                persistActiveSelection: persistActiveSelection
+            )
+        }
+    }
 
-            if self.accessibleOrganizations != memberships {
-                self.accessibleOrganizations = memberships
+    @MainActor
+    private func applyOrganizationContextNow(
+        memberships: [ActiveOrganizationMembership],
+        activeOrganizationID: UUID?,
+        ready: Bool,
+        expectedAuthenticatedUserID: UUID? = nil,
+        persistActiveSelection: Bool = true
+    ) {
+        if let expectedAuthenticatedUserID,
+           authenticatedSupabaseUser?.id != expectedAuthenticatedUserID {
+            print(
+                "[OrgAccess] discard_context_for_stale_user " +
+                "expectedUserID=\(expectedAuthenticatedUserID.uuidString) " +
+                "currentUserID=\(authenticatedSupabaseUser?.id.uuidString ?? "nil")"
+            )
+            return
+        }
+        let previousReady = isOrganizationContextReady
+        let previousActiveOrganizationID = self.activeOrganizationID
+
+        if accessibleOrganizations != memberships {
+            accessibleOrganizations = memberships
+        }
+        if self.activeOrganizationID != activeOrganizationID {
+            self.activeOrganizationID = activeOrganizationID
+            if persistActiveSelection {
+                persistActiveOrganizationID()
             }
-            if self.activeOrganizationID != activeOrganizationID {
-                self.activeOrganizationID = activeOrganizationID
-                self.persistActiveOrganizationID()
-            }
-            if self.isOrganizationContextReady != ready {
-                self.isOrganizationContextReady = ready
-            }
-            if activeOrganizationID == nil {
-                self.finishPropertyListLoadingForOrgSwitch()
-            }
-            self.applyTenantScopedState()
-            if ready, activeOrganizationID != nil {
-                self.queuePendingSupabaseMediaBackfillIfNeeded(reason: "org_context_ready")
-                if !previousReady {
-                    Task { @MainActor [weak self] in
-                        guard let self else { return }
-                        await self.performRemoteConvergenceCycle(source: "launch")
-                    }
+        }
+        if isOrganizationContextReady != ready {
+            isOrganizationContextReady = ready
+        }
+        if activeOrganizationID == nil {
+            finishPropertyListLoadingForOrgSwitch()
+        }
+        applyTenantScopedState()
+        scheduleOrganizationAccessControlRefresh()
+        if ready, activeOrganizationID != nil {
+            queuePendingSupabaseMediaBackfillIfNeeded(reason: "org_context_ready")
+            if !previousReady {
+                Task { @MainActor [weak self] in
+                    guard let self else { return }
+                    await self.performRemoteConvergenceCycle(source: "launch")
+                }
+            } else if let resolvedActiveOrganizationID = activeOrganizationID,
+                      previousActiveOrganizationID != resolvedActiveOrganizationID {
+                beginPropertyListLoadingForOrgSwitch(organizationID: resolvedActiveOrganizationID)
+                Task { @MainActor [weak self] in
+                    guard let self else { return }
+                    await self.refreshPropertiesForOrganizationSwitch(requestedOrganizationID: resolvedActiveOrganizationID)
+                    await self.performRemoteConvergenceCycle(source: "org_context_refresh")
                 }
             }
         }
@@ -1374,6 +1595,7 @@ final class AppState: ObservableObject {
             isOrganizationContextReady = ready
         }
         applyTenantScopedState()
+        scheduleOrganizationAccessControlRefresh()
     }
 
     func _debugRefreshPropertiesLocallyForTests() {
@@ -1388,22 +1610,242 @@ final class AppState: ObservableObject {
                 && self.activeOrganizationID != nil
                 && !self.accessibleOrganizations.isEmpty
             guard !hasUsableContext else { return }
-            self.clearOrganizationContext()
+            self.clearOrganizationContext(persistActiveSelection: false)
         }
     }
 
-    private func clearOrganizationContext() {
-        applyOrganizationContext(memberships: [], activeOrganizationID: nil, ready: !requiresAuthentication)
+    @MainActor
+    private func resetOrganizationAccessState(
+        ready: Bool,
+        persistActiveSelection: Bool
+    ) {
+        if !accessibleOrganizations.isEmpty {
+            accessibleOrganizations = []
+        }
+        if activeOrganizationID != nil {
+            activeOrganizationID = nil
+            if persistActiveSelection {
+                persistActiveOrganizationID()
+            }
+        }
+        if isOrganizationContextReady != ready {
+            isOrganizationContextReady = ready
+        }
+        if !activeOrganizationMembers.isEmpty {
+            activeOrganizationMembers = []
+        }
+        if !pendingOrganizationInvitations.isEmpty {
+            pendingOrganizationInvitations = []
+        }
+        finishPropertyListLoadingForOrgSwitch()
+        applyTenantScopedState()
+    }
+
+    @MainActor
+    private func hardResetAuthenticatedAccessContext(
+        ready: Bool,
+        persistActiveSelection: Bool
+    ) {
+        authenticatedAccessContextGeneration &+= 1
+        resetOrganizationAccessState(
+            ready: ready,
+            persistActiveSelection: persistActiveSelection
+        )
+        clearCurrentSession()
+        if !locallyLockedPropertyIDs.isEmpty {
+            locallyLockedPropertyIDs.removeAll()
+        }
+        if !propertySessionOccupancyByPropertyID.isEmpty {
+            propertySessionOccupancyByPropertyID = [:]
+        }
+        if !sessionCoordinationStateBySessionID.isEmpty {
+            sessionCoordinationStateBySessionID = [:]
+        }
+        if !sessionCoordinationEntrySnapshotBySessionID.isEmpty {
+            sessionCoordinationEntrySnapshotBySessionID = [:]
+        }
+#if DEBUG
+        if !propertySessionOccupancyDebugRemoteRecords.isEmpty {
+            propertySessionOccupancyDebugRemoteRecords = [:]
+        }
+        if !sessionCoordinationDebugRemoteRecords.isEmpty {
+            sessionCoordinationDebugRemoteRecords = [:]
+        }
+#endif
+        allProperties = []
+        allOrganizations = []
+        allSessionIndexByProperty = [:]
+        allDraftSessionByProperty = [:]
+        allPendingExportSessionByProperty = [:]
+        allHubMetaByProperty = [:]
+        lastLiveSyncFingerprint = nil
+        lastBackgroundRemoteFingerprint = nil
+        lastBackgroundRemoteAttemptCompletedAt = nil
+        lastLiveSyncRefreshAt = nil
+        lastBackgroundRefreshStartedAt = nil
+        nextPropertyRefreshToken = 0
+        newestStartedPropertyRefreshByOrg = [:]
+        lastAppliedPropertyRefreshByOrg = [:]
+        isBackgroundRefreshInFlight = false
+        pendingPropertyListLoadingOrganizationID = nil
+        isLoadingPropertiesForOrgSwitch = false
+        applyTenantScopedState()
+        NotificationCenter.default.post(name: .scoutClearLocalUICache, object: nil)
+    }
+
+    @MainActor
+    private func isCurrentAuthenticatedAccessContext(
+        userID: UUID?,
+        organizationID: UUID?,
+        generation: UInt64
+    ) -> Bool {
+        guard authenticatedAccessContextGeneration == generation else {
+            return false
+        }
+        guard authenticatedSupabaseUser?.id == userID else {
+            return false
+        }
+        if let organizationID, activeOrganizationID != organizationID {
+            return false
+        }
+        return true
+    }
+
+    private func runPostAuthenticationRebuild(for userID: UUID) async {
+        let generation = await MainActor.run { self.authenticatedAccessContextGeneration }
+
+        do {
+            try await ensureCurrentUserProfileIfNeeded(for: userID, force: true)
+            guard !Task.isCancelled else { return }
+            let userStillCurrentAfterProfile = await MainActor.run {
+                self.isCurrentAuthenticatedAccessContext(
+                    userID: userID,
+                    organizationID: nil,
+                    generation: generation
+                )
+            }
+            guard userStillCurrentAfterProfile else { return }
+
+            try await refreshOrganizationContext(for: userID)
+            guard !Task.isCancelled else { return }
+
+            let rebuiltOrganizationID = await MainActor.run { () -> UUID? in
+                guard self.isCurrentAuthenticatedAccessContext(
+                    userID: userID,
+                    organizationID: nil,
+                    generation: generation
+                ) else {
+                    return nil
+                }
+                if self.activeOrganizationID == nil,
+                   let fallbackOrganizationID = self.accessibleOrganizations.first?.id {
+                    self.setActiveOrganization(id: fallbackOrganizationID)
+                }
+                return self.activeOrganizationID
+            }
+
+            if let rebuiltOrganizationID {
+                let canRefreshProperties = await MainActor.run {
+                    self.isCurrentAuthenticatedAccessContext(
+                        userID: userID,
+                        organizationID: rebuiltOrganizationID,
+                        generation: generation
+                    )
+                }
+                guard canRefreshProperties else { return }
+                await refreshPropertiesAwaitingForegroundRefresh()
+            }
+
+            guard !Task.isCancelled else { return }
+            let canRefreshAccessState = await MainActor.run {
+                self.isCurrentAuthenticatedAccessContext(
+                    userID: userID,
+                    organizationID: nil,
+                    generation: generation
+                )
+            }
+            guard canRefreshAccessState else { return }
+
+            await refreshActiveOrganizationMembers()
+            guard !Task.isCancelled else { return }
+            await refreshPendingOrganizationInvitations()
+        } catch {
+            print("[SupabaseAuth] post_auth_rebuild_failed userID=\(userID.uuidString) error=\(error.localizedDescription)")
+            await MainActor.run {
+                guard self.isCurrentAuthenticatedAccessContext(
+                    userID: userID,
+                    organizationID: nil,
+                    generation: generation
+                ) else {
+                    return
+                }
+                self.handleOrganizationRefreshFailure()
+            }
+        }
+    }
+
+    private func clearOrganizationContext(persistActiveSelection: Bool = true) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.resetOrganizationAccessState(
+                ready: !self.requiresAuthentication,
+                persistActiveSelection: persistActiveSelection
+            )
+        }
+    }
+
+    private func scheduleOrganizationAccessControlRefresh() {
+        guard requiresAuthentication,
+              isAuthenticationReady,
+              authenticatedSupabaseUser != nil else {
+            if !activeOrganizationMembers.isEmpty {
+                activeOrganizationMembers = []
+            }
+            if !pendingOrganizationInvitations.isEmpty {
+                pendingOrganizationInvitations = []
+            }
+            return
+        }
+
+        Task { [weak self] in
+            guard let self else { return }
+            await self.refreshPendingOrganizationInvitations()
+            await self.refreshActiveOrganizationMembers()
+        }
+    }
+
+    @MainActor
+    private func updateActiveOrganizationMembers(_ members: [OrganizationAccessMember]) {
+        if activeOrganizationMembers != members {
+            activeOrganizationMembers = members
+        }
+    }
+
+    @MainActor
+    private func updatePendingOrganizationInvitations(_ invitations: [PendingOrganizationInvitation]) {
+        if pendingOrganizationInvitations != invitations {
+            pendingOrganizationInvitations = invitations
+        }
     }
 
     private func refreshOrganizationContext(for userID: UUID?) async throws {
         guard requiresAuthentication else {
-            clearOrganizationContext()
+            clearOrganizationContext(persistActiveSelection: false)
             return
         }
 
-        guard userID != nil, let client = supabaseClient else {
-            clearOrganizationContext()
+        guard let userID, let client = supabaseClient else {
+            clearOrganizationContext(persistActiveSelection: false)
+            return
+        }
+
+        let currentAuthenticatedUserID = await MainActor.run { self.authenticatedSupabaseUser?.id }
+        guard currentAuthenticatedUserID == userID else {
+            print(
+                "[OrgAccess] skip_context_refresh_for_stale_user " +
+                "requestedUserID=\(userID.uuidString) " +
+                "currentUserID=\(currentAuthenticatedUserID?.uuidString ?? "nil")"
+            )
             return
         }
 
@@ -1418,7 +1860,7 @@ final class AppState: ObservableObject {
 
         let membershipRows = try await client
             .from("org_memberships")
-            .select("org_id, role, deleted_at")
+            .select("user_id, org_id, role, deleted_at")
             .execute()
             .value as [SupabaseOrgMembershipRecord]
 
@@ -1428,7 +1870,10 @@ final class AppState: ObservableObject {
             .execute()
             .value as [SupabaseAccessibleOrgRecord]
 
-        let activeMemberships = membershipRows.filter { $0.deletedAt == nil }
+        let activeMemberships = membershipRows.filter {
+            $0.deletedAt == nil &&
+            $0.userID == userID
+        }
         let namesByID = Dictionary(
             uniqueKeysWithValues: orgRows
                 .filter { $0.deletedAt == nil }
@@ -1453,11 +1898,218 @@ final class AppState: ObservableObject {
             resolvedActiveID = memberships.first?.id
         }
 
-        applyOrganizationContext(
-            memberships: memberships,
-            activeOrganizationID: resolvedActiveID,
-            ready: true
+        let currentContextSnapshot = await MainActor.run {
+            (
+                userMatches: self.authenticatedSupabaseUser?.id == userID,
+                generation: self.authenticatedAccessContextGeneration,
+                currentUserID: self.authenticatedSupabaseUser?.id
+            )
+        }
+        guard currentContextSnapshot.userMatches else {
+            print(
+                "[OrgAccess] discard_fetched_context_for_stale_user " +
+                "requestedUserID=\(userID.uuidString) " +
+                "currentUserID=\(currentContextSnapshot.currentUserID?.uuidString ?? "nil")"
+            )
+            return
+        }
+
+        await MainActor.run {
+            guard self.isCurrentAuthenticatedAccessContext(
+                userID: userID,
+                organizationID: nil,
+                generation: currentContextSnapshot.generation
+            ) else {
+                print(
+                    "[OrgAccess] discard_context_before_apply_for_stale_user " +
+                    "requestedUserID=\(userID.uuidString) " +
+                    "currentUserID=\(self.authenticatedSupabaseUser?.id.uuidString ?? "nil")"
+                )
+                return
+            }
+            self.applyOrganizationContextNow(
+                memberships: memberships,
+                activeOrganizationID: resolvedActiveID,
+                ready: true,
+                expectedAuthenticatedUserID: userID
+            )
+        }
+    }
+
+    func refreshPendingOrganizationInvitations() async {
+        guard requiresAuthentication,
+              isAuthenticationReady,
+              let authenticatedUser = authenticatedSupabaseUser,
+              let client = supabaseClient else {
+            await MainActor.run {
+                self.updatePendingOrganizationInvitations([])
+            }
+            return
+        }
+
+        do {
+            let rows = try await (try client.rpc("list_pending_org_invitations")).execute().value as [SupabasePendingInvitationRecord]
+            let invitations = rows
+                .map {
+                    PendingOrganizationInvitation(
+                        id: $0.id,
+                        orgID: $0.orgID,
+                        orgName: $0.orgName,
+                        inviteeEmail: $0.inviteeEmail,
+                        role: $0.role,
+                        createdAt: $0.createdAt
+                    )
+                }
+                .sorted { lhs, rhs in
+                    if lhs.createdAt != rhs.createdAt {
+                        return lhs.createdAt > rhs.createdAt
+                    }
+                    return lhs.orgName.localizedCaseInsensitiveCompare(rhs.orgName) == .orderedAscending
+                }
+
+            let currentUserMatches = await MainActor.run { self.authenticatedSupabaseUser?.id == authenticatedUser.id }
+            guard currentUserMatches else {
+                print(
+                    "[OrgAccess] discard_pending_invites_for_stale_user " +
+                    "requestedUserID=\(authenticatedUser.id.uuidString) " +
+                    "currentUserID=\(await MainActor.run { self.authenticatedSupabaseUser?.id.uuidString ?? "nil" })"
+                )
+                return
+            }
+            await MainActor.run {
+                self.updatePendingOrganizationInvitations(invitations)
+            }
+        } catch {
+            print("[OrgAccess] pending_invites_refresh_failed error=\(error.localizedDescription)")
+        }
+    }
+
+    func refreshActiveOrganizationMembers() async {
+        guard requiresAuthentication,
+              isAuthenticationReady,
+              let authenticatedUser = authenticatedSupabaseUser,
+              let activeOrganizationID,
+              let client = supabaseClient,
+              canManageActiveOrganizationAccess else {
+            await MainActor.run {
+                self.updateActiveOrganizationMembers([])
+            }
+            return
+        }
+
+        do {
+            let membershipRows = try await client
+                .from("org_memberships")
+                .select("user_id, role, deleted_at")
+                .eq("org_id", value: activeOrganizationID.uuidString.lowercased())
+                .execute()
+                .value as [SupabaseOrganizationMemberRecord]
+
+            let userRows = try await client
+                .from("users_profile")
+                .select("id, email, full_name")
+                .execute()
+                .value as [SupabaseUserProfileRecord]
+
+            let profilesByID = Dictionary(uniqueKeysWithValues: userRows.map { ($0.id, $0) })
+            let members = membershipRows
+                .filter { $0.deletedAt == nil }
+                .map { row in
+                    let profile = profilesByID[row.userID]
+                    return OrganizationAccessMember(
+                        id: row.userID,
+                        email: profile?.email,
+                        fullName: profile?.fullName,
+                        role: row.role
+                    )
+                }
+                .sorted { lhs, rhs in
+                    if lhs.role != rhs.role {
+                        return Self.organizationRoleSortIndex(lhs.role) < Self.organizationRoleSortIndex(rhs.role)
+                    }
+                    return lhs.displayName.localizedCaseInsensitiveCompare(rhs.displayName) == .orderedAscending
+                }
+
+            let stateStillMatches = await MainActor.run {
+                self.authenticatedSupabaseUser?.id == authenticatedUser.id &&
+                self.activeOrganizationID == activeOrganizationID &&
+                self.canManageActiveOrganizationAccess
+            }
+            guard stateStillMatches else {
+                print(
+                    "[OrgAccess] discard_members_for_stale_context " +
+                    "requestedUserID=\(authenticatedUser.id.uuidString) " +
+                    "currentUserID=\(await MainActor.run { self.authenticatedSupabaseUser?.id.uuidString ?? "nil" }) " +
+                    "requestedOrgID=\(activeOrganizationID.uuidString) " +
+                    "currentOrgID=\(await MainActor.run { self.activeOrganizationID?.uuidString ?? "nil" })"
+                )
+                return
+            }
+            await MainActor.run {
+                self.updateActiveOrganizationMembers(members)
+            }
+        } catch {
+            print("[OrgAccess] members_refresh_failed orgID=\(activeOrganizationID.uuidString) error=\(error.localizedDescription)")
+        }
+    }
+
+    func inviteUserToOrganization(email: String, role: String, orgID: UUID) async throws {
+        guard let client = supabaseClient else { return }
+
+        let normalizedEmail = email.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let normalizedRole = role.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let params = CreateOrgInvitationRPCPayload(
+            targetOrgID: orgID,
+            targetInviteeEmail: normalizedEmail,
+            targetRole: normalizedRole
         )
+
+        _ = try await (try client.rpc("create_org_invitation", params: params)).execute()
+
+        await refreshPendingOrganizationInvitations()
+        await refreshActiveOrganizationMembers()
+        try await refreshOrganizationContext(for: authenticatedSupabaseUser?.id)
+        if await MainActor.run(body: { self.activeOrganizationID == orgID }) {
+            await MainActor.run {
+                self.refreshProperties()
+            }
+        }
+    }
+
+    func acceptOrganizationInvitation(invitationID: UUID) async throws {
+        guard let client = supabaseClient else { return }
+
+        let params = AcceptOrgInvitationRPCPayload(targetInvitationID: invitationID)
+        _ = try await (try client.rpc("accept_org_invitation", params: params)).execute()
+
+        await refreshPendingOrganizationInvitations()
+        try await refreshOrganizationContext(for: authenticatedSupabaseUser?.id)
+        await refreshActiveOrganizationMembers()
+        await MainActor.run {
+            self.refreshProperties()
+        }
+    }
+
+    func revokeOrganizationMembership(userID: UUID, orgID: UUID) async throws {
+        guard let client = supabaseClient else { return }
+
+        let params = RevokeOrgAccessRPCPayload(
+            targetOrgID: orgID,
+            targetUserID: userID,
+            targetInvitationID: nil
+        )
+        _ = try await (try client.rpc("revoke_org_access", params: params)).execute()
+
+        await refreshPendingOrganizationInvitations()
+        try await refreshOrganizationContext(for: authenticatedSupabaseUser?.id)
+        await refreshActiveOrganizationMembers()
+
+        let activeOrgAfterRefresh = await MainActor.run { self.activeOrganizationID }
+        if activeOrgAfterRefresh == orgID || activeOrgAfterRefresh == nil {
+            await MainActor.run {
+                self.refreshProperties()
+            }
+        }
     }
 
     func setActiveOrganization(id: UUID) {
@@ -4098,13 +4750,38 @@ final class AppState: ObservableObject {
         propertySessionOccupancyByPropertyID = nextState
     }
 
+    @MainActor
+    private func clearLockDisplayState(propertyIDs: [UUID]) {
+        guard !propertyIDs.isEmpty else { return }
+        let propertyIDSet = Set(propertyIDs)
+        if !locallyLockedPropertyIDs.isEmpty {
+            locallyLockedPropertyIDs = locallyLockedPropertyIDs.subtracting(propertyIDSet)
+        }
+        for propertyID in propertyIDs {
+            propertySessionOccupancyByPropertyID.removeValue(forKey: propertyID)
+            guard let session = canonicalLockSession(for: propertyID) else { continue }
+            sessionCoordinationStateBySessionID.removeValue(forKey: session.id)
+        }
+    }
+
     private func hydratePreTapLockVisibility(
         orgID: UUID,
         propertyIDs: [UUID]
     ) async {
-        try? await refreshRemotePropertySessionOccupancyState(orgID: orgID)
+        let displayPropertyIDs = Array(Set(propertyIDs))
+        await MainActor.run {
+            self.clearLockDisplayState(propertyIDs: displayPropertyIDs)
+        }
 
-        for propertyID in propertyIDs {
+        do {
+            try await refreshRemotePropertySessionOccupancyState(orgID: orgID)
+        } catch {
+            await MainActor.run {
+                self.clearLockDisplayState(propertyIDs: displayPropertyIDs)
+            }
+        }
+
+        for propertyID in displayPropertyIDs {
             guard let session = canonicalLockSession(for: propertyID) else { continue }
 
             let remoteRecord = try? await fetchRemoteSessionCoordinationRecord(
@@ -4328,13 +5005,9 @@ final class AppState: ObservableObject {
 
         guard authenticatedSupabaseUser != nil,
               supabaseClient != nil else {
-            print("[SessionCoordinationEval] event=early_return result=blocked reason=coordination_unavailable ownerDescription=Session coordination unavailable lockedAt=nil")
-            return .blocked(
-                SessionEntryCoordinationBlock(
-                    ownerDescription: "Session coordination unavailable",
-                    lockedAt: nil
-                )
-            )
+            locallyLockedPropertyIDs.remove(propertyID)
+            print("[SessionCoordinationEval] event=early_return result=allowed reason=coordination_unavailable")
+            return .allowed
         }
 
         let currentUserID = authenticatedSupabaseUser?.id
@@ -4421,6 +5094,8 @@ final class AppState: ObservableObject {
             }
         }
 
+        locallyLockedPropertyIDs.remove(propertyID)
+
         let baselineSnapshot = remoteRecord?.coordinationTier1Snapshot ??
             (metadata != nil ? sessionCoordinationTier1SnapshotString(metadata: metadata!) : "") ?? ""
         sessionCoordinationEntrySnapshotBySessionID[sessionID] = baselineSnapshot
@@ -4454,12 +5129,9 @@ final class AppState: ObservableObject {
                     lockedByDeviceID: nil,
                     lockedAt: nil
                 )
-                return .blocked(
-                    SessionEntryCoordinationBlock(
-                        ownerDescription: "Session coordination unavailable",
-                        lockedAt: nil
-                    )
-                )
+                locallyLockedPropertyIDs.remove(propertyID)
+                print("[SessionCoordinationEval] event=return result=allowed reason=occupancy_claim_unavailable")
+                return .allowed
             }
             print("[SessionCoordinationEval] event=return result=allowed reason=untouched_local_session_occupancy_claimed")
             return .allowed
@@ -4484,14 +5156,11 @@ final class AppState: ObservableObject {
             desiredState: desiredState
         )
         guard didPersistClaim else {
-            print("[SessionCoordinationEval] event=return result=blocked reason=claim_persist_failed ownerDescription=Session coordination unavailable lockedAt=nil")
-            return .blocked(
-                SessionEntryCoordinationBlock(
-                    ownerDescription: "Session coordination unavailable",
-                    lockedAt: nil
-                )
-            )
+            locallyLockedPropertyIDs.remove(propertyID)
+            print("[SessionCoordinationEval] event=return result=allowed reason=claim_persist_unavailable")
+            return .allowed
         }
+        locallyLockedPropertyIDs.remove(propertyID)
         print("[SessionCoordinationEval] event=return result=allowed sessionID=\(sessionID.uuidString)")
         return .allowed
     }
@@ -7583,6 +8252,128 @@ final class AppState: ObservableObject {
         return records
     }
 
+    private func backingPropertyCount(for organizationID: UUID) -> Int {
+        allProperties.reduce(into: 0) { count, property in
+            if property.orgId == organizationID {
+                count += 1
+            }
+        }
+    }
+
+    private func orgScopedProperties(
+        in properties: [Property],
+        organizationID: UUID
+    ) -> [Property] {
+        properties.filter { $0.orgId == organizationID }
+    }
+
+    private func beginPropertyRefreshAuthority(
+        orgID: UUID?,
+        priority: PropertyRefreshPriority,
+        source: String
+    ) -> PropertyRefreshAuthority {
+        nextPropertyRefreshToken &+= 1
+        let authority = PropertyRefreshAuthority(
+            token: nextPropertyRefreshToken,
+            orgID: orgID,
+            priority: priority,
+            userID: authenticatedSupabaseUser?.id,
+            contextGeneration: authenticatedAccessContextGeneration,
+            source: source
+        )
+        if let orgID {
+            newestStartedPropertyRefreshByOrg[orgID] = authority
+        }
+        return authority
+    }
+
+    private func shouldApplyRefreshPayload(
+        _ payload: PropertyRefreshPayload,
+        authority: PropertyRefreshAuthority?,
+        replacingOrganizationID: UUID?
+    ) -> Bool {
+        guard let authority else {
+            return true
+        }
+
+        guard authority.userID == authenticatedSupabaseUser?.id,
+              authority.contextGeneration == authenticatedAccessContextGeneration else {
+            print(
+                "[RefreshAuthority] reject reason=stale_auth_context " +
+                "source=\(authority.source) token=\(authority.token)"
+            )
+            return false
+        }
+
+        guard let organizationID = replacingOrganizationID ?? authority.orgID else {
+            return true
+        }
+
+        let orgProperties = orgScopedProperties(in: payload.properties, organizationID: organizationID)
+        let uniquePropertyIDs = Set(orgProperties.map(\.id))
+        guard uniquePropertyIDs.count == orgProperties.count else {
+            print(
+                "[RefreshAuthority] reject reason=duplicate_property_ids " +
+                "source=\(authority.source) token=\(authority.token) " +
+                "orgID=\(organizationID.uuidString) " +
+                "orgScopedCount=\(orgProperties.count) uniqueCount=\(uniquePropertyIDs.count)"
+            )
+            return false
+        }
+
+        if let newestAuthority = newestStartedPropertyRefreshByOrg[organizationID],
+           newestAuthority.token != authority.token,
+           newestAuthority.priority.rawValue >= authority.priority.rawValue {
+            print(
+                "[RefreshAuthority] reject reason=newer_or_higher_priority_refresh_exists " +
+                "source=\(authority.source) token=\(authority.token) " +
+                "orgID=\(organizationID.uuidString) " +
+                "newestToken=\(newestAuthority.token) newestPriority=\(newestAuthority.priority.rawValue)"
+            )
+            return false
+        }
+
+        if let lastAppliedState = lastAppliedPropertyRefreshByOrg[organizationID] {
+            if lastAppliedState.fingerprint == payload.fingerprint &&
+                lastAppliedState.orgScopedCount != orgProperties.count {
+                print(
+                    "[RefreshAuthority] reject reason=fingerprint_count_mismatch " +
+                    "source=\(authority.source) token=\(authority.token) " +
+                    "orgID=\(organizationID.uuidString) " +
+                    "fingerprint=\(payload.fingerprint) " +
+                    "incomingCount=\(orgProperties.count) appliedCount=\(lastAppliedState.orgScopedCount)"
+                )
+                return false
+            }
+
+            if lastAppliedState.priority.rawValue > authority.priority.rawValue &&
+                (lastAppliedState.fingerprint != payload.fingerprint ||
+                 lastAppliedState.orgScopedCount != orgProperties.count) {
+                let isExpectedNormalFallbackRejection =
+                    authority.priority == .fallback &&
+                    authority.source == "background_fast_local"
+                if !isExpectedNormalFallbackRejection {
+                    print(
+                        "[RefreshAuthority] reject reason=lower_priority_cannot_override " +
+                        "source=\(authority.source) token=\(authority.token) " +
+                        "orgID=\(organizationID.uuidString) " +
+                        "incomingPriority=\(authority.priority.rawValue) " +
+                        "appliedPriority=\(lastAppliedState.priority.rawValue)"
+                    )
+                }
+                return false
+            }
+        }
+
+        lastAppliedPropertyRefreshByOrg[organizationID] = AppliedPropertyRefreshState(
+            token: authority.token,
+            priority: authority.priority,
+            fingerprint: payload.fingerprint,
+            orgScopedCount: orgProperties.count
+        )
+        return true
+    }
+
     private func makeRemotePropertyRefreshPayload(
         validatedRecords: [RemotePropertyRecord],
         requestedOrganizationID: UUID
@@ -7801,10 +8592,11 @@ final class AppState: ObservableObject {
         }
 
         do {
+            let localBackingCount = backingPropertyCount(for: activeOrganizationID)
             let records = try await fetchRemotePropertyList(activeOrganizationID: activeOrganizationID)
             let validated = try validateRemotePropertyResponse(
                 records: records,
-                localCacheCount: properties.count,
+                localCacheCount: localBackingCount,
                 activeOrganizationID: activeOrganizationID
             )
             let payload = try makeRemotePropertyRefreshPayload(
@@ -7909,7 +8701,10 @@ final class AppState: ObservableObject {
         cloudBackupManager?.refreshStatus()
         setLoadingState(true)
         guard isRemotePropertyRefreshEnabled else {
-            performLocalPropertyRefreshFallback()
+            performLocalPropertyRefreshFallback(
+                orgID: activeOrganizationID,
+                source: "refresh_properties_local"
+            )
             setLoadingState(false)
             return
         }
@@ -7928,7 +8723,10 @@ final class AppState: ObservableObject {
         defer { setLoadingState(false) }
 
         guard isRemotePropertyRefreshEnabled else {
-            performLocalPropertyRefreshFallback()
+            performLocalPropertyRefreshFallback(
+                orgID: activeOrganizationID,
+                source: "awaited_refresh_local"
+            )
             return
         }
 
@@ -7973,7 +8771,16 @@ final class AppState: ObservableObject {
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
                 if let fastPayload, fastHasProperties || self.allProperties.isEmpty {
-                    self.applyRefreshPayload(fastPayload)
+                    let authority = self.beginPropertyRefreshAuthority(
+                        orgID: self.activeOrganizationID,
+                        priority: .fallback,
+                        source: "background_fast_local"
+                    )
+                    self.applyRefreshPayload(
+                        fastPayload,
+                        authority: authority,
+                        replacingOrganizationID: self.activeOrganizationID
+                    )
                     self.scheduleOffloadEligibleSessionMedia(excludingSessionID: self.currentSession?.id)
                 }
                 if fastHasProperties || !self.allProperties.isEmpty {
@@ -8006,7 +8813,16 @@ final class AppState: ObservableObject {
                 let payload = try self.makeRefreshPayload()
                 DispatchQueue.main.async { [weak self] in
                     guard let self else { return }
-                    self.applyRefreshPayload(payload)
+                    let authority = self.beginPropertyRefreshAuthority(
+                        orgID: self.activeOrganizationID,
+                        priority: .fallback,
+                        source: "background_full_local"
+                    )
+                    self.applyRefreshPayload(
+                        payload,
+                        authority: authority,
+                        replacingOrganizationID: self.activeOrganizationID
+                    )
                     self.scheduleOffloadEligibleSessionMedia(excludingSessionID: self.currentSession?.id)
                     self.setLoadingState(false)
                     if self.isRemotePropertyRefreshEnabled {
@@ -8125,6 +8941,21 @@ final class AppState: ObservableObject {
         return lockedByUser != authenticatedSupabaseUser?.id
     }
 
+    func debugPropertyOccupancyDescription(propertyID: UUID) -> String {
+        guard let occupancy = propertySessionOccupancyByPropertyID[propertyID] else {
+            return "nil"
+        }
+        return "occupiedByUserID=\(occupancy.occupiedByUserID?.uuidString ?? "nil"),occupiedByDeviceID=\(occupancy.occupiedByDeviceID ?? "nil"),occupiedAt=\(occupancy.occupiedAt?.ISO8601Format() ?? "nil")"
+    }
+
+    func debugSessionCoordinationDescription(sessionID: UUID?) -> String {
+        guard let sessionID else { return "nil" }
+        guard let state = sessionCoordinationStateBySessionID[sessionID] else {
+            return "nil"
+        }
+        return "lockedByUserID=\(state.lockedByUserID?.uuidString ?? "nil"),lockedByDeviceID=\(state.lockedByDeviceID ?? "nil"),lockedAt=\(state.lockedAt?.ISO8601Format() ?? "nil")"
+    }
+
     func setLiveSyncMonitoringActive(_ active: Bool) {
         if active {
             guard liveSyncTimer == nil else { return }
@@ -8160,6 +8991,28 @@ final class AppState: ObservableObject {
         let fingerprint: String
     }
 
+    private enum PropertyRefreshPriority: Int {
+        case fallback = 0
+        case background = 1
+        case foreground = 2
+    }
+
+    private struct PropertyRefreshAuthority {
+        let token: UInt64
+        let orgID: UUID?
+        let priority: PropertyRefreshPriority
+        let userID: UUID?
+        let contextGeneration: UInt64
+        let source: String
+    }
+
+    private struct AppliedPropertyRefreshState {
+        let token: UInt64
+        let priority: PropertyRefreshPriority
+        let fingerprint: String?
+        let orgScopedCount: Int
+    }
+
     private var isRemotePropertyRefreshEnabled: Bool {
         backendFeatureFlags.supabaseEnabled &&
         backendFeatureFlags.supabasePropertyReadEnabled &&
@@ -8173,6 +9026,42 @@ final class AppState: ObservableObject {
         backendFeatureFlags.syncDeltaEnabled &&
         supabaseClient != nil &&
         activeOrganizationID != nil
+    }
+
+    private func shouldReevaluateOrganizationAccess(for error: Error) -> Bool {
+        if let remoteError = error as? RemotePropertyFetchError {
+            switch remoteError {
+            case .emptyResponseRejected:
+                return true
+            default:
+                break
+            }
+        }
+
+        let message = error.localizedDescription.lowercased()
+        return message.contains("permission")
+            || message.contains("row-level security")
+            || message.contains("not found for the authenticated user")
+            || message.contains("forbidden")
+    }
+
+    @MainActor
+    private func resolveOrganizationAccessAfterRemotePropertyFailure(
+        requestedOrganizationID: UUID,
+        error: Error
+    ) async -> Bool {
+        guard shouldReevaluateOrganizationAccess(for: error),
+              let userID = authenticatedSupabaseUser?.id else {
+            return false
+        }
+
+        do {
+            try await refreshOrganizationContext(for: userID)
+        } catch {
+            print("[OrgAccess] context_recheck_failed orgID=\(requestedOrganizationID.uuidString) error=\(error.localizedDescription)")
+        }
+
+        return activeOrganizationID != requestedOrganizationID
     }
 
     private func setLoadingState(_ loading: Bool) {
@@ -8197,6 +9086,11 @@ final class AppState: ObservableObject {
     }
 
     private func refreshPropertiesForOrganizationSwitch(requestedOrganizationID: UUID) async {
+        let localAuthority = beginPropertyRefreshAuthority(
+            orgID: requestedOrganizationID,
+            priority: .fallback,
+            source: "org_switch_local"
+        )
         let firstPayload: PropertyRefreshPayload? = await withCheckedContinuation { continuation in
             DispatchQueue.global(qos: .userInitiated).async {
                 let payload = (try? self.makeRefreshPayloadForHubIndexOnly())
@@ -8211,7 +9105,11 @@ final class AppState: ObservableObject {
         }
 
         if let firstPayload {
-            applyRefreshPayload(firstPayload)
+            applyRefreshPayload(
+                firstPayload,
+                authority: localAuthority,
+                replacingOrganizationID: requestedOrganizationID
+            )
             scheduleOffloadEligibleSessionMedia(excludingSessionID: currentSession?.id)
         }
 
@@ -8223,35 +9121,68 @@ final class AppState: ObservableObject {
     @MainActor
     private func performForegroundRemotePropertyRefresh() async {
         guard let requestedOrganizationID = activeOrganizationID else {
-            performLocalPropertyRefreshFallback()
+            performLocalPropertyRefreshFallback(
+                orgID: nil,
+                source: "foreground_missing_org"
+            )
             return
         }
+        let authority = beginPropertyRefreshAuthority(
+            orgID: requestedOrganizationID,
+            priority: .foreground,
+            source: "foreground_remote"
+        )
+        let requestedUserID = authenticatedSupabaseUser?.id
+        let requestedContextGeneration = authenticatedAccessContextGeneration
 
         logRemotePropertyFetchResult(
             outcome: "foreground_fetch_started",
-            recordCount: properties.count,
+            recordCount: backingPropertyCount(for: requestedOrganizationID),
             error: nil
         )
 
         do {
+            let localBackingCount = backingPropertyCount(for: requestedOrganizationID)
             let records = try await fetchRemotePropertyList(activeOrganizationID: requestedOrganizationID)
             let validated = try validateRemotePropertyResponse(
                 records: records,
-                localCacheCount: properties.count,
+                localCacheCount: localBackingCount,
                 activeOrganizationID: requestedOrganizationID
             )
-            guard activeOrganizationID == requestedOrganizationID else {
+            guard isCurrentAuthenticatedAccessContext(
+                userID: requestedUserID,
+                organizationID: requestedOrganizationID,
+                generation: requestedContextGeneration
+            ) else {
                 throw RemotePropertyFetchError.missingActiveOrganization
             }
             let payload = try makeRemotePropertyRefreshPayload(
                 validatedRecords: validated,
                 requestedOrganizationID: requestedOrganizationID
             )
+            guard isCurrentAuthenticatedAccessContext(
+                userID: requestedUserID,
+                organizationID: requestedOrganizationID,
+                generation: requestedContextGeneration
+            ) else {
+                print(
+                    "[OrgAccess] discard_foreground_property_payload_for_stale_context " +
+                    "requestedUserID=\(requestedUserID?.uuidString ?? "nil") " +
+                    "currentUserID=\(authenticatedSupabaseUser?.id.uuidString ?? "nil") " +
+                    "requestedOrgID=\(requestedOrganizationID.uuidString) " +
+                    "currentOrgID=\(activeOrganizationID?.uuidString ?? "nil")"
+                )
+                return
+            }
             try localStore.replacePropertyListCacheAtomically(
                 properties: payload.properties,
                 organizations: payload.organizations
             )
-            applyRefreshPayload(payload)
+            applyRefreshPayload(
+                payload,
+                authority: authority,
+                replacingOrganizationID: requestedOrganizationID
+            )
             await hydratePreTapLockVisibility(
                 orgID: requestedOrganizationID,
                 propertyIDs: payload.properties.map(\.id)
@@ -8265,12 +9196,21 @@ final class AppState: ObservableObject {
                 fingerprint: payload.fingerprint
             )
         } catch {
+            if await resolveOrganizationAccessAfterRemotePropertyFailure(
+                requestedOrganizationID: requestedOrganizationID,
+                error: error
+            ) {
+                return
+            }
             logRemotePropertyFetchResult(
                 outcome: "foreground_fallback_local",
                 recordCount: nil,
                 error: error
             )
-            performLocalPropertyRefreshFallback()
+            performLocalPropertyRefreshFallback(
+                orgID: requestedOrganizationID,
+                source: "foreground_fallback_local"
+            )
         }
     }
 
@@ -8286,6 +9226,13 @@ final class AppState: ObservableObject {
             )
             return
         }
+        let authority = beginPropertyRefreshAuthority(
+            orgID: requestedOrganizationID,
+            priority: .background,
+            source: "background_remote"
+        )
+        let requestedUserID = authenticatedSupabaseUser?.id
+        let requestedContextGeneration = authenticatedAccessContextGeneration
 
         if let lastCompletedAt = lastBackgroundRemoteAttemptCompletedAt,
            Date().timeIntervalSince(lastCompletedAt) < 60 {
@@ -8294,24 +9241,43 @@ final class AppState: ObservableObject {
 
         logRemotePropertyFetchResult(
             outcome: "background_fetch_started",
-            recordCount: properties.count,
+            recordCount: backingPropertyCount(for: requestedOrganizationID),
             error: nil
         )
 
         do {
+            let localBackingCount = backingPropertyCount(for: requestedOrganizationID)
             let records = try await fetchRemotePropertyList(activeOrganizationID: requestedOrganizationID)
             let validated = try validateRemotePropertyResponse(
                 records: records,
-                localCacheCount: properties.count,
+                localCacheCount: localBackingCount,
                 activeOrganizationID: requestedOrganizationID
             )
-            guard activeOrganizationID == requestedOrganizationID else {
+            guard isCurrentAuthenticatedAccessContext(
+                userID: requestedUserID,
+                organizationID: requestedOrganizationID,
+                generation: requestedContextGeneration
+            ) else {
                 throw RemotePropertyFetchError.missingActiveOrganization
             }
             let payload = try makeRemotePropertyRefreshPayload(
                 validatedRecords: validated,
                 requestedOrganizationID: requestedOrganizationID
             )
+            guard isCurrentAuthenticatedAccessContext(
+                userID: requestedUserID,
+                organizationID: requestedOrganizationID,
+                generation: requestedContextGeneration
+            ) else {
+                print(
+                    "[OrgAccess] discard_background_property_payload_for_stale_context " +
+                    "requestedUserID=\(requestedUserID?.uuidString ?? "nil") " +
+                    "currentUserID=\(authenticatedSupabaseUser?.id.uuidString ?? "nil") " +
+                    "requestedOrgID=\(requestedOrganizationID.uuidString) " +
+                    "currentOrgID=\(activeOrganizationID?.uuidString ?? "nil")"
+                )
+                return
+            }
             let mergedPayload = mergedBackingRefreshPayload(
                 replacingOrganizationID: requestedOrganizationID,
                 with: payload
@@ -8329,7 +9295,11 @@ final class AppState: ObservableObject {
                 properties: mergedPayload.properties,
                 organizations: mergedPayload.organizations
             )
-            applyRefreshPayload(mergedPayload)
+            applyRefreshPayload(
+                mergedPayload,
+                authority: authority,
+                replacingOrganizationID: requestedOrganizationID
+            )
             await hydratePreTapLockVisibility(
                 orgID: requestedOrganizationID,
                 propertyIDs: mergedPayload.properties.map(\.id)
@@ -8345,6 +9315,12 @@ final class AppState: ObservableObject {
                 fingerprint: mergedPayload.fingerprint
             )
         } catch {
+            if await resolveOrganizationAccessAfterRemotePropertyFailure(
+                requestedOrganizationID: requestedOrganizationID,
+                error: error
+            ) {
+                return
+            }
             logRemotePropertyFetchResult(
                 outcome: "background_rejected",
                 recordCount: nil,
@@ -8353,10 +9329,22 @@ final class AppState: ObservableObject {
         }
     }
 
-    private func performLocalPropertyRefreshFallback() {
+    private func performLocalPropertyRefreshFallback(
+        orgID: UUID? = nil,
+        source: String = "local_fallback"
+    ) {
         do {
             let payload = try makeRefreshPayload()
-            applyRefreshPayload(payload)
+            let authority = beginPropertyRefreshAuthority(
+                orgID: orgID ?? activeOrganizationID,
+                priority: .fallback,
+                source: source
+            )
+            applyRefreshPayload(
+                payload,
+                authority: authority,
+                replacingOrganizationID: orgID ?? activeOrganizationID
+            )
         } catch {
             // Preserve current in-memory view on transient iCloud read failures.
             print("[PropertiesRefresh] transient read failure: \(error.localizedDescription)")
@@ -8417,7 +9405,18 @@ final class AppState: ObservableObject {
         )
     }
 
-    private func applyRefreshPayload(_ payload: PropertyRefreshPayload) {
+    private func applyRefreshPayload(
+        _ payload: PropertyRefreshPayload,
+        authority: PropertyRefreshAuthority? = nil,
+        replacingOrganizationID: UUID? = nil
+    ) {
+        guard shouldApplyRefreshPayload(
+            payload,
+            authority: authority,
+            replacingOrganizationID: replacingOrganizationID
+        ) else {
+            return
+        }
         applyHubCachePayload(
             properties: payload.properties,
             organizations: payload.organizations,
