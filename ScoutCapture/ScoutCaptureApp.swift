@@ -1748,6 +1748,11 @@ struct SessionHubView: View {
     }
 
     private struct HubSettingsSheet: View {
+        private struct PropertyAccessManagementPresentation: Identifiable {
+            let id = UUID()
+            let member: OrganizationAccessMember
+        }
+
         @EnvironmentObject private var appState: AppState
         @Binding var showArchivedProperties: Bool
         let onOpenDebugTools: (() -> Void)?
@@ -1758,6 +1763,7 @@ struct SessionHubView: View {
         @State private var collaborationStatusMessage: String?
         @State private var collaborationErrorMessage: String?
         @State private var isCollaborationActionInFlight: Bool = false
+        @State private var memberForPropertyAccessManagement: PropertyAccessManagementPresentation?
         private let showDeveloperSection: Bool = false
         private let inviteRoleOptions = ["viewer", "field", "manager", "owner"]
 
@@ -1933,10 +1939,19 @@ struct SessionHubView: View {
                                                 Spacer(minLength: 0)
 
                                                 if member.role != "owner" {
-                                                    Button(isCollaborationActionInFlight ? "Revoking..." : "Revoke", role: .destructive) {
-                                                        revoke(member: member)
+                                                    VStack(alignment: .trailing, spacing: 8) {
+                                                        Button("Manage Properties") {
+                                                            memberForPropertyAccessManagement = PropertyAccessManagementPresentation(member: member)
+                                                        }
+                                                        .disabled(isCollaborationActionInFlight)
+                                                        .buttonStyle(.borderless)
+
+                                                        Button(isCollaborationActionInFlight ? "Revoking..." : "Revoke", role: .destructive) {
+                                                            revoke(member: member)
+                                                        }
+                                                        .disabled(isCollaborationActionInFlight)
+                                                        .buttonStyle(.borderless)
                                                     }
-                                                    .disabled(isCollaborationActionInFlight)
                                                 }
                                             }
                                             .padding(.vertical, 2)
@@ -1964,6 +1979,25 @@ struct SessionHubView: View {
             }
             .task {
                 await refreshCollaborationState()
+            }
+            .sheet(
+                item: $memberForPropertyAccessManagement,
+                onDismiss: {
+                    memberForPropertyAccessManagement = nil
+                }
+            ) { presentation in
+                if let activeOrganizationID = appState.activeOrganizationID,
+                   let activeOrganization = appState.activeOrganization {
+                    PropertyAccessManagementSheet(
+                        member: presentation.member,
+                        organizationID: activeOrganizationID,
+                        organizationName: activeOrganization.name,
+                        onClose: {
+                            memberForPropertyAccessManagement = nil
+                        }
+                    )
+                    .environmentObject(appState)
+                }
             }
         }
 
@@ -2030,6 +2064,238 @@ struct SessionHubView: View {
                     collaborationStatusMessage = "Access revoked."
                 } catch {
                     collaborationErrorMessage = error.localizedDescription
+                }
+            }
+        }
+    }
+
+    private struct PropertyAccessManagementSheet: View {
+        private enum AccessMode: String, CaseIterable, Identifiable {
+            case fullOrg = "org"
+            case selectedProperties = "property"
+
+            var id: String { rawValue }
+
+            var title: String {
+                switch self {
+                case .fullOrg:
+                    return "Full Org Access"
+                case .selectedProperties:
+                    return "Selected Properties Only"
+                }
+            }
+        }
+
+        @EnvironmentObject private var appState: AppState
+
+        let member: OrganizationAccessMember
+        let organizationID: UUID
+        let organizationName: String
+        let onClose: () -> Void
+
+        @State private var accessMode: AccessMode = .fullOrg
+        @State private var grantedPropertyIDs: Set<UUID> = []
+        @State private var isLoading: Bool = true
+        @State private var isSaving: Bool = false
+        @State private var errorMessage: String?
+        @State private var explicitSaveRequested: Bool = false
+
+        private var organizationProperties: [Property] {
+            appState.properties.filter { $0.orgId == organizationID }
+        }
+
+        private var memberSubtitle: String {
+            if let email = member.email, !email.isEmpty, email != member.displayName {
+                return email
+            }
+            return member.role.capitalized
+        }
+
+        private var canEditPropertyToggles: Bool {
+            accessMode == .selectedProperties && !isSaving && !isLoading
+        }
+
+        var body: some View {
+            NavigationStack {
+                List {
+                    Section("Member") {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(member.displayName)
+                                .font(.system(size: 17, weight: .semibold))
+                            Text(memberSubtitle)
+                                .font(.system(size: 13, weight: .medium))
+                                .foregroundStyle(.secondary)
+                            Text(member.role.capitalized)
+                                .font(.system(size: 12, weight: .medium))
+                                .foregroundStyle(.secondary)
+                        }
+                        Text("Managing access for \(organizationName)")
+                            .font(.system(size: 13, weight: .medium))
+                            .foregroundStyle(.secondary)
+                    }
+
+                    Section("Access Mode") {
+                        Picker("Access Mode", selection: $accessMode) {
+                            ForEach(AccessMode.allCases) { mode in
+                                Text(mode.title).tag(mode)
+                            }
+                        }
+                        .pickerStyle(.inline)
+                    }
+
+                    Section("Properties") {
+                        if isLoading {
+                            ProgressView("Loading property access…")
+                        } else if organizationProperties.isEmpty {
+                            Text("No active properties found.")
+                                .foregroundStyle(.secondary)
+                        } else {
+                            ForEach(organizationProperties) { property in
+                                Toggle(
+                                    isOn: Binding(
+                                        get: { grantedPropertyIDs.contains(property.id) },
+                                        set: { isGranted in
+                                            if isGranted {
+                                                grantedPropertyIDs.insert(property.id)
+                                            } else {
+                                                grantedPropertyIDs.remove(property.id)
+                                            }
+                                        }
+                                    )
+                                ) {
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(property.name)
+                                        if let address = property.address, !address.isEmpty {
+                                            Text(address)
+                                                .font(.system(size: 12, weight: .medium))
+                                                .foregroundStyle(.secondary)
+                                        }
+                                    }
+                                }
+                                .disabled(!canEditPropertyToggles)
+                            }
+                        }
+
+                        if accessMode == .fullOrg {
+                            Text("Full Org Access ignores property grant filtering while active.")
+                                .font(.system(size: 12, weight: .medium))
+                                .foregroundStyle(.secondary)
+                        } else {
+                            Text("Zero selected properties is allowed and means this member will see no properties.")
+                                .font(.system(size: 12, weight: .medium))
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+
+                    if let errorMessage, !errorMessage.isEmpty {
+                        Section {
+                            Text(errorMessage)
+                                .font(.system(size: 13, weight: .medium))
+                                .foregroundStyle(.red)
+                        }
+                    }
+                }
+                .navigationTitle("Manage Properties")
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button("Cancel") {
+                            onClose()
+                        }
+                        .disabled(isSaving)
+                    }
+
+                    ToolbarItem(placement: .confirmationAction) {
+                        Button(isSaving ? "Saving…" : "Save") {
+                            explicitSaveRequested = true
+                            save()
+                        }
+                        .disabled(isLoading || isSaving)
+                    }
+                }
+            }
+            .task {
+                await load()
+            }
+        }
+
+        private func load() async {
+            isLoading = true
+            errorMessage = nil
+            do {
+                let grants = try await appState.fetchPropertyAccessGrants(
+                    for: member.id,
+                    orgID: organizationID
+                )
+                await MainActor.run {
+                    grantedPropertyIDs = grants
+                    accessMode = member.accessScope == "property" ? .selectedProperties : .fullOrg
+                    isLoading = false
+                }
+            } catch {
+                await MainActor.run {
+                    errorMessage = error.localizedDescription
+                    isLoading = false
+                }
+            }
+        }
+
+        @MainActor
+        private func save() {
+            guard explicitSaveRequested else {
+                assertionFailure("PropertyAccessManagementSheet.save() called without explicit Save tap")
+                errorMessage = "Save was blocked because it was not explicitly requested."
+                print(
+                    "[PropertyAccessSaveUI] phase=save_blocked " +
+                    "targetUserID=\(member.id.uuidString) " +
+                    "orgID=\(organizationID.uuidString)"
+                )
+                return
+            }
+            errorMessage = nil
+            isSaving = true
+            let requestedScope = accessMode.rawValue
+            let selectedPropertyIDs = grantedPropertyIDs
+            let selectedPropertyIDStrings = selectedPropertyIDs.map(\.uuidString).sorted()
+
+            print(
+                "[PropertyAccessSaveUI] phase=save_tapped " +
+                "targetUserID=\(member.id.uuidString) " +
+                "orgID=\(organizationID.uuidString) " +
+                "accessScope=\(requestedScope) " +
+                "grantedPropertyIDs=\(selectedPropertyIDStrings)"
+            )
+
+            Task {
+                do {
+                    try await appState.savePropertyAccessConfiguration(
+                        userID: member.id,
+                        orgID: organizationID,
+                        accessScope: requestedScope,
+                        grantedPropertyIDs: selectedPropertyIDs
+                    )
+                    await MainActor.run {
+                        print(
+                            "[PropertyAccessSaveUI] phase=save_success " +
+                            "targetUserID=\(member.id.uuidString) " +
+                            "orgID=\(organizationID.uuidString)"
+                        )
+                        explicitSaveRequested = false
+                        isSaving = false
+                        onClose()
+                    }
+                } catch {
+                    await MainActor.run {
+                        print(
+                            "[PropertyAccessSaveUI] phase=save_error " +
+                            "targetUserID=\(member.id.uuidString) " +
+                            "orgID=\(organizationID.uuidString) " +
+                            "error=\(error.localizedDescription)"
+                        )
+                        explicitSaveRequested = false
+                        isSaving = false
+                        errorMessage = error.localizedDescription
+                    }
                 }
             }
         }

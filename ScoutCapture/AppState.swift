@@ -172,6 +172,7 @@ struct OrganizationAccessMember: Equatable, Identifiable {
     let email: String?
     let fullName: String?
     let role: String
+    let accessScope: String
 
     var displayName: String {
         if let fullName = OrganizationAccessMember.normalizedText(fullName) {
@@ -224,6 +225,9 @@ final class AppState: ObservableObject {
         UUID,
         UUID
     ) async throws -> RemoteSessionCoordinationRecord?
+    typealias PropertyAccessGrantsFetchOverride = (UUID, UUID) async throws -> Set<UUID>
+    typealias MemberAccessScopeSetOverride = (UUID, UUID, String) async throws -> Void
+    typealias PropertyAccessMutationOverride = (UUID, UUID, UUID) async throws -> Void
 #endif
 
     struct PendingSupabaseMediaBackfillCandidate: Equatable {
@@ -460,12 +464,116 @@ final class AppState: ObservableObject {
     private struct SupabaseOrganizationMemberRecord: Decodable {
         let userID: UUID
         let role: String
+        let accessScope: String?
         let deletedAt: String?
 
         enum CodingKeys: String, CodingKey {
             case userID = "user_id"
             case role
+            case accessScope = "access_scope"
             case deletedAt = "deleted_at"
+        }
+    }
+
+    private struct SupabaseMembershipAccessScopeRecord: Decodable {
+        let accessScope: String?
+        let deletedAt: String?
+
+        enum CodingKeys: String, CodingKey {
+            case accessScope = "access_scope"
+            case deletedAt = "deleted_at"
+        }
+    }
+
+    private struct SupabasePropertyAccessGrantRecord: Decodable {
+        let propertyID: UUID
+        let deletedAt: String?
+
+        enum CodingKeys: String, CodingKey {
+            case propertyID = "property_id"
+            case deletedAt = "deleted_at"
+        }
+    }
+
+    private struct SupabasePropertyAccessGrantLookupRecord: Decodable {
+        let id: UUID
+        let orgID: UUID
+        let propertyID: UUID
+        let userID: UUID
+        let deletedAt: String?
+        let createdAt: String?
+
+        enum CodingKeys: String, CodingKey {
+            case id
+            case orgID = "org_id"
+            case propertyID = "property_id"
+            case userID = "user_id"
+            case deletedAt = "deleted_at"
+            case createdAt = "created_at"
+        }
+    }
+
+    private enum PropertyAccessPersistenceError: LocalizedError {
+        case missingAuthenticatedUser
+        case accessScopeVerificationFailed(expected: String, actual: String?)
+        case grantVerificationFailed(propertyID: UUID)
+        case revokeVerificationFailed(propertyID: UUID)
+
+        var errorDescription: String? {
+            switch self {
+            case .missingAuthenticatedUser:
+                return "Property access changes require an authenticated user."
+            case let .accessScopeVerificationFailed(expected, actual):
+                return "Property access scope save failed. Expected '\(expected)', found '\(actual ?? "nil")'."
+            case let .grantVerificationFailed(propertyID):
+                return "Property access grant save failed for property \(propertyID.uuidString)."
+            case let .revokeVerificationFailed(propertyID):
+                return "Property access revoke failed for property \(propertyID.uuidString)."
+            }
+        }
+    }
+
+    private struct SupabasePropertyAccessGrantMutationPayload: Encodable {
+        let orgID: UUID
+        let propertyID: UUID
+        let userID: UUID
+        let grantedBy: UUID
+        let deletedAt: String?
+
+        enum CodingKeys: String, CodingKey {
+            case orgID = "org_id"
+            case propertyID = "property_id"
+            case userID = "user_id"
+            case grantedBy = "granted_by"
+            case deletedAt = "deleted_at"
+        }
+    }
+
+    private struct SupabasePropertyAccessGrantInsertPayload: Encodable {
+        let id: UUID
+        let orgID: UUID
+        let propertyID: UUID
+        let userID: UUID
+        let grantedBy: UUID
+        let deletedAt: String?
+
+        enum CodingKeys: String, CodingKey {
+            case id
+            case orgID = "org_id"
+            case propertyID = "property_id"
+            case userID = "user_id"
+            case grantedBy = "granted_by"
+            case deletedAt = "deleted_at"
+        }
+    }
+
+    private struct SupabaseMembershipAccessScopeUpdatePayload: Encodable {
+        let accessScope: String
+        let updatedBy: UUID
+
+        enum CodingKeys: String, CodingKey {
+            case accessScope = "access_scope"
+            case updatedBy = "updated_by"
         }
     }
 
@@ -1046,6 +1154,10 @@ final class AppState: ObservableObject {
 #if DEBUG
     private var syncDeltaFetchOverride: SyncDeltaFetchOverride?
     private var sessionCoordinationFetchOverride: SessionCoordinationFetchOverride?
+    private var propertyAccessGrantsFetchOverride: PropertyAccessGrantsFetchOverride?
+    private var memberAccessScopeSetOverride: MemberAccessScopeSetOverride?
+    private var propertyAccessGrantOverride: PropertyAccessMutationOverride?
+    private var propertyAccessRevokeOverride: PropertyAccessMutationOverride?
     private var sessionCoordinationDebugRemoteRecords: [UUID: RemoteSessionCoordinationRecord] = [:]
 #endif
     private var authStateChangesTask: Task<Void, Never>?
@@ -2091,7 +2203,7 @@ final class AppState: ObservableObject {
         do {
             let membershipRows = try await client
                 .from("org_memberships")
-                .select("user_id, role, deleted_at")
+                .select("user_id, role, access_scope, deleted_at")
                 .eq("org_id", value: activeOrganizationID.uuidString.lowercased())
                 .execute()
                 .value as [SupabaseOrganizationMemberRecord]
@@ -2111,7 +2223,8 @@ final class AppState: ObservableObject {
                         id: row.userID,
                         email: profile?.email,
                         fullName: profile?.fullName,
-                        role: row.role
+                        role: row.role,
+                        accessScope: Self.normalizedAccessScope(row.accessScope)
                     )
                 }
                 .sorted { lhs, rhs in
@@ -2197,6 +2310,420 @@ final class AppState: ObservableObject {
 
         let activeOrgAfterRefresh = await MainActor.run { self.activeOrganizationID }
         if activeOrgAfterRefresh == orgID || activeOrgAfterRefresh == nil {
+            await MainActor.run {
+                self.refreshProperties()
+            }
+        }
+    }
+
+    func fetchPropertyAccessGrants(for userID: UUID, orgID: UUID) async throws -> Set<UUID> {
+#if DEBUG
+        if let propertyAccessGrantsFetchOverride {
+            return try await propertyAccessGrantsFetchOverride(userID, orgID)
+        }
+#endif
+        guard let client = supabaseClient else { return [] }
+
+        let rows = try await client
+            .from("property_access_grants")
+            .select("property_id, deleted_at")
+            .eq("org_id", value: orgID.uuidString.lowercased())
+            .eq("user_id", value: userID.uuidString.lowercased())
+            .execute()
+            .value as [SupabasePropertyAccessGrantRecord]
+
+        return Set(
+            rows
+                .filter { $0.deletedAt == nil }
+                .map(\.propertyID)
+        )
+    }
+
+    func setMemberAccessScope(userID: UUID, orgID: UUID, accessScope: String) async throws {
+        let normalizedScope = Self.normalizedAccessScope(accessScope)
+#if DEBUG
+        if let memberAccessScopeSetOverride {
+            try await memberAccessScopeSetOverride(userID, orgID, normalizedScope)
+            return
+        }
+#endif
+        guard let client = supabaseClient,
+              let actorID = authenticatedSupabaseUser?.id else {
+            throw PropertyAccessPersistenceError.missingAuthenticatedUser
+        }
+
+        print(
+            "[PropertyAccessSave] phase=set_scope_start " +
+            "targetUserID=\(userID.uuidString) " +
+            "orgID=\(orgID.uuidString) " +
+            "accessScope=\(normalizedScope) " +
+            "actorUserID=\(actorID.uuidString)"
+        )
+
+        let payload = SupabaseMembershipAccessScopeUpdatePayload(
+            accessScope: normalizedScope,
+            updatedBy: actorID
+        )
+
+        do {
+            try await client
+                .from("org_memberships")
+                .update(payload, returning: .minimal)
+                .eq("org_id", value: orgID.uuidString.lowercased())
+                .eq("user_id", value: userID.uuidString.lowercased())
+                .is("deleted_at", value: nil)
+                .execute()
+        } catch {
+            print(
+                "[PropertyAccessSave] phase=set_scope_update_error " +
+                "targetUserID=\(userID.uuidString) " +
+                "orgID=\(orgID.uuidString) " +
+                "expectedScope=\(normalizedScope) " +
+                "error=\(error.localizedDescription)"
+            )
+            throw error
+        }
+
+        let verificationRows: [SupabaseMembershipAccessScopeRecord]
+        do {
+            verificationRows = try await client
+                .from("org_memberships")
+                .select("access_scope, deleted_at")
+                .eq("org_id", value: orgID.uuidString.lowercased())
+                .eq("user_id", value: userID.uuidString.lowercased())
+                .is("deleted_at", value: nil)
+                .execute()
+                .value as [SupabaseMembershipAccessScopeRecord]
+        } catch {
+            print(
+                "[PropertyAccessSave] phase=set_scope_verify_error " +
+                "targetUserID=\(userID.uuidString) " +
+                "orgID=\(orgID.uuidString) " +
+                "expectedScope=\(normalizedScope) " +
+                "error=\(error.localizedDescription)"
+            )
+            throw error
+        }
+
+        let persistedScope = verificationRows.first.flatMap(\.accessScope).map(Self.normalizedAccessScope)
+        guard persistedScope == normalizedScope else {
+            print(
+                "[PropertyAccessSave] phase=set_scope_verify_failed " +
+                "targetUserID=\(userID.uuidString) " +
+                "orgID=\(orgID.uuidString) " +
+                "expectedScope=\(normalizedScope) " +
+                "actualScope=\(persistedScope ?? "nil")"
+            )
+            throw PropertyAccessPersistenceError.accessScopeVerificationFailed(
+                expected: normalizedScope,
+                actual: persistedScope
+            )
+        }
+
+        print(
+            "[PropertyAccessSave] phase=set_scope_success " +
+            "targetUserID=\(userID.uuidString) " +
+            "orgID=\(orgID.uuidString) " +
+            "accessScope=\(normalizedScope)"
+        )
+    }
+
+    func grantPropertyAccess(userID: UUID, orgID: UUID, propertyID: UUID) async throws {
+#if DEBUG
+        if let propertyAccessGrantOverride {
+            try await propertyAccessGrantOverride(userID, orgID, propertyID)
+            return
+        }
+#endif
+        guard let client = supabaseClient,
+              let actorID = authenticatedSupabaseUser?.id else {
+            throw PropertyAccessPersistenceError.missingAuthenticatedUser
+        }
+
+        print(
+            "[PropertyAccessSave] phase=grant_start " +
+            "targetUserID=\(userID.uuidString) " +
+            "orgID=\(orgID.uuidString) " +
+            "propertyID=\(propertyID.uuidString) " +
+            "actorUserID=\(actorID.uuidString)"
+        )
+
+        let existingRows: [SupabasePropertyAccessGrantLookupRecord]
+        do {
+            existingRows = try await client
+                .from("property_access_grants")
+                .select("id, org_id, property_id, user_id, deleted_at, created_at")
+                .eq("org_id", value: orgID.uuidString.lowercased())
+                .eq("user_id", value: userID.uuidString.lowercased())
+                .eq("property_id", value: propertyID.uuidString.lowercased())
+                .execute()
+                .value as [SupabasePropertyAccessGrantLookupRecord]
+        } catch {
+            print(
+                "[PropertyAccessSave] phase=grant_lookup_error " +
+                "targetUserID=\(userID.uuidString) " +
+                "orgID=\(orgID.uuidString) " +
+                "propertyID=\(propertyID.uuidString) " +
+                "error=\(error.localizedDescription)"
+            )
+            throw error
+        }
+
+        let activeExistingRow = existingRows.first(where: { $0.deletedAt == nil })
+        let deletedExistingRows = existingRows.filter { $0.deletedAt != nil }
+        let deletedExistingRowIDs = deletedExistingRows.map(\.id.uuidString).sorted()
+
+        print(
+            "[PropertyAccessSave] phase=grant_lookup_result " +
+            "targetUserID=\(userID.uuidString) " +
+            "orgID=\(orgID.uuidString) " +
+            "propertyID=\(propertyID.uuidString) " +
+            "existingRowCount=\(existingRows.count) " +
+            "hasActiveRow=\(activeExistingRow != nil) " +
+            "hasDeletedRow=\(!deletedExistingRows.isEmpty) " +
+            "deletedRowIDs=\(deletedExistingRowIDs)"
+        )
+
+        if activeExistingRow != nil {
+            print(
+                "[PropertyAccessSave] phase=grant_skip_existing " +
+                "targetUserID=\(userID.uuidString) " +
+                "orgID=\(orgID.uuidString) " +
+                "propertyID=\(propertyID.uuidString)"
+            )
+            return
+        }
+
+        if let deletedExistingRow = deletedExistingRows.max(by: { ($0.createdAt ?? "") < ($1.createdAt ?? "") }) {
+            print(
+                "[PropertyAccessSave] phase=grant_reactivation_bypassed " +
+                "targetUserID=\(userID.uuidString) " +
+                "orgID=\(orgID.uuidString) " +
+                "propertyID=\(propertyID.uuidString) " +
+                "selectedDeletedGrantID=\(deletedExistingRow.id.uuidString) " +
+                "reason=multiple_or_historical_deleted_rows_inserting_fresh_active_row"
+            )
+        }
+
+        let newGrantID = UUID()
+        let payload = SupabasePropertyAccessGrantInsertPayload(
+            id: newGrantID,
+            orgID: orgID,
+            propertyID: propertyID,
+            userID: userID,
+            grantedBy: actorID,
+            deletedAt: nil
+        )
+        do {
+            try await client
+                .from("property_access_grants")
+                .insert(payload, returning: .minimal)
+                .execute()
+        } catch {
+            print(
+                "[PropertyAccessSave] phase=grant_insert_error " +
+                "targetUserID=\(userID.uuidString) " +
+                "orgID=\(orgID.uuidString) " +
+                "propertyID=\(propertyID.uuidString) " +
+                "newGrantID=\(newGrantID.uuidString) " +
+                "error=\(error.localizedDescription)"
+            )
+            throw error
+        }
+
+        do {
+            let insertedRows = try await client
+                .from("property_access_grants")
+                .select("id, org_id, property_id, user_id, deleted_at, created_at")
+                .eq("id", value: newGrantID.uuidString.lowercased())
+                .execute()
+                .value as [SupabasePropertyAccessGrantLookupRecord]
+
+            if let insertedRow = insertedRows.first {
+                print(
+                    "[PropertyAccessSave] phase=grant_insert_verify_row " +
+                    "id=\(insertedRow.id.uuidString) " +
+                    "orgID=\(insertedRow.orgID.uuidString) " +
+                    "propertyID=\(insertedRow.propertyID.uuidString) " +
+                    "userID=\(insertedRow.userID.uuidString) " +
+                    "deletedAt=\(insertedRow.deletedAt ?? "nil")"
+                )
+            } else {
+                print(
+                    "[PropertyAccessSave] phase=grant_insert_verify_row_missing " +
+                    "newGrantID=\(newGrantID.uuidString)"
+                )
+            }
+        } catch {
+            print(
+                "[PropertyAccessSave] phase=grant_insert_verify_error " +
+                "targetUserID=\(userID.uuidString) " +
+                "orgID=\(orgID.uuidString) " +
+                "propertyID=\(propertyID.uuidString) " +
+                "newGrantID=\(newGrantID.uuidString) " +
+                "error=\(error.localizedDescription)"
+            )
+            throw error
+        }
+
+        let verificationRows: [SupabasePropertyAccessGrantRecord]
+        do {
+            verificationRows = try await client
+                .from("property_access_grants")
+                .select("property_id, deleted_at")
+                .eq("org_id", value: orgID.uuidString.lowercased())
+                .eq("user_id", value: userID.uuidString.lowercased())
+                .eq("property_id", value: propertyID.uuidString.lowercased())
+                .execute()
+                .value as [SupabasePropertyAccessGrantRecord]
+        } catch {
+            print(
+                "[PropertyAccessSave] phase=grant_verify_error " +
+                "targetUserID=\(userID.uuidString) " +
+                "orgID=\(orgID.uuidString) " +
+                "propertyID=\(propertyID.uuidString) " +
+                "error=\(error.localizedDescription)"
+            )
+            throw error
+        }
+
+        let hasActiveGrant = verificationRows.contains { $0.propertyID == propertyID && $0.deletedAt == nil }
+
+        guard hasActiveGrant else {
+            print(
+                "[PropertyAccessSave] phase=grant_verify_failed " +
+                "targetUserID=\(userID.uuidString) " +
+                "orgID=\(orgID.uuidString) " +
+                "propertyID=\(propertyID.uuidString)"
+            )
+            throw PropertyAccessPersistenceError.grantVerificationFailed(propertyID: propertyID)
+        }
+
+        print(
+            "[PropertyAccessSave] phase=grant_success " +
+            "targetUserID=\(userID.uuidString) " +
+            "orgID=\(orgID.uuidString) " +
+            "propertyID=\(propertyID.uuidString)"
+        )
+    }
+
+    func revokePropertyAccess(userID: UUID, orgID: UUID, propertyID: UUID) async throws {
+#if DEBUG
+        if let propertyAccessRevokeOverride {
+            try await propertyAccessRevokeOverride(userID, orgID, propertyID)
+            return
+        }
+#endif
+        guard let client = supabaseClient else {
+            throw PropertyAccessPersistenceError.missingAuthenticatedUser
+        }
+
+        print(
+            "[PropertyAccessSave] phase=revoke_start " +
+            "targetUserID=\(userID.uuidString) " +
+            "orgID=\(orgID.uuidString) " +
+            "propertyID=\(propertyID.uuidString)"
+        )
+
+        let payload = ["deleted_at": Date().ISO8601Format()]
+        try await client
+            .from("property_access_grants")
+            .update(payload, returning: .minimal)
+            .eq("org_id", value: orgID.uuidString.lowercased())
+            .eq("user_id", value: userID.uuidString.lowercased())
+            .eq("property_id", value: propertyID.uuidString.lowercased())
+            .is("deleted_at", value: nil)
+            .execute()
+
+        let verificationRows = try await client
+            .from("property_access_grants")
+            .select("property_id, deleted_at")
+            .eq("org_id", value: orgID.uuidString.lowercased())
+            .eq("user_id", value: userID.uuidString.lowercased())
+            .eq("property_id", value: propertyID.uuidString.lowercased())
+            .execute()
+            .value as [SupabasePropertyAccessGrantRecord]
+
+        let hasActiveGrant = verificationRows.contains { $0.propertyID == propertyID && $0.deletedAt == nil }
+        guard !hasActiveGrant else {
+            print(
+                "[PropertyAccessSave] phase=revoke_verify_failed " +
+                "targetUserID=\(userID.uuidString) " +
+                "orgID=\(orgID.uuidString) " +
+                "propertyID=\(propertyID.uuidString)"
+            )
+            throw PropertyAccessPersistenceError.revokeVerificationFailed(propertyID: propertyID)
+        }
+
+        print(
+            "[PropertyAccessSave] phase=revoke_success " +
+            "targetUserID=\(userID.uuidString) " +
+            "orgID=\(orgID.uuidString) " +
+            "propertyID=\(propertyID.uuidString)"
+        )
+    }
+
+    func savePropertyAccessConfiguration(
+        userID: UUID,
+        orgID: UUID,
+        accessScope: String,
+        grantedPropertyIDs: Set<UUID>
+    ) async throws {
+        let normalizedScope = Self.normalizedAccessScope(accessScope)
+        let existingGrants = try await fetchPropertyAccessGrants(for: userID, orgID: orgID)
+        let grantsToCreate = grantedPropertyIDs.subtracting(existingGrants)
+        let grantsToRevoke = existingGrants.subtracting(grantedPropertyIDs)
+        let grantedPropertyIDStrings = grantedPropertyIDs.map(\.uuidString).sorted()
+        let existingGrantPropertyIDStrings = existingGrants.map(\.uuidString).sorted()
+        let grantCreationPropertyIDStrings = grantsToCreate.map(\.uuidString).sorted()
+        let grantRevocationPropertyIDStrings = grantsToRevoke.map(\.uuidString).sorted()
+
+        print(
+            "[PropertyAccessSave] phase=save_start " +
+            "targetUserID=\(userID.uuidString) " +
+            "orgID=\(orgID.uuidString) " +
+            "accessScope=\(normalizedScope) " +
+            "grantedPropertyIDs=\(grantedPropertyIDStrings) " +
+            "existingGrantPropertyIDs=\(existingGrantPropertyIDStrings) " +
+            "grantsToCreate=\(grantCreationPropertyIDStrings) " +
+            "grantsToRevoke=\(grantRevocationPropertyIDStrings)"
+        )
+
+        try await setMemberAccessScope(
+            userID: userID,
+            orgID: orgID,
+            accessScope: normalizedScope
+        )
+
+        for propertyID in grantsToCreate {
+            try await grantPropertyAccess(
+                userID: userID,
+                orgID: orgID,
+                propertyID: propertyID
+            )
+        }
+
+        for propertyID in grantsToRevoke {
+            try await revokePropertyAccess(
+                userID: userID,
+                orgID: orgID,
+                propertyID: propertyID
+            )
+        }
+
+        print(
+            "[PropertyAccessSave] phase=save_success " +
+            "targetUserID=\(userID.uuidString) " +
+            "orgID=\(orgID.uuidString) " +
+            "accessScope=\(normalizedScope) " +
+            "createdGrantPropertyIDs=\(grantCreationPropertyIDStrings) " +
+            "revokedGrantPropertyIDs=\(grantRevocationPropertyIDStrings)"
+        )
+
+        try await refreshOrganizationContext(for: authenticatedSupabaseUser?.id)
+        await refreshActiveOrganizationMembers()
+
+        if authenticatedSupabaseUser?.id == userID {
             await MainActor.run {
                 self.refreshProperties()
             }
@@ -10506,6 +11033,18 @@ final class AppState: ObservableObject {
             authorizedPropertyIDsByOrganization.removeValue(forKey: orgID)
         }
         applyTenantScopedState()
+    }
+
+    func _debugSetPropertyAccessMethodOverridesForTests(
+        fetch: PropertyAccessGrantsFetchOverride? = nil,
+        setScope: MemberAccessScopeSetOverride? = nil,
+        grant: PropertyAccessMutationOverride? = nil,
+        revoke: PropertyAccessMutationOverride? = nil
+    ) {
+        propertyAccessGrantsFetchOverride = fetch
+        memberAccessScopeSetOverride = setScope
+        propertyAccessGrantOverride = grant
+        propertyAccessRevokeOverride = revoke
     }
 
     func _debugDiscoverPendingSupabaseMediaBackfillCandidates() -> [PendingSupabaseMediaBackfillCandidate] {
