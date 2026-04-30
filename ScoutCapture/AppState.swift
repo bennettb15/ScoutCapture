@@ -9718,6 +9718,61 @@ final class AppState: ObservableObject {
     }
 
     @MainActor
+    private func performForegroundAccessRefreshSequence(
+        contextRefreshOverride: ((UUID?) async throws -> Void)? = nil,
+        propertyRefreshOverride: ((String?) async -> Bool)? = nil,
+        convergenceOverride: ((String) async -> Void)? = nil
+    ) async {
+        if requiresAuthentication {
+            guard isAuthenticationReady,
+                  let userID = authenticatedSupabaseUser?.id else {
+                return
+            }
+
+            do {
+                if let contextRefreshOverride {
+                    try await contextRefreshOverride(userID)
+                } else {
+                    try await refreshOrganizationContext(for: userID)
+                }
+            } catch {
+                print("[OrgAccess] foreground_context_refresh_failed error=\(error.localizedDescription)")
+                return
+            }
+        }
+
+        guard isOrganizationContextReady,
+              activeOrganizationID != nil else {
+            return
+        }
+
+        let activeSessionCheckpointTrigger =
+            currentSession?.status == .draft
+            ? "foreground"
+            : nil
+
+        let propertyRefreshSucceeded: Bool
+        if let propertyRefreshOverride {
+            propertyRefreshSucceeded = await propertyRefreshOverride(activeSessionCheckpointTrigger)
+        } else {
+            propertyRefreshSucceeded = await performForegroundRemotePropertyRefresh(
+                activeSessionCheckpointTrigger: activeSessionCheckpointTrigger
+            )
+        }
+
+        guard propertyRefreshSucceeded,
+              activeOrganizationID != nil else {
+            return
+        }
+
+        if let convergenceOverride {
+            await convergenceOverride("foreground")
+        } else {
+            await performRemoteConvergenceCycle(source: "foreground")
+        }
+    }
+
+    @MainActor
     @discardableResult
     private func revalidateActiveSessionAccessIfNeeded(
         trigger: String,
@@ -9831,13 +9886,13 @@ final class AppState: ObservableObject {
     @MainActor
     private func performForegroundRemotePropertyRefresh(
         activeSessionCheckpointTrigger: String? = nil
-    ) async {
+    ) async -> Bool {
         guard let requestedOrganizationID = activeOrganizationID else {
             performLocalPropertyRefreshFallback(
                 orgID: nil,
                 source: "foreground_missing_org"
             )
-            return
+            return false
         }
         let authority = beginPropertyRefreshAuthority(
             orgID: requestedOrganizationID,
@@ -9884,7 +9939,7 @@ final class AppState: ObservableObject {
                     "requestedOrgID=\(requestedOrganizationID.uuidString) " +
                     "currentOrgID=\(activeOrganizationID?.uuidString ?? "nil")"
                 )
-                return
+                return false
             }
             setAuthorizedPropertyIDs(
                 Set(payload.properties.map(\.id)),
@@ -9922,12 +9977,13 @@ final class AppState: ObservableObject {
                 error: nil,
                 fingerprint: payload.fingerprint
             )
+            return true
         } catch {
             if await resolveOrganizationAccessAfterRemotePropertyFailure(
                 requestedOrganizationID: requestedOrganizationID,
                 error: error
             ) {
-                return
+                return false
             }
             logRemotePropertyFetchResult(
                 outcome: "foreground_fallback_local",
@@ -9938,6 +9994,7 @@ final class AppState: ObservableObject {
                 orgID: requestedOrganizationID,
                 source: "foreground_fallback_local"
             )
+            return false
         }
     }
 
@@ -11014,15 +11071,9 @@ final class AppState: ObservableObject {
 
     func handleSceneDidBecomeActive() {
         queuePendingSupabaseMediaBackfillIfNeeded(reason: "scene_active")
-        guard isOrganizationContextReady else { return }
         Task { @MainActor [weak self] in
             guard let self else { return }
-            if self.currentSession?.status == .draft {
-                await self.performForegroundRemotePropertyRefresh(
-                    activeSessionCheckpointTrigger: "foreground"
-                )
-            }
-            await performRemoteConvergenceCycle(source: "foreground")
+            await self.performForegroundAccessRefreshSequence()
         }
     }
 
@@ -11445,6 +11496,19 @@ final class AppState: ObservableObject {
     @MainActor
     func _debugPerformSyncDeltaPullForTests(source: String = "test") async {
         await performSyncDeltaPull(source: source)
+    }
+
+    @MainActor
+    func _debugPerformForegroundAccessRefreshSequenceForTests(
+        contextRefreshOverride: ((UUID?) async throws -> Void)? = nil,
+        propertyRefreshOverride: ((String?) async -> Bool)? = nil,
+        convergenceOverride: ((String) async -> Void)? = nil
+    ) async {
+        await performForegroundAccessRefreshSequence(
+            contextRefreshOverride: contextRefreshOverride,
+            propertyRefreshOverride: propertyRefreshOverride,
+            convergenceOverride: convergenceOverride
+        )
     }
 
     @MainActor
