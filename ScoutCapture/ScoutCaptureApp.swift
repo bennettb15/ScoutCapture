@@ -1753,6 +1753,11 @@ struct SessionHubView: View {
             let member: OrganizationAccessMember
         }
 
+        private struct PendingMembershipRevoke: Identifiable {
+            let id = UUID()
+            let member: OrganizationAccessMember
+        }
+
         @EnvironmentObject private var appState: AppState
         @Binding var showArchivedProperties: Bool
         let onOpenDebugTools: (() -> Void)?
@@ -1764,6 +1769,7 @@ struct SessionHubView: View {
         @State private var collaborationErrorMessage: String?
         @State private var isCollaborationActionInFlight: Bool = false
         @State private var memberForPropertyAccessManagement: PropertyAccessManagementPresentation?
+        @State private var pendingMembershipRevoke: PendingMembershipRevoke?
         private let showDeveloperSection: Bool = false
         private let inviteRoleOptions = ["viewer", "field", "manager", "owner"]
 
@@ -1922,7 +1928,7 @@ struct SessionHubView: View {
                                             .foregroundStyle(.secondary)
                                     } else {
                                         ForEach(appState.activeOrganizationMembers) { member in
-                                            HStack(alignment: .top, spacing: 12) {
+                                            HStack(alignment: .center, spacing: 12) {
                                                 VStack(alignment: .leading, spacing: 2) {
                                                     Text(member.displayName)
                                                         .font(.system(size: 15, weight: .semibold))
@@ -1939,22 +1945,37 @@ struct SessionHubView: View {
                                                 Spacer(minLength: 0)
 
                                                 if member.role != "owner" {
-                                                    VStack(alignment: .trailing, spacing: 8) {
-                                                        Button("Manage Properties") {
+                                                    HStack(spacing: 10) {
+                                                        Button("Manage") {
                                                             memberForPropertyAccessManagement = PropertyAccessManagementPresentation(member: member)
                                                         }
                                                         .disabled(isCollaborationActionInFlight)
                                                         .buttonStyle(.borderless)
+                                                        .font(.system(size: 13, weight: .semibold))
+                                                        .foregroundStyle(.white)
+                                                        .padding(.horizontal, 14)
+                                                        .frame(height: 32)
+                                                        .background(Color.blue)
+                                                        .clipShape(Capsule())
 
-                                                        Button(isCollaborationActionInFlight ? "Revoking..." : "Revoke", role: .destructive) {
-                                                            revoke(member: member)
+                                                        Button {
+                                                            pendingMembershipRevoke = PendingMembershipRevoke(member: member)
+                                                        } label: {
+                                                            ZStack {
+                                                                Circle()
+                                                                    .fill(Color.red)
+                                                                    .frame(width: 32, height: 32)
+                                                                Text("X")
+                                                                    .font(.system(size: 13, weight: .bold))
+                                                                    .foregroundStyle(.white)
+                                                            }
                                                         }
                                                         .disabled(isCollaborationActionInFlight)
                                                         .buttonStyle(.borderless)
                                                     }
                                                 }
                                             }
-                                            .padding(.vertical, 2)
+                                            .padding(.vertical, 4)
                                         }
                                     }
                                 }
@@ -1998,6 +2019,16 @@ struct SessionHubView: View {
                     )
                     .environmentObject(appState)
                 }
+            }
+            .alert(item: $pendingMembershipRevoke) { pendingRevoke in
+                Alert(
+                    title: Text("Revoke Access?"),
+                    message: Text(revokeConfirmationMessage(for: pendingRevoke.member)),
+                    primaryButton: .destructive(Text("Revoke Access")) {
+                        revoke(member: pendingRevoke.member)
+                    },
+                    secondaryButton: .cancel(Text("Cancel"))
+                )
             }
         }
 
@@ -2067,6 +2098,11 @@ struct SessionHubView: View {
                 }
             }
         }
+
+        private func revokeConfirmationMessage(for member: OrganizationAccessMember) -> String {
+            let memberIdentifier = member.email ?? member.displayName
+            return "\(memberIdentifier) will lose access to this organization and its associated data."
+        }
     }
 
     private struct PropertyAccessManagementSheet: View {
@@ -2105,10 +2141,10 @@ struct SessionHubView: View {
         }
 
         private var memberSubtitle: String {
-            if let email = member.email, !email.isEmpty, email != member.displayName {
-                return email
+            guard let email = member.email, !email.isEmpty, email != member.displayName else {
+                return ""
             }
-            return member.role.capitalized
+            return email
         }
 
         private var canEditPropertyToggles: Bool {
@@ -2122,9 +2158,11 @@ struct SessionHubView: View {
                         VStack(alignment: .leading, spacing: 4) {
                             Text(member.displayName)
                                 .font(.system(size: 17, weight: .semibold))
-                            Text(memberSubtitle)
-                                .font(.system(size: 13, weight: .medium))
-                                .foregroundStyle(.secondary)
+                            if !memberSubtitle.isEmpty {
+                                Text(memberSubtitle)
+                                    .font(.system(size: 13, weight: .medium))
+                                    .foregroundStyle(.secondary)
+                            }
                             Text(member.role.capitalized)
                                 .font(.system(size: 12, weight: .medium))
                                 .foregroundStyle(.secondary)
@@ -2135,12 +2173,35 @@ struct SessionHubView: View {
                     }
 
                     Section("Access Mode") {
-                        Picker("Access Mode", selection: $accessMode) {
-                            ForEach(AccessMode.allCases) { mode in
-                                Text(mode.title).tag(mode)
+                        VStack(spacing: 0) {
+                            ForEach(Array(AccessMode.allCases.enumerated()), id: \.element.id) { index, mode in
+                                Button {
+                                    accessMode = mode
+                                } label: {
+                                    HStack(spacing: 12) {
+                                        VStack(alignment: .leading, spacing: 2) {
+                                            Text(mode.title)
+                                                .foregroundStyle(.primary)
+                                        }
+                                        Spacer(minLength: 0)
+                                        if accessMode == mode {
+                                            Image(systemName: "checkmark")
+                                                .foregroundStyle(.blue)
+                                                .font(.system(size: 18, weight: .bold))
+                                        }
+                                    }
+                                    .padding(.horizontal, 2)
+                                    .padding(.vertical, 10)
+                                    .overlay(alignment: .bottom) {
+                                        if index < AccessMode.allCases.count - 1 {
+                                            Divider()
+                                                .padding(.leading, 2)
+                                        }
+                                    }
+                                }
+                                .buttonStyle(.plain)
                             }
                         }
-                        .pickerStyle(.inline)
                     }
 
                     Section("Properties") {
