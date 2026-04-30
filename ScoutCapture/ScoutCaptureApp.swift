@@ -556,6 +556,7 @@ struct SessionHubView: View {
     @State private var mapsErrorToastToken: Int = 0
     @State private var showPhoneNumberErrorToast: Bool = false
     @State private var phoneErrorToastToken: Int = 0
+    @State private var hubTransientStatusToastToken: Int = 0
     @State private var isSearchExpanded: Bool = false
     @State private var searchQuery: String = ""
     @FocusState private var isSearchFieldFocused: Bool
@@ -842,6 +843,15 @@ struct SessionHubView: View {
                 appState.triggerBackupForLifecycleEvent()
                 selectionHaptic.prepare()
             }
+            .onChange(of: appState.hubTransientStatusMessage) { _, newValue in
+                guard let newValue, !newValue.isEmpty else { return }
+                hubTransientStatusToastToken += 1
+                let token = hubTransientStatusToastToken
+                DispatchQueue.main.asyncAfter(deadline: .now() + 2.2) {
+                    guard token == hubTransientStatusToastToken else { return }
+                    appState.clearHubTransientStatusMessageIfMatching(newValue)
+                }
+            }
             .onChange(of: appState.properties.count) { _, newCount in
                 if newCount > 0 {
                     placeholderHoldUntil = nil
@@ -960,6 +970,9 @@ struct SessionHubView: View {
             }
             .overlay(alignment: .top) {
                 VStack(spacing: 8) {
+                    if let hubTransientStatusMessage = appState.hubTransientStatusMessage {
+                        toastCapsule(hubTransientStatusMessage)
+                    }
                     if showMapsErrorToast {
                         toastCapsule("Unable to open Maps for this address.")
                     }
@@ -1398,22 +1411,6 @@ struct SessionHubView: View {
             if !isSearchExpanded {
                 ZStack {
                     HStack {
-                        Button {
-                            showCalendarComingSoonPopup = true
-                        } label: {
-                            Image(systemName: "calendar")
-                                .font(.system(size: 18, weight: .semibold))
-                                .foregroundColor(buttonLabel)
-                                .frame(width: 42, height: 42)
-                                .background(buttonFill)
-                                .clipShape(Circle())
-                                .overlay(
-                                    Circle()
-                                        .stroke(buttonStroke, lineWidth: 1)
-                                )
-                        }
-                        .buttonStyle(.plain)
-
                         Spacer(minLength: 0)
                         Button {
                             showCloudBackupSheet = true
@@ -6537,6 +6534,19 @@ struct PropertySessionView: View {
                 if sessionEntryBlock == nil && camera.isPreviewRunning && didStartOpenFlow && hasSessionReadyForProperty {
                     completeOpenFlow()
                 }
+            }
+            .onChange(of: appState.activeSessionAccessRevocationRequest?.id) { _, newValue in
+                guard let newValue,
+                      let request = appState.activeSessionAccessRevocationRequest,
+                      request.id == newValue,
+                      request.propertyID == propertyID else {
+                    return
+                }
+                appState.finalizeActiveSessionAccessRevocationIfNeeded(
+                    requestID: request.id,
+                    propertyID: request.propertyID
+                )
+                dismiss()
             }
     }
 

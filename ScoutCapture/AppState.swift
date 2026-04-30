@@ -1086,6 +1086,15 @@ final class AppState: ObservableObject {
         }
     }
 
+    struct ActiveSessionAccessRevocationRequest: Equatable, Identifiable {
+        let id: UUID
+        let propertyID: UUID
+        let message: String
+    }
+
+    @Published private(set) var activeSessionAccessRevocationRequest: ActiveSessionAccessRevocationRequest?
+    @Published private(set) var hubTransientStatusMessage: String?
+
     var selectedProperty: Property? {
         guard let selectedPropertyID else { return nil }
         return properties.first { $0.id == selectedPropertyID }
@@ -9708,6 +9717,68 @@ final class AppState: ObservableObject {
         isLoading = loading
     }
 
+    @MainActor
+    @discardableResult
+    private func revalidateActiveSessionAccessIfNeeded(
+        trigger: String,
+        authorizedPropertyIDs: Set<UUID>,
+        organizationID: UUID
+    ) async -> Bool {
+        guard let session = currentSession,
+              session.status == .draft,
+              session.propertyID == selectedPropertyID,
+              activeOrganizationID == organizationID else {
+            return false
+        }
+
+        guard !authorizedPropertyIDs.contains(session.propertyID) else {
+            return false
+        }
+
+        print(
+            "[ActiveSessionAccess] result=revoked " +
+            "trigger=\(trigger) " +
+            "propertyID=\(session.propertyID.uuidString) " +
+            "sessionID=\(session.id.uuidString)"
+        )
+
+        let persistedDraft = saveDraftCurrentSession(scheduleShadowWrite: false)
+        await releaseCurrentSessionCoordinationLockIfOwned()
+        if let persistedDraft {
+            scheduleSessionShadowWriteAfterCoordinationRelease(for: persistedDraft)
+        }
+
+        let message = "Access to this property was revoked."
+        hubTransientStatusMessage = message
+        activeSessionAccessRevocationRequest = ActiveSessionAccessRevocationRequest(
+            id: UUID(),
+            propertyID: session.propertyID,
+            message: message
+        )
+        return true
+    }
+
+    @MainActor
+    func finalizeActiveSessionAccessRevocationIfNeeded(
+        requestID: UUID,
+        propertyID: UUID
+    ) {
+        guard activeSessionAccessRevocationRequest?.id == requestID else { return }
+        if currentSession?.propertyID == propertyID {
+            clearCurrentSession()
+        }
+        if selectedPropertyID == propertyID {
+            selectedPropertyID = nil
+        }
+        activeSessionAccessRevocationRequest = nil
+    }
+
+    @MainActor
+    func clearHubTransientStatusMessageIfMatching(_ message: String) {
+        guard hubTransientStatusMessage == message else { return }
+        hubTransientStatusMessage = nil
+    }
+
     private func beginPropertyListLoadingForOrgSwitch(organizationID: UUID) {
         pendingPropertyListLoadingOrganizationID = organizationID
         guard !isLoadingPropertiesForOrgSwitch else { return }
@@ -9758,7 +9829,9 @@ final class AppState: ObservableObject {
     }
 
     @MainActor
-    private func performForegroundRemotePropertyRefresh() async {
+    private func performForegroundRemotePropertyRefresh(
+        activeSessionCheckpointTrigger: String? = nil
+    ) async {
         guard let requestedOrganizationID = activeOrganizationID else {
             performLocalPropertyRefreshFallback(
                 orgID: nil,
@@ -9817,6 +9890,13 @@ final class AppState: ObservableObject {
                 Set(payload.properties.map(\.id)),
                 for: requestedOrganizationID
             )
+            if let activeSessionCheckpointTrigger {
+                _ = await revalidateActiveSessionAccessIfNeeded(
+                    trigger: activeSessionCheckpointTrigger,
+                    authorizedPropertyIDs: Set(payload.properties.map(\.id)),
+                    organizationID: requestedOrganizationID
+                )
+            }
             do {
                 try localStore.replacePropertyListCacheAtomically(
                     properties: payload.properties,
@@ -10937,6 +11017,11 @@ final class AppState: ObservableObject {
         guard isOrganizationContextReady else { return }
         Task { @MainActor [weak self] in
             guard let self else { return }
+            if self.currentSession?.status == .draft {
+                await self.performForegroundRemotePropertyRefresh(
+                    activeSessionCheckpointTrigger: "foreground"
+                )
+            }
             await performRemoteConvergenceCycle(source: "foreground")
         }
     }
@@ -11360,6 +11445,21 @@ final class AppState: ObservableObject {
     @MainActor
     func _debugPerformSyncDeltaPullForTests(source: String = "test") async {
         await performSyncDeltaPull(source: source)
+    }
+
+    @MainActor
+    func _debugRunForegroundActiveSessionAccessCheckpointForTests(
+        refreshSucceeded: Bool,
+        authorizedPropertyIDs: Set<UUID>,
+        organizationID: UUID,
+        trigger: String = "test"
+    ) async -> Bool {
+        guard refreshSucceeded else { return false }
+        return await revalidateActiveSessionAccessIfNeeded(
+            trigger: trigger,
+            authorizedPropertyIDs: authorizedPropertyIDs,
+            organizationID: organizationID
+        )
     }
 #endif
 
