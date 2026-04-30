@@ -157,6 +157,14 @@ struct ActiveOrganizationMembership: Equatable, Identifiable {
     let id: UUID
     let name: String
     let role: String
+    let accessScope: String
+
+    init(id: UUID, name: String, role: String, accessScope: String = "org") {
+        self.id = id
+        self.name = name
+        self.role = role
+        self.accessScope = accessScope
+    }
 }
 
 struct OrganizationAccessMember: Equatable, Identifiable {
@@ -437,12 +445,14 @@ final class AppState: ObservableObject {
         let userID: UUID?
         let orgID: UUID
         let role: String
+        let accessScope: String?
         let deletedAt: String?
 
         enum CodingKeys: String, CodingKey {
             case userID = "user_id"
             case orgID = "org_id"
             case role
+            case accessScope = "access_scope"
             case deletedAt = "deleted_at"
         }
     }
@@ -1044,6 +1054,7 @@ final class AppState: ObservableObject {
     private var nextPropertyRefreshToken: UInt64 = 0
     private var newestStartedPropertyRefreshByOrg: [UUID: PropertyRefreshAuthority] = [:]
     private var lastAppliedPropertyRefreshByOrg: [UUID: AppliedPropertyRefreshState] = [:]
+    private var authorizedPropertyIDsByOrganization: [UUID: Set<UUID>] = [:]
     private var lastEnsuredUserProfileID: UUID?
     private var allProperties: [Property] = []
     private var allOrganizations: [Organization] = []
@@ -1111,6 +1122,13 @@ final class AppState: ObservableObject {
             .role
     }
 
+    var activeOrganizationMembershipAccessScope: String? {
+        guard let activeOrganizationID else { return nil }
+        return accessibleOrganizations
+            .first(where: { $0.id == activeOrganizationID })?
+            .accessScope
+    }
+
     var isOwnerOfActiveOrganization: Bool {
         guard let role = activeOrganizationMembershipRole?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() else {
             return false
@@ -1162,6 +1180,50 @@ final class AppState: ObservableObject {
         default:
             return 99
         }
+    }
+
+    private static func normalizedAccessScope(_ rawValue: String?) -> String {
+        let trimmed = rawValue?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        switch trimmed {
+        case "property":
+            return "property"
+        default:
+            return "org"
+        }
+    }
+
+    private func accessScope(for organizationID: UUID?) -> String {
+        guard let organizationID else { return "org" }
+        return Self.normalizedAccessScope(
+            accessibleOrganizations.first(where: { $0.id == organizationID })?.accessScope
+        )
+    }
+
+    private func isPropertyScopedOrganization(_ organizationID: UUID?) -> Bool {
+        accessScope(for: organizationID) == "property"
+    }
+
+    private func synchronizeAuthorizedPropertyAccessState() {
+        let membershipsByID = Dictionary(uniqueKeysWithValues: accessibleOrganizations.map { ($0.id, $0) })
+        authorizedPropertyIDsByOrganization = authorizedPropertyIDsByOrganization.filter { orgID, _ in
+            guard let membership = membershipsByID[orgID] else { return false }
+            return Self.normalizedAccessScope(membership.accessScope) == "property"
+        }
+    }
+
+    private func setAuthorizedPropertyIDs(
+        _ propertyIDs: Set<UUID>,
+        for organizationID: UUID
+    ) {
+        guard isPropertyScopedOrganization(organizationID) else {
+            authorizedPropertyIDsByOrganization.removeValue(forKey: organizationID)
+            return
+        }
+        authorizedPropertyIDsByOrganization[organizationID] = propertyIDs
+    }
+
+    private func clearAuthorizedPropertyIDs(for organizationID: UUID) {
+        authorizedPropertyIDsByOrganization.removeValue(forKey: organizationID)
     }
 
     func sessionArchiveSummaries() -> [LocalStore.SessionArchiveSummary] {
@@ -1538,6 +1600,7 @@ final class AppState: ObservableObject {
         }
         let previousReady = isOrganizationContextReady
         let previousActiveOrganizationID = self.activeOrganizationID
+        let previousActiveOrganizationAccessScope = self.activeOrganizationMembershipAccessScope
 
         if accessibleOrganizations != memberships {
             accessibleOrganizations = memberships
@@ -1551,12 +1614,21 @@ final class AppState: ObservableObject {
         if isOrganizationContextReady != ready {
             isOrganizationContextReady = ready
         }
+        synchronizeAuthorizedPropertyAccessState()
+        if let activeOrganizationID,
+           !isPropertyScopedOrganization(activeOrganizationID) {
+            clearAuthorizedPropertyIDs(for: activeOrganizationID)
+        }
         if activeOrganizationID == nil {
             finishPropertyListLoadingForOrgSwitch()
         }
         applyTenantScopedState()
         scheduleOrganizationAccessControlRefresh()
         if ready, activeOrganizationID != nil {
+            let currentActiveOrganizationAccessScope = self.activeOrganizationMembershipAccessScope
+            let didChangeActiveOrganizationAccessScope =
+                previousActiveOrganizationID == activeOrganizationID &&
+                previousActiveOrganizationAccessScope != currentActiveOrganizationAccessScope
             queuePendingSupabaseMediaBackfillIfNeeded(reason: "org_context_ready")
             if !previousReady {
                 Task { @MainActor [weak self] in
@@ -1570,6 +1642,12 @@ final class AppState: ObservableObject {
                     guard let self else { return }
                     await self.refreshPropertiesForOrganizationSwitch(requestedOrganizationID: resolvedActiveOrganizationID)
                     await self.performRemoteConvergenceCycle(source: "org_context_refresh")
+                }
+            } else if didChangeActiveOrganizationAccessScope {
+                Task { @MainActor [weak self] in
+                    guard let self else { return }
+                    await self.refreshPropertiesAwaitingForegroundRefresh()
+                    await self.performRemoteConvergenceCycle(source: "org_access_scope_refresh")
                 }
             }
         }
@@ -1593,6 +1671,11 @@ final class AppState: ObservableObject {
         }
         if isOrganizationContextReady != ready {
             isOrganizationContextReady = ready
+        }
+        synchronizeAuthorizedPropertyAccessState()
+        if let activeOrganizationID,
+           !isPropertyScopedOrganization(activeOrganizationID) {
+            clearAuthorizedPropertyIDs(for: activeOrganizationID)
         }
         applyTenantScopedState()
         scheduleOrganizationAccessControlRefresh()
@@ -1657,6 +1740,9 @@ final class AppState: ObservableObject {
         }
         if !propertySessionOccupancyByPropertyID.isEmpty {
             propertySessionOccupancyByPropertyID = [:]
+        }
+        if !authorizedPropertyIDsByOrganization.isEmpty {
+            authorizedPropertyIDsByOrganization = [:]
         }
         if !sessionCoordinationStateBySessionID.isEmpty {
             sessionCoordinationStateBySessionID = [:]
@@ -1860,7 +1946,7 @@ final class AppState: ObservableObject {
 
         let membershipRows = try await client
             .from("org_memberships")
-            .select("user_id, org_id, role, deleted_at")
+            .select("user_id, org_id, role, access_scope, deleted_at")
             .execute()
             .value as [SupabaseOrgMembershipRecord]
 
@@ -1883,7 +1969,12 @@ final class AppState: ObservableObject {
         let memberships = activeMemberships
             .compactMap { row -> ActiveOrganizationMembership? in
                 guard let name = namesByID[row.orgID] else { return nil }
-                return ActiveOrganizationMembership(id: row.orgID, name: name, role: row.role)
+                return ActiveOrganizationMembership(
+                    id: row.orgID,
+                    name: name,
+                    role: row.role,
+                    accessScope: Self.normalizedAccessScope(row.accessScope)
+                )
             }
             .sorted { lhs, rhs in
                 lhs.name.localizedCaseInsensitiveCompare(rhs.name) == .orderedAscending
@@ -2161,6 +2252,7 @@ final class AppState: ObservableObject {
         let scopedDrafts = allDraftSessionByProperty.filter { scopedPropertyIDs.contains($0.key) }
         let scopedPending = allPendingExportSessionByProperty.filter { scopedPropertyIDs.contains($0.key) }
         let scopedMeta = allHubMetaByProperty.filter { scopedPropertyIDs.contains($0.key) }
+        let scopedSessionIDs = Set(scopedSessionIndex.values.flatMap { $0.map(\.id) })
         var didChangeScopedSessionDerivedCaches = false
 
         if organizations != scopedOrganizations {
@@ -2188,6 +2280,19 @@ final class AppState: ObservableObject {
             hubRowRefreshToken = UUID()
         }
 
+        let hiddenPropertyIDs = Set(propertySessionOccupancyByPropertyID.keys).subtracting(scopedPropertyIDs)
+        if !hiddenPropertyIDs.isEmpty {
+            for propertyID in hiddenPropertyIDs {
+                propertySessionOccupancyByPropertyID.removeValue(forKey: propertyID)
+            }
+        }
+        if !locallyLockedPropertyIDs.isSubset(of: scopedPropertyIDs) {
+            locallyLockedPropertyIDs = locallyLockedPropertyIDs.intersection(scopedPropertyIDs)
+        }
+        if !sessionCoordinationStateBySessionID.isEmpty {
+            sessionCoordinationStateBySessionID = sessionCoordinationStateBySessionID.filter { scopedSessionIDs.contains($0.key) }
+        }
+
         if let selectedPropertyID,
            !scopedPropertyIDs.contains(selectedPropertyID) {
             self.selectedPropertyID = nil
@@ -2211,7 +2316,12 @@ final class AppState: ObservableObject {
     private func scopedProperties(from properties: [Property]) -> [Property] {
         guard requiresAuthentication else { return properties }
         guard let activeOrganizationID else { return [] }
-        return properties.filter { $0.orgId == activeOrganizationID }
+        let orgScoped = properties.filter { $0.orgId == activeOrganizationID }
+        guard isPropertyScopedOrganization(activeOrganizationID) else {
+            return orgScoped
+        }
+        let authorizedIDs = authorizedPropertyIDsByOrganization[activeOrganizationID] ?? []
+        return orgScoped.filter { authorizedIDs.contains($0.id) }
     }
 
     private func canAccessOrganization(_ organizationID: UUID?) -> Bool {
@@ -8192,7 +8302,9 @@ final class AppState: ObservableObject {
         localCacheCount: Int,
         activeOrganizationID: UUID
     ) throws -> [RemotePropertyRecord] {
-        if localCacheCount > 0 && records.isEmpty {
+        if localCacheCount > 0 &&
+            records.isEmpty &&
+            !isPropertyScopedOrganization(activeOrganizationID) {
             throw RemotePropertyFetchError.emptyResponseRejected(localCacheCount: localCacheCount)
         }
 
@@ -9174,10 +9286,18 @@ final class AppState: ObservableObject {
                 )
                 return
             }
-            try localStore.replacePropertyListCacheAtomically(
-                properties: payload.properties,
-                organizations: payload.organizations
+            setAuthorizedPropertyIDs(
+                Set(payload.properties.map(\.id)),
+                for: requestedOrganizationID
             )
+            do {
+                try localStore.replacePropertyListCacheAtomically(
+                    properties: payload.properties,
+                    organizations: payload.organizations
+                )
+            } catch {
+                print("[PropertiesRefresh] local cache replacement failed after remote authorization: \(error.localizedDescription)")
+            }
             applyRefreshPayload(
                 payload,
                 authority: authority,
@@ -9278,6 +9398,10 @@ final class AppState: ObservableObject {
                 )
                 return
             }
+            setAuthorizedPropertyIDs(
+                Set(payload.properties.map(\.id)),
+                for: requestedOrganizationID
+            )
             let mergedPayload = mergedBackingRefreshPayload(
                 replacingOrganizationID: requestedOrganizationID,
                 with: payload
@@ -9291,10 +9415,14 @@ final class AppState: ObservableObject {
                 lastBackgroundRemoteAttemptCompletedAt = Date()
                 return
             }
-            try localStore.replacePropertyListCacheAtomically(
-                properties: mergedPayload.properties,
-                organizations: mergedPayload.organizations
-            )
+            do {
+                try localStore.replacePropertyListCacheAtomically(
+                    properties: mergedPayload.properties,
+                    organizations: mergedPayload.organizations
+                )
+            } catch {
+                print("[PropertiesRefresh] local cache replacement failed after background remote authorization: \(error.localizedDescription)")
+            }
             applyRefreshPayload(
                 mergedPayload,
                 authority: authority,
@@ -10367,6 +10495,19 @@ final class AppState: ObservableObject {
     }
 
 #if DEBUG
+    @MainActor
+    func _debugSetAuthorizedPropertyIDsForTests(
+        orgID: UUID,
+        propertyIDs: Set<UUID>?
+    ) {
+        if let propertyIDs {
+            authorizedPropertyIDsByOrganization[orgID] = propertyIDs
+        } else {
+            authorizedPropertyIDsByOrganization.removeValue(forKey: orgID)
+        }
+        applyTenantScopedState()
+    }
+
     func _debugDiscoverPendingSupabaseMediaBackfillCandidates() -> [PendingSupabaseMediaBackfillCandidate] {
         discoverPendingSupabaseMediaBackfillCandidates().candidates
     }
