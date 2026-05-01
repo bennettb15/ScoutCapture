@@ -1806,6 +1806,15 @@ struct SessionHubView: View {
                                 .tint(.blue)
                         }
 
+                        if let activeOrganizationID = appState.activeOrganizationID {
+                            Section("Activity") {
+                                NavigationLink("View Activity") {
+                                    ActivityFeedView(orgID: activeOrganizationID)
+                                        .environmentObject(appState)
+                                }
+                            }
+                        }
+
                         if let authenticatedSupabaseUser = appState.authenticatedSupabaseUser {
                             Section("Account") {
                                 if let email = authenticatedSupabaseUser.email, !email.isEmpty {
@@ -2084,6 +2093,71 @@ struct SessionHubView: View {
         private func revokeConfirmationMessage(for member: OrganizationAccessMember) -> String {
             let memberIdentifier = member.email ?? member.displayName
             return "\(memberIdentifier) will lose access to this organization and its associated data."
+        }
+    }
+
+    private struct ActivityFeedView: View {
+        @EnvironmentObject private var appState: AppState
+        let orgID: UUID
+
+        @State private var items: [AppState.ActivityFeedItem] = []
+        @State private var isLoading: Bool = true
+        @State private var errorMessage: String?
+
+        var body: some View {
+            List {
+                if isLoading {
+                    HStack {
+                        Spacer()
+                        ProgressView()
+                        Spacer()
+                    }
+                    .listRowSeparator(.hidden)
+                } else if let errorMessage, !errorMessage.isEmpty {
+                    Text(errorMessage)
+                        .foregroundStyle(.red)
+                } else if items.isEmpty {
+                    Text("No activity yet")
+                        .foregroundStyle(.secondary)
+                } else {
+                    ForEach(items) { item in
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(item.displayTitle)
+                                .font(.system(size: 15, weight: .semibold))
+                            if !item.displaySubtitle.isEmpty {
+                                Text(item.displaySubtitle)
+                                    .font(.system(size: 13, weight: .medium))
+                                    .foregroundStyle(.secondary)
+                            }
+                            Text(item.createdAt.formatted(date: .abbreviated, time: .shortened))
+                                .font(.system(size: 12, weight: .medium))
+                                .foregroundStyle(.tertiary)
+                        }
+                        .padding(.vertical, 4)
+                    }
+                }
+            }
+            .navigationTitle("Activity")
+            .task {
+                await load()
+            }
+            .refreshable {
+                await load()
+            }
+        }
+
+        private func load() async {
+            isLoading = true
+            errorMessage = nil
+
+            do {
+                items = try await appState.fetchActivityFeed(orgID: orgID)
+            } catch {
+                items = []
+                errorMessage = error.localizedDescription
+            }
+
+            isLoading = false
         }
     }
 

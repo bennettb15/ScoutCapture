@@ -220,6 +220,11 @@ final class AppState: ObservableObject {
         Date?,
         Date?
     ) async throws -> ([RemotePropertyDeltaRecord], [RemoteSessionDeltaRecord])
+    typealias ActivityFeedFetchOverride = (
+        UUID,
+        UUID?,
+        Int
+    ) async throws -> [ActivityFeedItem]
     private typealias SessionCoordinationFetchOverride = (
         UUID,
         UUID,
@@ -319,6 +324,17 @@ final class AppState: ObservableObject {
         var occupiedAt: Date?
     }
 
+    struct ActivityFeedItem: Equatable, Identifiable {
+        let id: UUID
+        let orgID: UUID
+        let sessionID: UUID
+        let eventType: String
+        let payload: [String: AnyJSON]
+        let createdAt: Date
+        let displayTitle: String
+        let displaySubtitle: String
+    }
+
 #if DEBUG
     struct DebugRemotePropertyDeltaInput {
         let id: UUID
@@ -360,6 +376,15 @@ final class AppState: ObservableObject {
         let lockedAt: String?
         let coordinationTier1Snapshot: String?
         let updatedAt: Date?
+    }
+
+    struct DebugActivityFeedEventInput {
+        let id: UUID
+        let orgID: UUID
+        let sessionID: UUID
+        let eventType: String
+        let payload: [String: AnyJSON]
+        let createdAt: Date
     }
 #endif
 
@@ -511,6 +536,40 @@ final class AppState: ObservableObject {
             case deletedAt = "deleted_at"
             case createdAt = "created_at"
         }
+    }
+
+    private struct SupabaseSessionEventRecord: Decodable {
+        let id: UUID
+        let orgID: UUID
+        let sessionID: UUID
+        let eventType: String
+        let payload: [String: AnyJSON]
+        let createdAt: String
+
+        enum CodingKeys: String, CodingKey {
+            case id
+            case orgID = "org_id"
+            case sessionID = "session_id"
+            case eventType = "event_type"
+            case payload
+            case createdAt = "created_at"
+        }
+    }
+
+    private struct SupabaseActivitySessionLookupRecord: Decodable {
+        let id: UUID
+        let propertyID: UUID
+        let title: String?
+
+        enum CodingKeys: String, CodingKey {
+            case id
+            case propertyID = "property_id"
+            case title
+        }
+    }
+
+    private struct SessionIDOnlyRecord: Decodable {
+        let id: UUID
     }
 
     private enum PropertyAccessPersistenceError: LocalizedError {
@@ -1162,6 +1221,7 @@ final class AppState: ObservableObject {
     private var lastForegroundSyncDeltaCompletedAt: Date?
 #if DEBUG
     private var syncDeltaFetchOverride: SyncDeltaFetchOverride?
+    private var activityFeedFetchOverride: ActivityFeedFetchOverride?
     private var sessionCoordinationFetchOverride: SessionCoordinationFetchOverride?
     private var propertyAccessGrantsFetchOverride: PropertyAccessGrantsFetchOverride?
     private var memberAccessScopeSetOverride: MemberAccessScopeSetOverride?
@@ -2325,6 +2385,67 @@ final class AppState: ObservableObject {
         }
     }
 
+    func fetchActivityFeed(
+        orgID: UUID,
+        propertyID: UUID? = nil,
+        limit: Int = 50
+    ) async throws -> [ActivityFeedItem] {
+#if DEBUG
+        if let activityFeedFetchOverride {
+            return try await activityFeedFetchOverride(orgID, propertyID, limit)
+        }
+#endif
+        guard let client = supabaseClient else { return [] }
+
+        let normalizedLimit = max(1, limit)
+        let orgValue = orgID.uuidString.lowercased()
+
+        let sessionIDFilterValues: [String]?
+        if let propertyID {
+            let propertySessionIDs = try await client
+                .from("sessions")
+                .select("id")
+                .eq("org_id", value: orgValue)
+                .eq("property_id", value: propertyID.uuidString.lowercased())
+                .execute()
+                .value as [SessionIDOnlyRecord]
+
+            let filteredIDs = propertySessionIDs.map { $0.id.uuidString.lowercased() }
+            guard !filteredIDs.isEmpty else { return [] }
+            sessionIDFilterValues = filteredIDs
+        } else {
+            sessionIDFilterValues = nil
+        }
+
+        var eventQuery = client
+            .from("session_events")
+            .select("id, org_id, session_id, event_type, payload, created_at")
+            .eq("org_id", value: orgValue)
+
+        if let sessionIDFilterValues {
+            eventQuery = eventQuery.in("session_id", values: sessionIDFilterValues)
+        }
+
+        let eventRecords = try await eventQuery
+            .order("created_at", ascending: false)
+            .limit(normalizedLimit)
+            .execute()
+            .value as [SupabaseSessionEventRecord]
+
+        let eventSessionIDs = Array(Set(eventRecords.map(\.sessionID)))
+        let sessionLookupByID = try await fetchActivitySessionLookupByID(
+            sessionIDs: eventSessionIDs,
+            client: client
+        )
+
+        return eventRecords.map { record in
+            makeActivityFeedItem(
+                record: record,
+                sessionLookup: sessionLookupByID[record.sessionID]
+            )
+        }
+    }
+
     func fetchPropertyAccessGrants(for userID: UUID, orgID: UUID) async throws -> Set<UUID> {
 #if DEBUG
         if let propertyAccessGrantsFetchOverride {
@@ -2345,6 +2466,201 @@ final class AppState: ObservableObject {
             rows
                 .filter { $0.deletedAt == nil }
                 .map(\.propertyID)
+        )
+    }
+
+    private func fetchActivitySessionLookupByID(
+        sessionIDs: [UUID],
+        client: SupabaseClient
+    ) async throws -> [UUID: SupabaseActivitySessionLookupRecord] {
+        guard !sessionIDs.isEmpty else { return [:] }
+
+        let rows = try await client
+            .from("sessions")
+            .select("id, property_id, title")
+            .in("id", values: sessionIDs.map(\.uuidString))
+            .execute()
+            .value as [SupabaseActivitySessionLookupRecord]
+
+        return Dictionary(uniqueKeysWithValues: rows.map { ($0.id, $0) })
+    }
+
+    private func makeActivityFeedItem(
+        record: SupabaseSessionEventRecord,
+        sessionLookup: SupabaseActivitySessionLookupRecord?
+    ) -> ActivityFeedItem {
+        let createdAt = parseSupabaseDateString(record.createdAt) ?? Date()
+        let propertyName = sessionLookup.flatMap { activityPropertyName(for: $0.propertyID) }
+        let sessionTitle = normalizedSupabaseText(sessionLookup?.title)
+        let title = activityFeedTitle(for: record.eventType)
+        let subtitle = activityFeedSubtitle(
+            eventType: record.eventType,
+            payload: record.payload,
+            propertyName: propertyName,
+            sessionTitle: sessionTitle,
+            sessionID: record.sessionID
+        )
+
+        return ActivityFeedItem(
+            id: record.id,
+            orgID: record.orgID,
+            sessionID: record.sessionID,
+            eventType: record.eventType,
+            payload: record.payload,
+            createdAt: createdAt,
+            displayTitle: title,
+            displaySubtitle: subtitle
+        )
+    }
+
+    private func activityFeedTitle(for eventType: String) -> String {
+        switch eventType.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "session.started":
+            return "Session started"
+        case "session.locked":
+            return "Session locked"
+        case "session.released":
+            return "Session released"
+        case "session.exported":
+            return "Session exported"
+        case "member.invited":
+            return "Member invited"
+        case "member.accepted":
+            return "Member accepted"
+        case "member.revoked":
+            return "Member revoked"
+        case "property.access.granted":
+            return "Property access granted"
+        case "property.access.revoked":
+            return "Property access revoked"
+        default:
+            return eventType
+        }
+    }
+
+    private func activityFeedSubtitle(
+        eventType: String,
+        payload: [String: AnyJSON],
+        propertyName: String?,
+        sessionTitle: String?,
+        sessionID: UUID
+    ) -> String {
+        let actor = activityPayloadString(
+            payload,
+            keys: ["actor_name", "actorName", "actor_email", "actorEmail", "actor"]
+        )
+        let subject = activityPayloadString(
+            payload,
+            keys: [
+                "member_name",
+                "memberName",
+                "member_email",
+                "memberEmail",
+                "invitee_email",
+                "inviteeEmail",
+                "target_user_name",
+                "targetUserName",
+                "target_user_email",
+                "targetUserEmail"
+            ]
+        )
+        let payloadPropertyName = activityPayloadString(
+            payload,
+            keys: ["property_name", "propertyName", "property", "property_title", "propertyTitle"]
+        )
+        let resolvedPropertyName = payloadPropertyName ?? propertyName
+        let resolvedSessionName = activityPayloadString(
+            payload,
+            keys: ["session_title", "sessionTitle", "title"]
+        ) ?? sessionTitle
+        let fallbackSession = "Session \(sessionID.uuidString.prefix(8))"
+
+        switch eventType.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "session.started":
+            return resolvedPropertyName.map { "For \($0)" } ?? (resolvedSessionName ?? fallbackSession)
+        case "session.locked":
+            if let actor, let resolvedPropertyName {
+                return "\(actor) locked \(resolvedPropertyName)"
+            }
+            return resolvedPropertyName ?? resolvedSessionName ?? fallbackSession
+        case "session.released":
+            if let actor, let resolvedPropertyName {
+                return "\(actor) released \(resolvedPropertyName)"
+            }
+            return resolvedPropertyName ?? resolvedSessionName ?? fallbackSession
+        case "session.exported":
+            return resolvedPropertyName.map { "For \($0)" } ?? (resolvedSessionName ?? fallbackSession)
+        case "member.invited":
+            if let actor, let subject {
+                return "\(actor) invited \(subject)"
+            }
+            return subject ?? "Organization access change"
+        case "member.accepted":
+            if let subject {
+                return "\(subject) accepted the invite"
+            }
+            return "Organization access change"
+        case "member.revoked":
+            if let actor, let subject {
+                return "\(actor) revoked \(subject)"
+            }
+            return subject ?? "Organization access revoked"
+        case "property.access.granted":
+            if let actor, let resolvedPropertyName {
+                return "\(actor) granted access to \(resolvedPropertyName)"
+            }
+            return resolvedPropertyName ?? (subject.map { "For \($0)" } ?? "Property access change")
+        case "property.access.revoked":
+            if let actor, let resolvedPropertyName {
+                return "\(actor) revoked access to \(resolvedPropertyName)"
+            }
+            return resolvedPropertyName ?? (subject.map { "For \($0)" } ?? "Property access change")
+        default:
+            if let resolvedPropertyName {
+                return resolvedPropertyName
+            }
+            if let resolvedSessionName {
+                return resolvedSessionName
+            }
+            if let actor {
+                return actor
+            }
+            return fallbackSession
+        }
+    }
+
+    private func activityPayloadString(
+        _ payload: [String: AnyJSON],
+        keys: [String]
+    ) -> String? {
+        for key in keys {
+            guard let value = payload[key] else { continue }
+            if let normalized = normalizedActivityPayloadValue(value) {
+                return normalized
+            }
+        }
+        return nil
+    }
+
+    private func normalizedActivityPayloadValue(_ value: AnyJSON) -> String? {
+        switch value {
+        case let .string(string):
+            return normalizedSupabaseText(string)
+        case let .integer(number):
+            return String(number)
+        case let .double(number):
+            return String(number)
+        case let .bool(flag):
+            return flag ? "true" : "false"
+        default:
+            return nil
+        }
+    }
+
+    private func activityPropertyName(for propertyID: UUID) -> String? {
+        normalizedSupabaseText(
+            properties.first(where: { $0.id == propertyID })?.name
+                ?? allProperties.first(where: { $0.id == propertyID })?.name
         )
     }
 
@@ -11069,6 +11385,57 @@ final class AppState: ObservableObject {
         memberAccessScopeSetOverride = setScope
         propertyAccessGrantOverride = grant
         propertyAccessRevokeOverride = revoke
+    }
+
+    func _debugSetActivityFeedFetchOverrideForTests(
+        _ override: ActivityFeedFetchOverride?
+    ) {
+        activityFeedFetchOverride = override
+    }
+
+    func _debugMakeActivityFeedItemForTests(
+        event: DebugActivityFeedEventInput,
+        propertyID: UUID? = nil,
+        propertyName: String? = nil,
+        sessionTitle: String? = nil
+    ) -> ActivityFeedItem {
+        if let propertyID, let propertyName {
+            let property = Property(
+                id: propertyID,
+                orgId: event.orgID,
+                folderId: nil,
+                clientName: nil,
+                name: propertyName,
+                address: "",
+                street: "",
+                city: "",
+                state: "",
+                zip: "",
+                createdAt: event.createdAt,
+                updatedAt: event.createdAt
+            )
+            if !allProperties.contains(where: { $0.id == propertyID }) {
+                allProperties.append(property)
+            }
+        }
+
+        return makeActivityFeedItem(
+            record: SupabaseSessionEventRecord(
+                id: event.id,
+                orgID: event.orgID,
+                sessionID: event.sessionID,
+                eventType: event.eventType,
+                payload: event.payload,
+                createdAt: supabaseTimestampString(event.createdAt)
+            ),
+            sessionLookup: propertyID.map {
+                SupabaseActivitySessionLookupRecord(
+                    id: event.sessionID,
+                    propertyID: $0,
+                    title: sessionTitle
+                )
+            }
+        )
     }
 
     func _debugDiscoverPendingSupabaseMediaBackfillCandidates() -> [PendingSupabaseMediaBackfillCandidate] {
