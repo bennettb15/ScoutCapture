@@ -1098,21 +1098,6 @@ struct SessionHubView: View {
         }()
         let locallyLocked = appState.locallyLockedPropertyIDs.contains(property.id)
         let showLock = isOccupiedByOther || isLockedByOther || locallyLocked
-        let _ = print(
-            "[LockDisplayDiag] property_row " +
-            "propertyID=\(property.id.uuidString) " +
-            "locallyLocked=\(locallyLocked) " +
-            "occupancy=\(appState.debugPropertyOccupancyDescription(propertyID: property.id)) " +
-            "canonicalSessionID=\(canonicalLockSession?.id.uuidString ?? "nil") " +
-            "canonicalSessionStatus=\(canonicalLockSession?.status.rawValue ?? "nil") " +
-            "canonicalSessionCoordination=\(appState.debugSessionCoordinationDescription(sessionID: canonicalLockSession?.id)) " +
-            "draftSessionID=\(draftLockSession?.id.uuidString ?? "nil") " +
-            "draftSessionStatus=\(draftLockSession?.status.rawValue ?? "nil") " +
-            "draftSessionCoordination=\(appState.debugSessionCoordinationDescription(sessionID: draftLockSession?.id)) " +
-            "isOccupiedByOther=\(isOccupiedByOther) " +
-            "isLockedByOther=\(isLockedByOther) " +
-            "showLock=\(showLock)"
-        )
         HStack(alignment: .top, spacing: 10) {
             VStack(alignment: .leading, spacing: 4) {
                 HStack(alignment: .firstTextBaseline, spacing: 6) {
@@ -2302,27 +2287,13 @@ struct SessionHubView: View {
         private func save() {
             guard explicitSaveRequested else {
                 assertionFailure("PropertyAccessManagementSheet.save() called without explicit Save tap")
-                errorMessage = "Save was blocked because it was not explicitly requested."
-                print(
-                    "[PropertyAccessSaveUI] phase=save_blocked " +
-                    "targetUserID=\(member.id.uuidString) " +
-                    "orgID=\(organizationID.uuidString)"
-                )
+                errorMessage = "Unable to save property access changes."
                 return
             }
             errorMessage = nil
             isSaving = true
             let requestedScope = accessMode.rawValue
             let selectedPropertyIDs = grantedPropertyIDs
-            let selectedPropertyIDStrings = selectedPropertyIDs.map(\.uuidString).sorted()
-
-            print(
-                "[PropertyAccessSaveUI] phase=save_tapped " +
-                "targetUserID=\(member.id.uuidString) " +
-                "orgID=\(organizationID.uuidString) " +
-                "accessScope=\(requestedScope) " +
-                "grantedPropertyIDs=\(selectedPropertyIDStrings)"
-            )
 
             Task {
                 do {
@@ -2333,11 +2304,6 @@ struct SessionHubView: View {
                         grantedPropertyIDs: selectedPropertyIDs
                     )
                     await MainActor.run {
-                        print(
-                            "[PropertyAccessSaveUI] phase=save_success " +
-                            "targetUserID=\(member.id.uuidString) " +
-                            "orgID=\(organizationID.uuidString)"
-                        )
                         explicitSaveRequested = false
                         isSaving = false
                         onClose()

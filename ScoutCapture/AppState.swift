@@ -2361,14 +2361,6 @@ final class AppState: ObservableObject {
             throw PropertyAccessPersistenceError.missingAuthenticatedUser
         }
 
-        print(
-            "[PropertyAccessSave] phase=set_scope_start " +
-            "targetUserID=\(userID.uuidString) " +
-            "orgID=\(orgID.uuidString) " +
-            "accessScope=\(normalizedScope) " +
-            "actorUserID=\(actorID.uuidString)"
-        )
-
         let payload = SupabaseMembershipAccessScopeUpdatePayload(
             accessScope: normalizedScope,
             updatedBy: actorID
@@ -2429,12 +2421,6 @@ final class AppState: ObservableObject {
             )
         }
 
-        print(
-            "[PropertyAccessSave] phase=set_scope_success " +
-            "targetUserID=\(userID.uuidString) " +
-            "orgID=\(orgID.uuidString) " +
-            "accessScope=\(normalizedScope)"
-        )
     }
 
     func grantPropertyAccess(userID: UUID, orgID: UUID, propertyID: UUID) async throws {
@@ -2448,14 +2434,6 @@ final class AppState: ObservableObject {
               let actorID = authenticatedSupabaseUser?.id else {
             throw PropertyAccessPersistenceError.missingAuthenticatedUser
         }
-
-        print(
-            "[PropertyAccessSave] phase=grant_start " +
-            "targetUserID=\(userID.uuidString) " +
-            "orgID=\(orgID.uuidString) " +
-            "propertyID=\(propertyID.uuidString) " +
-            "actorUserID=\(actorID.uuidString)"
-        )
 
         let existingRows: [SupabasePropertyAccessGrantLookupRecord]
         do {
@@ -2480,39 +2458,12 @@ final class AppState: ObservableObject {
 
         let activeExistingRow = existingRows.first(where: { $0.deletedAt == nil })
         let deletedExistingRows = existingRows.filter { $0.deletedAt != nil }
-        let deletedExistingRowIDs = deletedExistingRows.map(\.id.uuidString).sorted()
-
-        print(
-            "[PropertyAccessSave] phase=grant_lookup_result " +
-            "targetUserID=\(userID.uuidString) " +
-            "orgID=\(orgID.uuidString) " +
-            "propertyID=\(propertyID.uuidString) " +
-            "existingRowCount=\(existingRows.count) " +
-            "hasActiveRow=\(activeExistingRow != nil) " +
-            "hasDeletedRow=\(!deletedExistingRows.isEmpty) " +
-            "deletedRowIDs=\(deletedExistingRowIDs)"
-        )
 
         if activeExistingRow != nil {
-            print(
-                "[PropertyAccessSave] phase=grant_skip_existing " +
-                "targetUserID=\(userID.uuidString) " +
-                "orgID=\(orgID.uuidString) " +
-                "propertyID=\(propertyID.uuidString)"
-            )
             return
         }
 
-        if let deletedExistingRow = deletedExistingRows.max(by: { ($0.createdAt ?? "") < ($1.createdAt ?? "") }) {
-            print(
-                "[PropertyAccessSave] phase=grant_reactivation_bypassed " +
-                "targetUserID=\(userID.uuidString) " +
-                "orgID=\(orgID.uuidString) " +
-                "propertyID=\(propertyID.uuidString) " +
-                "selectedDeletedGrantID=\(deletedExistingRow.id.uuidString) " +
-                "reason=multiple_or_historical_deleted_rows_inserting_fresh_active_row"
-            )
-        }
+        _ = deletedExistingRows.max(by: { ($0.createdAt ?? "") < ($1.createdAt ?? "") })
 
         let newGrantID = UUID()
         let payload = SupabasePropertyAccessGrantInsertPayload(
@@ -2541,28 +2492,12 @@ final class AppState: ObservableObject {
         }
 
         do {
-            let insertedRows = try await client
+            _ = try await client
                 .from("property_access_grants")
                 .select("id, org_id, property_id, user_id, deleted_at, created_at")
                 .eq("id", value: newGrantID.uuidString.lowercased())
                 .execute()
                 .value as [SupabasePropertyAccessGrantLookupRecord]
-
-            if let insertedRow = insertedRows.first {
-                print(
-                    "[PropertyAccessSave] phase=grant_insert_verify_row " +
-                    "id=\(insertedRow.id.uuidString) " +
-                    "orgID=\(insertedRow.orgID.uuidString) " +
-                    "propertyID=\(insertedRow.propertyID.uuidString) " +
-                    "userID=\(insertedRow.userID.uuidString) " +
-                    "deletedAt=\(insertedRow.deletedAt ?? "nil")"
-                )
-            } else {
-                print(
-                    "[PropertyAccessSave] phase=grant_insert_verify_row_missing " +
-                    "newGrantID=\(newGrantID.uuidString)"
-                )
-            }
         } catch {
             print(
                 "[PropertyAccessSave] phase=grant_insert_verify_error " +
@@ -2608,12 +2543,6 @@ final class AppState: ObservableObject {
             throw PropertyAccessPersistenceError.grantVerificationFailed(propertyID: propertyID)
         }
 
-        print(
-            "[PropertyAccessSave] phase=grant_success " +
-            "targetUserID=\(userID.uuidString) " +
-            "orgID=\(orgID.uuidString) " +
-            "propertyID=\(propertyID.uuidString)"
-        )
     }
 
     func revokePropertyAccess(userID: UUID, orgID: UUID, propertyID: UUID) async throws {
@@ -2626,13 +2555,6 @@ final class AppState: ObservableObject {
         guard let client = supabaseClient else {
             throw PropertyAccessPersistenceError.missingAuthenticatedUser
         }
-
-        print(
-            "[PropertyAccessSave] phase=revoke_start " +
-            "targetUserID=\(userID.uuidString) " +
-            "orgID=\(orgID.uuidString) " +
-            "propertyID=\(propertyID.uuidString)"
-        )
 
         let payload = ["deleted_at": Date().ISO8601Format()]
         try await client
@@ -2664,12 +2586,6 @@ final class AppState: ObservableObject {
             throw PropertyAccessPersistenceError.revokeVerificationFailed(propertyID: propertyID)
         }
 
-        print(
-            "[PropertyAccessSave] phase=revoke_success " +
-            "targetUserID=\(userID.uuidString) " +
-            "orgID=\(orgID.uuidString) " +
-            "propertyID=\(propertyID.uuidString)"
-        )
     }
 
     func savePropertyAccessConfiguration(
@@ -2682,21 +2598,6 @@ final class AppState: ObservableObject {
         let existingGrants = try await fetchPropertyAccessGrants(for: userID, orgID: orgID)
         let grantsToCreate = grantedPropertyIDs.subtracting(existingGrants)
         let grantsToRevoke = existingGrants.subtracting(grantedPropertyIDs)
-        let grantedPropertyIDStrings = grantedPropertyIDs.map(\.uuidString).sorted()
-        let existingGrantPropertyIDStrings = existingGrants.map(\.uuidString).sorted()
-        let grantCreationPropertyIDStrings = grantsToCreate.map(\.uuidString).sorted()
-        let grantRevocationPropertyIDStrings = grantsToRevoke.map(\.uuidString).sorted()
-
-        print(
-            "[PropertyAccessSave] phase=save_start " +
-            "targetUserID=\(userID.uuidString) " +
-            "orgID=\(orgID.uuidString) " +
-            "accessScope=\(normalizedScope) " +
-            "grantedPropertyIDs=\(grantedPropertyIDStrings) " +
-            "existingGrantPropertyIDs=\(existingGrantPropertyIDStrings) " +
-            "grantsToCreate=\(grantCreationPropertyIDStrings) " +
-            "grantsToRevoke=\(grantRevocationPropertyIDStrings)"
-        )
 
         try await setMemberAccessScope(
             userID: userID,
@@ -2719,15 +2620,6 @@ final class AppState: ObservableObject {
                 propertyID: propertyID
             )
         }
-
-        print(
-            "[PropertyAccessSave] phase=save_success " +
-            "targetUserID=\(userID.uuidString) " +
-            "orgID=\(orgID.uuidString) " +
-            "accessScope=\(normalizedScope) " +
-            "createdGrantPropertyIDs=\(grantCreationPropertyIDStrings) " +
-            "revokedGrantPropertyIDs=\(grantRevocationPropertyIDStrings)"
-        )
 
         try await refreshOrganizationContext(for: authenticatedSupabaseUser?.id)
         await refreshActiveOrganizationMembers()
@@ -5405,8 +5297,12 @@ final class AppState: ObservableObject {
         }
         for propertyID in propertyIDs {
             propertySessionOccupancyByPropertyID.removeValue(forKey: propertyID)
-            guard let session = canonicalLockSession(for: propertyID) else { continue }
-            sessionCoordinationStateBySessionID.removeValue(forKey: session.id)
+            let cachedSessions = allSessionIndexByProperty[propertyID] ?? []
+            let fetchedSessions = (try? localStore.fetchSessions(propertyID: propertyID)) ?? []
+            let sessionIDs = Set(cachedSessions.map(\.id)).union(fetchedSessions.map(\.id))
+            for sessionID in sessionIDs {
+                sessionCoordinationStateBySessionID.removeValue(forKey: sessionID)
+            }
         }
     }
 
@@ -5685,14 +5581,6 @@ final class AppState: ObservableObject {
             "lockedByDeviceID=\(remoteRecord?.lockedByDeviceID ?? "nil") " +
             "lockedAt=\(remoteRecord?.lockedAt ?? "nil")"
         )
-        if remoteRecord == nil {
-            print("[SessionCoordinationEval] DEBUG: remoteRecord is NIL")
-        } else if remoteRecord?.lockedByUserID == nil && normalizedSupabaseText(remoteRecord?.lockedByDeviceID) == nil {
-            print("[SessionCoordinationEval] DEBUG: remoteRecord has NO LOCK")
-        } else {
-            print("[SessionCoordinationEval] DEBUG: remoteRecord HAS LOCK")
-        }
-
         if let propertyOccupancy,
            propertyOccupancy.occupiedByUserID != nil || normalizedSupabaseText(propertyOccupancy.occupiedByDeviceID) != nil {
             let isOwnedByCurrentActor =
@@ -11524,6 +11412,11 @@ final class AppState: ObservableObject {
             authorizedPropertyIDs: authorizedPropertyIDs,
             organizationID: organizationID
         )
+    }
+
+    @MainActor
+    func _debugClearLockDisplayStateForTests(propertyIDs: [UUID]) {
+        clearLockDisplayState(propertyIDs: propertyIDs)
     }
 #endif
 
