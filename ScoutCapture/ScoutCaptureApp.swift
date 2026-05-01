@@ -2098,50 +2098,94 @@ struct SessionHubView: View {
 
     private struct ActivityFeedView: View {
         @EnvironmentObject private var appState: AppState
+        @Environment(\.dismiss) private var dismiss
+        @Environment(\.colorScheme) private var colorScheme
         let orgID: UUID
 
         @State private var items: [AppState.ActivityFeedItem] = []
         @State private var isLoading: Bool = true
         @State private var errorMessage: String?
 
+        private var buttonFill: Color {
+            colorScheme == .light ? Color.white.opacity(0.90) : Color.black.opacity(0.65)
+        }
+
+        private var buttonStroke: Color {
+            colorScheme == .light ? Color.black.opacity(0.14) : Color.white.opacity(0.28)
+        }
+
+        private var buttonLabel: Color {
+            colorScheme == .light ? Color.black.opacity(0.88) : .white
+        }
+
         var body: some View {
-            List {
-                if isLoading {
-                    HStack {
-                        Spacer()
-                        ProgressView()
-                        Spacer()
+            VStack(spacing: 0) {
+                HStack {
+                    Text("Activity")
+                        .font(.system(size: 28, weight: .bold))
+                        .foregroundStyle(.primary)
+
+                    Spacer(minLength: 0)
+
+                    Button("Done") {
+                        dismiss()
                     }
-                    .listRowSeparator(.hidden)
-                } else if let errorMessage, !errorMessage.isEmpty {
-                    Text(errorMessage)
-                        .foregroundStyle(.red)
-                } else if items.isEmpty {
-                    Text("No activity yet")
-                        .foregroundStyle(.secondary)
-                } else {
-                    ForEach(items) { item in
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text(item.displayTitle)
-                                .font(.system(size: 15, weight: .semibold))
-                            if !item.displaySubtitle.isEmpty {
-                                Text(item.displaySubtitle)
-                                    .font(.system(size: 13, weight: .medium))
-                                    .foregroundStyle(.secondary)
-                            }
-                            Text(item.createdAt.formatted(date: .abbreviated, time: .shortened))
-                                .font(.system(size: 12, weight: .medium))
-                                .foregroundStyle(.tertiary)
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundStyle(buttonLabel)
+                    .padding(.horizontal, 14)
+                    .frame(height: 36)
+                    .background(buttonFill)
+                    .clipShape(Capsule())
+                    .overlay(
+                        Capsule()
+                            .stroke(buttonStroke, lineWidth: 1)
+                    )
+                    .buttonStyle(.plain)
+                }
+                .padding(.horizontal, 16)
+                .padding(.top, 12)
+                .padding(.bottom, 2)
+
+                List {
+                    if isLoading {
+                        HStack {
+                            Spacer()
+                            ProgressView()
+                            Spacer()
                         }
-                        .padding(.vertical, 4)
+                        .listRowSeparator(.hidden)
+                    } else if let errorMessage, !errorMessage.isEmpty {
+                        Text(errorMessage)
+                            .foregroundStyle(.red)
+                    } else if items.isEmpty {
+                        Text("No activity yet")
+                            .foregroundStyle(.secondary)
+                    } else {
+                        ForEach(items) { item in
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text(item.displayTitle)
+                                    .font(.system(size: 15, weight: .semibold))
+                                if !item.displaySubtitle.isEmpty {
+                                    Text(item.displaySubtitle)
+                                        .font(.system(size: 13, weight: .medium))
+                                        .foregroundStyle(.secondary)
+                                }
+                                Text(item.createdAt.formatted(date: .abbreviated, time: .shortened))
+                                    .font(.system(size: 12, weight: .medium))
+                                    .foregroundStyle(.tertiary)
+                            }
+                            .padding(.vertical, 4)
+                        }
                     }
                 }
+                .listStyle(.plain)
+                .refreshable {
+                    await load()
+                }
             }
-            .navigationTitle("Activity")
+            .navigationBarBackButtonHidden(true)
+            .toolbar(.hidden, for: .navigationBar)
             .task {
-                await load()
-            }
-            .refreshable {
                 await load()
             }
         }

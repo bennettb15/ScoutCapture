@@ -51,6 +51,7 @@ final class Phase2C13AActivityFeedTests: XCTestCase {
                 id: UUID(),
                 orgID: UUID(),
                 sessionID: UUID(),
+                actorUserID: nil,
                 eventType: "session.started",
                 payload: [:],
                 createdAt: Date(timeIntervalSinceReferenceDate: 100)
@@ -72,6 +73,7 @@ final class Phase2C13AActivityFeedTests: XCTestCase {
                 id: UUID(),
                 orgID: UUID(),
                 sessionID: UUID(),
+                actorUserID: nil,
                 eventType: "member.revoked",
                 payload: [
                     "actor_name": "Brian",
@@ -82,7 +84,7 @@ final class Phase2C13AActivityFeedTests: XCTestCase {
         )
 
         XCTAssertEqual(item.displayTitle, "Member revoked")
-        XCTAssertEqual(item.displaySubtitle, "Brian revoked john@example.com")
+        XCTAssertEqual(item.displaySubtitle, "Brian revoked access for john@example.com")
     }
 
     func testUnknownEventFallsBackToRawEventTypeAndSessionIdentifier() {
@@ -95,6 +97,7 @@ final class Phase2C13AActivityFeedTests: XCTestCase {
                 id: UUID(),
                 orgID: UUID(),
                 sessionID: sessionID,
+                actorUserID: nil,
                 eventType: "custom.audit.event",
                 payload: [:],
                 createdAt: Date(timeIntervalSinceReferenceDate: 300)
@@ -145,5 +148,88 @@ final class Phase2C13AActivityFeedTests: XCTestCase {
         XCTAssertEqual(capturedLimit, 25)
         XCTAssertEqual(items.count, 1)
         XCTAssertEqual(items.first?.displayTitle, "Session started")
+    }
+
+    func testPropertyAccessGrantedUsesActorPropertyAndTargetContext() async {
+        let fixture = try! makeFixture()
+        defer { tearDownFixture(fixture) }
+
+        let actorUserID = UUID()
+        let targetUserID = UUID()
+        let orgID = UUID()
+        let propertyID = UUID()
+
+        await fixture.appState._debugSetActiveOrganizationMembersForTests([
+            OrganizationAccessMember(
+                id: actorUserID,
+                email: "brian@example.com",
+                fullName: "Brian",
+                role: "owner",
+                accessScope: "org"
+            ),
+            OrganizationAccessMember(
+                id: targetUserID,
+                email: "target@example.com",
+                fullName: nil,
+                role: "viewer",
+                accessScope: "property"
+            )
+        ])
+
+        let item = fixture.appState._debugMakeActivityFeedItemForTests(
+            event: AppState.DebugActivityFeedEventInput(
+                id: UUID(),
+                orgID: orgID,
+                sessionID: nil,
+                actorUserID: actorUserID,
+                eventType: "property.access.granted",
+                payload: [
+                    "target_user_id": .string(targetUserID.uuidString.lowercased()),
+                    "property_name": .string("ALDI")
+                ],
+                createdAt: Date(timeIntervalSinceReferenceDate: 500)
+            ),
+            propertyID: propertyID,
+            propertyName: "ALDI"
+        )
+
+        XCTAssertEqual(item.displayTitle, "Property access granted")
+        XCTAssertEqual(item.displaySubtitle, "Brian granted ALDI access to target@example.com")
+    }
+
+    func testMemberInvitedUsesActorRoleAndTargetEmailContext() async {
+        let fixture = try! makeFixture()
+        defer { tearDownFixture(fixture) }
+
+        let actorUserID = UUID()
+        let orgID = UUID()
+
+        await fixture.appState._debugSetActiveOrganizationMembersForTests([
+            OrganizationAccessMember(
+                id: actorUserID,
+                email: "brian@example.com",
+                fullName: "Brian",
+                role: "owner",
+                accessScope: "org"
+            )
+        ])
+
+        let item = fixture.appState._debugMakeActivityFeedItemForTests(
+            event: AppState.DebugActivityFeedEventInput(
+                id: UUID(),
+                orgID: orgID,
+                sessionID: nil,
+                actorUserID: actorUserID,
+                eventType: "member.invited",
+                payload: [
+                    "target_email": .string("invitee@example.com"),
+                    "role": .string("viewer")
+                ],
+                createdAt: Date(timeIntervalSinceReferenceDate: 600)
+            )
+        )
+
+        XCTAssertEqual(item.displayTitle, "Member invited")
+        XCTAssertEqual(item.displaySubtitle, "Brian invited invitee@example.com as Viewer")
     }
 }

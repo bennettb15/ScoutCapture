@@ -225,6 +225,13 @@ final class AppState: ObservableObject {
         UUID?,
         Int
     ) async throws -> [ActivityFeedItem]
+    typealias AuditEventEmitOverride = (
+        UUID,
+        String,
+        UUID?,
+        UUID?,
+        [String: AnyJSON]
+    ) async throws -> Void
     private typealias SessionCoordinationFetchOverride = (
         UUID,
         UUID,
@@ -327,7 +334,7 @@ final class AppState: ObservableObject {
     struct ActivityFeedItem: Equatable, Identifiable {
         let id: UUID
         let orgID: UUID
-        let sessionID: UUID
+        let sessionID: UUID?
         let eventType: String
         let payload: [String: AnyJSON]
         let createdAt: Date
@@ -381,7 +388,8 @@ final class AppState: ObservableObject {
     struct DebugActivityFeedEventInput {
         let id: UUID
         let orgID: UUID
-        let sessionID: UUID
+        let sessionID: UUID?
+        let actorUserID: UUID?
         let eventType: String
         let payload: [String: AnyJSON]
         let createdAt: Date
@@ -541,7 +549,9 @@ final class AppState: ObservableObject {
     private struct SupabaseSessionEventRecord: Decodable {
         let id: UUID
         let orgID: UUID
-        let sessionID: UUID
+        let sessionID: UUID?
+        let propertyID: UUID?
+        let actorUserID: UUID?
         let eventType: String
         let payload: [String: AnyJSON]
         let createdAt: String
@@ -550,9 +560,27 @@ final class AppState: ObservableObject {
             case id
             case orgID = "org_id"
             case sessionID = "session_id"
+            case propertyID = "property_id"
+            case actorUserID = "actor_user_id"
             case eventType = "event_type"
             case payload
             case createdAt = "created_at"
+        }
+    }
+
+    private struct SupabaseSessionEventInsertPayload: Encodable {
+        let orgID: UUID
+        let sessionID: UUID?
+        let propertyID: UUID?
+        let eventType: String
+        let payload: [String: AnyJSON]
+
+        enum CodingKeys: String, CodingKey {
+            case orgID = "org_id"
+            case sessionID = "session_id"
+            case propertyID = "property_id"
+            case eventType = "event_type"
+            case payload
         }
     }
 
@@ -1222,6 +1250,7 @@ final class AppState: ObservableObject {
 #if DEBUG
     private var syncDeltaFetchOverride: SyncDeltaFetchOverride?
     private var activityFeedFetchOverride: ActivityFeedFetchOverride?
+    private var auditEventEmitOverride: AuditEventEmitOverride?
     private var sessionCoordinationFetchOverride: SessionCoordinationFetchOverride?
     private var propertyAccessGrantsFetchOverride: PropertyAccessGrantsFetchOverride?
     private var memberAccessScopeSetOverride: MemberAccessScopeSetOverride?
@@ -2339,6 +2368,15 @@ final class AppState: ObservableObject {
 
         _ = try await (try client.rpc("create_org_invitation", params: params)).execute()
 
+        await emitAuditEvent(
+            orgID: orgID,
+            eventType: "member.invited",
+            payload: [
+                "target_email": normalizedEmail,
+                "role": normalizedRole
+            ]
+        )
+
         await refreshPendingOrganizationInvitations()
         await refreshActiveOrganizationMembers()
         try await refreshOrganizationContext(for: authenticatedSupabaseUser?.id)
@@ -2353,7 +2391,18 @@ final class AppState: ObservableObject {
         guard let client = supabaseClient else { return }
 
         let params = AcceptOrgInvitationRPCPayload(targetInvitationID: invitationID)
-        _ = try await (try client.rpc("accept_org_invitation", params: params)).execute()
+        let acceptedOrgID = try await (try client.rpc("accept_org_invitation", params: params)).execute().value as UUID
+
+        var payload: [String: Any] = [:]
+        if let authenticatedEmail = authenticatedSupabaseUser?.email?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !authenticatedEmail.isEmpty {
+            payload["target_email"] = authenticatedEmail
+        }
+        await emitAuditEvent(
+            orgID: acceptedOrgID,
+            eventType: "member.accepted",
+            payload: payload
+        )
 
         await refreshPendingOrganizationInvitations()
         try await refreshOrganizationContext(for: authenticatedSupabaseUser?.id)
@@ -2372,6 +2421,14 @@ final class AppState: ObservableObject {
             targetInvitationID: nil
         )
         _ = try await (try client.rpc("revoke_org_access", params: params)).execute()
+
+        await emitAuditEvent(
+            orgID: orgID,
+            eventType: "member.revoked",
+            payload: [
+                "target_user_id": userID.uuidString.lowercased()
+            ]
+        )
 
         await refreshPendingOrganizationInvitations()
         try await refreshOrganizationContext(for: authenticatedSupabaseUser?.id)
@@ -2419,7 +2476,7 @@ final class AppState: ObservableObject {
 
         var eventQuery = client
             .from("session_events")
-            .select("id, org_id, session_id, event_type, payload, created_at")
+            .select("id, org_id, session_id, property_id, actor_user_id, event_type, payload, created_at")
             .eq("org_id", value: orgValue)
 
         if let sessionIDFilterValues {
@@ -2432,7 +2489,7 @@ final class AppState: ObservableObject {
             .execute()
             .value as [SupabaseSessionEventRecord]
 
-        let eventSessionIDs = Array(Set(eventRecords.map(\.sessionID)))
+        let eventSessionIDs = Array(Set(eventRecords.compactMap(\.sessionID)))
         let sessionLookupByID = try await fetchActivitySessionLookupByID(
             sessionIDs: eventSessionIDs,
             client: client
@@ -2441,7 +2498,7 @@ final class AppState: ObservableObject {
         return eventRecords.map { record in
             makeActivityFeedItem(
                 record: record,
-                sessionLookup: sessionLookupByID[record.sessionID]
+                sessionLookup: record.sessionID.flatMap { sessionLookupByID[$0] }
             )
         }
     }
@@ -2469,6 +2526,44 @@ final class AppState: ObservableObject {
         )
     }
 
+    func emitAuditEvent(
+        orgID: UUID,
+        eventType: String,
+        sessionID: UUID? = nil,
+        propertyID: UUID? = nil,
+        payload: [String: Any]
+    ) async {
+        let normalizedPayload = normalizedAuditEventPayload(payload)
+#if DEBUG
+        if let auditEventEmitOverride {
+            do {
+                try await auditEventEmitOverride(orgID, eventType, sessionID, propertyID, normalizedPayload)
+            } catch {
+                print("[AuditEvent] insert_failed eventType=\(eventType) error=\(error.localizedDescription)")
+            }
+            return
+        }
+#endif
+        guard let client = supabaseClient else { return }
+
+        let insertPayload = SupabaseSessionEventInsertPayload(
+            orgID: orgID,
+            sessionID: sessionID,
+            propertyID: propertyID,
+            eventType: eventType,
+            payload: normalizedPayload
+        )
+
+        do {
+            try await client
+                .from("session_events")
+                .insert(insertPayload, returning: .minimal)
+                .execute()
+        } catch {
+            print("[AuditEvent] insert_failed eventType=\(eventType) error=\(error.localizedDescription)")
+        }
+    }
+
     private func fetchActivitySessionLookupByID(
         sessionIDs: [UUID],
         client: SupabaseClient
@@ -2491,10 +2586,12 @@ final class AppState: ObservableObject {
     ) -> ActivityFeedItem {
         let createdAt = parseSupabaseDateString(record.createdAt) ?? Date()
         let propertyName = sessionLookup.flatMap { activityPropertyName(for: $0.propertyID) }
+            ?? record.propertyID.flatMap { activityPropertyName(for: $0) }
         let sessionTitle = normalizedSupabaseText(sessionLookup?.title)
         let title = activityFeedTitle(for: record.eventType)
         let subtitle = activityFeedSubtitle(
             eventType: record.eventType,
+            actorUserID: record.actorUserID,
             payload: record.payload,
             propertyName: propertyName,
             sessionTitle: sessionTitle,
@@ -2540,18 +2637,121 @@ final class AppState: ObservableObject {
 
     private func activityFeedSubtitle(
         eventType: String,
+        actorUserID: UUID?,
         payload: [String: AnyJSON],
         propertyName: String?,
         sessionTitle: String?,
-        sessionID: UUID
+        sessionID: UUID?
     ) -> String {
-        let actor = activityPayloadString(
+        let actor = activityActorDisplayName(actorUserID: actorUserID, payload: payload)
+        let subject = activityTargetDisplayName(payload: payload)
+        let payloadPropertyName = activityPayloadString(
+            payload,
+            keys: ["property_name", "propertyName", "property", "property_title", "propertyTitle"]
+        )
+        let resolvedPropertyName = payloadPropertyName ?? propertyName
+        let resolvedSessionName = activityPayloadString(
+            payload,
+            keys: ["session_title", "sessionTitle", "title"]
+        ) ?? sessionTitle
+        let fallbackSession = sessionID.map { "Session \($0.uuidString.prefix(8))" }
+        let fallbackScope = resolvedPropertyName ?? resolvedSessionName ?? fallbackSession ?? "Organization activity"
+        let resolvedRole = activityRoleDisplayName(payload: payload)
+
+        switch eventType.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "session.started":
+            return resolvedPropertyName.map { "For \($0)" } ?? (resolvedSessionName ?? fallbackSession ?? "Organization activity")
+        case "session.locked":
+            if !actor.isEmpty, let resolvedPropertyName {
+                return "\(actor) locked \(resolvedPropertyName)"
+            }
+            return fallbackScope
+        case "session.released":
+            if !actor.isEmpty, let resolvedPropertyName {
+                return "\(actor) released \(resolvedPropertyName)"
+            }
+            return fallbackScope
+        case "session.exported":
+            return resolvedPropertyName.map { "For \($0)" } ?? (resolvedSessionName ?? fallbackSession ?? "Organization activity")
+        case "member.invited":
+            if let subject, let resolvedRole {
+                return "\(actor) invited \(subject) as \(resolvedRole)"
+            }
+            if let subject {
+                return "\(actor) invited \(subject)"
+            }
+            if let resolvedRole {
+                return "\(actor) invited a member as \(resolvedRole)"
+            }
+            return "\(actor) invited a member"
+        case "member.accepted":
+            if let subject {
+                return "\(subject) accepted the invite"
+            }
+            return "\(actor) accepted the invite"
+        case "member.revoked":
+            if let subject {
+                return "\(actor) revoked access for \(subject)"
+            }
+            return "\(actor) revoked member access"
+        case "property.access.granted":
+            if let resolvedPropertyName, let subject {
+                return "\(actor) granted \(resolvedPropertyName) access to \(subject)"
+            }
+            if let resolvedPropertyName {
+                return "\(actor) granted access to \(resolvedPropertyName)"
+            }
+            if let subject {
+                return "\(actor) granted property access to \(subject)"
+            }
+            return "\(actor) granted property access"
+        case "property.access.revoked":
+            if let resolvedPropertyName, let subject {
+                return "\(actor) revoked \(resolvedPropertyName) access from \(subject)"
+            }
+            if let resolvedPropertyName {
+                return "\(actor) revoked access from \(resolvedPropertyName)"
+            }
+            if let subject {
+                return "\(actor) revoked property access from \(subject)"
+            }
+            return "\(actor) revoked property access"
+        default:
+            if let resolvedPropertyName {
+                return resolvedPropertyName
+            }
+            if let resolvedSessionName {
+                return resolvedSessionName
+            }
+            if !actor.isEmpty {
+                return actor
+            }
+            return fallbackScope
+        }
+    }
+
+    private func activityActorDisplayName(
+        actorUserID: UUID?,
+        payload: [String: AnyJSON]
+    ) -> String {
+        if let payloadActor = activityPayloadString(
             payload,
             keys: ["actor_name", "actorName", "actor_email", "actorEmail", "actor"]
-        )
-        let subject = activityPayloadString(
+        ) {
+            return payloadActor
+        }
+        if let resolvedActor = activityUserDisplayName(for: actorUserID) {
+            return resolvedActor
+        }
+        return "Someone"
+    }
+
+    private func activityTargetDisplayName(payload: [String: AnyJSON]) -> String? {
+        if let target = activityPayloadString(
             payload,
             keys: [
+                "target_email",
+                "targetEmail",
                 "member_name",
                 "memberName",
                 "member_email",
@@ -2563,70 +2763,23 @@ final class AppState: ObservableObject {
                 "target_user_email",
                 "targetUserEmail"
             ]
-        )
-        let payloadPropertyName = activityPayloadString(
-            payload,
-            keys: ["property_name", "propertyName", "property", "property_title", "propertyTitle"]
-        )
-        let resolvedPropertyName = payloadPropertyName ?? propertyName
-        let resolvedSessionName = activityPayloadString(
-            payload,
-            keys: ["session_title", "sessionTitle", "title"]
-        ) ?? sessionTitle
-        let fallbackSession = "Session \(sessionID.uuidString.prefix(8))"
-
-        switch eventType.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
-        case "session.started":
-            return resolvedPropertyName.map { "For \($0)" } ?? (resolvedSessionName ?? fallbackSession)
-        case "session.locked":
-            if let actor, let resolvedPropertyName {
-                return "\(actor) locked \(resolvedPropertyName)"
-            }
-            return resolvedPropertyName ?? resolvedSessionName ?? fallbackSession
-        case "session.released":
-            if let actor, let resolvedPropertyName {
-                return "\(actor) released \(resolvedPropertyName)"
-            }
-            return resolvedPropertyName ?? resolvedSessionName ?? fallbackSession
-        case "session.exported":
-            return resolvedPropertyName.map { "For \($0)" } ?? (resolvedSessionName ?? fallbackSession)
-        case "member.invited":
-            if let actor, let subject {
-                return "\(actor) invited \(subject)"
-            }
-            return subject ?? "Organization access change"
-        case "member.accepted":
-            if let subject {
-                return "\(subject) accepted the invite"
-            }
-            return "Organization access change"
-        case "member.revoked":
-            if let actor, let subject {
-                return "\(actor) revoked \(subject)"
-            }
-            return subject ?? "Organization access revoked"
-        case "property.access.granted":
-            if let actor, let resolvedPropertyName {
-                return "\(actor) granted access to \(resolvedPropertyName)"
-            }
-            return resolvedPropertyName ?? (subject.map { "For \($0)" } ?? "Property access change")
-        case "property.access.revoked":
-            if let actor, let resolvedPropertyName {
-                return "\(actor) revoked access to \(resolvedPropertyName)"
-            }
-            return resolvedPropertyName ?? (subject.map { "For \($0)" } ?? "Property access change")
-        default:
-            if let resolvedPropertyName {
-                return resolvedPropertyName
-            }
-            if let resolvedSessionName {
-                return resolvedSessionName
-            }
-            if let actor {
-                return actor
-            }
-            return fallbackSession
+        ) {
+            return target
         }
+
+        if let targetUserID = activityPayloadUUID(
+            payload,
+            keys: ["target_user_id", "targetUserID", "targetUserId"]
+        ) {
+            return activityUserDisplayName(for: targetUserID)
+        }
+
+        return nil
+    }
+
+    private func activityRoleDisplayName(payload: [String: AnyJSON]) -> String? {
+        guard let role = activityPayloadString(payload, keys: ["role"]) else { return nil }
+        return role.trimmingCharacters(in: .whitespacesAndNewlines).capitalized
     }
 
     private func activityPayloadString(
@@ -2638,6 +2791,20 @@ final class AppState: ObservableObject {
             if let normalized = normalizedActivityPayloadValue(value) {
                 return normalized
             }
+        }
+        return nil
+    }
+
+    private func activityPayloadUUID(
+        _ payload: [String: AnyJSON],
+        keys: [String]
+    ) -> UUID? {
+        for key in keys {
+            guard let rawValue = activityPayloadString(payload, keys: [key]),
+                  let uuid = UUID(uuidString: rawValue) else {
+                continue
+            }
+            return uuid
         }
         return nil
     }
@@ -2662,6 +2829,71 @@ final class AppState: ObservableObject {
             properties.first(where: { $0.id == propertyID })?.name
                 ?? allProperties.first(where: { $0.id == propertyID })?.name
         )
+    }
+
+    private func activityUserDisplayName(for userID: UUID?) -> String? {
+        guard let userID else { return nil }
+
+        if let member = activeOrganizationMembers.first(where: { $0.id == userID }) {
+            return member.displayName
+        }
+
+        if authenticatedSupabaseUser?.id == userID {
+            if let email = normalizedSupabaseText(authenticatedSupabaseUser?.email) {
+                return email
+            }
+        }
+
+        return userID.uuidString.prefix(8).uppercased()
+    }
+
+    private func propertyAccessAuditPayload(userID: UUID, propertyID: UUID) -> [String: Any] {
+        var payload: [String: Any] = [
+            "target_user_id": userID.uuidString.lowercased(),
+            "property_id": propertyID.uuidString.lowercased()
+        ]
+        if let propertyName = activityPropertyName(for: propertyID) {
+            payload["property_name"] = propertyName
+        }
+        return payload
+    }
+
+    private func normalizedAuditEventPayload(_ payload: [String: Any]) -> [String: AnyJSON] {
+        payload.reduce(into: [String: AnyJSON]()) { result, entry in
+            if let normalized = anyJSONValue(from: entry.value) {
+                result[entry.key] = normalized
+            }
+        }
+    }
+
+    private func anyJSONValue(from value: Any) -> AnyJSON? {
+        switch value {
+        case let value as AnyJSON:
+            return value
+        case let value as String:
+            return .string(value)
+        case let value as UUID:
+            return .string(value.uuidString.lowercased())
+        case let value as Int:
+            return .integer(value)
+        case let value as Double:
+            return .double(value)
+        case let value as Bool:
+            return .bool(value)
+        case let value as [String: Any]:
+            let object = value.reduce(into: [String: AnyJSON]()) { result, entry in
+                if let normalized = anyJSONValue(from: entry.value) {
+                    result[entry.key] = normalized
+                }
+            }
+            return .object(object)
+        case let value as [Any]:
+            return .array(value.compactMap { anyJSONValue(from: $0) })
+        case Optional<Any>.none:
+            return .null
+        default:
+            return nil
+        }
     }
 
     func setMemberAccessScope(userID: UUID, orgID: UUID, accessScope: String) async throws {
@@ -2743,6 +2975,12 @@ final class AppState: ObservableObject {
 #if DEBUG
         if let propertyAccessGrantOverride {
             try await propertyAccessGrantOverride(userID, orgID, propertyID)
+            await emitAuditEvent(
+                orgID: orgID,
+                eventType: "property.access.granted",
+                propertyID: propertyID,
+                payload: propertyAccessAuditPayload(userID: userID, propertyID: propertyID)
+            )
             return
         }
 #endif
@@ -2859,18 +3097,43 @@ final class AppState: ObservableObject {
             throw PropertyAccessPersistenceError.grantVerificationFailed(propertyID: propertyID)
         }
 
+        await emitAuditEvent(
+            orgID: orgID,
+            eventType: "property.access.granted",
+            propertyID: propertyID,
+            payload: propertyAccessAuditPayload(userID: userID, propertyID: propertyID)
+        )
+
     }
 
     func revokePropertyAccess(userID: UUID, orgID: UUID, propertyID: UUID) async throws {
 #if DEBUG
         if let propertyAccessRevokeOverride {
             try await propertyAccessRevokeOverride(userID, orgID, propertyID)
+            await emitAuditEvent(
+                orgID: orgID,
+                eventType: "property.access.revoked",
+                propertyID: propertyID,
+                payload: propertyAccessAuditPayload(userID: userID, propertyID: propertyID)
+            )
             return
         }
 #endif
         guard let client = supabaseClient else {
             throw PropertyAccessPersistenceError.missingAuthenticatedUser
         }
+
+        let existingRows = try await client
+            .from("property_access_grants")
+            .select("property_id, deleted_at")
+            .eq("org_id", value: orgID.uuidString.lowercased())
+            .eq("user_id", value: userID.uuidString.lowercased())
+            .eq("property_id", value: propertyID.uuidString.lowercased())
+            .execute()
+            .value as [SupabasePropertyAccessGrantRecord]
+
+        let hadActiveGrant = existingRows.contains { $0.propertyID == propertyID && $0.deletedAt == nil }
+        guard hadActiveGrant else { return }
 
         let payload = ["deleted_at": Date().ISO8601Format()]
         try await client
@@ -2901,6 +3164,13 @@ final class AppState: ObservableObject {
             )
             throw PropertyAccessPersistenceError.revokeVerificationFailed(propertyID: propertyID)
         }
+
+        await emitAuditEvent(
+            orgID: orgID,
+            eventType: "property.access.revoked",
+            propertyID: propertyID,
+            payload: propertyAccessAuditPayload(userID: userID, propertyID: propertyID)
+        )
 
     }
 
@@ -11375,6 +11645,11 @@ final class AppState: ObservableObject {
         applyTenantScopedState()
     }
 
+    @MainActor
+    func _debugSetActiveOrganizationMembersForTests(_ members: [OrganizationAccessMember]) {
+        updateActiveOrganizationMembers(members)
+    }
+
     func _debugSetPropertyAccessMethodOverridesForTests(
         fetch: PropertyAccessGrantsFetchOverride? = nil,
         setScope: MemberAccessScopeSetOverride? = nil,
@@ -11391,6 +11666,12 @@ final class AppState: ObservableObject {
         _ override: ActivityFeedFetchOverride?
     ) {
         activityFeedFetchOverride = override
+    }
+
+    func _debugSetAuditEventEmitOverrideForTests(
+        _ override: AuditEventEmitOverride?
+    ) {
+        auditEventEmitOverride = override
     }
 
     func _debugMakeActivityFeedItemForTests(
@@ -11424,14 +11705,17 @@ final class AppState: ObservableObject {
                 id: event.id,
                 orgID: event.orgID,
                 sessionID: event.sessionID,
+                propertyID: propertyID,
+                actorUserID: event.actorUserID,
                 eventType: event.eventType,
                 payload: event.payload,
                 createdAt: supabaseTimestampString(event.createdAt)
             ),
-            sessionLookup: propertyID.map {
-                SupabaseActivitySessionLookupRecord(
-                    id: event.sessionID,
-                    propertyID: $0,
+            sessionLookup: propertyID.flatMap { propertyID in
+                guard let sessionID = event.sessionID else { return nil }
+                return SupabaseActivitySessionLookupRecord(
+                    id: sessionID,
+                    propertyID: propertyID,
                     title: sessionTitle
                 )
             }
