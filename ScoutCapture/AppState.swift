@@ -1243,6 +1243,7 @@ final class AppState: ObservableObject {
     private var isOfflineReplayInFlight: Bool = false
     private var sessionCoordinationStateBySessionID: [UUID: SessionCoordinationState] = [:]
     private var sessionCoordinationEntrySnapshotBySessionID: [UUID: String] = [:]
+    private var occupancyOnlyClaimedSessionIDs: Set<UUID> = []
 #if DEBUG
     private var propertySessionOccupancyDebugRemoteRecords: [UUID: RemotePropertySessionOccupancyRecord] = [:]
 #endif
@@ -5990,7 +5991,11 @@ final class AppState: ObservableObject {
         }
     }
 
-    private func releasePropertySessionOccupancyIfOwned(propertyID: UUID) async {
+    private func releasePropertySessionOccupancyIfOwned(
+        propertyID: UUID,
+        sessionID: UUID? = nil,
+        emitReleasedEvent: Bool = false
+    ) async {
         guard backendFeatureFlags.sessionCoordinationEnabled,
               let property = properties.first(where: { $0.id == propertyID }) ?? allProperties.first(where: { $0.id == propertyID }),
               let orgID = property.orgId else {
@@ -6014,14 +6019,31 @@ final class AppState: ObservableObject {
 #if DEBUG
         propertySessionOccupancyDebugRemoteRecords.removeValue(forKey: propertyID)
         if AppStateTestEnvironment.isRunningUnderXCTest {
+            if emitReleasedEvent, let sessionID {
+                occupancyOnlyClaimedSessionIDs.remove(sessionID)
+            }
             return
         }
 #endif
 
-        try? await deletePropertySessionOccupancyRowFromSupabase(
-            orgID: orgID,
-            propertyID: propertyID
-        )
+        do {
+            try await deletePropertySessionOccupancyRowFromSupabase(
+                orgID: orgID,
+                propertyID: propertyID
+            )
+            if emitReleasedEvent, let sessionID {
+                occupancyOnlyClaimedSessionIDs.remove(sessionID)
+                Task {
+                    await emitAuditEvent(
+                        orgID: orgID,
+                        eventType: "session.released",
+                        sessionID: sessionID,
+                        propertyID: propertyID,
+                        payload: [:]
+                    )
+                }
+            }
+        } catch {}
     }
 
     private func persistSessionCoordinationMutation(
@@ -6253,6 +6275,16 @@ final class AppState: ObservableObject {
                 print("[SessionCoordinationEval] event=return result=allowed reason=occupancy_claim_unavailable")
                 return .allowed
             }
+            occupancyOnlyClaimedSessionIDs.insert(sessionID)
+            Task {
+                await emitAuditEvent(
+                    orgID: orgID,
+                    eventType: "session.locked",
+                    sessionID: sessionID,
+                    propertyID: propertyID,
+                    payload: [:]
+                )
+            }
             print("[SessionCoordinationEval] event=return result=allowed reason=untouched_local_session_occupancy_claimed")
             return .allowed
         }
@@ -6281,6 +6313,16 @@ final class AppState: ObservableObject {
             return .allowed
         }
         locallyLockedPropertyIDs.remove(propertyID)
+        occupancyOnlyClaimedSessionIDs.remove(sessionID)
+        Task {
+            await emitAuditEvent(
+                orgID: orgID,
+                eventType: "session.locked",
+                sessionID: sessionID,
+                propertyID: propertyID,
+                payload: [:]
+            )
+        }
         print("[SessionCoordinationEval] event=return result=allowed sessionID=\(sessionID.uuidString)")
         return .allowed
     }
@@ -6325,14 +6367,24 @@ final class AppState: ObservableObject {
               let sessionID = currentSession?.id else {
             return
         }
-        await releasePropertySessionOccupancyIfOwned(propertyID: propertyID)
-        await releaseSessionCoordinationLockIfOwned(propertyID: propertyID, sessionID: sessionID)
+        let emitReleasedFromOccupancy = occupancyOnlyClaimedSessionIDs.contains(sessionID)
+        await releasePropertySessionOccupancyIfOwned(
+            propertyID: propertyID,
+            sessionID: sessionID,
+            emitReleasedEvent: emitReleasedFromOccupancy
+        )
+        await releaseSessionCoordinationLockIfOwned(
+            propertyID: propertyID,
+            sessionID: sessionID,
+            emitReleasedEvent: !emitReleasedFromOccupancy
+        )
     }
 
     @MainActor
     func releaseSessionCoordinationLockIfOwned(
         propertyID: UUID,
-        sessionID: UUID
+        sessionID: UUID,
+        emitReleasedEvent: Bool = true
     ) async {
         let persistedSession = sessions(for: propertyID).first(where: { $0.id == sessionID })
         if persistedSession == nil {
@@ -6342,6 +6394,7 @@ final class AppState: ObservableObject {
                 lockedByDeviceID: nil,
                 lockedAt: nil
             )
+            occupancyOnlyClaimedSessionIDs.remove(sessionID)
             return
         }
 
@@ -6409,11 +6462,12 @@ final class AppState: ObservableObject {
             updatedAt: Date()
         )
         if AppStateTestEnvironment.isRunningUnderXCTest {
+            occupancyOnlyClaimedSessionIDs.remove(sessionID)
             return
         }
 #endif
 
-        _ = await persistSessionCoordinationMutation(
+        let didRelease = await persistSessionCoordinationMutation(
             property: property,
             session: session,
             metadata: metadata,
@@ -6425,6 +6479,18 @@ final class AppState: ObservableObject {
             lockedByDeviceID: clearedState.lockedByDeviceID,
             lockedAt: clearedState.lockedAt
         )
+        if didRelease, emitReleasedEvent, let orgID = property.orgId {
+            Task {
+                await emitAuditEvent(
+                    orgID: orgID,
+                    eventType: "session.released",
+                    sessionID: releasedSession.id,
+                    propertyID: releasedSession.propertyID,
+                    payload: [:]
+                )
+            }
+        }
+        occupancyOnlyClaimedSessionIDs.remove(sessionID)
     }
 
     private func normalizedSupabaseText(_ value: String?) -> String? {
@@ -11159,6 +11225,18 @@ final class AppState: ObservableObject {
 
         let session = Session(propertyID: selectedPropertyID, startedAt: Date(), status: .draft, endedAt: nil, exportedAt: nil)
         currentSession = session
+        if let property = properties.first(where: { $0.id == session.propertyID }) ?? allProperties.first(where: { $0.id == session.propertyID }),
+           let orgID = property.orgId {
+            Task {
+                await emitAuditEvent(
+                    orgID: orgID,
+                    eventType: "session.started",
+                    sessionID: session.id,
+                    propertyID: session.propertyID,
+                    payload: [:]
+                )
+            }
+        }
         print("[StartSession] propertyID=\(selectedPropertyID.uuidString) blockedReason=none pendingDeliveryExists=\(pendingDeliveryExists) reExportEligibleExists=\(reExportEligibleExists)")
         cloudBackupManager?.setCaptureModeActive(true)
         return session
@@ -11304,6 +11382,18 @@ final class AppState: ObservableObject {
         scheduleOffloadEligibleSessionMedia(excludingSessionID: currentSession?.id)
         cloudBackupManager?.setCaptureModeActive(false)
         triggerBackupForLifecycleEvent()
+        if let property = properties.first(where: { $0.id == persisted.propertyID }) ?? allProperties.first(where: { $0.id == persisted.propertyID }),
+           let orgID = property.orgId {
+            Task {
+                await emitAuditEvent(
+                    orgID: orgID,
+                    eventType: "session.exported",
+                    sessionID: persisted.id,
+                    propertyID: persisted.propertyID,
+                    payload: [:]
+                )
+            }
+        }
     }
 
     func sealCurrentSessionForExportLater() {
