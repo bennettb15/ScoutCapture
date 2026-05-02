@@ -2589,7 +2589,7 @@ final class AppState: ObservableObject {
         let propertyName = sessionLookup.flatMap { activityPropertyName(for: $0.propertyID) }
             ?? record.propertyID.flatMap { activityPropertyName(for: $0) }
         let sessionTitle = normalizedSupabaseText(sessionLookup?.title)
-        let title = activityFeedTitle(for: record.eventType)
+        let title = activityFeedTitle(for: record.eventType, payload: record.payload)
         let subtitle = activityFeedSubtitle(
             eventType: record.eventType,
             actorUserID: record.actorUserID,
@@ -2611,7 +2611,7 @@ final class AppState: ObservableObject {
         )
     }
 
-    private func activityFeedTitle(for eventType: String) -> String {
+    private func activityFeedTitle(for eventType: String, payload: [String: AnyJSON]) -> String {
         switch eventType.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
         case "session.started":
             return "Session started"
@@ -2619,6 +2619,8 @@ final class AppState: ObservableObject {
             return "Session locked"
         case "session.released":
             return "Session released"
+        case "session.completed":
+            return "Session completed"
         case "session.exported":
             return "Session exported"
         case "member.invited":
@@ -2631,6 +2633,15 @@ final class AppState: ObservableObject {
             return "Property access granted"
         case "property.access.revoked":
             return "Property access revoked"
+        case "observation.created":
+            if activityPayloadBool(payload, keys: ["is_flagged"]) == true {
+                return "Flagged observation created"
+            }
+            if let priority = activityPayloadString(payload, keys: ["priority"]),
+               !priority.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                return "Flagged observation created"
+            }
+            return "Observation created"
         default:
             return eventType
         }
@@ -2658,6 +2669,9 @@ final class AppState: ObservableObject {
         let fallbackSession = sessionID.map { "Session \($0.uuidString.prefix(8))" }
         let fallbackScope = resolvedPropertyName ?? resolvedSessionName ?? fallbackSession ?? "Organization activity"
         let resolvedRole = activityRoleDisplayName(payload: payload)
+        let resolvedPriority = activityPayloadString(payload, keys: ["priority"])
+        let resolvedTrade = activityPayloadString(payload, keys: ["trade"])
+        let resolvedReason = activityPayloadString(payload, keys: ["reason"])
 
         switch eventType.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
         case "session.started":
@@ -2717,6 +2731,23 @@ final class AppState: ObservableObject {
                 return "\(actor) revoked property access from \(subject)"
             }
             return "\(actor) revoked property access"
+        case "observation.created":
+            let context = [resolvedPropertyName, resolvedPriority, resolvedTrade, resolvedReason]
+                .compactMap { value -> String? in
+                    guard let value else { return nil }
+                    let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+                    return trimmed.isEmpty ? nil : trimmed
+                }
+            if !context.isEmpty {
+                return context.joined(separator: " • ")
+            }
+            if let resolvedPropertyName {
+                return resolvedPropertyName
+            }
+            if let resolvedSessionName {
+                return resolvedSessionName
+            }
+            return fallbackScope
         default:
             if let resolvedPropertyName {
                 return resolvedPropertyName
@@ -2806,6 +2837,26 @@ final class AppState: ObservableObject {
                 continue
             }
             return uuid
+        }
+        return nil
+    }
+
+    private func activityPayloadBool(
+        _ payload: [String: AnyJSON],
+        keys: [String]
+    ) -> Bool? {
+        for key in keys {
+            guard let value = payload[key] else { continue }
+            switch value {
+            case let .bool(flag):
+                return flag
+            case let .string(string):
+                let normalized = string.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+                if normalized == "true" { return true }
+                if normalized == "false" { return false }
+            default:
+                continue
+            }
         }
         return nil
     }
@@ -11279,6 +11330,7 @@ final class AppState: ObservableObject {
 
     func completeCurrentSession(markExported: Bool) {
         guard var session = currentSession else { return }
+        let wasAlreadyCompleted = session.status == .completed
         session.status = .completed
         if session.endedAt == nil {
             session.endedAt = Date()
@@ -11293,13 +11345,15 @@ final class AppState: ObservableObject {
             }
         }
         currentSession = session
-        let persisted = (try? localStore.upsertSession(session)) ?? session
+        let persistedSession = try? localStore.upsertSession(session)
+        let persisted = persistedSession ?? session
         currentSession = persisted
         reloadSessionCache(for: persisted.propertyID)
         schedulePhaseBSessionShadowWrite(for: persisted)
         scheduleOffloadEligibleSessionMedia(excludingSessionID: currentSession?.id)
         cloudBackupManager?.setCaptureModeActive(false)
         triggerBackupForLifecycleEvent()
+        emitSessionCompletedAuditEventIfNeeded(for: persistedSession, wasAlreadyCompleted: wasAlreadyCompleted)
     }
     
     func clearCurrentSession() {
@@ -11398,6 +11452,7 @@ final class AppState: ObservableObject {
 
     func sealCurrentSessionForExportLater() {
         guard var session = currentSession else { return }
+        let wasAlreadyCompleted = session.status == .completed
         session.status = .completed
         if session.endedAt == nil {
             session.endedAt = Date()
@@ -11406,7 +11461,8 @@ final class AppState: ObservableObject {
         session.isSealed = true
         print("[ExportSeal] action=export_later sessionID=\(session.id.uuidString) isSealed=true firstDeliveredAt=nil reExportExpiresAt=nil")
         currentSession = session
-        let persisted = (try? localStore.upsertSession(session)) ?? session
+        let persistedSession = try? localStore.upsertSession(session)
+        let persisted = persistedSession ?? session
         currentSession = persisted
         reloadSessionCache(for: persisted.propertyID)
         schedulePhaseBSessionShadowWrite(for: persisted)
@@ -11414,10 +11470,12 @@ final class AppState: ObservableObject {
         scheduleOffloadEligibleSessionMedia(excludingSessionID: currentSession?.id)
         cloudBackupManager?.setCaptureModeActive(false)
         triggerBackupForLifecycleEvent()
+        emitSessionCompletedAuditEventIfNeeded(for: persistedSession, wasAlreadyCompleted: wasAlreadyCompleted)
     }
 
     func sealCurrentSessionForExportNow() {
         guard var session = currentSession else { return }
+        let wasAlreadyCompleted = session.status == .completed
         session.status = .completed
         if session.endedAt == nil {
             session.endedAt = Date()
@@ -11425,7 +11483,8 @@ final class AppState: ObservableObject {
         session.isSealed = true
         print("[ExportSeal] action=export_now sessionID=\(session.id.uuidString) isSealed=true")
         currentSession = session
-        let persisted = (try? localStore.upsertSession(session)) ?? session
+        let persistedSession = try? localStore.upsertSession(session)
+        let persisted = persistedSession ?? session
         currentSession = persisted
         reloadSessionCache(for: persisted.propertyID)
         schedulePhaseBSessionShadowWrite(for: persisted)
@@ -11433,6 +11492,7 @@ final class AppState: ObservableObject {
         scheduleOffloadEligibleSessionMedia(excludingSessionID: currentSession?.id)
         cloudBackupManager?.setCaptureModeActive(false)
         triggerBackupForLifecycleEvent()
+        emitSessionCompletedAuditEventIfNeeded(for: persistedSession, wasAlreadyCompleted: wasAlreadyCompleted)
     }
     
     func loadDraftSession(for propertyID: UUID) -> Session? {
@@ -11454,6 +11514,23 @@ final class AppState: ObservableObject {
     func ensureCurrentSessionMetadataInBackground() {
         guard let session = currentSession else { return }
         ensureSessionMetadataInBackground(for: session)
+    }
+
+    private func emitSessionCompletedAuditEventIfNeeded(for session: Session?, wasAlreadyCompleted: Bool) {
+        guard let session, !wasAlreadyCompleted else { return }
+        guard let property = properties.first(where: { $0.id == session.propertyID }) ?? allProperties.first(where: { $0.id == session.propertyID }),
+              let orgID = property.orgId else {
+            return
+        }
+        Task {
+            await emitAuditEvent(
+                orgID: orgID,
+                eventType: "session.completed",
+                sessionID: session.id,
+                propertyID: session.propertyID,
+                payload: [:]
+            )
+        }
     }
 
     @discardableResult
@@ -11485,6 +11562,18 @@ final class AppState: ObservableObject {
             scheduleOffloadEligibleSessionMedia(excludingSessionID: currentSession?.id)
             cloudBackupManager?.setCaptureModeActive(false)
             triggerBackupForLifecycleEvent()
+            if let property = properties.first(where: { $0.id == persisted.propertyID }) ?? allProperties.first(where: { $0.id == persisted.propertyID }),
+               let orgID = property.orgId {
+                Task {
+                    await emitAuditEvent(
+                        orgID: orgID,
+                        eventType: "session.exported",
+                        sessionID: persisted.id,
+                        propertyID: persisted.propertyID,
+                        payload: [:]
+                    )
+                }
+            }
             return true
         } catch {
             return false

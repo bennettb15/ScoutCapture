@@ -9508,6 +9508,29 @@ extension ContentView {
             selectedPriority = ""
             isArmedIssueDetailNoteReadOnly = false
             setCaptureIntent(.free)
+            if let sessionID = created.sessionID,
+               let property = appState.properties.first(where: { $0.id == created.propertyID }) ?? appState.selectedProperty,
+               let orgID = property.orgId {
+                var payload: [String: Any] = [:]
+                payload["is_flagged"] = true
+                payload["priority"] = normalizedPriority
+                let trade = selectedTrade.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !trade.isEmpty {
+                    payload["trade"] = trade
+                }
+                if !reason.isEmpty {
+                    payload["reason"] = reason
+                }
+                Task {
+                    await appState.emitAuditEvent(
+                        orgID: orgID,
+                        eventType: "observation.created",
+                        sessionID: sessionID,
+                        propertyID: created.propertyID,
+                        payload: payload
+                    )
+                }
+            }
             return created.id
         } catch {
             // Keep capture UX resilient if local observation persistence fails.
