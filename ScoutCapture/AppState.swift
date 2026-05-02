@@ -2675,7 +2675,13 @@ final class AppState: ObservableObject {
 
         switch eventType.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
         case "session.started":
-            return resolvedPropertyName.map { "For \($0)" } ?? (resolvedSessionName ?? fallbackSession ?? "Organization activity")
+            if !actor.isEmpty, let resolvedPropertyName {
+                return "\(actor) • \(resolvedPropertyName)"
+            }
+            if !actor.isEmpty {
+                return actor
+            }
+            return resolvedPropertyName ?? (resolvedSessionName ?? fallbackSession ?? "Organization activity")
         case "session.locked":
             if !actor.isEmpty, let resolvedPropertyName {
                 return "\(actor) locked \(resolvedPropertyName)"
@@ -2686,8 +2692,22 @@ final class AppState: ObservableObject {
                 return "\(actor) released \(resolvedPropertyName)"
             }
             return fallbackScope
+        case "session.completed":
+            if !actor.isEmpty, let resolvedPropertyName {
+                return "\(actor) • \(resolvedPropertyName)"
+            }
+            if !actor.isEmpty {
+                return actor
+            }
+            return resolvedPropertyName ?? (resolvedSessionName ?? fallbackSession ?? "Organization activity")
         case "session.exported":
-            return resolvedPropertyName.map { "For \($0)" } ?? (resolvedSessionName ?? fallbackSession ?? "Organization activity")
+            if !actor.isEmpty, let resolvedPropertyName {
+                return "\(actor) • \(resolvedPropertyName)"
+            }
+            if !actor.isEmpty {
+                return actor
+            }
+            return resolvedPropertyName ?? (resolvedSessionName ?? fallbackSession ?? "Organization activity")
         case "member.invited":
             if let subject, let resolvedRole {
                 return "\(actor) invited \(subject) as \(resolvedRole)"
@@ -2732,7 +2752,7 @@ final class AppState: ObservableObject {
             }
             return "\(actor) revoked property access"
         case "observation.created":
-            let context = [resolvedPropertyName, resolvedPriority, resolvedTrade, resolvedReason]
+            let context = [actor, resolvedPropertyName, resolvedPriority, resolvedTrade, resolvedReason]
                 .compactMap { value -> String? in
                     guard let value else { return nil }
                     let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
