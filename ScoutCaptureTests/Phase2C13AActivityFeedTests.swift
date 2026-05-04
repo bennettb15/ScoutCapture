@@ -150,6 +150,95 @@ final class Phase2C13AActivityFeedTests: XCTestCase {
         XCTAssertEqual(items.first?.displayTitle, "Session started")
     }
 
+    func testFetchActivityFeedClampsLimitBeforeFetching() async throws {
+        let fixture = try makeFixture()
+        defer { tearDownFixture(fixture) }
+
+        let orgID = UUID()
+        var capturedLimits: [Int] = []
+
+        fixture.appState._debugSetActivityFeedFetchOverrideForTests { _, _, overrideLimit in
+            capturedLimits.append(overrideLimit)
+            return []
+        }
+
+        _ = try await fixture.appState.fetchActivityFeed(orgID: orgID, limit: -10)
+        _ = try await fixture.appState.fetchActivityFeed(orgID: orgID, limit: 0)
+        _ = try await fixture.appState.fetchActivityFeed(orgID: orgID, limit: 50)
+        _ = try await fixture.appState.fetchActivityFeed(orgID: orgID, limit: 250)
+
+        XCTAssertEqual(capturedLimits, [1, 1, 50, 100])
+    }
+
+    func testActivityFeedMapperPreservesNewestFirstInputOrder() {
+        let fixture = try! makeFixture()
+        defer { tearDownFixture(fixture) }
+
+        let orgID = UUID()
+        let newestID = UUID()
+        let olderID = UUID()
+        let oldestID = UUID()
+
+        let items = fixture.appState._debugMakeActivityFeedItemsForTests(events: [
+            AppState.DebugActivityFeedEventInput(
+                id: newestID,
+                orgID: orgID,
+                sessionID: nil,
+                actorUserID: nil,
+                eventType: "session.completed",
+                payload: [:],
+                createdAt: Date(timeIntervalSinceReferenceDate: 300)
+            ),
+            AppState.DebugActivityFeedEventInput(
+                id: olderID,
+                orgID: orgID,
+                sessionID: nil,
+                actorUserID: nil,
+                eventType: "session.started",
+                payload: [:],
+                createdAt: Date(timeIntervalSinceReferenceDate: 200)
+            ),
+            AppState.DebugActivityFeedEventInput(
+                id: oldestID,
+                orgID: orgID,
+                sessionID: nil,
+                actorUserID: nil,
+                eventType: "member.accepted",
+                payload: [:],
+                createdAt: Date(timeIntervalSinceReferenceDate: 100)
+            )
+        ])
+
+        XCTAssertEqual(items.map(\.id), [newestID, olderID, oldestID])
+    }
+
+    func testBlankUnknownEventAndMalformedPayloadUseSafeFallbacks() {
+        let fixture = try! makeFixture()
+        defer { tearDownFixture(fixture) }
+
+        let item = fixture.appState._debugMakeActivityFeedItemForTests(
+            event: AppState.DebugActivityFeedEventInput(
+                id: UUID(),
+                orgID: UUID(),
+                sessionID: nil,
+                actorUserID: nil,
+                eventType: "   ",
+                payload: [
+                    "actor_name": .object(["nested": .string("ignored")]),
+                    "property_name": .array([.string("ignored")]),
+                    "session_title": .null,
+                    "target_user_id": .string("not-a-uuid")
+                ],
+                createdAt: Date(timeIntervalSinceReferenceDate: 700)
+            )
+        )
+
+        XCTAssertEqual(item.displayTitle, "Activity event")
+        XCTAssertEqual(item.displaySubtitle, "Organization activity")
+        XCTAssertFalse(item.displayTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+        XCTAssertFalse(item.displaySubtitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+    }
+
     func testPropertyAccessGrantedUsesActorPropertyAndTargetContext() async {
         let fixture = try! makeFixture()
         defer { tearDownFixture(fixture) }

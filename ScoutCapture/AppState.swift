@@ -2448,14 +2448,14 @@ final class AppState: ObservableObject {
         propertyID: UUID? = nil,
         limit: Int = 50
     ) async throws -> [ActivityFeedItem] {
+        let normalizedLimit = clampedActivityFeedLimit(limit)
 #if DEBUG
         if let activityFeedFetchOverride {
-            return try await activityFeedFetchOverride(orgID, propertyID, limit)
+            return try await activityFeedFetchOverride(orgID, propertyID, normalizedLimit)
         }
 #endif
         guard let client = supabaseClient else { return [] }
 
-        let normalizedLimit = max(1, limit)
         let orgValue = orgID.uuidString.lowercased()
 
         let sessionIDFilterValues: [String]?
@@ -2486,6 +2486,7 @@ final class AppState: ObservableObject {
 
         let eventRecords = try await eventQuery
             .order("created_at", ascending: false)
+            .order("id", ascending: false)
             .limit(normalizedLimit)
             .execute()
             .value as [SupabaseSessionEventRecord]
@@ -2502,6 +2503,10 @@ final class AppState: ObservableObject {
                 sessionLookup: record.sessionID.flatMap { sessionLookupByID[$0] }
             )
         }
+    }
+
+    private func clampedActivityFeedLimit(_ limit: Int) -> Int {
+        min(max(limit, 1), 100)
     }
 
     func fetchPropertyAccessGrants(for userID: UUID, orgID: UUID) async throws -> Set<UUID> {
@@ -2589,14 +2594,20 @@ final class AppState: ObservableObject {
         let propertyName = sessionLookup.flatMap { activityPropertyName(for: $0.propertyID) }
             ?? record.propertyID.flatMap { activityPropertyName(for: $0) }
         let sessionTitle = normalizedSupabaseText(sessionLookup?.title)
-        let title = activityFeedTitle(for: record.eventType, payload: record.payload)
-        let subtitle = activityFeedSubtitle(
-            eventType: record.eventType,
-            actorUserID: record.actorUserID,
-            payload: record.payload,
-            propertyName: propertyName,
-            sessionTitle: sessionTitle,
-            sessionID: record.sessionID
+        let title = normalizedActivityDisplayText(
+            activityFeedTitle(for: record.eventType, payload: record.payload),
+            fallback: "Activity event"
+        )
+        let subtitle = normalizedActivityDisplayText(
+            activityFeedSubtitle(
+                eventType: record.eventType,
+                actorUserID: record.actorUserID,
+                payload: record.payload,
+                propertyName: propertyName,
+                sessionTitle: sessionTitle,
+                sessionID: record.sessionID
+            ),
+            fallback: "Organization activity"
         )
 
         return ActivityFeedItem(
@@ -2645,6 +2656,10 @@ final class AppState: ObservableObject {
         default:
             return eventType
         }
+    }
+
+    private func normalizedActivityDisplayText(_ value: String, fallback: String) -> String {
+        normalizedSupabaseText(value) ?? fallback
     }
 
     private func activityFeedSubtitle(
@@ -11919,6 +11934,14 @@ final class AppState: ObservableObject {
                 )
             }
         )
+    }
+
+    func _debugMakeActivityFeedItemsForTests(
+        events: [DebugActivityFeedEventInput]
+    ) -> [ActivityFeedItem] {
+        events.map { event in
+            _debugMakeActivityFeedItemForTests(event: event)
+        }
     }
 
     func _debugDiscoverPendingSupabaseMediaBackfillCandidates() -> [PendingSupabaseMediaBackfillCandidate] {

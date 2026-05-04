@@ -2193,15 +2193,18 @@ struct SessionHubView: View {
         private func load() async {
             isLoading = true
             errorMessage = nil
+            defer {
+                isLoading = false
+            }
 
             do {
                 items = try await appState.fetchActivityFeed(orgID: orgID)
             } catch {
                 items = []
-                errorMessage = error.localizedDescription
+                errorMessage = error.localizedDescription.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    ? "Unable to load activity."
+                    : error.localizedDescription
             }
-
-            isLoading = false
         }
     }
 
