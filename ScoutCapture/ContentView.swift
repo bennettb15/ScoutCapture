@@ -6573,12 +6573,51 @@ struct ContentView: View {
         sessionID: UUID,
         metadata: SessionMetadata
     ) -> Bool {
-        guard metadata.shots.isEmpty else { return false }
-        guard !appState.propertyHasBaseline(propertyID) else { return false }
-
         let allSessions = (try? localStore.fetchSessions(propertyID: propertyID)) ?? []
-        let uniqueSessionIDs = Set(allSessions.map(\.id))
-        return uniqueSessionIDs.count <= 1 && uniqueSessionIDs.contains(sessionID)
+        let observations = (try? localStore.fetchObservations(propertyID: propertyID)) ?? []
+
+        return !allSessions.contains { session in
+            let sessionMetadata = session.id == sessionID
+                ? metadata
+                : try? localStore.loadSessionMetadata(propertyID: propertyID, sessionID: session.id)
+
+            return captureProfileLockingActivityExists(
+                in: session,
+                metadata: sessionMetadata,
+                observations: observations
+            )
+        }
+    }
+
+    private func captureProfileLockingActivityExists(
+        in session: Session,
+        metadata: SessionMetadata?,
+        observations: [Observation]
+    ) -> Bool {
+        if metadata?.shots.isEmpty == false {
+            return true
+        }
+
+        if metadata?.flaggedIssues.isEmpty == false {
+            return true
+        }
+
+        return observations.contains { observation in
+            observationBelongsToCaptureProfileLockSession(observation, session: session)
+        }
+    }
+
+    private func observationBelongsToCaptureProfileLockSession(
+        _ observation: Observation,
+        session: Session
+    ) -> Bool {
+        if observation.sessionID == session.id { return true }
+        if observation.updatedInSessionID == session.id { return true }
+        if observation.resolvedInSessionID == session.id { return true }
+        if observation.historyEvents.contains(where: { $0.sessionID == session.id }) { return true }
+        guard observation.sessionID == nil else { return false }
+        let sessionEnd = session.endedAt ?? Date.distantFuture
+        return observation.createdAt >= session.startedAt && observation.createdAt <= sessionEnd
     }
 
     private func toggleCaptureProfileIfAllowed() {
