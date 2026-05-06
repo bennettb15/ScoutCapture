@@ -1070,6 +1070,7 @@ struct Property: Codable, Identifiable, Equatable {
     var zip: String?
     var baselineSessionID: UUID?
     var isArchived: Bool
+    var deletedAt: Date?
     var createdAt: Date
     var updatedAt: Date
 
@@ -1088,6 +1089,7 @@ struct Property: Codable, Identifiable, Equatable {
         zip: String? = nil,
         baselineSessionID: UUID? = nil,
         isArchived: Bool = false,
+        deletedAt: Date? = nil,
         createdAt: Date = Date(),
         updatedAt: Date = Date()
     ) {
@@ -1105,6 +1107,7 @@ struct Property: Codable, Identifiable, Equatable {
         self.zip = zip?.trimmingCharacters(in: .whitespacesAndNewlines)
         self.baselineSessionID = baselineSessionID
         self.isArchived = isArchived
+        self.deletedAt = deletedAt
         self.createdAt = createdAt
         self.updatedAt = updatedAt
     }
@@ -1124,6 +1127,7 @@ struct Property: Codable, Identifiable, Equatable {
         case zip
         case baselineSessionID
         case isArchived
+        case deletedAt
         case createdAt
         case updatedAt
     }
@@ -1144,6 +1148,7 @@ struct Property: Codable, Identifiable, Equatable {
         zip = try c.decodeIfPresent(String.self, forKey: .zip)?.trimmingCharacters(in: .whitespacesAndNewlines)
         baselineSessionID = try c.decodeIfPresent(UUID.self, forKey: .baselineSessionID)
         isArchived = try c.decodeIfPresent(Bool.self, forKey: .isArchived) ?? false
+        deletedAt = try c.decodeIfPresent(Date.self, forKey: .deletedAt)
         createdAt = try c.decode(Date.self, forKey: .createdAt)
         updatedAt = try c.decode(Date.self, forKey: .updatedAt)
     }
@@ -1164,6 +1169,7 @@ struct Property: Codable, Identifiable, Equatable {
         try c.encodeIfPresent(zip?.trimmingCharacters(in: .whitespacesAndNewlines), forKey: .zip)
         try c.encodeIfPresent(baselineSessionID, forKey: .baselineSessionID)
         try c.encode(isArchived, forKey: .isArchived)
+        try c.encodeIfPresent(deletedAt, forKey: .deletedAt)
         try c.encode(createdAt, forKey: .createdAt)
         try c.encode(updatedAt, forKey: .updatedAt)
     }

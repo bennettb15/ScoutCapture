@@ -362,6 +362,25 @@ final class AppState: ObservableObject {
         let deletedAt: Date?
     }
 
+    struct DebugRemotePropertyRecordInput {
+        let id: UUID
+        let orgID: UUID
+        let folderID: String?
+        let clientName: String?
+        let clientEmail: String?
+        let clientPhone: String?
+        let name: String
+        let addressLine1: String
+        let city: String
+        let state: String
+        let postalCode: String
+        let baselineSessionID: UUID?
+        let isArchived: Bool
+        let createdAt: Date?
+        let updatedAt: Date
+        let deletedAt: Date?
+    }
+
     struct DebugRemoteSessionDeltaInput {
         let id: UUID
         let orgID: UUID
@@ -922,6 +941,7 @@ final class AppState: ObservableObject {
         let postalCode: String
         let baselineSessionID: UUID?
         let isArchived: Bool
+        let deletedAt: Date?
         let createdAt: Date?
         let updatedAt: Date
 
@@ -939,6 +959,7 @@ final class AppState: ObservableObject {
             case postalCode = "postal_code"
             case baselineSessionID = "baseline_session_id"
             case isArchived = "is_archived"
+            case deletedAt = "deleted_at"
             case createdAt = "created_at"
             case updatedAt = "updated_at"
         }
@@ -3415,9 +3436,22 @@ final class AppState: ObservableObject {
     }
 
     private func scopedProperties(from properties: [Property]) -> [Property] {
-        guard requiresAuthentication else { return properties }
+        guard requiresAuthentication else { return properties.filter { $0.deletedAt == nil } }
         guard let activeOrganizationID else { return [] }
-        let orgScoped = properties.filter { $0.orgId == activeOrganizationID }
+        let orgScoped = properties.filter { $0.orgId == activeOrganizationID && $0.deletedAt == nil }
+        guard isPropertyScopedOrganization(activeOrganizationID) else {
+            return orgScoped
+        }
+        let authorizedIDs = authorizedPropertyIDsByOrganization[activeOrganizationID] ?? []
+        return orgScoped.filter { authorizedIDs.contains($0.id) }
+    }
+
+    private func scopedRecentlyDeletedProperties(from properties: [Property]) -> [Property] {
+        guard requiresAuthentication else {
+            return properties.filter { $0.deletedAt != nil }
+        }
+        guard let activeOrganizationID else { return [] }
+        let orgScoped = properties.filter { $0.orgId == activeOrganizationID && $0.deletedAt != nil }
         guard isPropertyScopedOrganization(activeOrganizationID) else {
             return orgScoped
         }
@@ -4171,7 +4205,8 @@ final class AppState: ObservableObject {
             state: trimmedState,
             zip: trimmedPostalCode,
             baselineSessionID: record.baselineSessionID,
-            isArchived: record.deletedAt != nil ? true : record.isArchived,
+            isArchived: record.isArchived,
+            deletedAt: record.deletedAt,
             createdAt: createdAt,
             updatedAt: record.updatedAt
         )
@@ -4277,6 +4312,7 @@ final class AppState: ObservableObject {
                 canonical.zip = candidate.zip
                 canonical.baselineSessionID = candidate.baselineSessionID
                 canonical.isArchived = candidate.isArchived
+                canonical.deletedAt = candidate.deletedAt
                 canonical.createdAt = candidate.createdAt
                 canonical.updatedAt = candidate.updatedAt
 
@@ -4293,6 +4329,7 @@ final class AppState: ObservableObject {
                     let persisted = try localStore.createProperty(candidate)
                     var canonical = persisted
                     canonical.createdAt = candidate.createdAt
+                    canonical.deletedAt = candidate.deletedAt
                     canonical.updatedAt = candidate.updatedAt
                     allProperties.append(canonical)
                     applied += 1
@@ -9437,6 +9474,7 @@ final class AppState: ObservableObject {
                         postal_code,
                         baseline_session_id,
                         is_archived,
+                        deleted_at,
                         created_at,
                         updated_at
                         """
@@ -9520,6 +9558,16 @@ final class AppState: ObservableObject {
                     value: createdAt
                 )
                 throw RemotePropertyFetchError.invalidCreatedAt(record.id)
+            }
+            if let deletedAt = record.deletedAt,
+               !remotePropertyDateIsValid(deletedAt) {
+                logRemotePropertyTimestampIssue(
+                    kind: "deleted_at",
+                    propertyID: record.id,
+                    orgID: record.orgID,
+                    value: deletedAt
+                )
+                throw RemotePropertyFetchError.invalidUpdatedAt(record.id)
             }
         }
 
@@ -9678,6 +9726,7 @@ final class AppState: ObservableObject {
                 zip: trimmedPostalCode,
                 baselineSessionID: record.baselineSessionID,
                 isArchived: record.isArchived,
+                deletedAt: record.deletedAt,
                 createdAt: createdAt,
                 updatedAt: record.updatedAt
             )
@@ -9729,6 +9778,16 @@ final class AppState: ObservableObject {
                     value: createdAt
                 )
                 throw RemotePropertyFetchError.invalidCreatedAt(record.id)
+            }
+            if let deletedAt = record.deletedAt,
+               !remotePropertyDateIsValid(deletedAt) {
+                logRemotePropertyTimestampIssue(
+                    kind: "deleted_at",
+                    propertyID: record.id,
+                    orgID: record.orgID,
+                    value: deletedAt
+                )
+                throw RemotePropertyFetchError.invalidUpdatedAt(record.id)
             }
             _ = try resolvedRemotePropertyCreatedAt(for: record)
         }
@@ -9810,6 +9869,7 @@ final class AppState: ObservableObject {
                 record.postalCode.trimmingCharacters(in: .whitespacesAndNewlines),
                 record.baselineSessionID?.uuidString.lowercased() ?? "",
                 record.isArchived ? "true" : "false",
+                record.deletedAt.map { formatter.string(from: $0) } ?? "",
                 formatter.string(from: try resolvedRemotePropertyCreatedAt(for: record)),
                 formatter.string(from: record.updatedAt)
             ].joined(separator: "|")
@@ -10568,13 +10628,13 @@ final class AppState: ObservableObject {
                 return false
             }
             setAuthorizedPropertyIDs(
-                Set(payload.properties.map(\.id)),
+                Set(payload.properties.filter { $0.deletedAt == nil }.map(\.id)),
                 for: requestedOrganizationID
             )
             if let activeSessionCheckpointTrigger {
                 _ = await revalidateActiveSessionAccessIfNeeded(
                     trigger: activeSessionCheckpointTrigger,
-                    authorizedPropertyIDs: Set(payload.properties.map(\.id)),
+                    authorizedPropertyIDs: Set(payload.properties.filter { $0.deletedAt == nil }.map(\.id)),
                     organizationID: requestedOrganizationID
                 )
             }
@@ -10689,7 +10749,7 @@ final class AppState: ObservableObject {
                 return
             }
             setAuthorizedPropertyIDs(
-                Set(payload.properties.map(\.id)),
+                Set(payload.properties.filter { $0.deletedAt == nil }.map(\.id)),
                 for: requestedOrganizationID
             )
             let mergedPayload = mergedBackingRefreshPayload(
@@ -10888,7 +10948,8 @@ final class AppState: ObservableObject {
         lhs.clientEmail == rhs.clientEmail &&
         lhs.clientPhone == rhs.clientPhone &&
         lhs.baselineSessionID == rhs.baselineSessionID &&
-        lhs.isArchived == rhs.isArchived
+        lhs.isArchived == rhs.isArchived &&
+        lhs.deletedAt == rhs.deletedAt
     }
 
     private static func propertyIsOrderedBefore(_ lhs: Property, _ rhs: Property) -> Bool {
@@ -11223,6 +11284,19 @@ final class AppState: ObservableObject {
         let guided = (try? localStore.fetchGuidedShots(propertyID: propertyID).count) ?? 0
         let observations = (try? localStore.fetchObservations(propertyID: propertyID).count) ?? 0
         return PropertyDataCounts(sessions: sessions, guided: guided, observations: observations)
+    }
+
+    func recentlyDeletedProperties() -> [Property] {
+        scopedRecentlyDeletedProperties(from: allProperties)
+            .sorted(by: Self.propertyIsOrderedBefore)
+    }
+
+    func activeProperties() -> [Property] {
+        properties.filter { $0.deletedAt == nil && !$0.isArchived }
+    }
+
+    func archivedProperties() -> [Property] {
+        properties.filter { $0.deletedAt == nil && $0.isArchived }
     }
 
     @discardableResult
@@ -12199,6 +12273,36 @@ final class AppState: ObservableObject {
 
     func _debugAllPropertiesForTests() -> [Property] {
         allProperties
+    }
+
+    @MainActor
+    func _debugMakeRemotePropertyRefreshPayloadForTests(
+        records: [DebugRemotePropertyRecordInput],
+        orgID: UUID
+    ) throws -> [Property] {
+        try makeRemotePropertyRefreshPayload(
+            validatedRecords: records.map {
+                RemotePropertyRecord(
+                    id: $0.id,
+                    orgID: $0.orgID,
+                    folderID: $0.folderID,
+                    clientName: $0.clientName,
+                    clientEmail: $0.clientEmail,
+                    clientPhone: $0.clientPhone,
+                    name: $0.name,
+                    addressLine1: $0.addressLine1,
+                    city: $0.city,
+                    state: $0.state,
+                    postalCode: $0.postalCode,
+                    baselineSessionID: $0.baselineSessionID,
+                    isArchived: $0.isArchived,
+                    deletedAt: $0.deletedAt,
+                    createdAt: $0.createdAt,
+                    updatedAt: $0.updatedAt
+                )
+            },
+            requestedOrganizationID: orgID
+        ).properties
     }
 
     @MainActor

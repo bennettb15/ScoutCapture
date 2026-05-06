@@ -3245,6 +3245,7 @@ final class LocalStore {
             let zip: String?
             let baselineSessionID: UUID?
             let isArchived: Bool
+            let deletedAt: Date?
             let createdAt: Date
             let updatedAt: Date
 
@@ -3264,6 +3265,7 @@ final class LocalStore {
                     zip: zip,
                     baselineSessionID: baselineSessionID,
                     isArchived: isArchived,
+                    deletedAt: deletedAt,
                     createdAt: createdAt,
                     updatedAt: updatedAt
                 )
@@ -3360,6 +3362,7 @@ final class LocalStore {
                     zip: property.zip,
                     baselineSessionID: property.baselineSessionID,
                     isArchived: property.isArchived,
+                    deletedAt: property.deletedAt,
                     createdAt: property.createdAt,
                     updatedAt: property.updatedAt
                 )

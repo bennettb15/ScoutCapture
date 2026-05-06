@@ -635,11 +635,11 @@ struct SessionHubView: View {
     }
 
     private var activeProperties: [Property] {
-        appState.properties.filter { !$0.isArchived }
+        appState.properties.filter { $0.deletedAt == nil && !$0.isArchived }
     }
 
     private var archivedProperties: [Property] {
-        appState.properties.filter { $0.isArchived }
+        appState.properties.filter { $0.deletedAt == nil && $0.isArchived }
     }
 
     private var normalizedSearchQuery: String {

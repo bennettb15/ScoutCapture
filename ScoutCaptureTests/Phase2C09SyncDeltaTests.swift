@@ -440,7 +440,149 @@ final class Phase2C09SyncDeltaTests: XCTestCase {
 
         let persisted = try fixture.localStore.fetchProperties().first(where: { $0.id == propertyID })
         XCTAssertEqual(result.applied, 1)
-        XCTAssertEqual(persisted?.isArchived, true)
+        XCTAssertEqual(persisted?.deletedAt, Date(timeIntervalSinceReferenceDate: 300))
+        XCTAssertEqual(persisted?.isArchived, false)
+        let visibleIDs = await MainActor.run {
+            Set(fixture.appState.properties.map(\.id))
+        }
+        XCTAssertFalse(visibleIDs.contains(propertyID))
+        let recentlyDeletedIDs = await MainActor.run {
+            Set(fixture.appState.recentlyDeletedProperties().map(\.id))
+        }
+        XCTAssertTrue(recentlyDeletedIDs.contains(propertyID))
+    }
+
+    func testPropertyDecodingMissingDeletedAtDefaultsNil() throws {
+        let id = UUID()
+        let payload = """
+        {
+          "id": "\(id.uuidString)",
+          "name": "Legacy Property",
+          "isArchived": false,
+          "createdAt": 100,
+          "updatedAt": 200
+        }
+        """
+        let decoded = try JSONDecoder().decode(Property.self, from: Data(payload.utf8))
+        XCTAssertNil(decoded.deletedAt)
+
+        let deletedAt = Date(timeIntervalSinceReferenceDate: 300)
+        var property = decoded
+        property.deletedAt = deletedAt
+        let encoded = try JSONEncoder().encode(property)
+        let roundTripped = try JSONDecoder().decode(Property.self, from: encoded)
+        XCTAssertEqual(roundTripped.deletedAt, deletedAt)
+    }
+
+    func testRemotePropertyRefreshPayloadMapsDeletedAt() async throws {
+        let fixture = try makeFixture()
+        defer { tearDownFixture(fixture) }
+        let orgID = UUID()
+        let propertyID = UUID()
+        let deletedAt = Date(timeIntervalSinceReferenceDate: 500)
+        try makeOrganization(fixture, id: orgID)
+        await refresh(fixture.appState)
+        await configureOrganizationContext(fixture.appState, orgID: orgID)
+
+        let properties = try await MainActor.run {
+            try fixture.appState._debugMakeRemotePropertyRefreshPayloadForTests(
+                records: [
+                    AppState.DebugRemotePropertyRecordInput(
+                        id: propertyID,
+                        orgID: orgID,
+                        folderID: "00001",
+                        clientName: "Client",
+                        clientEmail: "client@example.com",
+                        clientPhone: "5551234567",
+                        name: "Deleted Remote",
+                        addressLine1: "123 Main Street",
+                        city: "Atlanta",
+                        state: "GA",
+                        postalCode: "30301",
+                        baselineSessionID: nil,
+                        isArchived: true,
+                        createdAt: Date(timeIntervalSinceReferenceDate: 100),
+                        updatedAt: Date(timeIntervalSinceReferenceDate: 600),
+                        deletedAt: deletedAt
+                    )
+                ],
+                orgID: orgID
+            )
+        }
+
+        XCTAssertEqual(properties.first?.id, propertyID)
+        XCTAssertEqual(properties.first?.deletedAt, deletedAt)
+        XCTAssertEqual(properties.first?.isArchived, true)
+    }
+
+    func testDeletedPropertiesExcludedFromActiveAndArchivedAndReturnedAsRecentlyDeleted() async throws {
+        let fixture = try makeFixture()
+        defer { tearDownFixture(fixture) }
+        let orgID = UUID()
+        let activeID = UUID()
+        let archivedID = UUID()
+        let deletedActiveID = UUID()
+        let deletedArchivedID = UUID()
+        let deletedAt = Date(timeIntervalSinceReferenceDate: 700)
+        try makeOrganization(fixture, id: orgID)
+
+        try fixture.localStore.replacePropertyListCacheAtomically(
+            properties: [
+                Property(id: activeID, orgId: orgID, name: "Active", isArchived: false),
+                Property(id: archivedID, orgId: orgID, name: "Archived", isArchived: true),
+                Property(id: deletedActiveID, orgId: orgID, name: "Deleted Active", isArchived: false, deletedAt: deletedAt),
+                Property(id: deletedArchivedID, orgId: orgID, name: "Deleted Archived", isArchived: true, deletedAt: deletedAt)
+            ],
+            organizations: [Organization(id: orgID, name: "Org")]
+        )
+        await refresh(fixture.appState)
+        await configureOrganizationContext(fixture.appState, orgID: orgID)
+
+        let visibleIDs = await MainActor.run {
+            Set(fixture.appState.properties.map(\.id))
+        }
+        let activeIDs = await MainActor.run {
+            Set(fixture.appState.activeProperties().map(\.id))
+        }
+        let archivedIDs = await MainActor.run {
+            Set(fixture.appState.archivedProperties().map(\.id))
+        }
+        let recentlyDeletedIDs = await MainActor.run {
+            Set(fixture.appState.recentlyDeletedProperties().map(\.id))
+        }
+
+        XCTAssertEqual(visibleIDs, Set([activeID, archivedID]))
+        XCTAssertEqual(activeIDs, Set([activeID]))
+        XCTAssertEqual(archivedIDs, Set([archivedID]))
+        XCTAssertEqual(recentlyDeletedIDs, Set([deletedActiveID, deletedArchivedID]))
+    }
+
+    func testPropertyHubCacheRoundTripPreservesDeletedAt() throws {
+        let fixture = try makeFixture()
+        defer { tearDownFixture(fixture) }
+        let orgID = UUID()
+        let propertyID = UUID()
+        let deletedAt = Date(timeIntervalSinceReferenceDate: 800)
+        let property = Property(
+            id: propertyID,
+            orgId: orgID,
+            name: "Cached Deleted",
+            isArchived: true,
+            deletedAt: deletedAt
+        )
+
+        try fixture.localStore.replacePropertyListCacheAtomically(
+            properties: [property],
+            organizations: [Organization(id: orgID, name: "Org")]
+        )
+
+        let full = try fixture.localStore.fetchProperties().first(where: { $0.id == propertyID })
+        let hub = try fixture.localStore.fetchPropertyAndOrganizationStateFromLocalHubIndexCache()?
+            .properties
+            .first(where: { $0.id == propertyID })
+
+        XCTAssertEqual(full?.deletedAt, deletedAt)
+        XCTAssertEqual(hub?.deletedAt, deletedAt)
     }
 
     func testDeltaApplySessionUpsertRemoteAuthoritative() async throws {
