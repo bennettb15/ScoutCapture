@@ -185,6 +185,20 @@ final class Phase2C10BSessionCoordinationTests: XCTestCase {
         return formatter.string(from: date)
     }
 
+    private func makeSessionUntouched(_ fixture: Fixture) throws {
+        var metadata = try fixture.localStore.loadSessionMetadata(
+            propertyID: fixture.property.id,
+            sessionID: fixture.session.id
+        )
+        metadata.shots = []
+        metadata.issues = []
+        try fixture.localStore.saveSessionMetadataAtomically(
+            propertyID: fixture.property.id,
+            sessionID: fixture.session.id,
+            metadata: metadata
+        )
+    }
+
     func testEntryAllowsUnlockedSessionAndClaimsLock() async throws {
         let fixture = try makeFixture()
         defer { tearDownFixture(fixture) }
@@ -200,6 +214,102 @@ final class Phase2C10BSessionCoordinationTests: XCTestCase {
         XCTAssertEqual(state.lockedByUserID, fixture.userID)
         XCTAssertNotNil(state.lockedByDeviceID)
         XCTAssertNotNil(state.lockedAt)
+    }
+
+    func testUntouchedLocalSessionOccupancyClaimWritesRemoteMarker() async throws {
+        let fixture = try makeFixture()
+        defer { tearDownFixture(fixture) }
+        try makeSessionUntouched(fixture)
+
+        let result = await fixture.appState.evaluateSessionEntryCoordination(
+            propertyID: fixture.property.id,
+            sessionID: fixture.session.id
+        )
+
+        XCTAssertEqual(result, .allowed)
+        let remoteOccupancy = fixture.appState._debugReadRemotePropertySessionOccupancyForTests(
+            propertyID: fixture.property.id
+        )
+        XCTAssertEqual(remoteOccupancy.occupiedByUserID, fixture.userID)
+        XCTAssertNotNil(remoteOccupancy.occupiedByDeviceID)
+        XCTAssertNotNil(remoteOccupancy.occupiedAt)
+    }
+
+    func testUntouchedLocalSessionOccupancyClaimBlocksPropertyDeletePreflight() async throws {
+        let fixture = try makeFixture()
+        defer { tearDownFixture(fixture) }
+        try makeSessionUntouched(fixture)
+
+        let entryResult = await fixture.appState.evaluateSessionEntryCoordination(
+            propertyID: fixture.property.id,
+            sessionID: fixture.session.id
+        )
+        XCTAssertEqual(entryResult, .allowed)
+
+        var rpcCallCount = 0
+        fixture.appState._debugSetPropertySoftDeleteOverridesForTests(
+            rpc: { _ in rpcCallCount += 1 },
+            refresh: { true }
+        )
+
+        let deleteResult = await fixture.appState.remoteSoftDeleteProperty(id: fixture.property.id)
+
+        XCTAssertFalse(deleteResult)
+        XCTAssertEqual(rpcCallCount, 0)
+        XCTAssertEqual(
+            fixture.appState.hubTransientStatusMessage,
+            "This property is currently in use and cannot be deleted."
+        )
+    }
+
+    func testUntouchedExitClearsRemoteOccupancyMarker() async throws {
+        let fixture = try makeFixture()
+        defer { tearDownFixture(fixture) }
+        try makeSessionUntouched(fixture)
+
+        _ = await fixture.appState.evaluateSessionEntryCoordination(
+            propertyID: fixture.property.id,
+            sessionID: fixture.session.id
+        )
+        XCTAssertNotNil(
+            fixture.appState._debugReadRemotePropertySessionOccupancyForTests(
+                propertyID: fixture.property.id
+            ).occupiedAt
+        )
+
+        await fixture.appState.releaseCurrentSessionCoordinationLockIfOwned()
+
+        let remoteOccupancy = fixture.appState._debugReadRemotePropertySessionOccupancyForTests(
+            propertyID: fixture.property.id
+        )
+        XCTAssertNil(remoteOccupancy.occupiedByUserID)
+        XCTAssertNil(remoteOccupancy.occupiedByDeviceID)
+        XCTAssertNil(remoteOccupancy.occupiedAt)
+    }
+
+    func testFailedUntouchedOccupancyWriteDoesNotReturnAllowedClaimedState() async throws {
+        let fixture = try makeFixture()
+        defer { tearDownFixture(fixture) }
+        try makeSessionUntouched(fixture)
+        fixture.appState._debugSetPropertySoftDeleteOverridesForTests(
+            occupancyPersist: { _, _ in false }
+        )
+
+        let result = await fixture.appState.evaluateSessionEntryCoordination(
+            propertyID: fixture.property.id,
+            sessionID: fixture.session.id
+        )
+
+        guard case .blocked(let block) = result else {
+            return XCTFail("Expected blocked entry when remote occupancy cannot be persisted")
+        }
+        XCTAssertEqual(block.ownerDescription, "Remote coordination unavailable")
+        let remoteOccupancy = fixture.appState._debugReadRemotePropertySessionOccupancyForTests(
+            propertyID: fixture.property.id
+        )
+        XCTAssertNil(remoteOccupancy.occupiedByUserID)
+        XCTAssertNil(remoteOccupancy.occupiedByDeviceID)
+        XCTAssertNil(remoteOccupancy.occupiedAt)
     }
 
     func testEntryAllowsSameOwnerDeviceLock() async throws {

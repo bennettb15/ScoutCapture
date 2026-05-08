@@ -896,14 +896,16 @@ struct SessionHubView: View {
             )) {
                 Button("Delete", role: .destructive) {
                     guard let property = propertyToDelete else { return }
-                    _ = appState.deleteProperty(id: property.id)
                     propertyToDelete = nil
+                    Task {
+                        await appState.remoteSoftDeleteProperty(id: property.id)
+                    }
                 }
                 Button("Cancel", role: .cancel) {
                     propertyToDelete = nil
                 }
             } message: {
-                Text("This will permanently delete all sessions, guided shots, issues, and references for this property. This cannot be undone and will not be recoverable.")
+                Text("This property will move to Recently Deleted and can be restored for 30 days.")
             }
             .alert("Export Failed", isPresented: $showPendingExportError) {
                 Button("Retry") {
@@ -1813,6 +1815,15 @@ struct SessionHubView: View {
                                         .environmentObject(appState)
                                 }
                             }
+
+                            if appState.canRecoverDeletedPropertiesInActiveOrganization {
+                                Section("Recovery") {
+                                    NavigationLink("Recently Deleted") {
+                                        RecentlyDeletedPropertiesRecoveryView()
+                                            .environmentObject(appState)
+                                    }
+                                }
+                            }
                         }
 
                         if let authenticatedSupabaseUser = appState.authenticatedSupabaseUser {
@@ -2093,6 +2104,84 @@ struct SessionHubView: View {
         private func revokeConfirmationMessage(for member: OrganizationAccessMember) -> String {
             let memberIdentifier = member.email ?? member.displayName
             return "\(memberIdentifier) will lose access to this organization and its associated data."
+        }
+    }
+
+    private struct RecentlyDeletedPropertiesRecoveryView: View {
+        @EnvironmentObject private var appState: AppState
+        @State private var properties: [AppState.RecentlyDeletedProperty] = []
+        @State private var isLoading: Bool = true
+        @State private var restoringPropertyID: UUID?
+        @State private var errorMessage: String?
+
+        var body: some View {
+            List {
+                if isLoading {
+                    ProgressView("Loading recently deleted properties...")
+                } else if let errorMessage {
+                    Text(errorMessage)
+                        .foregroundStyle(.red)
+                } else if properties.isEmpty {
+                    Text("No recently deleted properties.")
+                        .foregroundStyle(.secondary)
+                } else {
+                    ForEach(properties) { property in
+                        HStack(alignment: .center, spacing: 12) {
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text(property.name)
+                                    .font(.system(size: 15, weight: .semibold))
+                                    .foregroundStyle(.primary)
+                                Text(deletedDetail(for: property))
+                                    .font(.system(size: 13, weight: .medium))
+                                    .foregroundStyle(.secondary)
+                            }
+
+                            Spacer(minLength: 0)
+
+                            Button(restoringPropertyID == property.id ? "Restoring..." : "Restore") {
+                                restore(property)
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .disabled(restoringPropertyID != nil)
+                        }
+                        .padding(.vertical, 4)
+                    }
+                }
+            }
+            .navigationTitle("Recently Deleted")
+            .task {
+                await loadProperties()
+            }
+            .refreshable {
+                await loadProperties()
+            }
+        }
+
+        private func loadProperties() async {
+            isLoading = true
+            errorMessage = nil
+            do {
+                properties = try await appState.fetchRecentlyDeletedPropertiesRemote()
+            } catch {
+                errorMessage = "Recently deleted properties could not be loaded. \(error.localizedDescription)"
+            }
+            isLoading = false
+        }
+
+        private func restore(_ property: AppState.RecentlyDeletedProperty) {
+            restoringPropertyID = property.id
+            Task {
+                let restored = await appState.remoteRestoreProperty(id: property.id)
+                if restored {
+                    await loadProperties()
+                }
+                restoringPropertyID = nil
+            }
+        }
+
+        private func deletedDetail(for property: AppState.RecentlyDeletedProperty) -> String {
+            let deletedText = property.deletedAt.formatted(date: .abbreviated, time: .shortened)
+            return "Deleted \(deletedText) - restorable for 30 days"
         }
     }
 
