@@ -4267,6 +4267,7 @@ private struct HubAddPropertySheet: View {
     @State private var newOrganizationName: String = ""
     @State private var propertyCreationErrorMessage: String? = nil
     @State private var showPropertyCreationError: Bool = false
+    @State private var isSavingProperty: Bool = false
     @State private var clientName: String = ""
     @State private var clientPhone: String = ""
     @State private var clientEmail: String = ""
@@ -4295,6 +4296,7 @@ private struct HubAddPropertySheet: View {
     }
     
     private var canSave: Bool {
+        !isSavingProperty &&
         !propertyName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
@@ -4659,6 +4661,7 @@ private struct HubAddPropertySheet: View {
     }
 
     private func submitProperty() {
+        guard !isSavingProperty else { return }
         guard canSave else {
             focusFirstInvalidField()
             return
@@ -4669,24 +4672,28 @@ private struct HubAddPropertySheet: View {
             return
         }
 
-        do {
-            let created = try appState.createProperty(
-                organizationID: organizationID,
-                clientName: clientName,
-                propertyName: propertyName,
-                address: addressForStorage,
-                street: streetAddress,
-                city: city,
-                state: state,
-                zip: zipCode,
-                clientPhone: clientPhone,
-                clientEmail: clientEmail
-            )
-            appState.selectProperty(id: created.id)
-            dismiss()
-        } catch {
-            propertyCreationErrorMessage = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
-            showPropertyCreationError = true
+        isSavingProperty = true
+        Task { @MainActor in
+            defer { isSavingProperty = false }
+            do {
+                let created = try await appState.createPropertyRemoteAware(
+                    organizationID: organizationID,
+                    clientName: clientName,
+                    propertyName: propertyName,
+                    address: addressForStorage,
+                    street: streetAddress,
+                    city: city,
+                    state: state,
+                    zip: zipCode,
+                    clientPhone: clientPhone,
+                    clientEmail: clientEmail
+                )
+                appState.selectProperty(id: created.id)
+                dismiss()
+            } catch {
+                propertyCreationErrorMessage = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+                showPropertyCreationError = true
+            }
         }
     }
 
@@ -5835,6 +5842,9 @@ private struct PropertySessionsManagerView: View {
     @State private var deleteTarget: Session? = nil
     @State private var showPendingExportWarning: Bool = false
     @State private var showDeleteConfirm: Bool = false
+    @State private var isDeletingSession: Bool = false
+    @State private var showDeleteError: Bool = false
+    @State private var deleteErrorMessage: String? = nil
 
     private var buttonFill: Color {
         colorScheme == .light ? Color.white.opacity(0.90) : Color.black.opacity(0.55)
@@ -5908,8 +5918,8 @@ private struct PropertySessionsManagerView: View {
                         Spacer(minLength: 0)
 
                         customCapsuleButton(
-                            title: "Delete",
-                            isEnabled: true,
+                            title: isDeletingSession && deleteTarget?.id == session.id ? "Deleting..." : "Delete",
+                            isEnabled: !isDeletingSession,
                             fill: destructiveFill,
                             stroke: destructiveStroke,
                             label: destructiveLabel
@@ -5933,7 +5943,7 @@ private struct PropertySessionsManagerView: View {
                 deleteTarget = nil
             }
         } message: {
-            Text("This completed session is pending export. Deleting it will permanently remove its local export state. Tap Continue to review deletion confirmation.")
+            Text("This session is pending export. Deleting it moves the session to Recently Deleted for 30 days. Media, records, and export data are retained.")
         }
         .alert(deleteConfirmationTitle, isPresented: $showDeleteConfirm) {
             Button("Delete", role: .destructive) {
@@ -5944,6 +5954,13 @@ private struct PropertySessionsManagerView: View {
             }
         } message: {
             Text(deleteConfirmationMessage)
+        }
+        .alert("Delete Failed", isPresented: $showDeleteError) {
+            Button("OK", role: .cancel) {
+                deleteErrorMessage = nil
+            }
+        } message: {
+            Text(deleteErrorMessage ?? "The session could not be deleted.")
         }
     }
 
@@ -5956,14 +5973,16 @@ private struct PropertySessionsManagerView: View {
     }
 
     private var deleteConfirmationMessage: String {
-        guard let target = deleteTarget else { return "This cannot be undone." }
+        guard let target = deleteTarget else {
+            return "This session will move to Recently Deleted for 30 days. Media and records are retained."
+        }
         if target.status == .draft {
-            return "This will permanently delete this draft session and its local records. This cannot be undone or recovered."
+            return "This draft session will move to Recently Deleted for 30 days. Media and records are retained."
         }
         if appState.isPendingDelivery(target) {
-            return "This session is pending export. Deleting it will permanently remove this session, its local records, and pending export state. This cannot be undone or recovered."
+            return "This session is pending export. It will move to Recently Deleted for 30 days. Media, records, and export data are retained."
         }
-        return "This will permanently delete this completed session and its local records. This cannot be undone or recovered."
+        return "This completed session will move to Recently Deleted for 30 days. Media and records are retained."
     }
 
     private func reloadSessions() {
@@ -5981,10 +6000,20 @@ private struct PropertySessionsManagerView: View {
 
     private func confirmDelete() {
         guard let target = deleteTarget else { return }
-        _ = appState.deleteSession(propertyID: property.id, sessionID: target.id)
-        deleteTarget = nil
-        appState.refreshProperties()
-        reloadSessions()
+        isDeletingSession = true
+        Task {
+            let deleted = await appState.remoteSoftDeleteSession(propertyID: property.id, sessionID: target.id)
+            await MainActor.run {
+                isDeletingSession = false
+                if deleted {
+                    deleteTarget = nil
+                    reloadSessions()
+                } else {
+                    deleteErrorMessage = appState.lastSessionDeleteErrorMessage ?? "The session could not be deleted."
+                    showDeleteError = true
+                }
+            }
+        }
     }
 
     @ViewBuilder

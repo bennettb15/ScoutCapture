@@ -11487,11 +11487,10 @@ extension ContentView {
             showSessionActionsSheet = false
             Task {
                 await appState.releaseCurrentSessionCoordinationLockIfOwned()
-                _ = appState.deleteSession(
-                    propertyID: propertyID,
-                    sessionID: sessionID,
-                    triggerSafetyPause: false
-                )
+                if appState.currentSession?.id == sessionID,
+                   appState.currentSession?.propertyID == propertyID {
+                    appState.clearCurrentSession()
+                }
                 appState.refreshPropertiesInBackground()
                 await MainActor.run {
                     onExitToHub?()

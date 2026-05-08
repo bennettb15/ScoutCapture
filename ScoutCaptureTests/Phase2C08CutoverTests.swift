@@ -281,4 +281,192 @@ final class Phase2C08CutoverTests: XCTestCase {
         let persisted = try localStore.fetchProperties()
         XCTAssertTrue(persisted.contains(where: { $0.id == created.id }))
     }
+
+    func testRemoteReadPropertyCreateWritesRemoteBeforeLocalAuthority() async throws {
+        let storageRoot = try makeTempStorageRoot()
+        defer { try? FileManager.default.removeItem(at: storageRoot) }
+
+        let defaults = makeDefaultsSuite()
+        defaults.set(true, forKey: "supabase_enabled")
+        defaults.set(false, forKey: "shadow_write_enabled")
+        defaults.set(true, forKey: "supabase_read_enabled")
+        defaults.set(true, forKey: "supabase_property_read_enabled")
+
+        actor Capture {
+            var propertyIDs: [UUID] = []
+            func append(_ id: UUID) { propertyIDs.append(id) }
+        }
+
+        let localStore = LocalStore(testStorageRootURL: storageRoot)
+        let organizationID = UUID()
+        let capture = Capture()
+        let appState = AppState(
+            localStore: localStore,
+            userDefaults: defaults,
+            propertyRemoteInsertOverride: { property in
+                await capture.append(property.id)
+            }
+        )
+
+        await configureRemoteCreateEnvironment(appState, organizationID: organizationID)
+
+        let created = try await appState.createPropertyRemoteAware(
+            organizationID: organizationID,
+            clientName: "Client",
+            propertyName: "Remote Canonical Property",
+            address: "123 Main Street",
+            street: "123 Main Street",
+            city: "Austin",
+            state: "TX",
+            zip: "78701"
+        )
+
+        let remoteWriteIDs = await capture.propertyIDs
+        XCTAssertEqual(remoteWriteIDs, [created.id])
+        XCTAssertTrue(try localStore.fetchProperties().contains(where: { $0.id == created.id }))
+    }
+
+    func testRemoteReadPropertyCreateFailureDoesNotPersistLocalOnlyProperty() async throws {
+        let storageRoot = try makeTempStorageRoot()
+        defer { try? FileManager.default.removeItem(at: storageRoot) }
+
+        let defaults = makeDefaultsSuite()
+        defaults.set(true, forKey: "supabase_enabled")
+        defaults.set(false, forKey: "shadow_write_enabled")
+        defaults.set(true, forKey: "supabase_read_enabled")
+        defaults.set(true, forKey: "supabase_property_read_enabled")
+
+        struct ForcedRemoteCreateFailure: LocalizedError {
+            var errorDescription: String? { "forced remote create failure" }
+        }
+
+        let localStore = LocalStore(testStorageRootURL: storageRoot)
+        let organizationID = UUID()
+        let appState = AppState(
+            localStore: localStore,
+            userDefaults: defaults,
+            propertyRemoteInsertOverride: { _ in
+                throw ForcedRemoteCreateFailure()
+            }
+        )
+
+        await configureRemoteCreateEnvironment(appState, organizationID: organizationID)
+
+        do {
+            _ = try await appState.createPropertyRemoteAware(
+                organizationID: organizationID,
+                clientName: "Client",
+                propertyName: "Failed Remote Property",
+                address: "123 Main Street",
+                street: "123 Main Street",
+                city: "Austin",
+                state: "TX",
+                zip: "78701"
+            )
+            XCTFail("Expected remote canonical property create to fail.")
+        } catch let error as AppState.PropertyCreationError {
+            guard case .remoteCreateFailed = error else {
+                XCTFail("Expected remoteCreateFailed, got \(error).")
+                return
+            }
+        }
+
+        XCTAssertTrue(try localStore.fetchProperties().isEmpty)
+    }
+
+    func testSynchronousPropertyCreateIsRejectedInRemoteReadMode() async throws {
+        let storageRoot = try makeTempStorageRoot()
+        defer { try? FileManager.default.removeItem(at: storageRoot) }
+
+        let defaults = makeDefaultsSuite()
+        defaults.set(true, forKey: "supabase_enabled")
+        defaults.set(false, forKey: "shadow_write_enabled")
+        defaults.set(true, forKey: "supabase_read_enabled")
+        defaults.set(true, forKey: "supabase_property_read_enabled")
+
+        let localStore = LocalStore(testStorageRootURL: storageRoot)
+        let organizationID = UUID()
+        let appState = AppState(localStore: localStore, userDefaults: defaults)
+
+        await configureRemoteCreateEnvironment(appState, organizationID: organizationID)
+
+        XCTAssertThrowsError(
+            try appState.createProperty(
+                organizationID: organizationID,
+                clientName: "Client",
+                propertyName: "Local Only Property",
+                address: "123 Main Street"
+            )
+        ) { error in
+            guard case AppState.PropertyCreationError.remoteCreateUnavailable = error else {
+                XCTFail("Expected remoteCreateUnavailable, got \(error).")
+                return
+            }
+        }
+        XCTAssertTrue(try localStore.fetchProperties().isEmpty)
+    }
+
+    func testPropertyReadEnabledPhaseBCreateWritesRemoteBeforeLocalAuthority() async throws {
+        let storageRoot = try makeTempStorageRoot()
+        defer { try? FileManager.default.removeItem(at: storageRoot) }
+
+        let defaults = makeDefaultsSuite()
+        defaults.set(true, forKey: "supabase_enabled")
+        defaults.set(true, forKey: "shadow_write_enabled")
+        defaults.set(false, forKey: "supabase_read_enabled")
+        defaults.set(true, forKey: "supabase_property_read_enabled")
+
+        let localStore = LocalStore(testStorageRootURL: storageRoot)
+        let organizationID = UUID()
+        actor Capture {
+            var propertyIDs: [UUID] = []
+            func append(_ id: UUID) { propertyIDs.append(id) }
+        }
+        let capture = Capture()
+        let appState = AppState(
+            localStore: localStore,
+            userDefaults: defaults,
+            propertyRemoteInsertOverride: { property in
+                await capture.append(property.id)
+            }
+        )
+
+        await configureRemoteCreateEnvironment(appState, organizationID: organizationID)
+
+        let created = try await appState.createPropertyRemoteAware(
+            organizationID: organizationID,
+            clientName: "Client",
+            propertyName: "Property Read Enabled Phase B Property",
+            address: "123 Main Street"
+        )
+
+        let remoteWriteIDs = await capture.propertyIDs
+        XCTAssertEqual(remoteWriteIDs, [created.id])
+        XCTAssertTrue(try localStore.fetchProperties().contains(where: { $0.id == created.id }))
+    }
+
+    @MainActor
+    private func configureRemoteCreateEnvironment(
+        _ appState: AppState,
+        organizationID: UUID
+    ) {
+        appState._debugSetOrganizationContextForTests(
+            memberships: [
+                ActiveOrganizationMembership(
+                    id: organizationID,
+                    name: "Test Org",
+                    role: "owner"
+                )
+            ],
+            activeOrganizationID: organizationID,
+            ready: true
+        )
+        appState._debugSetOfflineReplayEnvironmentForTests(
+            activeOrganizationID: organizationID,
+            ready: true,
+            clientConfigured: true,
+            authenticated: true,
+            authenticationReady: true
+        )
+    }
 }

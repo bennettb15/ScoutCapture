@@ -213,6 +213,7 @@ private enum AppStateTestEnvironment {
 
 final class AppState: ObservableObject {
     typealias PropertyShadowWriteOverride = (Property) async throws -> Void
+    typealias PropertyRemoteInsertOverride = (Property) async throws -> Void
     typealias SessionShadowWriteOverride = (Property, Session, SessionMetadata) async throws -> Void
 #if DEBUG
     private typealias SyncDeltaFetchOverride = (
@@ -247,6 +248,9 @@ final class AppState: ObservableObject {
     typealias RecentlyDeletedPropertiesFetchOverride = (UUID) async throws -> [RecentlyDeletedProperty]
     typealias PropertyDeletePreflightRefreshOverride = (UUID, UUID) async throws -> PropertyDeletePreflightSnapshot
     typealias PropertySessionOccupancyPersistOverride = (UUID, UUID) async -> Bool
+    typealias SessionSoftDeleteRPCOverride = (UUID) async throws -> Void
+    typealias SessionSoftDeleteRefreshOverride = () async -> Bool
+    typealias SessionDeletePreflightRefreshOverride = (UUID, UUID, UUID) async throws -> SessionDeletePreflightSnapshot
 #endif
 
     struct RecentlyDeletedProperty: Equatable, Identifiable, Decodable {
@@ -460,6 +464,8 @@ final class AppState: ObservableObject {
         case missingPropertyName
         case missingOrganization
         case noAvailableFolderID
+        case remoteCreateUnavailable
+        case remoteCreateFailed(String)
         case persistenceFailed
 
         var errorDescription: String? {
@@ -470,6 +476,10 @@ final class AppState: ObservableObject {
                 return "Select an organization."
             case .noAvailableFolderID:
                 return "No folder IDs are available. Please contact support."
+            case .remoteCreateUnavailable:
+                return "The property could not be saved because remote property sync is not ready. Check your connection and try again."
+            case .remoteCreateFailed(let message):
+                return "The property could not be saved to Supabase. \(message)"
             case .persistenceFailed:
                 return "The property could not be saved."
             }
@@ -499,6 +509,40 @@ final class AppState: ObservableObject {
                     return "The property could not be deleted."
                 }
                 return "The property could not be deleted. \(trimmed)"
+            }
+        }
+    }
+
+    enum SessionSoftDeleteError: LocalizedError {
+        case missingAuthenticatedContext
+        case sessionNotFound
+        case activeSession
+        case remoteInUse
+        case preflightFailed(String)
+        case remoteFailed(String)
+
+        var errorDescription: String? {
+            switch self {
+            case .missingAuthenticatedContext:
+                return "Sign in and select an organization before deleting this session."
+            case .sessionNotFound:
+                return "This session is no longer available."
+            case .activeSession:
+                return "Exit the active session before deleting this session."
+            case .remoteInUse:
+                return "This session is currently in use and cannot be deleted."
+            case .preflightFailed(let message):
+                let trimmed = message.trimmingCharacters(in: .whitespacesAndNewlines)
+                if trimmed.isEmpty {
+                    return "Unable to confirm this session is safe to delete. Try again."
+                }
+                return "Unable to confirm this session is safe to delete. \(trimmed)"
+            case .remoteFailed(let message):
+                let trimmed = message.trimmingCharacters(in: .whitespacesAndNewlines)
+                if trimmed.isEmpty {
+                    return "The session could not be deleted."
+                }
+                return "The session could not be deleted. \(trimmed)"
             }
         }
     }
@@ -824,6 +868,33 @@ final class AppState: ObservableObject {
         let city: String?
         let state: String?
         let postalCode: String?
+        let updatedBy: UUID?
+
+        init(
+            id: UUID,
+            orgID: UUID,
+            clientName: String?,
+            clientEmail: String?,
+            clientPhone: String?,
+            name: String,
+            addressLine1: String?,
+            city: String?,
+            state: String?,
+            postalCode: String?,
+            updatedBy: UUID? = nil
+        ) {
+            self.id = id
+            self.orgID = orgID
+            self.clientName = clientName
+            self.clientEmail = clientEmail
+            self.clientPhone = clientPhone
+            self.name = name
+            self.addressLine1 = addressLine1
+            self.city = city
+            self.state = state
+            self.postalCode = postalCode
+            self.updatedBy = updatedBy
+        }
 
         enum CodingKeys: String, CodingKey {
             case id
@@ -836,6 +907,7 @@ final class AppState: ObservableObject {
             case city
             case state
             case postalCode = "postal_code"
+            case updatedBy = "updated_by"
         }
     }
 
@@ -844,6 +916,14 @@ final class AppState: ObservableObject {
 
         enum CodingKeys: String, CodingKey {
             case targetPropertyID = "target_property_id"
+        }
+    }
+
+    private struct SoftDeleteSessionRPCPayload: Encodable {
+        let targetSessionID: UUID
+
+        enum CodingKeys: String, CodingKey {
+            case targetSessionID = "target_session_id"
         }
     }
 
@@ -965,6 +1045,26 @@ final class AppState: ObservableObject {
         }
     }
 
+    private struct RemoteSessionDeletePreflightRecord: Decodable {
+        let id: UUID
+        let orgID: UUID
+        let propertyID: UUID
+        let deletedAt: Date?
+        let lockedByUserID: UUID?
+        let lockedByDeviceID: String?
+        let lockedAt: String?
+
+        enum CodingKeys: String, CodingKey {
+            case id
+            case orgID = "org_id"
+            case propertyID = "property_id"
+            case deletedAt = "deleted_at"
+            case lockedByUserID = "locked_by_user_id"
+            case lockedByDeviceID = "locked_by_device_id"
+            case lockedAt = "locked_at"
+        }
+    }
+
     struct PropertyDeletePreflightSnapshot: Equatable {
         let occupancyCount: Int
         let lockCount: Int
@@ -972,6 +1072,22 @@ final class AppState: ObservableObject {
         let blockedReason: String?
 
         static let clear = PropertyDeletePreflightSnapshot(
+            occupancyCount: 0,
+            lockCount: 0,
+            isBlocked: false,
+            blockedReason: nil
+        )
+    }
+
+    struct SessionDeletePreflightSnapshot: Equatable {
+        let deletedAt: Date?
+        let occupancyCount: Int
+        let lockCount: Int
+        let isBlocked: Bool
+        let blockedReason: String?
+
+        static let clear = SessionDeletePreflightSnapshot(
+            deletedAt: nil,
             occupancyCount: 0,
             lockCount: 0,
             isBlocked: false,
@@ -1326,6 +1442,7 @@ final class AppState: ObservableObject {
 
     @Published private(set) var activeSessionAccessRevocationRequest: ActiveSessionAccessRevocationRequest?
     @Published private(set) var hubTransientStatusMessage: String?
+    @Published private(set) var lastSessionDeleteErrorMessage: String?
 
     var selectedProperty: Property? {
         guard let selectedPropertyID else { return nil }
@@ -1338,6 +1455,7 @@ final class AppState: ObservableObject {
     private let userDefaults: UserDefaults
     private let cloudBackupManager: CloudBackupManager?
     private let propertyShadowWriteOverride: PropertyShadowWriteOverride?
+    private let propertyRemoteInsertOverride: PropertyRemoteInsertOverride?
     private let sessionShadowWriteOverride: SessionShadowWriteOverride?
     private let selectedPropertyDefaultsKey = "scoutcapture.selectedPropertyID"
     private let activeOrganizationDefaultsKeyPrefix = "scoutcapture.activeOrganizationID"
@@ -1409,6 +1527,9 @@ final class AppState: ObservableObject {
     private var recentlyDeletedPropertiesFetchOverride: RecentlyDeletedPropertiesFetchOverride?
     private var propertyDeletePreflightRefreshOverride: PropertyDeletePreflightRefreshOverride?
     private var propertySessionOccupancyPersistOverride: PropertySessionOccupancyPersistOverride?
+    private var sessionSoftDeleteRPCOverride: SessionSoftDeleteRPCOverride?
+    private var sessionSoftDeleteRefreshOverride: SessionSoftDeleteRefreshOverride?
+    private var sessionDeletePreflightRefreshOverride: SessionDeletePreflightRefreshOverride?
     private var sessionCoordinationDebugRemoteRecords: [UUID: RemoteSessionCoordinationRecord] = [:]
 #endif
     private var authStateChangesTask: Task<Void, Never>?
@@ -1665,6 +1786,7 @@ final class AppState: ObservableObject {
         localStore: LocalStore? = nil,
         userDefaults: UserDefaults = .standard,
         propertyShadowWriteOverride: PropertyShadowWriteOverride? = nil,
+        propertyRemoteInsertOverride: PropertyRemoteInsertOverride? = nil,
         sessionShadowWriteOverride: SessionShadowWriteOverride? = nil,
         disableCloudBackupForTests: Bool = false
     ) {
@@ -1681,6 +1803,7 @@ final class AppState: ObservableObject {
         #endif
         self.cloudBackupStatus = cloudBackupManager?.status ?? Self.unavailableCloudBackupStatus
         self.propertyShadowWriteOverride = propertyShadowWriteOverride
+        self.propertyRemoteInsertOverride = propertyRemoteInsertOverride
         self.sessionShadowWriteOverride = sessionShadowWriteOverride
         self.supabaseConfiguration = AppState.loadSupabaseConfiguration()
         self.backendFeatureFlags = BackendFeatureFlags.load(userDefaults: userDefaults)
@@ -4264,6 +4387,14 @@ final class AppState: ObservableObject {
         backendFeatureFlags.shadowWriteEnabled
     }
 
+    private func requiresRemotePropertyCreate(for orgID: UUID) -> Bool {
+        backendFeatureFlags.supabaseEnabled &&
+        backendFeatureFlags.supabasePropertyReadEnabled &&
+        supabaseClient != nil &&
+        isOrganizationContextReady &&
+        activeOrganizationID == orgID
+    }
+
     private func syncCursorDefaultsKey(entity: String, orgID: UUID) -> String {
         "scoutcapture.syncCursor.\(entity).\(orgID.uuidString.lowercased())"
     }
@@ -5208,6 +5339,21 @@ final class AppState: ObservableObject {
         return true
     }
 
+    private func remotePropertyCreatePathAvailable(for orgID: UUID) -> Bool {
+        guard requiresRemotePropertyCreate(for: orgID),
+              supabaseClient != nil,
+              isOrganizationContextReady,
+              activeOrganizationID == orgID else {
+            return false
+        }
+
+        if requiresAuthentication {
+            return isAuthenticationReady && authenticatedSupabaseUser != nil
+        }
+
+        return true
+    }
+
     private func offlineReplayBackoffInterval(forAttemptCount attemptCount: Int) -> TimeInterval {
         switch attemptCount {
         case ...0:
@@ -5258,6 +5404,17 @@ final class AppState: ObservableObject {
             try await propertyShadowWriteOverride(property)
         } else {
             try await upsertPropertyRowToSupabase(payload)
+        }
+    }
+
+    private func performRemotePropertyInsert(
+        property: Property,
+        payload: SupabasePropertyPayload
+    ) async throws {
+        if let propertyRemoteInsertOverride {
+            try await propertyRemoteInsertOverride(property)
+        } else {
+            try await insertPropertyRowToSupabase(payload)
         }
     }
 
@@ -5894,7 +6051,8 @@ final class AppState: ObservableObject {
             addressLine1: normalizedSupabaseText(property?.street ?? metadata?.propertyStreetAtCapture),
             city: normalizedSupabaseText(property?.city ?? metadata?.propertyCityAtCapture),
             state: normalizedSupabaseText(property?.state ?? metadata?.propertyStateAtCapture),
-            postalCode: normalizedSupabaseText(property?.zip ?? metadata?.propertyZipAtCapture)
+            postalCode: normalizedSupabaseText(property?.zip ?? metadata?.propertyZipAtCapture),
+            updatedBy: authenticatedSupabaseUser?.id
         )
     }
 
@@ -5924,12 +6082,183 @@ final class AppState: ObservableObject {
         )
     }
 
+    private func supabaseClientAuthDiagnostic(_ client: SupabaseClient?) async -> (
+        userID: String,
+        email: String,
+        error: String
+    ) {
+        guard let client else {
+            return ("nil", "nil", "missing_client")
+        }
+
+        do {
+            let session = try await client.auth.session
+            return (
+                session.user.id.uuidString,
+                session.user.email ?? "nil",
+                "none"
+            )
+        } catch {
+            return ("nil", "nil", error.localizedDescription)
+        }
+    }
+
     private func upsertPropertyRowToSupabase(_ payload: SupabasePropertyPayload) async throws {
-        guard let client = supabaseClient else { return }
-        try await client
-            .from("properties")
-            .upsert(payload, onConflict: "id", returning: .minimal)
-            .execute()
+        guard let client = supabaseClient else {
+            print(
+                "[PropertyUpsertDiag] event=upsert_skipped " +
+                "reason=missing_client " +
+                "propertyID=\(payload.id.uuidString) " +
+                "payloadOrgID=\(payload.orgID.uuidString) " +
+                "payloadUpdatedBy=\(payload.updatedBy?.uuidString ?? "nil") " +
+                "appAuthUserID=\(authenticatedSupabaseUser?.id.uuidString ?? "nil") " +
+                "appAuthEmail=\(authenticatedSupabaseUser?.email ?? "nil") " +
+                "activeOrganizationID=\(activeOrganizationID?.uuidString ?? "nil") " +
+                "supabaseEnabled=\(backendFeatureFlags.supabaseEnabled) " +
+                "shadowWriteEnabled=\(backendFeatureFlags.shadowWriteEnabled) " +
+                "supabaseReadEnabled=\(backendFeatureFlags.supabaseReadEnabled) " +
+                "supabasePropertyReadEnabled=\(backendFeatureFlags.supabasePropertyReadEnabled) " +
+                "supabaseClientExists=false " +
+                "organizationContextReady=\(isOrganizationContextReady) " +
+                "upsertConflictTarget=id"
+            )
+            return
+        }
+
+        let clientAuth = await supabaseClientAuthDiagnostic(client)
+        print(
+            "[PropertyUpsertDiag] event=upsert_attempt " +
+            "propertyID=\(payload.id.uuidString) " +
+            "payloadOrgID=\(payload.orgID.uuidString) " +
+            "payloadUpdatedBy=\(payload.updatedBy?.uuidString ?? "nil") " +
+            "appAuthUserID=\(authenticatedSupabaseUser?.id.uuidString ?? "nil") " +
+            "appAuthEmail=\(authenticatedSupabaseUser?.email ?? "nil") " +
+            "clientAuthUserID=\(clientAuth.userID) " +
+            "clientAuthEmail=\(clientAuth.email) " +
+            "clientAuthError=\(clientAuth.error) " +
+            "activeOrganizationID=\(activeOrganizationID?.uuidString ?? "nil") " +
+            "supabaseEnabled=\(backendFeatureFlags.supabaseEnabled) " +
+            "shadowWriteEnabled=\(backendFeatureFlags.shadowWriteEnabled) " +
+            "supabaseReadEnabled=\(backendFeatureFlags.supabaseReadEnabled) " +
+            "supabasePropertyReadEnabled=\(backendFeatureFlags.supabasePropertyReadEnabled) " +
+            "supabaseClientExists=true " +
+            "organizationContextReady=\(isOrganizationContextReady) " +
+            "upsertConflictTarget=id"
+        )
+
+        do {
+            try await client
+                .from("properties")
+                .upsert(payload, onConflict: "id", returning: .minimal)
+                .execute()
+            print(
+                "[PropertyUpsertDiag] event=upsert_success " +
+                "propertyID=\(payload.id.uuidString) " +
+                "payloadOrgID=\(payload.orgID.uuidString) " +
+                "payloadUpdatedBy=\(payload.updatedBy?.uuidString ?? "nil") " +
+                "clientAuthUserID=\(clientAuth.userID) " +
+                "upsertConflictTarget=id"
+            )
+        } catch {
+            print(
+                "[PropertyUpsertDiag] event=upsert_failed " +
+                "propertyID=\(payload.id.uuidString) " +
+                "payloadOrgID=\(payload.orgID.uuidString) " +
+                "payloadUpdatedBy=\(payload.updatedBy?.uuidString ?? "nil") " +
+                "appAuthUserID=\(authenticatedSupabaseUser?.id.uuidString ?? "nil") " +
+                "appAuthEmail=\(authenticatedSupabaseUser?.email ?? "nil") " +
+                "clientAuthUserID=\(clientAuth.userID) " +
+                "clientAuthEmail=\(clientAuth.email) " +
+                "clientAuthError=\(clientAuth.error) " +
+                "activeOrganizationID=\(activeOrganizationID?.uuidString ?? "nil") " +
+                "supabaseEnabled=\(backendFeatureFlags.supabaseEnabled) " +
+                "shadowWriteEnabled=\(backendFeatureFlags.shadowWriteEnabled) " +
+                "supabaseReadEnabled=\(backendFeatureFlags.supabaseReadEnabled) " +
+                "supabasePropertyReadEnabled=\(backendFeatureFlags.supabasePropertyReadEnabled) " +
+                "supabaseClientExists=true " +
+                "organizationContextReady=\(isOrganizationContextReady) " +
+                "upsertConflictTarget=id " +
+                "error=\(error.localizedDescription)"
+            )
+            throw error
+        }
+    }
+
+    private func insertPropertyRowToSupabase(_ payload: SupabasePropertyPayload) async throws {
+        guard let client = supabaseClient else {
+            print(
+                "[PropertyInsertDiag] event=insert_skipped " +
+                "reason=missing_client " +
+                "propertyID=\(payload.id.uuidString) " +
+                "payloadOrgID=\(payload.orgID.uuidString) " +
+                "payloadUpdatedBy=\(payload.updatedBy?.uuidString ?? "nil") " +
+                "appAuthUserID=\(authenticatedSupabaseUser?.id.uuidString ?? "nil") " +
+                "appAuthEmail=\(authenticatedSupabaseUser?.email ?? "nil") " +
+                "activeOrganizationID=\(activeOrganizationID?.uuidString ?? "nil") " +
+                "supabaseEnabled=\(backendFeatureFlags.supabaseEnabled) " +
+                "shadowWriteEnabled=\(backendFeatureFlags.shadowWriteEnabled) " +
+                "supabaseReadEnabled=\(backendFeatureFlags.supabaseReadEnabled) " +
+                "supabasePropertyReadEnabled=\(backendFeatureFlags.supabasePropertyReadEnabled) " +
+                "supabaseClientExists=false " +
+                "organizationContextReady=\(isOrganizationContextReady)"
+            )
+            return
+        }
+
+        let clientAuth = await supabaseClientAuthDiagnostic(client)
+        print(
+            "[PropertyInsertDiag] event=insert_attempt " +
+            "propertyID=\(payload.id.uuidString) " +
+            "payloadOrgID=\(payload.orgID.uuidString) " +
+            "payloadUpdatedBy=\(payload.updatedBy?.uuidString ?? "nil") " +
+            "appAuthUserID=\(authenticatedSupabaseUser?.id.uuidString ?? "nil") " +
+            "appAuthEmail=\(authenticatedSupabaseUser?.email ?? "nil") " +
+            "clientAuthUserID=\(clientAuth.userID) " +
+            "clientAuthEmail=\(clientAuth.email) " +
+            "clientAuthError=\(clientAuth.error) " +
+            "activeOrganizationID=\(activeOrganizationID?.uuidString ?? "nil") " +
+            "supabaseEnabled=\(backendFeatureFlags.supabaseEnabled) " +
+            "shadowWriteEnabled=\(backendFeatureFlags.shadowWriteEnabled) " +
+            "supabaseReadEnabled=\(backendFeatureFlags.supabaseReadEnabled) " +
+            "supabasePropertyReadEnabled=\(backendFeatureFlags.supabasePropertyReadEnabled) " +
+            "supabaseClientExists=true " +
+            "organizationContextReady=\(isOrganizationContextReady)"
+        )
+
+        do {
+            try await client
+                .from("properties")
+                .insert(payload, returning: .minimal)
+                .execute()
+            print(
+                "[PropertyInsertDiag] event=insert_success " +
+                "propertyID=\(payload.id.uuidString) " +
+                "payloadOrgID=\(payload.orgID.uuidString) " +
+                "payloadUpdatedBy=\(payload.updatedBy?.uuidString ?? "nil") " +
+                "clientAuthUserID=\(clientAuth.userID)"
+            )
+        } catch {
+            print(
+                "[PropertyInsertDiag] event=insert_failed " +
+                "propertyID=\(payload.id.uuidString) " +
+                "payloadOrgID=\(payload.orgID.uuidString) " +
+                "payloadUpdatedBy=\(payload.updatedBy?.uuidString ?? "nil") " +
+                "appAuthUserID=\(authenticatedSupabaseUser?.id.uuidString ?? "nil") " +
+                "appAuthEmail=\(authenticatedSupabaseUser?.email ?? "nil") " +
+                "clientAuthUserID=\(clientAuth.userID) " +
+                "clientAuthEmail=\(clientAuth.email) " +
+                "clientAuthError=\(clientAuth.error) " +
+                "activeOrganizationID=\(activeOrganizationID?.uuidString ?? "nil") " +
+                "supabaseEnabled=\(backendFeatureFlags.supabaseEnabled) " +
+                "shadowWriteEnabled=\(backendFeatureFlags.shadowWriteEnabled) " +
+                "supabaseReadEnabled=\(backendFeatureFlags.supabaseReadEnabled) " +
+                "supabasePropertyReadEnabled=\(backendFeatureFlags.supabasePropertyReadEnabled) " +
+                "supabaseClientExists=true " +
+                "organizationContextReady=\(isOrganizationContextReady) " +
+                "error=\(error.localizedDescription)"
+            )
+            throw error
+        }
     }
 
     private func upsertSessionRowToSupabase(_ payload: SupabaseSessionPayload) async throws {
@@ -6051,6 +6380,42 @@ final class AppState: ObservableObject {
             .eq("org_id", value: activeOrganizationID.uuidString.lowercased())
             .execute()
             .value
+    }
+
+    private func fetchRemoteSessionDeletePreflightRecordDirect(
+        orgID: UUID,
+        propertyID: UUID,
+        sessionID: UUID
+    ) async throws -> RemoteSessionDeletePreflightRecord? {
+#if DEBUG
+        if AppStateTestEnvironment.isRunningUnderXCTest,
+           let cached = sessionCoordinationDebugRemoteRecords[sessionID],
+           cached.orgID == orgID,
+           cached.propertyID == propertyID {
+            return RemoteSessionDeletePreflightRecord(
+                id: cached.id,
+                orgID: cached.orgID,
+                propertyID: cached.propertyID,
+                deletedAt: nil,
+                lockedByUserID: cached.lockedByUserID,
+                lockedByDeviceID: cached.lockedByDeviceID,
+                lockedAt: cached.lockedAt
+            )
+        }
+#endif
+        guard let client = supabaseClient else { return nil }
+
+        let rows = try await client
+            .from("sessions")
+            .select("id, org_id, property_id, deleted_at, locked_by_user_id, locked_by_device_id, locked_at")
+            .eq("org_id", value: orgID.uuidString.lowercased())
+            .eq("property_id", value: propertyID.uuidString.lowercased())
+            .eq("id", value: sessionID.uuidString.lowercased())
+            .limit(1)
+            .execute()
+            .value as [RemoteSessionDeletePreflightRecord]
+
+        return rows.first
     }
 
     private func fetchRemotePropertySessionLockRecords(
@@ -11356,6 +11721,127 @@ final class AppState: ObservableObject {
         clientPhone: String = "",
         clientEmail: String = ""
     ) throws -> Property {
+        do {
+            let property = try makePropertyForCreate(
+                organizationID: organizationID,
+                clientName: clientName,
+                propertyName: propertyName,
+                address: address,
+                street: street,
+                city: city,
+                state: state,
+                zip: zip,
+                clientPhone: clientPhone,
+                clientEmail: clientEmail
+            )
+            guard !requiresRemotePropertyCreate(for: organizationID) else {
+                throw PropertyCreationError.remoteCreateUnavailable
+            }
+            let created = try persistCreatedPropertyLocally(property)
+            schedulePhaseBPropertyShadowWrite(for: created)
+            return created
+        } catch {
+            if let propertyCreationError = error as? PropertyCreationError {
+                throw propertyCreationError
+            }
+            if case LocalStore.StoreError.noAvailableFolderID = error {
+                throw PropertyCreationError.noAvailableFolderID
+            }
+            throw PropertyCreationError.persistenceFailed
+        }
+    }
+
+    @discardableResult
+    func createPropertyRemoteAware(
+        organizationID: UUID,
+        clientName: String,
+        propertyName: String,
+        address: String,
+        street: String = "",
+        city: String = "",
+        state: String = "",
+        zip: String = "",
+        clientPhone: String = "",
+        clientEmail: String = ""
+    ) async throws -> Property {
+        do {
+            let property = try makePropertyForCreate(
+                organizationID: organizationID,
+                clientName: clientName,
+                propertyName: propertyName,
+                address: address,
+                street: street,
+                city: city,
+                state: state,
+                zip: zip,
+                clientPhone: clientPhone,
+                clientEmail: clientEmail
+            )
+
+            if requiresRemotePropertyCreate(for: organizationID) {
+                guard remotePropertyCreatePathAvailable(for: organizationID) else {
+                    throw PropertyCreationError.remoteCreateUnavailable
+                }
+
+                let payload = makeSupabasePropertyPayload(
+                    propertyID: property.id,
+                    orgID: organizationID,
+                    property: property,
+                    metadata: nil
+                )
+                print(
+                    "[PropertyRemoteCreateDiag] event=remote_create_attempt " +
+                    "propertyID=\(property.id.uuidString) " +
+                    "selectedOrganizationID=\(organizationID.uuidString) " +
+                    "payloadOrgID=\(payload.orgID.uuidString) " +
+                    "payloadUpdatedBy=\(payload.updatedBy?.uuidString ?? "nil") " +
+                    "appAuthUserID=\(authenticatedSupabaseUser?.id.uuidString ?? "nil") " +
+                    "appAuthEmail=\(authenticatedSupabaseUser?.email ?? "nil") " +
+                    "activeOrganizationID=\(activeOrganizationID?.uuidString ?? "nil") " +
+                    "supabaseEnabled=\(backendFeatureFlags.supabaseEnabled) " +
+                    "shadowWriteEnabled=\(backendFeatureFlags.shadowWriteEnabled) " +
+                    "supabaseReadEnabled=\(backendFeatureFlags.supabaseReadEnabled) " +
+                    "supabasePropertyReadEnabled=\(backendFeatureFlags.supabasePropertyReadEnabled) " +
+                    "supabaseClientExists=\(supabaseClient != nil) " +
+                    "organizationContextReady=\(isOrganizationContextReady) " +
+                    "upsertConflictTarget=id"
+                )
+
+                do {
+                    try await performRemotePropertyInsert(property: property, payload: payload)
+                } catch {
+                    throw PropertyCreationError.remoteCreateFailed(error.localizedDescription)
+                }
+
+                return try persistCreatedPropertyLocally(property)
+            }
+
+            let created = try persistCreatedPropertyLocally(property)
+            schedulePhaseBPropertyShadowWrite(for: created)
+            return created
+        } catch {
+            if let propertyCreationError = error as? PropertyCreationError {
+                throw propertyCreationError
+            }
+            if case LocalStore.StoreError.noAvailableFolderID = error {
+                throw PropertyCreationError.noAvailableFolderID
+            }
+            throw PropertyCreationError.persistenceFailed
+        }
+    }
+
+    private func makePropertyForCreate(
+        organizationID: UUID,
+        clientName: String,
+        propertyName: String,
+        address: String,
+        street: String,
+        city: String,
+        state: String,
+        zip: String,
+        clientPhone: String,
+        clientEmail: String
+    ) throws -> Property {
         let cleanedClientName = clientName.trimmingCharacters(in: .whitespacesAndNewlines)
         let cleanedName = propertyName.trimmingCharacters(in: .whitespacesAndNewlines)
         let cleanedAddress = address.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -11369,43 +11855,36 @@ final class AppState: ObservableObject {
         guard !cleanedName.isEmpty else { throw PropertyCreationError.missingPropertyName }
         guard canAccessOrganization(organizationID) else { throw PropertyCreationError.missingOrganization }
 
-        do {
-            try ensureLocalOrganizationExists(for: organizationID)
-            let property = Property(
-                id: UUID(),
-                orgId: organizationID,
-                clientName: cleanedClientName.isEmpty ? nil : cleanedClientName,
-                clientPhone: cleanedPhone.isEmpty ? nil : cleanedPhone,
-                clientEmail: cleanedEmail.isEmpty ? nil : cleanedEmail,
-                name: cleanedName,
-                address: cleanedAddress.isEmpty ? nil : cleanedAddress,
-                street: cleanedStreet.isEmpty ? nil : cleanedStreet,
-                city: cleanedCity.isEmpty ? nil : cleanedCity,
-                state: cleanedState.isEmpty ? nil : cleanedState,
-                zip: cleanedZip.isEmpty ? nil : cleanedZip
-            )
-            let created = try localStore.createProperty(property)
-            allProperties.append(created)
-            allOrganizations = (try? localStore.fetchOrganizations()) ?? allOrganizations
-            allSessionIndexByProperty[created.id] = []
-            allDraftSessionByProperty[created.id] = nil
-            allPendingExportSessionByProperty[created.id] = nil
-            allHubMetaByProperty[created.id] = makeHubMeta(for: created, organizations: allOrganizations)
-            applyTenantScopedState()
-            if selectedPropertyID == nil {
-                selectedPropertyID = created.id
-            }
-            schedulePhaseBPropertyShadowWrite(for: created)
-            return created
-        } catch {
-            if let propertyCreationError = error as? PropertyCreationError {
-                throw propertyCreationError
-            }
-            if case LocalStore.StoreError.noAvailableFolderID = error {
-                throw PropertyCreationError.noAvailableFolderID
-            }
-            throw PropertyCreationError.persistenceFailed
+        return Property(
+            id: UUID(),
+            orgId: organizationID,
+            clientName: cleanedClientName.isEmpty ? nil : cleanedClientName,
+            clientPhone: cleanedPhone.isEmpty ? nil : cleanedPhone,
+            clientEmail: cleanedEmail.isEmpty ? nil : cleanedEmail,
+            name: cleanedName,
+            address: cleanedAddress.isEmpty ? nil : cleanedAddress,
+            street: cleanedStreet.isEmpty ? nil : cleanedStreet,
+            city: cleanedCity.isEmpty ? nil : cleanedCity,
+            state: cleanedState.isEmpty ? nil : cleanedState,
+            zip: cleanedZip.isEmpty ? nil : cleanedZip
+        )
+    }
+
+    private func persistCreatedPropertyLocally(_ property: Property) throws -> Property {
+        guard let orgID = property.orgId else { throw PropertyCreationError.missingOrganization }
+        try ensureLocalOrganizationExists(for: orgID)
+        let created = try localStore.createProperty(property)
+        allProperties.append(created)
+        allOrganizations = (try? localStore.fetchOrganizations()) ?? allOrganizations
+        allSessionIndexByProperty[created.id] = []
+        allDraftSessionByProperty[created.id] = nil
+        allPendingExportSessionByProperty[created.id] = nil
+        allHubMetaByProperty[created.id] = makeHubMeta(for: created, organizations: allOrganizations)
+        applyTenantScopedState()
+        if selectedPropertyID == nil {
+            selectedPropertyID = created.id
         }
+        return created
     }
 
     @discardableResult
@@ -11761,6 +12240,192 @@ final class AppState: ObservableObject {
 
         if selectedPropertyID == updated.id {
             selectedPropertyID = nil
+        }
+    }
+
+    @discardableResult
+    func remoteSoftDeleteSession(propertyID: UUID, sessionID: UUID) async -> Bool {
+        do {
+            try await performRemoteSoftDeleteSession(propertyID: propertyID, sessionID: sessionID)
+            lastSessionDeleteErrorMessage = nil
+            return true
+        } catch {
+            let message = softDeleteSessionErrorMessage(for: error)
+            lastSessionDeleteErrorMessage = message
+            hubTransientStatusMessage = message
+            print("[SessionSoftDelete] result=failed sessionID=\(sessionID.uuidString) error=\(message)")
+            return false
+        }
+    }
+
+    private func performRemoteSoftDeleteSession(propertyID: UUID, sessionID: UUID) async throws {
+        guard currentSession?.id != sessionID else {
+            throw SessionSoftDeleteError.activeSession
+        }
+        guard canAccessProperty(propertyID),
+              let existing = ((try? localStore.fetchSessionsForCacheBuild(propertyID: propertyID)) ?? [])
+                .first(where: { $0.id == sessionID }) else {
+            throw SessionSoftDeleteError.sessionNotFound
+        }
+        guard supabaseClient != nil,
+              let orgID = activeOrganizationID,
+              authenticatedSupabaseUser != nil,
+              isOrganizationContextReady else {
+            throw SessionSoftDeleteError.missingAuthenticatedContext
+        }
+
+        let preflight: SessionDeletePreflightSnapshot
+        do {
+            preflight = try await forceRefreshRemoteSessionDeletePreflightState(
+                orgID: orgID,
+                propertyID: propertyID,
+                sessionID: sessionID
+            )
+        } catch {
+            if let sessionError = error as? SessionSoftDeleteError {
+                throw sessionError
+            }
+            throw SessionSoftDeleteError.preflightFailed(error.localizedDescription)
+        }
+
+        print(
+            "[SessionSoftDelete] preflight sessionID=\(sessionID.uuidString) " +
+            "propertyID=\(propertyID.uuidString) " +
+            "deletedAt=\(preflight.deletedAt.map { supabaseTimestampString($0) } ?? "nil") " +
+            "occupancyCount=\(preflight.occupancyCount) " +
+            "lockCount=\(preflight.lockCount) " +
+            "decision=\(preflight.isBlocked ? "blocked" : "allowed") " +
+            "reason=\(preflight.blockedReason ?? "none")"
+        )
+        guard !preflight.isBlocked else {
+            throw SessionSoftDeleteError.remoteInUse
+        }
+
+        try await callSoftDeleteSessionRPC(sessionID: sessionID)
+        applyRemoteSoftDeletedSessionLocally(existing, deletedAt: preflight.deletedAt ?? Date())
+
+#if DEBUG
+        if let sessionSoftDeleteRefreshOverride {
+            _ = await sessionSoftDeleteRefreshOverride()
+            return
+        }
+#endif
+        _ = await performForegroundRemotePropertyRefresh()
+    }
+
+    private func forceRefreshRemoteSessionDeletePreflightState(
+        orgID: UUID,
+        propertyID: UUID,
+        sessionID: UUID
+    ) async throws -> SessionDeletePreflightSnapshot {
+#if DEBUG
+        if let sessionDeletePreflightRefreshOverride {
+            return try await sessionDeletePreflightRefreshOverride(orgID, propertyID, sessionID)
+        }
+#endif
+        guard let sessionRecord = try await fetchRemoteSessionDeletePreflightRecordDirect(
+            orgID: orgID,
+            propertyID: propertyID,
+            sessionID: sessionID
+        ) else {
+            throw SessionSoftDeleteError.sessionNotFound
+        }
+
+        let sessionLocked = sessionRecord.lockedByUserID != nil ||
+            normalizedSupabaseText(sessionRecord.lockedByDeviceID) != nil ||
+            normalizedSupabaseText(sessionRecord.lockedAt) != nil
+        if sessionLocked {
+            return SessionDeletePreflightSnapshot(
+                deletedAt: sessionRecord.deletedAt,
+                occupancyCount: 0,
+                lockCount: 1,
+                isBlocked: true,
+                blockedReason: "session_lock"
+            )
+        }
+
+        let occupancy = try await fetchRemotePropertySessionOccupancyRecordDirect(
+            orgID: orgID,
+            propertyID: propertyID
+        )
+        setPropertySessionOccupancyState(
+            propertyID: propertyID,
+            occupiedByUserID: occupancy?.occupiedByUserID,
+            occupiedByDeviceID: normalizedSupabaseText(occupancy?.occupiedByDeviceID),
+            occupiedAt: occupancy?.occupiedAt.flatMap(parseSupabaseDateString)
+        )
+        if let occupancy,
+           occupancy.occupiedByUserID != nil ||
+            normalizedSupabaseText(occupancy.occupiedByDeviceID) != nil ||
+            normalizedSupabaseText(occupancy.occupiedAt) != nil {
+            return SessionDeletePreflightSnapshot(
+                deletedAt: sessionRecord.deletedAt,
+                occupancyCount: 1,
+                lockCount: 0,
+                isBlocked: true,
+                blockedReason: "property_occupancy"
+            )
+        }
+
+        return SessionDeletePreflightSnapshot(
+            deletedAt: sessionRecord.deletedAt,
+            occupancyCount: 0,
+            lockCount: 0,
+            isBlocked: false,
+            blockedReason: nil
+        )
+    }
+
+    private func callSoftDeleteSessionRPC(sessionID: UUID) async throws {
+#if DEBUG
+        if let sessionSoftDeleteRPCOverride {
+            try await sessionSoftDeleteRPCOverride(sessionID)
+            return
+        }
+#endif
+        guard let client = supabaseClient else {
+            throw SessionSoftDeleteError.missingAuthenticatedContext
+        }
+        let params = SoftDeleteSessionRPCPayload(targetSessionID: sessionID)
+        do {
+            _ = try await (try client.rpc("soft_delete_session", params: params)).execute()
+        } catch {
+            throw normalizedSoftDeleteSessionRPCError(error)
+        }
+    }
+
+    private func normalizedSoftDeleteSessionRPCError(_ error: Error) -> Error {
+        let message = error.localizedDescription
+        let lowered = message.lowercased()
+        if lowered.contains("currently in use") ||
+            lowered.contains("occupancy") ||
+            lowered.contains("lock") {
+            return SessionSoftDeleteError.remoteInUse
+        }
+        return SessionSoftDeleteError.remoteFailed(message)
+    }
+
+    private func softDeleteSessionErrorMessage(for error: Error) -> String {
+        if let sessionError = error as? SessionSoftDeleteError,
+           let description = sessionError.errorDescription {
+            return description
+        }
+        let normalized = normalizedSoftDeleteSessionRPCError(error)
+        if let sessionError = normalized as? SessionSoftDeleteError,
+           let description = sessionError.errorDescription {
+            return description
+        }
+        return "The session could not be deleted. \(error.localizedDescription)"
+    }
+
+    private func applyRemoteSoftDeletedSessionLocally(_ session: Session, deletedAt: Date) {
+        var updated = session
+        updated.deletedAt = session.deletedAt ?? deletedAt
+        do {
+            _ = try localStore.upsertSession(updated)
+            reloadSessionCache(for: updated.propertyID)
+        } catch {
+            print("[SessionSoftDelete] local cache update failed after remote success: \(error.localizedDescription)")
         }
     }
 
@@ -12515,6 +13180,16 @@ final class AppState: ObservableObject {
         recentlyDeletedPropertiesFetchOverride = recentlyDeletedFetch
         propertyDeletePreflightRefreshOverride = deletePreflightRefresh
         propertySessionOccupancyPersistOverride = occupancyPersist
+    }
+
+    func _debugSetSessionSoftDeleteOverridesForTests(
+        rpc: SessionSoftDeleteRPCOverride? = nil,
+        refresh: SessionSoftDeleteRefreshOverride? = nil,
+        deletePreflightRefresh: SessionDeletePreflightRefreshOverride? = nil
+    ) {
+        sessionSoftDeleteRPCOverride = rpc
+        sessionSoftDeleteRefreshOverride = refresh
+        sessionDeletePreflightRefreshOverride = deletePreflightRefresh
     }
 
     func _debugSetPropertySessionOccupancyForTests(
