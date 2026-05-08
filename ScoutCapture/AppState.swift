@@ -3508,9 +3508,11 @@ final class AppState: ObservableObject {
         let scopedOrganizations = scopedOrganizations(from: allOrganizations)
         let scopedProperties = scopedProperties(from: allProperties)
         let scopedPropertyIDs = Set(scopedProperties.map(\.id))
-        let scopedSessionIndex = allSessionIndexByProperty.filter { scopedPropertyIDs.contains($0.key) }
-        let scopedDrafts = allDraftSessionByProperty.filter { scopedPropertyIDs.contains($0.key) }
-        let scopedPending = allPendingExportSessionByProperty.filter { scopedPropertyIDs.contains($0.key) }
+        let scopedSessionIndex = allSessionIndexByProperty
+            .filter { scopedPropertyIDs.contains($0.key) }
+            .mapValues { sessions in sessions.filter { $0.deletedAt == nil } }
+        let scopedDrafts = allDraftSessionByProperty.filter { scopedPropertyIDs.contains($0.key) && $0.value.deletedAt == nil }
+        let scopedPending = allPendingExportSessionByProperty.filter { scopedPropertyIDs.contains($0.key) && $0.value.deletedAt == nil }
         let scopedMeta = allHubMetaByProperty.filter { scopedPropertyIDs.contains($0.key) }
         let scopedSessionIDs = Set(scopedSessionIndex.values.flatMap { $0.map(\.id) })
         var didChangeScopedSessionDerivedCaches = false
@@ -4537,15 +4539,6 @@ final class AppState: ObservableObject {
                 )
                 continue
             }
-            guard record.deletedAt == nil else {
-                skipped += 1
-                print(
-                    "[SyncApply] action=session_skipped " +
-                    "sessionID=\(record.id.uuidString) " +
-                    "reason=soft_deleted"
-                )
-                continue
-            }
             guard let startedAt = parseSupabaseDateString(record.startedAt) else {
                 skipped += 1
                 print(
@@ -4558,12 +4551,20 @@ final class AppState: ObservableObject {
 
             let endedAt = record.completedAt.flatMap(parseSupabaseDateString)
             let normalizedStatus = record.status.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            let existingSession = ((try? localStore.fetchSessionsForCacheBuild(propertyID: record.propertyID)) ?? [])
+                .first(where: { $0.id == record.id })
             let session = Session(
                 id: record.id,
                 propertyID: record.propertyID,
                 startedAt: startedAt,
                 status: Session.Status(rawValue: normalizedStatus) ?? .draft,
-                endedAt: endedAt
+                endedAt: endedAt,
+                exportedAt: existingSession?.exportedAt,
+                isSealed: existingSession?.isSealed ?? (normalizedStatus == Session.Status.completed.rawValue),
+                firstDeliveredAt: existingSession?.firstDeliveredAt,
+                reExportExpiresAt: existingSession?.reExportExpiresAt,
+                notes: existingSession?.notes,
+                deletedAt: record.deletedAt
             )
 
             do {
@@ -12014,14 +12015,31 @@ final class AppState: ObservableObject {
     func sessions(for propertyID: UUID) -> [Session] {
         guard canAccessProperty(propertyID) else { return [] }
         if let cached = sessionIndexByProperty[propertyID] {
-            return cached
+            return cached.filter { $0.deletedAt == nil }
         }
         let fetched = (try? localStore.fetchSessions(propertyID: propertyID)) ?? []
         var uniqueByID: [UUID: Session] = [:]
         for session in fetched {
             uniqueByID[session.id] = session
         }
-        return uniqueByID.values.sorted { $0.startedAt < $1.startedAt }
+        return uniqueByID.values
+            .filter { $0.deletedAt == nil }
+            .sorted { $0.startedAt < $1.startedAt }
+    }
+
+    func recentlyDeletedSessions() -> [Session] {
+        properties
+            .flatMap { property -> [Session] in
+                if let cached = allSessionIndexByProperty[property.id] {
+                    return cached
+                }
+                return loadAndNormalizeSessions(propertyID: property.id)
+            }
+            .filter { $0.deletedAt != nil }
+            .sorted {
+                ($0.deletedAt ?? .distantPast, $0.startedAt) >
+                ($1.deletedAt ?? .distantPast, $1.startedAt)
+            }
     }
 
     func latestPendingExportSession(for propertyID: UUID) -> Session? {
@@ -13014,7 +13032,7 @@ final class AppState: ObservableObject {
             }
 
             if let pendingSession = sessions
-                .filter({ isPendingDelivery($0) })
+                .filter({ $0.deletedAt == nil && isPendingDelivery($0) })
                 .sorted(by: { $0.startedAt > $1.startedAt })
                 .first {
                 pending[property.id] = pendingSession
@@ -13076,7 +13094,7 @@ final class AppState: ObservableObject {
         }
 
         let pendingSession = sessions
-            .filter { isPendingDelivery($0) }
+            .filter { $0.deletedAt == nil && isPendingDelivery($0) }
             .sorted { $0.startedAt > $1.startedAt }
             .first
         if allPendingExportSessionByProperty[propertyID] != pendingSession {
@@ -13087,7 +13105,7 @@ final class AppState: ObservableObject {
 
     private func latestVisibleDraft(in sessions: [Session]) -> Session? {
         sessions
-            .filter { $0.status == .draft && sessionHasCaptures($0) }
+            .filter { $0.deletedAt == nil && $0.status == .draft && sessionHasCaptures($0) }
             .sorted { $0.startedAt > $1.startedAt }
             .first
     }

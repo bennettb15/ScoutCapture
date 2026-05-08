@@ -1191,6 +1191,7 @@ struct Session: Codable, Identifiable, Equatable {
     var firstDeliveredAt: Date?
     var reExportExpiresAt: Date?
     var notes: String?
+    var deletedAt: Date?
 
     init(
         id: UUID = UUID(),
@@ -1202,7 +1203,8 @@ struct Session: Codable, Identifiable, Equatable {
         isSealed: Bool = false,
         firstDeliveredAt: Date? = nil,
         reExportExpiresAt: Date? = nil,
-        notes: String? = nil
+        notes: String? = nil,
+        deletedAt: Date? = nil
     ) {
         self.id = id
         self.propertyID = propertyID
@@ -1214,6 +1216,7 @@ struct Session: Codable, Identifiable, Equatable {
         self.firstDeliveredAt = firstDeliveredAt
         self.reExportExpiresAt = reExportExpiresAt
         self.notes = notes
+        self.deletedAt = deletedAt
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -1227,6 +1230,7 @@ struct Session: Codable, Identifiable, Equatable {
         case firstDeliveredAt
         case reExportExpiresAt
         case notes
+        case deletedAt
     }
 
     init(from decoder: Decoder) throws {
@@ -1246,6 +1250,7 @@ struct Session: Codable, Identifiable, Equatable {
             reExportExpiresAt = nil
         }
         notes = try c.decodeIfPresent(String.self, forKey: .notes)
+        deletedAt = try c.decodeIfPresent(Date.self, forKey: .deletedAt)
         if let decodedStatus = try c.decodeIfPresent(Status.self, forKey: .status) {
             status = decodedStatus
         } else {
@@ -1267,6 +1272,7 @@ struct Session: Codable, Identifiable, Equatable {
         try c.encodeIfPresent(firstDeliveredAt, forKey: .firstDeliveredAt)
         try c.encodeIfPresent(reExportExpiresAt, forKey: .reExportExpiresAt)
         try c.encodeIfPresent(notes, forKey: .notes)
+        try c.encodeIfPresent(deletedAt, forKey: .deletedAt)
     }
 }
 

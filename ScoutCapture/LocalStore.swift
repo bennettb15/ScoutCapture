@@ -1812,6 +1812,7 @@ final class LocalStore {
     func fetchSessions(propertyID: UUID) throws -> [Session] {
         try ensurePropertyExists(propertyID)
         return try readSessions(propertyID: propertyID)
+            .filter { $0.deletedAt == nil }
     }
 
     func fetchSessionsForCacheBuild(propertyID: UUID) throws -> [Session] {
@@ -2059,7 +2060,7 @@ final class LocalStore {
     func latestDraftSession(propertyID: UUID) throws -> Session? {
         let sessions = try fetchSessions(propertyID: propertyID)
         return sessions
-            .filter { $0.status == .draft }
+            .filter { $0.deletedAt == nil && $0.status == .draft }
             .sorted { $0.startedAt > $1.startedAt }
             .first
     }
