@@ -10,6 +10,7 @@ final class Phase2C14B4SessionRemoteSoftDeleteTests: XCTestCase {
         let appState: AppState
         let orgID: UUID
         let propertyID: UUID
+        let deviceID: String
     }
 
     private func makeFixture() throws -> Fixture {
@@ -21,6 +22,8 @@ final class Phase2C14B4SessionRemoteSoftDeleteTests: XCTestCase {
         defaults.set(false, forKey: "supabase_read_enabled")
         defaults.set(false, forKey: "supabase_property_read_enabled")
         defaults.set(false, forKey: "media_supabase_upload_enabled")
+        let deviceID = "phase2c14b4-device-\(UUID().uuidString)"
+        defaults.set(deviceID, forKey: "scoutcapture.deviceIdentifier.v1")
 
         let storageRoot = FileManager.default.temporaryDirectory
             .appendingPathComponent("ScoutCapture-2C14B4-\(UUID().uuidString)", isDirectory: true)
@@ -52,7 +55,8 @@ final class Phase2C14B4SessionRemoteSoftDeleteTests: XCTestCase {
             localStore: localStore,
             appState: appState,
             orgID: orgID,
-            propertyID: propertyID
+            propertyID: propertyID,
+            deviceID: deviceID
         )
     }
 
@@ -95,6 +99,13 @@ final class Phase2C14B4SessionRemoteSoftDeleteTests: XCTestCase {
                 endedAt: status == .completed ? Date(timeIntervalSinceReferenceDate: 200) : nil
             )
         )
+    }
+
+    private func iso8601(_ date: Date) -> String {
+        let formatter = ISO8601DateFormatter()
+        formatter.timeZone = TimeZone(secondsFromGMT: 0)
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter.string(from: date)
     }
 
     func testRemoteSuccessSoftDeletesAndHidesSessionWithoutHardDelete() async throws {
@@ -229,6 +240,140 @@ final class Phase2C14B4SessionRemoteSoftDeleteTests: XCTestCase {
                         blockedReason: "session_lock"
                     )
                 }
+            )
+        }
+
+        let deleted = await fixture.appState.remoteSoftDeleteSession(
+            propertyID: fixture.propertyID,
+            sessionID: session.id
+        )
+
+        XCTAssertFalse(deleted)
+        XCTAssertEqual(rpcCount, 0)
+        XCTAssertEqual(fixture.appState.lastSessionDeleteErrorMessage, "This session is currently in use and cannot be deleted.")
+    }
+
+    func testRecentSameDeviceRemoteLockBlocksBeforeRPC() async throws {
+        let fixture = try makeFixture()
+        defer { tearDownFixture(fixture) }
+        let session = try seedSession(fixture)
+        await prepareRemoteContext(fixture)
+        let userID = fixture.appState.authenticatedSupabaseUser!.id
+        fixture.appState._debugSetSessionCoordinationFetchResultForTests(
+            AppState.DebugSessionCoordinationRemoteInput(
+                sessionID: session.id,
+                orgID: fixture.orgID,
+                propertyID: fixture.propertyID,
+                lockedByUserID: userID,
+                lockedByDeviceID: fixture.deviceID,
+                lockedAt: iso8601(Date()),
+                coordinationTier1Snapshot: nil,
+                updatedAt: Date()
+            )
+        )
+        var rpcCount = 0
+        await MainActor.run {
+            fixture.appState._debugSetSessionSoftDeleteOverridesForTests(
+                rpc: { _ in rpcCount += 1 },
+                refresh: { true }
+            )
+        }
+
+        let deleted = await fixture.appState.remoteSoftDeleteSession(
+            propertyID: fixture.propertyID,
+            sessionID: session.id
+        )
+
+        XCTAssertFalse(deleted)
+        XCTAssertEqual(rpcCount, 0)
+        XCTAssertEqual(fixture.appState.lastSessionDeleteErrorMessage, "This session is currently in use and cannot be deleted.")
+    }
+
+    func testStaleSameDeviceRemoteLockClearsAndAllowsSoftDeleteWithoutCascade() async throws {
+        let fixture = try makeFixture()
+        defer { tearDownFixture(fixture) }
+        let session = try seedSession(fixture)
+        _ = try fixture.localStore.createObservation(
+            Observation(
+                propertyID: fixture.propertyID,
+                sessionID: session.id,
+                statement: "Still retained"
+            )
+        )
+        try fixture.localStore.saveGuidedShots(
+            [
+                GuidedShot(
+                    title: "Still retained",
+                    skipSessionID: session.id
+                )
+            ],
+            propertyID: fixture.propertyID
+        )
+        await prepareRemoteContext(fixture)
+        let userID = fixture.appState.authenticatedSupabaseUser!.id
+        fixture.appState._debugSetSessionCoordinationFetchResultForTests(
+            AppState.DebugSessionCoordinationRemoteInput(
+                sessionID: session.id,
+                orgID: fixture.orgID,
+                propertyID: fixture.propertyID,
+                lockedByUserID: userID,
+                lockedByDeviceID: fixture.deviceID,
+                lockedAt: iso8601(Date().addingTimeInterval(-31 * 60)),
+                coordinationTier1Snapshot: nil,
+                updatedAt: Date().addingTimeInterval(-31 * 60)
+            )
+        )
+        var rpcCalls: [UUID] = []
+        await MainActor.run {
+            fixture.appState._debugSetSessionSoftDeleteOverridesForTests(
+                rpc: { rpcCalls.append($0) },
+                refresh: { true }
+            )
+        }
+
+        let deleted = await fixture.appState.remoteSoftDeleteSession(
+            propertyID: fixture.propertyID,
+            sessionID: session.id
+        )
+
+        let remoteLock = fixture.appState._debugReadSessionCoordinationStateForTests(sessionID: session.id)
+        let rawSessions = try fixture.localStore.fetchSessionsForCacheBuild(propertyID: fixture.propertyID)
+        let observations = try fixture.localStore.fetchObservations(propertyID: fixture.propertyID)
+        let guided = try fixture.localStore.fetchGuidedShots(propertyID: fixture.propertyID)
+
+        XCTAssertTrue(deleted)
+        XCTAssertEqual(rpcCalls, [session.id])
+        XCTAssertNil(remoteLock.lockedByUserID)
+        XCTAssertNil(remoteLock.lockedByDeviceID)
+        XCTAssertNil(remoteLock.lockedAt)
+        XCTAssertNotNil(rawSessions.first(where: { $0.id == session.id })?.deletedAt)
+        XCTAssertEqual(observations.count, 1)
+        XCTAssertEqual(guided.count, 1)
+    }
+
+    func testStaleOtherDeviceRemoteLockStillBlocksBeforeRPC() async throws {
+        let fixture = try makeFixture()
+        defer { tearDownFixture(fixture) }
+        let session = try seedSession(fixture)
+        await prepareRemoteContext(fixture)
+        let userID = fixture.appState.authenticatedSupabaseUser!.id
+        fixture.appState._debugSetSessionCoordinationFetchResultForTests(
+            AppState.DebugSessionCoordinationRemoteInput(
+                sessionID: session.id,
+                orgID: fixture.orgID,
+                propertyID: fixture.propertyID,
+                lockedByUserID: userID,
+                lockedByDeviceID: "other-device",
+                lockedAt: iso8601(Date().addingTimeInterval(-31 * 60)),
+                coordinationTier1Snapshot: nil,
+                updatedAt: Date().addingTimeInterval(-31 * 60)
+            )
+        )
+        var rpcCount = 0
+        await MainActor.run {
+            fixture.appState._debugSetSessionSoftDeleteOverridesForTests(
+                rpc: { _ in rpcCount += 1 },
+                refresh: { true }
             )
         }
 

@@ -251,6 +251,9 @@ final class AppState: ObservableObject {
     typealias SessionSoftDeleteRPCOverride = (UUID) async throws -> Void
     typealias SessionSoftDeleteRefreshOverride = () async -> Bool
     typealias SessionDeletePreflightRefreshOverride = (UUID, UUID, UUID) async throws -> SessionDeletePreflightSnapshot
+    typealias RecentlyDeletedSessionsFetchOverride = (UUID, UUID?) async throws -> [RecentlyDeletedSession]
+    typealias SessionRestoreRPCOverride = (UUID) async throws -> Void
+    typealias SessionRestoreRefreshOverride = () async -> Bool
 #endif
 
     struct RecentlyDeletedProperty: Equatable, Identifiable, Decodable {
@@ -283,6 +286,42 @@ final class AppState: ObservableObject {
             case isArchived = "is_archived"
             case deletedAt = "deleted_at"
             case updatedAt = "updated_at"
+            case revision
+        }
+    }
+
+    struct RecentlyDeletedSession: Equatable, Identifiable, Decodable {
+        let id: UUID
+        let orgID: UUID
+        let propertyID: UUID
+        let status: String
+        let startedAt: Date
+        let endedAt: Date?
+        let exportedAt: Date?
+        let isSealed: Bool
+        let firstDeliveredAt: Date?
+        let reExportExpiresAt: Date?
+        let notes: String?
+        let deletedAt: Date
+        let updatedAt: Date
+        let updatedBy: UUID?
+        let revision: Int64
+
+        enum CodingKeys: String, CodingKey {
+            case id
+            case orgID = "org_id"
+            case propertyID = "property_id"
+            case status
+            case startedAt = "started_at"
+            case endedAt = "ended_at"
+            case exportedAt = "exported_at"
+            case isSealed = "is_sealed"
+            case firstDeliveredAt = "first_delivered_at"
+            case reExportExpiresAt = "re_export_expires_at"
+            case notes
+            case deletedAt = "deleted_at"
+            case updatedAt = "updated_at"
+            case updatedBy = "updated_by"
             case revision
         }
     }
@@ -927,6 +966,24 @@ final class AppState: ObservableObject {
         }
     }
 
+    private struct RestoreSessionRPCPayload: Encodable {
+        let targetSessionID: UUID
+
+        enum CodingKeys: String, CodingKey {
+            case targetSessionID = "target_session_id"
+        }
+    }
+
+    private struct FetchRecentlyDeletedSessionsRPCPayload: Encodable {
+        let targetOrgID: UUID
+        let targetPropertyID: UUID?
+
+        enum CodingKeys: String, CodingKey {
+            case targetOrgID = "target_org_id"
+            case targetPropertyID = "target_property_id"
+        }
+    }
+
     private struct RestorePropertyRPCPayload: Encodable {
         let targetPropertyID: UUID
 
@@ -1463,6 +1520,7 @@ final class AppState: ObservableObject {
     private let deviceIdentifierDefaultsKey = "scoutcapture.deviceIdentifier.v1"
     private let reExportWindowDays = 7
     private let sessionMediaOffloadCooldown: TimeInterval = 30 * 60
+    private let sessionCoordinationStaleLockThreshold: TimeInterval = 30 * 60
     private let activatedPropertyRetentionWindow: TimeInterval = 7 * 24 * 60 * 60
     private let offloadSweepQueue = DispatchQueue(label: "ScoutCapture.AppState.offloadSweep", qos: .utility)
     private let archiveSnapshotQueue = DispatchQueue(label: "ScoutCapture.AppState.archiveSnapshot", qos: .utility)
@@ -1530,6 +1588,9 @@ final class AppState: ObservableObject {
     private var sessionSoftDeleteRPCOverride: SessionSoftDeleteRPCOverride?
     private var sessionSoftDeleteRefreshOverride: SessionSoftDeleteRefreshOverride?
     private var sessionDeletePreflightRefreshOverride: SessionDeletePreflightRefreshOverride?
+    private var recentlyDeletedSessionsFetchOverride: RecentlyDeletedSessionsFetchOverride?
+    private var sessionRestoreRPCOverride: SessionRestoreRPCOverride?
+    private var sessionRestoreRefreshOverride: SessionRestoreRefreshOverride?
     private var sessionCoordinationDebugRemoteRecords: [UUID: RemoteSessionCoordinationRecord] = [:]
 #endif
     private var authStateChangesTask: Task<Void, Never>?
@@ -3198,6 +3259,10 @@ final class AppState: ObservableObject {
             properties.first(where: { $0.id == propertyID })?.name
                 ?? allProperties.first(where: { $0.id == propertyID })?.name
         )
+    }
+
+    func displayNameForProperty(id propertyID: UUID) -> String {
+        activityPropertyName(for: propertyID) ?? "Property"
     }
 
     private func activityUserDisplayName(for userID: UUID?) -> String? {
@@ -7155,6 +7220,20 @@ final class AppState: ObservableObject {
         sessionID: UUID,
         emitReleasedEvent: Bool = true
     ) async {
+        await releaseSessionCoordinationLockIfOwnedUsingState(
+            propertyID: propertyID,
+            sessionID: sessionID,
+            emitReleasedEvent: emitReleasedEvent,
+            ownershipState: nil
+        )
+    }
+
+    private func releaseSessionCoordinationLockIfOwnedUsingState(
+        propertyID: UUID,
+        sessionID: UUID,
+        emitReleasedEvent: Bool,
+        ownershipState: SessionCoordinationState? = nil
+    ) async {
         let persistedSession = sessions(for: propertyID).first(where: { $0.id == sessionID })
         if persistedSession == nil {
             setSessionCoordinationState(
@@ -7182,7 +7261,7 @@ final class AppState: ObservableObject {
             lockedAt: nil
         )
 
-        let state = sessionCoordinationStateBySessionID[sessionID]
+        let state = ownershipState ?? sessionCoordinationStateBySessionID[sessionID]
         let lockedByDeviceID = state?.lockedByDeviceID ?? nil
         let ownsByAuthenticatedUser =
             state?.lockedByUserID == authenticatedSupabaseUser?.id &&
@@ -7274,6 +7353,29 @@ final class AppState: ObservableObject {
         let generated = UUID().uuidString.lowercased()
         userDefaults.set(generated, forKey: deviceIdentifierDefaultsKey)
         return generated
+    }
+
+    private func sessionDeletePreflightLockFieldsPresent(
+        _ record: RemoteSessionDeletePreflightRecord
+    ) -> Bool {
+        record.lockedByUserID != nil ||
+            normalizedSupabaseText(record.lockedByDeviceID) != nil ||
+            normalizedSupabaseText(record.lockedAt) != nil
+    }
+
+    private func sessionDeletePreflightLockIsOwnedByCurrentDevice(
+        _ record: RemoteSessionDeletePreflightRecord
+    ) -> Bool {
+        record.lockedByUserID == authenticatedSupabaseUser?.id &&
+            normalizedSupabaseText(record.lockedByDeviceID) == currentDeviceIdentifier()
+    }
+
+    private func sessionDeletePreflightLockIsStale(
+        _ record: RemoteSessionDeletePreflightRecord,
+        now: Date = Date()
+    ) -> Bool {
+        guard let lockedAt = record.lockedAt.flatMap(parseSupabaseDateString) else { return false }
+        return now.timeIntervalSince(lockedAt) >= sessionCoordinationStaleLockThreshold
     }
 
     private func sessionCoordinationTier1Snapshot(metadata: SessionMetadata) -> SessionCoordinationTier1Snapshot {
@@ -12331,19 +12433,6 @@ final class AppState: ObservableObject {
             throw SessionSoftDeleteError.sessionNotFound
         }
 
-        let sessionLocked = sessionRecord.lockedByUserID != nil ||
-            normalizedSupabaseText(sessionRecord.lockedByDeviceID) != nil ||
-            normalizedSupabaseText(sessionRecord.lockedAt) != nil
-        if sessionLocked {
-            return SessionDeletePreflightSnapshot(
-                deletedAt: sessionRecord.deletedAt,
-                occupancyCount: 0,
-                lockCount: 1,
-                isBlocked: true,
-                blockedReason: "session_lock"
-            )
-        }
-
         let occupancy = try await fetchRemotePropertySessionOccupancyRecordDirect(
             orgID: orgID,
             propertyID: propertyID
@@ -12361,9 +12450,40 @@ final class AppState: ObservableObject {
             return SessionDeletePreflightSnapshot(
                 deletedAt: sessionRecord.deletedAt,
                 occupancyCount: 1,
-                lockCount: 0,
+                lockCount: sessionDeletePreflightLockFieldsPresent(sessionRecord) ? 1 : 0,
                 isBlocked: true,
                 blockedReason: "property_occupancy"
+            )
+        }
+
+        if sessionDeletePreflightLockFieldsPresent(sessionRecord) {
+            let isStaleOwnLock = sessionDeletePreflightLockIsOwnedByCurrentDevice(sessionRecord) &&
+                sessionDeletePreflightLockIsStale(sessionRecord) &&
+                currentSession?.id != sessionID
+
+            if isStaleOwnLock {
+                let didClear = await clearStaleSessionCoordinationLockForDeletePreflight(
+                    sessionRecord: sessionRecord,
+                    propertyID: propertyID,
+                    sessionID: sessionID
+                )
+                if didClear {
+                    return SessionDeletePreflightSnapshot(
+                        deletedAt: sessionRecord.deletedAt,
+                        occupancyCount: 0,
+                        lockCount: 0,
+                        isBlocked: false,
+                        blockedReason: nil
+                    )
+                }
+            }
+
+            return SessionDeletePreflightSnapshot(
+                deletedAt: sessionRecord.deletedAt,
+                occupancyCount: 0,
+                lockCount: 1,
+                isBlocked: true,
+                blockedReason: isStaleOwnLock ? "stale_session_lock_clear_failed" : "session_lock"
             )
         }
 
@@ -12374,6 +12494,74 @@ final class AppState: ObservableObject {
             isBlocked: false,
             blockedReason: nil
         )
+    }
+
+    private func clearStaleSessionCoordinationLockForDeletePreflight(
+        sessionRecord: RemoteSessionDeletePreflightRecord,
+        propertyID: UUID,
+        sessionID: UUID
+    ) async -> Bool {
+        guard sessionDeletePreflightLockIsOwnedByCurrentDevice(sessionRecord),
+              sessionDeletePreflightLockIsStale(sessionRecord),
+              currentSession?.id != sessionID,
+              let property = properties.first(where: { $0.id == propertyID }) ?? allProperties.first(where: { $0.id == propertyID }),
+              let session = ((try? localStore.fetchSessionsForCacheBuild(propertyID: propertyID)) ?? []).first(where: { $0.id == sessionID }),
+              let metadata = try? localStore.loadSessionMetadata(propertyID: propertyID, sessionID: sessionID) else {
+            return false
+        }
+
+        print(
+            "[SessionSoftDelete] event=stale_lock_clear_attempt " +
+            "sessionID=\(sessionID.uuidString) " +
+            "propertyID=\(propertyID.uuidString) " +
+            "lockedByUserID=\(sessionRecord.lockedByUserID?.uuidString ?? "nil") " +
+            "lockedByDeviceID=\(sessionRecord.lockedByDeviceID ?? "nil") " +
+            "lockedAt=\(sessionRecord.lockedAt ?? "nil") " +
+            "ttlSeconds=\(Int(sessionCoordinationStaleLockThreshold))"
+        )
+
+        let clearedState = SessionCoordinationState(
+            lockedByUserID: nil,
+            lockedByDeviceID: nil,
+            lockedAt: nil
+        )
+        setSessionCoordinationState(
+            sessionID: sessionID,
+            lockedByUserID: nil,
+            lockedByDeviceID: nil,
+            lockedAt: nil
+        )
+#if DEBUG
+        if AppStateTestEnvironment.isRunningUnderXCTest {
+            sessionCoordinationDebugRemoteRecords[sessionID] = RemoteSessionCoordinationRecord(
+                id: sessionID,
+                orgID: sessionRecord.orgID,
+                propertyID: propertyID,
+                lockedByUserID: nil,
+                lockedByDeviceID: nil,
+                lockedAt: nil,
+                coordinationTier1Snapshot: sessionCoordinationTier1SnapshotString(metadata: metadata),
+                updatedAt: Date()
+            )
+            print(
+                "[SessionSoftDelete] event=stale_lock_clear_success " +
+                "sessionID=\(sessionID.uuidString) source=test"
+            )
+            return true
+        }
+#endif
+
+        let didClear = await persistSessionCoordinationMutation(
+            property: property,
+            session: session,
+            metadata: metadata,
+            desiredState: clearedState
+        )
+        print(
+            "[SessionSoftDelete] event=\(didClear ? "stale_lock_clear_success" : "stale_lock_clear_failed") " +
+            "sessionID=\(sessionID.uuidString)"
+        )
+        return didClear
     }
 
     private func callSoftDeleteSessionRPC(sessionID: UUID) async throws {
@@ -12426,6 +12614,102 @@ final class AppState: ObservableObject {
             reloadSessionCache(for: updated.propertyID)
         } catch {
             print("[SessionSoftDelete] local cache update failed after remote success: \(error.localizedDescription)")
+        }
+    }
+
+    func fetchRecentlyDeletedSessionsRemote(propertyID: UUID? = nil) async throws -> [RecentlyDeletedSession] {
+        guard let orgID = activeOrganizationID,
+              supabaseClient != nil,
+              authenticatedSupabaseUser != nil,
+              isOrganizationContextReady else {
+            throw SessionSoftDeleteError.missingAuthenticatedContext
+        }
+#if DEBUG
+        if let recentlyDeletedSessionsFetchOverride {
+            return try await recentlyDeletedSessionsFetchOverride(orgID, propertyID)
+        }
+#endif
+        guard let client = supabaseClient else {
+            throw SessionSoftDeleteError.missingAuthenticatedContext
+        }
+        let params = FetchRecentlyDeletedSessionsRPCPayload(
+            targetOrgID: orgID,
+            targetPropertyID: propertyID
+        )
+        return try await (try client.rpc("fetch_recently_deleted_sessions", params: params))
+            .execute()
+            .value as [RecentlyDeletedSession]
+    }
+
+    @discardableResult
+    func remoteRestoreSession(_ deletedSession: RecentlyDeletedSession) async -> Bool {
+        do {
+            try await performRemoteRestoreSession(deletedSession)
+            return true
+        } catch {
+            let message = "The session could not be restored. \(error.localizedDescription)"
+            hubTransientStatusMessage = message
+            print("[SessionRestore] result=failed sessionID=\(deletedSession.id.uuidString) error=\(message)")
+            return false
+        }
+    }
+
+    private func performRemoteRestoreSession(_ deletedSession: RecentlyDeletedSession) async throws {
+        guard supabaseClient != nil,
+              activeOrganizationID == deletedSession.orgID,
+              authenticatedSupabaseUser != nil,
+              isOrganizationContextReady else {
+            throw SessionSoftDeleteError.missingAuthenticatedContext
+        }
+#if DEBUG
+        if let sessionRestoreRPCOverride {
+            try await sessionRestoreRPCOverride(deletedSession.id)
+        } else {
+            try await callRestoreSessionRPC(sessionID: deletedSession.id)
+        }
+#else
+        try await callRestoreSessionRPC(sessionID: deletedSession.id)
+#endif
+
+        applyRemoteRestoredSessionLocally(deletedSession)
+
+#if DEBUG
+        if let sessionRestoreRefreshOverride {
+            _ = await sessionRestoreRefreshOverride()
+            return
+        }
+#endif
+        _ = await performForegroundRemotePropertyRefresh()
+    }
+
+    private func callRestoreSessionRPC(sessionID: UUID) async throws {
+        guard let client = supabaseClient else {
+            throw SessionSoftDeleteError.missingAuthenticatedContext
+        }
+        let params = RestoreSessionRPCPayload(targetSessionID: sessionID)
+        _ = try await (try client.rpc("restore_session", params: params)).execute()
+    }
+
+    private func applyRemoteRestoredSessionLocally(_ deletedSession: RecentlyDeletedSession) {
+        let status = Session.Status(rawValue: deletedSession.status) ?? .draft
+        let restored = Session(
+            id: deletedSession.id,
+            propertyID: deletedSession.propertyID,
+            startedAt: deletedSession.startedAt,
+            status: status,
+            endedAt: deletedSession.endedAt,
+            exportedAt: deletedSession.exportedAt,
+            isSealed: deletedSession.isSealed,
+            firstDeliveredAt: deletedSession.firstDeliveredAt,
+            reExportExpiresAt: deletedSession.reExportExpiresAt,
+            notes: deletedSession.notes,
+            deletedAt: nil
+        )
+        do {
+            _ = try localStore.upsertSession(restored)
+            reloadSessionCache(for: restored.propertyID)
+        } catch {
+            print("[SessionRestore] local cache update failed after remote success: \(error.localizedDescription)")
         }
     }
 
@@ -12664,6 +12948,21 @@ final class AppState: ObservableObject {
     
     func clearCurrentSession() {
         scheduleOffloadEligibleSessionMedia(excludingSessionID: currentSession?.id)
+        if let session = currentSession {
+            let ownershipState = sessionCoordinationStateBySessionID[session.id]
+            if ownershipState?.lockedByUserID != nil ||
+                normalizedSupabaseText(ownershipState?.lockedByDeviceID) != nil ||
+                ownershipState?.lockedAt != nil {
+                Task {
+                    await self.releaseSessionCoordinationLockIfOwnedUsingState(
+                        propertyID: session.propertyID,
+                        sessionID: session.id,
+                        emitReleasedEvent: true,
+                        ownershipState: ownershipState
+                    )
+                }
+            }
+        }
         if let sessionID = currentSession?.id {
             sessionCoordinationStateBySessionID.removeValue(forKey: sessionID)
             sessionCoordinationEntrySnapshotBySessionID.removeValue(forKey: sessionID)
@@ -13185,11 +13484,17 @@ final class AppState: ObservableObject {
     func _debugSetSessionSoftDeleteOverridesForTests(
         rpc: SessionSoftDeleteRPCOverride? = nil,
         refresh: SessionSoftDeleteRefreshOverride? = nil,
-        deletePreflightRefresh: SessionDeletePreflightRefreshOverride? = nil
+        deletePreflightRefresh: SessionDeletePreflightRefreshOverride? = nil,
+        recentlyDeletedFetch: RecentlyDeletedSessionsFetchOverride? = nil,
+        restore: SessionRestoreRPCOverride? = nil,
+        restoreRefresh: SessionRestoreRefreshOverride? = nil
     ) {
         sessionSoftDeleteRPCOverride = rpc
         sessionSoftDeleteRefreshOverride = refresh
         sessionDeletePreflightRefreshOverride = deletePreflightRefresh
+        recentlyDeletedSessionsFetchOverride = recentlyDeletedFetch
+        sessionRestoreRPCOverride = restore
+        sessionRestoreRefreshOverride = restoreRefresh
     }
 
     func _debugSetPropertySessionOccupancyForTests(

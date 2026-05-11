@@ -1818,8 +1818,12 @@ struct SessionHubView: View {
 
                             if appState.canRecoverDeletedPropertiesInActiveOrganization {
                                 Section("Recovery") {
-                                    NavigationLink("Recently Deleted") {
+                                    NavigationLink("Recently Deleted Properties") {
                                         RecentlyDeletedPropertiesRecoveryView()
+                                            .environmentObject(appState)
+                                    }
+                                    NavigationLink("Recently Deleted Sessions") {
+                                        RecentlyDeletedSessionsRecoveryView()
                                             .environmentObject(appState)
                                     }
                                 }
@@ -2181,6 +2185,94 @@ struct SessionHubView: View {
 
         private func deletedDetail(for property: AppState.RecentlyDeletedProperty) -> String {
             let deletedText = property.deletedAt.formatted(date: .abbreviated, time: .shortened)
+            return "Deleted \(deletedText) - restorable for 30 days"
+        }
+    }
+
+    private struct RecentlyDeletedSessionsRecoveryView: View {
+        @EnvironmentObject private var appState: AppState
+        @State private var sessions: [AppState.RecentlyDeletedSession] = []
+        @State private var isLoading: Bool = true
+        @State private var restoringSessionID: UUID?
+        @State private var errorMessage: String?
+
+        var body: some View {
+            List {
+                if isLoading {
+                    ProgressView("Loading recently deleted sessions...")
+                } else if let errorMessage {
+                    Text(errorMessage)
+                        .foregroundStyle(.red)
+                } else if sessions.isEmpty {
+                    Text("No recently deleted sessions.")
+                        .foregroundStyle(.secondary)
+                } else {
+                    ForEach(sessions) { session in
+                        HStack(alignment: .center, spacing: 12) {
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text(title(for: session))
+                                    .font(.system(size: 15, weight: .semibold))
+                                    .foregroundStyle(.primary)
+                                Text(appState.displayNameForProperty(id: session.propertyID))
+                                    .font(.system(size: 13, weight: .medium))
+                                    .foregroundStyle(.secondary)
+                                Text(deletedDetail(for: session))
+                                    .font(.system(size: 13, weight: .medium))
+                                    .foregroundStyle(.secondary)
+                            }
+
+                            Spacer(minLength: 0)
+
+                            Button(restoringSessionID == session.id ? "Restoring..." : "Restore") {
+                                restore(session)
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .disabled(restoringSessionID != nil)
+                        }
+                        .padding(.vertical, 4)
+                    }
+                }
+            }
+            .navigationTitle("Recently Deleted Sessions")
+            .task {
+                await loadSessions()
+            }
+            .refreshable {
+                await loadSessions()
+            }
+        }
+
+        private func loadSessions() async {
+            isLoading = true
+            errorMessage = nil
+            do {
+                sessions = try await appState.fetchRecentlyDeletedSessionsRemote()
+            } catch {
+                errorMessage = "Recently deleted sessions could not be loaded. \(error.localizedDescription)"
+            }
+            isLoading = false
+        }
+
+        private func restore(_ session: AppState.RecentlyDeletedSession) {
+            restoringSessionID = session.id
+            Task {
+                let restored = await appState.remoteRestoreSession(session)
+                if restored {
+                    await loadSessions()
+                } else {
+                    errorMessage = "The session could not be restored."
+                }
+                restoringSessionID = nil
+            }
+        }
+
+        private func title(for session: AppState.RecentlyDeletedSession) -> String {
+            let date = session.startedAt.formatted(date: .abbreviated, time: .shortened)
+            return "\(session.status.capitalized) Session - \(date)"
+        }
+
+        private func deletedDetail(for session: AppState.RecentlyDeletedSession) -> String {
+            let deletedText = session.deletedAt.formatted(date: .abbreviated, time: .shortened)
             return "Deleted \(deletedText) - restorable for 30 days"
         }
     }
