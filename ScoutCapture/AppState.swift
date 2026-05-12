@@ -302,6 +302,7 @@ final class AppState: ObservableObject {
         let firstDeliveredAt: Date?
         let reExportExpiresAt: Date?
         let notes: String?
+        var captureProfile: String? = nil
         let deletedAt: Date
         let updatedAt: Date
         let updatedBy: UUID?
@@ -319,6 +320,7 @@ final class AppState: ObservableObject {
             case firstDeliveredAt = "first_delivered_at"
             case reExportExpiresAt = "re_export_expires_at"
             case notes
+            case captureProfile = "capture_profile"
             case deletedAt = "deleted_at"
             case updatedAt = "updated_at"
             case updatedBy = "updated_by"
@@ -431,6 +433,7 @@ final class AppState: ObservableObject {
         let id: UUID
         let orgID: UUID
         let folderID: String?
+        let captureProfile: String?
         let clientName: String?
         let clientEmail: String?
         let clientPhone: String?
@@ -444,12 +447,51 @@ final class AppState: ObservableObject {
         let createdAt: Date
         let updatedAt: Date
         let deletedAt: Date?
+
+        init(
+            id: UUID,
+            orgID: UUID,
+            folderID: String?,
+            captureProfile: String? = nil,
+            clientName: String?,
+            clientEmail: String?,
+            clientPhone: String?,
+            name: String,
+            addressLine1: String?,
+            city: String?,
+            state: String?,
+            postalCode: String?,
+            baselineSessionID: UUID?,
+            isArchived: Bool,
+            createdAt: Date,
+            updatedAt: Date,
+            deletedAt: Date?
+        ) {
+            self.id = id
+            self.orgID = orgID
+            self.folderID = folderID
+            self.captureProfile = captureProfile
+            self.clientName = clientName
+            self.clientEmail = clientEmail
+            self.clientPhone = clientPhone
+            self.name = name
+            self.addressLine1 = addressLine1
+            self.city = city
+            self.state = state
+            self.postalCode = postalCode
+            self.baselineSessionID = baselineSessionID
+            self.isArchived = isArchived
+            self.createdAt = createdAt
+            self.updatedAt = updatedAt
+            self.deletedAt = deletedAt
+        }
     }
 
     struct DebugRemotePropertyRecordInput {
         let id: UUID
         let orgID: UUID
         let folderID: String?
+        let captureProfile: String?
         let clientName: String?
         let clientEmail: String?
         let clientPhone: String?
@@ -463,6 +505,44 @@ final class AppState: ObservableObject {
         let createdAt: Date?
         let updatedAt: Date
         let deletedAt: Date?
+
+        init(
+            id: UUID,
+            orgID: UUID,
+            folderID: String?,
+            captureProfile: String? = nil,
+            clientName: String?,
+            clientEmail: String?,
+            clientPhone: String?,
+            name: String,
+            addressLine1: String,
+            city: String,
+            state: String,
+            postalCode: String,
+            baselineSessionID: UUID?,
+            isArchived: Bool,
+            createdAt: Date?,
+            updatedAt: Date,
+            deletedAt: Date?
+        ) {
+            self.id = id
+            self.orgID = orgID
+            self.folderID = folderID
+            self.captureProfile = captureProfile
+            self.clientName = clientName
+            self.clientEmail = clientEmail
+            self.clientPhone = clientPhone
+            self.name = name
+            self.addressLine1 = addressLine1
+            self.city = city
+            self.state = state
+            self.postalCode = postalCode
+            self.baselineSessionID = baselineSessionID
+            self.isArchived = isArchived
+            self.createdAt = createdAt
+            self.updatedAt = updatedAt
+            self.deletedAt = deletedAt
+        }
     }
 
     struct DebugRemoteSessionDeltaInput {
@@ -473,8 +553,39 @@ final class AppState: ObservableObject {
         let status: String
         let startedAt: String
         let completedAt: String?
+        let captureProfile: String?
         let updatedAt: Date
+        let updatedBy: UUID?
+        let revision: Int64?
         let deletedAt: Date?
+
+        init(
+            id: UUID,
+            orgID: UUID,
+            propertyID: UUID,
+            title: String?,
+            status: String,
+            startedAt: String,
+            completedAt: String?,
+            captureProfile: String? = nil,
+            updatedAt: Date,
+            updatedBy: UUID? = nil,
+            revision: Int64? = nil,
+            deletedAt: Date?
+        ) {
+            self.id = id
+            self.orgID = orgID
+            self.propertyID = propertyID
+            self.title = title
+            self.status = status
+            self.startedAt = startedAt
+            self.completedAt = completedAt
+            self.captureProfile = captureProfile
+            self.updatedAt = updatedAt
+            self.updatedBy = updatedBy
+            self.revision = revision
+            self.deletedAt = deletedAt
+        }
     }
 
     struct DebugSessionCoordinationRemoteInput {
@@ -899,6 +1010,7 @@ final class AppState: ObservableObject {
     private struct SupabasePropertyPayload: Codable {
         let id: UUID
         let orgID: UUID
+        let captureProfile: String?
         let clientName: String?
         let clientEmail: String?
         let clientPhone: String?
@@ -912,6 +1024,7 @@ final class AppState: ObservableObject {
         init(
             id: UUID,
             orgID: UUID,
+            captureProfile: String? = nil,
             clientName: String?,
             clientEmail: String?,
             clientPhone: String?,
@@ -924,6 +1037,7 @@ final class AppState: ObservableObject {
         ) {
             self.id = id
             self.orgID = orgID
+            self.captureProfile = captureProfile
             self.clientName = clientName
             self.clientEmail = clientEmail
             self.clientPhone = clientPhone
@@ -938,6 +1052,7 @@ final class AppState: ObservableObject {
         enum CodingKeys: String, CodingKey {
             case id
             case orgID = "org_id"
+            case captureProfile = "capture_profile"
             case clientName = "client_name"
             case clientEmail = "client_email"
             case clientPhone = "client_phone"
@@ -1008,6 +1123,8 @@ final class AppState: ObservableObject {
         let status: String
         let startedAt: String
         let completedAt: String?
+        let captureProfile: String?
+        let updatedBy: UUID?
         let lockedByUserID: UUID?
         let lockedByDeviceID: String?
         let lockedAt: String?
@@ -1021,6 +1138,8 @@ final class AppState: ObservableObject {
             case status
             case startedAt = "started_at"
             case completedAt = "completed_at"
+            case captureProfile = "capture_profile"
+            case updatedBy = "updated_by"
             case lockedByUserID = "locked_by_user_id"
             case lockedByDeviceID = "locked_by_device_id"
             case lockedAt = "locked_at"
@@ -1154,6 +1273,36 @@ final class AppState: ObservableObject {
 
     private struct SupabaseShotStorageRecord: Decodable {
         let id: UUID
+        let orgID: UUID?
+        let propertyID: UUID?
+        let sessionID: UUID?
+        let createdAt: Date?
+        let updatedAt: Date?
+        let updatedBy: UUID?
+        let revision: Int64?
+        let deletedAt: Date?
+        let building: String?
+        let elevation: String?
+        let detailType: String?
+        let angleIndex: Int?
+        let shotKey: String?
+        let logicalShotIdentity: String?
+        let captureKind: String?
+        let firstCaptureKind: String?
+        let isGuided: Bool?
+        let isFlagged: Bool?
+        let issueID: UUID?
+        let issueStatus: String?
+        let trade: String?
+        let reason: String?
+        let priority: String?
+        let captureMode: String?
+        let lens: String?
+        let latitude: Double?
+        let longitude: Double?
+        let accuracyMeters: Double?
+        let imageWidth: Int?
+        let imageHeight: Int?
         let storageBucket: String?
         let storagePath: String?
         let checksumSHA256: String?
@@ -1164,6 +1313,36 @@ final class AppState: ObservableObject {
 
         enum CodingKeys: String, CodingKey {
             case id
+            case orgID = "org_id"
+            case propertyID = "property_id"
+            case sessionID = "session_id"
+            case createdAt = "created_at"
+            case updatedAt = "updated_at"
+            case updatedBy = "updated_by"
+            case revision
+            case deletedAt = "deleted_at"
+            case building
+            case elevation
+            case detailType = "detail_type"
+            case angleIndex = "angle_index"
+            case shotKey = "shot_key"
+            case logicalShotIdentity = "logical_shot_identity"
+            case captureKind = "capture_kind"
+            case firstCaptureKind = "first_capture_kind"
+            case isGuided = "is_guided"
+            case isFlagged = "is_flagged"
+            case issueID = "issue_id"
+            case issueStatus = "issue_status"
+            case trade
+            case reason
+            case priority
+            case captureMode = "capture_mode"
+            case lens
+            case latitude
+            case longitude
+            case accuracyMeters = "accuracy_meters"
+            case imageWidth = "image_width"
+            case imageHeight = "image_height"
             case storageBucket = "storage_bucket"
             case storagePath = "storage_path"
             case checksumSHA256 = "checksum_sha256"
@@ -1190,6 +1369,7 @@ final class AppState: ObservableObject {
         let id: UUID
         let orgID: UUID
         let folderID: String?
+        let captureProfile: String?
         let clientName: String?
         let clientEmail: String?
         let clientPhone: String?
@@ -1202,12 +1382,15 @@ final class AppState: ObservableObject {
         let isArchived: Bool
         let createdAt: Date
         let updatedAt: Date
+        let updatedBy: UUID?
+        let revision: Int64?
         let deletedAt: Date?
 
         enum CodingKeys: String, CodingKey {
             case id
             case orgID = "org_id"
             case folderID = "folder_id"
+            case captureProfile = "capture_profile"
             case clientName = "client_name"
             case clientEmail = "client_email"
             case clientPhone = "client_phone"
@@ -1220,6 +1403,8 @@ final class AppState: ObservableObject {
             case isArchived = "is_archived"
             case createdAt = "created_at"
             case updatedAt = "updated_at"
+            case updatedBy = "updated_by"
+            case revision
             case deletedAt = "deleted_at"
         }
     }
@@ -1228,6 +1413,7 @@ final class AppState: ObservableObject {
         let id: UUID
         let orgID: UUID
         let folderID: String?
+        let captureProfile: String?
         let clientName: String?
         let clientEmail: String?
         let clientPhone: String?
@@ -1241,11 +1427,14 @@ final class AppState: ObservableObject {
         let deletedAt: Date?
         let createdAt: Date?
         let updatedAt: Date
+        let updatedBy: UUID?
+        let revision: Int64?
 
         enum CodingKeys: String, CodingKey {
             case id
             case orgID = "org_id"
             case folderID = "folder_id"
+            case captureProfile = "capture_profile"
             case clientName = "client_name"
             case clientEmail = "client_email"
             case clientPhone = "client_phone"
@@ -1259,6 +1448,8 @@ final class AppState: ObservableObject {
             case deletedAt = "deleted_at"
             case createdAt = "created_at"
             case updatedAt = "updated_at"
+            case updatedBy = "updated_by"
+            case revision
         }
     }
 
@@ -1342,7 +1533,10 @@ final class AppState: ObservableObject {
         let status: String
         let startedAt: String
         let completedAt: String?
+        let captureProfile: String?
         let updatedAt: Date
+        let updatedBy: UUID?
+        let revision: Int64?
         let deletedAt: Date?
 
         enum CodingKeys: String, CodingKey {
@@ -1353,7 +1547,10 @@ final class AppState: ObservableObject {
             case status
             case startedAt = "started_at"
             case completedAt = "completed_at"
+            case captureProfile = "capture_profile"
             case updatedAt = "updated_at"
+            case updatedBy = "updated_by"
+            case revision
             case deletedAt = "deleted_at"
         }
     }
@@ -4531,6 +4728,7 @@ final class AppState: ObservableObject {
             id: record.id,
             orgId: record.orgID,
             folderId: normalizedRemotePropertyText(record.folderID),
+            captureProfile: CaptureProfile(storedValue: record.captureProfile),
             clientName: normalizedRemotePropertyText(record.clientName),
             clientPhone: normalizedRemotePropertyText(record.clientPhone),
             clientEmail: normalizedRemotePropertyText(record.clientEmail),
@@ -4562,7 +4760,7 @@ final class AppState: ObservableObject {
         async let propertyFetch: [RemotePropertyDeltaRecord] = {
             var query = client
                 .from("properties")
-                .select("id, org_id, folder_id, client_name, client_email, client_phone, name, address_line1, city, state, postal_code, baseline_session_id, is_archived, created_at, updated_at, deleted_at")
+                .select("id, org_id, folder_id, capture_profile, client_name, client_email, client_phone, name, address_line1, city, state, postal_code, baseline_session_id, is_archived, created_at, updated_at, updated_by, revision, deleted_at")
                 .eq("org_id", value: orgValue)
             if let propertyCursor {
                 query = query.gt("updated_at", value: supabaseTimestampString(propertyCursor))
@@ -4577,7 +4775,7 @@ final class AppState: ObservableObject {
         async let sessionFetch: [RemoteSessionDeltaRecord] = {
             var query = client
                 .from("sessions")
-                .select("id, org_id, property_id, title, status, started_at, completed_at, updated_at, deleted_at")
+                .select("id, org_id, property_id, title, status, started_at, completed_at, capture_profile, updated_at, updated_by, revision, deleted_at")
                 .eq("org_id", value: orgValue)
             if let sessionCursor {
                 query = query.gt("updated_at", value: supabaseTimestampString(sessionCursor))
@@ -4624,7 +4822,10 @@ final class AppState: ObservableObject {
             }
 
             let createdAt = existingProperty?.createdAt ?? record.createdAt
-            let candidate = propertyFromSyncDeltaRecord(record, createdAt: createdAt)
+            var candidate = propertyFromSyncDeltaRecord(record, createdAt: createdAt)
+            if candidate.captureProfile == nil {
+                candidate.captureProfile = existingProperty?.captureProfile
+            }
 
             do {
                 let persisted: Property
@@ -4637,6 +4838,7 @@ final class AppState: ObservableObject {
                 var canonical = persisted
                 canonical.orgId = candidate.orgId
                 canonical.folderId = candidate.folderId
+                canonical.captureProfile = candidate.captureProfile
                 canonical.clientName = candidate.clientName
                 canonical.clientPhone = candidate.clientPhone
                 canonical.clientEmail = candidate.clientEmail
@@ -4664,6 +4866,7 @@ final class AppState: ObservableObject {
                 do {
                     let persisted = try localStore.createProperty(candidate)
                     var canonical = persisted
+                    canonical.captureProfile = candidate.captureProfile
                     canonical.createdAt = candidate.createdAt
                     canonical.deletedAt = candidate.deletedAt
                     canonical.updatedAt = candidate.updatedAt
@@ -4760,6 +4963,7 @@ final class AppState: ObservableObject {
                 firstDeliveredAt: existingSession?.firstDeliveredAt,
                 reExportExpiresAt: existingSession?.reExportExpiresAt,
                 notes: existingSession?.notes,
+                captureProfile: CaptureProfile(storedValue: record.captureProfile) ?? existingSession?.captureProfile,
                 deletedAt: record.deletedAt
             )
 
@@ -5542,6 +5746,7 @@ final class AppState: ObservableObject {
             id: payload.id,
             orgId: queueItem.organizationID,
             folderId: nil,
+            captureProfile: CaptureProfile(storedValue: payload.captureProfile),
             clientName: nil,
             clientPhone: nil,
             clientEmail: nil,
@@ -5566,6 +5771,7 @@ final class AppState: ObservableObject {
             property: SupabasePropertyPayload(
                 id: queueItem.entityID,
                 orgID: queueItem.organizationID,
+                captureProfile: payload.captureProfile,
                 clientName: payload.clientName,
                 clientEmail: payload.clientEmail,
                 clientPhone: payload.clientPhone,
@@ -5589,7 +5795,8 @@ final class AppState: ObservableObject {
             status: Session.Status(rawValue: payload.session.status) ?? .draft,
             endedAt: payload.session.completedAt.flatMap(parseSupabaseDateString),
             exportedAt: nil,
-            isSealed: payload.session.status == Session.Status.completed.rawValue
+            isSealed: payload.session.status == Session.Status.completed.rawValue,
+            captureProfile: CaptureProfile(storedValue: payload.session.captureProfile)
         )
     }
 
@@ -5604,6 +5811,7 @@ final class AppState: ObservableObject {
             orgID: payload.property.orgID,
             propertyNameAtCapture: payload.property.name,
             propertyNameAtExport: nil,
+            captureProfile: payload.session.captureProfile,
             startedAt: session.startedAt,
             endedAt: session.endedAt,
             status: session.status,
@@ -6109,6 +6317,7 @@ final class AppState: ObservableObject {
         return SupabasePropertyPayload(
             id: propertyID,
             orgID: orgID,
+            captureProfile: property?.captureProfile?.rawValue,
             clientName: normalizedSupabaseText(property?.clientName),
             clientEmail: normalizedSupabaseText(property?.clientEmail),
             clientPhone: normalizedSupabaseText(property?.clientPhone),
@@ -6140,6 +6349,8 @@ final class AppState: ObservableObject {
             status: metadata.status.rawValue,
             startedAt: metadata.startedAt.ISO8601Format(),
             completedAt: metadata.endedAt?.ISO8601Format(),
+            captureProfile: metadata.captureProfile ?? property?.captureProfile?.rawValue,
+            updatedBy: authenticatedSupabaseUser?.id,
             lockedByUserID: coordinationState?.lockedByUserID,
             lockedByDeviceID: normalizedSupabaseText(coordinationState?.lockedByDeviceID),
             lockedAt: coordinationState?.lockedAt?.ISO8601Format(),
@@ -10011,6 +10222,36 @@ final class AppState: ObservableObject {
             .select(
                 """
                 id,
+                org_id,
+                property_id,
+                session_id,
+                created_at,
+                updated_at,
+                updated_by,
+                revision,
+                deleted_at,
+                building,
+                elevation,
+                detail_type,
+                angle_index,
+                shot_key,
+                logical_shot_identity,
+                capture_kind,
+                first_capture_kind,
+                is_guided,
+                is_flagged,
+                issue_id,
+                issue_status,
+                trade,
+                reason,
+                priority,
+                capture_mode,
+                lens,
+                latitude,
+                longitude,
+                accuracy_meters,
+                image_width,
+                image_height,
                 storage_bucket,
                 storage_path,
                 checksum_sha256,
@@ -10041,6 +10282,36 @@ final class AppState: ObservableObject {
             .select(
                 """
                 id,
+                org_id,
+                property_id,
+                session_id,
+                created_at,
+                updated_at,
+                updated_by,
+                revision,
+                deleted_at,
+                building,
+                elevation,
+                detail_type,
+                angle_index,
+                shot_key,
+                logical_shot_identity,
+                capture_kind,
+                first_capture_kind,
+                is_guided,
+                is_flagged,
+                issue_id,
+                issue_status,
+                trade,
+                reason,
+                priority,
+                capture_mode,
+                lens,
+                latitude,
+                longitude,
+                accuracy_meters,
+                image_width,
+                image_height,
                 storage_bucket,
                 storage_path,
                 checksum_sha256,
@@ -10092,23 +10363,23 @@ final class AppState: ObservableObject {
         }
 
         try? localStore.updateShotStorageMetadata(propertyID: propertyID, sessionID: sessionID, shotID: shot.shotID) { localShot in
-            localShot.storageBucket = remote.storageBucket
-            localShot.storagePath = remote.storagePath
-            localShot.checksumSHA256 = remote.checksumSHA256
-            localShot.byteSize = remote.byteSize
+            localShot.storageBucket = remote.storageBucket ?? localShot.storageBucket
+            localShot.storagePath = remote.storagePath ?? localShot.storagePath
+            localShot.checksumSHA256 = remote.checksumSHA256 ?? localShot.checksumSHA256
+            localShot.byteSize = remote.byteSize ?? localShot.byteSize
             localShot.uploadState = remote.uploadState
             localShot.uploadAttempts = max(localShot.uploadAttempts, remote.uploadAttempts)
-            localShot.lastUploadError = remote.lastUploadError
+            localShot.lastUploadError = remote.lastUploadError ?? localShot.lastUploadError
         }
 
         var resolvedShot = shot
-        resolvedShot.storageBucket = remote.storageBucket
-        resolvedShot.storagePath = remote.storagePath
-        resolvedShot.checksumSHA256 = remote.checksumSHA256
-        resolvedShot.byteSize = remote.byteSize
+        resolvedShot.storageBucket = remote.storageBucket ?? resolvedShot.storageBucket
+        resolvedShot.storagePath = remote.storagePath ?? resolvedShot.storagePath
+        resolvedShot.checksumSHA256 = remote.checksumSHA256 ?? resolvedShot.checksumSHA256
+        resolvedShot.byteSize = remote.byteSize ?? resolvedShot.byteSize
         resolvedShot.uploadState = remote.uploadState
         resolvedShot.uploadAttempts = max(resolvedShot.uploadAttempts, remote.uploadAttempts)
-        resolvedShot.lastUploadError = remote.lastUploadError
+        resolvedShot.lastUploadError = remote.lastUploadError ?? resolvedShot.lastUploadError
         return resolvedShot
     }
 
@@ -10212,6 +10483,7 @@ final class AppState: ObservableObject {
                         id,
                         org_id,
                         folder_id,
+                        capture_profile,
                         client_name,
                         client_email,
                         client_phone,
@@ -10224,7 +10496,9 @@ final class AppState: ObservableObject {
                         is_archived,
                         deleted_at,
                         created_at,
-                        updated_at
+                        updated_at,
+                        updated_by,
+                        revision
                         """
                     )
                     .eq("org_id", value: activeOrganizationID.uuidString.lowercased())
@@ -10463,6 +10737,8 @@ final class AppState: ObservableObject {
                 id: record.id,
                 orgId: record.orgID,
                 folderId: normalizedRemotePropertyText(record.folderID),
+                captureProfile: CaptureProfile(storedValue: record.captureProfile)
+                    ?? allProperties.first(where: { $0.id == record.id })?.captureProfile,
                 clientName: normalizedRemotePropertyText(record.clientName),
                 clientPhone: normalizedRemotePropertyText(record.clientPhone),
                 clientEmail: normalizedRemotePropertyText(record.clientEmail),
@@ -10607,6 +10883,7 @@ final class AppState: ObservableObject {
                 record.id.uuidString.lowercased(),
                 record.orgID.uuidString.lowercased(),
                 normalizedRemotePropertyText(record.folderID) ?? "",
+                CaptureProfile(storedValue: record.captureProfile)?.rawValue ?? "",
                 normalizedRemotePropertyText(record.clientName) ?? "",
                 normalizedRemotePropertyText(record.clientEmail) ?? "",
                 normalizedRemotePropertyText(record.clientPhone) ?? "",
@@ -12703,6 +12980,7 @@ final class AppState: ObservableObject {
             firstDeliveredAt: deletedSession.firstDeliveredAt,
             reExportExpiresAt: deletedSession.reExportExpiresAt,
             notes: deletedSession.notes,
+            captureProfile: CaptureProfile(storedValue: deletedSession.captureProfile),
             deletedAt: nil
         )
         do {
@@ -13747,6 +14025,7 @@ final class AppState: ObservableObject {
                         id: $0.id,
                         orgID: $0.orgID == orgID ? $0.orgID : orgID,
                         folderID: $0.folderID,
+                        captureProfile: $0.captureProfile,
                         clientName: $0.clientName,
                         clientEmail: $0.clientEmail,
                         clientPhone: $0.clientPhone,
@@ -13759,6 +14038,8 @@ final class AppState: ObservableObject {
                         isArchived: $0.isArchived,
                         createdAt: $0.createdAt,
                         updatedAt: $0.updatedAt,
+                        updatedBy: nil,
+                        revision: nil,
                         deletedAt: $0.deletedAt
                     )
                 },
@@ -13771,7 +14052,10 @@ final class AppState: ObservableObject {
                         status: $0.status,
                         startedAt: $0.startedAt,
                         completedAt: $0.completedAt,
+                        captureProfile: $0.captureProfile,
                         updatedAt: $0.updatedAt,
+                        updatedBy: $0.updatedBy,
+                        revision: $0.revision,
                         deletedAt: $0.deletedAt
                     )
                 }
@@ -13885,6 +14169,7 @@ final class AppState: ObservableObject {
                     id: $0.id,
                     orgID: $0.orgID,
                     folderID: $0.folderID,
+                    captureProfile: $0.captureProfile,
                     clientName: $0.clientName,
                     clientEmail: $0.clientEmail,
                     clientPhone: $0.clientPhone,
@@ -13897,7 +14182,9 @@ final class AppState: ObservableObject {
                     isArchived: $0.isArchived,
                     deletedAt: $0.deletedAt,
                     createdAt: $0.createdAt,
-                    updatedAt: $0.updatedAt
+                    updatedAt: $0.updatedAt,
+                    updatedBy: nil,
+                    revision: nil
                 )
             },
             requestedOrganizationID: orgID
@@ -13915,6 +14202,7 @@ final class AppState: ObservableObject {
                     id: $0.id,
                     orgID: $0.orgID,
                     folderID: $0.folderID,
+                    captureProfile: $0.captureProfile,
                     clientName: $0.clientName,
                     clientEmail: $0.clientEmail,
                     clientPhone: $0.clientPhone,
@@ -13927,6 +14215,8 @@ final class AppState: ObservableObject {
                     isArchived: $0.isArchived,
                     createdAt: $0.createdAt,
                     updatedAt: $0.updatedAt,
+                    updatedBy: nil,
+                    revision: nil,
                     deletedAt: $0.deletedAt
                 )
             },
@@ -13949,7 +14239,10 @@ final class AppState: ObservableObject {
                     status: $0.status,
                     startedAt: $0.startedAt,
                     completedAt: $0.completedAt,
+                    captureProfile: $0.captureProfile,
                     updatedAt: $0.updatedAt,
+                    updatedBy: $0.updatedBy,
+                    revision: $0.revision,
                     deletedAt: $0.deletedAt
                 )
             },

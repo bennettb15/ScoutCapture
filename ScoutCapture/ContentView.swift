@@ -2889,23 +2889,6 @@ private struct FullImage: View {
 
 // MARK: - Detail Types Model (persisted per mode)
 
-fileprivate enum CaptureProfile: String, CaseIterable {
-    case residential
-    case commercial
-
-    init?(storedValue: String?) {
-        guard let storedValue else { return nil }
-        self.init(rawValue: storedValue.trimmingCharacters(in: .whitespacesAndNewlines).lowercased())
-    }
-
-    var title: String {
-        switch self {
-        case .residential: "Residential"
-        case .commercial: "Commercial"
-        }
-    }
-}
-
 private final class DetailTypesModel: ObservableObject {
 
     struct DetailTypeItem: Identifiable, Codable, Equatable {

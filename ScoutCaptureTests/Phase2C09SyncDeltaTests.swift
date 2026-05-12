@@ -474,6 +474,27 @@ final class Phase2C09SyncDeltaTests: XCTestCase {
         XCTAssertEqual(roundTripped.deletedAt, deletedAt)
     }
 
+    func testPropertyCaptureProfileCodableRoundTripAndMissingDefaultsNil() throws {
+        let id = UUID()
+        let legacyPayload = """
+        {
+          "id": "\(id.uuidString)",
+          "name": "Legacy Property",
+          "isArchived": false,
+          "createdAt": 100,
+          "updatedAt": 200
+        }
+        """
+        let legacy = try JSONDecoder().decode(Property.self, from: Data(legacyPayload.utf8))
+        XCTAssertNil(legacy.captureProfile)
+
+        var property = legacy
+        property.captureProfile = .commercial
+        let encoded = try JSONEncoder().encode(property)
+        let roundTripped = try JSONDecoder().decode(Property.self, from: encoded)
+        XCTAssertEqual(roundTripped.captureProfile, .commercial)
+    }
+
     func testRemotePropertyRefreshPayloadMapsDeletedAt() async throws {
         let fixture = try makeFixture()
         defer { tearDownFixture(fixture) }
@@ -513,6 +534,83 @@ final class Phase2C09SyncDeltaTests: XCTestCase {
         XCTAssertEqual(properties.first?.id, propertyID)
         XCTAssertEqual(properties.first?.deletedAt, deletedAt)
         XCTAssertEqual(properties.first?.isArchived, true)
+    }
+
+    func testRemotePropertyRefreshPayloadMapsCaptureProfile() async throws {
+        let fixture = try makeFixture()
+        defer { tearDownFixture(fixture) }
+        let orgID = UUID()
+        let propertyID = UUID()
+        try makeOrganization(fixture, id: orgID)
+        await refresh(fixture.appState)
+        await configureOrganizationContext(fixture.appState, orgID: orgID)
+
+        let properties = try await MainActor.run {
+            try fixture.appState._debugMakeRemotePropertyRefreshPayloadForTests(
+                records: [
+                    AppState.DebugRemotePropertyRecordInput(
+                        id: propertyID,
+                        orgID: orgID,
+                        folderID: "00001",
+                        captureProfile: "commercial",
+                        clientName: "Client",
+                        clientEmail: "client@example.com",
+                        clientPhone: "5551234567",
+                        name: "Profile Remote",
+                        addressLine1: "123 Main Street",
+                        city: "Atlanta",
+                        state: "GA",
+                        postalCode: "30301",
+                        baselineSessionID: nil,
+                        isArchived: false,
+                        createdAt: Date(timeIntervalSinceReferenceDate: 100),
+                        updatedAt: Date(timeIntervalSinceReferenceDate: 600),
+                        deletedAt: nil
+                    )
+                ],
+                orgID: orgID
+            )
+        }
+
+        XCTAssertEqual(properties.first?.captureProfile, .commercial)
+    }
+
+    func testRemotePropertyNilCaptureProfilePreservesExistingLocalDefault() async throws {
+        let fixture = try makeFixture()
+        defer { tearDownFixture(fixture) }
+        let orgID = UUID()
+        let propertyID = UUID()
+        try makeOrganization(fixture, id: orgID)
+        _ = try fixture.localStore.createProperty(
+            Property(
+                id: propertyID,
+                orgId: orgID,
+                captureProfile: .residential,
+                name: "Local Profile",
+                createdAt: Date(timeIntervalSinceReferenceDate: 100),
+                updatedAt: Date(timeIntervalSinceReferenceDate: 100)
+            )
+        )
+        await refresh(fixture.appState)
+        await configureOrganizationContext(fixture.appState, orgID: orgID)
+
+        _ = await MainActor.run {
+            fixture.appState._debugApplySyncDeltaPropertiesForTests(
+                records: [
+                    makePropertyDelta(
+                        id: propertyID,
+                        orgID: orgID,
+                        name: "Remote Without Profile",
+                        createdAt: Date(timeIntervalSinceReferenceDate: 100),
+                        updatedAt: Date(timeIntervalSinceReferenceDate: 300)
+                    )
+                ],
+                orgID: orgID
+            )
+        }
+
+        let persisted = try fixture.localStore.fetchProperties().first(where: { $0.id == propertyID })
+        XCTAssertEqual(persisted?.captureProfile, .residential)
     }
 
     func testDeletedPropertiesExcludedFromActiveAndArchivedAndReturnedAsRecentlyDeleted() async throws {
@@ -636,6 +734,80 @@ final class Phase2C09SyncDeltaTests: XCTestCase {
         XCTAssertEqual(persisted?.status, .completed)
         XCTAssertEqual(persisted?.startedAt, Date(timeIntervalSinceReferenceDate: 120))
         XCTAssertEqual(persisted?.endedAt, Date(timeIntervalSinceReferenceDate: 180))
+    }
+
+    func testDeltaApplySessionMapsCaptureProfileAndNilPreservesExistingSnapshot() async throws {
+        let fixture = try makeFixture()
+        defer { tearDownFixture(fixture) }
+        let orgID = UUID()
+        let propertyID = UUID()
+        let sessionID = UUID()
+        try makeOrganization(fixture, id: orgID)
+        _ = try fixture.localStore.createProperty(
+            Property(
+                id: propertyID,
+                orgId: orgID,
+                folderId: "00001",
+                name: "Session Property",
+                createdAt: Date(timeIntervalSinceReferenceDate: 100),
+                updatedAt: Date(timeIntervalSinceReferenceDate: 100)
+            )
+        )
+        _ = try fixture.localStore.upsertSession(
+            Session(
+                id: sessionID,
+                propertyID: propertyID,
+                startedAt: Date(timeIntervalSinceReferenceDate: 100),
+                status: .draft,
+                captureProfile: .residential
+            )
+        )
+        await refresh(fixture.appState)
+        await configureOrganizationContext(fixture.appState, orgID: orgID)
+
+        _ = await MainActor.run {
+            fixture.appState._debugApplySyncDeltaSessionsForTests(
+                records: [
+                    AppState.DebugRemoteSessionDeltaInput(
+                        id: sessionID,
+                        orgID: orgID,
+                        propertyID: propertyID,
+                        title: "Remote Session",
+                        status: "draft",
+                        startedAt: iso8601(Date(timeIntervalSinceReferenceDate: 120)),
+                        completedAt: nil,
+                        captureProfile: nil,
+                        updatedAt: Date(timeIntervalSinceReferenceDate: 200),
+                        deletedAt: nil
+                    )
+                ],
+                orgID: orgID
+            )
+        }
+        var persisted = try fixture.localStore.fetchSessions(propertyID: propertyID).first(where: { $0.id == sessionID })
+        XCTAssertEqual(persisted?.captureProfile, .residential)
+
+        _ = await MainActor.run {
+            fixture.appState._debugApplySyncDeltaSessionsForTests(
+                records: [
+                    AppState.DebugRemoteSessionDeltaInput(
+                        id: sessionID,
+                        orgID: orgID,
+                        propertyID: propertyID,
+                        title: "Remote Session",
+                        status: "draft",
+                        startedAt: iso8601(Date(timeIntervalSinceReferenceDate: 120)),
+                        completedAt: nil,
+                        captureProfile: "commercial",
+                        updatedAt: Date(timeIntervalSinceReferenceDate: 300),
+                        deletedAt: nil
+                    )
+                ],
+                orgID: orgID
+            )
+        }
+        persisted = try fixture.localStore.fetchSessions(propertyID: propertyID).first(where: { $0.id == sessionID })
+        XCTAssertEqual(persisted?.captureProfile, .commercial)
     }
 
     func testDeltaApplySessionSkipsUnknownProperty() async throws {

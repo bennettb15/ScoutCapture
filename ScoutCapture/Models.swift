@@ -16,6 +16,23 @@ enum CanonicalElevation {
     }
 }
 
+enum CaptureProfile: String, Codable, CaseIterable, Equatable {
+    case residential
+    case commercial
+
+    init?(storedValue: String?) {
+        guard let storedValue else { return nil }
+        self.init(rawValue: storedValue.trimmingCharacters(in: .whitespacesAndNewlines).lowercased())
+    }
+
+    var title: String {
+        switch self {
+        case .residential: "Residential"
+        case .commercial: "Commercial"
+        }
+    }
+}
+
 struct SessionMetadata: Codable {
     var schemaVersion: Int
     var propertyID: UUID
@@ -1055,10 +1072,146 @@ struct IssueMetadata: Codable, Identifiable, Equatable {
     }
 }
 
+struct RemoteShotMetadataRecord: Decodable, Equatable {
+    let id: UUID
+    let orgID: UUID?
+    let propertyID: UUID?
+    let sessionID: UUID?
+    let createdAt: Date?
+    let updatedAt: Date?
+    let updatedBy: UUID?
+    let revision: Int64?
+    let deletedAt: Date?
+    let building: String?
+    let elevation: String?
+    let detailType: String?
+    let angleIndex: Int?
+    let shotKey: String?
+    let logicalShotIdentity: String?
+    let captureKind: String?
+    let firstCaptureKind: String?
+    let isGuided: Bool?
+    let isFlagged: Bool?
+    let issueID: UUID?
+    let issueStatus: String?
+    let trade: String?
+    let reason: String?
+    let priority: String?
+    let captureMode: String?
+    let lens: String?
+    let latitude: Double?
+    let longitude: Double?
+    let accuracyMeters: Double?
+    let imageWidth: Int?
+    let imageHeight: Int?
+    let storageBucket: String?
+    let storagePath: String?
+    let checksumSHA256: String?
+    let byteSize: Int?
+    let uploadState: String?
+    let uploadAttempts: Int?
+    let lastUploadError: String?
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case orgID = "org_id"
+        case propertyID = "property_id"
+        case sessionID = "session_id"
+        case createdAt = "created_at"
+        case updatedAt = "updated_at"
+        case updatedBy = "updated_by"
+        case revision
+        case deletedAt = "deleted_at"
+        case building
+        case elevation
+        case detailType = "detail_type"
+        case angleIndex = "angle_index"
+        case shotKey = "shot_key"
+        case logicalShotIdentity = "logical_shot_identity"
+        case captureKind = "capture_kind"
+        case firstCaptureKind = "first_capture_kind"
+        case isGuided = "is_guided"
+        case isFlagged = "is_flagged"
+        case issueID = "issue_id"
+        case issueStatus = "issue_status"
+        case trade
+        case reason
+        case priority
+        case captureMode = "capture_mode"
+        case lens
+        case latitude
+        case longitude
+        case accuracyMeters = "accuracy_meters"
+        case imageWidth = "image_width"
+        case imageHeight = "image_height"
+        case storageBucket = "storage_bucket"
+        case storagePath = "storage_path"
+        case checksumSHA256 = "checksum_sha256"
+        case byteSize = "byte_size"
+        case uploadState = "upload_state"
+        case uploadAttempts = "upload_attempts"
+        case lastUploadError = "last_upload_error"
+    }
+
+    func merged(withLocal local: ShotMetadata) -> ShotMetadata {
+        ShotMetadata(
+            shotID: local.shotID,
+            propertyID: propertyID ?? local.propertyID,
+            sessionID: sessionID ?? local.sessionID,
+            createdAt: createdAt ?? local.createdAt,
+            capturedAtLocal: local.capturedAtLocal,
+            updatedAt: updatedAt ?? local.updatedAt,
+            building: Self.trimmedNonEmpty(building) ?? local.building,
+            elevation: Self.trimmedNonEmpty(elevation) ?? local.elevation,
+            detailType: Self.trimmedNonEmpty(detailType) ?? local.detailType,
+            angleIndex: angleIndex ?? local.angleIndex,
+            trade: Self.trimmedNonEmpty(trade) ?? local.trade,
+            priority: Self.trimmedNonEmpty(priority) ?? local.priority,
+            shotKey: Self.trimmedNonEmpty(shotKey) ?? local.shotKey,
+            isGuided: isGuided ?? local.isGuided,
+            isFlagged: isFlagged ?? local.isFlagged,
+            issueID: issueID ?? local.issueID,
+            issueStatus: Self.trimmedNonEmpty(issueStatus) ?? local.issueStatus,
+            captureKind: Self.trimmedNonEmpty(captureKind) ?? local.captureKind,
+            firstCaptureKind: Self.trimmedNonEmpty(firstCaptureKind) ?? local.firstCaptureKind,
+            noteText: Self.trimmedNonEmpty(reason) ?? local.noteText,
+            noteCategory: local.noteCategory,
+            originalFilename: local.originalFilename,
+            originalRelativePath: local.originalRelativePath,
+            originalByteSize: local.originalByteSize,
+            storageBucket: Self.trimmedNonEmpty(storageBucket) ?? local.storageBucket,
+            storagePath: Self.trimmedNonEmpty(storagePath) ?? local.storagePath,
+            checksumSHA256: Self.trimmedNonEmpty(checksumSHA256) ?? local.checksumSHA256,
+            byteSize: byteSize ?? local.byteSize,
+            uploadState: Self.trimmedNonEmpty(uploadState) ?? local.uploadState,
+            uploadAttempts: max(local.uploadAttempts, uploadAttempts ?? local.uploadAttempts),
+            lastUploadError: Self.trimmedNonEmpty(lastUploadError) ?? local.lastUploadError,
+            stampedFilename: local.stampedFilename,
+            stampedRelativePath: local.stampedRelativePath,
+            captureMode: Self.trimmedNonEmpty(captureMode) ?? local.captureMode,
+            lens: Self.trimmedNonEmpty(lens) ?? local.lens,
+            exifOrientation: local.exifOrientation,
+            orientation: local.orientation,
+            latitude: latitude ?? local.latitude,
+            longitude: longitude ?? local.longitude,
+            accuracyMeters: accuracyMeters ?? local.accuracyMeters,
+            imageWidth: imageWidth ?? local.imageWidth,
+            imageHeight: imageHeight ?? local.imageHeight
+        )
+    }
+
+    private static func trimmedNonEmpty(_ value: String?) -> String? {
+        guard let value else { return nil }
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+}
+
 struct Property: Codable, Identifiable, Equatable {
     let id: UUID
     var orgId: UUID?
     var folderId: String?
+    var captureProfile: CaptureProfile?
     var clientName: String?
     var clientPhone: String?
     var clientEmail: String?
@@ -1078,6 +1231,7 @@ struct Property: Codable, Identifiable, Equatable {
         id: UUID = UUID(),
         orgId: UUID? = nil,
         folderId: String? = nil,
+        captureProfile: CaptureProfile? = nil,
         clientName: String? = nil,
         clientPhone: String? = nil,
         clientEmail: String? = nil,
@@ -1096,6 +1250,7 @@ struct Property: Codable, Identifiable, Equatable {
         self.id = id
         self.orgId = orgId
         self.folderId = folderId?.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.captureProfile = captureProfile
         self.clientName = clientName
         self.clientPhone = clientPhone
         self.clientEmail = clientEmail?.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1116,6 +1271,7 @@ struct Property: Codable, Identifiable, Equatable {
         case id
         case orgId
         case folderId
+        case captureProfile
         case clientName
         case clientPhone
         case clientEmail
@@ -1137,6 +1293,7 @@ struct Property: Codable, Identifiable, Equatable {
         id = try c.decode(UUID.self, forKey: .id)
         orgId = try c.decodeIfPresent(UUID.self, forKey: .orgId)
         folderId = try c.decodeIfPresent(String.self, forKey: .folderId)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        captureProfile = try c.decodeIfPresent(CaptureProfile.self, forKey: .captureProfile)
         clientName = try c.decodeIfPresent(String.self, forKey: .clientName)
         clientPhone = try c.decodeIfPresent(String.self, forKey: .clientPhone)
         clientEmail = try c.decodeIfPresent(String.self, forKey: .clientEmail)?.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1158,6 +1315,7 @@ struct Property: Codable, Identifiable, Equatable {
         try c.encode(id, forKey: .id)
         try c.encodeIfPresent(orgId, forKey: .orgId)
         try c.encodeIfPresent(folderId?.trimmingCharacters(in: .whitespacesAndNewlines), forKey: .folderId)
+        try c.encodeIfPresent(captureProfile, forKey: .captureProfile)
         try c.encodeIfPresent(clientName, forKey: .clientName)
         try c.encodeIfPresent(clientPhone, forKey: .clientPhone)
         try c.encodeIfPresent(clientEmail?.trimmingCharacters(in: .whitespacesAndNewlines), forKey: .clientEmail)
@@ -1191,6 +1349,7 @@ struct Session: Codable, Identifiable, Equatable {
     var firstDeliveredAt: Date?
     var reExportExpiresAt: Date?
     var notes: String?
+    var captureProfile: CaptureProfile?
     var deletedAt: Date?
 
     init(
@@ -1204,6 +1363,7 @@ struct Session: Codable, Identifiable, Equatable {
         firstDeliveredAt: Date? = nil,
         reExportExpiresAt: Date? = nil,
         notes: String? = nil,
+        captureProfile: CaptureProfile? = nil,
         deletedAt: Date? = nil
     ) {
         self.id = id
@@ -1216,6 +1376,7 @@ struct Session: Codable, Identifiable, Equatable {
         self.firstDeliveredAt = firstDeliveredAt
         self.reExportExpiresAt = reExportExpiresAt
         self.notes = notes
+        self.captureProfile = captureProfile
         self.deletedAt = deletedAt
     }
 
@@ -1230,6 +1391,7 @@ struct Session: Codable, Identifiable, Equatable {
         case firstDeliveredAt
         case reExportExpiresAt
         case notes
+        case captureProfile
         case deletedAt
     }
 
@@ -1250,6 +1412,7 @@ struct Session: Codable, Identifiable, Equatable {
             reExportExpiresAt = nil
         }
         notes = try c.decodeIfPresent(String.self, forKey: .notes)
+        captureProfile = try c.decodeIfPresent(CaptureProfile.self, forKey: .captureProfile)
         deletedAt = try c.decodeIfPresent(Date.self, forKey: .deletedAt)
         if let decodedStatus = try c.decodeIfPresent(Status.self, forKey: .status) {
             status = decodedStatus
@@ -1272,6 +1435,7 @@ struct Session: Codable, Identifiable, Equatable {
         try c.encodeIfPresent(firstDeliveredAt, forKey: .firstDeliveredAt)
         try c.encodeIfPresent(reExportExpiresAt, forKey: .reExportExpiresAt)
         try c.encodeIfPresent(notes, forKey: .notes)
+        try c.encodeIfPresent(captureProfile, forKey: .captureProfile)
         try c.encodeIfPresent(deletedAt, forKey: .deletedAt)
     }
 }
