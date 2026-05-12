@@ -9799,6 +9799,13 @@ extension ContentView {
 #if DEBUG
             print("[Session] shotsCount=\(updated.shots.count) originalsCount=\(originalsCount)")
 #endif
+            appState.scheduleShotMetadataSupabaseWriteIfNeeded(
+                propertyID: propertyID,
+                sessionID: session.id,
+                shotID: shot.id,
+                reason: "initial_capture",
+                allowInsert: true
+            )
             appState.uploadOperationalMediaIfNeeded(
                 propertyID: propertyID,
                 sessionID: session.id,
@@ -9885,6 +9892,12 @@ extension ContentView {
                     propertyID: propertyID,
                     sessionID: candidateSessionID,
                     metadata: metadata
+                )
+                appState.scheduleShotMetadataSupabaseWriteIfNeeded(
+                    propertyID: propertyID,
+                    sessionID: candidateSessionID,
+                    shotID: shotID,
+                    reason: "priority_trade_update"
                 )
             } catch {
                 // Keep flagged update flow resilient if metadata persistence fails.
@@ -10706,6 +10719,12 @@ extension ContentView {
                 propertyID: propertyID,
                 sessionID: session.id,
                 metadata: metadata
+            )
+            appState.scheduleShotMetadataSupabaseWriteIfNeeded(
+                propertyID: propertyID,
+                sessionID: session.id,
+                shotID: shotID,
+                reason: "location_classification_update"
             )
             didUpdate = true
         }

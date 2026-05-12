@@ -215,6 +215,7 @@ final class AppState: ObservableObject {
     typealias PropertyShadowWriteOverride = (Property) async throws -> Void
     typealias PropertyRemoteInsertOverride = (Property) async throws -> Void
     typealias SessionShadowWriteOverride = (Property, Session, SessionMetadata) async throws -> Void
+    typealias ShotMetadataWriteOverride = (UUID, UUID, SupabaseShotRichMetadataPayload, Bool) async throws -> Void
 #if DEBUG
     private typealias SyncDeltaFetchOverride = (
         UUID,
@@ -719,6 +720,7 @@ final class AppState: ObservableObject {
     private struct SupabaseShotStoragePayload: Encodable {
         let id: UUID
         let orgID: UUID
+        let propertyID: UUID?
         let sessionID: UUID
         let storageBucket: String?
         let storagePath: String?
@@ -727,10 +729,12 @@ final class AppState: ObservableObject {
         let uploadState: String
         let uploadAttempts: Int
         let lastUploadError: String?
+        let updatedBy: UUID?
 
         enum CodingKeys: String, CodingKey {
             case id
             case orgID = "org_id"
+            case propertyID = "property_id"
             case sessionID = "session_id"
             case storageBucket = "storage_bucket"
             case storagePath = "storage_path"
@@ -739,6 +743,113 @@ final class AppState: ObservableObject {
             case uploadState = "upload_state"
             case uploadAttempts = "upload_attempts"
             case lastUploadError = "last_upload_error"
+            case updatedBy = "updated_by"
+        }
+    }
+
+    struct SupabaseShotRichMetadataPayload: Encodable {
+        let id: UUID
+        let orgID: UUID
+        let propertyID: UUID
+        let sessionID: UUID
+        let shotType: String?
+        let position: Int?
+        let capturedAt: String?
+        let building: String?
+        let elevation: String?
+        let detailType: String?
+        let angleIndex: Int?
+        let shotKey: String?
+        let logicalShotIdentity: String?
+        let captureKind: String?
+        let firstCaptureKind: String?
+        let isGuided: Bool
+        let isFlagged: Bool
+        let issueID: UUID?
+        let issueStatus: String?
+        let trade: String?
+        let reason: String?
+        let priority: String?
+        let captureMode: String?
+        let lens: String?
+        let latitude: Double?
+        let longitude: Double?
+        let accuracyMeters: Double?
+        let imageWidth: Int?
+        let imageHeight: Int?
+        let uploadState: String?
+        let uploadAttempts: Int?
+        let updatedBy: UUID?
+
+        enum CodingKeys: String, CodingKey {
+            case id
+            case orgID = "org_id"
+            case propertyID = "property_id"
+            case sessionID = "session_id"
+            case shotType = "shot_type"
+            case position
+            case capturedAt = "captured_at"
+            case building
+            case elevation
+            case detailType = "detail_type"
+            case angleIndex = "angle_index"
+            case shotKey = "shot_key"
+            case logicalShotIdentity = "logical_shot_identity"
+            case captureKind = "capture_kind"
+            case firstCaptureKind = "first_capture_kind"
+            case isGuided = "is_guided"
+            case isFlagged = "is_flagged"
+            case issueID = "issue_id"
+            case issueStatus = "issue_status"
+            case trade
+            case reason
+            case priority
+            case captureMode = "capture_mode"
+            case lens
+            case latitude
+            case longitude
+            case accuracyMeters = "accuracy_meters"
+            case imageWidth = "image_width"
+            case imageHeight = "image_height"
+            case uploadState = "upload_state"
+            case uploadAttempts = "upload_attempts"
+            case updatedBy = "updated_by"
+        }
+
+        func encode(to encoder: Encoder) throws {
+            var c = encoder.container(keyedBy: CodingKeys.self)
+            try c.encode(id, forKey: .id)
+            try c.encode(orgID, forKey: .orgID)
+            try c.encode(propertyID, forKey: .propertyID)
+            try c.encode(sessionID, forKey: .sessionID)
+            try c.encodeIfPresent(shotType, forKey: .shotType)
+            try c.encodeIfPresent(position, forKey: .position)
+            try c.encodeIfPresent(capturedAt, forKey: .capturedAt)
+            try c.encodeIfPresent(building, forKey: .building)
+            try c.encodeIfPresent(elevation, forKey: .elevation)
+            try c.encodeIfPresent(detailType, forKey: .detailType)
+            try c.encodeIfPresent(angleIndex, forKey: .angleIndex)
+            try c.encodeIfPresent(shotKey, forKey: .shotKey)
+            try c.encodeIfPresent(logicalShotIdentity, forKey: .logicalShotIdentity)
+            try c.encodeIfPresent(captureKind, forKey: .captureKind)
+            try c.encodeIfPresent(firstCaptureKind, forKey: .firstCaptureKind)
+            try c.encode(isGuided, forKey: .isGuided)
+            try c.encode(isFlagged, forKey: .isFlagged)
+            try c.encodeIfPresent(issueID, forKey: .issueID)
+            try c.encodeIfPresent(issueStatus, forKey: .issueStatus)
+            try c.encodeIfPresent(trade, forKey: .trade)
+            try c.encodeIfPresent(reason, forKey: .reason)
+            try c.encodeIfPresent(priority, forKey: .priority)
+            try c.encodeIfPresent(captureMode, forKey: .captureMode)
+            try c.encodeIfPresent(lens, forKey: .lens)
+            try c.encodeIfPresent(latitude, forKey: .latitude)
+            try c.encodeIfPresent(longitude, forKey: .longitude)
+            try c.encodeIfPresent(accuracyMeters, forKey: .accuracyMeters)
+            try c.encodeIfPresent(imageWidth, forKey: .imageWidth)
+            try c.encodeIfPresent(imageHeight, forKey: .imageHeight)
+            try c.encodeIfPresent(uploadState, forKey: .uploadState)
+            try c.encodeIfPresent(uploadAttempts, forKey: .uploadAttempts)
+            try c.encodeIfPresent(updatedBy, forKey: .updatedBy)
         }
     }
 
@@ -1144,6 +1255,28 @@ final class AppState: ObservableObject {
             case lockedByDeviceID = "locked_by_device_id"
             case lockedAt = "locked_at"
             case coordinationTier1Snapshot = "coordination_tier1_snapshot"
+        }
+    }
+
+    private struct SupabaseSessionEnsureInsertPayload: Encodable {
+        let id: UUID
+        let orgID: UUID
+        let propertyID: UUID
+        let title: String?
+        let status: String
+        let startedAt: String
+        let completedAt: String?
+        let updatedBy: UUID
+
+        enum CodingKeys: String, CodingKey {
+            case id
+            case orgID = "org_id"
+            case propertyID = "property_id"
+            case title
+            case status
+            case startedAt = "started_at"
+            case completedAt = "completed_at"
+            case updatedBy = "updated_by"
         }
     }
 
@@ -1711,6 +1844,7 @@ final class AppState: ObservableObject {
     private let propertyShadowWriteOverride: PropertyShadowWriteOverride?
     private let propertyRemoteInsertOverride: PropertyRemoteInsertOverride?
     private let sessionShadowWriteOverride: SessionShadowWriteOverride?
+    private let shotMetadataWriteOverride: ShotMetadataWriteOverride?
     private let selectedPropertyDefaultsKey = "scoutcapture.selectedPropertyID"
     private let activeOrganizationDefaultsKeyPrefix = "scoutcapture.activeOrganizationID"
     private let propertyActivationTimestampsDefaultsKey = "scoutcapture.propertyActivationTimestamps.v1"
@@ -2046,6 +2180,7 @@ final class AppState: ObservableObject {
         propertyShadowWriteOverride: PropertyShadowWriteOverride? = nil,
         propertyRemoteInsertOverride: PropertyRemoteInsertOverride? = nil,
         sessionShadowWriteOverride: SessionShadowWriteOverride? = nil,
+        shotMetadataWriteOverride: ShotMetadataWriteOverride? = nil,
         disableCloudBackupForTests: Bool = false
     ) {
         self.injectedLocalStore = localStore
@@ -2063,6 +2198,7 @@ final class AppState: ObservableObject {
         self.propertyShadowWriteOverride = propertyShadowWriteOverride
         self.propertyRemoteInsertOverride = propertyRemoteInsertOverride
         self.sessionShadowWriteOverride = sessionShadowWriteOverride
+        self.shotMetadataWriteOverride = shotMetadataWriteOverride
         self.supabaseConfiguration = AppState.loadSupabaseConfiguration()
         self.backendFeatureFlags = BackendFeatureFlags.load(userDefaults: userDefaults)
 
@@ -6071,6 +6207,7 @@ final class AppState: ObservableObject {
             failurePhase = "shotMetadataWrite"
             try await persistShotStorageMetadataToSupabase(
                 orgID: orgID,
+                propertyID: propertyID,
                 sessionID: sessionID,
                 shotID: shotID,
                 storageBucket: supabaseOperationalMediaBucket,
@@ -6226,7 +6363,6 @@ final class AppState: ObservableObject {
         metadata: SessionMetadata,
         orgID: UUID
     ) async throws {
-        guard let client = supabaseClient else { return }
         guard canAccessOrganization(orgID) else {
             throw NSError(domain: "ScoutCapture.SupabaseMedia", code: 3, userInfo: [
                 NSLocalizedDescriptionKey: "Blocked Supabase session write outside the active organization."
@@ -6241,17 +6377,15 @@ final class AppState: ObservableObject {
             metadata: metadata
         )
 
-        let sessionPayload = makeSupabaseSessionPayload(
-            sessionID: sessionID,
-            propertyID: propertyID,
-            orgID: orgID,
-            property: property,
-            metadata: metadata
-        )
-
         do {
-            try await upsertPropertyRowToSupabase(propertyPayload)
-            try await upsertSessionRowToSupabase(sessionPayload)
+            try await ensureSupabasePropertyRowForShotMetadata(propertyPayload)
+            try await ensureSupabaseSessionRowForShotMetadata(
+                propertyID: propertyID,
+                sessionID: sessionID,
+                orgID: orgID,
+                property: property,
+                metadata: metadata
+            )
         } catch {
             print(
                 "[SupabaseSessionEnsure] result=failed " +
@@ -6266,8 +6400,148 @@ final class AppState: ObservableObject {
         }
     }
 
+    private func ensureSupabasePropertyRowForShotMetadata(_ payload: SupabasePropertyPayload) async throws {
+        guard let client = supabaseClient else { return }
+
+        do {
+            let existingRows = try await client
+                .from("properties")
+                .select("id")
+                .eq("id", value: payload.id.uuidString.lowercased())
+                .eq("org_id", value: payload.orgID.uuidString.lowercased())
+                .limit(1)
+                .execute()
+                .value as [SessionIDOnlyRecord]
+
+            if !existingRows.isEmpty {
+                print(
+                    "[SupabasePropertyEnsure] result=success " +
+                    "strategy=existing_row " +
+                    "orgID=\(payload.orgID.uuidString) " +
+                    "propertyID=\(payload.id.uuidString)"
+                )
+                return
+            }
+        } catch {
+            print(
+                "[SupabasePropertyEnsure] event=select_failed_continuing_to_upsert " +
+                "orgID=\(payload.orgID.uuidString) " +
+                "propertyID=\(payload.id.uuidString) " +
+                "error=\(error.localizedDescription)"
+            )
+        }
+
+        try await upsertPropertyRowToSupabase(payload)
+    }
+
+    private func ensureSupabaseSessionRowForShotMetadata(
+        propertyID: UUID,
+        sessionID: UUID,
+        orgID: UUID,
+        property: Property?,
+        metadata: SessionMetadata
+    ) async throws {
+        guard let client = supabaseClient else { return }
+        guard let actorID = authenticatedSupabaseUser?.id else {
+            throw NSError(domain: "ScoutCapture.SupabaseMedia", code: 5, userInfo: [
+                NSLocalizedDescriptionKey: "Cannot ensure Supabase session row without an authenticated actor."
+            ])
+        }
+
+        let authDiagnostic = await supabaseClientAuthDiagnostic(client)
+        print(
+            "[SupabaseSessionEnsure] event=attempt " +
+            "strategy=select_then_insert " +
+            "orgID=\(orgID.uuidString) " +
+            "propertyID=\(propertyID.uuidString) " +
+            "sessionID=\(sessionID.uuidString) " +
+            "updatedBy=\(actorID.uuidString) " +
+            "appAuthUserID=\(authenticatedSupabaseUser?.id.uuidString ?? "nil") " +
+            "clientAuthUserID=\(authDiagnostic.userID) " +
+            "clientAuthError=\(authDiagnostic.error)"
+        )
+
+        do {
+            let existingRows = try await client
+                .from("sessions")
+                .select("id")
+                .eq("id", value: sessionID.uuidString.lowercased())
+                .eq("org_id", value: orgID.uuidString.lowercased())
+                .eq("property_id", value: propertyID.uuidString.lowercased())
+                .limit(1)
+                .execute()
+                .value as [SessionIDOnlyRecord]
+
+            if !existingRows.isEmpty {
+                print(
+                    "[SupabaseSessionEnsure] result=success " +
+                    "strategy=existing_row " +
+                    "orgID=\(orgID.uuidString) " +
+                    "propertyID=\(propertyID.uuidString) " +
+                    "sessionID=\(sessionID.uuidString)"
+                )
+                return
+            }
+        } catch {
+            print(
+                "[SupabaseSessionEnsure] event=select_failed_continuing_to_insert " +
+                "orgID=\(orgID.uuidString) " +
+                "propertyID=\(propertyID.uuidString) " +
+                "sessionID=\(sessionID.uuidString) " +
+                "error=\(error.localizedDescription)"
+            )
+        }
+
+        let insertPayload = makeSupabaseSessionEnsureInsertPayload(
+            sessionID: sessionID,
+            propertyID: propertyID,
+            orgID: orgID,
+            property: property,
+            metadata: metadata,
+            updatedBy: actorID
+        )
+
+        do {
+            try await client
+                .from("sessions")
+                .insert(insertPayload, returning: .minimal)
+                .execute()
+            print(
+                "[SupabaseSessionEnsure] result=success " +
+                "strategy=insert " +
+                "orgID=\(orgID.uuidString) " +
+                "propertyID=\(propertyID.uuidString) " +
+                "sessionID=\(sessionID.uuidString) " +
+                "updatedBy=\(actorID.uuidString)"
+            )
+        } catch {
+            if isDuplicateKeyError(error) {
+                print(
+                    "[SupabaseSessionEnsure] result=success " +
+                    "strategy=duplicate_after_insert " +
+                    "orgID=\(orgID.uuidString) " +
+                    "propertyID=\(propertyID.uuidString) " +
+                    "sessionID=\(sessionID.uuidString)"
+                )
+                return
+            }
+
+            print(
+                "[SupabaseSessionEnsure] result=failed " +
+                "strategy=insert " +
+                "orgID=\(orgID.uuidString) " +
+                "propertyID=\(propertyID.uuidString) " +
+                "sessionID=\(sessionID.uuidString) " +
+                "updatedBy=\(actorID.uuidString) " +
+                "error=\(error.localizedDescription)"
+            )
+            throw error
+        }
+    }
+
     private func persistShotStorageMetadataToSupabase(
         orgID: UUID,
+        propertyID: UUID? = nil,
         sessionID: UUID,
         shotID: UUID,
         storageBucket: String?,
@@ -6288,6 +6562,7 @@ final class AppState: ObservableObject {
         let payload = SupabaseShotStoragePayload(
             id: shotID,
             orgID: orgID,
+            propertyID: propertyID,
             sessionID: sessionID,
             storageBucket: storageBucket,
             storagePath: storagePath,
@@ -6295,12 +6570,336 @@ final class AppState: ObservableObject {
             byteSize: byteSize,
             uploadState: uploadState,
             uploadAttempts: max(0, uploadAttempts),
-            lastUploadError: lastUploadError
+            lastUploadError: lastUploadError,
+            updatedBy: authenticatedSupabaseUser?.id
         )
 
         try await client
             .from("shots")
             .upsert(payload, onConflict: "id", returning: .minimal)
+            .execute()
+    }
+
+    private func makeSupabaseShotRichMetadataPayload(
+        orgID: UUID,
+        propertyID: UUID,
+        sessionID: UUID,
+        shot: ShotMetadata,
+        includeInsertDefaults: Bool,
+        updatedBy overrideUpdatedBy: UUID? = nil
+    ) -> SupabaseShotRichMetadataPayload {
+        SupabaseShotRichMetadataPayload(
+            id: shot.shotID,
+            orgID: orgID,
+            propertyID: propertyID,
+            sessionID: sessionID,
+            shotType: includeInsertDefaults ? supabaseShotType(for: shot) : nil,
+            position: includeInsertDefaults ? max(0, shot.angleIndex) : nil,
+            capturedAt: includeInsertDefaults ? shot.createdAt.ISO8601Format() : nil,
+            building: normalizedSupabaseText(shot.building),
+            elevation: normalizedSupabaseText(CanonicalElevation.normalize(shot.elevation) ?? shot.elevation),
+            detailType: normalizedSupabaseText(shot.detailType),
+            angleIndex: max(0, shot.angleIndex),
+            shotKey: normalizedSupabaseText(shot.shotKey),
+            logicalShotIdentity: normalizedSupabaseText(shot.logicalShotIdentity),
+            captureKind: normalizedSupabaseText(shot.captureKind),
+            firstCaptureKind: normalizedSupabaseText(shot.firstCaptureKind),
+            isGuided: shot.isGuided,
+            isFlagged: shot.isFlagged,
+            issueID: shot.issueID,
+            issueStatus: normalizedSupabaseText(shot.issueStatus),
+            trade: normalizedSupabaseText(shot.trade),
+            reason: normalizedSupabaseText(shot.noteText),
+            priority: normalizedSupabaseText(shot.priority),
+            captureMode: normalizedSupabaseText(shot.captureMode),
+            lens: normalizedSupabaseText(shot.lens),
+            latitude: shot.latitude,
+            longitude: shot.longitude,
+            accuracyMeters: shot.accuracyMeters,
+            imageWidth: shot.imageWidth,
+            imageHeight: shot.imageHeight,
+            uploadState: includeInsertDefaults ? shot.uploadState : nil,
+            uploadAttempts: includeInsertDefaults ? max(0, shot.uploadAttempts) : nil,
+            updatedBy: overrideUpdatedBy ?? authenticatedSupabaseUser?.id
+        )
+    }
+
+    private func supabaseShotType(for shot: ShotMetadata) -> String {
+        normalizedSupabaseText(shot.captureKind)
+            ?? normalizedSupabaseText(shot.detailType)?.lowercased()
+            ?? "detail"
+    }
+
+    private func resolveShotMetadataWriteOrgID(
+        propertyID: UUID,
+        sessionID: UUID,
+        property: Property,
+        metadata: SessionMetadata
+    ) -> UUID? {
+        if canAccessOrganization(property.orgId) {
+            return property.orgId
+        }
+        if canAccessOrganization(metadata.orgID) {
+            return metadata.orgID
+        }
+
+        guard let activeOrganizationID,
+              canUseActiveOrganizationForShotMetadataWrite(
+                propertyID: propertyID,
+                sessionID: sessionID
+              ) else {
+            return property.orgId ?? metadata.orgID
+        }
+
+        if property.orgId != activeOrganizationID || metadata.orgID != activeOrganizationID {
+            print(
+                "[ShotMetadataWrite] event=org_resolution_override " +
+                "propertyID=\(propertyID.uuidString) " +
+                "sessionID=\(sessionID.uuidString) " +
+                "propertyOrgID=\(property.orgId?.uuidString ?? "nil") " +
+                "sessionOrgID=\(metadata.orgID?.uuidString ?? "nil") " +
+                "activeOrganizationID=\(activeOrganizationID.uuidString) " +
+                "resolvedOrgID=\(activeOrganizationID.uuidString)"
+            )
+        }
+        return activeOrganizationID
+    }
+
+    private func canUseActiveOrganizationForShotMetadataWrite(
+        propertyID: UUID,
+        sessionID: UUID
+    ) -> Bool {
+        if selectedPropertyID == propertyID {
+            return true
+        }
+        if currentSession?.id == sessionID,
+           currentSession?.propertyID == propertyID {
+            return true
+        }
+        return false
+    }
+
+    func scheduleShotMetadataSupabaseWriteIfNeeded(
+        propertyID: UUID,
+        sessionID: UUID,
+        shotID: UUID,
+        reason: String,
+        allowInsert: Bool = false
+    ) {
+        guard isPhaseBMetadataShadowWriteEnabled else { return }
+        guard let property = allProperties.first(where: { $0.id == propertyID }) ??
+                properties.first(where: { $0.id == propertyID }) else {
+            print("[ShotMetadataWrite] skipped reason=missing_property_or_org shotID=\(shotID.uuidString)")
+            return
+        }
+        guard let metadata = try? localStore.loadSessionMetadata(propertyID: propertyID, sessionID: sessionID),
+              let shot = metadata.shots.first(where: { $0.shotID == shotID }) else {
+            print("[ShotMetadataWrite] skipped reason=missing_local_shot shotID=\(shotID.uuidString)")
+            return
+        }
+        guard let orgID = resolveShotMetadataWriteOrgID(
+            propertyID: propertyID,
+            sessionID: sessionID,
+            property: property,
+            metadata: metadata
+        ) else {
+            print("[ShotMetadataWrite] skipped reason=missing_property_or_org shotID=\(shotID.uuidString)")
+            return
+        }
+        guard canAccessOrganization(orgID) else {
+            print(
+                "[ShotMetadataWrite] skipped reason=inactive_org " +
+                "shotID=\(shotID.uuidString) " +
+                "orgID=\(orgID.uuidString) " +
+                "activeOrganizationID=\(activeOrganizationID?.uuidString ?? "nil") " +
+                "propertyID=\(propertyID.uuidString) " +
+                "propertyOrgID=\(property.orgId?.uuidString ?? "nil") " +
+                "sessionID=\(sessionID.uuidString) " +
+                "sessionOrgID=\(metadata.orgID?.uuidString ?? "nil") " +
+                "resolvedOrgID=\(orgID.uuidString)"
+            )
+            return
+        }
+
+        let operationKey = "shot-metadata|\(sessionID.uuidString.lowercased())|\(shotID.uuidString.lowercased())|\(reason)"
+        guard beginSupabaseMediaOperation(operationKey) else { return }
+
+        Task(priority: .utility) { [weak self] in
+            defer { self?.endSupabaseMediaOperation(operationKey) }
+            do {
+                try await self?.persistShotRichMetadataToSupabase(
+                    orgID: orgID,
+                    propertyID: propertyID,
+                    sessionID: sessionID,
+                    metadata: metadata,
+                    shot: shot,
+                    allowInsert: allowInsert
+                )
+                print(
+                    "[ShotMetadataWrite] result=success " +
+                    "reason=\(reason) shotID=\(shotID.uuidString) sessionID=\(sessionID.uuidString)"
+                )
+            } catch {
+                print(
+                    "[ShotMetadataWrite] result=failed " +
+                    "reason=\(reason) shotID=\(shotID.uuidString) sessionID=\(sessionID.uuidString) " +
+                    "error=\(error.localizedDescription)"
+                )
+            }
+        }
+    }
+
+    private func persistShotRichMetadataToSupabase(
+        orgID: UUID,
+        propertyID: UUID,
+        sessionID: UUID,
+        metadata: SessionMetadata,
+        shot: ShotMetadata,
+        allowInsert: Bool
+    ) async throws {
+#if DEBUG
+        if let shotMetadataWriteOverride {
+            let payload = makeSupabaseShotRichMetadataPayload(
+                orgID: orgID,
+                propertyID: propertyID,
+                sessionID: sessionID,
+                shot: shot,
+                includeInsertDefaults: allowInsert
+            )
+            try await shotMetadataWriteOverride(orgID, sessionID, payload, allowInsert)
+            return
+        }
+#endif
+        guard let client = supabaseClient else { return }
+        guard canAccessOrganization(orgID) else {
+            throw NSError(domain: "ScoutCapture.SupabaseShotMetadata", code: 1, userInfo: [
+                NSLocalizedDescriptionKey: "Blocked Supabase rich shot metadata write outside the active organization."
+            ])
+        }
+
+        try await ensureSupabaseSessionPrerequisites(
+            propertyID: propertyID,
+            sessionID: sessionID,
+            metadata: metadata,
+            orgID: orgID
+        )
+
+        var remoteRows: [SessionIDOnlyRecord] = []
+        if allowInsert {
+            do {
+                remoteRows = try await client
+                    .from("shots")
+                    .select("id")
+                    .eq("id", value: shot.shotID.uuidString.lowercased())
+                    .eq("org_id", value: orgID.uuidString.lowercased())
+                    .eq("session_id", value: sessionID.uuidString.lowercased())
+                    .limit(1)
+                    .execute()
+                    .value as [SessionIDOnlyRecord]
+            } catch {
+                print(
+                    "[ShotMetadataWrite] event=select_failed_continuing_to_insert " +
+                    "shotID=\(shot.shotID.uuidString) " +
+                    "sessionID=\(sessionID.uuidString) " +
+                    "orgID=\(orgID.uuidString) " +
+                    "error=\(error.localizedDescription)"
+                )
+            }
+        }
+
+        if allowInsert, remoteRows.isEmpty {
+            let insertPayload = makeSupabaseShotRichMetadataPayload(
+                orgID: orgID,
+                propertyID: propertyID,
+                sessionID: sessionID,
+                shot: shot,
+                includeInsertDefaults: true
+            )
+            let authDiagnostic = await supabaseClientAuthDiagnostic(client)
+            print(
+                "[ShotMetadataWrite] event=insert_attempt " +
+                "shotID=\(shot.shotID.uuidString) " +
+                "sessionID=\(sessionID.uuidString) " +
+                "propertyID=\(propertyID.uuidString) " +
+                "orgID=\(orgID.uuidString) " +
+                "updatedBy=\(authenticatedSupabaseUser?.id.uuidString ?? "nil") " +
+                "appAuthUserID=\(authenticatedSupabaseUser?.id.uuidString ?? "nil") " +
+                "clientAuthUserID=\(authDiagnostic.userID) " +
+                "clientAuthError=\(authDiagnostic.error)"
+            )
+            do {
+                try await client
+                    .from("shots")
+                    .insert(insertPayload, returning: .minimal)
+                    .execute()
+            } catch {
+                if isDuplicateKeyError(error) {
+                    print(
+                        "[ShotMetadataWrite] event=insert_duplicate_fallback_update " +
+                        "shotID=\(shot.shotID.uuidString) " +
+                        "sessionID=\(sessionID.uuidString) " +
+                        "orgID=\(orgID.uuidString)"
+                    )
+                    try await updateShotRichMetadataRow(
+                        client: client,
+                        orgID: orgID,
+                        propertyID: propertyID,
+                        sessionID: sessionID,
+                        shot: shot
+                    )
+                    return
+                }
+                print(
+                    "[ShotMetadataWrite] event=insert_failed " +
+                    "shotID=\(shot.shotID.uuidString) " +
+                    "sessionID=\(sessionID.uuidString) " +
+                    "propertyID=\(propertyID.uuidString) " +
+                    "orgID=\(orgID.uuidString) " +
+                    "updatedBy=\(authenticatedSupabaseUser?.id.uuidString ?? "nil") " +
+                    "error=\(error.localizedDescription)"
+                )
+                throw error
+            }
+            return
+        }
+
+        try await updateShotRichMetadataRow(
+            client: client,
+            orgID: orgID,
+            propertyID: propertyID,
+            sessionID: sessionID,
+            shot: shot
+        )
+    }
+
+    private func updateShotRichMetadataRow(
+        client: SupabaseClient,
+        orgID: UUID,
+        propertyID: UUID,
+        sessionID: UUID,
+        shot: ShotMetadata
+    ) async throws {
+        let updatePayload = makeSupabaseShotRichMetadataPayload(
+            orgID: orgID,
+            propertyID: propertyID,
+            sessionID: sessionID,
+            shot: shot,
+            includeInsertDefaults: false
+        )
+        print(
+            "[ShotMetadataWrite] event=update_attempt " +
+            "shotID=\(shot.shotID.uuidString) " +
+            "sessionID=\(sessionID.uuidString) " +
+            "propertyID=\(propertyID.uuidString) " +
+            "orgID=\(orgID.uuidString) " +
+            "updatedBy=\(authenticatedSupabaseUser?.id.uuidString ?? "nil")"
+        )
+        try await client
+            .from("shots")
+            .update(updatePayload, returning: .minimal)
+            .eq("id", value: shot.shotID.uuidString.lowercased())
+            .eq("org_id", value: orgID.uuidString.lowercased())
+            .eq("session_id", value: sessionID.uuidString.lowercased())
             .execute()
     }
 
@@ -6358,6 +6957,26 @@ final class AppState: ObservableObject {
         )
     }
 
+    private func makeSupabaseSessionEnsureInsertPayload(
+        sessionID: UUID,
+        propertyID: UUID,
+        orgID: UUID,
+        property: Property?,
+        metadata: SessionMetadata,
+        updatedBy: UUID
+    ) -> SupabaseSessionEnsureInsertPayload {
+        SupabaseSessionEnsureInsertPayload(
+            id: sessionID,
+            orgID: orgID,
+            propertyID: propertyID,
+            title: normalizedSupabaseText(metadata.propertyNameAtCapture ?? property?.name),
+            status: metadata.status.rawValue,
+            startedAt: metadata.startedAt.ISO8601Format(),
+            completedAt: metadata.endedAt?.ISO8601Format(),
+            updatedBy: updatedBy
+        )
+    }
+
     private func supabaseClientAuthDiagnostic(_ client: SupabaseClient?) async -> (
         userID: String,
         email: String,
@@ -6377,6 +6996,11 @@ final class AppState: ObservableObject {
         } catch {
             return ("nil", "nil", error.localizedDescription)
         }
+    }
+
+    private func isDuplicateKeyError(_ error: Error) -> Bool {
+        guard let postgrestError = error as? PostgrestError else { return false }
+        return postgrestError.code == "23505"
     }
 
     private func upsertPropertyRowToSupabase(_ payload: SupabasePropertyPayload) async throws {
@@ -8732,6 +9356,7 @@ final class AppState: ObservableObject {
                 do {
                     try await persistShotStorageMetadataToSupabase(
                         orgID: ledger.activeOrganizationID,
+                        propertyID: propertyID,
                         sessionID: sessionID,
                         shotID: shotID,
                         storageBucket: nil,
@@ -9543,6 +10168,7 @@ final class AppState: ObservableObject {
                 do {
                     try await persistShotStorageMetadataToSupabase(
                         orgID: ledger.activeOrganizationID,
+                        propertyID: mediaEntry.propertyID,
                         sessionID: mediaEntry.sessionID,
                         shotID: mediaEntry.shotID,
                         storageBucket: expectedBucket,
@@ -13711,6 +14337,89 @@ final class AppState: ObservableObject {
     }
 
 #if DEBUG
+    func _debugEncodeShotRichMetadataPayloadForTests(
+        orgID: UUID,
+        propertyID: UUID,
+        sessionID: UUID,
+        shot: ShotMetadata,
+        includeInsertDefaults: Bool,
+        updatedBy: UUID?
+    ) throws -> [String: Any] {
+        let payload = makeSupabaseShotRichMetadataPayload(
+            orgID: orgID,
+            propertyID: propertyID,
+            sessionID: sessionID,
+            shot: shot,
+            includeInsertDefaults: includeInsertDefaults,
+            updatedBy: updatedBy
+        )
+        return try Self.debugJSONObject(payload)
+    }
+
+    func _debugEncodeShotStoragePayloadForTests(
+        orgID: UUID,
+        propertyID: UUID?,
+        sessionID: UUID,
+        shotID: UUID,
+        storageBucket: String?,
+        storagePath: String?,
+        checksumSHA256: String?,
+        byteSize: Int?,
+        uploadState: String,
+        uploadAttempts: Int,
+        lastUploadError: String?,
+        updatedBy: UUID?
+    ) throws -> [String: Any] {
+        let payload = SupabaseShotStoragePayload(
+            id: shotID,
+            orgID: orgID,
+            propertyID: propertyID,
+            sessionID: sessionID,
+            storageBucket: storageBucket,
+            storagePath: storagePath,
+            checksumSHA256: checksumSHA256,
+            byteSize: byteSize,
+            uploadState: uploadState,
+            uploadAttempts: max(0, uploadAttempts),
+            lastUploadError: lastUploadError,
+            updatedBy: updatedBy
+        )
+        return try Self.debugJSONObject(payload)
+    }
+
+    func _debugEncodeSessionEnsureInsertPayloadForTests(
+        orgID: UUID,
+        propertyID: UUID,
+        sessionID: UUID,
+        property: Property?,
+        metadata: SessionMetadata,
+        updatedBy: UUID
+    ) throws -> [String: Any] {
+        let payload = makeSupabaseSessionEnsureInsertPayload(
+            sessionID: sessionID,
+            propertyID: propertyID,
+            orgID: orgID,
+            property: property,
+            metadata: metadata,
+            updatedBy: updatedBy
+        )
+        return try Self.debugJSONObject(payload)
+    }
+
+    private static func debugJSONObject<T: Encodable>(_ payload: T) throws -> [String: Any] {
+        let data = try JSONEncoder().encode(payload)
+        return try XCTUnwrapLikeDictionary(JSONSerialization.jsonObject(with: data, options: []))
+    }
+
+    private static func XCTUnwrapLikeDictionary(_ value: Any) throws -> [String: Any] {
+        guard let dictionary = value as? [String: Any] else {
+            throw NSError(domain: "ScoutCapture.DebugJSON", code: 1, userInfo: [
+                NSLocalizedDescriptionKey: "Encoded payload was not a JSON object."
+            ])
+        }
+        return dictionary
+    }
+
     @MainActor
     func _debugSetAuthorizedPropertyIDsForTests(
         orgID: UUID,

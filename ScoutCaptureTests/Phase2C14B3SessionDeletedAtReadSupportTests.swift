@@ -294,6 +294,570 @@ final class Phase2C14B3SessionDeletedAtReadSupportTests: XCTestCase {
         XCTAssertEqual(merged.lastUploadError, "keep if remote nil")
     }
 
+    func testShotRichMetadataPayloadIncludesCanonicalFieldsAndUpdatedBy() throws {
+        let appState = AppState(disableCloudBackupForTests: true)
+        let orgID = UUID()
+        let propertyID = UUID()
+        let sessionID = UUID()
+        let shotID = UUID()
+        let issueID = UUID()
+        let updatedBy = UUID()
+        let shot = ShotMetadata(
+            shotID: shotID,
+            propertyID: propertyID,
+            sessionID: sessionID,
+            createdAt: Date(timeIntervalSinceReferenceDate: 100),
+            updatedAt: Date(timeIntervalSinceReferenceDate: 110),
+            building: "Main",
+            elevation: "north elevation",
+            detailType: "Window",
+            angleIndex: 2,
+            trade: "Glazing",
+            priority: "High",
+            shotKey: "main|north|window|2",
+            isGuided: true,
+            isFlagged: true,
+            issueID: issueID,
+            issueStatus: "active",
+            captureKind: "issue",
+            firstCaptureKind: "guided",
+            noteText: "Cracked pane",
+            noteCategory: nil,
+            originalFilename: "original.heic",
+            originalRelativePath: "Originals/original.heic",
+            originalByteSize: 123,
+            uploadState: "pending",
+            uploadAttempts: 0,
+            stampedFilename: nil,
+            stampedRelativePath: nil,
+            captureMode: "hd",
+            lens: "wide",
+            exifOrientation: 1,
+            latitude: 33.75,
+            longitude: -84.39,
+            accuracyMeters: 4.5,
+            imageWidth: 4032,
+            imageHeight: 3024
+        )
+
+        let payload = try appState._debugEncodeShotRichMetadataPayloadForTests(
+            orgID: orgID,
+            propertyID: propertyID,
+            sessionID: sessionID,
+            shot: shot,
+            includeInsertDefaults: true,
+            updatedBy: updatedBy
+        )
+
+        XCTAssertEqual(payload["id"] as? String, shotID.uuidString)
+        XCTAssertEqual(payload["org_id"] as? String, orgID.uuidString)
+        XCTAssertEqual(payload["property_id"] as? String, propertyID.uuidString)
+        XCTAssertEqual(payload["session_id"] as? String, sessionID.uuidString)
+        XCTAssertEqual(payload["shot_type"] as? String, "issue")
+        XCTAssertEqual(payload["position"] as? Int, 2)
+        XCTAssertNotNil(payload["captured_at"] as? String)
+        XCTAssertEqual(payload["building"] as? String, "Main")
+        XCTAssertEqual(payload["elevation"] as? String, "North")
+        XCTAssertEqual(payload["detail_type"] as? String, "Window")
+        XCTAssertEqual(payload["angle_index"] as? Int, 2)
+        XCTAssertEqual(payload["shot_key"] as? String, "main|north|window|2")
+        XCTAssertEqual(payload["logical_shot_identity"] as? String, shot.logicalShotIdentity)
+        XCTAssertEqual(payload["capture_kind"] as? String, "issue")
+        XCTAssertEqual(payload["first_capture_kind"] as? String, "guided")
+        XCTAssertEqual(payload["is_guided"] as? Bool, true)
+        XCTAssertEqual(payload["is_flagged"] as? Bool, true)
+        XCTAssertEqual(payload["issue_id"] as? String, issueID.uuidString)
+        XCTAssertEqual(payload["issue_status"] as? String, "active")
+        XCTAssertEqual(payload["trade"] as? String, "Glazing")
+        XCTAssertEqual(payload["reason"] as? String, "Cracked pane")
+        XCTAssertEqual(payload["priority"] as? String, "high")
+        XCTAssertEqual(payload["capture_mode"] as? String, "hd")
+        XCTAssertEqual(payload["lens"] as? String, "wide")
+        XCTAssertEqual(payload["latitude"] as? Double, 33.75)
+        XCTAssertEqual(payload["longitude"] as? Double, -84.39)
+        XCTAssertEqual(payload["accuracy_meters"] as? Double, 4.5)
+        XCTAssertEqual(payload["image_width"] as? Int, 4032)
+        XCTAssertEqual(payload["image_height"] as? Int, 3024)
+        XCTAssertEqual(payload["updated_by"] as? String, updatedBy.uuidString)
+        XCTAssertEqual(payload["upload_state"] as? String, "pending")
+    }
+
+    func testRichAndStoragePayloadsDoNotClobberEachOther() throws {
+        let appState = AppState(disableCloudBackupForTests: true)
+        let orgID = UUID()
+        let propertyID = UUID()
+        let sessionID = UUID()
+        let shotID = UUID()
+        let shot = ShotMetadata(
+            shotID: shotID,
+            propertyID: propertyID,
+            sessionID: sessionID,
+            createdAt: Date(timeIntervalSinceReferenceDate: 100),
+            updatedAt: Date(timeIntervalSinceReferenceDate: 110),
+            building: "Main",
+            elevation: "North",
+            detailType: "Window",
+            angleIndex: 2,
+            shotKey: "main|north|window|2",
+            isGuided: false,
+            isFlagged: false,
+            issueID: nil,
+            issueStatus: nil,
+            noteText: nil,
+            noteCategory: nil,
+            originalFilename: "original.heic",
+            originalRelativePath: "Originals/original.heic",
+            originalByteSize: 123,
+            uploadState: "pending",
+            uploadAttempts: 0,
+            stampedFilename: nil,
+            stampedRelativePath: nil,
+            captureMode: nil,
+            lens: nil,
+            exifOrientation: 1,
+            latitude: nil,
+            longitude: nil,
+            accuracyMeters: nil,
+            imageWidth: nil,
+            imageHeight: nil
+        )
+
+        let richUpdate = try appState._debugEncodeShotRichMetadataPayloadForTests(
+            orgID: orgID,
+            propertyID: propertyID,
+            sessionID: sessionID,
+            shot: shot,
+            includeInsertDefaults: false,
+            updatedBy: UUID()
+        )
+        let storageUpdate = try appState._debugEncodeShotStoragePayloadForTests(
+            orgID: orgID,
+            propertyID: propertyID,
+            sessionID: sessionID,
+            shotID: shotID,
+            storageBucket: "bucket",
+            storagePath: "path/original.heic",
+            checksumSHA256: "abc",
+            byteSize: 123,
+            uploadState: "uploaded",
+            uploadAttempts: 1,
+            lastUploadError: nil,
+            updatedBy: UUID()
+        )
+
+        XCTAssertNil(richUpdate["storage_bucket"])
+        XCTAssertNil(richUpdate["storage_path"])
+        XCTAssertNil(richUpdate["checksum_sha256"])
+        XCTAssertNil(richUpdate["byte_size"])
+        XCTAssertNil(richUpdate["last_upload_error"])
+        XCTAssertNil(richUpdate["upload_state"])
+        XCTAssertNil(richUpdate["shot_type"])
+        XCTAssertNil(richUpdate["position"])
+        XCTAssertNil(richUpdate["captured_at"])
+        XCTAssertEqual(richUpdate["building"] as? String, "Main")
+        XCTAssertEqual(richUpdate["is_guided"] as? Bool, false)
+        XCTAssertNil(richUpdate["issue_id"])
+
+        XCTAssertEqual(storageUpdate["storage_bucket"] as? String, "bucket")
+        XCTAssertEqual(storageUpdate["storage_path"] as? String, "path/original.heic")
+        XCTAssertEqual(storageUpdate["checksum_sha256"] as? String, "abc")
+        XCTAssertEqual(storageUpdate["upload_state"] as? String, "uploaded")
+        XCTAssertNil(storageUpdate["building"])
+        XCTAssertNil(storageUpdate["detail_type"])
+        XCTAssertNil(storageUpdate["issue_id"])
+        XCTAssertNil(storageUpdate["reason"])
+    }
+
+    func testSessionEnsureInsertPayloadIncludesUpdatedByAndParentFields() throws {
+        let appState = AppState(disableCloudBackupForTests: true)
+        let orgID = UUID()
+        let propertyID = UUID()
+        let sessionID = UUID()
+        let actorID = UUID()
+        let startedAt = Date(timeIntervalSinceReferenceDate: 1_000)
+        let endedAt = Date(timeIntervalSinceReferenceDate: 1_500)
+        let property = Property(id: propertyID, orgId: orgID, name: "Remote Backed Property")
+        let metadata = SessionMetadata(
+            schemaVersion: 1,
+            propertyID: propertyID,
+            sessionID: sessionID,
+            orgID: orgID,
+            propertyNameAtCapture: "Captured Property",
+            propertyNameAtExport: nil,
+            captureProfile: "commercial",
+            startedAt: startedAt,
+            endedAt: endedAt,
+            status: .completed,
+            isBaselineSession: false,
+            exportedAt: nil,
+            appVersion: "test",
+            deviceModel: "sim",
+            osVersion: "test",
+            shots: [],
+            issues: []
+        )
+
+        let payload = try appState._debugEncodeSessionEnsureInsertPayloadForTests(
+            orgID: orgID,
+            propertyID: propertyID,
+            sessionID: sessionID,
+            property: property,
+            metadata: metadata,
+            updatedBy: actorID
+        )
+
+        XCTAssertEqual(payload["id"] as? String, sessionID.uuidString)
+        XCTAssertEqual(payload["org_id"] as? String, orgID.uuidString)
+        XCTAssertEqual(payload["property_id"] as? String, propertyID.uuidString)
+        XCTAssertEqual(payload["title"] as? String, "Captured Property")
+        XCTAssertEqual(payload["status"] as? String, "completed")
+        XCTAssertEqual(payload["updated_by"] as? String, actorID.uuidString)
+        XCTAssertNotNil(payload["started_at"] as? String)
+        XCTAssertNotNil(payload["completed_at"] as? String)
+    }
+
+    func testSessionEnsureInsertPayloadDoesNotWipeCoordinationLifecycleOrProfileFields() throws {
+        let appState = AppState(disableCloudBackupForTests: true)
+        let orgID = UUID()
+        let propertyID = UUID()
+        let sessionID = UUID()
+        let metadata = SessionMetadata(
+            schemaVersion: 1,
+            propertyID: propertyID,
+            sessionID: sessionID,
+            propertyNameAtCapture: "Property",
+            propertyNameAtExport: nil,
+            captureProfile: "residential",
+            startedAt: Date(timeIntervalSinceReferenceDate: 100),
+            endedAt: nil,
+            status: .draft,
+            isBaselineSession: false,
+            exportedAt: Date(timeIntervalSinceReferenceDate: 200),
+            isSealed: true,
+            firstDeliveredAt: Date(timeIntervalSinceReferenceDate: 300),
+            reExportExpiresAt: Date(timeIntervalSinceReferenceDate: 400),
+            appVersion: "test",
+            deviceModel: "sim",
+            osVersion: "test",
+            shots: [],
+            issues: []
+        )
+
+        let payload = try appState._debugEncodeSessionEnsureInsertPayloadForTests(
+            orgID: orgID,
+            propertyID: propertyID,
+            sessionID: sessionID,
+            property: nil,
+            metadata: metadata,
+            updatedBy: UUID()
+        )
+
+        XCTAssertNil(payload["capture_profile"])
+        XCTAssertNil(payload["locked_by_user_id"])
+        XCTAssertNil(payload["locked_by_device_id"])
+        XCTAssertNil(payload["locked_at"])
+        XCTAssertNil(payload["coordination_tier1_snapshot"])
+        XCTAssertNil(payload["deleted_at"])
+        XCTAssertNil(payload["revision"])
+        XCTAssertNil(payload["exported_at"])
+        XCTAssertNil(payload["is_sealed"])
+        XCTAssertNil(payload["first_delivered_at"])
+        XCTAssertNil(payload["re_export_expires_at"])
+    }
+
+    func testShotMetadataWriteFailureDoesNotMutateLocalMetadata() async throws {
+        let suiteName = "Phase2C15-4-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName) ?? .standard
+        defaults.removePersistentDomain(forName: suiteName)
+        defaults.set(true, forKey: "supabase_enabled")
+        defaults.set(true, forKey: "shadow_write_enabled")
+        defaults.set(false, forKey: "supabase_read_enabled")
+        defaults.set(false, forKey: "supabase_property_read_enabled")
+
+        let storageRoot = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ScoutCapture-2C15-4-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: storageRoot, withIntermediateDirectories: true)
+        defer {
+            defaults.removePersistentDomain(forName: suiteName)
+            try? FileManager.default.removeItem(at: storageRoot)
+        }
+
+        let localStore = LocalStore(testStorageRootURL: storageRoot)
+        var attempted = false
+        let appState = AppState(
+            localStore: localStore,
+            userDefaults: defaults,
+            shotMetadataWriteOverride: { _, _, _, _ in
+                attempted = true
+                throw NSError(domain: "ScoutCaptureTests", code: 42, userInfo: [
+                    NSLocalizedDescriptionKey: "intentional failure"
+                ])
+            },
+            disableCloudBackupForTests: true
+        )
+
+        let orgID = UUID()
+        let propertyID = UUID()
+        let sessionID = UUID()
+        let shotID = UUID()
+        _ = try localStore.createOrganization(Organization(id: orgID, name: "Org"))
+        _ = try localStore.createProperty(Property(id: propertyID, orgId: orgID, name: "Property"))
+        _ = try localStore.upsertSession(Session(id: sessionID, propertyID: propertyID))
+        let shot = ShotMetadata(
+            shotID: shotID,
+            propertyID: propertyID,
+            sessionID: sessionID,
+            createdAt: Date(timeIntervalSinceReferenceDate: 100),
+            updatedAt: Date(timeIntervalSinceReferenceDate: 110),
+            building: "Main",
+            elevation: "North",
+            detailType: "Window",
+            angleIndex: 1,
+            shotKey: "main|north|window|1",
+            isGuided: false,
+            isFlagged: false,
+            issueID: nil,
+            issueStatus: nil,
+            noteText: "local note",
+            noteCategory: nil,
+            originalFilename: "original.heic",
+            originalRelativePath: "Originals/original.heic",
+            originalByteSize: 123,
+            uploadState: "pending",
+            uploadAttempts: 0,
+            stampedFilename: nil,
+            stampedRelativePath: nil,
+            captureMode: nil,
+            lens: nil,
+            exifOrientation: 1,
+            latitude: nil,
+            longitude: nil,
+            accuracyMeters: nil,
+            imageWidth: nil,
+            imageHeight: nil
+        )
+        try localStore.upsertShot(propertyID: propertyID, sessionID: sessionID, shot: shot, matchMode: .append)
+
+        await MainActor.run {
+            appState.refreshProperties()
+            appState._debugSetOrganizationContextForTests(
+                memberships: [ActiveOrganizationMembership(id: orgID, name: "Org", role: "owner")],
+                activeOrganizationID: orgID,
+                ready: true
+            )
+            appState.scheduleShotMetadataSupabaseWriteIfNeeded(
+                propertyID: propertyID,
+                sessionID: sessionID,
+                shotID: shotID,
+                reason: "test_failure",
+                allowInsert: true
+            )
+        }
+        try await Task.sleep(nanoseconds: 200_000_000)
+
+        let persisted = try localStore.loadSessionMetadata(propertyID: propertyID, sessionID: sessionID)
+            .shots
+            .first(where: { $0.shotID == shotID })
+        XCTAssertTrue(attempted)
+        XCTAssertEqual(persisted?.shotID, shotID)
+        XCTAssertEqual(persisted?.building, "Main")
+        XCTAssertEqual(persisted?.elevation, "North")
+        XCTAssertEqual(persisted?.detailType, "Window")
+        XCTAssertEqual(persisted?.shotKey, "main|north|window|1")
+        XCTAssertEqual(persisted?.noteText, "local note")
+        XCTAssertEqual(persisted?.uploadState, "pending")
+        XCTAssertEqual(persisted?.uploadAttempts, 0)
+    }
+
+    func testShotMetadataWriteUsesActiveOrgWhenLocalPropertyOrgIsStaleForSelectedProperty() async throws {
+        let suiteName = "Phase2C15-4-StaleOrg-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName) ?? .standard
+        defaults.removePersistentDomain(forName: suiteName)
+        defaults.set(true, forKey: "supabase_enabled")
+        defaults.set(true, forKey: "shadow_write_enabled")
+
+        let storageRoot = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ScoutCapture-2C15-4-StaleOrg-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: storageRoot, withIntermediateDirectories: true)
+        defer {
+            defaults.removePersistentDomain(forName: suiteName)
+            try? FileManager.default.removeItem(at: storageRoot)
+        }
+
+        let localStore = LocalStore(testStorageRootURL: storageRoot)
+        let activeOrgID = UUID()
+        let staleOrgID = UUID()
+        let propertyID = UUID()
+        let sessionID = UUID()
+        let shotID = UUID()
+        _ = try localStore.createOrganization(Organization(id: activeOrgID, name: "Active Org"))
+        _ = try localStore.createOrganization(Organization(id: staleOrgID, name: "Stale Org"))
+        _ = try localStore.createProperty(Property(id: propertyID, orgId: staleOrgID, name: "Remote Backed Property"))
+        _ = try localStore.upsertSession(Session(id: sessionID, propertyID: propertyID))
+        try localStore.upsertShot(
+            propertyID: propertyID,
+            sessionID: sessionID,
+            shot: ShotMetadata(
+                shotID: shotID,
+                propertyID: propertyID,
+                sessionID: sessionID,
+                createdAt: Date(timeIntervalSinceReferenceDate: 100),
+                updatedAt: Date(timeIntervalSinceReferenceDate: 110),
+                building: "Main",
+                elevation: "North",
+                detailType: "Window",
+                angleIndex: 1,
+                shotKey: "main|north|window|1",
+                isGuided: false,
+                isFlagged: false,
+                issueID: nil,
+                issueStatus: nil,
+                noteText: nil,
+                noteCategory: nil,
+                originalFilename: "original.heic",
+                originalRelativePath: "Originals/original.heic",
+                originalByteSize: 123,
+                uploadState: "pending",
+                uploadAttempts: 0,
+                stampedFilename: nil,
+                stampedRelativePath: nil,
+                captureMode: nil,
+                lens: nil,
+                exifOrientation: 1,
+                latitude: nil,
+                longitude: nil,
+                accuracyMeters: nil,
+                imageWidth: nil,
+                imageHeight: nil
+            ),
+            matchMode: .append
+        )
+
+        var attemptedOrgID: UUID?
+        let appState = AppState(
+            localStore: localStore,
+            userDefaults: defaults,
+            shotMetadataWriteOverride: { orgID, _, _, _ in
+                attemptedOrgID = orgID
+            },
+            disableCloudBackupForTests: true
+        )
+
+        await MainActor.run {
+            appState.refreshProperties()
+            appState._debugSetOrganizationContextForTests(
+                memberships: [ActiveOrganizationMembership(id: activeOrgID, name: "Active Org", role: "owner")],
+                activeOrganizationID: activeOrgID,
+                ready: true
+            )
+            appState.selectProperty(id: propertyID)
+            appState.scheduleShotMetadataSupabaseWriteIfNeeded(
+                propertyID: propertyID,
+                sessionID: sessionID,
+                shotID: shotID,
+                reason: "test_stale_org",
+                allowInsert: true
+            )
+        }
+        try await Task.sleep(nanoseconds: 200_000_000)
+
+        XCTAssertEqual(attemptedOrgID, activeOrgID)
+    }
+
+    func testShotMetadataWriteSkipsWrongOrgWhenPropertyIsNotActiveContext() async throws {
+        let suiteName = "Phase2C15-4-WrongOrg-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName) ?? .standard
+        defaults.removePersistentDomain(forName: suiteName)
+        defaults.set(true, forKey: "supabase_enabled")
+        defaults.set(true, forKey: "shadow_write_enabled")
+
+        let storageRoot = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ScoutCapture-2C15-4-WrongOrg-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: storageRoot, withIntermediateDirectories: true)
+        defer {
+            defaults.removePersistentDomain(forName: suiteName)
+            try? FileManager.default.removeItem(at: storageRoot)
+        }
+
+        let localStore = LocalStore(testStorageRootURL: storageRoot)
+        let activeOrgID = UUID()
+        let staleOrgID = UUID()
+        let propertyID = UUID()
+        let sessionID = UUID()
+        let shotID = UUID()
+        _ = try localStore.createOrganization(Organization(id: activeOrgID, name: "Active Org"))
+        _ = try localStore.createOrganization(Organization(id: staleOrgID, name: "Stale Org"))
+        _ = try localStore.createProperty(Property(id: propertyID, orgId: staleOrgID, name: "Wrong Org Property"))
+        _ = try localStore.upsertSession(Session(id: sessionID, propertyID: propertyID))
+        try localStore.upsertShot(
+            propertyID: propertyID,
+            sessionID: sessionID,
+            shot: ShotMetadata(
+                shotID: shotID,
+                propertyID: propertyID,
+                sessionID: sessionID,
+                createdAt: Date(timeIntervalSinceReferenceDate: 100),
+                updatedAt: Date(timeIntervalSinceReferenceDate: 110),
+                building: "Main",
+                elevation: "North",
+                detailType: "Window",
+                angleIndex: 1,
+                shotKey: "main|north|window|1",
+                isGuided: false,
+                isFlagged: false,
+                issueID: nil,
+                issueStatus: nil,
+                noteText: nil,
+                noteCategory: nil,
+                originalFilename: "original.heic",
+                originalRelativePath: "Originals/original.heic",
+                originalByteSize: 123,
+                uploadState: "pending",
+                uploadAttempts: 0,
+                stampedFilename: nil,
+                stampedRelativePath: nil,
+                captureMode: nil,
+                lens: nil,
+                exifOrientation: 1,
+                latitude: nil,
+                longitude: nil,
+                accuracyMeters: nil,
+                imageWidth: nil,
+                imageHeight: nil
+            ),
+            matchMode: .append
+        )
+
+        var attempted = false
+        let appState = AppState(
+            localStore: localStore,
+            userDefaults: defaults,
+            shotMetadataWriteOverride: { _, _, _, _ in
+                attempted = true
+            },
+            disableCloudBackupForTests: true
+        )
+
+        await MainActor.run {
+            appState.refreshProperties()
+            appState._debugSetOrganizationContextForTests(
+                memberships: [ActiveOrganizationMembership(id: activeOrgID, name: "Active Org", role: "owner")],
+                activeOrganizationID: activeOrgID,
+                ready: true
+            )
+            appState.scheduleShotMetadataSupabaseWriteIfNeeded(
+                propertyID: propertyID,
+                sessionID: sessionID,
+                shotID: shotID,
+                reason: "test_wrong_org",
+                allowInsert: true
+            )
+        }
+        try await Task.sleep(nanoseconds: 200_000_000)
+
+        XCTAssertFalse(attempted)
+    }
+
     func testRemoteDeletedAtAppliesWithoutHardDeletingLocalSession() async throws {
         let fixture = try makeFixture()
         defer { tearDownFixture(fixture) }
