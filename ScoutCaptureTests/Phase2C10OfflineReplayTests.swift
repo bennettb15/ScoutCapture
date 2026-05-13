@@ -423,6 +423,52 @@ final class Phase2C10OfflineReplayTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(diagnostics.offlineQueue.oldestFailureAgeSeconds ?? 0, 80)
     }
 
+    func testFailedQueueDiagnosticItemsMapSanitizedDetails() throws {
+        let fixture = try makeFixture()
+        defer { tearDownFixture(fixture) }
+
+        let queueItemID = UUID()
+        let entityID = UUID()
+        let createdAt = Date().addingTimeInterval(-120)
+        let lastAttemptAt = Date().addingTimeInterval(-60)
+        let nextAttemptAt = Date().addingTimeInterval(300)
+        _ = try fixture.localStore.appendQueuedMutation(
+            LocalStore.QueuedMutation(
+                id: queueItemID,
+                entityType: "property",
+                entityID: entityID,
+                organizationID: fixture.organizationID,
+                propertyID: entityID,
+                operation: "upsert_property",
+                payloadData: Data("{}".utf8),
+                idempotencyKey: "property-test-key",
+                createdAt: createdAt,
+                updatedAt: lastAttemptAt,
+                attemptCount: 3,
+                lastAttemptAt: lastAttemptAt,
+                nextAttemptAt: nextAttemptAt,
+                lastError: "local write failed at /private/tmp/secret.json",
+                status: .failed
+            )
+        )
+
+        let appState = makeAppState(fixture: fixture)
+        let items = appState.diagnosticsFailedQueueItems()
+
+        XCTAssertEqual(items.count, 1)
+        XCTAssertEqual(items[0].id, queueItemID)
+        XCTAssertEqual(items[0].entityType, "property")
+        XCTAssertEqual(items[0].entityID, entityID)
+        XCTAssertEqual(items[0].operation, "upsert_property")
+        XCTAssertEqual(items[0].status, "failed")
+        XCTAssertEqual(items[0].attemptCount, 3)
+        XCTAssertEqual(items[0].lastAttemptAt, lastAttemptAt)
+        XCTAssertEqual(items[0].nextAttemptAt, nextAttemptAt)
+        XCTAssertEqual(items[0].lastError, "local write failed at [path]")
+        XCTAssertFalse(items[0].lastError?.contains("/private") ?? true)
+        XCTAssertGreaterThanOrEqual(items[0].ageSeconds ?? 0, 100)
+    }
+
     func testDiagnosticsErrorClassificationMapsObviousCasesAndResetClearsState() throws {
         let fixture = try makeFixture()
         defer { tearDownFixture(fixture) }

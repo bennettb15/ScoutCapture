@@ -216,6 +216,69 @@ final class Phase2C07bMediaBackfillTests: XCTestCase {
         XCTAssertEqual(metadata.shots.first?.uploadAttempts, 5)
     }
 
+    func testRetryCappedMediaDiagnosticsExposeSafeDetailOnly() throws {
+        let now = Date()
+        let fixture = try makeAppStateWithSingleSession(
+            uploadStates: [
+                ("pending", 5, now),
+                ("uploaded", 1, now)
+            ]
+        )
+        defer {
+            fixture.appState.shutdown()
+            try? FileManager.default.removeItem(at: fixture.storageRoot)
+        }
+
+        let localStore = fixture.appState.sharedLocalStore
+        var metadata = try localStore.loadSessionMetadata(propertyID: fixture.propertyID, sessionID: fixture.sessionID)
+        metadata.shots[0].originalFilename = "/private/tmp/hidden/\(fixture.shots[0].shotID.uuidString).heic"
+        metadata.shots[0].originalRelativePath = "/private/tmp/hidden/\(fixture.shots[0].shotID.uuidString).heic"
+        metadata.shots[0].lastUploadError = "upload failed at /private/tmp/hidden/original.heic"
+        metadata.shots[0].storagePath = "sessions/\(fixture.sessionID.uuidString.lowercased())/shots/\(fixture.shots[0].shotID.uuidString.lowercased())/original.heic"
+        try localStore.saveSessionMetadataAtomically(propertyID: fixture.propertyID, sessionID: fixture.sessionID, metadata: metadata)
+
+        let items = fixture.appState.diagnosticsRetryCappedMediaItems()
+
+        XCTAssertEqual(items.count, 1)
+        XCTAssertEqual(items[0].shotID, fixture.shots[0].shotID)
+        XCTAssertEqual(items[0].sessionID, fixture.sessionID)
+        XCTAssertEqual(items[0].propertyID, fixture.propertyID)
+        XCTAssertEqual(items[0].uploadState, "pending")
+        XCTAssertEqual(items[0].attemptCount, 5)
+        XCTAssertEqual(items[0].localFilename, "\(fixture.shots[0].shotID.uuidString).heic")
+        XCTAssertEqual(items[0].hasStoragePath, true)
+        XCTAssertEqual(items[0].lastUploadError, "upload failed at [path]")
+        XCTAssertFalse(items[0].localFilename?.contains("/") ?? true)
+        XCTAssertFalse(items[0].lastUploadError?.contains("/private") ?? true)
+    }
+
+    func testPendingMediaDiagnosticsExcludeRetryCappedAndUploadedItems() throws {
+        let now = Date()
+        let fixture = try makeAppStateWithSingleSession(
+            uploadStates: [
+                ("pending", 1, now),
+                ("uploading", 2, now),
+                ("failed", 3, now),
+                ("pending", 5, now),
+                ("uploaded", 1, now)
+            ]
+        )
+        defer {
+            fixture.appState.shutdown()
+            try? FileManager.default.removeItem(at: fixture.storageRoot)
+        }
+
+        let pending = fixture.appState.diagnosticsPendingMediaItems()
+
+        XCTAssertEqual(Set(pending.map(\.shotID)), Set([
+            fixture.shots[0].shotID,
+            fixture.shots[1].shotID,
+            fixture.shots[2].shotID
+        ]))
+        XCTAssertFalse(pending.contains { $0.shotID == fixture.shots[3].shotID })
+        XCTAssertFalse(pending.contains { $0.shotID == fixture.shots[4].shotID })
+    }
+
     func testBackfillRunIsSingletonGuarded() async throws {
         let fixture = try makeAppStateWithSingleSession(uploadStates: [])
         defer {

@@ -6174,6 +6174,11 @@ private struct DebugLocalDiagnosticsView: View {
                     diagnosticRow("Failed", diagnostics.offlineQueue.failedCount)
                     diagnosticRow("Oldest Failure Age", formattedAge(diagnostics.offlineQueue.oldestFailureAgeSeconds))
                     diagnosticRow("Refreshed", formattedDate(diagnostics.offlineQueue.refreshedAt))
+                    NavigationLink {
+                        DebugOfflineQueueItemsView(items: appState.diagnosticsFailedQueueItems())
+                    } label: {
+                        diagnosticNavigationLabel("Failed Queue Items", count: appState.diagnosticsFailedQueueItems().count)
+                    }
                 }
 
                 Section("Media") {
@@ -6184,6 +6189,22 @@ private struct DebugLocalDiagnosticsView: View {
                     diagnosticRow("Upload Failures", diagnostics.media.uploadFailureCount)
                     diagnosticRow("Pending Local Media", optionalCount(diagnostics.media.pendingLocalMediaCount))
                     diagnosticRow("Last Backfill", formattedDate(diagnostics.media.lastBackfillAt))
+                    NavigationLink {
+                        DebugMediaDiagnosticItemsView(
+                            title: "Retry-Capped Media",
+                            items: appState.diagnosticsRetryCappedMediaItems()
+                        )
+                    } label: {
+                        diagnosticNavigationLabel("Retry-Capped Media", count: appState.diagnosticsRetryCappedMediaItems().count)
+                    }
+                    NavigationLink {
+                        DebugMediaDiagnosticItemsView(
+                            title: "Pending Media",
+                            items: appState.diagnosticsPendingMediaItems()
+                        )
+                    } label: {
+                        diagnosticNavigationLabel("Pending Media Items", count: appState.diagnosticsPendingMediaItems().count)
+                    }
                 }
 
                 Section("Shadow Writes") {
@@ -6298,6 +6319,19 @@ private struct DebugLocalDiagnosticsView: View {
         .padding(.vertical, 2)
     }
 
+    @ViewBuilder
+    private func diagnosticNavigationLabel(_ label: String, count: Int) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 12) {
+            Text(label)
+                .font(.system(size: 14, weight: .semibold))
+            Spacer(minLength: 12)
+            Text(String(count))
+                .font(.system(size: 14, weight: .medium, design: .monospaced))
+                .foregroundStyle(.secondary)
+        }
+        .padding(.vertical, 2)
+    }
+
     private func optionalCount(_ value: Int?) -> String {
         value.map(String.init) ?? "not scanned"
     }
@@ -6319,6 +6353,142 @@ private struct DebugLocalDiagnosticsView: View {
         if minutes > 0 { return "\(minutes)m \(remainingSeconds)s" }
         return "\(remainingSeconds)s"
     }
+}
+
+private struct DebugOfflineQueueItemsView: View {
+    let items: [AppState.OfflineQueueDiagnosticItem]
+
+    var body: some View {
+        List {
+            Section {
+                Text("Read-only local queue diagnostics. No queue items can be deleted, reset, or retried from this screen.")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(.secondary)
+            }
+
+            if items.isEmpty {
+                Section {
+                    Text("No failed offline queue items.")
+                        .font(.system(size: 14, weight: .medium))
+                        .foregroundStyle(.secondary)
+                }
+            } else {
+                Section("Failed Items") {
+                    ForEach(items) { item in
+                        VStack(alignment: .leading, spacing: 8) {
+                            diagnosticRow("Entity Type", item.entityType)
+                            diagnosticRow("Entity ID", item.entityID.uuidString)
+                            diagnosticRow("Operation", item.operation)
+                            diagnosticRow("Status", item.status)
+                            diagnosticRow("Attempt Count", String(item.attemptCount))
+                            diagnosticRow("Last Attempt", formattedDate(item.lastAttemptAt))
+                            diagnosticRow("Next Attempt", formattedDate(item.nextAttemptAt))
+                            diagnosticRow("Age", formattedAge(item.ageSeconds))
+                            if let lastError = item.lastError {
+                                diagnosticBlock("Last Error", lastError)
+                            } else {
+                                diagnosticRow("Last Error", "none")
+                            }
+                        }
+                        .padding(.vertical, 6)
+                    }
+                }
+            }
+        }
+        .navigationTitle("Failed Queue")
+        .navigationBarTitleDisplayMode(.inline)
+    }
+}
+
+private struct DebugMediaDiagnosticItemsView: View {
+    let title: String
+    let items: [AppState.MediaDiagnosticItem]
+
+    var body: some View {
+        List {
+            Section {
+                Text("Read-only local media diagnostics. Full file paths and storage paths are hidden.")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(.secondary)
+            }
+
+            if items.isEmpty {
+                Section {
+                    Text("No matching media items.")
+                        .font(.system(size: 14, weight: .medium))
+                        .foregroundStyle(.secondary)
+                }
+            } else {
+                Section("Media Items") {
+                    ForEach(items) { item in
+                        VStack(alignment: .leading, spacing: 8) {
+                            diagnosticRow("Shot ID", item.shotID.uuidString)
+                            diagnosticRow("Session ID", item.sessionID.uuidString)
+                            diagnosticRow("Property ID", item.propertyID.uuidString)
+                            diagnosticRow("Upload State", item.uploadState)
+                            diagnosticRow("Attempt Count", String(item.attemptCount))
+                            diagnosticRow("Local Filename", item.localFilename ?? "unknown")
+                            diagnosticRow("Storage Path Exists", item.hasStoragePath ? "yes" : "no")
+                            if let lastUploadError = item.lastUploadError {
+                                diagnosticBlock("Last Upload Error", lastUploadError)
+                            } else {
+                                diagnosticRow("Last Upload Error", "none")
+                            }
+                        }
+                        .padding(.vertical, 6)
+                    }
+                }
+            }
+        }
+        .navigationTitle(title)
+        .navigationBarTitleDisplayMode(.inline)
+    }
+}
+
+@ViewBuilder
+private func diagnosticRow(_ label: String, _ value: String) -> some View {
+    HStack(alignment: .firstTextBaseline, spacing: 12) {
+        Text(label)
+            .font(.system(size: 14, weight: .semibold))
+            .foregroundStyle(.primary)
+        Spacer(minLength: 12)
+        Text(value)
+            .font(.system(size: 13, weight: .medium, design: .monospaced))
+            .foregroundStyle(.secondary)
+            .multilineTextAlignment(.trailing)
+            .textSelection(.enabled)
+    }
+}
+
+@ViewBuilder
+private func diagnosticBlock(_ label: String, _ value: String) -> some View {
+    VStack(alignment: .leading, spacing: 4) {
+        Text(label)
+            .font(.system(size: 14, weight: .semibold))
+            .foregroundStyle(.primary)
+        Text(value)
+            .font(.system(size: 13, weight: .regular, design: .monospaced))
+            .foregroundStyle(.secondary)
+            .textSelection(.enabled)
+    }
+}
+
+private func formattedDate(_ date: Date?) -> String {
+    guard let date else { return "none" }
+    return date.formatted(date: .abbreviated, time: .standard)
+}
+
+private func formattedAge(_ seconds: TimeInterval?) -> String {
+    guard let seconds else { return "unknown" }
+    let clamped = max(0, Int(seconds.rounded()))
+    let days = clamped / 86_400
+    let hours = (clamped % 86_400) / 3_600
+    let minutes = (clamped % 3_600) / 60
+    let remainingSeconds = clamped % 60
+    if days > 0 { return "\(days)d \(hours)h" }
+    if hours > 0 { return "\(hours)h \(minutes)m" }
+    if minutes > 0 { return "\(minutes)m \(remainingSeconds)s" }
+    return "\(remainingSeconds)s"
 }
 
 private struct DebugToolsView: View {

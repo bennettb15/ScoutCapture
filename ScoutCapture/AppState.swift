@@ -302,6 +302,31 @@ final class AppState: ObservableObject {
         var lastError: DiagnosticErrorSnapshot?
     }
 
+    struct OfflineQueueDiagnosticItem: Equatable, Identifiable {
+        let id: UUID
+        let entityType: String
+        let entityID: UUID
+        let operation: String
+        let status: String
+        let attemptCount: Int
+        let lastError: String?
+        let lastAttemptAt: Date?
+        let nextAttemptAt: Date?
+        let ageSeconds: TimeInterval?
+    }
+
+    struct MediaDiagnosticItem: Equatable, Identifiable {
+        let id: UUID
+        let shotID: UUID
+        let sessionID: UUID
+        let propertyID: UUID
+        let uploadState: String
+        let attemptCount: Int
+        let lastUploadError: String?
+        let localFilename: String?
+        let hasStoragePath: Bool
+    }
+
     struct CaptureProfileBackfillRemoteState {
         let propertyRowExists: Bool
         let propertyCaptureProfile: CaptureProfile?
@@ -1979,6 +2004,48 @@ final class AppState: ObservableObject {
     func clearLocalDiagnostics() {
         mutateLocalDiagnostics { diagnostics in
             diagnostics = LocalDiagnosticsState()
+        }
+    }
+
+    func diagnosticsFailedQueueItems() -> [OfflineQueueDiagnosticItem] {
+        let now = Date()
+        let queued = (try? localStore.fetchQueuedMutations()) ?? []
+        return queued
+            .filter { $0.status == .failed }
+            .sorted {
+                let lhsDate = $0.lastAttemptAt ?? $0.updatedAt
+                let rhsDate = $1.lastAttemptAt ?? $1.updatedAt
+                if lhsDate != rhsDate { return lhsDate < rhsDate }
+                return $0.id.uuidString < $1.id.uuidString
+            }
+            .map { item in
+                OfflineQueueDiagnosticItem(
+                    id: item.id,
+                    entityType: item.entityType,
+                    entityID: item.entityID,
+                    operation: item.operation,
+                    status: item.status.rawValue,
+                    attemptCount: item.attemptCount,
+                    lastError: item.lastError.map(Self.sanitizedDiagnosticsErrorMessage),
+                    lastAttemptAt: item.lastAttemptAt,
+                    nextAttemptAt: item.nextAttemptAt,
+                    ageSeconds: now.timeIntervalSince(item.createdAt)
+                )
+            }
+    }
+
+    func diagnosticsRetryCappedMediaItems() -> [MediaDiagnosticItem] {
+        diagnosticsMediaItems { shot in
+            shot.uploadState != "uploaded" &&
+                shot.uploadAttempts >= maximumSupabaseMediaUploadAttempts
+        }
+    }
+
+    func diagnosticsPendingMediaItems() -> [MediaDiagnosticItem] {
+        diagnosticsMediaItems { shot in
+            shot.uploadState == "pending" ||
+                shot.uploadState == "uploading" ||
+                (shot.uploadState == "failed" && shot.uploadAttempts < maximumSupabaseMediaUploadAttempts)
         }
     }
 
@@ -6074,6 +6141,67 @@ final class AppState: ObservableObject {
         }
     }
 
+    private func diagnosticsMediaItems(
+        matching predicate: (ShotMetadata) -> Bool
+    ) -> [MediaDiagnosticItem] {
+        let properties = (try? localStore.fetchProperties()) ?? []
+        var items: [MediaDiagnosticItem] = []
+
+        for property in properties {
+            let sessions = (try? localStore.fetchSessionsForCacheBuild(propertyID: property.id)) ?? []
+            for session in sessions {
+                guard let metadata = try? localStore.loadSessionMetadata(
+                    propertyID: property.id,
+                    sessionID: session.id
+                ) else {
+                    continue
+                }
+                for shot in metadata.shots where predicate(shot) {
+                    items.append(
+                        MediaDiagnosticItem(
+                            id: shot.shotID,
+                            shotID: shot.shotID,
+                            sessionID: session.id,
+                            propertyID: property.id,
+                            uploadState: shot.uploadState,
+                            attemptCount: shot.uploadAttempts,
+                            lastUploadError: shot.lastUploadError.map(Self.sanitizedDiagnosticsErrorMessage),
+                            localFilename: Self.safeDiagnosticsFilename(
+                                originalFilename: shot.originalFilename,
+                                originalRelativePath: shot.originalRelativePath
+                            ),
+                            hasStoragePath: normalizedSupabaseText(shot.storagePath) != nil
+                        )
+                    )
+                }
+            }
+        }
+
+        return items.sorted {
+            if $0.propertyID != $1.propertyID {
+                return $0.propertyID.uuidString < $1.propertyID.uuidString
+            }
+            if $0.sessionID != $1.sessionID {
+                return $0.sessionID.uuidString < $1.sessionID.uuidString
+            }
+            return $0.shotID.uuidString < $1.shotID.uuidString
+        }
+    }
+
+    private nonisolated static func safeDiagnosticsFilename(
+        originalFilename: String,
+        originalRelativePath: String
+    ) -> String? {
+        let filename = URL(fileURLWithPath: originalFilename).lastPathComponent
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if !filename.isEmpty {
+            return filename
+        }
+        let relativeFilename = URL(fileURLWithPath: originalRelativePath).lastPathComponent
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return relativeFilename.isEmpty ? nil : relativeFilename
+    }
+
     private enum ShadowWriteDiagnosticsEntity {
         case property
         case session
@@ -6113,7 +6241,7 @@ final class AppState: ObservableObject {
         }
     }
 
-    static func diagnosticErrorCategory(for error: Error) -> DiagnosticErrorCategory {
+    nonisolated static func diagnosticErrorCategory(for error: Error) -> DiagnosticErrorCategory {
         let nsError = error as NSError
         let domain = nsError.domain.lowercased()
         let message = error.localizedDescription.lowercased()
@@ -6158,7 +6286,7 @@ final class AppState: ObservableObject {
         return .unknown
     }
 
-    private static func sanitizedDiagnosticsErrorMessage(_ message: String) -> String {
+    private nonisolated static func sanitizedDiagnosticsErrorMessage(_ message: String) -> String {
         let redactedPathTokens = message
             .split(separator: " ")
             .map { token -> String in
