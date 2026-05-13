@@ -342,6 +342,14 @@ final class AppState: ObservableObject {
         case remoteUnavailable = "remote_unavailable"
     }
 
+    enum DivergenceAuditSeverity: String, CaseIterable, Equatable {
+        case ok = "OK"
+        case info = "Info"
+        case needsReview = "Needs Review"
+        case warning = "Warning"
+        case critical = "Critical"
+    }
+
     struct DivergenceAuditItem: Equatable, Identifiable {
         let id: UUID
         let category: DivergenceAuditCategory
@@ -352,6 +360,7 @@ final class AppState: ObservableObject {
         let shotID: UUID?
         let orgID: UUID?
         let reason: String
+        let severity: DivergenceAuditSeverity
 
         init(
             id: UUID = UUID(),
@@ -362,7 +371,8 @@ final class AppState: ObservableObject {
             sessionID: UUID? = nil,
             shotID: UUID? = nil,
             orgID: UUID? = nil,
-            reason: String
+            reason: String,
+            severity: DivergenceAuditSeverity? = nil
         ) {
             self.id = id
             self.category = category
@@ -373,6 +383,20 @@ final class AppState: ObservableObject {
             self.shotID = shotID
             self.orgID = orgID
             self.reason = reason
+            self.severity = severity ?? Self.defaultSeverity(for: category)
+        }
+
+        static func defaultSeverity(for category: DivergenceAuditCategory) -> DivergenceAuditSeverity {
+            switch category {
+            case .localOnlyProperty, .remoteOnlyProperty, .localOnlySession, .remoteOnlySession:
+                return .warning
+            case .remoteOnlyShot, .localOnlyShot, .mediaDrift:
+                return .needsReview
+            case .missingParent, .deletedHiddenMismatch, .remoteUnavailable:
+                return .warning
+            case .staleOrgMismatch, .captureProfile:
+                return .info
+            }
         }
     }
 
@@ -6504,6 +6528,10 @@ final class AppState: ObservableObject {
                 remoteShotIDs: remoteShotIDs
             )
         }
+        let localOnlyShotIDs = Set(scopedLocalShots.compactMap { shot -> String? in
+            let shotKey = divergenceKey(shot.shot.shotID)
+            return remote != nil && !remoteShotIDs.contains(shotKey) ? shotKey : nil
+        })
 
         var items: [DivergenceAuditItem] = []
         var presenceCounts = DivergencePresenceCounts()
@@ -6604,7 +6632,8 @@ final class AppState: ObservableObject {
                     )
                 )
             }
-            if localPropertiesByID[divergenceKey(shot.propertyID)] == nil {
+            if localPropertiesByID[divergenceKey(shot.propertyID)] == nil,
+               !localOnlyShotIDs.contains(shotKey) {
                 items.append(
                     DivergenceAuditItem(
                         category: .missingParent,
@@ -6618,7 +6647,8 @@ final class AppState: ObservableObject {
                     )
                 )
             }
-            if localSessionsByID[divergenceKey(shot.sessionID)] == nil {
+            if localSessionsByID[divergenceKey(shot.sessionID)] == nil,
+               !localOnlyShotIDs.contains(shotKey) {
                 items.append(
                     DivergenceAuditItem(
                         category: .missingParent,
@@ -7204,10 +7234,21 @@ final class AppState: ObservableObject {
     }
 
     private nonisolated static func sanitizedDiagnosticsErrorMessage(_ message: String) -> String {
-        let redactedPathTokens = message
-            .split(separator: " ")
-            .map { token -> String in
-                token.hasPrefix("/") || token.hasPrefix("file:") ? "[path]" : String(token)
+        let rawTokens = message.split(separator: " ").map(String.init)
+        let redactedPathTokens = rawTokens.enumerated()
+            .map { index, token -> String in
+                let lower = token.lowercased()
+                let previousLower = index > 0 ? rawTokens[index - 1].lowercased() : ""
+                if token.hasPrefix("/") || token.hasPrefix("file:") {
+                    return "[path]"
+                }
+                if previousLower == "token" || previousLower == "bearer" || previousLower == "jwt" {
+                    return "[redacted]"
+                }
+                if lower.hasPrefix("token=") || lower.hasPrefix("access_token=") || lower.hasPrefix("authorization=") {
+                    return "[redacted]"
+                }
+                return token
             }
             .joined(separator: " ")
         let maxLength = 240
@@ -7224,6 +7265,54 @@ final class AppState: ObservableObject {
         guard !sanitized.isEmpty else { return nil }
         guard sanitized.count > maxLength else { return sanitized }
         return String(sanitized.prefix(max(0, maxLength))) + "..."
+    }
+
+    nonisolated static func divergenceAuditSnapshotText(_ summary: DivergenceAuditSummary) -> String {
+        var lines: [String] = []
+        lines.append("ScoutCapture Local Health - Divergence Audit")
+        lines.append("Ran: \(summary.ranAt.formatted(date: .abbreviated, time: .standard))")
+        lines.append("Active Org: \(summary.activeOrganizationID?.uuidString ?? "none")")
+        lines.append("Remote Scope Available: \(summary.remoteScopeAvailable ? "yes" : "no")")
+        lines.append("")
+        lines.append("Core Sync Health")
+        lines.append("Matched Properties: \(summary.matchedPropertyCount) / local \(summary.localPropertyCount) / remote \(summary.remotePropertyCount)")
+        lines.append("Matched Sessions: \(summary.matchedSessionCount) / local \(summary.localSessionCount) / remote \(summary.remoteSessionCount)")
+        lines.append("Matched Shots: \(summary.matchedShotCount) / local \(summary.localShotCount) / remote \(summary.remoteShotCount)")
+        lines.append("Local-Only Properties: \(summary.localOnlyPropertyCount)")
+        lines.append("Remote-Only Properties: \(summary.remoteOnlyPropertyCount)")
+        lines.append("Local-Only Sessions: \(summary.localOnlySessionCount)")
+        lines.append("Remote-Only Sessions: \(summary.remoteOnlySessionCount)")
+        lines.append("")
+        lines.append("Legacy / Needs Review")
+        lines.append("Local-Only Shots: \(summary.localOnlyShotCount)")
+        lines.append("Remote-Only Shots: \(summary.remoteOnlyShotCount)")
+        lines.append("Stale Org Reconciled Properties: \(summary.staleOrgReconciledPropertyCount)")
+        lines.append("Stale Org Reconciled Shots: \(summary.staleOrgReconciledShotCount)")
+        lines.append("")
+        lines.append("Category Counts")
+        let counts = Dictionary(grouping: summary.items, by: \.category).mapValues(\.count)
+        for category in DivergenceAuditCategory.allCases {
+            let count = counts[category] ?? 0
+            if count > 0 {
+                lines.append("\(category.rawValue): \(count)")
+            }
+        }
+        lines.append("")
+        lines.append("Findings")
+        for item in summary.items {
+            lines.append([
+                item.severity.rawValue,
+                item.category.rawValue,
+                item.entityType,
+                item.entityID?.uuidString ?? "none",
+                item.propertyID?.uuidString ?? "none",
+                item.sessionID?.uuidString ?? "none",
+                item.shotID?.uuidString ?? "none",
+                item.orgID?.uuidString ?? "none",
+                diagnosticsPreviewText(item.reason, maxLength: 240) ?? "none"
+            ].joined(separator: " | "))
+        }
+        return lines.joined(separator: "\n")
     }
 
     private func performQueuedPropertyRemoteWrite(
@@ -17530,6 +17619,12 @@ final class AppState: ObservableObject {
             local: makeLocalDivergenceSnapshot(),
             remote: RemoteDivergenceSnapshot(properties: [], sessions: [], shots: [])
         )
+    }
+
+    func _debugDivergenceSeverityForTests(
+        category: DivergenceAuditCategory
+    ) -> DivergenceAuditSeverity {
+        DivergenceAuditItem.defaultSeverity(for: category)
     }
 
     struct DebugDivergenceLocalShotInput {

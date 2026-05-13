@@ -6217,6 +6217,7 @@ private struct DebugDivergenceAuditSnapshot {
     let totalFindings: String
     let categoryCounts: [(AppState.DivergenceAuditCategory, Int)]
     let items: [DebugDivergenceAuditSnapshotItem]
+    let snapshotText: String
 
     init(_ summary: AppState.DivergenceAuditSummary) {
         ranAt = formattedDate(summary.ranAt)
@@ -6245,7 +6246,21 @@ private struct DebugDivergenceAuditSnapshot {
             .map { ($0, counts[$0] ?? 0) }
             .filter { $0.1 > 0 }
         items = summary.items.map(DebugDivergenceAuditSnapshotItem.init)
+        snapshotText = AppState.divergenceAuditSnapshotText(summary)
     }
+
+    var corePropertyStatus: String {
+        remoteOnlyPropertyCount == "0" && localOnlyPropertyCount == "0" ? "OK" : "Needs Review"
+    }
+
+    var coreSessionStatus: String {
+        remoteOnlySessionCount == "0" && localOnlySessionCount == "0" ? "OK" : "Needs Review"
+    }
+
+    var legacyReviewCount: Int {
+        items.filter { $0.filterMatches(.needsReview) }.count
+    }
+
 }
 
 private struct DebugDivergenceAuditSnapshotItem: Identifiable, Equatable {
@@ -6259,6 +6274,7 @@ private struct DebugDivergenceAuditSnapshotItem: Identifiable, Equatable {
     let orgID: String
     let reasonPreview: String
     let reasonFull: String
+    let severity: String
 
     nonisolated init(_ item: AppState.DivergenceAuditItem) {
         id = item.id
@@ -6271,7 +6287,40 @@ private struct DebugDivergenceAuditSnapshotItem: Identifiable, Equatable {
         orgID = item.orgID?.uuidString ?? "none"
         reasonPreview = AppState.diagnosticsPreviewText(item.reason) ?? "none"
         reasonFull = item.reason
+        severity = item.severity.rawValue
     }
+
+    func filterMatches(_ filter: DebugDivergenceAuditFilter) -> Bool {
+        switch filter {
+        case .all:
+            return true
+        case .needsReview:
+            return severity == AppState.DivergenceAuditSeverity.needsReview.rawValue ||
+                severity == AppState.DivergenceAuditSeverity.warning.rawValue ||
+                severity == AppState.DivergenceAuditSeverity.critical.rawValue
+        case .media:
+            return category == AppState.DivergenceAuditCategory.localOnlyShot.rawValue ||
+                category == AppState.DivergenceAuditCategory.remoteOnlyShot.rawValue ||
+                category == AppState.DivergenceAuditCategory.mediaDrift.rawValue
+        case .captureProfile:
+            return category == AppState.DivergenceAuditCategory.captureProfile.rawValue
+        case .parentMissing:
+            return category == AppState.DivergenceAuditCategory.missingParent.rawValue
+        case .orgReconciliation:
+            return category == AppState.DivergenceAuditCategory.staleOrgMismatch.rawValue
+        }
+    }
+}
+
+private enum DebugDivergenceAuditFilter: String, CaseIterable, Identifiable {
+    case all = "All"
+    case needsReview = "Needs Review"
+    case media = "Media"
+    case captureProfile = "Capture Profile"
+    case parentMissing = "Parent/Missing"
+    case orgReconciliation = "Org Reconciliation"
+
+    var id: String { rawValue }
 }
 
 private struct DebugLocalDiagnosticsView: View {
@@ -6395,36 +6444,59 @@ private struct DebugLocalDiagnosticsView: View {
                         diagnosticRow("Ran", snapshot.ranAt)
                         diagnosticRow("Active Org", snapshot.activeOrganizationID)
                         diagnosticRow("Remote Scope", snapshot.remoteScopeAvailable)
-                        diagnosticRow("Local Properties", snapshot.localPropertyCount)
-                        diagnosticRow("Remote Properties", snapshot.remotePropertyCount)
-                        diagnosticRow("Local Sessions", snapshot.localSessionCount)
-                        diagnosticRow("Remote Sessions", snapshot.remoteSessionCount)
-                        diagnosticRow("Local Shots", snapshot.localShotCount)
-                        diagnosticRow("Remote Shots", snapshot.remoteShotCount)
+                        NavigationLink {
+                            DebugDivergenceAuditSnapshotTextView(snapshotText: snapshot.snapshotText)
+                        } label: {
+                            Text("View Copyable Snapshot")
+                                .font(.system(size: 14, weight: .semibold))
+                        }
+                    } else {
+                        Text("No divergence audit has been run in this view.")
+                            .font(.system(size: 14, weight: .medium))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                if let snapshot = divergenceAuditSnapshot {
+                    Section("Core Sync Health") {
+                        diagnosticRow("Property Match Status", snapshot.corePropertyStatus)
                         diagnosticRow("Matched Properties", snapshot.matchedPropertyCount)
-                        diagnosticRow("Matched Sessions", snapshot.matchedSessionCount)
-                        diagnosticRow("Matched Shots", snapshot.matchedShotCount)
                         diagnosticRow("Local-Only Properties", snapshot.localOnlyPropertyCount)
                         diagnosticRow("Remote-Only Properties", snapshot.remoteOnlyPropertyCount)
+                        Text(snapshot.corePropertyStatus == "OK" ? "No property presence divergence detected." : "Property presence needs review.")
+                            .font(.system(size: 13, weight: .medium))
+                            .foregroundStyle(.secondary)
+
+                        diagnosticRow("Session Match Status", snapshot.coreSessionStatus)
+                        diagnosticRow("Matched Sessions", snapshot.matchedSessionCount)
                         diagnosticRow("Local-Only Sessions", snapshot.localOnlySessionCount)
                         diagnosticRow("Remote-Only Sessions", snapshot.remoteOnlySessionCount)
+                        Text(snapshot.coreSessionStatus == "OK" ? "No session presence divergence detected." : "Session presence needs review.")
+                            .font(.system(size: 13, weight: .medium))
+                            .foregroundStyle(.secondary)
+                    }
+
+                    Section("Legacy / Needs Review") {
+                        diagnosticRow("Matched Shots", snapshot.matchedShotCount)
                         diagnosticRow("Local-Only Shots", snapshot.localOnlyShotCount)
+                        Text("Local-only shots may be legacy captures or uploads that have not reached remote storage yet.")
+                            .font(.system(size: 13, weight: .medium))
+                            .foregroundStyle(.secondary)
                         diagnosticRow("Remote-Only Shots", snapshot.remoteOnlyShotCount)
                         diagnosticRow("Stale Org Reconciled Properties", snapshot.staleOrgReconciledPropertyCount)
                         diagnosticRow("Stale Org Reconciled Shots", snapshot.staleOrgReconciledShotCount)
+                        Text("Stale org reconciled means remote active-org ownership proved the local historical org metadata safe for this audit. It is not treated as an active sync failure.")
+                            .font(.system(size: 13, weight: .medium))
+                            .foregroundStyle(.secondary)
                         diagnosticRow("Findings", snapshot.totalFindings)
                         ForEach(snapshot.categoryCounts, id: \.0) { category, count in
-                            diagnosticRow(category.rawValue, count)
+                            diagnosticRow(label(for: category), count)
                         }
                         NavigationLink {
                             DebugDivergenceAuditItemsView(items: snapshot.items)
                         } label: {
                             diagnosticNavigationLabel("Audit Findings", count: snapshot.items.count)
                         }
-                    } else {
-                        Text("No divergence audit has been run in this view.")
-                            .font(.system(size: 14, weight: .medium))
-                            .foregroundStyle(.secondary)
                     }
                 }
 
@@ -6541,6 +6613,25 @@ private struct DebugLocalDiagnosticsView: View {
 
     private func optionalCount(_ value: Int?) -> String {
         value.map(String.init) ?? "not scanned"
+    }
+
+    private func label(for category: AppState.DivergenceAuditCategory) -> String {
+        switch category {
+        case .localOnlyShot:
+            return "Local-only shots"
+        case .remoteOnlyShot:
+            return "Remote-only shots"
+        case .mediaDrift:
+            return "Media drift"
+        case .staleOrgMismatch:
+            return "Stale org needs review"
+        case .captureProfile:
+            return "Capture profile"
+        case .missingParent:
+            return "Parent/missing"
+        default:
+            return category.rawValue
+        }
     }
 
     private func formattedDate(_ date: Date?) -> String {
@@ -6666,6 +6757,11 @@ private struct DebugMediaDiagnosticItemsView: View {
 
 private struct DebugDivergenceAuditItemsView: View {
     let items: [DebugDivergenceAuditSnapshotItem]
+    @State private var filter: DebugDivergenceAuditFilter = .all
+
+    private var filteredItems: [DebugDivergenceAuditSnapshotItem] {
+        items.filter { $0.filterMatches(filter) }
+    }
 
     var body: some View {
         List {
@@ -6673,26 +6769,32 @@ private struct DebugDivergenceAuditItemsView: View {
                 Text("Read-only divergence findings. No repair, retry, delete, or reset actions are available here.")
                     .font(.system(size: 13, weight: .medium))
                     .foregroundStyle(.secondary)
+                Picker("Filter", selection: $filter) {
+                    ForEach(DebugDivergenceAuditFilter.allCases) { filter in
+                        Text(filter.rawValue).tag(filter)
+                    }
+                }
+                .pickerStyle(.menu)
             }
 
-            if items.isEmpty {
+            if filteredItems.isEmpty {
                 Section {
-                    Text("No divergence findings in the latest audit snapshot.")
+                    Text("No findings for this filter.")
                         .font(.system(size: 14, weight: .medium))
                         .foregroundStyle(.secondary)
                 }
             } else {
                 Section("Findings") {
-                    ForEach(items) { item in
+                    ForEach(filteredItems) { item in
                         NavigationLink {
                             DebugDivergenceAuditItemDetailView(item: item)
                         } label: {
                             VStack(alignment: .leading, spacing: 4) {
-                                Text("\(item.category) / \(item.entityType)")
+                                Text("\(item.severity) / \(item.category)")
                                     .font(.system(size: 14, weight: .semibold))
                                     .foregroundStyle(.primary)
                                     .lineLimit(1)
-                                Text(item.entityID)
+                                Text("\(item.entityType) \(item.entityID)")
                                     .font(.system(size: 12, weight: .medium, design: .monospaced))
                                     .foregroundStyle(.secondary)
                                     .lineLimit(1)
@@ -6708,6 +6810,34 @@ private struct DebugDivergenceAuditItemsView: View {
             }
         }
         .navigationTitle("Divergence Audit")
+        .navigationBarTitleDisplayMode(.inline)
+    }
+}
+
+private struct DebugDivergenceAuditSnapshotTextView: View {
+    let snapshotText: String
+    @State private var didCopySnapshot: Bool = false
+
+    var body: some View {
+        List {
+            Section {
+                Button(didCopySnapshot ? "Copied Plain Text" : "Copy Snapshot") {
+                    UIPasteboard.general.string = snapshotText
+                    didCopySnapshot = true
+                }
+                .font(.system(size: 14, weight: .semibold))
+            } footer: {
+                Text("Copies the sanitized snapshot as plain text only.")
+            }
+
+            Section {
+                Text(snapshotText)
+                    .font(.system(size: 12, weight: .regular, design: .monospaced))
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .textSelection(.enabled)
+            }
+        }
+        .navigationTitle("Audit Snapshot")
         .navigationBarTitleDisplayMode(.inline)
     }
 }
@@ -6779,6 +6909,7 @@ private struct DebugDivergenceAuditItemDetailView: View {
     var body: some View {
         List {
             Section("Finding") {
+                diagnosticRow("Severity", item.severity)
                 diagnosticRow("Category", item.category)
                 diagnosticRow("Entity Type", item.entityType)
                 diagnosticRow("Entity ID", item.entityID)

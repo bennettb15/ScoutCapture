@@ -481,6 +481,116 @@ final class Phase2C07bMediaBackfillTests: XCTestCase {
         })
     }
 
+    func testDivergenceAuditSuppressesLocalOnlyShotMissingParentCascade() throws {
+        let activeOrganizationID = UUID()
+        let localPropertyID = UUID()
+        let missingPropertyID = UUID()
+        let missingSessionID = UUID()
+        let localOnlyShotID = UUID()
+        let fixture = try makeAppStateWithSingleSession(uploadStates: [])
+        defer {
+            fixture.appState.shutdown()
+            try? FileManager.default.removeItem(at: fixture.storageRoot)
+        }
+
+        let localOnlyShot = makeShot(
+            propertyID: missingPropertyID,
+            sessionID: missingSessionID,
+            shotID: localOnlyShotID,
+            uploadState: "pending",
+            uploadAttempts: 5,
+            angleIndex: 1,
+            shotKey: "building|front|overview|1"
+        )
+
+        let summary = fixture.appState._debugDivergenceAuditSummaryForTests(
+            properties: [
+                Property(
+                    id: localPropertyID,
+                    orgId: activeOrganizationID,
+                    name: "Local",
+                    address: "123 Main Street"
+                )
+            ],
+            sessions: [],
+            shots: [
+                AppState.DebugDivergenceLocalShotInput(
+                    shot: localOnlyShot,
+                    propertyID: localPropertyID,
+                    sessionID: missingSessionID,
+                    metadataOrgID: activeOrganizationID,
+                    metadataCaptureProfile: nil
+                )
+            ],
+            remote: AppState.DebugDivergenceRemoteInput(
+                propertyIDs: [localPropertyID.uuidString],
+                orgID: activeOrganizationID
+            ),
+            activeOrganizationID: activeOrganizationID
+        )
+
+        XCTAssertEqual(summary.localOnlyShotCount, 1)
+        XCTAssertTrue(summary.items.contains { $0.category == .localOnlyShot && $0.shotID == localOnlyShotID })
+        XCTAssertFalse(summary.items.contains { $0.category == .missingParent && $0.shotID == localOnlyShotID })
+    }
+
+    func testDivergenceAuditSeverityMappingIsConservative() throws {
+        let fixture = try makeAppStateWithSingleSession(uploadStates: [])
+        defer {
+            fixture.appState.shutdown()
+            try? FileManager.default.removeItem(at: fixture.storageRoot)
+        }
+
+        XCTAssertEqual(fixture.appState._debugDivergenceSeverityForTests(category: .localOnlyShot), .needsReview)
+        XCTAssertEqual(fixture.appState._debugDivergenceSeverityForTests(category: .mediaDrift), .needsReview)
+        XCTAssertEqual(fixture.appState._debugDivergenceSeverityForTests(category: .captureProfile), .info)
+        XCTAssertEqual(fixture.appState._debugDivergenceSeverityForTests(category: .staleOrgMismatch), .info)
+        XCTAssertEqual(fixture.appState._debugDivergenceSeverityForTests(category: .missingParent), .warning)
+    }
+
+    func testDivergenceAuditSnapshotTextSanitizesPathsAndIncludesCounts() throws {
+        let propertyID = UUID()
+        let summary = AppState.DivergenceAuditSummary(
+            ranAt: Date(timeIntervalSince1970: 0),
+            activeOrganizationID: UUID(),
+            remoteScopeAvailable: true,
+            localPropertyCount: 1,
+            remotePropertyCount: 1,
+            localSessionCount: 0,
+            remoteSessionCount: 0,
+            localShotCount: 0,
+            remoteShotCount: 0,
+            matchedPropertyCount: 1,
+            matchedSessionCount: 0,
+            matchedShotCount: 0,
+            localOnlyPropertyCount: 0,
+            remoteOnlyPropertyCount: 0,
+            localOnlySessionCount: 0,
+            remoteOnlySessionCount: 0,
+            localOnlyShotCount: 0,
+            remoteOnlyShotCount: 0,
+            staleOrgReconciledPropertyCount: 0,
+            staleOrgReconciledShotCount: 0,
+            items: [
+                AppState.DivergenceAuditItem(
+                    category: .mediaDrift,
+                    entityType: "shot",
+                    entityID: propertyID,
+                    reason: "failed at /private/tmp/source.heic with token abc"
+                )
+            ]
+        )
+
+        let snapshot = AppState.divergenceAuditSnapshotText(summary)
+
+        XCTAssertTrue(snapshot.contains("Core Sync Health"))
+        XCTAssertTrue(snapshot.contains("Matched Properties: 1"))
+        XCTAssertTrue(snapshot.contains("Needs Review | media_drift"))
+        XCTAssertTrue(snapshot.contains("[path]"))
+        XCTAssertFalse(snapshot.contains("/private/tmp"))
+        XCTAssertFalse(snapshot.contains("abc"))
+    }
+
     func testBackfillRunIsSingletonGuarded() async throws {
         let fixture = try makeAppStateWithSingleSession(uploadStates: [])
         defer {
