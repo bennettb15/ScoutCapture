@@ -565,6 +565,141 @@ final class Phase2C14B3SessionDeletedAtReadSupportTests: XCTestCase {
         XCTAssertNil(payload["re_export_expires_at"])
     }
 
+    func testCaptureProfileRemoteUpdatePayloadIncludesProfileAndUpdatedBy() throws {
+        let appState = AppState(disableCloudBackupForTests: true)
+        let updatedBy = UUID()
+
+        let payload = try appState._debugEncodeCaptureProfileUpdatePayloadForTests(
+            profile: .commercial,
+            updatedBy: updatedBy
+        )
+
+        XCTAssertEqual(payload["capture_profile"] as? String, "commercial")
+        XCTAssertEqual(payload["updated_by"] as? String, updatedBy.uuidString)
+        XCTAssertNil(payload["name"])
+        XCTAssertNil(payload["status"])
+        XCTAssertNil(payload["deleted_at"])
+        XCTAssertNil(payload["revision"])
+    }
+
+    func testEmptySessionCaptureProfileUpdateResultIsTreatedAsFailure() throws {
+        let appState = AppState(disableCloudBackupForTests: true)
+
+        XCTAssertThrowsError(
+            try appState._debugValidateEmptyCaptureProfileUpdateResultForTests(
+                table: "sessions",
+                id: UUID(),
+                orgID: UUID(),
+                propertyID: UUID(),
+                profile: .commercial
+            )
+        )
+    }
+
+    func testVerifiedSessionCaptureProfileUpdateResultReturnsSnapshot() throws {
+        let appState = AppState(disableCloudBackupForTests: true)
+
+        let profile = try appState._debugValidateCaptureProfileUpdateResultForTests(
+            table: "sessions",
+            id: UUID(),
+            orgID: UUID(),
+            propertyID: UUID(),
+            profile: .commercial
+        )
+
+        XCTAssertEqual(profile, CaptureProfile.commercial.rawValue)
+    }
+
+    func testSessionUpsertPayloadPrefersSelectedSessionSnapshotOverStaleMetadataProfile() throws {
+        let appState = AppState(disableCloudBackupForTests: true)
+        let orgID = UUID()
+        let propertyID = UUID()
+        let sessionID = UUID()
+        let property = Property(id: propertyID, orgId: orgID, captureProfile: .residential, name: "Profile Property")
+        let session = Session(id: sessionID, propertyID: propertyID, captureProfile: .commercial)
+        let metadata = SessionMetadata(
+            schemaVersion: 1,
+            propertyID: propertyID,
+            sessionID: sessionID,
+            orgID: orgID,
+            propertyNameAtCapture: "Profile Property",
+            propertyNameAtExport: nil,
+            captureProfile: "residential",
+            startedAt: session.startedAt,
+            endedAt: nil,
+            status: .draft,
+            isBaselineSession: false,
+            exportedAt: nil,
+            appVersion: "test",
+            deviceModel: "sim",
+            osVersion: "test",
+            shots: [],
+            issues: []
+        )
+
+        let payload = try appState._debugEncodeSessionUpsertPayloadForTests(
+            orgID: orgID,
+            propertyID: propertyID,
+            session: session,
+            property: property,
+            metadata: metadata
+        )
+
+        XCTAssertEqual(payload["id"] as? String, sessionID.uuidString)
+        XCTAssertEqual(payload["capture_profile"] as? String, "commercial")
+    }
+
+    func testCaptureProfileSessionEnsurePayloadUsesActualLocalSessionStatus() throws {
+        let appState = AppState(disableCloudBackupForTests: true)
+        let orgID = UUID()
+        let propertyID = UUID()
+        let sessionID = UUID()
+        let actorID = UUID()
+        let property = Property(id: propertyID, orgId: orgID, name: "Lifecycle Property")
+        let session = Session(
+            id: sessionID,
+            propertyID: propertyID,
+            startedAt: Date(timeIntervalSinceReferenceDate: 2_000),
+            status: .completed,
+            endedAt: Date(timeIntervalSinceReferenceDate: 2_500),
+            captureProfile: .commercial
+        )
+        let metadata = SessionMetadata(
+            schemaVersion: 1,
+            propertyID: propertyID,
+            sessionID: sessionID,
+            orgID: orgID,
+            propertyNameAtCapture: "Lifecycle Property",
+            propertyNameAtExport: nil,
+            captureProfile: "residential",
+            startedAt: Date(timeIntervalSinceReferenceDate: 1_000),
+            endedAt: nil,
+            status: .draft,
+            isBaselineSession: false,
+            exportedAt: nil,
+            appVersion: "test",
+            deviceModel: "sim",
+            osVersion: "test",
+            shots: [],
+            issues: []
+        )
+
+        let payload = try appState._debugEncodeCaptureProfileSessionEnsurePayloadForTests(
+            orgID: orgID,
+            propertyID: propertyID,
+            session: session,
+            property: property,
+            metadata: metadata,
+            profile: .commercial,
+            updatedBy: actorID
+        )
+
+        XCTAssertEqual(payload["id"] as? String, sessionID.uuidString)
+        XCTAssertEqual(payload["status"] as? String, Session.Status.completed.rawValue)
+        XCTAssertNotNil(payload["completed_at"] as? String)
+        XCTAssertNil(payload["capture_profile"])
+    }
+
     func testShotMetadataWriteFailureDoesNotMutateLocalMetadata() async throws {
         let suiteName = "Phase2C15-4-\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName) ?? .standard
@@ -856,6 +991,254 @@ final class Phase2C14B3SessionDeletedAtReadSupportTests: XCTestCase {
         try await Task.sleep(nanoseconds: 200_000_000)
 
         XCTAssertFalse(attempted)
+    }
+
+    func testNewSessionInheritsPropertyCaptureProfileDefault() async throws {
+        let fixture = try makeFixture()
+        defer { tearDownFixture(fixture) }
+        let orgID = UUID()
+        let propertyID = UUID()
+        try seedProperty(fixture, orgID: orgID, propertyID: propertyID)
+        var property = try XCTUnwrap(fixture.localStore.fetchProperties().first(where: { $0.id == propertyID }))
+        property.captureProfile = .commercial
+        _ = try fixture.localStore.updateProperty(property)
+
+        await prepareAppState(fixture.appState, orgID: orgID)
+        await MainActor.run {
+            fixture.appState.selectProperty(id: propertyID)
+        }
+
+        let session = await MainActor.run {
+            fixture.appState.startSession()
+        }
+
+        XCTAssertEqual(session?.captureProfile, .commercial)
+    }
+
+    func testSessionCaptureProfileSnapshotSurvivesPropertyDefaultChange() async throws {
+        let fixture = try makeFixture()
+        defer { tearDownFixture(fixture) }
+        let orgID = UUID()
+        let propertyID = UUID()
+        try seedProperty(fixture, orgID: orgID, propertyID: propertyID)
+        var property = try XCTUnwrap(fixture.localStore.fetchProperties().first(where: { $0.id == propertyID }))
+        property.captureProfile = .residential
+        _ = try fixture.localStore.updateProperty(property)
+        let session = try fixture.localStore.upsertSession(
+            Session(id: UUID(), propertyID: propertyID, captureProfile: .residential)
+        )
+        await prepareAppState(fixture.appState, orgID: orgID)
+
+        _ = await MainActor.run {
+            fixture.appState.setSessionCaptureProfileSnapshot(
+                propertyID: propertyID,
+                sessionID: session.id,
+                profile: .residential
+            )
+        }
+        _ = await MainActor.run {
+            fixture.appState.setPropertyCaptureProfileDefault(
+                propertyID: propertyID,
+                profile: .commercial
+            )
+        }
+
+        let metadata = try fixture.localStore.loadSessionMetadata(propertyID: propertyID, sessionID: session.id)
+        let updatedProperty = try XCTUnwrap(fixture.localStore.fetchProperties().first(where: { $0.id == propertyID }))
+        XCTAssertEqual(metadata.captureProfile, CaptureProfile.residential.rawValue)
+        XCTAssertEqual(updatedProperty.captureProfile, .commercial)
+    }
+
+    func testSessionCaptureProfileSnapshotUsesDirectToggleTargetOverPropertyDefault() async throws {
+        let fixture = try makeFixture()
+        defer { tearDownFixture(fixture) }
+        let orgID = UUID()
+        let propertyID = UUID()
+        try seedProperty(fixture, orgID: orgID, propertyID: propertyID)
+        var property = try XCTUnwrap(fixture.localStore.fetchProperties().first(where: { $0.id == propertyID }))
+        property.captureProfile = .residential
+        _ = try fixture.localStore.updateProperty(property)
+        let session = try fixture.localStore.upsertSession(
+            Session(id: UUID(), propertyID: propertyID, captureProfile: .residential)
+        )
+        await prepareAppState(fixture.appState, orgID: orgID)
+
+        let updated = await MainActor.run {
+            fixture.appState.setSessionCaptureProfileSnapshot(
+                propertyID: propertyID,
+                sessionID: session.id,
+                profile: .commercial
+            )
+        }
+
+        let metadata = try fixture.localStore.loadSessionMetadata(propertyID: propertyID, sessionID: session.id)
+        let storedSession = try XCTUnwrap(
+            fixture.localStore.fetchSessionsForCacheBuild(propertyID: propertyID)
+                .first(where: { $0.id == session.id })
+        )
+        XCTAssertTrue(updated)
+        XCTAssertEqual(metadata.captureProfile, CaptureProfile.commercial.rawValue)
+        XCTAssertEqual(storedSession.captureProfile, .commercial)
+    }
+
+    func testPropertyCaptureProfileUpdateKeepsSelectedPropertyVisibleWhenLocalOrgIsStale() async throws {
+        let fixture = try makeFixture()
+        defer { tearDownFixture(fixture) }
+        let activeOrgID = UUID()
+        let staleOrgID = UUID()
+        let propertyID = UUID()
+        _ = try fixture.localStore.createOrganization(Organization(id: activeOrgID, name: "Active Org"))
+        _ = try fixture.localStore.createOrganization(Organization(id: staleOrgID, name: "Stale Org"))
+        _ = try fixture.localStore.createProperty(
+            Property(
+                id: propertyID,
+                orgId: staleOrgID,
+                folderId: "00002",
+                name: "Stale Org Property",
+                address: "456 Main Street",
+                street: "456 Main Street",
+                city: "Atlanta",
+                state: "GA",
+                zip: "30301"
+            )
+        )
+
+        await prepareAppState(fixture.appState, orgID: activeOrgID)
+        let updated = await MainActor.run {
+            fixture.appState.selectProperty(id: propertyID)
+            return fixture.appState.setPropertyCaptureProfileDefault(
+                propertyID: propertyID,
+                profile: .commercial
+            )
+        }
+
+        let stored = try XCTUnwrap(fixture.localStore.fetchProperties().first(where: { $0.id == propertyID }))
+        let visible = await MainActor.run {
+            fixture.appState.properties.contains(where: { $0.id == propertyID })
+        }
+        XCTAssertTrue(updated)
+        XCTAssertTrue(visible)
+        XCTAssertEqual(stored.orgId, activeOrgID)
+        XCTAssertEqual(stored.captureProfile, .commercial)
+    }
+
+    func testPropertyCaptureProfileUpdateNormalizesSelectedStaleOrgEvenWhenProfileAlreadyMatches() async throws {
+        let fixture = try makeFixture()
+        defer { tearDownFixture(fixture) }
+        let activeOrgID = UUID()
+        let staleOrgID = UUID()
+        let propertyID = UUID()
+        _ = try fixture.localStore.createOrganization(Organization(id: staleOrgID, name: "Stale Org"))
+        _ = try fixture.localStore.createProperty(
+            Property(
+                id: propertyID,
+                orgId: staleOrgID,
+                folderId: "00004",
+                name: "Matching Profile Property",
+                address: "246 Main Street",
+                street: "246 Main Street",
+                city: "Atlanta",
+                state: "GA",
+                zip: "30301",
+                captureProfile: .commercial
+            )
+        )
+
+        await prepareAppState(fixture.appState, orgID: activeOrgID)
+        let updated = await MainActor.run {
+            fixture.appState.selectProperty(id: propertyID)
+            return fixture.appState.setPropertyCaptureProfileDefault(
+                propertyID: propertyID,
+                profile: .commercial
+            )
+        }
+
+        let stored = try XCTUnwrap(fixture.localStore.fetchProperties().first(where: { $0.id == propertyID }))
+        let visible = await MainActor.run {
+            fixture.appState.properties.contains(where: { $0.id == propertyID })
+        }
+        XCTAssertTrue(updated)
+        XCTAssertTrue(visible)
+        XCTAssertEqual(stored.orgId, activeOrgID)
+        XCTAssertEqual(stored.captureProfile, .commercial)
+    }
+
+    func testPropertyCaptureProfileUpdateStillBlocksWrongOrgPropertyOutsideActiveContext() async throws {
+        let fixture = try makeFixture()
+        defer { tearDownFixture(fixture) }
+        let activeOrgID = UUID()
+        let foreignOrgID = UUID()
+        let propertyID = UUID()
+        _ = try fixture.localStore.createOrganization(Organization(id: activeOrgID, name: "Active Org"))
+        _ = try fixture.localStore.createOrganization(Organization(id: foreignOrgID, name: "Foreign Org"))
+        _ = try fixture.localStore.createProperty(
+            Property(
+                id: propertyID,
+                orgId: foreignOrgID,
+                folderId: "00003",
+                name: "Foreign Property",
+                address: "789 Main Street",
+                street: "789 Main Street",
+                city: "Atlanta",
+                state: "GA",
+                zip: "30301"
+            )
+        )
+
+        await prepareAppState(fixture.appState, orgID: activeOrgID)
+        let updated = await MainActor.run {
+            fixture.appState.setPropertyCaptureProfileDefault(
+                propertyID: propertyID,
+                profile: .commercial
+            )
+        }
+
+        let stored = try XCTUnwrap(fixture.localStore.fetchProperties().first(where: { $0.id == propertyID }))
+        XCTAssertFalse(updated)
+        XCTAssertEqual(stored.orgId, foreignOrgID)
+        XCTAssertNil(stored.captureProfile)
+    }
+
+    func testRemoteNilSessionCaptureProfileDoesNotWipeLocalSnapshot() async throws {
+        let fixture = try makeFixture()
+        defer { tearDownFixture(fixture) }
+        let orgID = UUID()
+        let propertyID = UUID()
+        let sessionID = UUID()
+        try seedProperty(fixture, orgID: orgID, propertyID: propertyID)
+        _ = try fixture.localStore.upsertSession(
+            Session(
+                id: sessionID,
+                propertyID: propertyID,
+                startedAt: Date(timeIntervalSinceReferenceDate: 900),
+                status: .draft,
+                captureProfile: .commercial
+            )
+        )
+        await prepareAppState(fixture.appState, orgID: orgID)
+
+        _ = await MainActor.run {
+            fixture.appState._debugApplySyncDeltaSessionsForTests(
+                records: [
+                    makeSessionDelta(
+                        id: sessionID,
+                        orgID: orgID,
+                        propertyID: propertyID,
+                        status: "draft",
+                        startedAt: Date(timeIntervalSinceReferenceDate: 900),
+                        updatedAt: Date(timeIntervalSinceReferenceDate: 1_000),
+                        deletedAt: nil
+                    )
+                ],
+                orgID: orgID
+            )
+        }
+
+        let session = try XCTUnwrap(
+            fixture.localStore.fetchSessionsForCacheBuild(propertyID: propertyID)
+                .first(where: { $0.id == sessionID })
+        )
+        XCTAssertEqual(session.captureProfile, .commercial)
     }
 
     func testRemoteDeletedAtAppliesWithoutHardDeletingLocalSession() async throws {

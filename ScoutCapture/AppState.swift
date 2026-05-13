@@ -1280,6 +1280,32 @@ final class AppState: ObservableObject {
         }
     }
 
+    private struct SupabaseCaptureProfileUpdatePayload: Encodable {
+        let captureProfile: String
+        let updatedBy: UUID?
+
+        enum CodingKeys: String, CodingKey {
+            case captureProfile = "capture_profile"
+            case updatedBy = "updated_by"
+        }
+    }
+
+    private struct SupabaseCaptureProfileUpdateResult: Decodable {
+        let id: UUID
+        let orgID: UUID?
+        let propertyID: UUID?
+        let captureProfile: String?
+        let updatedBy: UUID?
+
+        enum CodingKeys: String, CodingKey {
+            case id
+            case orgID = "org_id"
+            case propertyID = "property_id"
+            case captureProfile = "capture_profile"
+            case updatedBy = "updated_by"
+        }
+    }
+
     private struct RemoteSessionCoordinationRecord: Decodable {
         let id: UUID
         let orgID: UUID
@@ -5648,7 +5674,8 @@ final class AppState: ObservableObject {
                 propertyID: property.id,
                 orgID: orgID,
                 property: property,
-                metadata: metadata
+                metadata: metadata,
+                session: session
             )
         )
 
@@ -5839,16 +5866,24 @@ final class AppState: ObservableObject {
         if let sessionShadowWriteOverride {
             try await sessionShadowWriteOverride(property, session, metadata)
         } else {
+            let canonicalPayload = canonicalQueuedSessionMutationPayload(
+                payload,
+                property: property,
+                session: session,
+                metadata: metadata
+            )
             do {
-                try await upsertPropertyRowToSupabase(payload.property)
+                try await upsertPropertyRowToSupabase(canonicalPayload.property)
                 print(
                     "[SessionCoordinationWrite] event=session_upsert_attempt " +
-                    "entityID=\(session.id.uuidString)"
+                    "entityID=\(session.id.uuidString) " +
+                    "captureProfile=\(canonicalPayload.session.captureProfile ?? "nil")"
                 )
-                try await upsertSessionRowToSupabase(payload.session)
+                try await upsertSessionRowToSupabase(canonicalPayload.session)
                 print(
                     "[SessionCoordinationWrite] event=session_upsert_success " +
-                    "entityID=\(session.id.uuidString)"
+                    "entityID=\(session.id.uuidString) " +
+                    "captureProfile=\(canonicalPayload.session.captureProfile ?? "nil")"
                 )
             } catch {
                 print(
@@ -5859,6 +5894,25 @@ final class AppState: ObservableObject {
                 throw error
             }
         }
+    }
+
+    private func canonicalQueuedSessionMutationPayload(
+        _ payload: QueuedSessionMutationPayload,
+        property: Property,
+        session: Session,
+        metadata: SessionMetadata
+    ) -> QueuedSessionMutationPayload {
+        QueuedSessionMutationPayload(
+            property: payload.property,
+            session: makeSupabaseSessionPayload(
+                sessionID: session.id,
+                propertyID: property.id,
+                orgID: payload.session.orgID,
+                property: property,
+                metadata: metadata,
+                session: session
+            )
+        )
     }
 
     private func performSessionCoordinationRemoteWrite(
@@ -6934,7 +6988,8 @@ final class AppState: ObservableObject {
         propertyID: UUID,
         orgID: UUID,
         property: Property?,
-        metadata: SessionMetadata
+        metadata: SessionMetadata,
+        session: Session? = nil
     ) -> SupabaseSessionPayload {
         // Session lock fields remain owned by the 2C-10b coordination helpers.
         // The generic 2C-11 local conflict reducers intentionally do not touch
@@ -6948,7 +7003,7 @@ final class AppState: ObservableObject {
             status: metadata.status.rawValue,
             startedAt: metadata.startedAt.ISO8601Format(),
             completedAt: metadata.endedAt?.ISO8601Format(),
-            captureProfile: metadata.captureProfile ?? property?.captureProfile?.rawValue,
+            captureProfile: session?.captureProfile?.rawValue ?? metadata.captureProfile ?? property?.captureProfile?.rawValue,
             updatedBy: authenticatedSupabaseUser?.id,
             lockedByUserID: coordinationState?.lockedByUserID,
             lockedByDeviceID: normalizedSupabaseText(coordinationState?.lockedByDeviceID),
@@ -6977,6 +7032,19 @@ final class AppState: ObservableObject {
         )
     }
 
+    private func sessionEnsureMetadataForCaptureProfileSync(
+        metadata: SessionMetadata,
+        session: Session,
+        profile: CaptureProfile
+    ) -> SessionMetadata {
+        var ensured = metadata
+        ensured.startedAt = session.startedAt
+        ensured.endedAt = session.endedAt
+        ensured.status = session.status
+        ensured.captureProfile = profile.rawValue
+        return ensured
+    }
+
     private func supabaseClientAuthDiagnostic(_ client: SupabaseClient?) async -> (
         userID: String,
         email: String,
@@ -7001,6 +7069,94 @@ final class AppState: ObservableObject {
     private func isDuplicateKeyError(_ error: Error) -> Bool {
         guard let postgrestError = error as? PostgrestError else { return false }
         return postgrestError.code == "23505"
+    }
+
+    private func makeCaptureProfileUpdatePayload(
+        profile: CaptureProfile,
+        updatedBy overrideUpdatedBy: UUID? = nil
+    ) -> SupabaseCaptureProfileUpdatePayload {
+        SupabaseCaptureProfileUpdatePayload(
+            captureProfile: profile.rawValue,
+            updatedBy: overrideUpdatedBy ?? authenticatedSupabaseUser?.id
+        )
+    }
+
+    private func updatePropertyCaptureProfileInSupabase(
+        propertyID: UUID,
+        orgID: UUID,
+        profile: CaptureProfile
+    ) async throws {
+        guard let client = supabaseClient else { return }
+        let payload = makeCaptureProfileUpdatePayload(profile: profile)
+        try await client
+            .from("properties")
+            .update(payload, returning: .minimal)
+            .eq("id", value: propertyID.uuidString.lowercased())
+            .eq("org_id", value: orgID.uuidString.lowercased())
+            .execute()
+    }
+
+    private func updateSessionCaptureProfileInSupabase(
+        sessionID: UUID,
+        propertyID: UUID,
+        orgID: UUID,
+        profile: CaptureProfile
+    ) async throws -> SupabaseCaptureProfileUpdateResult {
+        guard let client = supabaseClient else {
+            throw NSError(domain: "ScoutCapture.CaptureProfileSync", code: 0, userInfo: [
+                NSLocalizedDescriptionKey: "Missing Supabase client for session capture_profile update."
+            ])
+        }
+        let payload = makeCaptureProfileUpdatePayload(profile: profile)
+        let rows = try await client
+            .from("sessions")
+            .update(payload, returning: .representation)
+            .eq("id", value: sessionID.uuidString.lowercased())
+            .eq("property_id", value: propertyID.uuidString.lowercased())
+            .eq("org_id", value: orgID.uuidString.lowercased())
+            .execute()
+            .value as [SupabaseCaptureProfileUpdateResult]
+        return try validateCaptureProfileUpdateResult(
+            rows,
+            table: "sessions",
+            id: sessionID,
+            orgID: orgID,
+            propertyID: propertyID,
+            profile: profile
+        )
+    }
+
+    private func validateCaptureProfileUpdateResult(
+        _ rows: [SupabaseCaptureProfileUpdateResult],
+        table: String,
+        id: UUID,
+        orgID: UUID,
+        propertyID: UUID?,
+        profile: CaptureProfile
+    ) throws -> SupabaseCaptureProfileUpdateResult {
+        guard let row = rows.first else {
+            throw NSError(domain: "ScoutCapture.CaptureProfileSync", code: 1, userInfo: [
+                NSLocalizedDescriptionKey: "No \(table) row matched capture_profile update for id \(id.uuidString)."
+            ])
+        }
+        guard rows.count == 1 else {
+            throw NSError(domain: "ScoutCapture.CaptureProfileSync", code: 2, userInfo: [
+                NSLocalizedDescriptionKey: "Expected one \(table) row for capture_profile update, got \(rows.count)."
+            ])
+        }
+        guard row.id == id,
+              row.orgID == nil || row.orgID == orgID,
+              propertyID == nil || row.propertyID == nil || row.propertyID == propertyID else {
+            throw NSError(domain: "ScoutCapture.CaptureProfileSync", code: 3, userInfo: [
+                NSLocalizedDescriptionKey: "\(table) capture_profile update returned an unexpected row."
+            ])
+        }
+        guard row.captureProfile == profile.rawValue else {
+            throw NSError(domain: "ScoutCapture.CaptureProfileSync", code: 4, userInfo: [
+                NSLocalizedDescriptionKey: "\(table) capture_profile update verification returned \(row.captureProfile ?? "nil"), expected \(profile.rawValue)."
+            ])
+        }
+        return row
     }
 
     private func upsertPropertyRowToSupabase(_ payload: SupabasePropertyPayload) async throws {
@@ -9102,7 +9258,8 @@ final class AppState: ObservableObject {
                     propertyID: propertyID,
                     orgID: activeOrganizationID,
                     property: localProperty,
-                    metadata: metadata
+                    metadata: metadata,
+                    session: localSession
                 )
 
                 do {
@@ -12943,6 +13100,303 @@ final class AppState: ObservableObject {
         markPropertyActivated(id: id)
     }
 
+    @discardableResult
+    func setPropertyCaptureProfileDefault(propertyID: UUID, profile: CaptureProfile) -> Bool {
+        guard canAccessProperty(propertyID) || selectedPropertyID == propertyID else { return false }
+        guard let source = properties.first(where: { $0.id == propertyID }) ??
+                allProperties.first(where: { $0.id == propertyID }) else { return false }
+        var updated = source
+        let resolvedOrgID = resolveCaptureProfileOrgID(property: updated, propertyID: propertyID)
+        let selectedContext = selectedPropertyID == propertyID
+        let currentSessionContext = currentSession?.propertyID == propertyID
+        print(
+            "[CaptureProfileSync] event=property_local_update_prepare " +
+            "propertyID=\(propertyID.uuidString) " +
+            "oldOrgID=\(updated.orgId?.uuidString ?? "nil") " +
+            "resolvedOrgID=\(resolvedOrgID?.uuidString ?? "nil") " +
+            "activeOrganizationID=\(activeOrganizationID?.uuidString ?? "nil") " +
+            "selectedPropertyMatch=\(selectedContext) " +
+            "currentSessionPropertyMatch=\(currentSessionContext) " +
+            "oldCaptureProfile=\(updated.captureProfile?.rawValue ?? "nil") " +
+            "newCaptureProfile=\(profile.rawValue)"
+        )
+        if let resolvedOrgID {
+            do {
+                try ensureLocalOrganizationExists(for: resolvedOrgID)
+            } catch {
+                print(
+                    "[CaptureProfileSync] event=property_local_org_ensure_failed " +
+                    "propertyID=\(propertyID.uuidString) " +
+                    "resolvedOrgID=\(resolvedOrgID.uuidString) " +
+                    "error=\(error.localizedDescription)"
+                )
+            }
+            ensureCaptureProfilePropertyVisibility(propertyID: propertyID, orgID: resolvedOrgID)
+        }
+        if updated.orgId != resolvedOrgID {
+            updated.orgId = resolvedOrgID
+        }
+        updated.captureProfile = profile
+
+        do {
+            let persisted = try localStore.updateProperty(updated)
+            if let rawIndex = allProperties.firstIndex(where: { $0.id == propertyID }) {
+                allProperties[rawIndex] = persisted
+            }
+            let caches = makeHubCaches(for: allProperties)
+            applyHubCachePayload(properties: allProperties, organizations: allOrganizations, caches: caches)
+            let remainsVisible = properties.contains(where: { $0.id == propertyID })
+            let passesActiveOrgFilter = activeOrganizationID.map { persisted.orgId == $0 } ?? !requiresAuthentication
+            print(
+                "[CaptureProfileSync] event=property_local_update " +
+                "propertyID=\(propertyID.uuidString) " +
+                "orgID=\(persisted.orgId?.uuidString ?? "nil") " +
+                "activeOrganizationID=\(activeOrganizationID?.uuidString ?? "nil") " +
+                "captureProfile=\(profile.rawValue) " +
+                "remainsVisible=\(remainsVisible) " +
+                "passesActiveOrgFilter=\(passesActiveOrgFilter) " +
+                "deletedAt=\(persisted.deletedAt.map { supabaseTimestampString($0) } ?? "nil") " +
+                "isArchived=\(persisted.isArchived)"
+            )
+            scheduleCaptureProfilePropertyRemoteWrite(property: persisted, profile: profile)
+            return true
+        } catch {
+            print(
+                "[CaptureProfileSync] event=property_local_update_failed " +
+                "propertyID=\(propertyID.uuidString) " +
+                "captureProfile=\(profile.rawValue) " +
+                "error=\(error.localizedDescription)"
+            )
+            return false
+        }
+    }
+
+    @discardableResult
+    func setSessionCaptureProfileSnapshot(
+        propertyID: UUID,
+        sessionID: UUID,
+        profile: CaptureProfile
+    ) -> Bool {
+        guard canAccessProperty(propertyID) else { return false }
+
+        do {
+            var metadata = try localStore.loadSessionMetadata(propertyID: propertyID, sessionID: sessionID)
+            let previousMetadataProfile = metadata.captureProfile
+            metadata.captureProfile = profile.rawValue
+            try localStore.saveSessionMetadataAtomically(
+                propertyID: propertyID,
+                sessionID: sessionID,
+                metadata: metadata
+            )
+
+            let localSessions = (try? localStore.fetchSessionsForCacheBuild(propertyID: propertyID)) ?? []
+            let baseSession = localSessions.first(where: { $0.id == sessionID }) ??
+                (currentSession?.id == sessionID ? currentSession : nil)
+            if var session = baseSession {
+                session.captureProfile = profile
+                let persisted = (try? localStore.upsertSession(session)) ?? session
+                if currentSession?.id == sessionID {
+                    currentSession = persisted
+                }
+                reloadSessionCache(for: propertyID)
+                scheduleCaptureProfileSessionRemoteWrite(
+                    propertyID: propertyID,
+                    session: persisted,
+                    profile: profile
+                )
+            }
+
+            if previousMetadataProfile != profile.rawValue {
+                print(
+                    "[CaptureProfileSync] event=session_local_update " +
+                    "propertyID=\(propertyID.uuidString) " +
+                    "sessionID=\(sessionID.uuidString) " +
+                    "activeOrganizationID=\(activeOrganizationID?.uuidString ?? "nil") " +
+                    "captureProfile=\(profile.rawValue)"
+                )
+            }
+            return true
+        } catch {
+            print(
+                "[CaptureProfileSync] event=session_local_update_failed " +
+                "propertyID=\(propertyID.uuidString) " +
+                "sessionID=\(sessionID.uuidString) " +
+                "captureProfile=\(profile.rawValue) " +
+                "error=\(error.localizedDescription)"
+            )
+            return false
+        }
+    }
+
+    private func isCaptureProfileActivePropertyContext(propertyID: UUID) -> Bool {
+        if currentSession?.propertyID == propertyID {
+            return true
+        }
+        if selectedPropertyID == propertyID {
+            return true
+        }
+        return false
+    }
+
+    private func ensureCaptureProfilePropertyVisibility(propertyID: UUID, orgID: UUID) {
+        guard isCaptureProfileActivePropertyContext(propertyID: propertyID),
+              isPropertyScopedOrganization(orgID) else { return }
+        var authorizedIDs = authorizedPropertyIDsByOrganization[orgID] ?? []
+        guard authorizedIDs.insert(propertyID).inserted else { return }
+        authorizedPropertyIDsByOrganization[orgID] = authorizedIDs
+    }
+
+    private func resolveCaptureProfileOrgID(property: Property, propertyID: UUID) -> UUID? {
+        if isCaptureProfileActivePropertyContext(propertyID: propertyID),
+           let activeOrganizationID {
+            if property.orgId != activeOrganizationID {
+                print(
+                    "[CaptureProfileSync] event=stale_org_override " +
+                    "propertyID=\(propertyID.uuidString) " +
+                    "staleOrgID=\(property.orgId?.uuidString ?? "nil") " +
+                    "resolvedOrgID=\(activeOrganizationID.uuidString) " +
+                    "activeOrganizationID=\(activeOrganizationID.uuidString)"
+                )
+            }
+            return activeOrganizationID
+        }
+        if canAccessOrganization(property.orgId) {
+            return property.orgId
+        }
+        return property.orgId
+    }
+
+    private func scheduleCaptureProfilePropertyRemoteWrite(property: Property, profile: CaptureProfile) {
+        guard let orgID = resolveCaptureProfileOrgID(property: property, propertyID: property.id) else {
+            print("[CaptureProfileSync] event=property_remote_write_skipped reason=missing_org propertyID=\(property.id.uuidString)")
+            return
+        }
+        let canAttempt = remoteMutationPathAvailable(for: orgID)
+        print(
+            "[CaptureProfileSync] event=property_remote_write_attempt " +
+            "propertyID=\(property.id.uuidString) " +
+            "orgID=\(orgID.uuidString) " +
+            "activeOrganizationID=\(activeOrganizationID?.uuidString ?? "nil") " +
+            "captureProfile=\(profile.rawValue) " +
+            "updatedBy=\(authenticatedSupabaseUser?.id.uuidString ?? "nil") " +
+            "supabaseClientExists=\(supabaseClient != nil) " +
+            "gateAllowed=\(canAttempt)"
+        )
+        guard canAttempt else { return }
+
+        Task(priority: .utility) { [weak self] in
+            do {
+                try await self?.updatePropertyCaptureProfileInSupabase(
+                    propertyID: property.id,
+                    orgID: orgID,
+                    profile: profile
+                )
+                print(
+                    "[CaptureProfileSync] event=property_remote_write_success " +
+                    "propertyID=\(property.id.uuidString) " +
+                    "orgID=\(orgID.uuidString) " +
+                    "captureProfile=\(profile.rawValue)"
+                )
+            } catch {
+                print(
+                    "[CaptureProfileSync] event=property_remote_write_failed " +
+                    "propertyID=\(property.id.uuidString) " +
+                    "orgID=\(orgID.uuidString) " +
+                    "captureProfile=\(profile.rawValue) " +
+                    "error=\(error.localizedDescription)"
+                )
+            }
+        }
+    }
+
+    private func scheduleCaptureProfileSessionRemoteWrite(
+        propertyID: UUID,
+        session: Session,
+        profile: CaptureProfile
+    ) {
+        guard let property = allProperties.first(where: { $0.id == propertyID }) ??
+                properties.first(where: { $0.id == propertyID }),
+              let orgID = resolveCaptureProfileOrgID(property: property, propertyID: propertyID) else {
+            print("[CaptureProfileSync] event=session_remote_write_skipped reason=missing_property_or_org propertyID=\(propertyID.uuidString) sessionID=\(session.id.uuidString)")
+            return
+        }
+        let canAttempt = remoteMutationPathAvailable(for: orgID)
+        print(
+            "[CaptureProfileSync] event=session_remote_write_attempt " +
+            "propertyID=\(propertyID.uuidString) " +
+            "sessionID=\(session.id.uuidString) " +
+            "orgID=\(orgID.uuidString) " +
+            "activeOrganizationID=\(activeOrganizationID?.uuidString ?? "nil") " +
+            "captureProfile=\(profile.rawValue) " +
+            "updatedBy=\(authenticatedSupabaseUser?.id.uuidString ?? "nil") " +
+            "supabaseClientExists=\(supabaseClient != nil) " +
+            "gateAllowed=\(canAttempt)"
+        )
+        guard canAttempt else { return }
+
+        Task(priority: .utility) { [weak self] in
+            do {
+                guard let self else { return }
+                let loadedMetadata = try self.localStore.loadSessionMetadata(
+                    propertyID: propertyID,
+                    sessionID: session.id
+                )
+                let ensureMetadata = self.sessionEnsureMetadataForCaptureProfileSync(
+                    metadata: loadedMetadata,
+                    session: session,
+                    profile: profile
+                )
+                print(
+                    "[CaptureProfileSync] event=session_remote_ensure_attempt " +
+                    "propertyID=\(propertyID.uuidString) " +
+                    "sessionID=\(session.id.uuidString) " +
+                    "orgID=\(orgID.uuidString) " +
+                    "targetProfile=\(profile.rawValue) " +
+                    "localSessionStatus=\(session.status.rawValue) " +
+                    "metadataStatus=\(loadedMetadata.status.rawValue) " +
+                    "ensureStatus=\(ensureMetadata.status.rawValue)"
+                )
+                try await self.ensureSupabaseSessionPrerequisites(
+                    propertyID: propertyID,
+                    sessionID: session.id,
+                    metadata: ensureMetadata,
+                    orgID: orgID
+                )
+                print(
+                    "[CaptureProfileSync] event=session_remote_ensure_success " +
+                    "propertyID=\(propertyID.uuidString) " +
+                    "sessionID=\(session.id.uuidString) " +
+                    "orgID=\(orgID.uuidString) " +
+                    "targetProfile=\(profile.rawValue)"
+                )
+                let result = try await self.updateSessionCaptureProfileInSupabase(
+                    sessionID: session.id,
+                    propertyID: propertyID,
+                    orgID: orgID,
+                    profile: profile
+                )
+                print(
+                    "[CaptureProfileSync] event=session_remote_write_success " +
+                    "propertyID=\(propertyID.uuidString) " +
+                    "sessionID=\(session.id.uuidString) " +
+                    "orgID=\(orgID.uuidString) " +
+                    "captureProfile=\(profile.rawValue) " +
+                    "verifiedCaptureProfile=\(result.captureProfile ?? "nil") " +
+                    "affectedRows=1"
+                )
+            } catch {
+                print(
+                    "[CaptureProfileSync] event=session_remote_write_failed " +
+                    "propertyID=\(propertyID.uuidString) " +
+                    "sessionID=\(session.id.uuidString) " +
+                    "orgID=\(orgID.uuidString) " +
+                    "captureProfile=\(profile.rawValue) " +
+                    "error=\(error.localizedDescription)"
+                )
+            }
+        }
+    }
+
     func propertyHasBaseline(_ propertyID: UUID) -> Bool {
         guard canAccessProperty(propertyID) else { return false }
         return properties.first(where: { $0.id == propertyID })?.baselineSessionID != nil
@@ -13768,7 +14222,16 @@ final class AppState: ObservableObject {
             return draft
         }
 
-        let session = Session(propertyID: selectedPropertyID, startedAt: Date(), status: .draft, endedAt: nil, exportedAt: nil)
+        let inheritedCaptureProfile = properties.first(where: { $0.id == selectedPropertyID })?.captureProfile ??
+            allProperties.first(where: { $0.id == selectedPropertyID })?.captureProfile
+        let session = Session(
+            propertyID: selectedPropertyID,
+            startedAt: Date(),
+            status: .draft,
+            endedAt: nil,
+            exportedAt: nil,
+            captureProfile: inheritedCaptureProfile
+        )
         currentSession = session
         if let property = properties.first(where: { $0.id == session.propertyID }) ?? allProperties.first(where: { $0.id == session.propertyID }),
            let orgID = property.orgId {
@@ -14404,6 +14867,101 @@ final class AppState: ObservableObject {
             updatedBy: updatedBy
         )
         return try Self.debugJSONObject(payload)
+    }
+
+    func _debugEncodeCaptureProfileSessionEnsurePayloadForTests(
+        orgID: UUID,
+        propertyID: UUID,
+        session: Session,
+        property: Property?,
+        metadata: SessionMetadata,
+        profile: CaptureProfile,
+        updatedBy: UUID
+    ) throws -> [String: Any] {
+        let ensureMetadata = sessionEnsureMetadataForCaptureProfileSync(
+            metadata: metadata,
+            session: session,
+            profile: profile
+        )
+        let payload = makeSupabaseSessionEnsureInsertPayload(
+            sessionID: session.id,
+            propertyID: propertyID,
+            orgID: orgID,
+            property: property,
+            metadata: ensureMetadata,
+            updatedBy: updatedBy
+        )
+        return try Self.debugJSONObject(payload)
+    }
+
+    func _debugEncodeSessionUpsertPayloadForTests(
+        orgID: UUID,
+        propertyID: UUID,
+        session: Session,
+        property: Property?,
+        metadata: SessionMetadata
+    ) throws -> [String: Any] {
+        let payload = makeSupabaseSessionPayload(
+            sessionID: session.id,
+            propertyID: propertyID,
+            orgID: orgID,
+            property: property,
+            metadata: metadata,
+            session: session
+        )
+        return try Self.debugJSONObject(payload)
+    }
+
+    func _debugEncodeCaptureProfileUpdatePayloadForTests(
+        profile: CaptureProfile,
+        updatedBy: UUID?
+    ) throws -> [String: Any] {
+        let payload = makeCaptureProfileUpdatePayload(
+            profile: profile,
+            updatedBy: updatedBy
+        )
+        return try Self.debugJSONObject(payload)
+    }
+
+    func _debugValidateEmptyCaptureProfileUpdateResultForTests(
+        table: String,
+        id: UUID,
+        orgID: UUID,
+        propertyID: UUID?,
+        profile: CaptureProfile
+    ) throws {
+        _ = try validateCaptureProfileUpdateResult(
+            [],
+            table: table,
+            id: id,
+            orgID: orgID,
+            propertyID: propertyID,
+            profile: profile
+        )
+    }
+
+    func _debugValidateCaptureProfileUpdateResultForTests(
+        table: String,
+        id: UUID,
+        orgID: UUID,
+        propertyID: UUID?,
+        profile: CaptureProfile
+    ) throws -> String? {
+        let row = SupabaseCaptureProfileUpdateResult(
+            id: id,
+            orgID: orgID,
+            propertyID: propertyID,
+            captureProfile: profile.rawValue,
+            updatedBy: orgID
+        )
+        return try validateCaptureProfileUpdateResult(
+            [row],
+            table: table,
+            id: id,
+            orgID: orgID,
+            propertyID: propertyID,
+            profile: profile
+        ).captureProfile
     }
 
     private static func debugJSONObject<T: Encodable>(_ payload: T) throws -> [String: Any] {

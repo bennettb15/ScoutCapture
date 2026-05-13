@@ -6459,7 +6459,11 @@ struct ContentView: View {
     }
 
     private func storedPropertyCaptureProfile(for propertyID: UUID) -> CaptureProfile? {
-        CaptureProfile(
+        if let profile = appState.properties.first(where: { $0.id == propertyID })?.captureProfile ??
+            (appState.selectedProperty?.id == propertyID ? appState.selectedProperty?.captureProfile : nil) {
+            return profile
+        }
+        return CaptureProfile(
             storedValue: UserDefaults.standard.string(
                 forKey: propertyCaptureProfileDefaultsKey(for: propertyID)
             )
@@ -6468,6 +6472,7 @@ struct ContentView: View {
 
     private func persistPropertyCaptureProfile(_ profile: CaptureProfile, for propertyID: UUID) {
         UserDefaults.standard.set(profile.rawValue, forKey: propertyCaptureProfileDefaultsKey(for: propertyID))
+        _ = appState.setPropertyCaptureProfileDefault(propertyID: propertyID, profile: profile)
     }
 
     private func inheritedCaptureProfileForCurrentProperty(
@@ -6522,9 +6527,11 @@ struct ContentView: View {
     }
 
     private func persistCaptureProfileToCurrentSession(
+        targetProfile: CaptureProfile? = nil,
         lockStateOverride: Bool? = nil,
         persistSessionIfNeeded: Bool = false
     ) {
+        let profileToPersist = targetProfile ?? captureProfile
         if persistSessionIfNeeded {
             _ = appState.ensureCurrentSessionPersisted()
         }
@@ -6535,10 +6542,25 @@ struct ContentView: View {
             return
         }
 
-        metadata.captureProfile = captureProfile.rawValue
-        try? localStore.saveSessionMetadataAtomically(propertyID: propertyID, sessionID: sessionID, metadata: metadata)
+        print(
+            "[CaptureProfileSync] event=toggle_persist_request " +
+            "propertyID=\(propertyID.uuidString) " +
+            "sessionID=\(sessionID.uuidString) " +
+            "previousSessionProfile=\(metadata.captureProfile ?? "nil") " +
+            "previousPropertyProfile=\(storedPropertyCaptureProfile(for: propertyID)?.rawValue ?? "nil") " +
+            "targetProfile=\(profileToPersist.rawValue)"
+        )
+
+        metadata.captureProfile = profileToPersist.rawValue
+        if !appState.setSessionCaptureProfileSnapshot(
+            propertyID: propertyID,
+            sessionID: sessionID,
+            profile: profileToPersist
+        ) {
+            try? localStore.saveSessionMetadataAtomically(propertyID: propertyID, sessionID: sessionID, metadata: metadata)
+        }
         syncGuidedShotsToCurrentSessionMetadataIfPersisted(propertyID: propertyID, sessionID: sessionID)
-        persistPropertyCaptureProfile(captureProfile, for: propertyID)
+        persistPropertyCaptureProfile(profileToPersist, for: propertyID)
 
         if let lockStateOverride {
             sessionCaptureProfileLocked = lockStateOverride
@@ -6609,13 +6631,19 @@ struct ContentView: View {
             return
         }
 
-        captureProfile = captureProfile == .residential ? .commercial : .residential
-        persistCaptureProfileToCurrentSession(persistSessionIfNeeded: true)
+        let targetProfile: CaptureProfile = captureProfile == .residential ? .commercial : .residential
+        captureProfile = targetProfile
+        persistCaptureProfileToCurrentSession(
+            targetProfile: targetProfile,
+            persistSessionIfNeeded: true
+        )
     }
 
     private func confirmCaptureProfileSwitch() {
-        captureProfile = captureProfile == .residential ? .commercial : .residential
+        let targetProfile: CaptureProfile = captureProfile == .residential ? .commercial : .residential
+        captureProfile = targetProfile
         persistCaptureProfileToCurrentSession(
+            targetProfile: targetProfile,
             lockStateOverride: sessionCaptureProfileLocked,
             persistSessionIfNeeded: true
         )

@@ -3833,6 +3833,9 @@ final class LocalStore {
         metadata.endedAt = session.endedAt
         metadata.sessionEndedAtLocal = session.endedAt.map { localISO8601String(for: $0, timeZone: captureTimeZone.timeZone) }
         metadata.status = session.status
+        if metadata.captureProfile == nil {
+            metadata.captureProfile = session.captureProfile?.rawValue
+        }
         metadata.isBaselineSession = isBaselineSession(sessionID: session.id, propertyID: session.propertyID)
         metadata.exportedAt = session.exportedAt
         metadata.isSealed = session.isSealed
