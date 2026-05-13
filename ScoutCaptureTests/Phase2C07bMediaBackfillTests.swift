@@ -73,18 +73,31 @@ final class Phase2C07bMediaBackfillTests: XCTestCase {
     }
 
     private func makeAppStateWithSingleSession(
-        uploadStates: [(state: String, attempts: Int, updatedAt: Date)]
+        uploadStates: [(state: String, attempts: Int, updatedAt: Date)],
+        propertyOrganizationID: UUID? = nil,
+        metadataOrganizationID: UUID? = nil,
+        extraOrganizationIDs: [UUID] = [],
+        supabaseEnabled: Bool = false,
+        mediaSupabaseUploadEnabled: Bool = false
     ) throws -> (appState: AppState, propertyID: UUID, sessionID: UUID, shots: [ShotMetadata], storageRoot: URL) {
         let storageRoot = try makeTempStorageRoot()
         let defaults = makeDefaultsSuite()
         defaults.set(false, forKey: "scout.backup.automaticEnabled")
+        if supabaseEnabled {
+            defaults.set(true, forKey: "supabase_enabled")
+        }
+        if mediaSupabaseUploadEnabled {
+            defaults.set(true, forKey: "media_supabase_upload_enabled")
+        }
         let localStore = LocalStore(testStorageRootURL: storageRoot)
 
-        let organizationID = UUID()
+        let organizationID = propertyOrganizationID ?? UUID()
         let propertyID = UUID()
         let sessionID = UUID()
 
-        _ = try localStore.createOrganization(Organization(id: organizationID, name: "Org"))
+        for id in Set([organizationID] + extraOrganizationIDs) {
+            _ = try localStore.createOrganization(Organization(id: id, name: "Org"))
+        }
         _ = try localStore.createProperty(
             Property(
                 id: propertyID,
@@ -103,7 +116,7 @@ final class Phase2C07bMediaBackfillTests: XCTestCase {
         )
 
         var metadata = try localStore.loadSessionMetadata(propertyID: propertyID, sessionID: sessionID)
-        metadata.orgID = organizationID
+        metadata.orgID = metadataOrganizationID ?? organizationID
         metadata.shots = uploadStates.enumerated().map { index, state in
             let shotNumber = index + 1
             return makeShot(
@@ -255,6 +268,81 @@ final class Phase2C07bMediaBackfillTests: XCTestCase {
 
         XCTAssertEqual(candidates.map(\.shotID), [fixture.shots[1].shotID])
         XCTAssertEqual(candidates.map(\.uploadState), ["pending"])
+    }
+
+    func testBackfillDiscoveryIncludesSelectedPendingShotWhenLocalPropertyOrgIsStale() async throws {
+        let now = Date()
+        let activeOrganizationID = UUID()
+        let staleOrganizationID = UUID()
+        let fixture = try makeAppStateWithSingleSession(
+            uploadStates: [("pending", 0, now)],
+            propertyOrganizationID: staleOrganizationID,
+            metadataOrganizationID: staleOrganizationID,
+            extraOrganizationIDs: [activeOrganizationID],
+            supabaseEnabled: true,
+            mediaSupabaseUploadEnabled: true
+        )
+        defer {
+            fixture.appState.shutdown()
+            try? FileManager.default.removeItem(at: fixture.storageRoot)
+        }
+
+        await MainActor.run {
+            fixture.appState.selectedPropertyID = fixture.propertyID
+            fixture.appState._debugSetOfflineReplayEnvironmentForTests(
+                activeOrganizationID: activeOrganizationID,
+                ready: true,
+                clientConfigured: true
+            )
+            fixture.appState._debugSetOrganizationContextForTests(
+                memberships: [
+                    ActiveOrganizationMembership(id: activeOrganizationID, name: "Active Org", role: "owner")
+                ],
+                activeOrganizationID: activeOrganizationID,
+                ready: true
+            )
+        }
+
+        let candidates = fixture.appState._debugDiscoverPendingSupabaseMediaBackfillCandidates()
+
+        XCTAssertEqual(candidates.map(\.shotID), [fixture.shots[0].shotID])
+    }
+
+    func testBackfillDiscoveryStillBlocksWrongOrgPendingShotWhenNotActiveContext() async throws {
+        let now = Date()
+        let activeOrganizationID = UUID()
+        let staleOrganizationID = UUID()
+        let fixture = try makeAppStateWithSingleSession(
+            uploadStates: [("pending", 0, now)],
+            propertyOrganizationID: staleOrganizationID,
+            metadataOrganizationID: staleOrganizationID,
+            extraOrganizationIDs: [activeOrganizationID],
+            supabaseEnabled: true,
+            mediaSupabaseUploadEnabled: true
+        )
+        defer {
+            fixture.appState.shutdown()
+            try? FileManager.default.removeItem(at: fixture.storageRoot)
+        }
+
+        await MainActor.run {
+            fixture.appState._debugSetOfflineReplayEnvironmentForTests(
+                activeOrganizationID: activeOrganizationID,
+                ready: true,
+                clientConfigured: true
+            )
+            fixture.appState._debugSetOrganizationContextForTests(
+                memberships: [
+                    ActiveOrganizationMembership(id: activeOrganizationID, name: "Active Org", role: "owner")
+                ],
+                activeOrganizationID: activeOrganizationID,
+                ready: true
+            )
+        }
+
+        let candidates = fixture.appState._debugDiscoverPendingSupabaseMediaBackfillCandidates()
+
+        XCTAssertTrue(candidates.isEmpty)
     }
 
     func testBackfillRunNoOpsWhenNothingIsEligible() async throws {

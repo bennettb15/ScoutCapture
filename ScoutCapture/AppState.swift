@@ -4422,7 +4422,16 @@ final class AppState: ObservableObject {
                isOrganizationContextReady,
                let activeOrganizationID,
                property.orgId != activeOrganizationID {
-                continue
+                guard canUseActiveOrganizationForOperationalMedia(propertyID: property.id) else {
+                    continue
+                }
+                print(
+                    "[SupabaseMediaBackfill] event=org_resolution_override " +
+                    "propertyID=\(property.id.uuidString) " +
+                    "staleOrgID=\(property.orgId?.uuidString ?? "nil") " +
+                    "activeOrganizationID=\(activeOrganizationID.uuidString) " +
+                    "resolvedOrgID=\(activeOrganizationID.uuidString)"
+                )
             }
 
             let sessions = ((try? localStore.fetchSessions(propertyID: property.id)) ?? [])
@@ -6185,11 +6194,39 @@ final class AppState: ObservableObject {
               let shot = metadata.shots.first(where: { $0.shotID == shotID }) else {
             return
         }
-        guard canAccessProperty(propertyID) else {
-            print("[SupabaseMediaUpload] skipped reason=inactiveOrg propertyID=\(propertyID.uuidString)")
+        let property = allProperties.first(where: { $0.id == propertyID }) ??
+            properties.first(where: { $0.id == propertyID })
+        guard canAccessProperty(propertyID) ||
+                canUseActiveOrganizationForOperationalMedia(propertyID: propertyID, sessionID: sessionID) else {
+            print(
+                "[SupabaseMediaUpload] skipped reason=inactiveOrg " +
+                "propertyID=\(propertyID.uuidString) " +
+                "sessionID=\(sessionID.uuidString) " +
+                "propertyOrgID=\(property?.orgId?.uuidString ?? "nil") " +
+                "sessionOrgID=\(metadata.orgID?.uuidString ?? "nil") " +
+                "activeOrganizationID=\(activeOrganizationID?.uuidString ?? "nil")"
+            )
             return
         }
-        let orgID = metadata.orgID ?? properties.first(where: { $0.id == propertyID })?.orgId
+        let resolvedOrgID = resolveOperationalMediaUploadOrgID(
+            propertyID: propertyID,
+            sessionID: sessionID,
+            property: property,
+            metadata: metadata
+        )
+        guard let orgID = resolvedOrgID,
+              canAccessOrganization(orgID) else {
+            print(
+                "[SupabaseMediaUpload] skipped reason=inactiveOrg " +
+                "propertyID=\(propertyID.uuidString) " +
+                "sessionID=\(sessionID.uuidString) " +
+                "propertyOrgID=\(property?.orgId?.uuidString ?? "nil") " +
+                "sessionOrgID=\(metadata.orgID?.uuidString ?? "nil") " +
+                "activeOrganizationID=\(activeOrganizationID?.uuidString ?? "nil") " +
+                "resolvedOrgID=\(resolvedOrgID?.uuidString ?? "nil")"
+            )
+            return
+        }
 
         let localFileURL: URL
         if let resolved = localStore.resolveSessionRelativeFileURL(
@@ -6243,13 +6280,6 @@ final class AppState: ObservableObject {
                     upsert: true
                 )
             )
-
-            guard let orgID else {
-                throw NSError(domain: "ScoutCapture.SupabaseMedia", code: 1, userInfo: [
-                    NSLocalizedDescriptionKey: "Missing orgID for shot \(shotID.uuidString)"
-                ])
-            }
-
             failurePhase = "sessionPrereq"
             try await ensureSupabaseSessionPrerequisites(
                 propertyID: propertyID,
@@ -6309,6 +6339,55 @@ final class AppState: ObservableObject {
                 "error=\(error.localizedDescription)"
             )
         }
+    }
+
+    private func resolveOperationalMediaUploadOrgID(
+        propertyID: UUID,
+        sessionID: UUID,
+        property: Property?,
+        metadata: SessionMetadata
+    ) -> UUID? {
+        if canAccessOrganization(property?.orgId) {
+            return property?.orgId
+        }
+        if canAccessOrganization(metadata.orgID) {
+            return metadata.orgID
+        }
+
+        guard let activeOrganizationID,
+              canUseActiveOrganizationForOperationalMedia(
+                propertyID: propertyID,
+                sessionID: sessionID
+              ) else {
+            return property?.orgId ?? metadata.orgID
+        }
+
+        print(
+            "[SupabaseMediaUpload] event=org_resolution_override " +
+            "propertyID=\(propertyID.uuidString) " +
+            "sessionID=\(sessionID.uuidString) " +
+            "propertyOrgID=\(property?.orgId?.uuidString ?? "nil") " +
+            "sessionOrgID=\(metadata.orgID?.uuidString ?? "nil") " +
+            "activeOrganizationID=\(activeOrganizationID.uuidString) " +
+            "resolvedOrgID=\(activeOrganizationID.uuidString)"
+        )
+        return activeOrganizationID
+    }
+
+    private func canUseActiveOrganizationForOperationalMedia(
+        propertyID: UUID,
+        sessionID: UUID? = nil
+    ) -> Bool {
+        if selectedPropertyID == propertyID {
+            return true
+        }
+        guard currentSession?.propertyID == propertyID else {
+            return false
+        }
+        guard let sessionID else {
+            return true
+        }
+        return currentSession?.id == sessionID
     }
 
     private func performOperationalMediaHydration(
