@@ -506,6 +506,15 @@ final class Phase2C10OfflineReplayTests: XCTestCase {
         )
         XCTAssertEqual(appState._debugLocalDiagnosticsForTests().lastError?.category, .network)
 
+        let preview = AppState.diagnosticsPreviewText(
+            "failure at /private/tmp/secret-file.json with " + String(repeating: "x", count: 180),
+            maxLength: 48
+        )
+        XCTAssertNotNil(preview)
+        XCTAssertLessThanOrEqual(preview?.count ?? 0, 51)
+        XCTAssertTrue(preview?.hasSuffix("...") ?? false)
+        XCTAssertFalse(preview?.contains("/private") ?? true)
+
         appState.clearLocalDiagnostics()
         XCTAssertNil(appState._debugLocalDiagnosticsForTests().lastError)
         XCTAssertEqual(appState._debugLocalDiagnosticsForTests().offlineQueue.totalQueued, 0)

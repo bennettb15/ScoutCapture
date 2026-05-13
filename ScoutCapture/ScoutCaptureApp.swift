@@ -6139,11 +6139,68 @@ private struct PropertySessionsManagerView: View {
     }
 }
 
+private struct DebugQueueDiagnosticSnapshotItem: Identifiable, Equatable {
+    let id: UUID
+    let entityType: String
+    let entityID: String
+    let operation: String
+    let status: String
+    let attemptCount: String
+    let lastAttempt: String
+    let nextAttempt: String
+    let age: String
+    let lastErrorPreview: String
+    let lastErrorFull: String?
+
+    nonisolated init(_ item: AppState.OfflineQueueDiagnosticItem) {
+        id = item.id
+        entityType = item.entityType
+        entityID = item.entityID.uuidString
+        operation = item.operation
+        status = item.status
+        attemptCount = String(item.attemptCount)
+        lastAttempt = formattedDate(item.lastAttemptAt)
+        nextAttempt = formattedDate(item.nextAttemptAt)
+        age = formattedAge(item.ageSeconds)
+        lastErrorPreview = AppState.diagnosticsPreviewText(item.lastError) ?? "none"
+        lastErrorFull = item.lastError
+    }
+}
+
+private struct DebugMediaDiagnosticSnapshotItem: Identifiable, Equatable {
+    let id: UUID
+    let shotID: String
+    let sessionID: String
+    let propertyID: String
+    let uploadState: String
+    let attemptCount: String
+    let localFilename: String
+    let hasStoragePath: String
+    let lastUploadErrorPreview: String
+    let lastUploadErrorFull: String?
+
+    nonisolated init(_ item: AppState.MediaDiagnosticItem) {
+        id = item.id
+        shotID = item.shotID.uuidString
+        sessionID = item.sessionID.uuidString
+        propertyID = item.propertyID.uuidString
+        uploadState = item.uploadState
+        attemptCount = String(item.attemptCount)
+        localFilename = item.localFilename ?? "unknown"
+        hasStoragePath = item.hasStoragePath ? "yes" : "no"
+        lastUploadErrorPreview = AppState.diagnosticsPreviewText(item.lastUploadError) ?? "none"
+        lastUploadErrorFull = item.lastUploadError
+    }
+}
+
 private struct DebugLocalDiagnosticsView: View {
     @EnvironmentObject private var appState: AppState
     @Environment(\.dismiss) private var dismiss
 
     @State private var showClearConfirm: Bool = false
+    @State private var failedQueueItems: [DebugQueueDiagnosticSnapshotItem] = []
+    @State private var retryCappedMediaItems: [DebugMediaDiagnosticSnapshotItem] = []
+    @State private var pendingMediaItems: [DebugMediaDiagnosticSnapshotItem] = []
 
     private var diagnostics: AppState.LocalDiagnosticsState {
         appState.localDiagnostics
@@ -6175,9 +6232,9 @@ private struct DebugLocalDiagnosticsView: View {
                     diagnosticRow("Oldest Failure Age", formattedAge(diagnostics.offlineQueue.oldestFailureAgeSeconds))
                     diagnosticRow("Refreshed", formattedDate(diagnostics.offlineQueue.refreshedAt))
                     NavigationLink {
-                        DebugOfflineQueueItemsView(items: appState.diagnosticsFailedQueueItems())
+                        DebugOfflineQueueItemsView(items: failedQueueItems)
                     } label: {
-                        diagnosticNavigationLabel("Failed Queue Items", count: appState.diagnosticsFailedQueueItems().count)
+                        diagnosticNavigationLabel("Failed Queue Items", count: failedQueueItems.count)
                     }
                 }
 
@@ -6192,18 +6249,18 @@ private struct DebugLocalDiagnosticsView: View {
                     NavigationLink {
                         DebugMediaDiagnosticItemsView(
                             title: "Retry-Capped Media",
-                            items: appState.diagnosticsRetryCappedMediaItems()
+                            items: retryCappedMediaItems
                         )
                     } label: {
-                        diagnosticNavigationLabel("Retry-Capped Media", count: appState.diagnosticsRetryCappedMediaItems().count)
+                        diagnosticNavigationLabel("Retry-Capped Media", count: retryCappedMediaItems.count)
                     }
                     NavigationLink {
                         DebugMediaDiagnosticItemsView(
                             title: "Pending Media",
-                            items: appState.diagnosticsPendingMediaItems()
+                            items: pendingMediaItems
                         )
                     } label: {
-                        diagnosticNavigationLabel("Pending Media Items", count: appState.diagnosticsPendingMediaItems().count)
+                        diagnosticNavigationLabel("Pending Media Items", count: pendingMediaItems.count)
                     }
                 }
 
@@ -6280,6 +6337,9 @@ private struct DebugLocalDiagnosticsView: View {
                 }
             }
         }
+        .task {
+            refreshDiagnosticDetailSnapshots()
+        }
         .alert("Clear Local Diagnostics?", isPresented: $showClearConfirm) {
             Button("Clear", role: .destructive) {
                 appState.clearLocalDiagnostics()
@@ -6288,6 +6348,12 @@ private struct DebugLocalDiagnosticsView: View {
         } message: {
             Text("Only local diagnostic counters and the last sanitized error will be reset. Queues, files, Supabase data, exports, and app records are not changed.")
         }
+    }
+
+    private func refreshDiagnosticDetailSnapshots() {
+        failedQueueItems = appState.diagnosticsFailedQueueItems().map(DebugQueueDiagnosticSnapshotItem.init)
+        retryCappedMediaItems = appState.diagnosticsRetryCappedMediaItems().map(DebugMediaDiagnosticSnapshotItem.init)
+        pendingMediaItems = appState.diagnosticsPendingMediaItems().map(DebugMediaDiagnosticSnapshotItem.init)
     }
 
     @ViewBuilder
@@ -6356,7 +6422,7 @@ private struct DebugLocalDiagnosticsView: View {
 }
 
 private struct DebugOfflineQueueItemsView: View {
-    let items: [AppState.OfflineQueueDiagnosticItem]
+    let items: [DebugQueueDiagnosticSnapshotItem]
 
     var body: some View {
         List {
@@ -6375,19 +6441,24 @@ private struct DebugOfflineQueueItemsView: View {
             } else {
                 Section("Failed Items") {
                     ForEach(items) { item in
-                        VStack(alignment: .leading, spacing: 8) {
-                            diagnosticRow("Entity Type", item.entityType)
-                            diagnosticRow("Entity ID", item.entityID.uuidString)
-                            diagnosticRow("Operation", item.operation)
-                            diagnosticRow("Status", item.status)
-                            diagnosticRow("Attempt Count", String(item.attemptCount))
-                            diagnosticRow("Last Attempt", formattedDate(item.lastAttemptAt))
-                            diagnosticRow("Next Attempt", formattedDate(item.nextAttemptAt))
-                            diagnosticRow("Age", formattedAge(item.ageSeconds))
-                            if let lastError = item.lastError {
-                                diagnosticBlock("Last Error", lastError)
-                            } else {
-                                diagnosticRow("Last Error", "none")
+                        NavigationLink {
+                            DebugOfflineQueueItemDetailView(item: item)
+                        } label: {
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("\(item.entityType) / \(item.operation)")
+                                    .font(.system(size: 14, weight: .semibold))
+                                    .foregroundStyle(.primary)
+                                Text(item.entityID)
+                                    .font(.system(size: 12, weight: .medium, design: .monospaced))
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(1)
+                                Text("attempts \(item.attemptCount) | next \(item.nextAttempt)")
+                                    .font(.system(size: 12, weight: .medium))
+                                    .foregroundStyle(.secondary)
+                                Text(item.lastErrorPreview)
+                                    .font(.system(size: 12, weight: .regular, design: .monospaced))
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(2)
                             }
                         }
                         .padding(.vertical, 6)
@@ -6402,7 +6473,7 @@ private struct DebugOfflineQueueItemsView: View {
 
 private struct DebugMediaDiagnosticItemsView: View {
     let title: String
-    let items: [AppState.MediaDiagnosticItem]
+    let items: [DebugMediaDiagnosticSnapshotItem]
 
     var body: some View {
         List {
@@ -6421,18 +6492,25 @@ private struct DebugMediaDiagnosticItemsView: View {
             } else {
                 Section("Media Items") {
                     ForEach(items) { item in
-                        VStack(alignment: .leading, spacing: 8) {
-                            diagnosticRow("Shot ID", item.shotID.uuidString)
-                            diagnosticRow("Session ID", item.sessionID.uuidString)
-                            diagnosticRow("Property ID", item.propertyID.uuidString)
-                            diagnosticRow("Upload State", item.uploadState)
-                            diagnosticRow("Attempt Count", String(item.attemptCount))
-                            diagnosticRow("Local Filename", item.localFilename ?? "unknown")
-                            diagnosticRow("Storage Path Exists", item.hasStoragePath ? "yes" : "no")
-                            if let lastUploadError = item.lastUploadError {
-                                diagnosticBlock("Last Upload Error", lastUploadError)
-                            } else {
-                                diagnosticRow("Last Upload Error", "none")
+                        NavigationLink {
+                            DebugMediaDiagnosticItemDetailView(item: item)
+                        } label: {
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text(item.localFilename)
+                                    .font(.system(size: 14, weight: .semibold))
+                                    .foregroundStyle(.primary)
+                                    .lineLimit(1)
+                                Text(item.shotID)
+                                    .font(.system(size: 12, weight: .medium, design: .monospaced))
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(1)
+                                Text("state \(item.uploadState) | attempts \(item.attemptCount) | storage \(item.hasStoragePath)")
+                                    .font(.system(size: 12, weight: .medium))
+                                    .foregroundStyle(.secondary)
+                                Text(item.lastUploadErrorPreview)
+                                    .font(.system(size: 12, weight: .regular, design: .monospaced))
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(2)
                             }
                         }
                         .padding(.vertical, 6)
@@ -6441,6 +6519,67 @@ private struct DebugMediaDiagnosticItemsView: View {
             }
         }
         .navigationTitle(title)
+        .navigationBarTitleDisplayMode(.inline)
+    }
+}
+
+private struct DebugOfflineQueueItemDetailView: View {
+    let item: DebugQueueDiagnosticSnapshotItem
+
+    var body: some View {
+        List {
+            Section("Queue Item") {
+                diagnosticRow("Entity Type", item.entityType)
+                diagnosticRow("Entity ID", item.entityID)
+                diagnosticRow("Operation", item.operation)
+                diagnosticRow("Status", item.status)
+                diagnosticRow("Attempt Count", item.attemptCount)
+                diagnosticRow("Last Attempt", item.lastAttempt)
+                diagnosticRow("Next Attempt", item.nextAttempt)
+                diagnosticRow("Age", item.age)
+            }
+
+            Section("Last Error") {
+                if let error = item.lastErrorFull {
+                    diagnosticBlock("Sanitized Error", error)
+                } else {
+                    Text("No last error recorded.")
+                        .font(.system(size: 14, weight: .medium))
+                        .foregroundStyle(.secondary)
+                }
+            }
+        }
+        .navigationTitle("Queue Item")
+        .navigationBarTitleDisplayMode(.inline)
+    }
+}
+
+private struct DebugMediaDiagnosticItemDetailView: View {
+    let item: DebugMediaDiagnosticSnapshotItem
+
+    var body: some View {
+        List {
+            Section("Media Item") {
+                diagnosticRow("Shot ID", item.shotID)
+                diagnosticRow("Session ID", item.sessionID)
+                diagnosticRow("Property ID", item.propertyID)
+                diagnosticRow("Upload State", item.uploadState)
+                diagnosticRow("Attempt Count", item.attemptCount)
+                diagnosticRow("Local Filename", item.localFilename)
+                diagnosticRow("Storage Path Exists", item.hasStoragePath)
+            }
+
+            Section("Last Upload Error") {
+                if let error = item.lastUploadErrorFull {
+                    diagnosticBlock("Sanitized Error", error)
+                } else {
+                    Text("No last upload error recorded.")
+                        .font(.system(size: 14, weight: .medium))
+                        .foregroundStyle(.secondary)
+                }
+            }
+        }
+        .navigationTitle("Media Item")
         .navigationBarTitleDisplayMode(.inline)
     }
 }
@@ -6473,12 +6612,12 @@ private func diagnosticBlock(_ label: String, _ value: String) -> some View {
     }
 }
 
-private func formattedDate(_ date: Date?) -> String {
+nonisolated private func formattedDate(_ date: Date?) -> String {
     guard let date else { return "none" }
     return date.formatted(date: .abbreviated, time: .standard)
 }
 
-private func formattedAge(_ seconds: TimeInterval?) -> String {
+nonisolated private func formattedAge(_ seconds: TimeInterval?) -> String {
     guard let seconds else { return "unknown" }
     let clamped = max(0, Int(seconds.rounded()))
     let days = clamped / 86_400

@@ -6298,6 +6298,17 @@ final class AppState: ObservableObject {
         return String(redactedPathTokens.prefix(maxLength))
     }
 
+    nonisolated static func diagnosticsPreviewText(_ value: String?, maxLength: Int = 96) -> String? {
+        guard let value else { return nil }
+        let sanitized = sanitizedDiagnosticsErrorMessage(value)
+            .replacingOccurrences(of: "\n", with: " ")
+            .replacingOccurrences(of: "\t", with: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !sanitized.isEmpty else { return nil }
+        guard sanitized.count > maxLength else { return sanitized }
+        return String(sanitized.prefix(max(0, maxLength))) + "..."
+    }
+
     private func performQueuedPropertyRemoteWrite(
         property: Property,
         payload: SupabasePropertyPayload
