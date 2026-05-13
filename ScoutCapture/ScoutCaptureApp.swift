@@ -6156,12 +6156,14 @@ private struct DebugToolsView: View {
     @State private var isRunningMigrationStep2BSlice2A: Bool = false
     @State private var isRunningMigrationStep2BSlice2BReadiness: Bool = false
     @State private var isRunningMigrationStep2BSlice2BFinalize: Bool = false
+    @State private var isRunningCaptureProfileMaintenanceBackfill: Bool = false
     @State private var migrationPreflightStatusMessage: String? = nil
     @State private var migrationStep2AStatusMessage: String? = nil
     @State private var migrationStep2BSlice1StatusMessage: String? = nil
     @State private var migrationStep2BSlice2AStatusMessage: String? = nil
     @State private var migrationStep2BSlice2BReadinessStatusMessage: String? = nil
     @State private var migrationStep2BSlice2BFinalizeStatusMessage: String? = nil
+    @State private var captureProfileMaintenanceBackfillStatusMessage: String? = nil
     @State private var isRunningForegroundPropertyRefresh: Bool = false
     @State private var foregroundPropertyRefreshStatusMessage: String? = nil
     @State private var migrationPreflightErrorMessage: String? = nil
@@ -6169,6 +6171,7 @@ private struct DebugToolsView: View {
     @State private var preflightReportText: String = ""
     @State private var showPreflightReportSheet: Bool = false
     @State private var showLocalOrgRepairSheet: Bool = false
+    @State private var showCaptureProfileMaintenanceBackfillConfirm: Bool = false
 
     private var buttonFill: Color {
         colorScheme == .light ? Color.white.opacity(0.90) : Color.black.opacity(0.55)
@@ -6475,6 +6478,21 @@ private struct DebugToolsView: View {
                         }
 
                         debugActionCard(
+                            title: "Backfill Capture Profiles",
+                            detail: "Owner/manager maintenance action. Scans local active-org properties and sessions, fills only missing Supabase capture_profile values, and ensures missing remote session rows when a local session snapshot exists. Does NOT overwrite non-null Supabase values.",
+                            role: .normal,
+                            buttonTitle: isRunningCaptureProfileMaintenanceBackfill ? "Running Backfill..." : "Run Backfill"
+                        ) {
+                            guard !isRunningCaptureProfileMaintenanceBackfill else { return }
+                            guard appState.canRecoverDeletedPropertiesInActiveOrganization else {
+                                migrationPreflightErrorMessage = "Only organization owners and managers can run capture profile backfill."
+                                showMigrationPreflightError = true
+                                return
+                            }
+                            showCaptureProfileMaintenanceBackfillConfirm = true
+                        }
+
+                        debugActionCard(
                             title: "Run Foreground Property Refresh",
                             detail: "Manually runs AppState.refreshProperties() so the new foreground remote property-list path can be tested directly without changing the normal hub startup flow.",
                             role: .normal,
@@ -6527,6 +6545,13 @@ private struct DebugToolsView: View {
 
                         if let migrationStep2BSlice2BFinalizeStatusMessage {
                             Text(migrationStep2BSlice2BFinalizeStatusMessage)
+                                .font(.system(size: 13, weight: .medium))
+                                .foregroundColor(.secondary)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+
+                        if let captureProfileMaintenanceBackfillStatusMessage {
+                            Text(captureProfileMaintenanceBackfillStatusMessage)
                                 .font(.system(size: 13, weight: .medium))
                                 .foregroundColor(.secondary)
                                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -6588,6 +6613,24 @@ private struct DebugToolsView: View {
         } message: {
             Text("This clears local UI/image cache only and reloads from local SCOUT storage. It does not delete Originals, Stamped, session.json, or iCloud Drive data.")
         }
+        .alert("Backfill Capture Profiles?", isPresented: $showCaptureProfileMaintenanceBackfillConfirm) {
+            Button("Run Backfill") {
+                guard !isRunningCaptureProfileMaintenanceBackfill else { return }
+                isRunningCaptureProfileMaintenanceBackfill = true
+                captureProfileMaintenanceBackfillStatusMessage = nil
+                Task {
+                    let result = await appState.runCaptureProfileMaintenanceBackfill()
+                    await MainActor.run {
+                        isRunningCaptureProfileMaintenanceBackfill = false
+                        captureProfileMaintenanceBackfillStatusMessage =
+                            "Capture profile backfill complete. Scanned properties: \(result.propertiesScanned)/\(result.localPropertiesFound), sessions: \(result.sessionsScanned), remote checks: \(result.remotePropertiesChecked) properties / \(result.remoteSessionsChecked) sessions. Remote active properties: \(result.remoteActivePropertyCount), stale org reconciled: \(result.staleOrgReconciledCount), true org mismatches: \(result.trueOrgMismatchCount). Filled: \(result.propertyProfilesFilled) properties, \(result.sessionProfilesFilled) sessions. Ensured sessions: \(result.sessionsEnsured). Skipped: \(result.skipped), failed: \(result.failed). \(captureProfileBackfillSummaryHint(for: result))"
+                    }
+                }
+            }
+            Button("Cancel", role: .cancel) { }
+        } message: {
+            Text("This fills only missing Supabase capture_profile values for the active organization. Existing non-null Supabase values are preserved.")
+        }
         .alert("Migration Preflight Failed", isPresented: $showMigrationPreflightError) {
             Button("OK", role: .cancel) { }
         } message: {
@@ -6617,6 +6660,26 @@ private struct DebugToolsView: View {
             DebugLocalOrgRepairView()
                 .environmentObject(appState)
         }
+    }
+
+    private func captureProfileBackfillSummaryHint(
+        for result: AppState.CaptureProfileMaintenanceBackfillResult
+    ) -> String {
+        if result.localPropertiesFound == 0 {
+            return "No local properties were found."
+        }
+        if result.propertiesScanned == 0 {
+            return "No properties were eligible after org/deleted/archive/access filters."
+        }
+        if result.sessionsScanned == 0 {
+            return "No local sessions were found for eligible properties."
+        }
+        if result.propertyProfilesFilled == 0 &&
+            result.sessionProfilesFilled == 0 &&
+            result.failed == 0 {
+            return "Nothing needed backfill or local profile values were unknown."
+        }
+        return ""
     }
 
     private enum DebugRole {

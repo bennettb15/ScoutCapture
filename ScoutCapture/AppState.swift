@@ -216,6 +216,55 @@ final class AppState: ObservableObject {
     typealias PropertyRemoteInsertOverride = (Property) async throws -> Void
     typealias SessionShadowWriteOverride = (Property, Session, SessionMetadata) async throws -> Void
     typealias ShotMetadataWriteOverride = (UUID, UUID, SupabaseShotRichMetadataPayload, Bool) async throws -> Void
+    struct CaptureProfileMaintenanceBackfillResult: Equatable {
+        var localPropertiesFound: Int = 0
+        var propertiesScanned: Int = 0
+        var sessionsScanned: Int = 0
+        var remotePropertiesChecked: Int = 0
+        var remoteSessionsChecked: Int = 0
+        var remoteActivePropertyCount: Int = 0
+        var propertyProfilesFilled: Int = 0
+        var sessionProfilesFilled: Int = 0
+        var sessionsEnsured: Int = 0
+        var skipped: Int = 0
+        var failed: Int = 0
+        var staleOrgReconciledCount: Int = 0
+        var trueOrgMismatchCount: Int = 0
+        var propertiesFilteredDeleted: Int = 0
+        var propertiesFilteredArchived: Int = 0
+        var propertiesFilteredOrgMismatch: Int = 0
+        var propertiesFilteredInaccessible: Int = 0
+        var sessionMetadataMissing: Int = 0
+        var sessionProfileUnknown: Int = 0
+    }
+
+    struct CaptureProfileBackfillRemoteState {
+        let propertyRowExists: Bool
+        let propertyCaptureProfile: CaptureProfile?
+        let sessionRowExists: Bool
+        let sessionCaptureProfile: CaptureProfile?
+
+        init(
+            propertyRowExists: Bool,
+            propertyCaptureProfile: CaptureProfile?,
+            sessionRowExists: Bool = false,
+            sessionCaptureProfile: CaptureProfile? = nil
+        ) {
+            self.propertyRowExists = propertyRowExists
+            self.propertyCaptureProfile = propertyCaptureProfile
+            self.sessionRowExists = sessionRowExists
+            self.sessionCaptureProfile = sessionCaptureProfile
+        }
+    }
+    typealias CaptureProfileBackfillFetchOverride = (UUID, UUID, UUID?) async throws -> CaptureProfileBackfillRemoteState
+    typealias CaptureProfileRemotePropertyIDsFetchOverride = (UUID) async throws -> Set<UUID>
+    typealias CaptureProfileBackfillEnsureOverride = (UUID, UUID, UUID, CaptureProfile) async throws -> Void
+    typealias CaptureProfileBackfillWriteOverride = (UUID, UUID, UUID?, CaptureProfile?, CaptureProfile?) async throws -> Void
+    private enum CaptureProfileSessionProfileScanState {
+        case known(CaptureProfile)
+        case missingMetadata
+        case unknownProfile
+    }
 #if DEBUG
     private typealias SyncDeltaFetchOverride = (
         UUID,
@@ -1871,6 +1920,10 @@ final class AppState: ObservableObject {
     private let propertyRemoteInsertOverride: PropertyRemoteInsertOverride?
     private let sessionShadowWriteOverride: SessionShadowWriteOverride?
     private let shotMetadataWriteOverride: ShotMetadataWriteOverride?
+    private let captureProfileBackfillFetchOverride: CaptureProfileBackfillFetchOverride?
+    private let captureProfileRemotePropertyIDsFetchOverride: CaptureProfileRemotePropertyIDsFetchOverride?
+    private let captureProfileBackfillEnsureOverride: CaptureProfileBackfillEnsureOverride?
+    private let captureProfileBackfillWriteOverride: CaptureProfileBackfillWriteOverride?
     private let selectedPropertyDefaultsKey = "scoutcapture.selectedPropertyID"
     private let activeOrganizationDefaultsKeyPrefix = "scoutcapture.activeOrganizationID"
     private let propertyActivationTimestampsDefaultsKey = "scoutcapture.propertyActivationTimestamps.v1"
@@ -1892,6 +1945,7 @@ final class AppState: ObservableObject {
     private var lastHubFetchLogAt: Date?
     private var lastSessionOffloadLogSignature: String?
     private var lastSessionOffloadLogAt: Date?
+    private var captureProfileBackfillLoggedKeys: Set<String> = []
     private var didLoad = false
     private var cancellables: Set<AnyCancellable> = []
     private var liveSyncTimer: Timer?
@@ -2207,6 +2261,10 @@ final class AppState: ObservableObject {
         propertyRemoteInsertOverride: PropertyRemoteInsertOverride? = nil,
         sessionShadowWriteOverride: SessionShadowWriteOverride? = nil,
         shotMetadataWriteOverride: ShotMetadataWriteOverride? = nil,
+        captureProfileBackfillFetchOverride: CaptureProfileBackfillFetchOverride? = nil,
+        captureProfileRemotePropertyIDsFetchOverride: CaptureProfileRemotePropertyIDsFetchOverride? = nil,
+        captureProfileBackfillEnsureOverride: CaptureProfileBackfillEnsureOverride? = nil,
+        captureProfileBackfillWriteOverride: CaptureProfileBackfillWriteOverride? = nil,
         disableCloudBackupForTests: Bool = false
     ) {
         self.injectedLocalStore = localStore
@@ -2225,6 +2283,10 @@ final class AppState: ObservableObject {
         self.propertyRemoteInsertOverride = propertyRemoteInsertOverride
         self.sessionShadowWriteOverride = sessionShadowWriteOverride
         self.shotMetadataWriteOverride = shotMetadataWriteOverride
+        self.captureProfileBackfillFetchOverride = captureProfileBackfillFetchOverride
+        self.captureProfileRemotePropertyIDsFetchOverride = captureProfileRemotePropertyIDsFetchOverride
+        self.captureProfileBackfillEnsureOverride = captureProfileBackfillEnsureOverride
+        self.captureProfileBackfillWriteOverride = captureProfileBackfillWriteOverride
         self.supabaseConfiguration = AppState.loadSupabaseConfiguration()
         self.backendFeatureFlags = BackendFeatureFlags.load(userDefaults: userDefaults)
 
@@ -7173,6 +7235,34 @@ final class AppState: ObservableObject {
             .eq("id", value: propertyID.uuidString.lowercased())
             .eq("org_id", value: orgID.uuidString.lowercased())
             .execute()
+    }
+
+    private func backfillPropertyCaptureProfileInSupabase(
+        propertyID: UUID,
+        orgID: UUID,
+        profile: CaptureProfile
+    ) async throws -> SupabaseCaptureProfileUpdateResult {
+        guard let client = supabaseClient else {
+            throw NSError(domain: "ScoutCapture.CaptureProfileSync", code: 0, userInfo: [
+                NSLocalizedDescriptionKey: "Missing Supabase client for property capture_profile backfill."
+            ])
+        }
+        let payload = makeCaptureProfileUpdatePayload(profile: profile)
+        let rows = try await client
+            .from("properties")
+            .update(payload, returning: .representation)
+            .eq("id", value: propertyID.uuidString.lowercased())
+            .eq("org_id", value: orgID.uuidString.lowercased())
+            .execute()
+            .value as [SupabaseCaptureProfileUpdateResult]
+        return try validateCaptureProfileUpdateResult(
+            rows,
+            table: "properties",
+            id: propertyID,
+            orgID: orgID,
+            propertyID: nil,
+            profile: profile
+        )
     }
 
     private func updateSessionCaptureProfileInSupabase(
@@ -13305,6 +13395,809 @@ final class AppState: ObservableObject {
             )
             return false
         }
+    }
+
+    @discardableResult
+    func backfillCaptureProfilesIfMissing(
+        propertyID: UUID,
+        sessionID: UUID?,
+        propertyProfile: CaptureProfile?,
+        sessionProfile: CaptureProfile?
+    ) async -> Bool {
+        if propertyProfile == nil && sessionProfile == nil {
+            logCaptureProfileBackfillOnce(
+                key: "unknown|\(propertyID.uuidString)|\(sessionID?.uuidString ?? "nil")",
+                message:
+                    "[CaptureProfileSync] event=backfill_skipped reason=local_value_unknown " +
+                    "propertyID=\(propertyID.uuidString) " +
+                    "sessionID=\(sessionID?.uuidString ?? "nil")"
+            )
+            return false
+        }
+        guard canAccessProperty(propertyID) || selectedPropertyID == propertyID else {
+            return false
+        }
+        guard let property = allProperties.first(where: { $0.id == propertyID }) ??
+                properties.first(where: { $0.id == propertyID }),
+              let orgID = resolveCaptureProfileOrgID(property: property, propertyID: propertyID) else {
+            return false
+        }
+
+        let canAttemptRemote = captureProfileBackfillFetchOverride != nil ||
+            remoteMutationPathAvailable(for: orgID)
+        guard canAttemptRemote else { return false }
+
+        do {
+            let remoteState: CaptureProfileBackfillRemoteState
+            if let captureProfileBackfillFetchOverride {
+                remoteState = try await captureProfileBackfillFetchOverride(orgID, propertyID, sessionID)
+            } else {
+                remoteState = try await fetchCaptureProfileBackfillRemoteState(
+                    orgID: orgID,
+                    propertyID: propertyID,
+                    sessionID: sessionID
+                )
+            }
+
+            let propertyProfileToWrite: CaptureProfile?
+            if let propertyProfile {
+                if !remoteState.propertyRowExists {
+                    logCaptureProfileBackfillOnce(
+                        key: "property-missing|\(propertyID.uuidString)",
+                        message:
+                            "[CaptureProfileSync] event=backfill_property_profile_skipped reason=remote_row_missing " +
+                            "propertyID=\(propertyID.uuidString) " +
+                            "orgID=\(orgID.uuidString) " +
+                            "captureProfile=\(propertyProfile.rawValue)"
+                    )
+                    propertyProfileToWrite = nil
+                } else if let remoteProfile = remoteState.propertyCaptureProfile {
+                    logCaptureProfileBackfillOnce(
+                        key: "property-nonnull|\(propertyID.uuidString)|\(remoteProfile.rawValue)",
+                        message:
+                            "[CaptureProfileSync] event=backfill_property_profile_skipped reason=remote_already_non_null " +
+                            "propertyID=\(propertyID.uuidString) " +
+                            "orgID=\(orgID.uuidString) " +
+                            "remoteCaptureProfile=\(remoteProfile.rawValue) " +
+                            "localCaptureProfile=\(propertyProfile.rawValue)"
+                    )
+                    propertyProfileToWrite = nil
+                } else {
+                    propertyProfileToWrite = propertyProfile
+                }
+            } else {
+                logCaptureProfileBackfillOnce(
+                    key: "property-unknown|\(propertyID.uuidString)",
+                    message:
+                        "[CaptureProfileSync] event=backfill_property_profile_skipped reason=local_value_unknown " +
+                        "propertyID=\(propertyID.uuidString) " +
+                        "orgID=\(orgID.uuidString)"
+                )
+                propertyProfileToWrite = nil
+            }
+
+            let sessionProfileToWrite: CaptureProfile?
+            var sessionEnsureProfile: CaptureProfile?
+            if let sessionID {
+                if let sessionProfile {
+                    if !remoteState.sessionRowExists {
+                        sessionEnsureProfile = sessionProfile
+                        sessionProfileToWrite = sessionProfile
+                    } else if let remoteProfile = remoteState.sessionCaptureProfile {
+                        logCaptureProfileBackfillOnce(
+                            key: "session-nonnull|\(sessionID.uuidString)|\(remoteProfile.rawValue)",
+                            message:
+                                "[CaptureProfileSync] event=backfill_session_profile_skipped reason=remote_already_non_null " +
+                                "propertyID=\(propertyID.uuidString) " +
+                                "sessionID=\(sessionID.uuidString) " +
+                                "orgID=\(orgID.uuidString) " +
+                                "remoteCaptureProfile=\(remoteProfile.rawValue) " +
+                                "localCaptureProfile=\(sessionProfile.rawValue)"
+                        )
+                        sessionProfileToWrite = nil
+                    } else {
+                        sessionProfileToWrite = sessionProfile
+                    }
+                } else {
+                    logCaptureProfileBackfillOnce(
+                        key: "session-unknown|\(sessionID.uuidString)",
+                        message:
+                            "[CaptureProfileSync] event=backfill_session_profile_skipped reason=local_value_unknown " +
+                            "propertyID=\(propertyID.uuidString) " +
+                            "sessionID=\(sessionID.uuidString) " +
+                            "orgID=\(orgID.uuidString)"
+                    )
+                    sessionProfileToWrite = nil
+                }
+            } else {
+                sessionProfileToWrite = nil
+            }
+
+            guard propertyProfileToWrite != nil || sessionProfileToWrite != nil else {
+                return false
+            }
+
+            if let propertyProfileToWrite {
+                print(
+                    "[CaptureProfileSync] event=backfill_property_profile_attempt " +
+                    "propertyID=\(propertyID.uuidString) " +
+                    "orgID=\(orgID.uuidString) " +
+                    "captureProfile=\(propertyProfileToWrite.rawValue)"
+                )
+            }
+            if let sessionID, let sessionProfileToWrite {
+                print(
+                    "[CaptureProfileSync] event=backfill_session_profile_attempt " +
+                    "propertyID=\(propertyID.uuidString) " +
+                    "sessionID=\(sessionID.uuidString) " +
+                    "orgID=\(orgID.uuidString) " +
+                    "captureProfile=\(sessionProfileToWrite.rawValue)"
+                )
+            }
+
+            if let sessionID, let sessionEnsureProfile {
+                do {
+                    print(
+                        "[CaptureProfileSync] event=backfill_session_profile_ensure_attempt " +
+                        "propertyID=\(propertyID.uuidString) " +
+                        "sessionID=\(sessionID.uuidString) " +
+                        "orgID=\(orgID.uuidString) " +
+                        "captureProfile=\(sessionEnsureProfile.rawValue)"
+                    )
+                    if let captureProfileBackfillEnsureOverride {
+                        try await captureProfileBackfillEnsureOverride(
+                            orgID,
+                            propertyID,
+                            sessionID,
+                            sessionEnsureProfile
+                        )
+                    } else {
+                        let metadata = try localStore.loadSessionMetadata(
+                            propertyID: propertyID,
+                            sessionID: sessionID
+                        )
+                        let localSessions = (try? localStore.fetchSessionsForCacheBuild(propertyID: propertyID)) ?? []
+                        let baseSession = localSessions.first(where: { $0.id == sessionID }) ??
+                            (currentSession?.id == sessionID ? currentSession : nil)
+                        guard let baseSession else {
+                            throw NSError(domain: "ScoutCapture.CaptureProfileSync", code: 6, userInfo: [
+                                NSLocalizedDescriptionKey: "Missing local session for capture_profile backfill ensure."
+                            ])
+                        }
+                        let ensureMetadata = sessionEnsureMetadataForCaptureProfileSync(
+                            metadata: metadata,
+                            session: baseSession,
+                            profile: sessionEnsureProfile
+                        )
+                        try await ensureSupabaseSessionPrerequisites(
+                            propertyID: propertyID,
+                            sessionID: sessionID,
+                            metadata: ensureMetadata,
+                            orgID: orgID
+                        )
+                    }
+                    print(
+                        "[CaptureProfileSync] event=backfill_session_profile_ensure_success " +
+                        "propertyID=\(propertyID.uuidString) " +
+                        "sessionID=\(sessionID.uuidString) " +
+                        "orgID=\(orgID.uuidString) " +
+                        "captureProfile=\(sessionEnsureProfile.rawValue)"
+                    )
+                } catch {
+                    print(
+                        "[CaptureProfileSync] event=backfill_session_profile_failed " +
+                        "propertyID=\(propertyID.uuidString) " +
+                        "sessionID=\(sessionID.uuidString) " +
+                        "orgID=\(orgID.uuidString) " +
+                        "captureProfile=\(sessionEnsureProfile.rawValue) " +
+                        "error=\(error.localizedDescription)"
+                    )
+                    throw error
+                }
+            }
+
+            if let captureProfileBackfillWriteOverride {
+                try await captureProfileBackfillWriteOverride(
+                    orgID,
+                    propertyID,
+                    sessionID,
+                    propertyProfileToWrite,
+                    sessionProfileToWrite
+                )
+            } else {
+                if let propertyProfileToWrite {
+                    do {
+                        _ = try await backfillPropertyCaptureProfileInSupabase(
+                            propertyID: propertyID,
+                            orgID: orgID,
+                            profile: propertyProfileToWrite
+                        )
+                    } catch {
+                        print(
+                            "[CaptureProfileSync] event=backfill_property_profile_failed " +
+                            "propertyID=\(propertyID.uuidString) " +
+                            "orgID=\(orgID.uuidString) " +
+                            "captureProfile=\(propertyProfileToWrite.rawValue) " +
+                            "error=\(error.localizedDescription)"
+                        )
+                        throw error
+                    }
+                }
+                if let sessionID, let sessionProfileToWrite {
+                    do {
+                        _ = try await updateSessionCaptureProfileInSupabase(
+                            sessionID: sessionID,
+                            propertyID: propertyID,
+                            orgID: orgID,
+                            profile: sessionProfileToWrite
+                        )
+                    } catch {
+                        print(
+                            "[CaptureProfileSync] event=backfill_session_profile_failed " +
+                            "propertyID=\(propertyID.uuidString) " +
+                            "sessionID=\(sessionID.uuidString) " +
+                            "orgID=\(orgID.uuidString) " +
+                            "captureProfile=\(sessionProfileToWrite.rawValue) " +
+                            "error=\(error.localizedDescription)"
+                        )
+                        throw error
+                    }
+                }
+            }
+
+            if let propertyProfileToWrite {
+                logCaptureProfileBackfillOnce(
+                    key: "property-success|\(propertyID.uuidString)|\(propertyProfileToWrite.rawValue)",
+                    message:
+                    "[CaptureProfileSync] event=backfill_property_profile_success " +
+                    "propertyID=\(propertyID.uuidString) " +
+                    "orgID=\(orgID.uuidString) " +
+                    "captureProfile=\(propertyProfileToWrite.rawValue) " +
+                    "verifiedCaptureProfile=\(propertyProfileToWrite.rawValue) " +
+                    "affectedRows=1"
+                )
+            }
+            if let sessionID, let sessionProfileToWrite {
+                logCaptureProfileBackfillOnce(
+                    key: "session-success|\(sessionID.uuidString)|\(sessionProfileToWrite.rawValue)",
+                    message:
+                    "[CaptureProfileSync] event=backfill_session_profile_success " +
+                    "propertyID=\(propertyID.uuidString) " +
+                    "sessionID=\(sessionID.uuidString) " +
+                    "orgID=\(orgID.uuidString) " +
+                    "captureProfile=\(sessionProfileToWrite.rawValue) " +
+                    "verifiedCaptureProfile=\(sessionProfileToWrite.rawValue) " +
+                    "affectedRows=1"
+                )
+            }
+            return true
+        } catch {
+            print(
+                "[CaptureProfileSync] event=backfill_failed " +
+                "propertyID=\(propertyID.uuidString) " +
+                "sessionID=\(sessionID?.uuidString ?? "nil") " +
+                "orgID=\(orgID.uuidString) " +
+                "error=\(error.localizedDescription)"
+            )
+            return false
+        }
+    }
+
+    func runCaptureProfileMaintenanceBackfill() async -> CaptureProfileMaintenanceBackfillResult {
+        var result = CaptureProfileMaintenanceBackfillResult()
+        guard canRecoverDeletedPropertiesInActiveOrganization,
+              let activeOrganizationID else {
+            print(
+                "[CaptureProfileSync] event=maintenance_backfill_scan " +
+                "reason=active_org_missing_or_not_authorized " +
+                "localPropertiesFound=0 propertiesScanned=0 sessionsScanned=0 " +
+                "remotePropertiesChecked=0 remoteSessionsChecked=0"
+            )
+            print("[CaptureProfileSync] event=maintenance_backfill_complete reason=not_authorized")
+            result.failed += 1
+            return result
+        }
+        let canAttemptRemote = captureProfileBackfillFetchOverride != nil ||
+            remoteMutationPathAvailable(for: activeOrganizationID)
+        guard canAttemptRemote else {
+            print(
+                "[CaptureProfileSync] event=maintenance_backfill_scan " +
+                "reason=remote_unavailable " +
+                "orgID=\(activeOrganizationID.uuidString) " +
+                "localPropertiesFound=0 propertiesScanned=0 sessionsScanned=0 " +
+                "remotePropertiesChecked=0 remoteSessionsChecked=0"
+            )
+            print(
+                "[CaptureProfileSync] event=maintenance_backfill_complete reason=remote_unavailable " +
+                "orgID=\(activeOrganizationID.uuidString)"
+            )
+            result.failed += 1
+            return result
+        }
+
+        print(
+            "[CaptureProfileSync] event=maintenance_backfill_start " +
+            "orgID=\(activeOrganizationID.uuidString)"
+        )
+
+        let remoteActivePropertyIDs: Set<UUID>
+        do {
+            remoteActivePropertyIDs = try await fetchActiveRemotePropertyIDsForCaptureProfileMaintenance(
+                orgID: activeOrganizationID
+            )
+            result.remoteActivePropertyCount = remoteActivePropertyIDs.count
+        } catch {
+            print(
+                "[CaptureProfileSync] event=maintenance_backfill_scan " +
+                "reason=remote_active_properties_fetch_failed " +
+                "orgID=\(activeOrganizationID.uuidString) " +
+                "localPropertiesFound=0 propertiesScanned=0 sessionsScanned=0 " +
+                "remotePropertiesChecked=0 remoteSessionsChecked=0 " +
+                "remoteActivePropertyCount=0 " +
+                "error=\(error.localizedDescription)"
+            )
+            result.failed += 1
+            return result
+        }
+
+        let localProperties: [Property]
+        do {
+            localProperties = try localStore.fetchProperties()
+            result.localPropertiesFound = localProperties.count
+        } catch {
+            print(
+                "[CaptureProfileSync] event=maintenance_backfill_complete " +
+                "orgID=\(activeOrganizationID.uuidString) " +
+                "localPropertiesFound=0 propertiesScanned=0 sessionsScanned=0 " +
+                "remotePropertiesChecked=0 remoteSessionsChecked=0 " +
+                "remoteActivePropertyCount=\(result.remoteActivePropertyCount) " +
+                "propertyProfilesFilled=0 sessionProfilesFilled=0 sessionsEnsured=0 skipped=0 failed=1 " +
+                "error=\(error.localizedDescription)"
+            )
+            result.failed += 1
+            return result
+        }
+
+        let candidateProperties = localProperties.compactMap { property -> Property? in
+            if property.deletedAt != nil {
+                result.propertiesFilteredDeleted += 1
+                return nil
+            }
+            if property.isArchived {
+                result.propertiesFilteredArchived += 1
+                return nil
+            }
+            let resolvedOrgID = maintenanceBackfillResolvedOrgID(
+                for: property,
+                activeOrganizationID: activeOrganizationID,
+                remoteActivePropertyIDs: remoteActivePropertyIDs
+            )
+            guard resolvedOrgID == activeOrganizationID else {
+                result.propertiesFilteredOrgMismatch += 1
+                result.trueOrgMismatchCount += 1
+                return nil
+            }
+            if property.orgId != activeOrganizationID {
+                result.staleOrgReconciledCount += 1
+            }
+            guard canAccessProperty(property.id) ||
+                    isCaptureProfileActivePropertyContext(propertyID: property.id) ||
+                    remoteActivePropertyIDs.contains(property.id) else {
+                result.propertiesFilteredInaccessible += 1
+                return nil
+            }
+            return property
+        }
+
+        for property in candidateProperties {
+            result.propertiesScanned += 1
+            let propertyProfile = knownLocalPropertyCaptureProfile(for: property)
+            if let propertyProfile {
+                do {
+                    result.remotePropertiesChecked += 1
+                    let remoteState = try await fetchCaptureProfileBackfillStateForMaintenance(
+                        orgID: activeOrganizationID,
+                        propertyID: property.id,
+                        sessionID: nil
+                    )
+                    if remoteState.propertyRowExists,
+                       remoteState.propertyCaptureProfile == nil {
+                        do {
+                            print(
+                                "[CaptureProfileSync] event=backfill_property_profile_attempt " +
+                                "propertyID=\(property.id.uuidString) " +
+                                "orgID=\(activeOrganizationID.uuidString) " +
+                                "captureProfile=\(propertyProfile.rawValue)"
+                            )
+                            if let captureProfileBackfillWriteOverride {
+                                try await captureProfileBackfillWriteOverride(
+                                    activeOrganizationID,
+                                    property.id,
+                                    nil,
+                                    propertyProfile,
+                                    nil
+                                )
+                            } else {
+                                _ = try await backfillPropertyCaptureProfileInSupabase(
+                                    propertyID: property.id,
+                                    orgID: activeOrganizationID,
+                                    profile: propertyProfile
+                                )
+                            }
+                            result.propertyProfilesFilled += 1
+                            logCaptureProfileBackfillOnce(
+                                key: "maintenance-property-success|\(property.id.uuidString)|\(propertyProfile.rawValue)",
+                                message:
+                                "[CaptureProfileSync] event=backfill_property_profile_success " +
+                                "propertyID=\(property.id.uuidString) " +
+                                "orgID=\(activeOrganizationID.uuidString) " +
+                                "captureProfile=\(propertyProfile.rawValue) " +
+                                "verifiedCaptureProfile=\(propertyProfile.rawValue) " +
+                                "affectedRows=1"
+                            )
+                        } catch {
+                            result.failed += 1
+                            print(
+                                "[CaptureProfileSync] event=maintenance_backfill_property_failed " +
+                                "propertyID=\(property.id.uuidString) " +
+                                "orgID=\(activeOrganizationID.uuidString) " +
+                                "captureProfile=\(propertyProfile.rawValue) " +
+                                "error=\(error.localizedDescription)"
+                            )
+                        }
+                    } else {
+                        result.skipped += 1
+                    }
+                } catch {
+                    result.failed += 1
+                    print(
+                        "[CaptureProfileSync] event=maintenance_backfill_property_failed " +
+                        "propertyID=\(property.id.uuidString) " +
+                        "orgID=\(activeOrganizationID.uuidString) " +
+                        "error=\(error.localizedDescription)"
+                    )
+                }
+            } else {
+                result.skipped += 1
+            }
+
+            let localSessions = (try? localStore.fetchSessionsForCacheBuild(propertyID: property.id)) ?? []
+            for session in localSessions where session.deletedAt == nil {
+                result.sessionsScanned += 1
+                let sessionProfileState = localSessionCaptureProfileScanState(
+                    propertyID: property.id,
+                    session: session
+                )
+                let sessionProfile: CaptureProfile
+                switch sessionProfileState {
+                case .known(let profile):
+                    sessionProfile = profile
+                case .missingMetadata:
+                    result.sessionMetadataMissing += 1
+                    result.skipped += 1
+                    continue
+                case .unknownProfile:
+                    result.sessionProfileUnknown += 1
+                    result.skipped += 1
+                    continue
+                }
+
+                do {
+                    result.remoteSessionsChecked += 1
+                    let remoteState = try await fetchCaptureProfileBackfillStateForMaintenance(
+                        orgID: activeOrganizationID,
+                        propertyID: property.id,
+                        sessionID: session.id
+                    )
+                    if remoteState.sessionRowExists,
+                       remoteState.sessionCaptureProfile != nil {
+                        result.skipped += 1
+                        continue
+                    }
+
+                    do {
+                        if !remoteState.sessionRowExists {
+                            print(
+                                "[CaptureProfileSync] event=backfill_session_profile_ensure_attempt " +
+                                "propertyID=\(property.id.uuidString) " +
+                                "sessionID=\(session.id.uuidString) " +
+                                "orgID=\(activeOrganizationID.uuidString) " +
+                                "captureProfile=\(sessionProfile.rawValue)"
+                            )
+                            if let captureProfileBackfillEnsureOverride {
+                                try await captureProfileBackfillEnsureOverride(
+                                    activeOrganizationID,
+                                    property.id,
+                                    session.id,
+                                    sessionProfile
+                                )
+                            } else {
+                                let metadata = try localStore.loadSessionMetadata(
+                                    propertyID: property.id,
+                                    sessionID: session.id
+                                )
+                                let ensureMetadata = sessionEnsureMetadataForCaptureProfileSync(
+                                    metadata: metadata,
+                                    session: session,
+                                    profile: sessionProfile
+                                )
+                                try await ensureSupabaseSessionPrerequisites(
+                                    propertyID: property.id,
+                                    sessionID: session.id,
+                                    metadata: ensureMetadata,
+                                    orgID: activeOrganizationID
+                                )
+                            }
+                            print(
+                                "[CaptureProfileSync] event=backfill_session_profile_ensure_success " +
+                                "propertyID=\(property.id.uuidString) " +
+                                "sessionID=\(session.id.uuidString) " +
+                                "orgID=\(activeOrganizationID.uuidString) " +
+                                "captureProfile=\(sessionProfile.rawValue)"
+                            )
+                        }
+                        print(
+                            "[CaptureProfileSync] event=backfill_session_profile_attempt " +
+                            "propertyID=\(property.id.uuidString) " +
+                            "sessionID=\(session.id.uuidString) " +
+                            "orgID=\(activeOrganizationID.uuidString) " +
+                            "captureProfile=\(sessionProfile.rawValue)"
+                        )
+                        if let captureProfileBackfillWriteOverride {
+                            try await captureProfileBackfillWriteOverride(
+                                activeOrganizationID,
+                                property.id,
+                                session.id,
+                                nil,
+                                sessionProfile
+                            )
+                        } else {
+                            _ = try await updateSessionCaptureProfileInSupabase(
+                                sessionID: session.id,
+                                propertyID: property.id,
+                                orgID: activeOrganizationID,
+                                profile: sessionProfile
+                            )
+                        }
+                        result.sessionProfilesFilled += 1
+                        if !remoteState.sessionRowExists {
+                            result.sessionsEnsured += 1
+                        }
+                        logCaptureProfileBackfillOnce(
+                            key: "maintenance-session-success|\(session.id.uuidString)|\(sessionProfile.rawValue)",
+                            message:
+                            "[CaptureProfileSync] event=backfill_session_profile_success " +
+                            "propertyID=\(property.id.uuidString) " +
+                            "sessionID=\(session.id.uuidString) " +
+                            "orgID=\(activeOrganizationID.uuidString) " +
+                            "captureProfile=\(sessionProfile.rawValue) " +
+                            "verifiedCaptureProfile=\(sessionProfile.rawValue) " +
+                            "affectedRows=1"
+                        )
+                    } catch {
+                        result.failed += 1
+                        print(
+                            "[CaptureProfileSync] event=maintenance_backfill_session_failed " +
+                            "propertyID=\(property.id.uuidString) " +
+                            "sessionID=\(session.id.uuidString) " +
+                            "orgID=\(activeOrganizationID.uuidString) " +
+                            "captureProfile=\(sessionProfile.rawValue) " +
+                            "error=\(error.localizedDescription)"
+                        )
+                    }
+                } catch {
+                    result.failed += 1
+                    print(
+                        "[CaptureProfileSync] event=maintenance_backfill_session_failed " +
+                        "propertyID=\(property.id.uuidString) " +
+                        "sessionID=\(session.id.uuidString) " +
+                        "orgID=\(activeOrganizationID.uuidString) " +
+                        "error=\(error.localizedDescription)"
+                    )
+                }
+            }
+        }
+
+        let scanReason: String
+        if result.localPropertiesFound == 0 {
+            scanReason = "local_property_list_empty"
+        } else if result.propertiesScanned == 0 {
+            scanReason = "all_properties_filtered"
+        } else if result.sessionsScanned == 0 {
+            scanReason = "no_local_sessions_found"
+        } else {
+            scanReason = "complete"
+        }
+        print(
+            "[CaptureProfileSync] event=maintenance_backfill_scan " +
+            "reason=\(scanReason) " +
+            "orgID=\(activeOrganizationID.uuidString) " +
+            "localPropertiesFound=\(result.localPropertiesFound) " +
+            "propertiesScanned=\(result.propertiesScanned) " +
+            "sessionsScanned=\(result.sessionsScanned) " +
+            "remotePropertiesChecked=\(result.remotePropertiesChecked) " +
+            "remoteSessionsChecked=\(result.remoteSessionsChecked) " +
+            "remoteActivePropertyCount=\(result.remoteActivePropertyCount) " +
+            "staleOrgReconciledCount=\(result.staleOrgReconciledCount) " +
+            "trueOrgMismatchCount=\(result.trueOrgMismatchCount) " +
+            "filteredDeleted=\(result.propertiesFilteredDeleted) " +
+            "filteredArchived=\(result.propertiesFilteredArchived) " +
+            "filteredOrgMismatch=\(result.propertiesFilteredOrgMismatch) " +
+            "filteredInaccessible=\(result.propertiesFilteredInaccessible) " +
+            "sessionMetadataMissing=\(result.sessionMetadataMissing) " +
+            "sessionProfileUnknown=\(result.sessionProfileUnknown)"
+        )
+        print(
+            "[CaptureProfileSync] event=maintenance_backfill_complete " +
+            "orgID=\(activeOrganizationID.uuidString) " +
+            "localPropertiesFound=\(result.localPropertiesFound) " +
+            "propertiesScanned=\(result.propertiesScanned) " +
+            "sessionsScanned=\(result.sessionsScanned) " +
+            "remotePropertiesChecked=\(result.remotePropertiesChecked) " +
+            "remoteSessionsChecked=\(result.remoteSessionsChecked) " +
+            "remoteActivePropertyCount=\(result.remoteActivePropertyCount) " +
+            "staleOrgReconciledCount=\(result.staleOrgReconciledCount) " +
+            "trueOrgMismatchCount=\(result.trueOrgMismatchCount) " +
+            "propertyProfilesFilled=\(result.propertyProfilesFilled) " +
+            "sessionProfilesFilled=\(result.sessionProfilesFilled) " +
+            "sessionsEnsured=\(result.sessionsEnsured) " +
+            "skipped=\(result.skipped) " +
+            "failed=\(result.failed)"
+        )
+        return result
+    }
+
+    private func knownLocalPropertyCaptureProfile(for property: Property) -> CaptureProfile? {
+        if let captureProfile = property.captureProfile {
+            return captureProfile
+        }
+        return CaptureProfile(
+            storedValue: userDefaults.string(
+                forKey: "scout.captureProfile.property.\(property.id.uuidString)"
+            )
+        )
+    }
+
+    private func knownLocalSessionCaptureProfile(propertyID: UUID, session: Session) -> CaptureProfile? {
+        if let captureProfile = session.captureProfile {
+            return captureProfile
+        }
+        guard let metadata = try? localStore.loadSessionMetadata(
+            propertyID: propertyID,
+            sessionID: session.id
+        ) else {
+            return nil
+        }
+        return CaptureProfile(storedValue: metadata.captureProfile)
+    }
+
+    private func localSessionCaptureProfileScanState(
+        propertyID: UUID,
+        session: Session
+    ) -> CaptureProfileSessionProfileScanState {
+        if let captureProfile = session.captureProfile {
+            return .known(captureProfile)
+        }
+        guard let metadata = try? localStore.loadSessionMetadata(
+            propertyID: propertyID,
+            sessionID: session.id
+        ) else {
+            return .missingMetadata
+        }
+        if let profile = CaptureProfile(storedValue: metadata.captureProfile) {
+            return .known(profile)
+        }
+        return .unknownProfile
+    }
+
+    private func maintenanceBackfillResolvedOrgID(
+        for property: Property,
+        activeOrganizationID: UUID,
+        remoteActivePropertyIDs: Set<UUID>
+    ) -> UUID? {
+        if property.orgId == activeOrganizationID {
+            return activeOrganizationID
+        }
+        if remoteActivePropertyIDs.contains(property.id) {
+            print(
+                "[CaptureProfileSync] event=maintenance_backfill_remote_org_reconcile " +
+                "propertyID=\(property.id.uuidString) " +
+                "staleOrgID=\(property.orgId?.uuidString ?? "nil") " +
+                "resolvedOrgID=\(activeOrganizationID.uuidString) " +
+                "activeOrganizationID=\(activeOrganizationID.uuidString)"
+            )
+            return activeOrganizationID
+        }
+        if isCaptureProfileActivePropertyContext(propertyID: property.id) {
+            print(
+                "[CaptureProfileSync] event=maintenance_backfill_stale_org_override " +
+                "propertyID=\(property.id.uuidString) " +
+                "staleOrgID=\(property.orgId?.uuidString ?? "nil") " +
+                "resolvedOrgID=\(activeOrganizationID.uuidString) " +
+                "activeOrganizationID=\(activeOrganizationID.uuidString)"
+            )
+            return activeOrganizationID
+        }
+        return property.orgId
+    }
+
+    private func fetchActiveRemotePropertyIDsForCaptureProfileMaintenance(orgID: UUID) async throws -> Set<UUID> {
+        if let captureProfileRemotePropertyIDsFetchOverride {
+            return try await captureProfileRemotePropertyIDsFetchOverride(orgID)
+        }
+        guard let client = supabaseClient else {
+            throw NSError(domain: "ScoutCapture.CaptureProfileSync", code: 7, userInfo: [
+                NSLocalizedDescriptionKey: "Missing Supabase client for capture_profile maintenance remote property scan."
+            ])
+        }
+        let rows = try await client
+            .from("properties")
+            .select("id")
+            .eq("org_id", value: orgID.uuidString.lowercased())
+            .execute()
+            .value as [SessionIDOnlyRecord]
+        return Set(rows.map(\.id))
+    }
+
+    private func fetchCaptureProfileBackfillStateForMaintenance(
+        orgID: UUID,
+        propertyID: UUID,
+        sessionID: UUID?
+    ) async throws -> CaptureProfileBackfillRemoteState {
+        if let captureProfileBackfillFetchOverride {
+            return try await captureProfileBackfillFetchOverride(orgID, propertyID, sessionID)
+        }
+        return try await fetchCaptureProfileBackfillRemoteState(
+            orgID: orgID,
+            propertyID: propertyID,
+            sessionID: sessionID
+        )
+    }
+
+    private func logCaptureProfileBackfillOnce(key: String, message: String) {
+        guard captureProfileBackfillLoggedKeys.insert(key).inserted else { return }
+        print(message)
+    }
+
+    private func fetchCaptureProfileBackfillRemoteState(
+        orgID: UUID,
+        propertyID: UUID,
+        sessionID: UUID?
+    ) async throws -> CaptureProfileBackfillRemoteState {
+        guard let client = supabaseClient else {
+            throw NSError(domain: "ScoutCapture.CaptureProfileSync", code: 5, userInfo: [
+                NSLocalizedDescriptionKey: "Missing Supabase client for capture_profile backfill."
+            ])
+        }
+
+        let propertyRows = try await client
+            .from("properties")
+            .select("id, org_id, capture_profile")
+            .eq("id", value: propertyID.uuidString.lowercased())
+            .eq("org_id", value: orgID.uuidString.lowercased())
+            .limit(1)
+            .execute()
+            .value as [SupabaseCaptureProfileUpdateResult]
+
+        var sessionRows: [SupabaseCaptureProfileUpdateResult] = []
+        if let sessionID {
+            sessionRows = try await client
+                .from("sessions")
+                .select("id, org_id, property_id, capture_profile")
+                .eq("id", value: sessionID.uuidString.lowercased())
+                .eq("property_id", value: propertyID.uuidString.lowercased())
+                .eq("org_id", value: orgID.uuidString.lowercased())
+                .limit(1)
+                .execute()
+                .value as [SupabaseCaptureProfileUpdateResult]
+        }
+
+        return CaptureProfileBackfillRemoteState(
+            propertyRowExists: !propertyRows.isEmpty,
+            propertyCaptureProfile: CaptureProfile(storedValue: propertyRows.first?.captureProfile),
+            sessionRowExists: !sessionRows.isEmpty,
+            sessionCaptureProfile: CaptureProfile(storedValue: sessionRows.first?.captureProfile)
+        )
     }
 
     private func isCaptureProfileActivePropertyContext(propertyID: UUID) -> Bool {

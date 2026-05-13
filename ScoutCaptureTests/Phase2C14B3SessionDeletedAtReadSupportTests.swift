@@ -10,7 +10,12 @@ final class Phase2C14B3SessionDeletedAtReadSupportTests: XCTestCase {
         let appState: AppState
     }
 
-    private func makeFixture() throws -> Fixture {
+    private func makeFixture(
+        captureProfileBackfillFetchOverride: AppState.CaptureProfileBackfillFetchOverride? = nil,
+        captureProfileRemotePropertyIDsFetchOverride: AppState.CaptureProfileRemotePropertyIDsFetchOverride? = nil,
+        captureProfileBackfillEnsureOverride: AppState.CaptureProfileBackfillEnsureOverride? = nil,
+        captureProfileBackfillWriteOverride: AppState.CaptureProfileBackfillWriteOverride? = nil
+    ) throws -> Fixture {
         let suiteName = "Phase2C14B3SessionDeletedAtReadSupportTests-\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName) ?? .standard
         defaults.removePersistentDomain(forName: suiteName)
@@ -26,7 +31,14 @@ final class Phase2C14B3SessionDeletedAtReadSupportTests: XCTestCase {
         try FileManager.default.createDirectory(at: storageRoot, withIntermediateDirectories: true)
 
         let localStore = LocalStore(testStorageRootURL: storageRoot)
-        let appState = AppState(localStore: localStore, userDefaults: defaults)
+        let appState = AppState(
+            localStore: localStore,
+            userDefaults: defaults,
+            captureProfileBackfillFetchOverride: captureProfileBackfillFetchOverride,
+            captureProfileRemotePropertyIDsFetchOverride: captureProfileRemotePropertyIDsFetchOverride,
+            captureProfileBackfillEnsureOverride: captureProfileBackfillEnsureOverride,
+            captureProfileBackfillWriteOverride: captureProfileBackfillWriteOverride
+        )
         return Fixture(
             defaultsSuiteName: suiteName,
             storageRoot: storageRoot,
@@ -59,14 +71,14 @@ final class Phase2C14B3SessionDeletedAtReadSupportTests: XCTestCase {
     }
 
     @MainActor
-    private func prepareAppState(_ appState: AppState, orgID: UUID) {
+    private func prepareAppState(_ appState: AppState, orgID: UUID, role: String = "owner") {
         appState.refreshProperties()
         appState._debugSetOrganizationContextForTests(
             memberships: [
                 ActiveOrganizationMembership(
                     id: orgID,
                     name: "Org",
-                    role: "owner"
+                    role: role
                 )
             ],
             activeOrganizationID: orgID,
@@ -596,6 +608,20 @@ final class Phase2C14B3SessionDeletedAtReadSupportTests: XCTestCase {
         )
     }
 
+    func testEmptyPropertyCaptureProfileUpdateResultIsTreatedAsFailure() throws {
+        let appState = AppState(disableCloudBackupForTests: true)
+
+        XCTAssertThrowsError(
+            try appState._debugValidateEmptyCaptureProfileUpdateResultForTests(
+                table: "properties",
+                id: UUID(),
+                orgID: UUID(),
+                propertyID: nil,
+                profile: .commercial
+            )
+        )
+    }
+
     func testVerifiedSessionCaptureProfileUpdateResultReturnsSnapshot() throws {
         let appState = AppState(disableCloudBackupForTests: true)
 
@@ -1081,6 +1107,640 @@ final class Phase2C14B3SessionDeletedAtReadSupportTests: XCTestCase {
         XCTAssertEqual(storedSession.captureProfile, .commercial)
     }
 
+    func testBackfillWritesNullRemotePropertyProfileFromKnownLocalDefault() async throws {
+        var writtenPropertyProfile: CaptureProfile?
+        var writtenSessionProfile: CaptureProfile?
+        let fixture = try makeFixture(
+            captureProfileBackfillFetchOverride: { _, _, _ in
+                AppState.CaptureProfileBackfillRemoteState(
+                    propertyRowExists: true,
+                    propertyCaptureProfile: nil
+                )
+            },
+            captureProfileBackfillWriteOverride: { _, _, _, propertyProfile, sessionProfile in
+                writtenPropertyProfile = propertyProfile
+                writtenSessionProfile = sessionProfile
+            }
+        )
+        defer { tearDownFixture(fixture) }
+        let orgID = UUID()
+        let propertyID = UUID()
+        try seedProperty(fixture, orgID: orgID, propertyID: propertyID)
+
+        await prepareAppState(fixture.appState, orgID: orgID)
+        await MainActor.run {
+            fixture.appState.selectProperty(id: propertyID)
+        }
+        let didBackfill = await fixture.appState.backfillCaptureProfilesIfMissing(
+            propertyID: propertyID,
+            sessionID: nil,
+            propertyProfile: .commercial,
+            sessionProfile: nil
+        )
+
+        XCTAssertTrue(didBackfill)
+        XCTAssertEqual(writtenPropertyProfile, .commercial)
+        XCTAssertNil(writtenSessionProfile)
+    }
+
+    func testBackfillWritesNullRemoteSessionProfileFromLocalSessionJSON() async throws {
+        var writtenPropertyProfile: CaptureProfile?
+        var writtenSessionProfile: CaptureProfile?
+        let fixture = try makeFixture(
+            captureProfileBackfillFetchOverride: { _, _, _ in
+                AppState.CaptureProfileBackfillRemoteState(
+                    propertyRowExists: true,
+                    propertyCaptureProfile: .residential,
+                    sessionRowExists: true,
+                    sessionCaptureProfile: nil
+                )
+            },
+            captureProfileBackfillWriteOverride: { _, _, _, propertyProfile, sessionProfile in
+                writtenPropertyProfile = propertyProfile
+                writtenSessionProfile = sessionProfile
+            }
+        )
+        defer { tearDownFixture(fixture) }
+        let orgID = UUID()
+        let propertyID = UUID()
+        let sessionID = UUID()
+        try seedProperty(fixture, orgID: orgID, propertyID: propertyID)
+        let session = try fixture.localStore.upsertSession(
+            Session(id: sessionID, propertyID: propertyID, captureProfile: .residential)
+        )
+
+        await prepareAppState(fixture.appState, orgID: orgID, role: "manager")
+        await MainActor.run {
+            fixture.appState.selectProperty(id: propertyID)
+            fixture.appState.currentSession = session
+        }
+        let didBackfill = await fixture.appState.backfillCaptureProfilesIfMissing(
+            propertyID: propertyID,
+            sessionID: sessionID,
+            propertyProfile: .commercial,
+            sessionProfile: .commercial
+        )
+
+        XCTAssertTrue(didBackfill)
+        XCTAssertNil(writtenPropertyProfile)
+        XCTAssertEqual(writtenSessionProfile, .commercial)
+    }
+
+    func testBackfillEnsuresMissingRemoteSessionBeforeWritingLocalProfile() async throws {
+        var didEnsure = false
+        var writtenSessionProfile: CaptureProfile?
+        let fixture = try makeFixture(
+            captureProfileBackfillFetchOverride: { _, _, _ in
+                AppState.CaptureProfileBackfillRemoteState(
+                    propertyRowExists: true,
+                    propertyCaptureProfile: .residential,
+                    sessionRowExists: false,
+                    sessionCaptureProfile: nil
+                )
+            },
+            captureProfileBackfillEnsureOverride: { _, _, _, profile in
+                didEnsure = true
+                XCTAssertEqual(profile, .residential)
+            },
+            captureProfileBackfillWriteOverride: { _, _, _, propertyProfile, sessionProfile in
+                XCTAssertNil(propertyProfile)
+                writtenSessionProfile = sessionProfile
+            }
+        )
+        defer { tearDownFixture(fixture) }
+        let orgID = UUID()
+        let propertyID = UUID()
+        let sessionID = UUID()
+        try seedProperty(fixture, orgID: orgID, propertyID: propertyID)
+        let session = try fixture.localStore.upsertSession(
+            Session(id: sessionID, propertyID: propertyID, captureProfile: .residential)
+        )
+
+        await prepareAppState(fixture.appState, orgID: orgID)
+        await MainActor.run {
+            fixture.appState.selectProperty(id: propertyID)
+            fixture.appState.currentSession = session
+        }
+        let didBackfill = await fixture.appState.backfillCaptureProfilesIfMissing(
+            propertyID: propertyID,
+            sessionID: sessionID,
+            propertyProfile: nil,
+            sessionProfile: .residential
+        )
+
+        XCTAssertTrue(didBackfill)
+        XCTAssertTrue(didEnsure)
+        XCTAssertEqual(writtenSessionProfile, .residential)
+    }
+
+    func testBackfillMissingRemoteSessionEnsureFailureDoesNotWriteProfile() async throws {
+        var didWriteRemote = false
+        let fixture = try makeFixture(
+            captureProfileBackfillFetchOverride: { _, _, _ in
+                AppState.CaptureProfileBackfillRemoteState(
+                    propertyRowExists: true,
+                    propertyCaptureProfile: .residential,
+                    sessionRowExists: false,
+                    sessionCaptureProfile: nil
+                )
+            },
+            captureProfileBackfillEnsureOverride: { _, _, _, _ in
+                throw NSError(domain: "ScoutCaptureTests", code: 1, userInfo: [
+                    NSLocalizedDescriptionKey: "ensure failed"
+                ])
+            },
+            captureProfileBackfillWriteOverride: { _, _, _, _, _ in
+                didWriteRemote = true
+            }
+        )
+        defer { tearDownFixture(fixture) }
+        let orgID = UUID()
+        let propertyID = UUID()
+        let sessionID = UUID()
+        try seedProperty(fixture, orgID: orgID, propertyID: propertyID)
+        let session = try fixture.localStore.upsertSession(
+            Session(id: sessionID, propertyID: propertyID, captureProfile: .residential)
+        )
+
+        await prepareAppState(fixture.appState, orgID: orgID)
+        await MainActor.run {
+            fixture.appState.selectProperty(id: propertyID)
+            fixture.appState.currentSession = session
+        }
+        let didBackfill = await fixture.appState.backfillCaptureProfilesIfMissing(
+            propertyID: propertyID,
+            sessionID: sessionID,
+            propertyProfile: nil,
+            sessionProfile: .residential
+        )
+
+        XCTAssertFalse(didBackfill)
+        XCTAssertFalse(didWriteRemote)
+    }
+
+    func testMaintenanceBackfillFillsNullPropertyAndSessionProfiles() async throws {
+        var fetchCalls: [UUID?] = []
+        var writtenPropertyProfile: CaptureProfile?
+        var writtenSessionProfile: CaptureProfile?
+        let orgID = UUID()
+        let propertyID = UUID()
+        let sessionID = UUID()
+        let fixture = try makeFixture(
+            captureProfileBackfillFetchOverride: { _, _, sessionID in
+                fetchCalls.append(sessionID)
+                if sessionID == nil {
+                    return AppState.CaptureProfileBackfillRemoteState(
+                        propertyRowExists: true,
+                        propertyCaptureProfile: nil
+                    )
+                }
+                return AppState.CaptureProfileBackfillRemoteState(
+                    propertyRowExists: true,
+                    propertyCaptureProfile: .commercial,
+                    sessionRowExists: true,
+                    sessionCaptureProfile: nil
+                )
+            },
+            captureProfileRemotePropertyIDsFetchOverride: { _ in
+                [propertyID]
+            },
+            captureProfileBackfillWriteOverride: { _, _, _, propertyProfile, sessionProfile in
+                if let propertyProfile {
+                    writtenPropertyProfile = propertyProfile
+                }
+                if let sessionProfile {
+                    writtenSessionProfile = sessionProfile
+                }
+            }
+        )
+        defer { tearDownFixture(fixture) }
+        try seedProperty(fixture, orgID: orgID, propertyID: propertyID)
+        var property = try XCTUnwrap(fixture.localStore.fetchProperties().first(where: { $0.id == propertyID }))
+        property.captureProfile = .commercial
+        _ = try fixture.localStore.updateProperty(property)
+        _ = try fixture.localStore.upsertSession(
+            Session(id: sessionID, propertyID: propertyID, captureProfile: .residential)
+        )
+
+        await prepareAppState(fixture.appState, orgID: orgID)
+        let result = await fixture.appState.runCaptureProfileMaintenanceBackfill()
+
+        XCTAssertEqual(result.propertyProfilesFilled, 1)
+        XCTAssertEqual(result.sessionProfilesFilled, 1)
+        XCTAssertEqual(result.sessionsEnsured, 0)
+        XCTAssertEqual(result.localPropertiesFound, 1)
+        XCTAssertEqual(result.propertiesScanned, 1)
+        XCTAssertEqual(result.sessionsScanned, 1)
+        XCTAssertEqual(result.remotePropertiesChecked, 1)
+        XCTAssertEqual(result.remoteSessionsChecked, 1)
+        XCTAssertEqual(result.failed, 0)
+        XCTAssertEqual(writtenPropertyProfile, .commercial)
+        XCTAssertEqual(writtenSessionProfile, .residential)
+        XCTAssertTrue(fetchCalls.contains(nil))
+        XCTAssertTrue(fetchCalls.contains(sessionID))
+    }
+
+    func testMaintenanceBackfillEnsuresMissingRemoteSessionThenFillsProfile() async throws {
+        var didEnsure = false
+        var writtenSessionProfile: CaptureProfile?
+        let orgID = UUID()
+        let propertyID = UUID()
+        let sessionID = UUID()
+        let fixture = try makeFixture(
+            captureProfileBackfillFetchOverride: { _, _, sessionID in
+                if sessionID == nil {
+                    return AppState.CaptureProfileBackfillRemoteState(
+                        propertyRowExists: true,
+                        propertyCaptureProfile: .residential
+                    )
+                }
+                return AppState.CaptureProfileBackfillRemoteState(
+                    propertyRowExists: true,
+                    propertyCaptureProfile: .residential,
+                    sessionRowExists: false,
+                    sessionCaptureProfile: nil
+                )
+            },
+            captureProfileRemotePropertyIDsFetchOverride: { _ in
+                [propertyID]
+            },
+            captureProfileBackfillEnsureOverride: { _, _, _, profile in
+                didEnsure = true
+                XCTAssertEqual(profile, .commercial)
+            },
+            captureProfileBackfillWriteOverride: { _, _, _, propertyProfile, sessionProfile in
+                XCTAssertNil(propertyProfile)
+                writtenSessionProfile = sessionProfile
+            }
+        )
+        defer { tearDownFixture(fixture) }
+        try seedProperty(fixture, orgID: orgID, propertyID: propertyID)
+        _ = try fixture.localStore.upsertSession(
+            Session(id: sessionID, propertyID: propertyID, captureProfile: .commercial)
+        )
+
+        await prepareAppState(fixture.appState, orgID: orgID)
+        let result = await fixture.appState.runCaptureProfileMaintenanceBackfill()
+
+        XCTAssertTrue(didEnsure)
+        XCTAssertEqual(result.sessionProfilesFilled, 1)
+        XCTAssertEqual(result.sessionsEnsured, 1)
+        XCTAssertEqual(result.propertiesScanned, 1)
+        XCTAssertEqual(result.sessionsScanned, 1)
+        XCTAssertEqual(result.remoteSessionsChecked, 1)
+        XCTAssertEqual(result.failed, 0)
+        XCTAssertEqual(writtenSessionProfile, .commercial)
+    }
+
+    func testMaintenanceBackfillDoesNotOverwriteNonNullRemoteValues() async throws {
+        var didWriteRemote = false
+        var didEnsure = false
+        let orgID = UUID()
+        let propertyID = UUID()
+        let sessionID = UUID()
+        let fixture = try makeFixture(
+            captureProfileBackfillFetchOverride: { _, _, sessionID in
+                AppState.CaptureProfileBackfillRemoteState(
+                    propertyRowExists: true,
+                    propertyCaptureProfile: .residential,
+                    sessionRowExists: sessionID != nil,
+                    sessionCaptureProfile: sessionID == nil ? nil : .residential
+                )
+            },
+            captureProfileRemotePropertyIDsFetchOverride: { _ in
+                [propertyID]
+            },
+            captureProfileBackfillEnsureOverride: { _, _, _, _ in
+                didEnsure = true
+            },
+            captureProfileBackfillWriteOverride: { _, _, _, _, _ in
+                didWriteRemote = true
+            }
+        )
+        defer { tearDownFixture(fixture) }
+        try seedProperty(fixture, orgID: orgID, propertyID: propertyID)
+        var property = try XCTUnwrap(fixture.localStore.fetchProperties().first(where: { $0.id == propertyID }))
+        property.captureProfile = .commercial
+        _ = try fixture.localStore.updateProperty(property)
+        _ = try fixture.localStore.upsertSession(
+            Session(id: sessionID, propertyID: propertyID, captureProfile: .commercial)
+        )
+
+        await prepareAppState(fixture.appState, orgID: orgID)
+        let result = await fixture.appState.runCaptureProfileMaintenanceBackfill()
+
+        XCTAssertFalse(didWriteRemote)
+        XCTAssertFalse(didEnsure)
+        XCTAssertEqual(result.propertyProfilesFilled, 0)
+        XCTAssertEqual(result.sessionProfilesFilled, 0)
+        XCTAssertEqual(result.sessionsEnsured, 0)
+        XCTAssertEqual(result.propertiesScanned, 1)
+        XCTAssertEqual(result.sessionsScanned, 1)
+        XCTAssertEqual(result.remotePropertiesChecked, 1)
+        XCTAssertEqual(result.remoteSessionsChecked, 1)
+        XCTAssertEqual(result.failed, 0)
+    }
+
+    func testMaintenanceBackfillScansSelectedPropertyWithStaleLocalOrg() async throws {
+        var writtenPropertyProfile: CaptureProfile?
+        var writtenSessionProfile: CaptureProfile?
+        let activeOrgID = UUID()
+        let staleOrgID = UUID()
+        let propertyID = UUID()
+        let sessionID = UUID()
+        let fixture = try makeFixture(
+            captureProfileBackfillFetchOverride: { _, _, sessionID in
+                if sessionID == nil {
+                    return AppState.CaptureProfileBackfillRemoteState(
+                        propertyRowExists: true,
+                        propertyCaptureProfile: nil
+                    )
+                }
+                return AppState.CaptureProfileBackfillRemoteState(
+                    propertyRowExists: true,
+                    propertyCaptureProfile: .commercial,
+                    sessionRowExists: true,
+                    sessionCaptureProfile: nil
+                )
+            },
+            captureProfileRemotePropertyIDsFetchOverride: { _ in
+                [propertyID]
+            },
+            captureProfileBackfillWriteOverride: { _, _, _, propertyProfile, sessionProfile in
+                if let propertyProfile {
+                    writtenPropertyProfile = propertyProfile
+                }
+                if let sessionProfile {
+                    writtenSessionProfile = sessionProfile
+                }
+            }
+        )
+        defer { tearDownFixture(fixture) }
+        _ = try fixture.localStore.createOrganization(Organization(id: activeOrgID, name: "Active Org"))
+        _ = try fixture.localStore.createOrganization(Organization(id: staleOrgID, name: "Stale Org"))
+        _ = try fixture.localStore.createProperty(
+            Property(
+                id: propertyID,
+                orgId: staleOrgID,
+                folderId: "00005",
+                captureProfile: .commercial,
+                name: "Selected Stale Org",
+                address: "135 Main Street",
+                street: "135 Main Street",
+                city: "Atlanta",
+                state: "GA",
+                zip: "30301"
+            )
+        )
+        let session = try fixture.localStore.upsertSession(
+            Session(id: sessionID, propertyID: propertyID, captureProfile: .residential)
+        )
+
+        await prepareAppState(fixture.appState, orgID: activeOrgID)
+        await MainActor.run {
+            fixture.appState.selectProperty(id: propertyID)
+            fixture.appState.currentSession = session
+        }
+        let result = await fixture.appState.runCaptureProfileMaintenanceBackfill()
+
+        XCTAssertEqual(result.localPropertiesFound, 1)
+        XCTAssertEqual(result.propertiesScanned, 1)
+        XCTAssertEqual(result.propertiesFilteredOrgMismatch, 0)
+        XCTAssertEqual(result.remoteActivePropertyCount, 1)
+        XCTAssertEqual(result.staleOrgReconciledCount, 1)
+        XCTAssertEqual(result.trueOrgMismatchCount, 0)
+        XCTAssertEqual(result.propertyProfilesFilled, 1)
+        XCTAssertEqual(result.sessionProfilesFilled, 1)
+        XCTAssertEqual(writtenPropertyProfile, .commercial)
+        XCTAssertEqual(writtenSessionProfile, .residential)
+    }
+
+    func testMaintenanceBackfillReportsAllPropertiesFilteredByOrgMismatch() async throws {
+        var didFetchRemote = false
+        let fixture = try makeFixture(
+            captureProfileBackfillFetchOverride: { _, _, _ in
+                didFetchRemote = true
+                return AppState.CaptureProfileBackfillRemoteState(
+                    propertyRowExists: true,
+                    propertyCaptureProfile: nil
+                )
+            },
+            captureProfileRemotePropertyIDsFetchOverride: { _ in
+                []
+            }
+        )
+        defer { tearDownFixture(fixture) }
+        let activeOrgID = UUID()
+        let foreignOrgID = UUID()
+        let propertyID = UUID()
+        _ = try fixture.localStore.createOrganization(Organization(id: activeOrgID, name: "Active Org"))
+        _ = try fixture.localStore.createOrganization(Organization(id: foreignOrgID, name: "Foreign Org"))
+        _ = try fixture.localStore.createProperty(
+            Property(
+                id: propertyID,
+                orgId: foreignOrgID,
+                folderId: "00006",
+                captureProfile: .commercial,
+                name: "Foreign Property",
+                address: "864 Main Street",
+                street: "864 Main Street",
+                city: "Atlanta",
+                state: "GA",
+                zip: "30301"
+            )
+        )
+
+        await prepareAppState(fixture.appState, orgID: activeOrgID)
+        let result = await fixture.appState.runCaptureProfileMaintenanceBackfill()
+
+        XCTAssertFalse(didFetchRemote)
+        XCTAssertEqual(result.localPropertiesFound, 1)
+        XCTAssertEqual(result.propertiesScanned, 0)
+        XCTAssertEqual(result.propertiesFilteredOrgMismatch, 1)
+        XCTAssertEqual(result.remoteActivePropertyCount, 0)
+        XCTAssertEqual(result.staleOrgReconciledCount, 0)
+        XCTAssertEqual(result.trueOrgMismatchCount, 1)
+        XCTAssertEqual(result.remotePropertiesChecked, 0)
+        XCTAssertEqual(result.remoteSessionsChecked, 0)
+    }
+
+    func testMaintenanceBackfillDoesNotInferPropertyDefaultFromConflictingSessions() async throws {
+        var writtenPropertyProfile: CaptureProfile?
+        var writtenSessionProfiles: [CaptureProfile] = []
+        let orgID = UUID()
+        let propertyID = UUID()
+        let fixture = try makeFixture(
+            captureProfileBackfillFetchOverride: { _, _, sessionID in
+                if sessionID == nil {
+                    return AppState.CaptureProfileBackfillRemoteState(
+                        propertyRowExists: true,
+                        propertyCaptureProfile: nil
+                    )
+                }
+                return AppState.CaptureProfileBackfillRemoteState(
+                    propertyRowExists: true,
+                    propertyCaptureProfile: nil,
+                    sessionRowExists: true,
+                    sessionCaptureProfile: nil
+                )
+            },
+            captureProfileRemotePropertyIDsFetchOverride: { _ in
+                [propertyID]
+            },
+            captureProfileBackfillWriteOverride: { _, _, _, propertyProfile, sessionProfile in
+                if let propertyProfile {
+                    writtenPropertyProfile = propertyProfile
+                }
+                if let sessionProfile {
+                    writtenSessionProfiles.append(sessionProfile)
+                }
+            }
+        )
+        defer { tearDownFixture(fixture) }
+        try seedProperty(fixture, orgID: orgID, propertyID: propertyID)
+        _ = try fixture.localStore.upsertSession(
+            Session(id: UUID(), propertyID: propertyID, captureProfile: .residential)
+        )
+        _ = try fixture.localStore.upsertSession(
+            Session(id: UUID(), propertyID: propertyID, captureProfile: .commercial)
+        )
+
+        await prepareAppState(fixture.appState, orgID: orgID)
+        let result = await fixture.appState.runCaptureProfileMaintenanceBackfill()
+
+        XCTAssertNil(writtenPropertyProfile)
+        XCTAssertEqual(writtenSessionProfiles.sorted { $0.rawValue < $1.rawValue }, [.commercial, .residential])
+        XCTAssertEqual(result.propertyProfilesFilled, 0)
+        XCTAssertEqual(result.sessionProfilesFilled, 2)
+        XCTAssertEqual(result.propertiesScanned, 1)
+        XCTAssertEqual(result.sessionsScanned, 2)
+        XCTAssertEqual(result.failed, 0)
+    }
+
+    func testBackfillDoesNotOverwriteNonNullRemoteProfiles() async throws {
+        var didWriteRemote = false
+        let fixture = try makeFixture(
+            captureProfileBackfillFetchOverride: { _, _, _ in
+                AppState.CaptureProfileBackfillRemoteState(
+                    propertyRowExists: true,
+                    propertyCaptureProfile: .residential,
+                    sessionRowExists: true,
+                    sessionCaptureProfile: .residential
+                )
+            },
+            captureProfileBackfillWriteOverride: { _, _, _, _, _ in
+                didWriteRemote = true
+            }
+        )
+        defer { tearDownFixture(fixture) }
+        let orgID = UUID()
+        let propertyID = UUID()
+        let sessionID = UUID()
+        try seedProperty(fixture, orgID: orgID, propertyID: propertyID)
+        let session = try fixture.localStore.upsertSession(
+            Session(id: sessionID, propertyID: propertyID, captureProfile: .residential)
+        )
+
+        await prepareAppState(fixture.appState, orgID: orgID, role: "viewer")
+        await MainActor.run {
+            fixture.appState.selectProperty(id: propertyID)
+            fixture.appState.currentSession = session
+        }
+        let didBackfill = await fixture.appState.backfillCaptureProfilesIfMissing(
+            propertyID: propertyID,
+            sessionID: sessionID,
+            propertyProfile: .commercial,
+            sessionProfile: .commercial
+        )
+
+        XCTAssertFalse(didBackfill)
+        XCTAssertFalse(didWriteRemote)
+    }
+
+    func testConflictingSessionProfilesDoNotForcePropertyDefault() async throws {
+        var writtenPropertyProfile: CaptureProfile?
+        var writtenSessionProfile: CaptureProfile?
+        let fixture = try makeFixture(
+            captureProfileBackfillFetchOverride: { _, _, _ in
+                AppState.CaptureProfileBackfillRemoteState(
+                    propertyRowExists: true,
+                    propertyCaptureProfile: nil,
+                    sessionRowExists: true,
+                    sessionCaptureProfile: nil
+                )
+            },
+            captureProfileBackfillWriteOverride: { _, _, _, propertyProfile, sessionProfile in
+                writtenPropertyProfile = propertyProfile
+                writtenSessionProfile = sessionProfile
+            }
+        )
+        defer { tearDownFixture(fixture) }
+        let orgID = UUID()
+        let propertyID = UUID()
+        let sessionID = UUID()
+        try seedProperty(fixture, orgID: orgID, propertyID: propertyID)
+        let session = try fixture.localStore.upsertSession(
+            Session(id: sessionID, propertyID: propertyID, captureProfile: .residential)
+        )
+        var metadata = try fixture.localStore.loadSessionMetadata(propertyID: propertyID, sessionID: sessionID)
+        metadata.captureProfile = CaptureProfile.residential.rawValue
+        try fixture.localStore.saveSessionMetadataAtomically(propertyID: propertyID, sessionID: sessionID, metadata: metadata)
+
+        await prepareAppState(fixture.appState, orgID: orgID)
+        await MainActor.run {
+            fixture.appState.selectProperty(id: propertyID)
+            fixture.appState.currentSession = session
+        }
+        let didBackfill = await fixture.appState.backfillCaptureProfilesIfMissing(
+            propertyID: propertyID,
+            sessionID: sessionID,
+            propertyProfile: nil,
+            sessionProfile: .commercial
+        )
+
+        XCTAssertTrue(didBackfill)
+        XCTAssertNil(writtenPropertyProfile)
+        XCTAssertEqual(writtenSessionProfile, .commercial)
+    }
+
+    func testBackfillSkipsWhenLocalCaptureProfileValueIsUnknown() async throws {
+        var didFetchRemote = false
+        var didWriteRemote = false
+        let fixture = try makeFixture(
+            captureProfileBackfillFetchOverride: { _, _, _ in
+                didFetchRemote = true
+                return AppState.CaptureProfileBackfillRemoteState(
+                    propertyRowExists: true,
+                    propertyCaptureProfile: nil,
+                    sessionRowExists: true,
+                    sessionCaptureProfile: nil
+                )
+            },
+            captureProfileBackfillWriteOverride: { _, _, _, _, _ in
+                didWriteRemote = true
+            }
+        )
+        defer { tearDownFixture(fixture) }
+        let orgID = UUID()
+        let propertyID = UUID()
+        try seedProperty(fixture, orgID: orgID, propertyID: propertyID)
+
+        await prepareAppState(fixture.appState, orgID: orgID)
+        await MainActor.run {
+            fixture.appState.selectProperty(id: propertyID)
+        }
+        let didBackfill = await fixture.appState.backfillCaptureProfilesIfMissing(
+            propertyID: propertyID,
+            sessionID: nil,
+            propertyProfile: nil,
+            sessionProfile: nil
+        )
+
+        XCTAssertFalse(didBackfill)
+        XCTAssertFalse(didFetchRemote)
+        XCTAssertFalse(didWriteRemote)
+    }
+
     func testPropertyCaptureProfileUpdateKeepsSelectedPropertyVisibleWhenLocalOrgIsStale() async throws {
         let fixture = try makeFixture()
         defer { tearDownFixture(fixture) }
@@ -1134,13 +1794,13 @@ final class Phase2C14B3SessionDeletedAtReadSupportTests: XCTestCase {
                 id: propertyID,
                 orgId: staleOrgID,
                 folderId: "00004",
+                captureProfile: .commercial,
                 name: "Matching Profile Property",
                 address: "246 Main Street",
                 street: "246 Main Street",
                 city: "Atlanta",
                 state: "GA",
-                zip: "30301",
-                captureProfile: .commercial
+                zip: "30301"
             )
         )
 

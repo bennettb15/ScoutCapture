@@ -6524,6 +6524,16 @@ struct ContentView: View {
             sessionID: sessionID,
             metadata: metadata
         )
+        let propertyProfile = storedPropertyCaptureProfile(for: propertyID)
+        let sessionProfile = CaptureProfile(storedValue: metadata.captureProfile)
+        Task {
+            _ = await appState.backfillCaptureProfilesIfMissing(
+                propertyID: propertyID,
+                sessionID: sessionID,
+                propertyProfile: propertyProfile,
+                sessionProfile: sessionProfile
+            )
+        }
     }
 
     private func persistCaptureProfileToCurrentSession(
