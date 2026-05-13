@@ -238,6 +238,70 @@ final class AppState: ObservableObject {
         var sessionProfileUnknown: Int = 0
     }
 
+    enum DiagnosticErrorCategory: String, Equatable {
+        case authOrRLS = "auth_or_rls"
+        case network
+        case conflict
+        case duplicate
+        case localIO = "local_io"
+        case unknown
+    }
+
+    struct DiagnosticErrorSnapshot: Equatable {
+        let category: DiagnosticErrorCategory
+        let message: String
+        let recordedAt: Date
+    }
+
+    struct OfflineReplayDiagnostics: Equatable {
+        var discoveredCount: Int = 0
+        var attemptedCount: Int = 0
+        var succeededCount: Int = 0
+        var failedCount: Int = 0
+        var skippedBackoffCount: Int = 0
+        var normalizedInFlightCount: Int = 0
+        var lastRunAt: Date?
+    }
+
+    struct OfflineQueueDiagnostics: Equatable {
+        var totalQueued: Int = 0
+        var pendingCount: Int = 0
+        var failedCount: Int = 0
+        var oldestFailureAgeSeconds: TimeInterval?
+        var refreshedAt: Date?
+    }
+
+    struct MediaDiagnostics: Equatable {
+        var lastBackfillDiscoveredCount: Int = 0
+        var lastBackfillAttemptedCount: Int = 0
+        var lastBackfillSkippedRetryCapCount: Int = 0
+        var uploadSuccessCount: Int = 0
+        var uploadFailureCount: Int = 0
+        var pendingLocalMediaCount: Int?
+        var lastBackfillAt: Date?
+    }
+
+    struct ShadowWriteEntityDiagnostics: Equatable {
+        var successCount: Int = 0
+        var failureCount: Int = 0
+    }
+
+    struct ShadowWriteDiagnostics: Equatable {
+        var property = ShadowWriteEntityDiagnostics()
+        var session = ShadowWriteEntityDiagnostics()
+        var shotMetadata = ShadowWriteEntityDiagnostics()
+        var captureProfile = ShadowWriteEntityDiagnostics()
+    }
+
+    struct LocalDiagnosticsState: Equatable {
+        var offlineReplay = OfflineReplayDiagnostics()
+        var offlineQueue = OfflineQueueDiagnostics()
+        var media = MediaDiagnostics()
+        var shadowWrites = ShadowWriteDiagnostics()
+        var captureProfileMaintenance: CaptureProfileMaintenanceBackfillResult?
+        var lastError: DiagnosticErrorSnapshot?
+    }
+
     struct CaptureProfileBackfillRemoteState {
         let propertyRowExists: Bool
         let propertyCaptureProfile: CaptureProfile?
@@ -1883,6 +1947,7 @@ final class AppState: ObservableObject {
     @Published private(set) var isOrganizationContextReady: Bool = false
     @Published private(set) var activeOrganizationMembers: [OrganizationAccessMember] = []
     @Published private(set) var pendingOrganizationInvitations: [PendingOrganizationInvitation] = []
+    @Published private(set) var localDiagnostics = LocalDiagnosticsState()
 
     @Published var selectedPropertyID: UUID? {
         didSet {
@@ -1909,6 +1974,12 @@ final class AppState: ObservableObject {
     var selectedProperty: Property? {
         guard let selectedPropertyID else { return nil }
         return properties.first { $0.id == selectedPropertyID }
+    }
+
+    func clearLocalDiagnostics() {
+        mutateLocalDiagnostics { diagnostics in
+            diagnostics = LocalDiagnosticsState()
+        }
     }
 
     private let injectedLocalStore: LocalStore?
@@ -4391,7 +4462,7 @@ final class AppState: ObservableObject {
     private func runPendingSupabaseMediaBackfill(reason: String) async -> SupabaseMediaBackfillRunSummary {
         guard beginSupabaseMediaBackfillRun() else {
             print("[SupabaseMediaBackfill] skipped reason=in_progress trigger=\(reason)")
-            return SupabaseMediaBackfillRunSummary(
+            let summary = SupabaseMediaBackfillRunSummary(
                 didStart: false,
                 reason: reason,
                 discoveredCount: 0,
@@ -4399,6 +4470,8 @@ final class AppState: ObservableObject {
                 skippedRetryCapCount: 0,
                 attemptedCount: 0
             )
+            recordMediaBackfillDiagnostics(summary)
+            return summary
         }
         defer { endSupabaseMediaBackfillRun() }
 
@@ -4461,7 +4534,7 @@ final class AppState: ObservableObject {
             "attempted=\(attemptedCount)"
         )
 
-        return SupabaseMediaBackfillRunSummary(
+        let summary = SupabaseMediaBackfillRunSummary(
             didStart: true,
             reason: reason,
             discoveredCount: discovery.candidates.count,
@@ -4469,6 +4542,8 @@ final class AppState: ObservableObject {
             skippedRetryCapCount: skippedRetryCapCount,
             attemptedCount: attemptedCount
         )
+        recordMediaBackfillDiagnostics(summary)
+        return summary
     }
 
     private func discoverPendingSupabaseMediaBackfillCandidates() -> (candidates: [PendingSupabaseMediaBackfillCandidate], excludedInFlightCount: Int) {
@@ -5330,7 +5405,7 @@ final class AppState: ObservableObject {
 
     private func offlineReplayNotReadySummary(source: String, reason: String) -> OfflineReplayRunSummary {
         print("[OfflineReplay] skipped source=\(source) reason=not_ready detail=\(reason)")
-        return OfflineReplayRunSummary(
+        let summary = OfflineReplayRunSummary(
             didStart: false,
             source: source,
             discoveredCount: 0,
@@ -5340,6 +5415,8 @@ final class AppState: ObservableObject {
             succeededCount: 0,
             failedCount: 0
         )
+        recordOfflineReplayDiagnostics(summary)
+        return summary
     }
 
     @MainActor
@@ -5363,7 +5440,7 @@ final class AppState: ObservableObject {
         }
         guard beginOfflineReplayRun() else {
             print("[OfflineReplay] skipped source=\(source) reason=in_flight")
-            return OfflineReplayRunSummary(
+            let summary = OfflineReplayRunSummary(
                 didStart: false,
                 source: source,
                 discoveredCount: 0,
@@ -5373,6 +5450,8 @@ final class AppState: ObservableObject {
                 succeededCount: 0,
                 failedCount: 0
             )
+            recordOfflineReplayDiagnostics(summary)
+            return summary
         }
 
         let startedAt = Date()
@@ -5390,7 +5469,8 @@ final class AppState: ObservableObject {
             }
         } catch {
             print("[OfflineReplay] skipped source=\(source) reason=queue_read_failed error=\(error.localizedDescription)")
-            return OfflineReplayRunSummary(
+            recordDiagnosticsError(error)
+            let summary = OfflineReplayRunSummary(
                 didStart: false,
                 source: source,
                 discoveredCount: 0,
@@ -5400,6 +5480,8 @@ final class AppState: ObservableObject {
                 succeededCount: 0,
                 failedCount: 0
             )
+            recordOfflineReplayDiagnostics(summary)
+            return summary
         }
 
         let queuedMutations: [LocalStore.QueuedMutation]
@@ -5407,7 +5489,8 @@ final class AppState: ObservableObject {
             queuedMutations = try localStore.fetchQueuedMutations()
         } catch {
             print("[OfflineReplay] skipped source=\(source) reason=queue_read_failed error=\(error.localizedDescription)")
-            return OfflineReplayRunSummary(
+            recordDiagnosticsError(error)
+            let summary = OfflineReplayRunSummary(
                 didStart: false,
                 source: source,
                 discoveredCount: 0,
@@ -5417,6 +5500,8 @@ final class AppState: ObservableObject {
                 succeededCount: 0,
                 failedCount: 0
             )
+            recordOfflineReplayDiagnostics(summary)
+            return summary
         }
 
         let orgMutations = queuedMutations.filter { $0.organizationID == orgID && $0.status != .completed }
@@ -5552,6 +5637,7 @@ final class AppState: ObservableObject {
                 )
             } catch {
                 failedCount += 1
+                recordDiagnosticsError(error)
                 var failedItem = inFlightItem
                 failedItem.attemptCount += 1
                 failedItem.lastAttemptAt = Date()
@@ -5598,7 +5684,7 @@ final class AppState: ObservableObject {
             "elapsedMs=\(elapsedMs)"
         )
 
-        return OfflineReplayRunSummary(
+        let summary = OfflineReplayRunSummary(
             didStart: true,
             source: source,
             discoveredCount: orgMutations.count,
@@ -5608,6 +5694,8 @@ final class AppState: ObservableObject {
             succeededCount: succeededCount,
             failedCount: failedCount
         )
+        recordOfflineReplayDiagnostics(summary)
+        return summary
     }
 
     private func reconcilePropertyShadowWrite(
@@ -5781,7 +5869,9 @@ final class AppState: ObservableObject {
                 "operation=\(persisted.operation) " +
                 "idempotencyKey=\(persisted.idempotencyKey)"
             )
+            refreshOfflineQueueDiagnostics()
         } catch {
+            recordDiagnosticsError(error)
             print(
                 "[OfflineQueue] result=failed " +
                 "reason=\(reason) " +
@@ -5806,6 +5896,7 @@ final class AppState: ObservableObject {
             }
 
             try localStore.removeQueuedMutation(id: existing.id)
+            refreshOfflineQueueDiagnostics()
             print(
                 "[OfflineQueue] result=removed_after_direct_success " +
                 "reason=\(reason) " +
@@ -5816,6 +5907,7 @@ final class AppState: ObservableObject {
                 "idempotencyKey=\(existing.idempotencyKey)"
             )
         } catch {
+            recordDiagnosticsError(error)
             print(
                 "[OfflineQueue] result=remove_failed " +
                 "reason=\(reason) " +
@@ -5899,14 +5991,199 @@ final class AppState: ObservableObject {
         }
     }
 
+    private func mutateLocalDiagnostics(_ update: @escaping (inout LocalDiagnosticsState) -> Void) {
+        if Thread.isMainThread {
+            update(&localDiagnostics)
+        } else {
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                update(&self.localDiagnostics)
+            }
+        }
+    }
+
+    private func recordDiagnosticsError(_ error: Error) {
+        let category = Self.diagnosticErrorCategory(for: error)
+        let message = Self.sanitizedDiagnosticsErrorMessage(error.localizedDescription)
+        mutateLocalDiagnostics { diagnostics in
+            diagnostics.lastError = DiagnosticErrorSnapshot(
+                category: category,
+                message: message,
+                recordedAt: Date()
+            )
+        }
+    }
+
+    private func recordOfflineReplayDiagnostics(_ summary: OfflineReplayRunSummary) {
+        mutateLocalDiagnostics { diagnostics in
+            diagnostics.offlineReplay = OfflineReplayDiagnostics(
+                discoveredCount: summary.discoveredCount,
+                attemptedCount: summary.attemptedCount,
+                succeededCount: summary.succeededCount,
+                failedCount: summary.failedCount,
+                skippedBackoffCount: summary.skippedBackoffCount,
+                normalizedInFlightCount: summary.normalizedInFlightCount,
+                lastRunAt: Date()
+            )
+        }
+        refreshOfflineQueueDiagnostics()
+    }
+
+    private func refreshOfflineQueueDiagnostics() {
+        do {
+            let queued = try localStore.fetchQueuedMutations()
+            let now = Date()
+            let failed = queued.filter { $0.status == .failed }
+            let oldestFailureDate = failed
+                .map { $0.lastAttemptAt ?? $0.updatedAt }
+                .min()
+            mutateLocalDiagnostics { diagnostics in
+                diagnostics.offlineQueue = OfflineQueueDiagnostics(
+                    totalQueued: queued.filter { $0.status != .completed }.count,
+                    pendingCount: queued.filter { $0.status == .pending }.count,
+                    failedCount: failed.count,
+                    oldestFailureAgeSeconds: oldestFailureDate.map { now.timeIntervalSince($0) },
+                    refreshedAt: now
+                )
+            }
+        } catch {
+            recordDiagnosticsError(error)
+        }
+    }
+
+    private func recordMediaBackfillDiagnostics(_ summary: SupabaseMediaBackfillRunSummary) {
+        mutateLocalDiagnostics { diagnostics in
+            diagnostics.media.lastBackfillDiscoveredCount = summary.discoveredCount
+            diagnostics.media.lastBackfillAttemptedCount = summary.attemptedCount
+            diagnostics.media.lastBackfillSkippedRetryCapCount = summary.skippedRetryCapCount
+            diagnostics.media.pendingLocalMediaCount = summary.discoveredCount
+            diagnostics.media.lastBackfillAt = Date()
+        }
+    }
+
+    private func recordMediaUploadSuccessDiagnostics() {
+        mutateLocalDiagnostics { diagnostics in
+            diagnostics.media.uploadSuccessCount += 1
+        }
+    }
+
+    private func recordMediaUploadFailureDiagnostics(_ error: Error) {
+        recordDiagnosticsError(error)
+        mutateLocalDiagnostics { diagnostics in
+            diagnostics.media.uploadFailureCount += 1
+        }
+    }
+
+    private enum ShadowWriteDiagnosticsEntity {
+        case property
+        case session
+        case shotMetadata
+        case captureProfile
+    }
+
+    private func recordShadowWriteDiagnostics(
+        entity: ShadowWriteDiagnosticsEntity,
+        succeeded: Bool,
+        error: Error? = nil
+    ) {
+        if let error {
+            recordDiagnosticsError(error)
+        }
+        mutateLocalDiagnostics { diagnostics in
+            switch entity {
+            case .property:
+                if succeeded { diagnostics.shadowWrites.property.successCount += 1 }
+                else { diagnostics.shadowWrites.property.failureCount += 1 }
+            case .session:
+                if succeeded { diagnostics.shadowWrites.session.successCount += 1 }
+                else { diagnostics.shadowWrites.session.failureCount += 1 }
+            case .shotMetadata:
+                if succeeded { diagnostics.shadowWrites.shotMetadata.successCount += 1 }
+                else { diagnostics.shadowWrites.shotMetadata.failureCount += 1 }
+            case .captureProfile:
+                if succeeded { diagnostics.shadowWrites.captureProfile.successCount += 1 }
+                else { diagnostics.shadowWrites.captureProfile.failureCount += 1 }
+            }
+        }
+    }
+
+    private func recordCaptureProfileMaintenanceDiagnostics(_ result: CaptureProfileMaintenanceBackfillResult) {
+        mutateLocalDiagnostics { diagnostics in
+            diagnostics.captureProfileMaintenance = result
+        }
+    }
+
+    static func diagnosticErrorCategory(for error: Error) -> DiagnosticErrorCategory {
+        let nsError = error as NSError
+        let domain = nsError.domain.lowercased()
+        let message = error.localizedDescription.lowercased()
+        let combined = "\(domain) \(message)"
+
+        if combined.contains("rls") ||
+            combined.contains("row level security") ||
+            combined.contains("permission denied") ||
+            combined.contains("unauthorized") ||
+            combined.contains("forbidden") ||
+            combined.contains("jwt") ||
+            combined.contains("auth") {
+            return .authOrRLS
+        }
+        if combined.contains("duplicate") ||
+            combined.contains("already exists") ||
+            combined.contains("unique constraint") ||
+            combined.contains("23505") {
+            return .duplicate
+        }
+        if combined.contains("conflict") ||
+            combined.contains("409") ||
+            combined.contains("stale") {
+            return .conflict
+        }
+        if domain.contains("url") ||
+            domain.contains("network") ||
+            combined.contains("network") ||
+            combined.contains("timed out") ||
+            combined.contains("offline") ||
+            combined.contains("connection lost") ||
+            combined.contains("cannot connect") {
+            return .network
+        }
+        if domain.contains("cocoa") ||
+            domain.contains("localstore") ||
+            combined.contains("file") ||
+            combined.contains("no such file") ||
+            combined.contains("permission") {
+            return .localIO
+        }
+        return .unknown
+    }
+
+    private static func sanitizedDiagnosticsErrorMessage(_ message: String) -> String {
+        let redactedPathTokens = message
+            .split(separator: " ")
+            .map { token -> String in
+                token.hasPrefix("/") || token.hasPrefix("file:") ? "[path]" : String(token)
+            }
+            .joined(separator: " ")
+        let maxLength = 240
+        guard redactedPathTokens.count > maxLength else { return redactedPathTokens }
+        return String(redactedPathTokens.prefix(maxLength))
+    }
+
     private func performQueuedPropertyRemoteWrite(
         property: Property,
         payload: SupabasePropertyPayload
     ) async throws {
-        if let propertyShadowWriteOverride {
-            try await propertyShadowWriteOverride(property)
-        } else {
-            try await upsertPropertyRowToSupabase(payload)
+        do {
+            if let propertyShadowWriteOverride {
+                try await propertyShadowWriteOverride(property)
+            } else {
+                try await upsertPropertyRowToSupabase(payload)
+            }
+            recordShadowWriteDiagnostics(entity: .property, succeeded: true)
+        } catch {
+            recordShadowWriteDiagnostics(entity: .property, succeeded: false, error: error)
+            throw error
         }
     }
 
@@ -5934,16 +6211,16 @@ final class AppState: ObservableObject {
             "operation=upsert_session " +
             "orgID=\(property.orgId?.uuidString ?? "nil")"
         )
-        if let sessionShadowWriteOverride {
-            try await sessionShadowWriteOverride(property, session, metadata)
-        } else {
-            let canonicalPayload = canonicalQueuedSessionMutationPayload(
-                payload,
-                property: property,
-                session: session,
-                metadata: metadata
-            )
-            do {
+        do {
+            if let sessionShadowWriteOverride {
+                try await sessionShadowWriteOverride(property, session, metadata)
+            } else {
+                let canonicalPayload = canonicalQueuedSessionMutationPayload(
+                    payload,
+                    property: property,
+                    session: session,
+                    metadata: metadata
+                )
                 try await upsertPropertyRowToSupabase(canonicalPayload.property)
                 print(
                     "[SessionCoordinationWrite] event=session_upsert_attempt " +
@@ -5956,14 +6233,16 @@ final class AppState: ObservableObject {
                     "entityID=\(session.id.uuidString) " +
                     "captureProfile=\(canonicalPayload.session.captureProfile ?? "nil")"
                 )
-            } catch {
-                print(
-                    "[SessionCoordinationWrite] event=failed " +
-                    "entityID=\(session.id.uuidString) " +
-                    "error=\(error.localizedDescription)"
-                )
-                throw error
             }
+            recordShadowWriteDiagnostics(entity: .session, succeeded: true)
+        } catch {
+            print(
+                "[SessionCoordinationWrite] event=failed " +
+                "entityID=\(session.id.uuidString) " +
+                "error=\(error.localizedDescription)"
+            )
+            recordShadowWriteDiagnostics(entity: .session, succeeded: false, error: error)
+            throw error
         }
     }
 
@@ -5992,10 +6271,16 @@ final class AppState: ObservableObject {
         metadata: SessionMetadata,
         payload: SupabaseSessionPayload
     ) async throws {
-        if let sessionShadowWriteOverride {
-            try await sessionShadowWriteOverride(property, session, metadata)
-        } else {
-            try await upsertSessionRowToSupabase(payload)
+        do {
+            if let sessionShadowWriteOverride {
+                try await sessionShadowWriteOverride(property, session, metadata)
+            } else {
+                try await upsertSessionRowToSupabase(payload)
+            }
+            recordShadowWriteDiagnostics(entity: .session, succeeded: true)
+        } catch {
+            recordShadowWriteDiagnostics(entity: .session, succeeded: false, error: error)
+            throw error
         }
     }
 
@@ -6381,6 +6666,7 @@ final class AppState: ObservableObject {
                 "bucket=\(supabaseOperationalMediaBucket) " +
                 "path=\(storagePath)"
             )
+            recordMediaUploadSuccessDiagnostics()
         } catch {
             try? localStore.updateShotStorageMetadata(propertyID: propertyID, sessionID: sessionID, shotID: shotID) { shot in
                 shot.storageBucket = self.supabaseOperationalMediaBucket
@@ -6400,6 +6686,7 @@ final class AppState: ObservableObject {
                 "phase=\(failurePhase) " +
                 "error=\(error.localizedDescription)"
             )
+            recordMediaUploadFailureDiagnostics(error)
         }
     }
 
@@ -6934,12 +7221,14 @@ final class AppState: ObservableObject {
                     "[ShotMetadataWrite] result=success " +
                     "reason=\(reason) shotID=\(shotID.uuidString) sessionID=\(sessionID.uuidString)"
                 )
+                self?.recordShadowWriteDiagnostics(entity: .shotMetadata, succeeded: true)
             } catch {
                 print(
                     "[ShotMetadataWrite] result=failed " +
                     "reason=\(reason) shotID=\(shotID.uuidString) sessionID=\(sessionID.uuidString) " +
                     "error=\(error.localizedDescription)"
                 )
+                self?.recordShadowWriteDiagnostics(entity: .shotMetadata, succeeded: false, error: error)
             }
         }
     }
@@ -13685,6 +13974,7 @@ final class AppState: ObservableObject {
 
     func runCaptureProfileMaintenanceBackfill() async -> CaptureProfileMaintenanceBackfillResult {
         var result = CaptureProfileMaintenanceBackfillResult()
+        defer { recordCaptureProfileMaintenanceDiagnostics(result) }
         guard canRecoverDeletedPropertiesInActiveOrganization,
               let activeOrganizationID else {
             print(
@@ -13727,6 +14017,7 @@ final class AppState: ObservableObject {
             )
             result.remoteActivePropertyCount = remoteActivePropertyIDs.count
         } catch {
+            recordDiagnosticsError(error)
             print(
                 "[CaptureProfileSync] event=maintenance_backfill_scan " +
                 "reason=remote_active_properties_fetch_failed " +
@@ -13745,6 +14036,7 @@ final class AppState: ObservableObject {
             localProperties = try localStore.fetchProperties()
             result.localPropertiesFound = localProperties.count
         } catch {
+            recordDiagnosticsError(error)
             print(
                 "[CaptureProfileSync] event=maintenance_backfill_complete " +
                 "orgID=\(activeOrganizationID.uuidString) " +
@@ -13825,6 +14117,7 @@ final class AppState: ObservableObject {
                                 )
                             }
                             result.propertyProfilesFilled += 1
+                            recordShadowWriteDiagnostics(entity: .captureProfile, succeeded: true)
                             logCaptureProfileBackfillOnce(
                                 key: "maintenance-property-success|\(property.id.uuidString)|\(propertyProfile.rawValue)",
                                 message:
@@ -13837,6 +14130,7 @@ final class AppState: ObservableObject {
                             )
                         } catch {
                             result.failed += 1
+                            recordShadowWriteDiagnostics(entity: .captureProfile, succeeded: false, error: error)
                             print(
                                 "[CaptureProfileSync] event=maintenance_backfill_property_failed " +
                                 "propertyID=\(property.id.uuidString) " +
@@ -13850,6 +14144,7 @@ final class AppState: ObservableObject {
                     }
                 } catch {
                     result.failed += 1
+                    recordDiagnosticsError(error)
                     print(
                         "[CaptureProfileSync] event=maintenance_backfill_property_failed " +
                         "propertyID=\(property.id.uuidString) " +
@@ -13960,6 +14255,7 @@ final class AppState: ObservableObject {
                             )
                         }
                         result.sessionProfilesFilled += 1
+                        recordShadowWriteDiagnostics(entity: .captureProfile, succeeded: true)
                         if !remoteState.sessionRowExists {
                             result.sessionsEnsured += 1
                         }
@@ -13976,6 +14272,7 @@ final class AppState: ObservableObject {
                         )
                     } catch {
                         result.failed += 1
+                        recordShadowWriteDiagnostics(entity: .captureProfile, succeeded: false, error: error)
                         print(
                             "[CaptureProfileSync] event=maintenance_backfill_session_failed " +
                             "propertyID=\(property.id.uuidString) " +
@@ -13987,6 +14284,7 @@ final class AppState: ObservableObject {
                     }
                 } catch {
                     result.failed += 1
+                    recordDiagnosticsError(error)
                     print(
                         "[CaptureProfileSync] event=maintenance_backfill_session_failed " +
                         "propertyID=\(property.id.uuidString) " +
@@ -14269,6 +14567,7 @@ final class AppState: ObservableObject {
                     "orgID=\(orgID.uuidString) " +
                     "captureProfile=\(profile.rawValue)"
                 )
+                self?.recordShadowWriteDiagnostics(entity: .captureProfile, succeeded: true)
             } catch {
                 print(
                     "[CaptureProfileSync] event=property_remote_write_failed " +
@@ -14277,6 +14576,7 @@ final class AppState: ObservableObject {
                     "captureProfile=\(profile.rawValue) " +
                     "error=\(error.localizedDescription)"
                 )
+                self?.recordShadowWriteDiagnostics(entity: .captureProfile, succeeded: false, error: error)
             }
         }
     }
@@ -14356,6 +14656,7 @@ final class AppState: ObservableObject {
                     "verifiedCaptureProfile=\(result.captureProfile ?? "nil") " +
                     "affectedRows=1"
                 )
+                self.recordShadowWriteDiagnostics(entity: .captureProfile, succeeded: true)
             } catch {
                 print(
                     "[CaptureProfileSync] event=session_remote_write_failed " +
@@ -14365,6 +14666,7 @@ final class AppState: ObservableObject {
                     "captureProfile=\(profile.rawValue) " +
                     "error=\(error.localizedDescription)"
                 )
+                self?.recordShadowWriteDiagnostics(entity: .captureProfile, succeeded: false, error: error)
             }
         }
     }
@@ -16156,6 +16458,18 @@ final class AppState: ObservableObject {
 
     func _debugRunPendingSupabaseMediaBackfillForTests(reason: String = "test") async -> SupabaseMediaBackfillRunSummary {
         await runPendingSupabaseMediaBackfill(reason: reason)
+    }
+
+    func _debugLocalDiagnosticsForTests() -> LocalDiagnosticsState {
+        localDiagnostics
+    }
+
+    func _debugRefreshOfflineQueueDiagnosticsForTests() {
+        refreshOfflineQueueDiagnostics()
+    }
+
+    func _debugRecordDiagnosticsErrorForTests(_ error: Error) {
+        recordDiagnosticsError(error)
     }
 
     func _debugSetOfflineReplayInFlightForTests(_ inFlight: Bool) {

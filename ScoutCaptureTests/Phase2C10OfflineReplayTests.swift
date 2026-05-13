@@ -369,6 +369,100 @@ final class Phase2C10OfflineReplayTests: XCTestCase {
         XCTAssertNotNil(failed.nextAttemptAt)
         XCTAssertEqual(failed.lastError, "forced replay failure")
         XCTAssertTrue((failed.nextAttemptAt ?? .distantPast) > (failed.lastAttemptAt ?? .distantPast))
+
+        let diagnostics = replayAppState._debugLocalDiagnosticsForTests()
+        XCTAssertEqual(diagnostics.offlineReplay.discoveredCount, 1)
+        XCTAssertEqual(diagnostics.offlineReplay.attemptedCount, 1)
+        XCTAssertEqual(diagnostics.offlineReplay.succeededCount, 0)
+        XCTAssertEqual(diagnostics.offlineReplay.failedCount, 1)
+        XCTAssertEqual(diagnostics.offlineQueue.totalQueued, 1)
+        XCTAssertEqual(diagnostics.offlineQueue.failedCount, 1)
+        XCTAssertEqual(diagnostics.shadowWrites.property.failureCount, 1)
+        XCTAssertEqual(diagnostics.lastError?.category, .unknown)
+    }
+
+    func testDiagnosticsStoreReplaySuccessSummary() async throws {
+        let fixture = try makeFixture()
+        defer { tearDownFixture(fixture) }
+
+        _ = try await createQueuedPropertyMutation(fixture: fixture)
+
+        let replayAppState = makeSuccessfulReplayAppState(fixture: fixture)
+        await configureReplayEnvironment(replayAppState, orgID: fixture.organizationID)
+
+        let summary = await replayAppState._debugPerformOfflineReplayForTests(source: "diagnostics_success_test")
+        let diagnostics = replayAppState._debugLocalDiagnosticsForTests()
+
+        XCTAssertTrue(summary.didStart)
+        XCTAssertEqual(diagnostics.offlineReplay.discoveredCount, 1)
+        XCTAssertEqual(diagnostics.offlineReplay.attemptedCount, 1)
+        XCTAssertEqual(diagnostics.offlineReplay.succeededCount, 1)
+        XCTAssertEqual(diagnostics.offlineReplay.failedCount, 0)
+        XCTAssertEqual(diagnostics.offlineQueue.totalQueued, 0)
+        XCTAssertEqual(diagnostics.shadowWrites.property.successCount, 1)
+    }
+
+    func testOfflineQueueDiagnosticsCountsPendingAndFailedItems() async throws {
+        let fixture = try makeFixture()
+        defer { tearDownFixture(fixture) }
+
+        _ = try await createQueuedPropertyMutation(fixture: fixture, name: "Pending Property")
+        var failed = try await createQueuedPropertyMutation(fixture: fixture, name: "Failed Property")
+        failed.status = .failed
+        failed.lastAttemptAt = Date().addingTimeInterval(-90)
+        _ = try fixture.localStore.updateQueuedMutation(failed)
+
+        let appState = makeAppState(fixture: fixture)
+        appState._debugRefreshOfflineQueueDiagnosticsForTests()
+        let diagnostics = appState._debugLocalDiagnosticsForTests()
+
+        XCTAssertEqual(diagnostics.offlineQueue.totalQueued, 2)
+        XCTAssertEqual(diagnostics.offlineQueue.pendingCount, 1)
+        XCTAssertEqual(diagnostics.offlineQueue.failedCount, 1)
+        XCTAssertNotNil(diagnostics.offlineQueue.oldestFailureAgeSeconds)
+        XCTAssertGreaterThanOrEqual(diagnostics.offlineQueue.oldestFailureAgeSeconds ?? 0, 80)
+    }
+
+    func testDiagnosticsErrorClassificationMapsObviousCasesAndResetClearsState() throws {
+        let fixture = try makeFixture()
+        defer { tearDownFixture(fixture) }
+
+        XCTAssertEqual(
+            AppState.diagnosticErrorCategory(for: NSError(domain: "PostgREST", code: 401, userInfo: [
+                NSLocalizedDescriptionKey: "new row violates row-level security policy"
+            ])),
+            .authOrRLS
+        )
+        XCTAssertEqual(
+            AppState.diagnosticErrorCategory(for: NSError(domain: NSURLErrorDomain, code: NSURLErrorTimedOut, userInfo: [
+                NSLocalizedDescriptionKey: "The request timed out."
+            ])),
+            .network
+        )
+        XCTAssertEqual(
+            AppState.diagnosticErrorCategory(for: NSError(domain: "PostgREST", code: 409, userInfo: [
+                NSLocalizedDescriptionKey: "duplicate key value violates unique constraint 23505"
+            ])),
+            .duplicate
+        )
+        XCTAssertEqual(
+            AppState.diagnosticErrorCategory(for: NSError(domain: NSCocoaErrorDomain, code: NSFileNoSuchFileError, userInfo: [
+                NSLocalizedDescriptionKey: "The file does not exist."
+            ])),
+            .localIO
+        )
+
+        let appState = makeAppState(fixture: fixture)
+        appState._debugRecordDiagnosticsErrorForTests(
+            NSError(domain: NSURLErrorDomain, code: NSURLErrorNotConnectedToInternet, userInfo: [
+                NSLocalizedDescriptionKey: "The Internet connection appears to be offline."
+            ])
+        )
+        XCTAssertEqual(appState._debugLocalDiagnosticsForTests().lastError?.category, .network)
+
+        appState.clearLocalDiagnostics()
+        XCTAssertNil(appState._debugLocalDiagnosticsForTests().lastError)
+        XCTAssertEqual(appState._debugLocalDiagnosticsForTests().offlineQueue.totalQueued, 0)
     }
 
     func testReplaySkipsFailedItemBeforeNextAttemptAt() async throws {
