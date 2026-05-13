@@ -6139,6 +6139,188 @@ private struct PropertySessionsManagerView: View {
     }
 }
 
+private struct DebugLocalDiagnosticsView: View {
+    @EnvironmentObject private var appState: AppState
+    @Environment(\.dismiss) private var dismiss
+
+    @State private var showClearConfirm: Bool = false
+
+    private var diagnostics: AppState.LocalDiagnosticsState {
+        appState.localDiagnostics
+    }
+
+    var body: some View {
+        NavigationStack {
+            List {
+                Section {
+                    Text("Local diagnostic state only. Clearing this screen resets counters and last-error memory; it does not clear queues, files, Supabase rows, exports, reports, or app data.")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(.secondary)
+                }
+
+                Section("Offline Replay Last Run") {
+                    diagnosticRow("Discovered", diagnostics.offlineReplay.discoveredCount)
+                    diagnosticRow("Attempted", diagnostics.offlineReplay.attemptedCount)
+                    diagnosticRow("Succeeded", diagnostics.offlineReplay.succeededCount)
+                    diagnosticRow("Failed", diagnostics.offlineReplay.failedCount)
+                    diagnosticRow("Skipped Backoff", diagnostics.offlineReplay.skippedBackoffCount)
+                    diagnosticRow("Normalized In-Flight", diagnostics.offlineReplay.normalizedInFlightCount)
+                    diagnosticRow("Last Run", formattedDate(diagnostics.offlineReplay.lastRunAt))
+                }
+
+                Section("Offline Queue") {
+                    diagnosticRow("Total", diagnostics.offlineQueue.totalQueued)
+                    diagnosticRow("Pending", diagnostics.offlineQueue.pendingCount)
+                    diagnosticRow("Failed", diagnostics.offlineQueue.failedCount)
+                    diagnosticRow("Oldest Failure Age", formattedAge(diagnostics.offlineQueue.oldestFailureAgeSeconds))
+                    diagnosticRow("Refreshed", formattedDate(diagnostics.offlineQueue.refreshedAt))
+                }
+
+                Section("Media") {
+                    diagnosticRow("Last Backfill Discovered", diagnostics.media.lastBackfillDiscoveredCount)
+                    diagnosticRow("Last Backfill Attempted", diagnostics.media.lastBackfillAttemptedCount)
+                    diagnosticRow("Skipped Retry Cap", diagnostics.media.lastBackfillSkippedRetryCapCount)
+                    diagnosticRow("Upload Successes", diagnostics.media.uploadSuccessCount)
+                    diagnosticRow("Upload Failures", diagnostics.media.uploadFailureCount)
+                    diagnosticRow("Pending Local Media", optionalCount(diagnostics.media.pendingLocalMediaCount))
+                    diagnosticRow("Last Backfill", formattedDate(diagnostics.media.lastBackfillAt))
+                }
+
+                Section("Shadow Writes") {
+                    shadowWriteRow("Property", diagnostics.shadowWrites.property)
+                    shadowWriteRow("Session", diagnostics.shadowWrites.session)
+                    shadowWriteRow("Shot Metadata", diagnostics.shadowWrites.shotMetadata)
+                    shadowWriteRow("Capture Profile", diagnostics.shadowWrites.captureProfile)
+                }
+
+                Section("Capture Profile Maintenance") {
+                    if let summary = diagnostics.captureProfileMaintenance {
+                        diagnosticRow("Local Properties Found", summary.localPropertiesFound)
+                        diagnosticRow("Properties Scanned", summary.propertiesScanned)
+                        diagnosticRow("Sessions Scanned", summary.sessionsScanned)
+                        diagnosticRow("Remote Properties Checked", summary.remotePropertiesChecked)
+                        diagnosticRow("Remote Sessions Checked", summary.remoteSessionsChecked)
+                        diagnosticRow("Remote Active Properties", summary.remoteActivePropertyCount)
+                        diagnosticRow("Property Profiles Filled", summary.propertyProfilesFilled)
+                        diagnosticRow("Session Profiles Filled", summary.sessionProfilesFilled)
+                        diagnosticRow("Sessions Ensured", summary.sessionsEnsured)
+                        diagnosticRow("Skipped", summary.skipped)
+                        diagnosticRow("Failed", summary.failed)
+                        diagnosticRow("Stale Org Reconciled", summary.staleOrgReconciledCount)
+                        diagnosticRow("True Org Mismatch", summary.trueOrgMismatchCount)
+                        diagnosticRow("Filtered Deleted", summary.propertiesFilteredDeleted)
+                        diagnosticRow("Filtered Archived", summary.propertiesFilteredArchived)
+                        diagnosticRow("Filtered Org Mismatch", summary.propertiesFilteredOrgMismatch)
+                        diagnosticRow("Filtered Inaccessible", summary.propertiesFilteredInaccessible)
+                        diagnosticRow("Session Metadata Missing", summary.sessionMetadataMissing)
+                        diagnosticRow("Session Profile Unknown", summary.sessionProfileUnknown)
+                    } else {
+                        Text("No maintenance backfill summary recorded.")
+                            .font(.system(size: 14, weight: .medium))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                Section("Last Error") {
+                    if let error = diagnostics.lastError {
+                        diagnosticRow("Category", error.category.rawValue)
+                        diagnosticRow("Recorded", formattedDate(error.recordedAt))
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text("Message")
+                                .font(.system(size: 14, weight: .semibold))
+                            Text(error.message)
+                                .font(.system(size: 13, weight: .regular, design: .monospaced))
+                                .foregroundStyle(.secondary)
+                                .textSelection(.enabled)
+                        }
+                        .padding(.vertical, 4)
+                    } else {
+                        Text("No sanitized error recorded.")
+                            .font(.system(size: 14, weight: .medium))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                Section {
+                    Button("Clear Local Diagnostics", role: .destructive) {
+                        showClearConfirm = true
+                    }
+                } footer: {
+                    Text("This reset affects diagnostic counters only.")
+                }
+            }
+            .navigationTitle("Local Health")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Done") {
+                        dismiss()
+                    }
+                }
+            }
+        }
+        .alert("Clear Local Diagnostics?", isPresented: $showClearConfirm) {
+            Button("Clear", role: .destructive) {
+                appState.clearLocalDiagnostics()
+            }
+            Button("Cancel", role: .cancel) { }
+        } message: {
+            Text("Only local diagnostic counters and the last sanitized error will be reset. Queues, files, Supabase data, exports, and app records are not changed.")
+        }
+    }
+
+    @ViewBuilder
+    private func shadowWriteRow(
+        _ label: String,
+        _ counters: AppState.ShadowWriteEntityDiagnostics
+    ) -> some View {
+        diagnosticRow(label, "ok \(counters.successCount) / fail \(counters.failureCount)")
+    }
+
+    @ViewBuilder
+    private func diagnosticRow(_ label: String, _ value: Int) -> some View {
+        diagnosticRow(label, String(value))
+    }
+
+    @ViewBuilder
+    private func diagnosticRow(_ label: String, _ value: String) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 12) {
+            Text(label)
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundStyle(.primary)
+            Spacer(minLength: 12)
+            Text(value)
+                .font(.system(size: 14, weight: .medium, design: .monospaced))
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.trailing)
+                .textSelection(.enabled)
+        }
+        .padding(.vertical, 2)
+    }
+
+    private func optionalCount(_ value: Int?) -> String {
+        value.map(String.init) ?? "not scanned"
+    }
+
+    private func formattedDate(_ date: Date?) -> String {
+        guard let date else { return "never" }
+        return date.formatted(date: .abbreviated, time: .standard)
+    }
+
+    private func formattedAge(_ seconds: TimeInterval?) -> String {
+        guard let seconds else { return "none" }
+        let clamped = max(0, Int(seconds.rounded()))
+        let days = clamped / 86_400
+        let hours = (clamped % 86_400) / 3_600
+        let minutes = (clamped % 3_600) / 60
+        let remainingSeconds = clamped % 60
+        if days > 0 { return "\(days)d \(hours)h" }
+        if hours > 0 { return "\(hours)h \(minutes)m" }
+        if minutes > 0 { return "\(minutes)m \(remainingSeconds)s" }
+        return "\(remainingSeconds)s"
+    }
+}
+
 private struct DebugToolsView: View {
     @EnvironmentObject private var appState: AppState
     @Environment(\.dismiss) private var dismiss
@@ -6171,6 +6353,7 @@ private struct DebugToolsView: View {
     @State private var preflightReportText: String = ""
     @State private var showPreflightReportSheet: Bool = false
     @State private var showLocalOrgRepairSheet: Bool = false
+    @State private var showLocalDiagnosticsSheet: Bool = false
     @State private var showCaptureProfileMaintenanceBackfillConfirm: Bool = false
 
     private var buttonFill: Color {
@@ -6245,6 +6428,15 @@ private struct DebugToolsView: View {
                                 dismiss()
                                 onShowMigrationImport()
                             }
+                        }
+
+                        debugActionCard(
+                            title: "Local Health / Diagnostics",
+                            detail: "Shows in-memory Phase B diagnostics counters for local inspection only. Does NOT read or mutate Supabase, queues, files, exports, or app data.",
+                            role: .normal,
+                            buttonTitle: "Open Diagnostics"
+                        ) {
+                            showLocalDiagnosticsSheet = true
                         }
 
                         debugActionCard(
@@ -6658,6 +6850,10 @@ private struct DebugToolsView: View {
         }
         .sheet(isPresented: $showLocalOrgRepairSheet) {
             DebugLocalOrgRepairView()
+                .environmentObject(appState)
+        }
+        .sheet(isPresented: $showLocalDiagnosticsSheet) {
+            DebugLocalDiagnosticsView()
                 .environmentObject(appState)
         }
     }
