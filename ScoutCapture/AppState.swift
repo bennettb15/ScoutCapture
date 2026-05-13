@@ -327,6 +327,83 @@ final class AppState: ObservableObject {
         let hasStoragePath: Bool
     }
 
+    enum DivergenceAuditCategory: String, CaseIterable, Equatable {
+        case localOnlyProperty = "local_only_property"
+        case remoteOnlyProperty = "remote_only_property"
+        case localOnlySession = "local_only_session"
+        case remoteOnlySession = "remote_only_session"
+        case localOnlyShot = "local_only_shot"
+        case remoteOnlyShot = "remote_only_shot"
+        case missingParent = "missing_parent"
+        case staleOrgMismatch = "stale_org_mismatch"
+        case captureProfile = "capture_profile"
+        case mediaDrift = "media_drift"
+        case deletedHiddenMismatch = "deleted_hidden_mismatch"
+        case remoteUnavailable = "remote_unavailable"
+    }
+
+    struct DivergenceAuditItem: Equatable, Identifiable {
+        let id: UUID
+        let category: DivergenceAuditCategory
+        let entityType: String
+        let entityID: UUID?
+        let propertyID: UUID?
+        let sessionID: UUID?
+        let shotID: UUID?
+        let orgID: UUID?
+        let reason: String
+
+        init(
+            id: UUID = UUID(),
+            category: DivergenceAuditCategory,
+            entityType: String,
+            entityID: UUID?,
+            propertyID: UUID? = nil,
+            sessionID: UUID? = nil,
+            shotID: UUID? = nil,
+            orgID: UUID? = nil,
+            reason: String
+        ) {
+            self.id = id
+            self.category = category
+            self.entityType = entityType
+            self.entityID = entityID
+            self.propertyID = propertyID
+            self.sessionID = sessionID
+            self.shotID = shotID
+            self.orgID = orgID
+            self.reason = reason
+        }
+    }
+
+    struct DivergenceAuditSummary: Equatable {
+        let ranAt: Date
+        let activeOrganizationID: UUID?
+        let remoteScopeAvailable: Bool
+        let localPropertyCount: Int
+        let remotePropertyCount: Int
+        let localSessionCount: Int
+        let remoteSessionCount: Int
+        let localShotCount: Int
+        let remoteShotCount: Int
+        let matchedPropertyCount: Int
+        let matchedSessionCount: Int
+        let matchedShotCount: Int
+        let localOnlyPropertyCount: Int
+        let remoteOnlyPropertyCount: Int
+        let localOnlySessionCount: Int
+        let remoteOnlySessionCount: Int
+        let localOnlyShotCount: Int
+        let remoteOnlyShotCount: Int
+        let staleOrgReconciledPropertyCount: Int
+        let staleOrgReconciledShotCount: Int
+        let items: [DivergenceAuditItem]
+
+        var countsByCategory: [DivergenceAuditCategory: Int] {
+            Dictionary(grouping: items, by: \.category).mapValues(\.count)
+        }
+    }
+
     struct CaptureProfileBackfillRemoteState {
         let propertyRowExists: Bool
         let propertyCaptureProfile: CaptureProfile?
@@ -1650,6 +1727,60 @@ final class AppState: ObservableObject {
         }
     }
 
+    private struct DivergenceRemotePropertyRecord: Decodable {
+        let id: UUID
+        let orgID: UUID
+        let captureProfile: String?
+        let isArchived: Bool?
+        let deletedAt: Date?
+
+        enum CodingKeys: String, CodingKey {
+            case id
+            case orgID = "org_id"
+            case captureProfile = "capture_profile"
+            case isArchived = "is_archived"
+            case deletedAt = "deleted_at"
+        }
+    }
+
+    private struct DivergenceRemoteSessionRecord: Decodable {
+        let id: UUID
+        let orgID: UUID
+        let propertyID: UUID
+        let captureProfile: String?
+        let deletedAt: Date?
+
+        enum CodingKeys: String, CodingKey {
+            case id
+            case orgID = "org_id"
+            case propertyID = "property_id"
+            case captureProfile = "capture_profile"
+            case deletedAt = "deleted_at"
+        }
+    }
+
+    private struct DivergenceRemoteShotRecord: Decodable {
+        let id: UUID
+        let orgID: UUID?
+        let propertyID: UUID?
+        let sessionID: UUID?
+        let uploadState: String?
+        let storagePath: String?
+        let uploadAttempts: Int?
+        let deletedAt: Date?
+
+        enum CodingKeys: String, CodingKey {
+            case id
+            case orgID = "org_id"
+            case propertyID = "property_id"
+            case sessionID = "session_id"
+            case uploadState = "upload_state"
+            case storagePath = "storage_path"
+            case uploadAttempts = "upload_attempts"
+            case deletedAt = "deleted_at"
+        }
+    }
+
     private struct SupabasePropertyIdentityRecord: Decodable {
         let id: UUID
         let orgID: UUID
@@ -2047,6 +2178,41 @@ final class AppState: ObservableObject {
                 shot.uploadState == "uploading" ||
                 (shot.uploadState == "failed" && shot.uploadAttempts < maximumSupabaseMediaUploadAttempts)
         }
+    }
+
+    func runDivergenceAudit() async -> DivergenceAuditSummary {
+        let ranAt = Date()
+        let organizationID = activeOrganizationID
+        print("[DivergenceAudit] event=start activeOrganizationID=\(organizationID?.uuidString ?? "nil")")
+
+        let localSnapshot = makeLocalDivergenceSnapshot()
+        let remoteSnapshot = await fetchRemoteDivergenceSnapshotIfAvailable(activeOrganizationID: organizationID)
+        let summary = makeDivergenceAuditSummary(
+            ranAt: ranAt,
+            activeOrganizationID: organizationID,
+            local: localSnapshot,
+            remote: remoteSnapshot
+        )
+        let counts = summary.countsByCategory
+            .sorted { $0.key.rawValue < $1.key.rawValue }
+            .map { "\($0.key.rawValue)=\($0.value)" }
+            .joined(separator: " ")
+        print(
+            "[DivergenceAudit] event=complete activeOrganizationID=\(organizationID?.uuidString ?? "nil") " +
+            "remoteScopeAvailable=\(summary.remoteScopeAvailable) " +
+            "localProperties=\(summary.localPropertyCount) remoteProperties=\(summary.remotePropertyCount) " +
+            "localSessions=\(summary.localSessionCount) remoteSessions=\(summary.remoteSessionCount) " +
+            "localShots=\(summary.localShotCount) remoteShots=\(summary.remoteShotCount) " +
+            "matchedProperties=\(summary.matchedPropertyCount) matchedSessions=\(summary.matchedSessionCount) " +
+            "matchedShots=\(summary.matchedShotCount) " +
+            "localOnlyProperties=\(summary.localOnlyPropertyCount) remoteOnlyProperties=\(summary.remoteOnlyPropertyCount) " +
+            "localOnlySessions=\(summary.localOnlySessionCount) remoteOnlySessions=\(summary.remoteOnlySessionCount) " +
+            "localOnlyShots=\(summary.localOnlyShotCount) remoteOnlyShots=\(summary.remoteOnlyShotCount) " +
+            "staleOrgReconciledProperties=\(summary.staleOrgReconciledPropertyCount) " +
+            "staleOrgReconciledShots=\(summary.staleOrgReconciledShotCount) " +
+            "items=\(summary.items.count) counts=\(counts)"
+        )
+        return summary
     }
 
     private let injectedLocalStore: LocalStore?
@@ -6186,6 +6352,757 @@ final class AppState: ObservableObject {
             }
             return $0.shotID.uuidString < $1.shotID.uuidString
         }
+    }
+
+    private struct LocalDivergenceShot {
+        let shot: ShotMetadata
+        let propertyID: UUID
+        let sessionID: UUID
+        let metadataOrgID: UUID?
+        let metadataCaptureProfile: String?
+    }
+
+    private struct LocalDivergenceSnapshot {
+        let properties: [Property]
+        let sessions: [Session]
+        let shots: [LocalDivergenceShot]
+    }
+
+    private struct RemoteDivergenceSnapshot {
+        let properties: [DivergenceRemotePropertyRecord]
+        let sessions: [DivergenceRemoteSessionRecord]
+        let shots: [DivergenceRemoteShotRecord]
+    }
+
+    private struct DivergencePresenceCounts {
+        var matchedProperties = 0
+        var matchedSessions = 0
+        var matchedShots = 0
+        var localOnlyProperties = 0
+        var remoteOnlyProperties = 0
+        var localOnlySessions = 0
+        var remoteOnlySessions = 0
+        var localOnlyShots = 0
+        var remoteOnlyShots = 0
+        var staleOrgReconciledProperties = 0
+        var staleOrgReconciledShots = 0
+    }
+
+    private func makeLocalDivergenceSnapshot() -> LocalDivergenceSnapshot {
+        let properties = (try? localStore.fetchProperties()) ?? []
+        var sessions: [Session] = []
+        var shots: [LocalDivergenceShot] = []
+
+        for property in properties {
+            let propertySessions = (try? localStore.fetchSessionsForCacheBuild(propertyID: property.id)) ?? []
+            sessions.append(contentsOf: propertySessions)
+            for session in propertySessions {
+                guard let metadata = try? localStore.loadSessionMetadata(
+                    propertyID: property.id,
+                    sessionID: session.id
+                ) else {
+                    continue
+                }
+                shots.append(contentsOf: metadata.shots.map { shot in
+                    LocalDivergenceShot(
+                        shot: shot,
+                        propertyID: property.id,
+                        sessionID: session.id,
+                        metadataOrgID: metadata.orgID,
+                        metadataCaptureProfile: metadata.captureProfile
+                    )
+                })
+            }
+        }
+
+        return LocalDivergenceSnapshot(properties: properties, sessions: sessions, shots: shots)
+    }
+
+    private func fetchRemoteDivergenceSnapshotIfAvailable(
+        activeOrganizationID: UUID?
+    ) async -> RemoteDivergenceSnapshot? {
+        guard backendFeatureFlags.supabaseEnabled,
+              isOrganizationContextReady,
+              let activeOrganizationID,
+              let client = supabaseClient else {
+            return nil
+        }
+
+        let orgValue = activeOrganizationID.uuidString.lowercased()
+        do {
+            async let properties: [DivergenceRemotePropertyRecord] = client
+                .from("properties")
+                .select("id, org_id, capture_profile, is_archived, deleted_at")
+                .eq("org_id", value: orgValue)
+                .limit(1_000)
+                .execute()
+                .value
+
+            async let sessions: [DivergenceRemoteSessionRecord] = client
+                .from("sessions")
+                .select("id, org_id, property_id, capture_profile, deleted_at")
+                .eq("org_id", value: orgValue)
+                .limit(1_000)
+                .execute()
+                .value
+
+            async let shots: [DivergenceRemoteShotRecord] = client
+                .from("shots")
+                .select("id, org_id, property_id, session_id, upload_state, storage_path, upload_attempts, deleted_at")
+                .eq("org_id", value: orgValue)
+                .limit(1_000)
+                .execute()
+                .value
+
+            return try await RemoteDivergenceSnapshot(
+                properties: properties,
+                sessions: sessions,
+                shots: shots
+            )
+        } catch {
+            recordDiagnosticsError(error)
+            return nil
+        }
+    }
+
+    private func makeDivergenceAuditSummary(
+        ranAt: Date,
+        activeOrganizationID: UUID?,
+        local: LocalDivergenceSnapshot,
+        remote: RemoteDivergenceSnapshot?
+    ) -> DivergenceAuditSummary {
+        let localPropertiesByID = dictionaryByNormalizedID(local.properties, id: \.id)
+        let localSessionsByID = dictionaryByNormalizedID(local.sessions, id: \.id)
+        let remotePropertiesByID = dictionaryByNormalizedID(remote?.properties ?? [], id: \.id)
+        let remoteSessionsByID = dictionaryByNormalizedID(remote?.sessions ?? [], id: \.id)
+        let remoteShotsByID = dictionaryByNormalizedID(remote?.shots ?? [], id: \.id)
+        let remotePropertyIDs = Set(remotePropertiesByID.keys)
+        let remoteSessionIDs = Set(remoteSessionsByID.keys)
+        let remoteShotIDs = Set(remoteShotsByID.keys)
+        let scopedLocalProperties = local.properties.filter { property in
+            localPropertyBelongsToAuditScope(
+                property,
+                activeOrganizationID: activeOrganizationID,
+                remotePropertyIDs: remotePropertyIDs
+            )
+        }
+        let scopedLocalPropertyIDs = Set(scopedLocalProperties.map { divergenceKey($0.id) })
+        let scopedLocalSessions = local.sessions.filter { session in
+            localSessionBelongsToAuditScope(
+                session,
+                scopedLocalPropertyIDs: scopedLocalPropertyIDs,
+                remoteSessionIDs: remoteSessionIDs
+            )
+        }
+        let scopedLocalSessionIDs = Set(scopedLocalSessions.map { divergenceKey($0.id) })
+        let scopedLocalShots = local.shots.filter { shot in
+            localShotBelongsToAuditScope(
+                shot,
+                activeOrganizationID: activeOrganizationID,
+                scopedLocalPropertyIDs: scopedLocalPropertyIDs,
+                scopedLocalSessionIDs: scopedLocalSessionIDs,
+                remoteShotIDs: remoteShotIDs
+            )
+        }
+
+        var items: [DivergenceAuditItem] = []
+        var presenceCounts = DivergencePresenceCounts()
+
+        if remote == nil {
+            items.append(
+                DivergenceAuditItem(
+                    category: .remoteUnavailable,
+                    entityType: "remote",
+                    entityID: nil,
+                    orgID: activeOrganizationID,
+                    reason: "Remote audit scope was unavailable; local-only and remote-only comparisons were skipped."
+                )
+            )
+        }
+
+        for property in local.properties.sorted(by: { $0.id.uuidString < $1.id.uuidString }) {
+            let propertyKey = divergenceKey(property.id)
+            if let activeOrganizationID,
+               property.orgId != activeOrganizationID,
+               remotePropertiesByID[propertyKey] == nil {
+                items.append(
+                    DivergenceAuditItem(
+                        category: .staleOrgMismatch,
+                        entityType: "property",
+                        entityID: property.id,
+                        propertyID: property.id,
+                        orgID: property.orgId,
+                        reason: "Local property org does not match the active organization."
+                    )
+                )
+            }
+            if property.captureProfile == nil {
+                items.append(
+                    DivergenceAuditItem(
+                        category: .captureProfile,
+                        entityType: "property",
+                        entityID: property.id,
+                        propertyID: property.id,
+                        orgID: property.orgId,
+                        reason: "Local property capture_profile is null."
+                    )
+                )
+            }
+        }
+
+        for session in local.sessions.sorted(by: { $0.id.uuidString < $1.id.uuidString }) {
+            let propertyKey = divergenceKey(session.propertyID)
+            let propertyOrgID = localPropertiesByID[propertyKey]?.orgId
+            if localPropertiesByID[propertyKey] == nil {
+                items.append(
+                    DivergenceAuditItem(
+                        category: .missingParent,
+                        entityType: "session",
+                        entityID: session.id,
+                        propertyID: session.propertyID,
+                        sessionID: session.id,
+                        orgID: propertyOrgID,
+                        reason: "Local session references a missing local property."
+                    )
+                )
+            }
+            if session.captureProfile == nil {
+                items.append(
+                    DivergenceAuditItem(
+                        category: .captureProfile,
+                        entityType: "session",
+                        entityID: session.id,
+                        propertyID: session.propertyID,
+                        sessionID: session.id,
+                        orgID: propertyOrgID,
+                        reason: "Local session capture_profile is null."
+                    )
+                )
+            }
+        }
+
+        var sessionMetadataProfileFindingIDs = Set<UUID>()
+        for localShot in local.shots.sorted(by: { $0.shot.shotID.uuidString < $1.shot.shotID.uuidString }) {
+            let shot = localShot.shot
+            let shotKey = divergenceKey(shot.shotID)
+            if let activeOrganizationID,
+               let metadataOrgID = localShot.metadataOrgID,
+               metadataOrgID != activeOrganizationID,
+               remoteShotsByID[shotKey] == nil,
+               !scopedLocalPropertyIDs.contains(divergenceKey(localShot.propertyID)),
+               !scopedLocalSessionIDs.contains(divergenceKey(localShot.sessionID)) {
+                items.append(
+                    DivergenceAuditItem(
+                        category: .staleOrgMismatch,
+                        entityType: "shot",
+                        entityID: shot.shotID,
+                        propertyID: localShot.propertyID,
+                        sessionID: localShot.sessionID,
+                        shotID: shot.shotID,
+                        orgID: metadataOrgID,
+                        reason: "Local shot metadata org does not match the active organization."
+                    )
+                )
+            }
+            if localPropertiesByID[divergenceKey(shot.propertyID)] == nil {
+                items.append(
+                    DivergenceAuditItem(
+                        category: .missingParent,
+                        entityType: "shot",
+                        entityID: shot.shotID,
+                        propertyID: shot.propertyID,
+                        sessionID: shot.sessionID,
+                        shotID: shot.shotID,
+                        orgID: localShot.metadataOrgID,
+                        reason: "Local shot references a missing local property."
+                    )
+                )
+            }
+            if localSessionsByID[divergenceKey(shot.sessionID)] == nil {
+                items.append(
+                    DivergenceAuditItem(
+                        category: .missingParent,
+                        entityType: "shot",
+                        entityID: shot.shotID,
+                        propertyID: shot.propertyID,
+                        sessionID: shot.sessionID,
+                        shotID: shot.shotID,
+                        orgID: localShot.metadataOrgID,
+                        reason: "Local shot references a missing local session."
+                    )
+                )
+            }
+            appendLocalMediaDriftItems(for: localShot, to: &items)
+            if CaptureProfile(storedValue: localShot.metadataCaptureProfile) == nil,
+               sessionMetadataProfileFindingIDs.insert(localShot.sessionID).inserted {
+                items.append(
+                    DivergenceAuditItem(
+                        category: .captureProfile,
+                        entityType: "session_metadata",
+                        entityID: localShot.sessionID,
+                        propertyID: localShot.propertyID,
+                        sessionID: localShot.sessionID,
+                        orgID: localShot.metadataOrgID,
+                        reason: "Local session metadata capture_profile is null or unknown."
+                    )
+                )
+            }
+        }
+
+        if let remote {
+            presenceCounts = appendLocalRemotePresenceItems(
+                localProperties: scopedLocalProperties,
+                localSessions: scopedLocalSessions,
+                localShots: scopedLocalShots,
+                remotePropertiesByID: remotePropertiesByID,
+                remoteSessionsByID: remoteSessionsByID,
+                remoteShotsByID: remoteShotsByID,
+                activeOrganizationID: activeOrganizationID,
+                to: &items
+            )
+            appendRemoteParentAndMediaItems(
+                remote: remote,
+                remotePropertiesByID: remotePropertiesByID,
+                remoteSessionsByID: remoteSessionsByID,
+                to: &items
+            )
+            appendCaptureProfileMismatchItems(
+                localPropertiesByID: localPropertiesByID,
+                localSessionsByID: localSessionsByID,
+                remotePropertiesByID: remotePropertiesByID,
+                remoteSessionsByID: remoteSessionsByID,
+                to: &items
+            )
+            appendDeletedHiddenMismatchItems(
+                localPropertiesByID: localPropertiesByID,
+                localSessionsByID: localSessionsByID,
+                remotePropertiesByID: remotePropertiesByID,
+                remoteSessionsByID: remoteSessionsByID,
+                to: &items
+            )
+        }
+
+        let sortedItems = items.sorted {
+            if $0.category.rawValue != $1.category.rawValue {
+                return $0.category.rawValue < $1.category.rawValue
+            }
+            return ($0.entityID?.uuidString ?? "") < ($1.entityID?.uuidString ?? "")
+        }
+
+        return DivergenceAuditSummary(
+            ranAt: ranAt,
+            activeOrganizationID: activeOrganizationID,
+            remoteScopeAvailable: remote != nil,
+            localPropertyCount: local.properties.count,
+            remotePropertyCount: remote?.properties.count ?? 0,
+            localSessionCount: local.sessions.count,
+            remoteSessionCount: remote?.sessions.count ?? 0,
+            localShotCount: local.shots.count,
+            remoteShotCount: remote?.shots.count ?? 0,
+            matchedPropertyCount: presenceCounts.matchedProperties,
+            matchedSessionCount: presenceCounts.matchedSessions,
+            matchedShotCount: presenceCounts.matchedShots,
+            localOnlyPropertyCount: presenceCounts.localOnlyProperties,
+            remoteOnlyPropertyCount: presenceCounts.remoteOnlyProperties,
+            localOnlySessionCount: presenceCounts.localOnlySessions,
+            remoteOnlySessionCount: presenceCounts.remoteOnlySessions,
+            localOnlyShotCount: presenceCounts.localOnlyShots,
+            remoteOnlyShotCount: presenceCounts.remoteOnlyShots,
+            staleOrgReconciledPropertyCount: presenceCounts.staleOrgReconciledProperties,
+            staleOrgReconciledShotCount: presenceCounts.staleOrgReconciledShots,
+            items: sortedItems
+        )
+    }
+
+    private func localPropertyBelongsToAuditScope(
+        _ property: Property,
+        activeOrganizationID: UUID?,
+        remotePropertyIDs: Set<String>
+    ) -> Bool {
+        guard let activeOrganizationID else { return true }
+        return property.orgId == activeOrganizationID ||
+            remotePropertyIDs.contains(divergenceKey(property.id))
+    }
+
+    private func localSessionBelongsToAuditScope(
+        _ session: Session,
+        scopedLocalPropertyIDs: Set<String>,
+        remoteSessionIDs: Set<String>
+    ) -> Bool {
+        scopedLocalPropertyIDs.contains(divergenceKey(session.propertyID)) ||
+            remoteSessionIDs.contains(divergenceKey(session.id))
+    }
+
+    private func localShotBelongsToAuditScope(
+        _ shot: LocalDivergenceShot,
+        activeOrganizationID: UUID?,
+        scopedLocalPropertyIDs: Set<String>,
+        scopedLocalSessionIDs: Set<String>,
+        remoteShotIDs: Set<String>
+    ) -> Bool {
+        remoteShotIDs.contains(divergenceKey(shot.shot.shotID)) ||
+            scopedLocalPropertyIDs.contains(divergenceKey(shot.propertyID)) ||
+            scopedLocalSessionIDs.contains(divergenceKey(shot.sessionID)) ||
+            (activeOrganizationID != nil && shot.metadataOrgID == activeOrganizationID)
+    }
+
+    @discardableResult
+    private func appendLocalRemotePresenceItems(
+        localProperties: [Property],
+        localSessions: [Session],
+        localShots: [LocalDivergenceShot],
+        remotePropertiesByID: [String: DivergenceRemotePropertyRecord],
+        remoteSessionsByID: [String: DivergenceRemoteSessionRecord],
+        remoteShotsByID: [String: DivergenceRemoteShotRecord],
+        activeOrganizationID: UUID?,
+        to items: inout [DivergenceAuditItem]
+    ) -> DivergencePresenceCounts {
+        let localPropertyIDs = Set(localProperties.map { divergenceKey($0.id) })
+        let localSessionIDs = Set(localSessions.map { divergenceKey($0.id) })
+        let localShotIDs = Set(localShots.map { divergenceKey($0.shot.shotID) })
+        var counts = DivergencePresenceCounts()
+        counts.matchedProperties = localPropertyIDs.intersection(remotePropertiesByID.keys).count
+        counts.matchedSessions = localSessionIDs.intersection(remoteSessionsByID.keys).count
+        counts.matchedShots = localShotIDs.intersection(remoteShotsByID.keys).count
+        counts.staleOrgReconciledProperties = localProperties.filter { property in
+            guard let activeOrganizationID else { return false }
+            return property.orgId != activeOrganizationID &&
+                remotePropertiesByID[divergenceKey(property.id)] != nil
+        }.count
+        counts.staleOrgReconciledShots = localShots.filter { shot in
+            guard let activeOrganizationID else { return false }
+            return shot.metadataOrgID != nil &&
+                shot.metadataOrgID != activeOrganizationID &&
+                remoteShotsByID[divergenceKey(shot.shot.shotID)] != nil
+        }.count
+
+        for property in localProperties where remotePropertiesByID[divergenceKey(property.id)] == nil {
+            counts.localOnlyProperties += 1
+            items.append(
+                DivergenceAuditItem(
+                    category: .localOnlyProperty,
+                    entityType: "property",
+                    entityID: property.id,
+                    propertyID: property.id,
+                    orgID: property.orgId,
+                    reason: "Local active-org property is missing from remote active-org query."
+                )
+            )
+        }
+        for remoteProperty in remotePropertiesByID.values where !localPropertyIDs.contains(divergenceKey(remoteProperty.id)) {
+            counts.remoteOnlyProperties += 1
+            items.append(
+                DivergenceAuditItem(
+                    category: .remoteOnlyProperty,
+                    entityType: "property",
+                    entityID: remoteProperty.id,
+                    propertyID: remoteProperty.id,
+                    orgID: remoteProperty.orgID,
+                    reason: "Remote active-org property is missing from local cache."
+                )
+            )
+        }
+
+        for session in localSessions where remoteSessionsByID[divergenceKey(session.id)] == nil {
+            counts.localOnlySessions += 1
+            items.append(
+                DivergenceAuditItem(
+                    category: .localOnlySession,
+                    entityType: "session",
+                    entityID: session.id,
+                    propertyID: session.propertyID,
+                    sessionID: session.id,
+                    orgID: activeOrganizationID,
+                    reason: "Local active-org session is missing from remote active-org query."
+                )
+            )
+        }
+        for remoteSession in remoteSessionsByID.values where !localSessionIDs.contains(divergenceKey(remoteSession.id)) {
+            counts.remoteOnlySessions += 1
+            items.append(
+                DivergenceAuditItem(
+                    category: .remoteOnlySession,
+                    entityType: "session",
+                    entityID: remoteSession.id,
+                    propertyID: remoteSession.propertyID,
+                    sessionID: remoteSession.id,
+                    orgID: remoteSession.orgID,
+                    reason: "Remote active-org session is missing from local cache."
+                )
+            )
+        }
+
+        for localShot in localShots where remoteShotsByID[divergenceKey(localShot.shot.shotID)] == nil {
+            counts.localOnlyShots += 1
+            items.append(
+                DivergenceAuditItem(
+                    category: .localOnlyShot,
+                    entityType: "shot",
+                    entityID: localShot.shot.shotID,
+                    propertyID: localShot.propertyID,
+                    sessionID: localShot.sessionID,
+                    shotID: localShot.shot.shotID,
+                    orgID: localShot.metadataOrgID ?? activeOrganizationID,
+                    reason: "Local active-org shot is missing from remote active-org query."
+                )
+            )
+        }
+        for remoteShot in remoteShotsByID.values where !localShotIDs.contains(divergenceKey(remoteShot.id)) {
+            counts.remoteOnlyShots += 1
+            items.append(
+                DivergenceAuditItem(
+                    category: .remoteOnlyShot,
+                    entityType: "shot",
+                    entityID: remoteShot.id,
+                    propertyID: remoteShot.propertyID,
+                    sessionID: remoteShot.sessionID,
+                    shotID: remoteShot.id,
+                    orgID: remoteShot.orgID,
+                    reason: "Remote active-org shot is missing from local metadata."
+                )
+            )
+        }
+        return counts
+    }
+
+    private func appendRemoteParentAndMediaItems(
+        remote: RemoteDivergenceSnapshot,
+        remotePropertiesByID: [String: DivergenceRemotePropertyRecord],
+        remoteSessionsByID: [String: DivergenceRemoteSessionRecord],
+        to items: inout [DivergenceAuditItem]
+    ) {
+        for session in remote.sessions where remotePropertiesByID[divergenceKey(session.propertyID)] == nil {
+            items.append(
+                DivergenceAuditItem(
+                    category: .missingParent,
+                    entityType: "session",
+                    entityID: session.id,
+                    propertyID: session.propertyID,
+                    sessionID: session.id,
+                    orgID: session.orgID,
+                    reason: "Remote session references a missing remote property in the active-org audit scope."
+                )
+            )
+        }
+
+        for shot in remote.shots {
+            if let propertyID = shot.propertyID, remotePropertiesByID[divergenceKey(propertyID)] == nil {
+                items.append(
+                    DivergenceAuditItem(
+                        category: .missingParent,
+                        entityType: "shot",
+                        entityID: shot.id,
+                        propertyID: propertyID,
+                        sessionID: shot.sessionID,
+                        shotID: shot.id,
+                        orgID: shot.orgID,
+                        reason: "Remote shot references a missing remote property in the active-org audit scope."
+                    )
+                )
+            }
+            if let sessionID = shot.sessionID, remoteSessionsByID[divergenceKey(sessionID)] == nil {
+                items.append(
+                    DivergenceAuditItem(
+                        category: .missingParent,
+                        entityType: "shot",
+                        entityID: shot.id,
+                        propertyID: shot.propertyID,
+                        sessionID: sessionID,
+                        shotID: shot.id,
+                        orgID: shot.orgID,
+                        reason: "Remote shot references a missing remote session in the active-org audit scope."
+                    )
+                )
+            }
+            if shot.propertyID == nil {
+                items.append(
+                    DivergenceAuditItem(
+                        category: .missingParent,
+                        entityType: "shot",
+                        entityID: shot.id,
+                        sessionID: shot.sessionID,
+                        shotID: shot.id,
+                        orgID: shot.orgID,
+                        reason: "Remote shot has a null property_id."
+                    )
+                )
+            }
+            if shot.sessionID == nil {
+                items.append(
+                    DivergenceAuditItem(
+                        category: .missingParent,
+                        entityType: "shot",
+                        entityID: shot.id,
+                        propertyID: shot.propertyID,
+                        shotID: shot.id,
+                        orgID: shot.orgID,
+                        reason: "Remote shot has a null session_id."
+                    )
+                )
+            }
+            appendRemoteMediaDriftItems(for: shot, to: &items)
+        }
+    }
+
+    private func appendLocalMediaDriftItems(
+        for localShot: LocalDivergenceShot,
+        to items: inout [DivergenceAuditItem]
+    ) {
+        let shot = localShot.shot
+        let uploadState = shot.uploadState.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let hasStoragePath = normalizedSupabaseText(shot.storagePath) != nil
+        let reason: String?
+        if uploadState == "pending", hasStoragePath {
+            reason = "Local upload_state is pending but storage path exists."
+        } else if uploadState == "uploaded", !hasStoragePath {
+            reason = "Local upload_state is uploaded but storage path is missing."
+        } else if uploadState != "uploaded", shot.uploadAttempts >= maximumSupabaseMediaUploadAttempts {
+            reason = "Local media upload is retry-capped."
+        } else {
+            reason = nil
+        }
+        guard let reason else { return }
+        items.append(
+            DivergenceAuditItem(
+                category: .mediaDrift,
+                entityType: "shot",
+                entityID: shot.shotID,
+                propertyID: localShot.propertyID,
+                sessionID: localShot.sessionID,
+                shotID: shot.shotID,
+                orgID: localShot.metadataOrgID,
+                reason: reason
+            )
+        )
+    }
+
+    private func appendRemoteMediaDriftItems(
+        for shot: DivergenceRemoteShotRecord,
+        to items: inout [DivergenceAuditItem]
+    ) {
+        let uploadState = normalizedSupabaseText(shot.uploadState)?.lowercased()
+        let hasStoragePath = normalizedSupabaseText(shot.storagePath) != nil
+        let reason: String?
+        if uploadState == "pending", hasStoragePath {
+            reason = "Remote upload_state is pending but storage path exists."
+        } else if uploadState == "uploaded", !hasStoragePath {
+            reason = "Remote upload_state is uploaded but storage path is missing."
+        } else if uploadState != "uploaded",
+                  (shot.uploadAttempts ?? 0) >= maximumSupabaseMediaUploadAttempts {
+            reason = "Remote media upload is retry-capped."
+        } else {
+            reason = nil
+        }
+        guard let reason else { return }
+        items.append(
+            DivergenceAuditItem(
+                category: .mediaDrift,
+                entityType: "shot",
+                entityID: shot.id,
+                propertyID: shot.propertyID,
+                sessionID: shot.sessionID,
+                shotID: shot.id,
+                orgID: shot.orgID,
+                reason: reason
+            )
+        )
+    }
+
+    private func appendCaptureProfileMismatchItems(
+        localPropertiesByID: [String: Property],
+        localSessionsByID: [String: Session],
+        remotePropertiesByID: [String: DivergenceRemotePropertyRecord],
+        remoteSessionsByID: [String: DivergenceRemoteSessionRecord],
+        to items: inout [DivergenceAuditItem]
+    ) {
+        for (propertyKey, remoteProperty) in remotePropertiesByID {
+            guard let localProperty = localPropertiesByID[propertyKey] else { continue }
+            if localProperty.captureProfile?.rawValue != normalizedSupabaseText(remoteProperty.captureProfile) {
+                items.append(
+                    DivergenceAuditItem(
+                        category: .captureProfile,
+                        entityType: "property",
+                        entityID: remoteProperty.id,
+                        propertyID: remoteProperty.id,
+                        orgID: remoteProperty.orgID,
+                        reason: "Local property capture_profile does not match remote capture_profile."
+                    )
+                )
+            }
+        }
+        for (sessionKey, remoteSession) in remoteSessionsByID {
+            guard let localSession = localSessionsByID[sessionKey] else { continue }
+            if localSession.captureProfile?.rawValue != normalizedSupabaseText(remoteSession.captureProfile) {
+                items.append(
+                    DivergenceAuditItem(
+                        category: .captureProfile,
+                        entityType: "session",
+                        entityID: remoteSession.id,
+                        propertyID: remoteSession.propertyID,
+                        sessionID: remoteSession.id,
+                        orgID: remoteSession.orgID,
+                        reason: "Local session capture_profile does not match remote capture_profile."
+                    )
+                )
+            }
+        }
+    }
+
+    private func appendDeletedHiddenMismatchItems(
+        localPropertiesByID: [String: Property],
+        localSessionsByID: [String: Session],
+        remotePropertiesByID: [String: DivergenceRemotePropertyRecord],
+        remoteSessionsByID: [String: DivergenceRemoteSessionRecord],
+        to items: inout [DivergenceAuditItem]
+    ) {
+        for (propertyKey, remoteProperty) in remotePropertiesByID {
+            guard let localProperty = localPropertiesByID[propertyKey] else { continue }
+            if (localProperty.deletedAt == nil) != (remoteProperty.deletedAt == nil) ||
+                localProperty.isArchived != (remoteProperty.isArchived ?? false) {
+                items.append(
+                    DivergenceAuditItem(
+                        category: .deletedHiddenMismatch,
+                        entityType: "property",
+                        entityID: remoteProperty.id,
+                        propertyID: remoteProperty.id,
+                        orgID: remoteProperty.orgID,
+                        reason: "Local property deleted/archived state does not match remote state."
+                    )
+                )
+            }
+        }
+        for (sessionKey, remoteSession) in remoteSessionsByID {
+            guard let localSession = localSessionsByID[sessionKey] else { continue }
+            if (localSession.deletedAt == nil) != (remoteSession.deletedAt == nil) {
+                items.append(
+                    DivergenceAuditItem(
+                        category: .deletedHiddenMismatch,
+                        entityType: "session",
+                        entityID: remoteSession.id,
+                        propertyID: remoteSession.propertyID,
+                        sessionID: remoteSession.id,
+                        orgID: remoteSession.orgID,
+                        reason: "Local session deleted state does not match remote state."
+                    )
+                )
+            }
+        }
+    }
+
+    private func dictionaryByNormalizedID<Value>(
+        _ values: [Value],
+        id: (Value) -> UUID
+    ) -> [String: Value] {
+        values.reduce(into: [:]) { result, value in
+            let key = divergenceKey(id(value))
+            if result[key] == nil {
+                result[key] = value
+            }
+        }
+    }
+
+    private func divergenceKey(_ id: UUID) -> String {
+        id.uuidString.lowercased()
     }
 
     private nonisolated static func safeDiagnosticsFilename(
@@ -16601,6 +17518,128 @@ final class AppState: ObservableObject {
 
     func _debugLocalDiagnosticsForTests() -> LocalDiagnosticsState {
         localDiagnostics
+    }
+
+    func _debugDivergenceAuditWithEmptyRemoteForTests(
+        activeOrganizationID: UUID? = nil,
+        ranAt: Date = Date()
+    ) -> DivergenceAuditSummary {
+        makeDivergenceAuditSummary(
+            ranAt: ranAt,
+            activeOrganizationID: activeOrganizationID,
+            local: makeLocalDivergenceSnapshot(),
+            remote: RemoteDivergenceSnapshot(properties: [], sessions: [], shots: [])
+        )
+    }
+
+    struct DebugDivergenceLocalShotInput {
+        let shot: ShotMetadata
+        let propertyID: UUID
+        let sessionID: UUID
+        let metadataOrgID: UUID?
+        let metadataCaptureProfile: String?
+
+        init(
+            shot: ShotMetadata,
+            propertyID: UUID,
+            sessionID: UUID,
+            metadataOrgID: UUID?,
+            metadataCaptureProfile: String?
+        ) {
+            self.shot = shot
+            self.propertyID = propertyID
+            self.sessionID = sessionID
+            self.metadataOrgID = metadataOrgID
+            self.metadataCaptureProfile = metadataCaptureProfile
+        }
+    }
+
+    struct DebugDivergenceRemoteInput {
+        let propertyIDs: [String]
+        let sessions: [(id: String, propertyID: String)]
+        let shots: [(id: String, propertyID: String?, sessionID: String?)]
+        let orgID: UUID
+
+        init(
+            propertyIDs: [String],
+            sessions: [(id: String, propertyID: String)] = [],
+            shots: [(id: String, propertyID: String?, sessionID: String?)] = [],
+            orgID: UUID
+        ) {
+            self.propertyIDs = propertyIDs
+            self.sessions = sessions
+            self.shots = shots
+            self.orgID = orgID
+        }
+    }
+
+    func _debugDivergenceAuditSummaryForTests(
+        properties: [Property],
+        sessions: [Session],
+        shots: [DebugDivergenceLocalShotInput],
+        remote: DebugDivergenceRemoteInput? = nil,
+        activeOrganizationID: UUID? = nil,
+        ranAt: Date = Date()
+    ) -> DivergenceAuditSummary {
+        makeDivergenceAuditSummary(
+            ranAt: ranAt,
+            activeOrganizationID: activeOrganizationID,
+            local: LocalDivergenceSnapshot(
+                properties: properties,
+                sessions: sessions,
+                shots: shots.map {
+                    LocalDivergenceShot(
+                        shot: $0.shot,
+                        propertyID: $0.propertyID,
+                        sessionID: $0.sessionID,
+                        metadataOrgID: $0.metadataOrgID,
+                        metadataCaptureProfile: $0.metadataCaptureProfile
+                    )
+                }
+            ),
+            remote: remote.map(debugRemoteDivergenceSnapshot)
+        )
+    }
+
+    private func debugRemoteDivergenceSnapshot(
+        _ input: DebugDivergenceRemoteInput
+    ) -> RemoteDivergenceSnapshot {
+        RemoteDivergenceSnapshot(
+            properties: input.propertyIDs.compactMap { id in
+                guard let propertyID = UUID(uuidString: id) else { return nil }
+                return DivergenceRemotePropertyRecord(
+                    id: propertyID,
+                    orgID: input.orgID,
+                    captureProfile: nil,
+                    isArchived: false,
+                    deletedAt: nil
+                )
+            },
+            sessions: input.sessions.compactMap { session in
+                guard let sessionID = UUID(uuidString: session.id),
+                      let propertyID = UUID(uuidString: session.propertyID) else { return nil }
+                return DivergenceRemoteSessionRecord(
+                    id: sessionID,
+                    orgID: input.orgID,
+                    propertyID: propertyID,
+                    captureProfile: nil,
+                    deletedAt: nil
+                )
+            },
+            shots: input.shots.compactMap { shot in
+                guard let shotID = UUID(uuidString: shot.id) else { return nil }
+                return DivergenceRemoteShotRecord(
+                    id: shotID,
+                    orgID: input.orgID,
+                    propertyID: shot.propertyID.flatMap(UUID.init(uuidString:)),
+                    sessionID: shot.sessionID.flatMap(UUID.init(uuidString:)),
+                    uploadState: "uploaded",
+                    storagePath: "debug/path",
+                    uploadAttempts: 0,
+                    deletedAt: nil
+                )
+            }
+        )
     }
 
     func _debugRefreshOfflineQueueDiagnosticsForTests() {

@@ -6193,14 +6193,97 @@ private struct DebugMediaDiagnosticSnapshotItem: Identifiable, Equatable {
     }
 }
 
+private struct DebugDivergenceAuditSnapshot {
+    let ranAt: String
+    let activeOrganizationID: String
+    let remoteScopeAvailable: String
+    let localPropertyCount: String
+    let remotePropertyCount: String
+    let localSessionCount: String
+    let remoteSessionCount: String
+    let localShotCount: String
+    let remoteShotCount: String
+    let matchedPropertyCount: String
+    let matchedSessionCount: String
+    let matchedShotCount: String
+    let localOnlyPropertyCount: String
+    let remoteOnlyPropertyCount: String
+    let localOnlySessionCount: String
+    let remoteOnlySessionCount: String
+    let localOnlyShotCount: String
+    let remoteOnlyShotCount: String
+    let staleOrgReconciledPropertyCount: String
+    let staleOrgReconciledShotCount: String
+    let totalFindings: String
+    let categoryCounts: [(AppState.DivergenceAuditCategory, Int)]
+    let items: [DebugDivergenceAuditSnapshotItem]
+
+    init(_ summary: AppState.DivergenceAuditSummary) {
+        ranAt = formattedDate(summary.ranAt)
+        activeOrganizationID = summary.activeOrganizationID?.uuidString ?? "none"
+        remoteScopeAvailable = summary.remoteScopeAvailable ? "yes" : "no"
+        localPropertyCount = String(summary.localPropertyCount)
+        remotePropertyCount = String(summary.remotePropertyCount)
+        localSessionCount = String(summary.localSessionCount)
+        remoteSessionCount = String(summary.remoteSessionCount)
+        localShotCount = String(summary.localShotCount)
+        remoteShotCount = String(summary.remoteShotCount)
+        matchedPropertyCount = String(summary.matchedPropertyCount)
+        matchedSessionCount = String(summary.matchedSessionCount)
+        matchedShotCount = String(summary.matchedShotCount)
+        localOnlyPropertyCount = String(summary.localOnlyPropertyCount)
+        remoteOnlyPropertyCount = String(summary.remoteOnlyPropertyCount)
+        localOnlySessionCount = String(summary.localOnlySessionCount)
+        remoteOnlySessionCount = String(summary.remoteOnlySessionCount)
+        localOnlyShotCount = String(summary.localOnlyShotCount)
+        remoteOnlyShotCount = String(summary.remoteOnlyShotCount)
+        staleOrgReconciledPropertyCount = String(summary.staleOrgReconciledPropertyCount)
+        staleOrgReconciledShotCount = String(summary.staleOrgReconciledShotCount)
+        totalFindings = String(summary.items.count)
+        let counts = summary.countsByCategory
+        categoryCounts = AppState.DivergenceAuditCategory.allCases
+            .map { ($0, counts[$0] ?? 0) }
+            .filter { $0.1 > 0 }
+        items = summary.items.map(DebugDivergenceAuditSnapshotItem.init)
+    }
+}
+
+private struct DebugDivergenceAuditSnapshotItem: Identifiable, Equatable {
+    let id: UUID
+    let category: String
+    let entityType: String
+    let entityID: String
+    let propertyID: String
+    let sessionID: String
+    let shotID: String
+    let orgID: String
+    let reasonPreview: String
+    let reasonFull: String
+
+    nonisolated init(_ item: AppState.DivergenceAuditItem) {
+        id = item.id
+        category = item.category.rawValue
+        entityType = item.entityType
+        entityID = item.entityID?.uuidString ?? "none"
+        propertyID = item.propertyID?.uuidString ?? "none"
+        sessionID = item.sessionID?.uuidString ?? "none"
+        shotID = item.shotID?.uuidString ?? "none"
+        orgID = item.orgID?.uuidString ?? "none"
+        reasonPreview = AppState.diagnosticsPreviewText(item.reason) ?? "none"
+        reasonFull = item.reason
+    }
+}
+
 private struct DebugLocalDiagnosticsView: View {
     @EnvironmentObject private var appState: AppState
     @Environment(\.dismiss) private var dismiss
 
     @State private var showClearConfirm: Bool = false
+    @State private var isRunningDivergenceAudit: Bool = false
     @State private var failedQueueItems: [DebugQueueDiagnosticSnapshotItem] = []
     @State private var retryCappedMediaItems: [DebugMediaDiagnosticSnapshotItem] = []
     @State private var pendingMediaItems: [DebugMediaDiagnosticSnapshotItem] = []
+    @State private var divergenceAuditSnapshot: DebugDivergenceAuditSnapshot?
 
     private var diagnostics: AppState.LocalDiagnosticsState {
         appState.localDiagnostics
@@ -6299,6 +6382,52 @@ private struct DebugLocalDiagnosticsView: View {
                     }
                 }
 
+                Section("Divergence Audit") {
+                    Text("Read-only local/remote audit. It does not repair, retry, delete, reset, or mutate app data.")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(.secondary)
+                    Button(isRunningDivergenceAudit ? "Running Audit..." : "Run Divergence Audit") {
+                        runDivergenceAudit()
+                    }
+                    .disabled(isRunningDivergenceAudit)
+
+                    if let snapshot = divergenceAuditSnapshot {
+                        diagnosticRow("Ran", snapshot.ranAt)
+                        diagnosticRow("Active Org", snapshot.activeOrganizationID)
+                        diagnosticRow("Remote Scope", snapshot.remoteScopeAvailable)
+                        diagnosticRow("Local Properties", snapshot.localPropertyCount)
+                        diagnosticRow("Remote Properties", snapshot.remotePropertyCount)
+                        diagnosticRow("Local Sessions", snapshot.localSessionCount)
+                        diagnosticRow("Remote Sessions", snapshot.remoteSessionCount)
+                        diagnosticRow("Local Shots", snapshot.localShotCount)
+                        diagnosticRow("Remote Shots", snapshot.remoteShotCount)
+                        diagnosticRow("Matched Properties", snapshot.matchedPropertyCount)
+                        diagnosticRow("Matched Sessions", snapshot.matchedSessionCount)
+                        diagnosticRow("Matched Shots", snapshot.matchedShotCount)
+                        diagnosticRow("Local-Only Properties", snapshot.localOnlyPropertyCount)
+                        diagnosticRow("Remote-Only Properties", snapshot.remoteOnlyPropertyCount)
+                        diagnosticRow("Local-Only Sessions", snapshot.localOnlySessionCount)
+                        diagnosticRow("Remote-Only Sessions", snapshot.remoteOnlySessionCount)
+                        diagnosticRow("Local-Only Shots", snapshot.localOnlyShotCount)
+                        diagnosticRow("Remote-Only Shots", snapshot.remoteOnlyShotCount)
+                        diagnosticRow("Stale Org Reconciled Properties", snapshot.staleOrgReconciledPropertyCount)
+                        diagnosticRow("Stale Org Reconciled Shots", snapshot.staleOrgReconciledShotCount)
+                        diagnosticRow("Findings", snapshot.totalFindings)
+                        ForEach(snapshot.categoryCounts, id: \.0) { category, count in
+                            diagnosticRow(category.rawValue, count)
+                        }
+                        NavigationLink {
+                            DebugDivergenceAuditItemsView(items: snapshot.items)
+                        } label: {
+                            diagnosticNavigationLabel("Audit Findings", count: snapshot.items.count)
+                        }
+                    } else {
+                        Text("No divergence audit has been run in this view.")
+                            .font(.system(size: 14, weight: .medium))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
                 Section("Last Error") {
                     if let error = diagnostics.lastError {
                         diagnosticRow("Category", error.category.rawValue)
@@ -6354,6 +6483,18 @@ private struct DebugLocalDiagnosticsView: View {
         failedQueueItems = appState.diagnosticsFailedQueueItems().map(DebugQueueDiagnosticSnapshotItem.init)
         retryCappedMediaItems = appState.diagnosticsRetryCappedMediaItems().map(DebugMediaDiagnosticSnapshotItem.init)
         pendingMediaItems = appState.diagnosticsPendingMediaItems().map(DebugMediaDiagnosticSnapshotItem.init)
+    }
+
+    private func runDivergenceAudit() {
+        guard !isRunningDivergenceAudit else { return }
+        isRunningDivergenceAudit = true
+        Task {
+            let summary = await appState.runDivergenceAudit()
+            await MainActor.run {
+                divergenceAuditSnapshot = DebugDivergenceAuditSnapshot(summary)
+                isRunningDivergenceAudit = false
+            }
+        }
     }
 
     @ViewBuilder
@@ -6523,6 +6664,54 @@ private struct DebugMediaDiagnosticItemsView: View {
     }
 }
 
+private struct DebugDivergenceAuditItemsView: View {
+    let items: [DebugDivergenceAuditSnapshotItem]
+
+    var body: some View {
+        List {
+            Section {
+                Text("Read-only divergence findings. No repair, retry, delete, or reset actions are available here.")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(.secondary)
+            }
+
+            if items.isEmpty {
+                Section {
+                    Text("No divergence findings in the latest audit snapshot.")
+                        .font(.system(size: 14, weight: .medium))
+                        .foregroundStyle(.secondary)
+                }
+            } else {
+                Section("Findings") {
+                    ForEach(items) { item in
+                        NavigationLink {
+                            DebugDivergenceAuditItemDetailView(item: item)
+                        } label: {
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("\(item.category) / \(item.entityType)")
+                                    .font(.system(size: 14, weight: .semibold))
+                                    .foregroundStyle(.primary)
+                                    .lineLimit(1)
+                                Text(item.entityID)
+                                    .font(.system(size: 12, weight: .medium, design: .monospaced))
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(1)
+                                Text(item.reasonPreview)
+                                    .font(.system(size: 12, weight: .regular, design: .monospaced))
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(2)
+                            }
+                        }
+                        .padding(.vertical, 6)
+                    }
+                }
+            }
+        }
+        .navigationTitle("Divergence Audit")
+        .navigationBarTitleDisplayMode(.inline)
+    }
+}
+
 private struct DebugOfflineQueueItemDetailView: View {
     let item: DebugQueueDiagnosticSnapshotItem
 
@@ -6580,6 +6769,30 @@ private struct DebugMediaDiagnosticItemDetailView: View {
             }
         }
         .navigationTitle("Media Item")
+        .navigationBarTitleDisplayMode(.inline)
+    }
+}
+
+private struct DebugDivergenceAuditItemDetailView: View {
+    let item: DebugDivergenceAuditSnapshotItem
+
+    var body: some View {
+        List {
+            Section("Finding") {
+                diagnosticRow("Category", item.category)
+                diagnosticRow("Entity Type", item.entityType)
+                diagnosticRow("Entity ID", item.entityID)
+                diagnosticRow("Property ID", item.propertyID)
+                diagnosticRow("Session ID", item.sessionID)
+                diagnosticRow("Shot ID", item.shotID)
+                diagnosticRow("Org ID", item.orgID)
+            }
+
+            Section("Reason") {
+                diagnosticBlock("Audit Reason", item.reasonFull)
+            }
+        }
+        .navigationTitle("Audit Finding")
         .navigationBarTitleDisplayMode(.inline)
     }
 }

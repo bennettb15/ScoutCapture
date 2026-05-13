@@ -279,6 +279,208 @@ final class Phase2C07bMediaBackfillTests: XCTestCase {
         XCTAssertFalse(pending.contains { $0.shotID == fixture.shots[4].shotID })
     }
 
+    func testDivergenceAuditDetectsLocalOnlyCaptureProfileAndMediaDrift() throws {
+        let now = Date()
+        let organizationID = UUID()
+        let fixture = try makeAppStateWithSingleSession(
+            uploadStates: [
+                ("pending", 1, now),
+                ("uploaded", 1, now),
+                ("pending", 5, now)
+            ],
+            propertyOrganizationID: organizationID,
+            metadataOrganizationID: organizationID
+        )
+        defer {
+            fixture.appState.shutdown()
+            try? FileManager.default.removeItem(at: fixture.storageRoot)
+        }
+
+        let localStore = fixture.appState.sharedLocalStore
+        var metadata = try localStore.loadSessionMetadata(propertyID: fixture.propertyID, sessionID: fixture.sessionID)
+        metadata.shots[0].storagePath = "sessions/\(fixture.sessionID.uuidString.lowercased())/shots/\(fixture.shots[0].shotID.uuidString.lowercased())/original.heic"
+        metadata.shots[1].storagePath = nil
+        metadata.shots[2].storagePath = nil
+        try localStore.saveSessionMetadataAtomically(propertyID: fixture.propertyID, sessionID: fixture.sessionID, metadata: metadata)
+
+        let summary = fixture.appState._debugDivergenceAuditWithEmptyRemoteForTests(activeOrganizationID: organizationID)
+        let categories = Set(summary.items.map(\.category))
+        let reasons = summary.items.map(\.reason)
+
+        XCTAssertTrue(categories.contains(.localOnlyProperty))
+        XCTAssertTrue(categories.contains(.localOnlySession))
+        XCTAssertTrue(categories.contains(.localOnlyShot))
+        XCTAssertTrue(categories.contains(.captureProfile))
+        XCTAssertTrue(categories.contains(.mediaDrift))
+        XCTAssertTrue(reasons.contains("Local upload_state is pending but storage path exists."))
+        XCTAssertTrue(reasons.contains("Local upload_state is uploaded but storage path is missing."))
+        XCTAssertTrue(reasons.contains("Local media upload is retry-capped."))
+    }
+
+    func testDivergenceAuditDetectsMissingParentAndStaleOrg() throws {
+        let now = Date()
+        let activeOrganizationID = UUID()
+        let staleOrganizationID = UUID()
+        let fixture = try makeAppStateWithSingleSession(
+            uploadStates: [
+                ("pending", 0, now)
+            ],
+            propertyOrganizationID: activeOrganizationID,
+            metadataOrganizationID: staleOrganizationID,
+            extraOrganizationIDs: [staleOrganizationID]
+        )
+        defer {
+            fixture.appState.shutdown()
+            try? FileManager.default.removeItem(at: fixture.storageRoot)
+        }
+
+        let localStore = fixture.appState.sharedLocalStore
+        let property = try XCTUnwrap(try localStore.fetchProperties().first(where: { $0.id == fixture.propertyID }))
+        let session = try XCTUnwrap(try localStore.fetchSessionsForCacheBuild(propertyID: fixture.propertyID).first(where: { $0.id == fixture.sessionID }))
+        let missingPropertyID = UUID()
+        let missingSessionID = UUID()
+        let orphanShot = makeShot(
+            propertyID: missingPropertyID,
+            sessionID: missingSessionID,
+            uploadState: "pending",
+            uploadAttempts: 0,
+            angleIndex: 2,
+            shotKey: "building|front|overview|2",
+            updatedAt: now
+        )
+
+        let summary = fixture.appState._debugDivergenceAuditSummaryForTests(
+            properties: [property],
+            sessions: [session],
+            shots: [
+                AppState.DebugDivergenceLocalShotInput(
+                    shot: orphanShot,
+                    propertyID: fixture.propertyID,
+                    sessionID: fixture.sessionID,
+                    metadataOrgID: staleOrganizationID,
+                    metadataCaptureProfile: nil
+                )
+            ],
+            activeOrganizationID: activeOrganizationID
+        )
+        let missingParentItems = summary.items.filter { $0.category == .missingParent }
+        let staleOrgItems = summary.items.filter { $0.category == .staleOrgMismatch }
+
+        XCTAssertTrue(missingParentItems.contains { $0.propertyID == missingPropertyID })
+        XCTAssertTrue(missingParentItems.contains { $0.sessionID == missingSessionID })
+        XCTAssertTrue(staleOrgItems.contains { $0.orgID == staleOrganizationID })
+    }
+
+    func testDivergenceAuditMatchesRemoteIDsWithCaseNormalizationAndStaleLocalOrg() throws {
+        let now = Date()
+        let activeOrganizationID = UUID()
+        let staleOrganizationID = UUID()
+        let propertyID = UUID()
+        let sessionID = UUID()
+        let shotID = UUID()
+        var shot = makeShot(
+            propertyID: propertyID,
+            sessionID: sessionID,
+            shotID: shotID,
+            uploadState: "uploaded",
+            uploadAttempts: 1,
+            angleIndex: 1,
+            shotKey: "building|front|overview|1",
+            updatedAt: now
+        )
+        shot.storagePath = "sessions/\(sessionID.uuidString.lowercased())/shots/\(shotID.uuidString.lowercased())/original.heic"
+
+        let fixture = try makeAppStateWithSingleSession(uploadStates: [])
+        defer {
+            fixture.appState.shutdown()
+            try? FileManager.default.removeItem(at: fixture.storageRoot)
+        }
+
+        let summary = fixture.appState._debugDivergenceAuditSummaryForTests(
+            properties: [
+                Property(
+                    id: propertyID,
+                    orgId: staleOrganizationID,
+                    name: "Property",
+                    address: "123 Main Street"
+                )
+            ],
+            sessions: [
+                Session(id: sessionID, propertyID: propertyID)
+            ],
+            shots: [
+                AppState.DebugDivergenceLocalShotInput(
+                    shot: shot,
+                    propertyID: propertyID,
+                    sessionID: sessionID,
+                    metadataOrgID: staleOrganizationID,
+                    metadataCaptureProfile: nil
+                )
+            ],
+            remote: AppState.DebugDivergenceRemoteInput(
+                propertyIDs: [propertyID.uuidString.uppercased()],
+                sessions: [(id: sessionID.uuidString.uppercased(), propertyID: propertyID.uuidString.lowercased())],
+                shots: [(id: shotID.uuidString.uppercased(), propertyID: propertyID.uuidString.uppercased(), sessionID: sessionID.uuidString.lowercased())],
+                orgID: activeOrganizationID
+            ),
+            activeOrganizationID: activeOrganizationID
+        )
+
+        XCTAssertEqual(summary.matchedPropertyCount, 1)
+        XCTAssertEqual(summary.matchedSessionCount, 1)
+        XCTAssertEqual(summary.matchedShotCount, 1)
+        XCTAssertEqual(summary.remoteOnlyPropertyCount, 0)
+        XCTAssertEqual(summary.remoteOnlySessionCount, 0)
+        XCTAssertEqual(summary.remoteOnlyShotCount, 0)
+        XCTAssertEqual(summary.localOnlyPropertyCount, 0)
+        XCTAssertEqual(summary.localOnlySessionCount, 0)
+        XCTAssertEqual(summary.localOnlyShotCount, 0)
+        XCTAssertEqual(summary.staleOrgReconciledPropertyCount, 1)
+        XCTAssertEqual(summary.staleOrgReconciledShotCount, 1)
+        XCTAssertFalse(summary.items.contains { $0.category == .remoteOnlyProperty })
+        XCTAssertFalse(summary.items.contains { $0.category == .missingParent })
+        XCTAssertFalse(summary.items.contains { $0.category == .staleOrgMismatch })
+    }
+
+    func testDivergenceAuditStillReportsTrueRemoteOnlyRows() throws {
+        let activeOrganizationID = UUID()
+        let localPropertyID = UUID()
+        let remoteOnlyPropertyID = UUID()
+        let fixture = try makeAppStateWithSingleSession(uploadStates: [])
+        defer {
+            fixture.appState.shutdown()
+            try? FileManager.default.removeItem(at: fixture.storageRoot)
+        }
+
+        let summary = fixture.appState._debugDivergenceAuditSummaryForTests(
+            properties: [
+                Property(
+                    id: localPropertyID,
+                    orgId: activeOrganizationID,
+                    name: "Local",
+                    address: "123 Main Street"
+                )
+            ],
+            sessions: [],
+            shots: [],
+            remote: AppState.DebugDivergenceRemoteInput(
+                propertyIDs: [
+                    localPropertyID.uuidString,
+                    remoteOnlyPropertyID.uuidString
+                ],
+                orgID: activeOrganizationID
+            ),
+            activeOrganizationID: activeOrganizationID
+        )
+
+        XCTAssertEqual(summary.matchedPropertyCount, 1)
+        XCTAssertEqual(summary.remoteOnlyPropertyCount, 1)
+        XCTAssertTrue(summary.items.contains {
+            $0.category == .remoteOnlyProperty &&
+                $0.propertyID == remoteOnlyPropertyID
+        })
+    }
+
     func testBackfillRunIsSingletonGuarded() async throws {
         let fixture = try makeAppStateWithSingleSession(uploadStates: [])
         defer {
