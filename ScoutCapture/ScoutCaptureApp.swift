@@ -6625,265 +6625,63 @@ private struct DebugLocalDiagnosticsView: View {
                         .foregroundStyle(.secondary)
                 }
 
-                Section("Offline Replay Last Run") {
-                    diagnosticRow("Discovered", diagnostics.offlineReplay.discoveredCount)
-                    diagnosticRow("Attempted", diagnostics.offlineReplay.attemptedCount)
-                    diagnosticRow("Succeeded", diagnostics.offlineReplay.succeededCount)
-                    diagnosticRow("Failed", diagnostics.offlineReplay.failedCount)
-                    diagnosticRow("Skipped Backoff", diagnostics.offlineReplay.skippedBackoffCount)
-                    diagnosticRow("Normalized In-Flight", diagnostics.offlineReplay.normalizedInFlightCount)
-                    diagnosticRow("Last Run", formattedDate(diagnostics.offlineReplay.lastRunAt))
+                Section("Overview / Summary") {
+                    diagnosticRow("Active Sync Issues", divergenceAuditSnapshot?.activeSyncIssueCount ?? "not run")
+                    diagnosticRow("Recoverable Findings", divergenceAuditSnapshot?.recoverableIssueCount ?? "not run")
+                    diagnosticRow("Failed Queue Items", failedQueueItems.count)
+                    diagnosticRow("Retry-Capped Media", retryCappedMediaItems.count)
+                    diagnosticRow("Pending Media", pendingMediaItems.count)
+                    diagnosticRow("Last Error", diagnostics.lastError?.category.rawValue ?? "none")
+                    diagnosticRow("Offline Replay", formattedDate(diagnostics.offlineReplay.lastRunAt))
+                    diagnosticRow("Media Backfill", formattedDate(diagnostics.media.lastBackfillAt))
                 }
 
-                Section("Offline Queue") {
-                    diagnosticRow("Total", diagnostics.offlineQueue.totalQueued)
-                    diagnosticRow("Pending", diagnostics.offlineQueue.pendingCount)
-                    diagnosticRow("Failed", diagnostics.offlineQueue.failedCount)
-                    diagnosticRow("Oldest Failure Age", formattedAge(diagnostics.offlineQueue.oldestFailureAgeSeconds))
-                    diagnosticRow("Refreshed", formattedDate(diagnostics.offlineQueue.refreshedAt))
+                Section("Health Areas") {
                     NavigationLink {
-                        DebugOfflineQueueItemsView(items: failedQueueItems)
+                        offlineQueuePage
                     } label: {
-                        diagnosticNavigationLabel("Failed Queue Items", count: failedQueueItems.count)
-                    }
-                }
-
-                Section("Media") {
-                    diagnosticRow("Last Backfill Discovered", diagnostics.media.lastBackfillDiscoveredCount)
-                    diagnosticRow("Last Backfill Attempted", diagnostics.media.lastBackfillAttemptedCount)
-                    diagnosticRow("Skipped Retry Cap", diagnostics.media.lastBackfillSkippedRetryCapCount)
-                    diagnosticRow("Upload Successes", diagnostics.media.uploadSuccessCount)
-                    diagnosticRow("Upload Failures", diagnostics.media.uploadFailureCount)
-                    diagnosticRow("Pending Local Media", optionalCount(diagnostics.media.pendingLocalMediaCount))
-                    diagnosticRow("Last Backfill", formattedDate(diagnostics.media.lastBackfillAt))
-                    NavigationLink {
-                        DebugMediaDiagnosticItemsView(
-                            title: "Retry-Capped Media",
-                            items: retryCappedMediaItems
+                        localHealthAreaLabel(
+                            "Offline Queue",
+                            subtitle: "Replay counters, queue totals, failed items",
+                            value: "\(diagnostics.offlineQueue.failedCount) failed"
                         )
-                    } label: {
-                        diagnosticNavigationLabel("Retry-Capped Media", count: retryCappedMediaItems.count)
                     }
                     NavigationLink {
-                        DebugMediaDiagnosticItemsView(
-                            title: "Pending Media",
-                            items: pendingMediaItems
-                        )
+                        mediaHealthPage
                     } label: {
-                        diagnosticNavigationLabel("Pending Media Items", count: pendingMediaItems.count)
+                        localHealthAreaLabel(
+                            "Media Health / Recovery",
+                            subtitle: "Backfill counters, pending media, recovery candidates",
+                            value: "\(retryCappedMediaItems.count) capped"
+                        )
                     }
-                }
-
-                Section("Shadow Writes") {
-                    shadowWriteRow("Property", diagnostics.shadowWrites.property)
-                    shadowWriteRow("Session", diagnostics.shadowWrites.session)
-                    shadowWriteRow("Shot Metadata", diagnostics.shadowWrites.shotMetadata)
-                    shadowWriteRow("Capture Profile", diagnostics.shadowWrites.captureProfile)
-                }
-
-                Section("Capture Profile Maintenance") {
-                    if let summary = diagnostics.captureProfileMaintenance {
-                        diagnosticRow("Local Properties Found", summary.localPropertiesFound)
-                        diagnosticRow("Properties Scanned", summary.propertiesScanned)
-                        diagnosticRow("Sessions Scanned", summary.sessionsScanned)
-                        diagnosticRow("Remote Properties Checked", summary.remotePropertiesChecked)
-                        diagnosticRow("Remote Sessions Checked", summary.remoteSessionsChecked)
-                        diagnosticRow("Remote Active Properties", summary.remoteActivePropertyCount)
-                        diagnosticRow("Property Profiles Filled", summary.propertyProfilesFilled)
-                        diagnosticRow("Session Profiles Filled", summary.sessionProfilesFilled)
-                        diagnosticRow("Sessions Ensured", summary.sessionsEnsured)
-                        diagnosticRow("Skipped", summary.skipped)
-                        diagnosticRow("Failed", summary.failed)
-                        diagnosticRow("Stale Org Reconciled", summary.staleOrgReconciledCount)
-                        diagnosticRow("True Org Mismatch", summary.trueOrgMismatchCount)
-                        diagnosticRow("Filtered Deleted", summary.propertiesFilteredDeleted)
-                        diagnosticRow("Filtered Archived", summary.propertiesFilteredArchived)
-                        diagnosticRow("Filtered Org Mismatch", summary.propertiesFilteredOrgMismatch)
-                        diagnosticRow("Filtered Inaccessible", summary.propertiesFilteredInaccessible)
-                        diagnosticRow("Session Metadata Missing", summary.sessionMetadataMissing)
-                        diagnosticRow("Session Profile Unknown", summary.sessionProfileUnknown)
-                    } else {
-                        Text("No maintenance backfill summary recorded.")
-                            .font(.system(size: 14, weight: .medium))
-                            .foregroundStyle(.secondary)
+                    NavigationLink {
+                        divergenceAuditPage
+                    } label: {
+                        localHealthAreaLabel(
+                            "Divergence Audit",
+                            subtitle: "Local/remote audit, grouped findings, snapshots",
+                            value: divergenceAuditSnapshot.map { "\($0.totalFindings) findings" } ?? "not run"
+                        )
                     }
-                }
-
-                Section("Divergence Audit") {
-                    Text("Read-only local/remote audit. It does not repair, retry, delete, reset, or mutate app data.")
-                        .font(.system(size: 13, weight: .medium))
-                        .foregroundStyle(.secondary)
-                    Button(isRunningDivergenceAudit ? "Running Audit..." : "Run Divergence Audit") {
-                        runDivergenceAudit()
+                    NavigationLink {
+                        captureProfileMaintenancePage
+                    } label: {
+                        localHealthAreaLabel(
+                            "Capture Profile Maintenance",
+                            subtitle: "Last backfill summary and profile sync counters",
+                            value: diagnostics.captureProfileMaintenance.map { "\($0.failed) failed" } ?? "no run"
+                        )
                     }
-                    .disabled(isRunningDivergenceAudit)
-
-                    if let snapshot = divergenceAuditSnapshot {
-                        diagnosticRow("Ran", snapshot.ranAt)
-                        diagnosticRow("Active Org", snapshot.activeOrganizationID)
-                        diagnosticRow("Remote Scope", snapshot.remoteScopeAvailable)
-                        NavigationLink {
-                            DebugDivergenceAuditSnapshotTextView(snapshotText: snapshot.snapshotText)
-                        } label: {
-                            Text("View Copyable Snapshot")
-                                .font(.system(size: 14, weight: .semibold))
-                        }
-                    } else {
-                        Text("No divergence audit has been run in this view.")
-                            .font(.system(size: 14, weight: .medium))
-                            .foregroundStyle(.secondary)
+                    NavigationLink {
+                        diagnosticsUtilitiesPage
+                    } label: {
+                        localHealthAreaLabel(
+                            "Last Error / Utilities",
+                            subtitle: "Sanitized last error, shadow writes, clear diagnostics",
+                            value: diagnostics.lastError?.category.rawValue ?? "none"
+                        )
                     }
-                }
-
-                Section("Media Recovery Candidates") {
-                    Text("Read-only inspector for retry-capped and divergence-linked media candidates. It does not retry, reset, delete, ignore, or mutate app data.")
-                        .font(.system(size: 13, weight: .medium))
-                        .foregroundStyle(.secondary)
-                    Button(isInspectingMediaRecovery ? "Inspecting..." : "Inspect Candidates") {
-                        inspectMediaRecoveryCandidates()
-                    }
-                    .disabled(isInspectingMediaRecovery)
-
-                    if let snapshot = mediaRecoverySnapshot {
-                        diagnosticRow("Inspected", snapshot.inspectedAt)
-                        diagnosticRow("Active Org", snapshot.activeOrganizationID)
-                        diagnosticRow("Remote Preflight", snapshot.remotePreflightAvailable)
-                        diagnosticRow("Candidates Found", snapshot.candidatesFound)
-                        diagnosticRow("File Exists", snapshot.fileExistsCount)
-                        diagnosticRow("Retryable", snapshot.retryableCount)
-                        diagnosticRow("Needs Org Reconciliation", snapshot.needsOrgReconciliationCount)
-                        diagnosticRow("Missing Remote Parent", snapshot.missingRemoteParentCount)
-                        diagnosticRow("Already Remote Complete", snapshot.alreadyRemoteCompleteCount)
-                        diagnosticRow("Missing Local File", snapshot.missingLocalFileCount)
-                        diagnosticRow("Manual Review", snapshot.manualReviewCount)
-                        Text("Retry-capped does not mean lost. It means automatic backfill stopped before another upload attempt.")
-                            .font(.system(size: 13, weight: .medium))
-                            .foregroundStyle(.secondary)
-                        Text("If the local file exists, recovery may be possible after remote parent and org checks pass. Draft or test sessions may still be intentionally left alone.")
-                            .font(.system(size: 13, weight: .medium))
-                            .foregroundStyle(.secondary)
-                        NavigationLink {
-                            DebugMediaRecoverySnapshotTextView(snapshotText: snapshot.snapshotText)
-                        } label: {
-                            Text("View Copyable Snapshot")
-                                .font(.system(size: 14, weight: .semibold))
-                        }
-                        NavigationLink {
-                            DebugMediaRecoveryCandidatesView(items: snapshot.items)
-                        } label: {
-                            diagnosticNavigationLabel("Candidate Details", count: snapshot.items.count)
-                        }
-                    } else {
-                        Text("No media recovery inspection has been run in this view.")
-                            .font(.system(size: 14, weight: .medium))
-                            .foregroundStyle(.secondary)
-                    }
-                }
-
-                if let snapshot = divergenceAuditSnapshot {
-                    Section("Core Sync Health") {
-                        diagnosticRow("Property Match Status", snapshot.corePropertyStatus)
-                        diagnosticRow("Matched Properties", snapshot.matchedPropertyCount)
-                        diagnosticRow("Local-Only Properties", snapshot.localOnlyPropertyCount)
-                        diagnosticRow("Remote-Only Properties", snapshot.remoteOnlyPropertyCount)
-                        Text(snapshot.corePropertyStatus == "OK" ? "No property presence divergence detected." : "Property presence needs review.")
-                            .font(.system(size: 13, weight: .medium))
-                            .foregroundStyle(.secondary)
-
-                        diagnosticRow("Session Match Status", snapshot.coreSessionStatus)
-                        diagnosticRow("Matched Sessions", snapshot.matchedSessionCount)
-                        diagnosticRow("Local-Only Sessions", snapshot.localOnlySessionCount)
-                        diagnosticRow("Remote-Only Sessions", snapshot.remoteOnlySessionCount)
-                        Text(snapshot.coreSessionStatus == "OK" ? "No session presence divergence detected." : "Session presence needs review.")
-                            .font(.system(size: 13, weight: .medium))
-                            .foregroundStyle(.secondary)
-                    }
-
-                    Section("Active Sync Issues") {
-                        diagnosticRow("Actionable Findings", snapshot.activeSyncIssueCount)
-                        diagnosticRow("Property Match Status", snapshot.corePropertyStatus)
-                        diagnosticRow("Session Match Status", snapshot.coreSessionStatus)
-                        Text(snapshot.activeSyncIssueCount == "0" ? "No active sync failures are currently classified by this audit." : "Warning and critical findings should be reviewed before treating historical findings as operational failures.")
-                            .font(.system(size: 13, weight: .medium))
-                            .foregroundStyle(.secondary)
-                    }
-
-                    Section("Recoverable Issues") {
-                        diagnosticRow("Recoverable Findings", snapshot.recoverableIssueCount)
-                        diagnosticRow("Matched Shots", snapshot.matchedShotCount)
-                        diagnosticRow("Local-Only Shots", snapshot.localOnlyShotCount)
-                        diagnosticRow("Remote-Only Shots", snapshot.remoteOnlyShotCount)
-                        Text("Local-only shots may be legacy captures or uploads that have not reached remote storage yet. Media drift means pending, failed, or uploaded state does not line up with storage path state.")
-                            .font(.system(size: 13, weight: .medium))
-                            .foregroundStyle(.secondary)
-                    }
-
-                    Section("Historical / Informational States") {
-                        diagnosticRow("Historical Findings", snapshot.historicalInformationalCount)
-                        diagnosticRow("Stale Org Reconciled Properties", snapshot.staleOrgReconciledPropertyCount)
-                        diagnosticRow("Stale Org Reconciled Shots", snapshot.staleOrgReconciledShotCount)
-                        Text("Stale org reconciled means remote active-org ownership proved historical local org metadata safe for this audit. Legacy capture_profile and remote schema findings remain visible but are not treated as active sync failures.")
-                            .font(.system(size: 13, weight: .medium))
-                            .foregroundStyle(.secondary)
-                        diagnosticRow("All Findings", snapshot.totalFindings)
-                        ForEach(snapshot.categoryCounts, id: \.0) { category, count in
-                            diagnosticRow(label(for: category), count)
-                        }
-                        ForEach(snapshot.historicalGroups) { group in
-                            NavigationLink {
-                                DebugDivergenceAuditHistoricalGroupView(group: group)
-                            } label: {
-                                VStack(alignment: .leading, spacing: 4) {
-                                    Text("\(group.title): \(group.totalCount)")
-                                        .font(.system(size: 14, weight: .semibold))
-                                    Text("Properties \(group.affectedPropertyCount) / Sessions \(group.affectedSessionCount) / Shots \(group.affectedShotCount)")
-                                        .font(.system(size: 12, weight: .medium, design: .monospaced))
-                                        .foregroundStyle(.secondary)
-                                    Text(group.context)
-                                        .font(.system(size: 12, weight: .medium))
-                                        .foregroundStyle(.secondary)
-                                        .lineLimit(2)
-                                }
-                                .padding(.vertical, 4)
-                            }
-                        }
-                        NavigationLink {
-                            DebugDivergenceAuditItemsView(
-                                items: snapshot.items,
-                                historicalGroups: snapshot.historicalGroups
-                            )
-                        } label: {
-                            diagnosticNavigationLabel("Audit Findings", count: snapshot.items.count)
-                        }
-                    }
-                }
-
-                Section("Last Error") {
-                    if let error = diagnostics.lastError {
-                        diagnosticRow("Category", error.category.rawValue)
-                        diagnosticRow("Recorded", formattedDate(error.recordedAt))
-                        VStack(alignment: .leading, spacing: 6) {
-                            Text("Message")
-                                .font(.system(size: 14, weight: .semibold))
-                            Text(error.message)
-                                .font(.system(size: 13, weight: .regular, design: .monospaced))
-                                .foregroundStyle(.secondary)
-                                .textSelection(.enabled)
-                        }
-                        .padding(.vertical, 4)
-                    } else {
-                        Text("No sanitized error recorded.")
-                            .font(.system(size: 14, weight: .medium))
-                            .foregroundStyle(.secondary)
-                    }
-                }
-
-                Section {
-                    Button("Clear Local Diagnostics", role: .destructive) {
-                        showClearConfirm = true
-                    }
-                } footer: {
-                    Text("This reset affects diagnostic counters only.")
                 }
             }
             .navigationTitle("Local Health")
@@ -6913,6 +6711,281 @@ private struct DebugLocalDiagnosticsView: View {
         } message: {
             Text("Only local diagnostic counters and the last sanitized error will be reset. Queues, files, Supabase data, exports, and app records are not changed.")
         }
+    }
+
+    private var offlineQueuePage: some View {
+        List {
+            Section("Offline Replay Last Run") {
+                diagnosticRow("Discovered", diagnostics.offlineReplay.discoveredCount)
+                diagnosticRow("Attempted", diagnostics.offlineReplay.attemptedCount)
+                diagnosticRow("Succeeded", diagnostics.offlineReplay.succeededCount)
+                diagnosticRow("Failed", diagnostics.offlineReplay.failedCount)
+                diagnosticRow("Skipped Backoff", diagnostics.offlineReplay.skippedBackoffCount)
+                diagnosticRow("Normalized In-Flight", diagnostics.offlineReplay.normalizedInFlightCount)
+                diagnosticRow("Last Run", formattedDate(diagnostics.offlineReplay.lastRunAt))
+            }
+
+            Section("Offline Queue") {
+                diagnosticRow("Total", diagnostics.offlineQueue.totalQueued)
+                diagnosticRow("Pending", diagnostics.offlineQueue.pendingCount)
+                diagnosticRow("Failed", diagnostics.offlineQueue.failedCount)
+                diagnosticRow("Oldest Failure Age", formattedAge(diagnostics.offlineQueue.oldestFailureAgeSeconds))
+                diagnosticRow("Refreshed", formattedDate(diagnostics.offlineQueue.refreshedAt))
+                NavigationLink {
+                    DebugOfflineQueueItemsView(items: failedQueueItems)
+                } label: {
+                    diagnosticNavigationLabel("Failed Queue Items", count: failedQueueItems.count)
+                }
+            }
+        }
+        .navigationTitle("Offline Queue")
+        .navigationBarTitleDisplayMode(.inline)
+    }
+
+    private var mediaHealthPage: some View {
+        List {
+            Section("Media Summary") {
+                diagnosticRow("Last Backfill Discovered", diagnostics.media.lastBackfillDiscoveredCount)
+                diagnosticRow("Last Backfill Attempted", diagnostics.media.lastBackfillAttemptedCount)
+                diagnosticRow("Skipped Retry Cap", diagnostics.media.lastBackfillSkippedRetryCapCount)
+                diagnosticRow("Upload Successes", diagnostics.media.uploadSuccessCount)
+                diagnosticRow("Upload Failures", diagnostics.media.uploadFailureCount)
+                diagnosticRow("Pending Local Media", optionalCount(diagnostics.media.pendingLocalMediaCount))
+                diagnosticRow("Last Backfill", formattedDate(diagnostics.media.lastBackfillAt))
+            }
+
+            Section("Media Detail Lists") {
+                NavigationLink {
+                    DebugMediaDiagnosticItemsView(
+                        title: "Retry-Capped Media",
+                        items: retryCappedMediaItems
+                    )
+                } label: {
+                    diagnosticNavigationLabel("Retry-Capped Media", count: retryCappedMediaItems.count)
+                }
+                NavigationLink {
+                    DebugMediaDiagnosticItemsView(
+                        title: "Pending Media",
+                        items: pendingMediaItems
+                    )
+                } label: {
+                    diagnosticNavigationLabel("Pending Media Items", count: pendingMediaItems.count)
+                }
+            }
+
+            Section("Media Recovery Candidates") {
+                Text("Read-only inspector for retry-capped and divergence-linked media candidates. It does not retry, reset, delete, ignore, or mutate app data.")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(.secondary)
+                Button(isInspectingMediaRecovery ? "Inspecting..." : "Inspect Candidates") {
+                    inspectMediaRecoveryCandidates()
+                }
+                .disabled(isInspectingMediaRecovery)
+
+                if let snapshot = mediaRecoverySnapshot {
+                    diagnosticRow("Inspected", snapshot.inspectedAt)
+                    diagnosticRow("Active Org", snapshot.activeOrganizationID)
+                    diagnosticRow("Remote Preflight", snapshot.remotePreflightAvailable)
+                    diagnosticRow("Candidates Found", snapshot.candidatesFound)
+                    diagnosticRow("File Exists", snapshot.fileExistsCount)
+                    diagnosticRow("Retryable", snapshot.retryableCount)
+                    diagnosticRow("Needs Org Reconciliation", snapshot.needsOrgReconciliationCount)
+                    diagnosticRow("Missing Remote Parent", snapshot.missingRemoteParentCount)
+                    diagnosticRow("Already Remote Complete", snapshot.alreadyRemoteCompleteCount)
+                    diagnosticRow("Missing Local File", snapshot.missingLocalFileCount)
+                    diagnosticRow("Manual Review", snapshot.manualReviewCount)
+                    Text("Retry-capped does not mean lost. If the local file exists, recovery may be possible after remote parent and org checks pass.")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(.secondary)
+                    NavigationLink {
+                        DebugMediaRecoverySnapshotTextView(snapshotText: snapshot.snapshotText)
+                    } label: {
+                        Text("View Copyable Snapshot")
+                            .font(.system(size: 14, weight: .semibold))
+                    }
+                    NavigationLink {
+                        DebugMediaRecoveryCandidatesView(items: snapshot.items)
+                    } label: {
+                        diagnosticNavigationLabel("Candidate Details", count: snapshot.items.count)
+                    }
+                } else {
+                    Text("No media recovery inspection has been run in this view.")
+                        .font(.system(size: 14, weight: .medium))
+                        .foregroundStyle(.secondary)
+                }
+            }
+        }
+        .navigationTitle("Media Health")
+        .navigationBarTitleDisplayMode(.inline)
+    }
+
+    private var divergenceAuditPage: some View {
+        List {
+            Section("Divergence Audit") {
+                Text("Read-only local/remote audit. It does not repair, retry, delete, reset, or mutate app data.")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(.secondary)
+                Button(isRunningDivergenceAudit ? "Running Audit..." : "Run Divergence Audit") {
+                    runDivergenceAudit()
+                }
+                .disabled(isRunningDivergenceAudit)
+
+                if let snapshot = divergenceAuditSnapshot {
+                    diagnosticRow("Ran", snapshot.ranAt)
+                    diagnosticRow("Active Org", snapshot.activeOrganizationID)
+                    diagnosticRow("Remote Scope", snapshot.remoteScopeAvailable)
+                    NavigationLink {
+                        DebugDivergenceAuditSnapshotTextView(snapshotText: snapshot.snapshotText)
+                    } label: {
+                        Text("View Copyable Snapshot")
+                            .font(.system(size: 14, weight: .semibold))
+                    }
+                } else {
+                    Text("No divergence audit has been run in this view.")
+                        .font(.system(size: 14, weight: .medium))
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            if let snapshot = divergenceAuditSnapshot {
+                Section("Core Sync Health") {
+                    diagnosticRow("Property Match Status", snapshot.corePropertyStatus)
+                    diagnosticRow("Matched Properties", snapshot.matchedPropertyCount)
+                    diagnosticRow("Local-Only Properties", snapshot.localOnlyPropertyCount)
+                    diagnosticRow("Remote-Only Properties", snapshot.remoteOnlyPropertyCount)
+                    diagnosticRow("Session Match Status", snapshot.coreSessionStatus)
+                    diagnosticRow("Matched Sessions", snapshot.matchedSessionCount)
+                    diagnosticRow("Local-Only Sessions", snapshot.localOnlySessionCount)
+                    diagnosticRow("Remote-Only Sessions", snapshot.remoteOnlySessionCount)
+                }
+
+                Section("Active Sync Issues") {
+                    diagnosticRow("Actionable Findings", snapshot.activeSyncIssueCount)
+                    Text(snapshot.activeSyncIssueCount == "0" ? "No active sync failures are currently classified by this audit." : "Warning and critical findings should be reviewed before treating historical findings as operational failures.")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(.secondary)
+                }
+
+                Section("Recoverable Issues") {
+                    diagnosticRow("Recoverable Findings", snapshot.recoverableIssueCount)
+                    diagnosticRow("Matched Shots", snapshot.matchedShotCount)
+                    diagnosticRow("Local-Only Shots", snapshot.localOnlyShotCount)
+                    diagnosticRow("Remote-Only Shots", snapshot.remoteOnlyShotCount)
+                    Text("Local-only shots may be legacy captures or uploads that have not reached remote storage yet. Media drift means pending, failed, or uploaded state does not line up with storage path state.")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(.secondary)
+                }
+
+                Section("Historical / Informational States") {
+                    diagnosticRow("Historical Findings", snapshot.historicalInformationalCount)
+                    diagnosticRow("Stale Org Reconciled Properties", snapshot.staleOrgReconciledPropertyCount)
+                    diagnosticRow("Stale Org Reconciled Shots", snapshot.staleOrgReconciledShotCount)
+                    diagnosticRow("All Findings", snapshot.totalFindings)
+                    ForEach(snapshot.categoryCounts, id: \.0) { category, count in
+                        diagnosticRow(label(for: category), count)
+                    }
+                    ForEach(snapshot.historicalGroups) { group in
+                        NavigationLink {
+                            DebugDivergenceAuditHistoricalGroupView(group: group)
+                        } label: {
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("\(group.title): \(group.totalCount)")
+                                    .font(.system(size: 14, weight: .semibold))
+                                Text("Properties \(group.affectedPropertyCount) / Sessions \(group.affectedSessionCount) / Shots \(group.affectedShotCount)")
+                                    .font(.system(size: 12, weight: .medium, design: .monospaced))
+                                    .foregroundStyle(.secondary)
+                            }
+                            .padding(.vertical, 4)
+                        }
+                    }
+                    NavigationLink {
+                        DebugDivergenceAuditItemsView(
+                            items: snapshot.items,
+                            historicalGroups: snapshot.historicalGroups
+                        )
+                    } label: {
+                        diagnosticNavigationLabel("Audit Findings", count: snapshot.items.count)
+                    }
+                }
+            }
+        }
+        .navigationTitle("Divergence Audit")
+        .navigationBarTitleDisplayMode(.inline)
+    }
+
+    private var captureProfileMaintenancePage: some View {
+        List {
+            Section("Capture Profile Maintenance") {
+                if let summary = diagnostics.captureProfileMaintenance {
+                    diagnosticRow("Local Properties Found", summary.localPropertiesFound)
+                    diagnosticRow("Properties Scanned", summary.propertiesScanned)
+                    diagnosticRow("Sessions Scanned", summary.sessionsScanned)
+                    diagnosticRow("Remote Properties Checked", summary.remotePropertiesChecked)
+                    diagnosticRow("Remote Sessions Checked", summary.remoteSessionsChecked)
+                    diagnosticRow("Remote Active Properties", summary.remoteActivePropertyCount)
+                    diagnosticRow("Property Profiles Filled", summary.propertyProfilesFilled)
+                    diagnosticRow("Session Profiles Filled", summary.sessionProfilesFilled)
+                    diagnosticRow("Sessions Ensured", summary.sessionsEnsured)
+                    diagnosticRow("Skipped", summary.skipped)
+                    diagnosticRow("Failed", summary.failed)
+                    diagnosticRow("Stale Org Reconciled", summary.staleOrgReconciledCount)
+                    diagnosticRow("True Org Mismatch", summary.trueOrgMismatchCount)
+                    diagnosticRow("Filtered Deleted", summary.propertiesFilteredDeleted)
+                    diagnosticRow("Filtered Archived", summary.propertiesFilteredArchived)
+                    diagnosticRow("Filtered Org Mismatch", summary.propertiesFilteredOrgMismatch)
+                    diagnosticRow("Filtered Inaccessible", summary.propertiesFilteredInaccessible)
+                    diagnosticRow("Session Metadata Missing", summary.sessionMetadataMissing)
+                    diagnosticRow("Session Profile Unknown", summary.sessionProfileUnknown)
+                } else {
+                    Text("No maintenance backfill summary recorded.")
+                        .font(.system(size: 14, weight: .medium))
+                        .foregroundStyle(.secondary)
+                }
+            }
+        }
+        .navigationTitle("Capture Profile")
+        .navigationBarTitleDisplayMode(.inline)
+    }
+
+    private var diagnosticsUtilitiesPage: some View {
+        List {
+            Section("Shadow Writes") {
+                shadowWriteRow("Property", diagnostics.shadowWrites.property)
+                shadowWriteRow("Session", diagnostics.shadowWrites.session)
+                shadowWriteRow("Shot Metadata", diagnostics.shadowWrites.shotMetadata)
+                shadowWriteRow("Capture Profile", diagnostics.shadowWrites.captureProfile)
+            }
+
+            Section("Last Error") {
+                if let error = diagnostics.lastError {
+                    diagnosticRow("Category", error.category.rawValue)
+                    diagnosticRow("Recorded", formattedDate(error.recordedAt))
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("Message")
+                            .font(.system(size: 14, weight: .semibold))
+                        Text(error.message)
+                            .font(.system(size: 13, weight: .regular, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                            .textSelection(.enabled)
+                    }
+                    .padding(.vertical, 4)
+                } else {
+                    Text("No sanitized error recorded.")
+                        .font(.system(size: 14, weight: .medium))
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            Section {
+                Button("Clear Local Diagnostics", role: .destructive) {
+                    showClearConfirm = true
+                }
+            } footer: {
+                Text("This reset affects diagnostic counters only.")
+            }
+        }
+        .navigationTitle("Diagnostics")
+        .navigationBarTitleDisplayMode(.inline)
     }
 
     private func refreshDiagnosticDetailSnapshots() {
@@ -6992,6 +7065,30 @@ private struct DebugLocalDiagnosticsView: View {
                 .foregroundStyle(.secondary)
         }
         .padding(.vertical, 2)
+    }
+
+    @ViewBuilder
+    private func localHealthAreaLabel(
+        _ title: String,
+        subtitle: String,
+        value: String
+    ) -> some View {
+        HStack(alignment: .center, spacing: 12) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(title)
+                    .font(.system(size: 15, weight: .semibold))
+                Text(subtitle)
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+            }
+            Spacer(minLength: 12)
+            Text(value)
+                .font(.system(size: 13, weight: .medium, design: .monospaced))
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.trailing)
+        }
+        .padding(.vertical, 4)
     }
 
     private func optionalCount(_ value: Int?) -> String {
