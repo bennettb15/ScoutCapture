@@ -6632,8 +6632,11 @@ private struct DebugLocalDiagnosticsView: View {
                     diagnosticRow("Retry-Capped Media", retryCappedMediaItems.count)
                     diagnosticRow("Pending Media", pendingMediaItems.count)
                     diagnosticRow("Last Error", diagnostics.lastError?.category.rawValue ?? "none")
-                    diagnosticRow("Offline Replay", formattedDate(diagnostics.offlineReplay.lastRunAt))
-                    diagnosticRow("Media Backfill", formattedDate(diagnostics.media.lastBackfillAt))
+                    diagnosticRow("Offline Replay", formattedRunDate(diagnostics.offlineReplay.lastRunAt))
+                    diagnosticRow("Media Backfill", formattedRunDate(diagnostics.media.lastBackfillAt))
+                    Text(overviewHelperText)
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(.secondary)
                 }
 
                 Section("Health Areas") {
@@ -6643,7 +6646,7 @@ private struct DebugLocalDiagnosticsView: View {
                         localHealthAreaLabel(
                             "Offline Queue",
                             subtitle: "Replay counters, queue totals, failed items",
-                            value: "\(diagnostics.offlineQueue.failedCount) failed"
+                            value: "\(diagnostics.offlineQueue.failedCount) failed items"
                         )
                     }
                     NavigationLink {
@@ -6670,7 +6673,7 @@ private struct DebugLocalDiagnosticsView: View {
                         localHealthAreaLabel(
                             "Capture Profile Maintenance",
                             subtitle: "Last backfill summary and profile sync counters",
-                            value: diagnostics.captureProfileMaintenance.map { "\($0.failed) failed" } ?? "no run"
+                            value: diagnostics.captureProfileMaintenance.map { "\($0.failed) historical failed" } ?? "No recorded run"
                         )
                     }
                     NavigationLink {
@@ -6719,18 +6722,18 @@ private struct DebugLocalDiagnosticsView: View {
                 diagnosticRow("Discovered", diagnostics.offlineReplay.discoveredCount)
                 diagnosticRow("Attempted", diagnostics.offlineReplay.attemptedCount)
                 diagnosticRow("Succeeded", diagnostics.offlineReplay.succeededCount)
-                diagnosticRow("Failed", diagnostics.offlineReplay.failedCount)
+                diagnosticRow("Failed Attempts", diagnostics.offlineReplay.failedCount)
                 diagnosticRow("Skipped Backoff", diagnostics.offlineReplay.skippedBackoffCount)
                 diagnosticRow("Normalized In-Flight", diagnostics.offlineReplay.normalizedInFlightCount)
-                diagnosticRow("Last Run", formattedDate(diagnostics.offlineReplay.lastRunAt))
+                diagnosticRow("Last Run", formattedRunDate(diagnostics.offlineReplay.lastRunAt))
             }
 
             Section("Offline Queue") {
                 diagnosticRow("Total", diagnostics.offlineQueue.totalQueued)
                 diagnosticRow("Pending", diagnostics.offlineQueue.pendingCount)
-                diagnosticRow("Failed", diagnostics.offlineQueue.failedCount)
+                diagnosticRow("Failed Items", diagnostics.offlineQueue.failedCount)
                 diagnosticRow("Oldest Failure Age", formattedAge(diagnostics.offlineQueue.oldestFailureAgeSeconds))
-                diagnosticRow("Refreshed", formattedDate(diagnostics.offlineQueue.refreshedAt))
+                diagnosticRow("Refreshed", formattedRunDate(diagnostics.offlineQueue.refreshedAt))
                 NavigationLink {
                     DebugOfflineQueueItemsView(items: failedQueueItems)
                 } label: {
@@ -6751,7 +6754,12 @@ private struct DebugLocalDiagnosticsView: View {
                 diagnosticRow("Upload Successes", diagnostics.media.uploadSuccessCount)
                 diagnosticRow("Upload Failures", diagnostics.media.uploadFailureCount)
                 diagnosticRow("Pending Local Media", optionalCount(diagnostics.media.pendingLocalMediaCount))
-                diagnosticRow("Last Backfill", formattedDate(diagnostics.media.lastBackfillAt))
+                diagnosticRow("Last Backfill", formattedRunDate(diagnostics.media.lastBackfillAt))
+                if pendingMediaItems.isEmpty {
+                    Text("No pending media uploads.")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(.secondary)
+                }
             }
 
             Section("Media Detail Lists") {
@@ -6794,7 +6802,7 @@ private struct DebugLocalDiagnosticsView: View {
                     diagnosticRow("Already Remote Complete", snapshot.alreadyRemoteCompleteCount)
                     diagnosticRow("Missing Local File", snapshot.missingLocalFileCount)
                     diagnosticRow("Manual Review", snapshot.manualReviewCount)
-                    Text("Retry-capped does not mean lost. If the local file exists, recovery may be possible after remote parent and org checks pass.")
+                    Text("Retry-capped does not mean lost. Historical findings are retained for forensic visibility.")
                         .font(.system(size: 13, weight: .medium))
                         .foregroundStyle(.secondary)
                     NavigationLink {
@@ -6861,7 +6869,7 @@ private struct DebugLocalDiagnosticsView: View {
 
                 Section("Active Sync Issues") {
                     diagnosticRow("Actionable Findings", snapshot.activeSyncIssueCount)
-                    Text(snapshot.activeSyncIssueCount == "0" ? "No active sync failures are currently classified by this audit." : "Warning and critical findings should be reviewed before treating historical findings as operational failures.")
+                    Text(snapshot.activeSyncIssueCount == "0" ? "No active sync issues detected." : "Warning and critical findings should be reviewed before treating historical findings as operational failures.")
                         .font(.system(size: 13, weight: .medium))
                         .foregroundStyle(.secondary)
                 }
@@ -6871,7 +6879,7 @@ private struct DebugLocalDiagnosticsView: View {
                     diagnosticRow("Matched Shots", snapshot.matchedShotCount)
                     diagnosticRow("Local-Only Shots", snapshot.localOnlyShotCount)
                     diagnosticRow("Remote-Only Shots", snapshot.remoteOnlyShotCount)
-                    Text("Local-only shots may be legacy captures or uploads that have not reached remote storage yet. Media drift means pending, failed, or uploaded state does not line up with storage path state.")
+                    Text("Local-only shots may be legacy captures or uploads that have not reached remote storage yet. Historical findings are retained for forensic visibility.")
                         .font(.system(size: 13, weight: .medium))
                         .foregroundStyle(.secondary)
                 }
@@ -6927,7 +6935,7 @@ private struct DebugLocalDiagnosticsView: View {
                     diagnosticRow("Session Profiles Filled", summary.sessionProfilesFilled)
                     diagnosticRow("Sessions Ensured", summary.sessionsEnsured)
                     diagnosticRow("Skipped", summary.skipped)
-                    diagnosticRow("Failed", summary.failed)
+                    diagnosticRow("Historical Failed", summary.failed)
                     diagnosticRow("Stale Org Reconciled", summary.staleOrgReconciledCount)
                     diagnosticRow("True Org Mismatch", summary.trueOrgMismatchCount)
                     diagnosticRow("Filtered Deleted", summary.propertiesFilteredDeleted)
@@ -7095,6 +7103,17 @@ private struct DebugLocalDiagnosticsView: View {
         value.map(String.init) ?? "not scanned"
     }
 
+    private var overviewHelperText: String {
+        if divergenceAuditSnapshot?.activeSyncIssueCount == "0",
+           divergenceAuditSnapshot?.recoverableIssueCount == "0",
+           failedQueueItems.isEmpty,
+           retryCappedMediaItems.isEmpty,
+           pendingMediaItems.isEmpty {
+            return "No active sync issues detected."
+        }
+        return "Historical findings are retained for forensic visibility."
+    }
+
     private func label(for category: AppState.DivergenceAuditCategory) -> String {
         switch category {
         case .localOnlyShot:
@@ -7125,6 +7144,11 @@ private struct DebugLocalDiagnosticsView: View {
         return date.formatted(date: .abbreviated, time: .standard)
     }
 
+    private func formattedRunDate(_ date: Date?) -> String {
+        guard let date else { return "No recorded run" }
+        return formattedDate(date)
+    }
+
     private func formattedAge(_ seconds: TimeInterval?) -> String {
         guard let seconds else { return "none" }
         let clamped = max(0, Int(seconds.rounded()))
@@ -7152,7 +7176,7 @@ private struct DebugOfflineQueueItemsView: View {
 
             if items.isEmpty {
                 Section {
-                    Text("No failed offline queue items.")
+                    Text("No failed queue items.")
                         .font(.system(size: 14, weight: .medium))
                         .foregroundStyle(.secondary)
                 }
@@ -7184,7 +7208,7 @@ private struct DebugOfflineQueueItemsView: View {
                 }
             }
         }
-        .navigationTitle("Failed Queue")
+        .navigationTitle("Queue Items")
         .navigationBarTitleDisplayMode(.inline)
     }
 }
