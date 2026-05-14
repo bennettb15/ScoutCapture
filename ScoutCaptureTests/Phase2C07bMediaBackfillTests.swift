@@ -719,6 +719,7 @@ final class Phase2C07bMediaBackfillTests: XCTestCase {
         XCTAssertTrue(snapshot.contains("Active Sync Issues"))
         XCTAssertTrue(snapshot.contains("Recoverable Issues"))
         XCTAssertTrue(snapshot.contains("Historical / Informational States"))
+        XCTAssertTrue(snapshot.contains("Grouped Historical Summaries"))
         XCTAssertTrue(snapshot.contains("Matched Properties: 1"))
         XCTAssertTrue(snapshot.contains("Needs Review | media_drift"))
         XCTAssertTrue(snapshot.contains("Info | legacy_remote_schema"))
@@ -786,6 +787,109 @@ final class Phase2C07bMediaBackfillTests: XCTestCase {
         XCTAssertEqual(summary.activeSyncIssueCount, 1)
         XCTAssertEqual(summary.recoverableIssueCount, 1)
         XCTAssertEqual(summary.historicalInformationalCount, 3)
+    }
+
+    func testDivergenceAuditGroupedHistoricalSummariesCountAffectedEntities() throws {
+        let propertyA = UUID()
+        let propertyB = UUID()
+        let sessionA = UUID()
+        let sessionB = UUID()
+        let shotA = UUID()
+        let shotB = UUID()
+        let items: [AppState.DivergenceAuditItem] = [
+            AppState.DivergenceAuditItem(
+                category: .legacyOrgReconciliation,
+                entityType: "property",
+                entityID: propertyA,
+                propertyID: propertyA,
+                reason: "historical org reconciled"
+            ),
+            AppState.DivergenceAuditItem(
+                category: .legacyOrgReconciliation,
+                entityType: "shot",
+                entityID: shotA,
+                propertyID: propertyA,
+                sessionID: sessionA,
+                shotID: shotA,
+                reason: "historical org reconciled"
+            ),
+            AppState.DivergenceAuditItem(
+                category: .legacyRemoteSchema,
+                entityType: "shot",
+                entityID: shotA,
+                propertyID: propertyA,
+                sessionID: sessionA,
+                shotID: shotA,
+                reason: "legacy remote schema"
+            ),
+            AppState.DivergenceAuditItem(
+                category: .legacyRemoteSchema,
+                entityType: "shot",
+                entityID: shotB,
+                propertyID: propertyB,
+                sessionID: sessionB,
+                shotID: shotB,
+                reason: "legacy remote schema"
+            ),
+            AppState.DivergenceAuditItem(
+                category: .legacyCaptureProfile,
+                entityType: "property",
+                entityID: propertyA,
+                propertyID: propertyA,
+                reason: "legacy capture profile"
+            ),
+            AppState.DivergenceAuditItem(
+                category: .legacyCaptureProfile,
+                entityType: "session",
+                entityID: sessionB,
+                propertyID: propertyB,
+                sessionID: sessionB,
+                reason: "legacy capture profile"
+            )
+        ]
+
+        let groups = AppState.DivergenceAuditSummary.groupedHistoricalFindings(in: items)
+        let staleOrg = try XCTUnwrap(groups.first { $0.category == .legacyOrgReconciliation })
+        let legacySchema = try XCTUnwrap(groups.first { $0.category == .legacyRemoteSchema })
+        let legacyProfile = try XCTUnwrap(groups.first { $0.category == .legacyCaptureProfile })
+
+        XCTAssertEqual(staleOrg.totalCount, 2)
+        XCTAssertEqual(staleOrg.affectedPropertyCount, 1)
+        XCTAssertEqual(staleOrg.affectedSessionCount, 1)
+        XCTAssertEqual(staleOrg.affectedShotCount, 1)
+        XCTAssertEqual(legacySchema.totalCount, 2)
+        XCTAssertEqual(legacySchema.affectedPropertyCount, 2)
+        XCTAssertEqual(legacySchema.affectedSessionCount, 2)
+        XCTAssertEqual(legacySchema.affectedShotCount, 2)
+        XCTAssertEqual(legacyProfile.totalCount, 2)
+        XCTAssertEqual(legacyProfile.affectedPropertyCount, 2)
+        XCTAssertEqual(legacyProfile.affectedSessionCount, 1)
+    }
+
+    func testDivergenceAuditGroupedHistoricalSummariesPreserveRawFindingsAndSamplesOnly() throws {
+        let propertyID = UUID()
+        let rawItems = (0..<8).map { index in
+            AppState.DivergenceAuditItem(
+                category: .legacyCaptureProfile,
+                entityType: "session",
+                entityID: UUID(),
+                propertyID: propertyID,
+                sessionID: UUID(),
+                reason: "legacy capture profile \(index)"
+            )
+        }
+
+        let groups = AppState.DivergenceAuditSummary.groupedHistoricalFindings(
+            in: rawItems,
+            sampleLimit: 3
+        )
+        let group = try XCTUnwrap(groups.first { $0.category == .legacyCaptureProfile })
+
+        XCTAssertEqual(rawItems.count, 8)
+        XCTAssertEqual(group.totalCount, 8)
+        XCTAssertEqual(group.sampleItems.count, 3)
+        XCTAssertEqual(group.affectedPropertyCount, 1)
+        XCTAssertEqual(group.affectedSessionCount, 8)
     }
 
     func testMediaRecoveryInspectionMapsRetryCappedLocalMediaAndFileExists() async throws {

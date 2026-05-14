@@ -546,6 +546,43 @@ final class AppState: ObservableObject {
                     $0.lifecycle == .toleratedHistoricalSchemaState
             }.count
         }
+
+        nonisolated var groupedHistoricalFindings: [DivergenceAuditFindingGroupSummary] {
+            Self.groupedHistoricalFindings(in: items)
+        }
+
+        nonisolated static func groupedHistoricalFindings(
+            in items: [DivergenceAuditItem],
+            sampleLimit: Int = 5
+        ) -> [DivergenceAuditFindingGroupSummary] {
+            let groupedCategories: [DivergenceAuditCategory] = [
+                .legacyOrgReconciliation,
+                .legacyRemoteSchema,
+                .legacyCaptureProfile
+            ]
+            return groupedCategories.compactMap { category in
+                let categoryItems = items.filter { $0.category == category }
+                guard !categoryItems.isEmpty else { return nil }
+                return DivergenceAuditFindingGroupSummary(
+                    category: category,
+                    totalCount: categoryItems.count,
+                    affectedPropertyCount: Set(categoryItems.compactMap(\.propertyID)).count,
+                    affectedSessionCount: Set(categoryItems.compactMap(\.sessionID)).count,
+                    affectedShotCount: Set(categoryItems.compactMap(\.shotID)).count,
+                    sampleItems: Array(categoryItems.prefix(max(0, sampleLimit)))
+                )
+            }
+        }
+    }
+
+    struct DivergenceAuditFindingGroupSummary: Equatable, Identifiable {
+        var id: DivergenceAuditCategory { category }
+        let category: DivergenceAuditCategory
+        let totalCount: Int
+        let affectedPropertyCount: Int
+        let affectedSessionCount: Int
+        let affectedShotCount: Int
+        let sampleItems: [DivergenceAuditItem]
     }
 
     struct CaptureProfileBackfillRemoteState {
@@ -8238,6 +8275,29 @@ final class AppState: ObservableObject {
         lines.append("Stale Org Reconciled Shots: \(summary.staleOrgReconciledShotCount)")
         lines.append("Stale org reconciled means remote active-org ownership proved historical local org metadata safe for audit.")
         lines.append("")
+        let groupedHistoricalFindings = summary.groupedHistoricalFindings
+        if !groupedHistoricalFindings.isEmpty {
+            lines.append("Grouped Historical Summaries")
+            for group in groupedHistoricalFindings {
+                lines.append([
+                    group.category.rawValue,
+                    "total \(group.totalCount)",
+                    "properties \(group.affectedPropertyCount)",
+                    "sessions \(group.affectedSessionCount)",
+                    "shots \(group.affectedShotCount)"
+                ].joined(separator: " | "))
+                for sample in group.sampleItems {
+                    lines.append([
+                        "sample",
+                        sample.entityID?.uuidString ?? "none",
+                        sample.propertyID?.uuidString ?? "none",
+                        sample.sessionID?.uuidString ?? "none",
+                        sample.shotID?.uuidString ?? "none"
+                    ].joined(separator: " | "))
+                }
+            }
+            lines.append("")
+        }
         lines.append("Category Counts")
         let counts = Dictionary(grouping: summary.items, by: \.category).mapValues(\.count)
         for category in DivergenceAuditCategory.allCases {

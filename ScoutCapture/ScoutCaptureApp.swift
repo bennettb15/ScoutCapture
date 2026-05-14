@@ -6345,6 +6345,7 @@ private struct DebugDivergenceAuditSnapshot {
     let totalFindings: String
     let categoryCounts: [(AppState.DivergenceAuditCategory, Int)]
     let items: [DebugDivergenceAuditSnapshotItem]
+    let historicalGroups: [DebugDivergenceAuditHistoricalGroup]
     let snapshotText: String
 
     init(_ summary: AppState.DivergenceAuditSummary) {
@@ -6377,6 +6378,12 @@ private struct DebugDivergenceAuditSnapshot {
             .map { ($0, counts[$0] ?? 0) }
             .filter { $0.1 > 0 }
         items = summary.items.map(DebugDivergenceAuditSnapshotItem.init)
+        historicalGroups = summary.groupedHistoricalFindings.map { group in
+            DebugDivergenceAuditHistoricalGroup(
+                summary: group,
+                allItems: summary.items
+            )
+        }
         snapshotText = AppState.divergenceAuditSnapshotText(summary)
     }
 
@@ -6388,6 +6395,63 @@ private struct DebugDivergenceAuditSnapshot {
         remoteOnlySessionCount == "0" && localOnlySessionCount == "0" ? "OK" : "Needs Review"
     }
 
+}
+
+private struct DebugDivergenceAuditHistoricalGroup: Identifiable, Equatable {
+    let id: String
+    let category: String
+    let title: String
+    let context: String
+    let totalCount: String
+    let affectedPropertyCount: String
+    let affectedSessionCount: String
+    let affectedShotCount: String
+    let sampleItems: [DebugDivergenceAuditSnapshotItem]
+    let allItems: [DebugDivergenceAuditSnapshotItem]
+
+    init(
+        summary: AppState.DivergenceAuditFindingGroupSummary,
+        allItems: [AppState.DivergenceAuditItem]
+    ) {
+        id = summary.category.rawValue
+        category = summary.category.rawValue
+        title = Self.title(for: summary.category)
+        context = Self.context(for: summary.category)
+        totalCount = String(summary.totalCount)
+        affectedPropertyCount = String(summary.affectedPropertyCount)
+        affectedSessionCount = String(summary.affectedSessionCount)
+        affectedShotCount = String(summary.affectedShotCount)
+        sampleItems = summary.sampleItems.map(DebugDivergenceAuditSnapshotItem.init)
+        self.allItems = allItems
+            .filter { $0.category == summary.category }
+            .map(DebugDivergenceAuditSnapshotItem.init)
+    }
+
+    private static func title(for category: AppState.DivergenceAuditCategory) -> String {
+        switch category {
+        case .legacyOrgReconciliation:
+            return "Stale Org Reconciled"
+        case .legacyRemoteSchema:
+            return "Legacy Remote Schema"
+        case .legacyCaptureProfile:
+            return "Legacy Capture Profile"
+        default:
+            return category.rawValue
+        }
+    }
+
+    private static func context(for category: AppState.DivergenceAuditCategory) -> String {
+        switch category {
+        case .legacyOrgReconciliation:
+            return "Historical local org metadata differed, but remote active-org ownership reconciled these records for audit."
+        case .legacyRemoteSchema:
+            return "Remote rows use an older schema shape, but lineage resolves through accessible active-org sessions/properties."
+        case .legacyCaptureProfile:
+            return "Local capture_profile metadata is legacy/null from before canonical profile propagation."
+        default:
+            return "Historical informational finding group."
+        }
+    }
 }
 
 private struct DebugDivergenceAuditSnapshotItem: Identifiable, Equatable {
@@ -6402,6 +6466,12 @@ private struct DebugDivergenceAuditSnapshotItem: Identifiable, Equatable {
     let reasonPreview: String
     let reasonFull: String
     let severity: String
+
+    var isGroupedHistorical: Bool {
+        category == AppState.DivergenceAuditCategory.legacyOrgReconciliation.rawValue ||
+            category == AppState.DivergenceAuditCategory.legacyRemoteSchema.rawValue ||
+            category == AppState.DivergenceAuditCategory.legacyCaptureProfile.rawValue
+    }
 
     nonisolated init(_ item: AppState.DivergenceAuditItem) {
         id = item.id
@@ -6684,8 +6754,29 @@ private struct DebugLocalDiagnosticsView: View {
                         ForEach(snapshot.categoryCounts, id: \.0) { category, count in
                             diagnosticRow(label(for: category), count)
                         }
+                        ForEach(snapshot.historicalGroups) { group in
+                            NavigationLink {
+                                DebugDivergenceAuditHistoricalGroupView(group: group)
+                            } label: {
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text("\(group.title): \(group.totalCount)")
+                                        .font(.system(size: 14, weight: .semibold))
+                                    Text("Properties \(group.affectedPropertyCount) / Sessions \(group.affectedSessionCount) / Shots \(group.affectedShotCount)")
+                                        .font(.system(size: 12, weight: .medium, design: .monospaced))
+                                        .foregroundStyle(.secondary)
+                                    Text(group.context)
+                                        .font(.system(size: 12, weight: .medium))
+                                        .foregroundStyle(.secondary)
+                                        .lineLimit(2)
+                                }
+                                .padding(.vertical, 4)
+                            }
+                        }
                         NavigationLink {
-                            DebugDivergenceAuditItemsView(items: snapshot.items)
+                            DebugDivergenceAuditItemsView(
+                                items: snapshot.items,
+                                historicalGroups: snapshot.historicalGroups
+                            )
                         } label: {
                             diagnosticNavigationLabel("Audit Findings", count: snapshot.items.count)
                         }
@@ -7054,10 +7145,15 @@ private extension Array where Element == DebugMediaRecoverySnapshotItem {
 
 private struct DebugDivergenceAuditItemsView: View {
     let items: [DebugDivergenceAuditSnapshotItem]
+    let historicalGroups: [DebugDivergenceAuditHistoricalGroup]
     @State private var filter: DebugDivergenceAuditFilter = .all
 
     private var filteredItems: [DebugDivergenceAuditSnapshotItem] {
         items.filter { $0.filterMatches(filter) }
+    }
+
+    private var foregroundItems: [DebugDivergenceAuditSnapshotItem] {
+        filteredItems.filter { !$0.isGroupedHistorical }
     }
 
     var body: some View {
@@ -7074,7 +7170,75 @@ private struct DebugDivergenceAuditItemsView: View {
                 .pickerStyle(.menu)
             }
 
-            if filteredItems.isEmpty {
+            if filter == .all {
+                if foregroundItems.isEmpty {
+                    Section("Active / Recoverable Findings") {
+                        Text("No active or recoverable findings. Historical findings are grouped below.")
+                            .font(.system(size: 14, weight: .medium))
+                            .foregroundStyle(.secondary)
+                    }
+                } else {
+                    Section("Active / Recoverable Findings") {
+                        ForEach(foregroundItems) { item in
+                            DebugDivergenceAuditFindingRow(item: item)
+                        }
+                    }
+                }
+
+                if historicalGroups.isEmpty {
+                    Section("Grouped Historical Findings") {
+                        Text("No grouped historical findings.")
+                            .font(.system(size: 14, weight: .medium))
+                            .foregroundStyle(.secondary)
+                    }
+                } else {
+                    Section("Grouped Historical Findings") {
+                        Text("Historical groups are informational and non-operational unless a separate active finding is present.")
+                            .font(.system(size: 13, weight: .medium))
+                            .foregroundStyle(.secondary)
+                        ForEach(historicalGroups) { group in
+                            NavigationLink {
+                                DebugDivergenceAuditHistoricalGroupView(group: group)
+                            } label: {
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text("\(group.title) (\(group.totalCount))")
+                                        .font(.system(size: 14, weight: .semibold))
+                                        .foregroundStyle(.primary)
+                                    Text("Properties \(group.affectedPropertyCount) / Sessions \(group.affectedSessionCount) / Shots \(group.affectedShotCount)")
+                                        .font(.system(size: 12, weight: .medium, design: .monospaced))
+                                        .foregroundStyle(.secondary)
+                                    Text(group.context)
+                                        .font(.system(size: 12, weight: .medium))
+                                        .foregroundStyle(.secondary)
+                                        .lineLimit(2)
+                                }
+                                .padding(.vertical, 6)
+                            }
+                        }
+                    }
+                }
+
+                Section {
+                    NavigationLink {
+                        DebugDivergenceAuditRawItemsView(
+                            title: "All Raw Findings",
+                            items: items
+                        )
+                    } label: {
+                        HStack(alignment: .firstTextBaseline, spacing: 12) {
+                            Text("View All Raw Findings")
+                                .font(.system(size: 14, weight: .semibold))
+                            Spacer(minLength: 12)
+                            Text(String(items.count))
+                                .font(.system(size: 14, weight: .medium, design: .monospaced))
+                                .foregroundStyle(.secondary)
+                        }
+                        .padding(.vertical, 2)
+                    }
+                } footer: {
+                    Text("Raw findings preserve every forensic ID and category.")
+                }
+            } else if filteredItems.isEmpty {
                 Section {
                     Text("No findings for this filter.")
                         .font(.system(size: 14, weight: .medium))
@@ -7083,30 +7247,101 @@ private struct DebugDivergenceAuditItemsView: View {
             } else {
                 Section("Findings") {
                     ForEach(filteredItems) { item in
-                        NavigationLink {
-                            DebugDivergenceAuditItemDetailView(item: item)
-                        } label: {
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text("\(item.severity) / \(item.category)")
-                                    .font(.system(size: 14, weight: .semibold))
-                                    .foregroundStyle(.primary)
-                                    .lineLimit(1)
-                                Text("\(item.entityType) \(item.entityID)")
-                                    .font(.system(size: 12, weight: .medium, design: .monospaced))
-                                    .foregroundStyle(.secondary)
-                                    .lineLimit(1)
-                                Text(item.reasonPreview)
-                                    .font(.system(size: 12, weight: .regular, design: .monospaced))
-                                    .foregroundStyle(.secondary)
-                                    .lineLimit(2)
-                            }
-                        }
-                        .padding(.vertical, 6)
+                        DebugDivergenceAuditFindingRow(item: item)
                     }
                 }
             }
         }
         .navigationTitle("Divergence Audit")
+        .navigationBarTitleDisplayMode(.inline)
+    }
+}
+
+private struct DebugDivergenceAuditFindingRow: View {
+    let item: DebugDivergenceAuditSnapshotItem
+
+    var body: some View {
+        NavigationLink {
+            DebugDivergenceAuditItemDetailView(item: item)
+        } label: {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("\(item.severity) / \(item.category)")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(.primary)
+                    .lineLimit(1)
+                Text("\(item.entityType) \(item.entityID)")
+                    .font(.system(size: 12, weight: .medium, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                Text(item.reasonPreview)
+                    .font(.system(size: 12, weight: .regular, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+            }
+        }
+        .padding(.vertical, 6)
+    }
+}
+
+private struct DebugDivergenceAuditRawItemsView: View {
+    let title: String
+    let items: [DebugDivergenceAuditSnapshotItem]
+
+    var body: some View {
+        List {
+            Section {
+                Text("Raw read-only forensic findings. This view intentionally includes historical detail and all visible IDs.")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(.secondary)
+            }
+            Section("Findings") {
+                ForEach(items) { item in
+                    DebugDivergenceAuditFindingRow(item: item)
+                }
+            }
+        }
+        .navigationTitle(title)
+        .navigationBarTitleDisplayMode(.inline)
+    }
+}
+
+private struct DebugDivergenceAuditHistoricalGroupView: View {
+    let group: DebugDivergenceAuditHistoricalGroup
+    @State private var showsAll: Bool = false
+
+    private var visibleItems: [DebugDivergenceAuditSnapshotItem] {
+        showsAll ? group.allItems : group.sampleItems
+    }
+
+    var body: some View {
+        List {
+            Section {
+                Text(group.context)
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(.secondary)
+                diagnosticRow("Severity", "Info")
+                diagnosticRow("Category", group.category)
+                diagnosticRow("Total", group.totalCount)
+                diagnosticRow("Affected Properties", group.affectedPropertyCount)
+                diagnosticRow("Affected Sessions", group.affectedSessionCount)
+                diagnosticRow("Affected Shots", group.affectedShotCount)
+            } footer: {
+                Text("Grouped for operator readability only. Raw findings remain available and unchanged.")
+            }
+
+            Section(showsAll ? "All Findings" : "Sample Findings") {
+                ForEach(visibleItems) { item in
+                    DebugDivergenceAuditFindingRow(item: item)
+                }
+                if group.allItems.count > group.sampleItems.count {
+                    Button(showsAll ? "Show Sample Only" : "Show All") {
+                        showsAll.toggle()
+                    }
+                    .font(.system(size: 14, weight: .semibold))
+                }
+            }
+        }
+        .navigationTitle(group.title)
         .navigationBarTitleDisplayMode(.inline)
     }
 }
