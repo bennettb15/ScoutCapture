@@ -480,6 +480,117 @@ struct OrganizationContact: Codable, Identifiable, Equatable {
     }
 }
 
+enum ShotLifecycleState: String, Codable, CaseIterable, Equatable {
+    case active
+    case retired
+    case superseded
+
+    var isActiveForDefaultWorkflows: Bool {
+        self == .active
+    }
+
+    var isHistorical: Bool {
+        switch self {
+        case .active:
+            return false
+        case .retired, .superseded:
+            return true
+        }
+    }
+
+    var isRetired: Bool {
+        self == .retired
+    }
+
+    var isSuperseded: Bool {
+        self == .superseded
+    }
+
+    var shouldAppearInDefaultGallery: Bool {
+        isActiveForDefaultWorkflows
+    }
+
+    var shouldAppearInDefaultReports: Bool {
+        isActiveForDefaultWorkflows
+    }
+
+    var shouldAppearInDefaultExports: Bool {
+        isActiveForDefaultWorkflows
+    }
+}
+
+enum ShotLifecycleValidationError: Equatable {
+    case selfSupersession(shotID: UUID)
+    case replacementCycle(shotIDs: [UUID])
+}
+
+enum ShotLifecycleRules {
+    static func validateReplacement(
+        shotID: UUID,
+        supersededByShotID: UUID?
+    ) -> [ShotLifecycleValidationError] {
+        guard supersededByShotID == shotID else { return [] }
+        return [.selfSupersession(shotID: shotID)]
+    }
+
+    static func validateReplacementLinks(
+        supersededByShotIDByShotID: [UUID: UUID]
+    ) -> [ShotLifecycleValidationError] {
+        var errors: [ShotLifecycleValidationError] = []
+        let nonSelfReplacementLinks = supersededByShotIDByShotID.filter { shotID, replacementID in
+            shotID != replacementID
+        }
+
+        for (shotID, replacementID) in supersededByShotIDByShotID where shotID == replacementID {
+            errors.append(.selfSupersession(shotID: shotID))
+        }
+
+        var processed: Set<UUID> = []
+
+        for shotID in nonSelfReplacementLinks.keys where !processed.contains(shotID) {
+            if let cycle = replacementCycle(
+                startingAt: shotID,
+                supersededByShotIDByShotID: nonSelfReplacementLinks,
+                processed: &processed
+            ) {
+                errors.append(.replacementCycle(shotIDs: cycle))
+            }
+        }
+
+        return errors
+    }
+
+    private static func replacementCycle(
+        startingAt shotID: UUID,
+        supersededByShotIDByShotID: [UUID: UUID],
+        processed: inout Set<UUID>
+    ) -> [UUID]? {
+        var path: [UUID] = []
+        var pathIndexByShotID: [UUID: Int] = [:]
+        var current: UUID? = shotID
+
+        while let currentShotID = current {
+            if let cycleStartIndex = pathIndexByShotID[currentShotID] {
+                let cycle = Array(path[cycleStartIndex...])
+                processed.formUnion(path)
+                return cycle
+            }
+
+            if processed.contains(currentShotID) {
+                processed.formUnion(path)
+                return nil
+            }
+
+            pathIndexByShotID[currentShotID] = path.count
+            path.append(currentShotID)
+            current = supersededByShotIDByShotID[currentShotID]
+        }
+
+        processed.formUnion(path)
+        return nil
+    }
+}
+
 struct ShotMetadata: Codable, Identifiable, Equatable {
     let shotID: UUID
     // Deprecated duplication kept for backwards compatibility with existing readers.
@@ -528,6 +639,14 @@ struct ShotMetadata: Codable, Identifiable, Equatable {
     var imageHeight: Int?
 
     var id: UUID { shotID }
+    var isActiveForDefaultWorkflows: Bool { ShotLifecycleState.active.isActiveForDefaultWorkflows }
+    var isHistorical: Bool { ShotLifecycleState.active.isHistorical }
+    var isRetired: Bool { ShotLifecycleState.active.isRetired }
+    var isSuperseded: Bool { ShotLifecycleState.active.isSuperseded }
+    var shouldAppearInDefaultGallery: Bool { ShotLifecycleState.active.shouldAppearInDefaultGallery }
+    var shouldAppearInDefaultReports: Bool { ShotLifecycleState.active.shouldAppearInDefaultReports }
+    var shouldAppearInDefaultExports: Bool { ShotLifecycleState.active.shouldAppearInDefaultExports }
+
     var logicalShotIdentity: String {
         let normalizedKey = shotKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             ? ShotMetadata.makeShotKey(
