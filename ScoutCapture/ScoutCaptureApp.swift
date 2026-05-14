@@ -6203,8 +6203,10 @@ private struct DebugMediaRecoverySnapshot {
     let needsOrgReconciliationCount: String
     let missingRemoteParentCount: String
     let alreadyRemoteCompleteCount: String
+    let missingLocalFileCount: String
     let manualReviewCount: String
     let items: [DebugMediaRecoverySnapshotItem]
+    let snapshotText: String
 
     init(_ summary: AppState.MediaRecoveryInspectionSummary) {
         inspectedAt = formattedDate(summary.inspectedAt)
@@ -6216,8 +6218,10 @@ private struct DebugMediaRecoverySnapshot {
         needsOrgReconciliationCount = String(summary.needsOrgReconciliationCount)
         missingRemoteParentCount = String(summary.missingRemoteParentCount)
         alreadyRemoteCompleteCount = String(summary.alreadyRemoteCompleteCount)
+        missingLocalFileCount = String(summary.missingLocalFileCount)
         manualReviewCount = String(summary.manualReviewCount)
         items = summary.candidates.map(DebugMediaRecoverySnapshotItem.init)
+        snapshotText = AppState.mediaRecoverySnapshotText(summary)
     }
 }
 
@@ -6228,7 +6232,9 @@ private struct DebugMediaRecoverySnapshotItem: Identifiable, Equatable {
     let sessionID: String
     let sessionStatus: String
     let sessionStartedAt: String
+    let sessionIsSealed: String
     let shotID: String
+    let shotIsFlagged: String
     let uploadState: String
     let uploadAttempts: String
     let lastUploadErrorPreview: String
@@ -6245,6 +6251,7 @@ private struct DebugMediaRecoverySnapshotItem: Identifiable, Equatable {
     let remoteShotExists: String
     let remoteStoragePathPresent: String
     let classification: String
+    let importanceHint: String
     let sourceReasons: String
 
     nonisolated init(_ candidate: AppState.MediaRecoveryCandidate) {
@@ -6254,7 +6261,9 @@ private struct DebugMediaRecoverySnapshotItem: Identifiable, Equatable {
         sessionID = candidate.sessionID.uuidString
         sessionStatus = candidate.sessionStatus
         sessionStartedAt = formattedDate(candidate.sessionStartedAt)
+        sessionIsSealed = candidate.sessionIsSealed ? "yes" : "no"
         shotID = candidate.shotID.uuidString
+        shotIsFlagged = candidate.shotIsFlagged ? "yes" : "no"
         uploadState = candidate.uploadState
         uploadAttempts = String(candidate.uploadAttempts)
         lastUploadErrorPreview = AppState.diagnosticsPreviewText(candidate.lastUploadError) ?? "none"
@@ -6271,6 +6280,7 @@ private struct DebugMediaRecoverySnapshotItem: Identifiable, Equatable {
         remoteShotExists = Self.optionalBool(candidate.remoteShotExists)
         remoteStoragePathPresent = Self.optionalBool(candidate.remoteStoragePathPresent)
         classification = candidate.classification.rawValue
+        importanceHint = candidate.importanceHint
         sourceReasons = candidate.sourceReasons.joined(separator: ", ")
     }
 
@@ -6566,7 +6576,20 @@ private struct DebugLocalDiagnosticsView: View {
                         diagnosticRow("Needs Org Reconciliation", snapshot.needsOrgReconciliationCount)
                         diagnosticRow("Missing Remote Parent", snapshot.missingRemoteParentCount)
                         diagnosticRow("Already Remote Complete", snapshot.alreadyRemoteCompleteCount)
+                        diagnosticRow("Missing Local File", snapshot.missingLocalFileCount)
                         diagnosticRow("Manual Review", snapshot.manualReviewCount)
+                        Text("Retry-capped does not mean lost. It means automatic backfill stopped before another upload attempt.")
+                            .font(.system(size: 13, weight: .medium))
+                            .foregroundStyle(.secondary)
+                        Text("If the local file exists, recovery may be possible after remote parent and org checks pass. Draft or test sessions may still be intentionally left alone.")
+                            .font(.system(size: 13, weight: .medium))
+                            .foregroundStyle(.secondary)
+                        NavigationLink {
+                            DebugMediaRecoverySnapshotTextView(snapshotText: snapshot.snapshotText)
+                        } label: {
+                            Text("View Copyable Snapshot")
+                                .font(.system(size: 14, weight: .semibold))
+                        }
                         NavigationLink {
                             DebugMediaRecoveryCandidatesView(items: snapshot.items)
                         } label: {
@@ -6896,6 +6919,17 @@ private struct DebugMediaDiagnosticItemsView: View {
 private struct DebugMediaRecoveryCandidatesView: View {
     let items: [DebugMediaRecoverySnapshotItem]
 
+    private var groupedItems: [(String, [DebugMediaRecoverySnapshotItem])] {
+        [
+            ("Retryable", items.matchingClassification("retryable")),
+            ("Needs Org Reconciliation", items.matchingClassification("needs_org_reconciliation")),
+            ("Missing Remote Parent", items.matchingClassification("missing_remote_parent")),
+            ("Already Remote Complete", items.matchingClassification("already_remote_complete")),
+            ("Missing Local File", items.matchingClassification("missing_local_file")),
+            ("Needs Manual Review", items.matchingClassification("needs_manual_review"))
+        ].filter { !$0.1.isEmpty }
+    }
+
     var body: some View {
         List {
             Section {
@@ -6911,36 +6945,48 @@ private struct DebugMediaRecoveryCandidatesView: View {
                         .foregroundStyle(.secondary)
                 }
             } else {
-                Section("Candidates") {
-                    ForEach(items) { item in
-                        NavigationLink {
-                            DebugMediaRecoveryCandidateDetailView(item: item)
-                        } label: {
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text("\(item.classification) / \(item.propertyName)")
-                                    .font(.system(size: 14, weight: .semibold))
-                                    .foregroundStyle(.primary)
-                                    .lineLimit(1)
-                                Text(item.shotID)
-                                    .font(.system(size: 12, weight: .medium, design: .monospaced))
-                                    .foregroundStyle(.secondary)
-                                    .lineLimit(1)
-                                Text("state \(item.uploadState) | attempts \(item.uploadAttempts) | file \(item.fileExists)")
-                                    .font(.system(size: 12, weight: .medium))
-                                    .foregroundStyle(.secondary)
-                                Text(item.lastUploadErrorPreview)
-                                    .font(.system(size: 12, weight: .regular, design: .monospaced))
-                                    .foregroundStyle(.secondary)
-                                    .lineLimit(2)
+                ForEach(groupedItems, id: \.0) { title, grouped in
+                    Section("\(title) (\(grouped.count))") {
+                        ForEach(grouped) { item in
+                            NavigationLink {
+                                DebugMediaRecoveryCandidateDetailView(item: item)
+                            } label: {
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text(item.propertyName)
+                                        .font(.system(size: 14, weight: .semibold))
+                                        .foregroundStyle(.primary)
+                                        .lineLimit(1)
+                                    Text(item.shotID)
+                                        .font(.system(size: 12, weight: .medium, design: .monospaced))
+                                        .foregroundStyle(.secondary)
+                                        .lineLimit(1)
+                                    Text("state \(item.uploadState) | attempts \(item.uploadAttempts) | file \(item.fileExists)")
+                                        .font(.system(size: 12, weight: .medium))
+                                        .foregroundStyle(.secondary)
+                                    Text(item.importanceHint)
+                                        .font(.system(size: 12, weight: .medium))
+                                        .foregroundStyle(.secondary)
+                                        .lineLimit(2)
+                                    Text(item.lastUploadErrorPreview)
+                                        .font(.system(size: 12, weight: .regular, design: .monospaced))
+                                        .foregroundStyle(.secondary)
+                                        .lineLimit(2)
+                                }
                             }
+                            .padding(.vertical, 6)
                         }
-                        .padding(.vertical, 6)
                     }
                 }
             }
         }
         .navigationTitle("Media Recovery")
         .navigationBarTitleDisplayMode(.inline)
+    }
+}
+
+private extension Array where Element == DebugMediaRecoverySnapshotItem {
+    func matchingClassification(_ classification: String) -> [DebugMediaRecoverySnapshotItem] {
+        filter { $0.classification == classification }
     }
 }
 
@@ -7031,6 +7077,34 @@ private struct DebugDivergenceAuditSnapshotTextView: View {
     }
 }
 
+private struct DebugMediaRecoverySnapshotTextView: View {
+    let snapshotText: String
+    @State private var didCopySnapshot: Bool = false
+
+    var body: some View {
+        List {
+            Section {
+                Button(didCopySnapshot ? "Copied Plain Text" : "Copy Snapshot") {
+                    UIPasteboard.general.string = snapshotText
+                    didCopySnapshot = true
+                }
+                .font(.system(size: 14, weight: .semibold))
+            } footer: {
+                Text("Copies the sanitized media recovery snapshot as plain text only.")
+            }
+
+            Section {
+                Text(snapshotText)
+                    .font(.system(size: 12, weight: .regular, design: .monospaced))
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .textSelection(.enabled)
+            }
+        }
+        .navigationTitle("Media Snapshot")
+        .navigationBarTitleDisplayMode(.inline)
+    }
+}
+
 private struct DebugOfflineQueueItemDetailView: View {
     let item: DebugQueueDiagnosticSnapshotItem
 
@@ -7111,15 +7185,18 @@ private struct DebugMediaRecoveryCandidateDetailView: View {
                 diagnosticRow("Session ID", item.sessionID)
                 diagnosticRow("Session Status", item.sessionStatus)
                 diagnosticRow("Session Started", item.sessionStartedAt)
+                diagnosticRow("Session Sealed", item.sessionIsSealed)
                 diagnosticRow("Session Org ID", item.sessionOrgID)
             }
 
             Section("Shot / Local File") {
                 diagnosticRow("Shot ID", item.shotID)
+                diagnosticRow("Flagged Shot", item.shotIsFlagged)
                 diagnosticRow("Upload State", item.uploadState)
                 diagnosticRow("Upload Attempts", item.uploadAttempts)
                 diagnosticRow("File Exists", item.fileExists)
                 diagnosticRow("Local Filename", item.localFilename)
+                diagnosticRow("Importance Hint", item.importanceHint)
             }
 
             Section("Remote Preflight") {

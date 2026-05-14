@@ -344,6 +344,8 @@ final class AppState: ObservableObject {
         let propertyName: String
         let sessionStatus: String
         let sessionStartedAt: Date?
+        let sessionIsSealed: Bool
+        let shotIsFlagged: Bool
         let uploadState: String
         let uploadAttempts: Int
         let lastUploadError: String?
@@ -359,6 +361,7 @@ final class AppState: ObservableObject {
         let remoteShotExists: Bool?
         let remoteStoragePathPresent: Bool?
         let classification: MediaRecoveryClassification
+        let importanceHint: String
         let sourceReasons: [String]
     }
 
@@ -368,15 +371,16 @@ final class AppState: ObservableObject {
         let remotePreflightAvailable: Bool
         let candidates: [MediaRecoveryCandidate]
 
-        var candidatesFound: Int { candidates.count }
-        var fileExistsCount: Int { candidates.filter(\.fileExists).count }
-        var retryableCount: Int { count(.retryable) }
-        var needsOrgReconciliationCount: Int { count(.needsOrgReconciliation) }
-        var missingRemoteParentCount: Int { count(.missingRemoteParent) }
-        var alreadyRemoteCompleteCount: Int { count(.alreadyRemoteComplete) }
-        var manualReviewCount: Int { count(.needsManualReview) }
+        nonisolated var candidatesFound: Int { candidates.count }
+        nonisolated var fileExistsCount: Int { candidates.filter(\.fileExists).count }
+        nonisolated var retryableCount: Int { count(.retryable) }
+        nonisolated var needsOrgReconciliationCount: Int { count(.needsOrgReconciliation) }
+        nonisolated var missingRemoteParentCount: Int { count(.missingRemoteParent) }
+        nonisolated var alreadyRemoteCompleteCount: Int { count(.alreadyRemoteComplete) }
+        nonisolated var missingLocalFileCount: Int { count(.missingLocalFile) }
+        nonisolated var manualReviewCount: Int { count(.needsManualReview) }
 
-        private func count(_ classification: MediaRecoveryClassification) -> Int {
+        private nonisolated func count(_ classification: MediaRecoveryClassification) -> Int {
             candidates.filter { $0.classification == classification }.count
         }
     }
@@ -2284,6 +2288,7 @@ final class AppState: ObservableObject {
             "needsOrgReconciliation=\(summary.needsOrgReconciliationCount) " +
             "missingRemoteParent=\(summary.missingRemoteParentCount) " +
             "alreadyRemoteComplete=\(summary.alreadyRemoteCompleteCount) " +
+            "missingLocalFile=\(summary.missingLocalFileCount) " +
             "manualReview=\(summary.manualReviewCount)"
         )
 
@@ -6648,6 +6653,8 @@ final class AppState: ObservableObject {
                 propertyName: normalizedSupabaseText(property?.name) ?? "Unknown Property",
                 sessionStatus: session?.status.rawValue ?? "unknown",
                 sessionStartedAt: session?.startedAt,
+                sessionIsSealed: session?.isSealed ?? false,
+                shotIsFlagged: shot.isFlagged,
                 uploadState: shot.uploadState,
                 uploadAttempts: shot.uploadAttempts,
                 lastUploadError: shot.lastUploadError.map(Self.sanitizedDiagnosticsErrorMessage),
@@ -6666,6 +6673,11 @@ final class AppState: ObservableObject {
                 remoteShotExists: remotePreflightAvailable ? remoteShot != nil : nil,
                 remoteStoragePathPresent: remoteStoragePathPresent,
                 classification: classification,
+                importanceHint: Self.mediaRecoveryImportanceHint(
+                    sessionStatus: session?.status.rawValue,
+                    sessionIsSealed: session?.isSealed ?? false,
+                    shotIsFlagged: shot.isFlagged
+                ),
                 sourceReasons: sourceReasons.sorted()
             )
         }
@@ -6794,6 +6806,66 @@ final class AppState: ObservableObject {
         }
 
         return .needsManualReview
+    }
+
+    nonisolated static func mediaRecoveryImportanceHint(
+        sessionStatus: String?,
+        sessionIsSealed: Bool,
+        shotIsFlagged: Bool
+    ) -> String {
+        if shotIsFlagged {
+            return "Flagged shot; likely needs review."
+        }
+        let normalizedStatus = sessionStatus?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        if sessionIsSealed || normalizedStatus == "completed" {
+            return "Completed or sealed session; likely important."
+        }
+        if normalizedStatus == "draft" {
+            return "Draft session; manual review before any future repair."
+        }
+        return "Manual review before any future repair."
+    }
+
+    nonisolated static func mediaRecoverySnapshotText(_ summary: MediaRecoveryInspectionSummary) -> String {
+        var lines: [String] = []
+        lines.append("ScoutCapture Local Health - Media Recovery Candidates")
+        lines.append("Inspected: \(summary.inspectedAt.formatted(date: .abbreviated, time: .standard))")
+        lines.append("Active Org: \(summary.activeOrganizationID?.uuidString ?? "none")")
+        lines.append("Remote Preflight Available: \(summary.remotePreflightAvailable ? "yes" : "no")")
+        lines.append("")
+        lines.append("Summary")
+        lines.append("Candidates Found: \(summary.candidatesFound)")
+        lines.append("File Exists: \(summary.fileExistsCount)")
+        lines.append("Retryable: \(summary.retryableCount)")
+        lines.append("Needs Org Reconciliation: \(summary.needsOrgReconciliationCount)")
+        lines.append("Missing Remote Parent: \(summary.missingRemoteParentCount)")
+        lines.append("Already Remote Complete: \(summary.alreadyRemoteCompleteCount)")
+        lines.append("Missing Local File: \(summary.missingLocalFileCount)")
+        lines.append("Needs Manual Review: \(summary.manualReviewCount)")
+        lines.append("")
+        lines.append("Notes")
+        lines.append("Retry-capped does not mean lost; it means automatic backfill stopped before another upload attempt.")
+        lines.append("If the local file exists, recovery may be possible after remote parent and org checks pass.")
+        lines.append("Draft or test sessions may be intentionally left alone after manual review.")
+        lines.append("")
+        lines.append("Candidates")
+        for candidate in summary.candidates {
+            lines.append([
+                candidate.classification.rawValue,
+                candidate.importanceHint,
+                "property=\(candidate.propertyID.uuidString)",
+                "session=\(candidate.sessionID.uuidString)",
+                "shot=\(candidate.shotID.uuidString)",
+                "fileExists=\(candidate.fileExists ? "yes" : "no")",
+                "sessionStatus=\(candidate.sessionStatus)",
+                "attempts=\(candidate.uploadAttempts)",
+                "sources=\(candidate.sourceReasons.joined(separator: ","))",
+                "error=\(diagnosticsPreviewText(candidate.lastUploadError, maxLength: 240) ?? "none")"
+            ].joined(separator: " | "))
+        }
+        return lines.joined(separator: "\n")
     }
 
     private func makeDivergenceAuditSummary(

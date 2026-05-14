@@ -728,6 +728,94 @@ final class Phase2C07bMediaBackfillTests: XCTestCase {
         )
     }
 
+    func testMediaRecoveryImportanceHintMapping() {
+        XCTAssertEqual(
+            AppState.mediaRecoveryImportanceHint(
+                sessionStatus: "completed",
+                sessionIsSealed: false,
+                shotIsFlagged: false
+            ),
+            "Completed or sealed session; likely important."
+        )
+        XCTAssertEqual(
+            AppState.mediaRecoveryImportanceHint(
+                sessionStatus: "draft",
+                sessionIsSealed: false,
+                shotIsFlagged: false
+            ),
+            "Draft session; manual review before any future repair."
+        )
+        XCTAssertEqual(
+            AppState.mediaRecoveryImportanceHint(
+                sessionStatus: "draft",
+                sessionIsSealed: false,
+                shotIsFlagged: true
+            ),
+            "Flagged shot; likely needs review."
+        )
+    }
+
+    func testMediaRecoverySnapshotTextIncludesCountsAndRedactsSensitiveValues() throws {
+        let now = Date(timeIntervalSince1970: 0)
+        let fixture = try makeAppStateWithSingleSession(uploadStates: [])
+        defer {
+            fixture.appState.shutdown()
+            try? FileManager.default.removeItem(at: fixture.storageRoot)
+        }
+
+        let shotID = UUID()
+        var shot = makeShot(
+            propertyID: fixture.propertyID,
+            sessionID: fixture.sessionID,
+            shotID: shotID,
+            uploadState: "failed",
+            uploadAttempts: 5,
+            angleIndex: 1,
+            shotKey: "building|front|overview|1",
+            updatedAt: now
+        )
+        shot.lastUploadError = "Failed at /private/tmp/secret.heic with bearer abc"
+
+        let summary = fixture.appState._debugMediaRecoveryInspectionSummaryForTests(
+            properties: [
+                Property(
+                    id: fixture.propertyID,
+                    name: "Property",
+                    address: "123 Main Street"
+                )
+            ],
+            sessions: [
+                Session(
+                    id: fixture.sessionID,
+                    propertyID: fixture.propertyID,
+                    startedAt: now,
+                    status: .completed,
+                    isSealed: true
+                )
+            ],
+            shots: [
+                AppState.DebugDivergenceLocalShotInput(
+                    shot: shot,
+                    propertyID: fixture.propertyID,
+                    sessionID: fixture.sessionID,
+                    metadataOrgID: nil,
+                    metadataCaptureProfile: nil
+                )
+            ],
+            inspectedAt: now
+        )
+
+        let snapshot = AppState.mediaRecoverySnapshotText(summary)
+
+        XCTAssertTrue(snapshot.contains("Media Recovery Candidates"))
+        XCTAssertTrue(snapshot.contains("Candidates Found: 1"))
+        XCTAssertTrue(snapshot.contains("Completed or sealed session; likely important."))
+        XCTAssertTrue(snapshot.contains("Retry-capped does not mean lost"))
+        XCTAssertTrue(snapshot.contains("[path]"))
+        XCTAssertFalse(snapshot.contains("/private/tmp"))
+        XCTAssertFalse(snapshot.contains("abc"))
+    }
+
     func testMediaRecoveryInspectionSanitizesErrorAndDoesNotExposeFullPath() throws {
         let now = Date()
         let fixture = try makeAppStateWithSingleSession(uploadStates: [])
