@@ -1239,6 +1239,16 @@ final class AppState: ObservableObject {
         let accuracyMeters: Double?
         let imageWidth: Int?
         let imageHeight: Int?
+        let lifecycleState: String?
+        let retiredAt: String?
+        let retiredReason: String?
+        let retiredBy: UUID?
+        let supersededByShotID: UUID?
+        let supersedesShotID: UUID?
+        let replacementReason: String?
+        let hiddenFromReports: Bool?
+        let hiddenFromGallery: Bool?
+        let lifecycleUpdatedAt: String?
         let uploadState: String?
         let uploadAttempts: Int?
         let updatedBy: UUID?
@@ -1273,6 +1283,16 @@ final class AppState: ObservableObject {
             case accuracyMeters = "accuracy_meters"
             case imageWidth = "image_width"
             case imageHeight = "image_height"
+            case lifecycleState = "lifecycle_state"
+            case retiredAt = "retired_at"
+            case retiredReason = "retired_reason"
+            case retiredBy = "retired_by"
+            case supersededByShotID = "superseded_by_shot_id"
+            case supersedesShotID = "supersedes_shot_id"
+            case replacementReason = "replacement_reason"
+            case hiddenFromReports = "hidden_from_reports"
+            case hiddenFromGallery = "hidden_from_gallery"
+            case lifecycleUpdatedAt = "lifecycle_updated_at"
             case uploadState = "upload_state"
             case uploadAttempts = "upload_attempts"
             case updatedBy = "updated_by"
@@ -1309,6 +1329,16 @@ final class AppState: ObservableObject {
             try c.encodeIfPresent(accuracyMeters, forKey: .accuracyMeters)
             try c.encodeIfPresent(imageWidth, forKey: .imageWidth)
             try c.encodeIfPresent(imageHeight, forKey: .imageHeight)
+            try c.encodeIfPresent(lifecycleState, forKey: .lifecycleState)
+            try c.encodeIfPresent(retiredAt, forKey: .retiredAt)
+            try c.encodeIfPresent(retiredReason, forKey: .retiredReason)
+            try c.encodeIfPresent(retiredBy, forKey: .retiredBy)
+            try c.encodeIfPresent(supersededByShotID, forKey: .supersededByShotID)
+            try c.encodeIfPresent(supersedesShotID, forKey: .supersedesShotID)
+            try c.encodeIfPresent(replacementReason, forKey: .replacementReason)
+            try c.encodeIfPresent(hiddenFromReports, forKey: .hiddenFromReports)
+            try c.encodeIfPresent(hiddenFromGallery, forKey: .hiddenFromGallery)
+            try c.encodeIfPresent(lifecycleUpdatedAt, forKey: .lifecycleUpdatedAt)
             try c.encodeIfPresent(uploadState, forKey: .uploadState)
             try c.encodeIfPresent(uploadAttempts, forKey: .uploadAttempts)
             try c.encodeIfPresent(updatedBy, forKey: .updatedBy)
@@ -9310,10 +9340,36 @@ final class AppState: ObservableObject {
             accuracyMeters: shot.accuracyMeters,
             imageWidth: shot.imageWidth,
             imageHeight: shot.imageHeight,
+            lifecycleState: supabaseLifecycleState(for: shot),
+            retiredAt: shot.retiredAt?.ISO8601Format(),
+            retiredReason: normalizedSupabaseText(shot.retiredReason),
+            retiredBy: shot.retiredByUserID,
+            supersededByShotID: shot.supersededByShotID,
+            supersedesShotID: shot.supersedesShotID,
+            replacementReason: normalizedSupabaseText(shot.replacementReason),
+            hiddenFromReports: shot.hiddenFromReports,
+            hiddenFromGallery: shot.hiddenFromGallery,
+            lifecycleUpdatedAt: shot.lifecycleUpdatedAt?.ISO8601Format(),
             uploadState: includeInsertDefaults ? shot.uploadState : nil,
             uploadAttempts: includeInsertDefaults ? max(0, shot.uploadAttempts) : nil,
             updatedBy: overrideUpdatedBy ?? authenticatedSupabaseUser?.id
         )
+    }
+
+    private func supabaseLifecycleState(for shot: ShotMetadata) -> String? {
+        let hasLifecycleMetadata = shot.retiredAt != nil
+            || normalizedSupabaseText(shot.retiredReason) != nil
+            || shot.retiredByUserID != nil
+            || shot.supersededByShotID != nil
+            || shot.supersedesShotID != nil
+            || normalizedSupabaseText(shot.replacementReason) != nil
+            || shot.hiddenFromReports != nil
+            || shot.hiddenFromGallery != nil
+            || shot.lifecycleUpdatedAt != nil
+        guard shot.lifecycleState != .active || hasLifecycleMetadata else {
+            return nil
+        }
+        return shot.lifecycleState.rawValue
     }
 
     private func supabaseShotType(for shot: ShotMetadata) -> String {
@@ -13703,6 +13759,16 @@ final class AppState: ObservableObject {
                 accuracy_meters,
                 image_width,
                 image_height,
+                lifecycle_state,
+                retired_at,
+                retired_reason,
+                retired_by,
+                superseded_by_shot_id,
+                supersedes_shot_id,
+                replacement_reason,
+                hidden_from_reports,
+                hidden_from_gallery,
+                lifecycle_updated_at,
                 storage_bucket,
                 storage_path,
                 checksum_sha256,
@@ -13763,6 +13829,16 @@ final class AppState: ObservableObject {
                 accuracy_meters,
                 image_width,
                 image_height,
+                lifecycle_state,
+                retired_at,
+                retired_reason,
+                retired_by,
+                superseded_by_shot_id,
+                supersedes_shot_id,
+                replacement_reason,
+                hidden_from_reports,
+                hidden_from_gallery,
+                lifecycle_updated_at,
                 storage_bucket,
                 storage_path,
                 checksum_sha256,
