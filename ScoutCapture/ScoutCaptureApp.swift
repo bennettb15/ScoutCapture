@@ -6193,6 +6193,93 @@ private struct DebugMediaDiagnosticSnapshotItem: Identifiable, Equatable {
     }
 }
 
+private struct DebugMediaRecoverySnapshot {
+    let inspectedAt: String
+    let activeOrganizationID: String
+    let remotePreflightAvailable: String
+    let candidatesFound: String
+    let fileExistsCount: String
+    let retryableCount: String
+    let needsOrgReconciliationCount: String
+    let missingRemoteParentCount: String
+    let alreadyRemoteCompleteCount: String
+    let manualReviewCount: String
+    let items: [DebugMediaRecoverySnapshotItem]
+
+    init(_ summary: AppState.MediaRecoveryInspectionSummary) {
+        inspectedAt = formattedDate(summary.inspectedAt)
+        activeOrganizationID = summary.activeOrganizationID?.uuidString ?? "none"
+        remotePreflightAvailable = summary.remotePreflightAvailable ? "yes" : "no"
+        candidatesFound = String(summary.candidatesFound)
+        fileExistsCount = String(summary.fileExistsCount)
+        retryableCount = String(summary.retryableCount)
+        needsOrgReconciliationCount = String(summary.needsOrgReconciliationCount)
+        missingRemoteParentCount = String(summary.missingRemoteParentCount)
+        alreadyRemoteCompleteCount = String(summary.alreadyRemoteCompleteCount)
+        manualReviewCount = String(summary.manualReviewCount)
+        items = summary.candidates.map(DebugMediaRecoverySnapshotItem.init)
+    }
+}
+
+private struct DebugMediaRecoverySnapshotItem: Identifiable, Equatable {
+    let id: UUID
+    let propertyName: String
+    let propertyID: String
+    let sessionID: String
+    let sessionStatus: String
+    let sessionStartedAt: String
+    let shotID: String
+    let uploadState: String
+    let uploadAttempts: String
+    let lastUploadErrorPreview: String
+    let lastUploadErrorFull: String?
+    let fileExists: String
+    let localFilename: String
+    let activeOrganizationID: String
+    let propertyOrgID: String
+    let sessionOrgID: String
+    let staleLocalOrg: String
+    let remotePreflightAvailable: String
+    let remotePropertyExists: String
+    let remoteSessionExists: String
+    let remoteShotExists: String
+    let remoteStoragePathPresent: String
+    let classification: String
+    let sourceReasons: String
+
+    nonisolated init(_ candidate: AppState.MediaRecoveryCandidate) {
+        id = candidate.id
+        propertyName = candidate.propertyName
+        propertyID = candidate.propertyID.uuidString
+        sessionID = candidate.sessionID.uuidString
+        sessionStatus = candidate.sessionStatus
+        sessionStartedAt = formattedDate(candidate.sessionStartedAt)
+        shotID = candidate.shotID.uuidString
+        uploadState = candidate.uploadState
+        uploadAttempts = String(candidate.uploadAttempts)
+        lastUploadErrorPreview = AppState.diagnosticsPreviewText(candidate.lastUploadError) ?? "none"
+        lastUploadErrorFull = candidate.lastUploadError
+        fileExists = candidate.fileExists ? "yes" : "no"
+        localFilename = candidate.localFilename ?? "unknown"
+        activeOrganizationID = candidate.activeOrganizationID?.uuidString ?? "none"
+        propertyOrgID = candidate.propertyOrgID?.uuidString ?? "none"
+        sessionOrgID = candidate.sessionOrgID?.uuidString ?? "none"
+        staleLocalOrg = candidate.staleLocalOrg ? "yes" : "no"
+        remotePreflightAvailable = candidate.remotePreflightAvailable ? "yes" : "no"
+        remotePropertyExists = Self.optionalBool(candidate.remotePropertyExists)
+        remoteSessionExists = Self.optionalBool(candidate.remoteSessionExists)
+        remoteShotExists = Self.optionalBool(candidate.remoteShotExists)
+        remoteStoragePathPresent = Self.optionalBool(candidate.remoteStoragePathPresent)
+        classification = candidate.classification.rawValue
+        sourceReasons = candidate.sourceReasons.joined(separator: ", ")
+    }
+
+    private nonisolated static func optionalBool(_ value: Bool?) -> String {
+        guard let value else { return "not scanned" }
+        return value ? "yes" : "no"
+    }
+}
+
 private struct DebugDivergenceAuditSnapshot {
     let ranAt: String
     let activeOrganizationID: String
@@ -6329,9 +6416,12 @@ private struct DebugLocalDiagnosticsView: View {
 
     @State private var showClearConfirm: Bool = false
     @State private var isRunningDivergenceAudit: Bool = false
+    @State private var isInspectingMediaRecovery: Bool = false
     @State private var failedQueueItems: [DebugQueueDiagnosticSnapshotItem] = []
     @State private var retryCappedMediaItems: [DebugMediaDiagnosticSnapshotItem] = []
     @State private var pendingMediaItems: [DebugMediaDiagnosticSnapshotItem] = []
+    @State private var mediaRecoverySnapshot: DebugMediaRecoverySnapshot?
+    @State private var divergenceAuditSummary: AppState.DivergenceAuditSummary?
     @State private var divergenceAuditSnapshot: DebugDivergenceAuditSnapshot?
 
     private var diagnostics: AppState.LocalDiagnosticsState {
@@ -6457,6 +6547,38 @@ private struct DebugLocalDiagnosticsView: View {
                     }
                 }
 
+                Section("Media Recovery Candidates") {
+                    Text("Read-only inspector for retry-capped and divergence-linked media candidates. It does not retry, reset, delete, ignore, or mutate app data.")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(.secondary)
+                    Button(isInspectingMediaRecovery ? "Inspecting..." : "Inspect Candidates") {
+                        inspectMediaRecoveryCandidates()
+                    }
+                    .disabled(isInspectingMediaRecovery)
+
+                    if let snapshot = mediaRecoverySnapshot {
+                        diagnosticRow("Inspected", snapshot.inspectedAt)
+                        diagnosticRow("Active Org", snapshot.activeOrganizationID)
+                        diagnosticRow("Remote Preflight", snapshot.remotePreflightAvailable)
+                        diagnosticRow("Candidates Found", snapshot.candidatesFound)
+                        diagnosticRow("File Exists", snapshot.fileExistsCount)
+                        diagnosticRow("Retryable", snapshot.retryableCount)
+                        diagnosticRow("Needs Org Reconciliation", snapshot.needsOrgReconciliationCount)
+                        diagnosticRow("Missing Remote Parent", snapshot.missingRemoteParentCount)
+                        diagnosticRow("Already Remote Complete", snapshot.alreadyRemoteCompleteCount)
+                        diagnosticRow("Manual Review", snapshot.manualReviewCount)
+                        NavigationLink {
+                            DebugMediaRecoveryCandidatesView(items: snapshot.items)
+                        } label: {
+                            diagnosticNavigationLabel("Candidate Details", count: snapshot.items.count)
+                        }
+                    } else {
+                        Text("No media recovery inspection has been run in this view.")
+                            .font(.system(size: 14, weight: .medium))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
                 if let snapshot = divergenceAuditSnapshot {
                     Section("Core Sync Health") {
                         diagnosticRow("Property Match Status", snapshot.corePropertyStatus)
@@ -6563,8 +6685,24 @@ private struct DebugLocalDiagnosticsView: View {
         Task {
             let summary = await appState.runDivergenceAudit()
             await MainActor.run {
+                divergenceAuditSummary = summary
                 divergenceAuditSnapshot = DebugDivergenceAuditSnapshot(summary)
                 isRunningDivergenceAudit = false
+            }
+        }
+    }
+
+    private func inspectMediaRecoveryCandidates() {
+        guard !isInspectingMediaRecovery else { return }
+        isInspectingMediaRecovery = true
+        let currentDivergenceSummary = divergenceAuditSummary
+        Task {
+            let summary = await appState.inspectMediaRecoveryCandidates(
+                divergenceAuditSummary: currentDivergenceSummary
+            )
+            await MainActor.run {
+                mediaRecoverySnapshot = DebugMediaRecoverySnapshot(summary)
+                isInspectingMediaRecovery = false
             }
         }
     }
@@ -6755,6 +6893,57 @@ private struct DebugMediaDiagnosticItemsView: View {
     }
 }
 
+private struct DebugMediaRecoveryCandidatesView: View {
+    let items: [DebugMediaRecoverySnapshotItem]
+
+    var body: some View {
+        List {
+            Section {
+                Text("Read-only media recovery candidates. Full file paths, storage paths, tokens, and auth payloads are hidden.")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(.secondary)
+            }
+
+            if items.isEmpty {
+                Section {
+                    Text("No media recovery candidates.")
+                        .font(.system(size: 14, weight: .medium))
+                        .foregroundStyle(.secondary)
+                }
+            } else {
+                Section("Candidates") {
+                    ForEach(items) { item in
+                        NavigationLink {
+                            DebugMediaRecoveryCandidateDetailView(item: item)
+                        } label: {
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("\(item.classification) / \(item.propertyName)")
+                                    .font(.system(size: 14, weight: .semibold))
+                                    .foregroundStyle(.primary)
+                                    .lineLimit(1)
+                                Text(item.shotID)
+                                    .font(.system(size: 12, weight: .medium, design: .monospaced))
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(1)
+                                Text("state \(item.uploadState) | attempts \(item.uploadAttempts) | file \(item.fileExists)")
+                                    .font(.system(size: 12, weight: .medium))
+                                    .foregroundStyle(.secondary)
+                                Text(item.lastUploadErrorPreview)
+                                    .font(.system(size: 12, weight: .regular, design: .monospaced))
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(2)
+                            }
+                        }
+                        .padding(.vertical, 6)
+                    }
+                }
+            }
+        }
+        .navigationTitle("Media Recovery")
+        .navigationBarTitleDisplayMode(.inline)
+    }
+}
+
 private struct DebugDivergenceAuditItemsView: View {
     let items: [DebugDivergenceAuditSnapshotItem]
     @State private var filter: DebugDivergenceAuditFilter = .all
@@ -6899,6 +7088,59 @@ private struct DebugMediaDiagnosticItemDetailView: View {
             }
         }
         .navigationTitle("Media Item")
+        .navigationBarTitleDisplayMode(.inline)
+    }
+}
+
+private struct DebugMediaRecoveryCandidateDetailView: View {
+    let item: DebugMediaRecoverySnapshotItem
+
+    var body: some View {
+        List {
+            Section("Classification") {
+                diagnosticRow("Classification", item.classification)
+                diagnosticRow("Sources", item.sourceReasons)
+                diagnosticRow("Active Org", item.activeOrganizationID)
+                diagnosticRow("Stale Local Org", item.staleLocalOrg)
+            }
+
+            Section("Property / Session") {
+                diagnosticRow("Property Name", item.propertyName)
+                diagnosticRow("Property ID", item.propertyID)
+                diagnosticRow("Property Org ID", item.propertyOrgID)
+                diagnosticRow("Session ID", item.sessionID)
+                diagnosticRow("Session Status", item.sessionStatus)
+                diagnosticRow("Session Started", item.sessionStartedAt)
+                diagnosticRow("Session Org ID", item.sessionOrgID)
+            }
+
+            Section("Shot / Local File") {
+                diagnosticRow("Shot ID", item.shotID)
+                diagnosticRow("Upload State", item.uploadState)
+                diagnosticRow("Upload Attempts", item.uploadAttempts)
+                diagnosticRow("File Exists", item.fileExists)
+                diagnosticRow("Local Filename", item.localFilename)
+            }
+
+            Section("Remote Preflight") {
+                diagnosticRow("Preflight Available", item.remotePreflightAvailable)
+                diagnosticRow("Remote Property", item.remotePropertyExists)
+                diagnosticRow("Remote Session", item.remoteSessionExists)
+                diagnosticRow("Remote Shot", item.remoteShotExists)
+                diagnosticRow("Remote Storage Path", item.remoteStoragePathPresent)
+            }
+
+            Section("Last Upload Error") {
+                if let error = item.lastUploadErrorFull {
+                    diagnosticBlock("Sanitized Error", error)
+                } else {
+                    Text("No last upload error recorded.")
+                        .font(.system(size: 14, weight: .medium))
+                        .foregroundStyle(.secondary)
+                }
+            }
+        }
+        .navigationTitle("Recovery Candidate")
         .navigationBarTitleDisplayMode(.inline)
     }
 }

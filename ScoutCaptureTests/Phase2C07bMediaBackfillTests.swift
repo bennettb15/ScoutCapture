@@ -591,6 +591,193 @@ final class Phase2C07bMediaBackfillTests: XCTestCase {
         XCTAssertFalse(snapshot.contains("abc"))
     }
 
+    func testMediaRecoveryInspectionMapsRetryCappedLocalMediaAndFileExists() async throws {
+        let now = Date()
+        let fixture = try makeAppStateWithSingleSession(
+            uploadStates: [("failed", 5, now)]
+        )
+        defer {
+            fixture.appState.shutdown()
+            try? FileManager.default.removeItem(at: fixture.storageRoot)
+        }
+
+        let shot = try XCTUnwrap(fixture.shots.first)
+        let originals = fixture.storageRoot
+            .appendingPathComponent("SCOUT/Properties/\(fixture.propertyID.uuidString)/Sessions/\(fixture.sessionID.uuidString)/Originals", isDirectory: true)
+        try FileManager.default.createDirectory(at: originals, withIntermediateDirectories: true)
+        try Data("media".utf8).write(to: originals.appendingPathComponent(shot.originalFilename))
+
+        let summary = await fixture.appState.inspectMediaRecoveryCandidates()
+
+        XCTAssertEqual(summary.candidatesFound, 1)
+        let candidate = try XCTUnwrap(summary.candidates.first)
+        XCTAssertEqual(candidate.shotID, shot.shotID)
+        XCTAssertTrue(candidate.fileExists)
+        XCTAssertEqual(candidate.localFilename, shot.originalFilename)
+        XCTAssertEqual(candidate.classification, .needsManualReview)
+        XCTAssertTrue(candidate.sourceReasons.contains("retry_capped_media"))
+    }
+
+    func testMediaRecoveryInspectionFlagsStaleLocalOrg() throws {
+        let now = Date()
+        let staleOrganizationID = UUID()
+        let activeOrganizationID = UUID()
+        let fixture = try makeAppStateWithSingleSession(
+            uploadStates: [("failed", 5, now)],
+            propertyOrganizationID: staleOrganizationID,
+            metadataOrganizationID: staleOrganizationID,
+            extraOrganizationIDs: [activeOrganizationID]
+        )
+        defer {
+            fixture.appState.shutdown()
+            try? FileManager.default.removeItem(at: fixture.storageRoot)
+        }
+
+        let shot = try XCTUnwrap(fixture.shots.first)
+        let originals = fixture.storageRoot
+            .appendingPathComponent("SCOUT/Properties/\(fixture.propertyID.uuidString)/Sessions/\(fixture.sessionID.uuidString)/Originals", isDirectory: true)
+        try FileManager.default.createDirectory(at: originals, withIntermediateDirectories: true)
+        try Data("media".utf8).write(to: originals.appendingPathComponent(shot.originalFilename))
+
+        let summary = fixture.appState._debugMediaRecoveryInspectionSummaryForTests(
+            properties: [
+                Property(
+                    id: fixture.propertyID,
+                    orgId: staleOrganizationID,
+                    name: "Property",
+                    address: "123 Main Street"
+                )
+            ],
+            sessions: [
+                Session(id: fixture.sessionID, propertyID: fixture.propertyID, startedAt: now, status: .draft)
+            ],
+            shots: [
+                AppState.DebugDivergenceLocalShotInput(
+                    shot: shot,
+                    propertyID: fixture.propertyID,
+                    sessionID: fixture.sessionID,
+                    metadataOrgID: staleOrganizationID,
+                    metadataCaptureProfile: nil
+                )
+            ],
+            remote: AppState.DebugDivergenceRemoteInput(
+                propertyIDs: [fixture.propertyID.uuidString],
+                sessions: [(fixture.sessionID.uuidString, fixture.propertyID.uuidString)],
+                orgID: activeOrganizationID
+            ),
+            activeOrganizationID: activeOrganizationID
+        )
+
+        let candidate = try XCTUnwrap(summary.candidates.first)
+        XCTAssertTrue(candidate.staleLocalOrg)
+        XCTAssertEqual(candidate.classification, .needsOrgReconciliation)
+    }
+
+    func testMediaRecoveryClassificationMapping() {
+        XCTAssertEqual(
+            AppState.mediaRecoveryClassification(
+                fileExists: false,
+                staleLocalOrg: false,
+                remotePreflightAvailable: true,
+                remotePropertyExists: true,
+                remoteSessionExists: true,
+                remoteShotExists: false,
+                remoteStoragePathPresent: nil,
+                remoteUploadState: nil
+            ),
+            .missingLocalFile
+        )
+        XCTAssertEqual(
+            AppState.mediaRecoveryClassification(
+                fileExists: true,
+                staleLocalOrg: false,
+                remotePreflightAvailable: true,
+                remotePropertyExists: true,
+                remoteSessionExists: true,
+                remoteShotExists: true,
+                remoteStoragePathPresent: true,
+                remoteUploadState: "uploaded"
+            ),
+            .alreadyRemoteComplete
+        )
+        XCTAssertEqual(
+            AppState.mediaRecoveryClassification(
+                fileExists: true,
+                staleLocalOrg: false,
+                remotePreflightAvailable: true,
+                remotePropertyExists: false,
+                remoteSessionExists: true,
+                remoteShotExists: false,
+                remoteStoragePathPresent: nil,
+                remoteUploadState: nil
+            ),
+            .missingRemoteParent
+        )
+        XCTAssertEqual(
+            AppState.mediaRecoveryClassification(
+                fileExists: true,
+                staleLocalOrg: false,
+                remotePreflightAvailable: true,
+                remotePropertyExists: true,
+                remoteSessionExists: true,
+                remoteShotExists: false,
+                remoteStoragePathPresent: nil,
+                remoteUploadState: nil
+            ),
+            .retryable
+        )
+    }
+
+    func testMediaRecoveryInspectionSanitizesErrorAndDoesNotExposeFullPath() throws {
+        let now = Date()
+        let fixture = try makeAppStateWithSingleSession(uploadStates: [])
+        defer {
+            fixture.appState.shutdown()
+            try? FileManager.default.removeItem(at: fixture.storageRoot)
+        }
+
+        let shotID = UUID()
+        var shot = makeShot(
+            propertyID: fixture.propertyID,
+            sessionID: fixture.sessionID,
+            shotID: shotID,
+            uploadState: "failed",
+            uploadAttempts: 5,
+            angleIndex: 1,
+            shotKey: "building|front|overview|1",
+            updatedAt: now
+        )
+        shot.lastUploadError = "Failed reading /private/tmp/secret.heic with token abc"
+
+        let summary = fixture.appState._debugMediaRecoveryInspectionSummaryForTests(
+            properties: [
+                Property(
+                    id: fixture.propertyID,
+                    name: "Property",
+                    address: "123 Main Street"
+                )
+            ],
+            sessions: [
+                Session(id: fixture.sessionID, propertyID: fixture.propertyID, startedAt: now, status: .draft)
+            ],
+            shots: [
+                AppState.DebugDivergenceLocalShotInput(
+                    shot: shot,
+                    propertyID: fixture.propertyID,
+                    sessionID: fixture.sessionID,
+                    metadataOrgID: nil,
+                    metadataCaptureProfile: nil
+                )
+            ]
+        )
+
+        let candidate = try XCTUnwrap(summary.candidates.first)
+        XCTAssertEqual(candidate.localFilename, "\(shotID.uuidString).heic")
+        XCTAssertFalse(candidate.localFilename?.contains("/") ?? true)
+        XCTAssertFalse(candidate.lastUploadError?.contains("/private/tmp") ?? true)
+        XCTAssertFalse(candidate.lastUploadError?.contains("abc") ?? true)
+    }
+
     func testBackfillRunIsSingletonGuarded() async throws {
         let fixture = try makeAppStateWithSingleSession(uploadStates: [])
         defer {

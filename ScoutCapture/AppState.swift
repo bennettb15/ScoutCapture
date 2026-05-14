@@ -327,6 +327,60 @@ final class AppState: ObservableObject {
         let hasStoragePath: Bool
     }
 
+    enum MediaRecoveryClassification: String, CaseIterable, Equatable {
+        case retryable
+        case needsOrgReconciliation = "needs_org_reconciliation"
+        case alreadyRemoteComplete = "already_remote_complete"
+        case missingLocalFile = "missing_local_file"
+        case missingRemoteParent = "missing_remote_parent"
+        case needsManualReview = "needs_manual_review"
+    }
+
+    struct MediaRecoveryCandidate: Equatable, Identifiable {
+        let id: UUID
+        let shotID: UUID
+        let sessionID: UUID
+        let propertyID: UUID
+        let propertyName: String
+        let sessionStatus: String
+        let sessionStartedAt: Date?
+        let uploadState: String
+        let uploadAttempts: Int
+        let lastUploadError: String?
+        let fileExists: Bool
+        let localFilename: String?
+        let activeOrganizationID: UUID?
+        let propertyOrgID: UUID?
+        let sessionOrgID: UUID?
+        let staleLocalOrg: Bool
+        let remotePreflightAvailable: Bool
+        let remotePropertyExists: Bool?
+        let remoteSessionExists: Bool?
+        let remoteShotExists: Bool?
+        let remoteStoragePathPresent: Bool?
+        let classification: MediaRecoveryClassification
+        let sourceReasons: [String]
+    }
+
+    struct MediaRecoveryInspectionSummary: Equatable {
+        let inspectedAt: Date
+        let activeOrganizationID: UUID?
+        let remotePreflightAvailable: Bool
+        let candidates: [MediaRecoveryCandidate]
+
+        var candidatesFound: Int { candidates.count }
+        var fileExistsCount: Int { candidates.filter(\.fileExists).count }
+        var retryableCount: Int { count(.retryable) }
+        var needsOrgReconciliationCount: Int { count(.needsOrgReconciliation) }
+        var missingRemoteParentCount: Int { count(.missingRemoteParent) }
+        var alreadyRemoteCompleteCount: Int { count(.alreadyRemoteComplete) }
+        var manualReviewCount: Int { count(.needsManualReview) }
+
+        private func count(_ classification: MediaRecoveryClassification) -> Int {
+            candidates.filter { $0.classification == classification }.count
+        }
+    }
+
     enum DivergenceAuditCategory: String, CaseIterable, Equatable {
         case localOnlyProperty = "local_only_property"
         case remoteOnlyProperty = "remote_only_property"
@@ -2202,6 +2256,38 @@ final class AppState: ObservableObject {
                 shot.uploadState == "uploading" ||
                 (shot.uploadState == "failed" && shot.uploadAttempts < maximumSupabaseMediaUploadAttempts)
         }
+    }
+
+    func inspectMediaRecoveryCandidates(
+        divergenceAuditSummary: DivergenceAuditSummary? = nil
+    ) async -> MediaRecoveryInspectionSummary {
+        let inspectedAt = Date()
+        let organizationID = activeOrganizationID
+        print("[MediaRecovery] event=inspect_start activeOrganizationID=\(organizationID?.uuidString ?? "nil")")
+
+        let localSnapshot = makeLocalDivergenceSnapshot()
+        let remoteSnapshot = await fetchRemoteDivergenceSnapshotIfAvailable(activeOrganizationID: organizationID)
+        let summary = makeMediaRecoveryInspectionSummary(
+            inspectedAt: inspectedAt,
+            activeOrganizationID: organizationID,
+            local: localSnapshot,
+            remote: remoteSnapshot,
+            divergenceAuditSummary: divergenceAuditSummary
+        )
+
+        print(
+            "[MediaRecovery] event=inspect_complete " +
+            "activeOrganizationID=\(organizationID?.uuidString ?? "nil") " +
+            "candidates=\(summary.candidatesFound) " +
+            "fileExists=\(summary.fileExistsCount) " +
+            "retryable=\(summary.retryableCount) " +
+            "needsOrgReconciliation=\(summary.needsOrgReconciliationCount) " +
+            "missingRemoteParent=\(summary.missingRemoteParentCount) " +
+            "alreadyRemoteComplete=\(summary.alreadyRemoteCompleteCount) " +
+            "manualReview=\(summary.manualReviewCount)"
+        )
+
+        return summary
     }
 
     func runDivergenceAudit() async -> DivergenceAuditSummary {
@@ -6487,6 +6573,227 @@ final class AppState: ObservableObject {
             recordDiagnosticsError(error)
             return nil
         }
+    }
+
+    private func makeMediaRecoveryInspectionSummary(
+        inspectedAt: Date,
+        activeOrganizationID: UUID?,
+        local: LocalDivergenceSnapshot,
+        remote: RemoteDivergenceSnapshot?,
+        divergenceAuditSummary: DivergenceAuditSummary?
+    ) -> MediaRecoveryInspectionSummary {
+        let localPropertiesByID = dictionaryByNormalizedID(local.properties, id: \.id)
+        let localSessionsByID = dictionaryByNormalizedID(local.sessions, id: \.id)
+        let remotePropertiesByID = dictionaryByNormalizedID(remote?.properties ?? [], id: \.id)
+        let remoteSessionsByID = dictionaryByNormalizedID(remote?.sessions ?? [], id: \.id)
+        let remoteShotsByID = dictionaryByNormalizedID(remote?.shots ?? [], id: \.id)
+        let divergenceCandidateReasons = mediaRecoveryDivergenceCandidateReasons(divergenceAuditSummary)
+
+        var candidateReasonsByShotID: [String: Set<String>] = [:]
+        for localShot in local.shots {
+            let shot = localShot.shot
+            let shotKey = divergenceKey(shot.shotID)
+            if shot.uploadState != "uploaded",
+               shot.uploadAttempts >= maximumSupabaseMediaUploadAttempts {
+                candidateReasonsByShotID[shotKey, default: []].insert("retry_capped_media")
+            }
+            if let reasons = divergenceCandidateReasons[shotKey] {
+                candidateReasonsByShotID[shotKey, default: []].formUnion(reasons)
+            }
+        }
+
+        let candidates = local.shots.compactMap { localShot -> MediaRecoveryCandidate? in
+            let shot = localShot.shot
+            let shotKey = divergenceKey(shot.shotID)
+            guard let sourceReasons = candidateReasonsByShotID[shotKey],
+                  !sourceReasons.isEmpty else {
+                return nil
+            }
+
+            let property = localPropertiesByID[divergenceKey(localShot.propertyID)]
+            let session = localSessionsByID[divergenceKey(localShot.sessionID)]
+            let remoteProperty = remotePropertiesByID[divergenceKey(localShot.propertyID)]
+            let remoteSession = remoteSessionsByID[divergenceKey(localShot.sessionID)]
+            let remoteShot = remoteShotsByID[shotKey]
+            let fileExists = localMediaFileExists(
+                propertyID: localShot.propertyID,
+                sessionID: localShot.sessionID,
+                shot: shot
+            )
+            let propertyOrgID = property?.orgId
+            let sessionOrgID = localShot.metadataOrgID
+            let staleLocalOrg = isStaleLocalMediaRecoveryOrg(
+                activeOrganizationID: activeOrganizationID,
+                propertyOrgID: propertyOrgID,
+                sessionOrgID: sessionOrgID
+            )
+            let remotePreflightAvailable = remote != nil
+            let remoteStoragePathPresent = remoteShot.map { normalizedSupabaseText($0.storagePath) != nil }
+            let classification = Self.mediaRecoveryClassification(
+                fileExists: fileExists,
+                staleLocalOrg: staleLocalOrg,
+                remotePreflightAvailable: remotePreflightAvailable,
+                remotePropertyExists: remotePreflightAvailable ? remoteProperty != nil : nil,
+                remoteSessionExists: remotePreflightAvailable ? remoteSession != nil : nil,
+                remoteShotExists: remotePreflightAvailable ? remoteShot != nil : nil,
+                remoteStoragePathPresent: remoteStoragePathPresent,
+                remoteUploadState: remoteShot?.uploadState
+            )
+
+            return MediaRecoveryCandidate(
+                id: shot.shotID,
+                shotID: shot.shotID,
+                sessionID: localShot.sessionID,
+                propertyID: localShot.propertyID,
+                propertyName: normalizedSupabaseText(property?.name) ?? "Unknown Property",
+                sessionStatus: session?.status.rawValue ?? "unknown",
+                sessionStartedAt: session?.startedAt,
+                uploadState: shot.uploadState,
+                uploadAttempts: shot.uploadAttempts,
+                lastUploadError: shot.lastUploadError.map(Self.sanitizedDiagnosticsErrorMessage),
+                fileExists: fileExists,
+                localFilename: Self.safeDiagnosticsFilename(
+                    originalFilename: shot.originalFilename,
+                    originalRelativePath: shot.originalRelativePath
+                ),
+                activeOrganizationID: activeOrganizationID,
+                propertyOrgID: propertyOrgID,
+                sessionOrgID: sessionOrgID,
+                staleLocalOrg: staleLocalOrg,
+                remotePreflightAvailable: remotePreflightAvailable,
+                remotePropertyExists: remotePreflightAvailable ? remoteProperty != nil : nil,
+                remoteSessionExists: remotePreflightAvailable ? remoteSession != nil : nil,
+                remoteShotExists: remotePreflightAvailable ? remoteShot != nil : nil,
+                remoteStoragePathPresent: remoteStoragePathPresent,
+                classification: classification,
+                sourceReasons: sourceReasons.sorted()
+            )
+        }
+        .sorted {
+            if $0.classification.rawValue != $1.classification.rawValue {
+                return $0.classification.rawValue < $1.classification.rawValue
+            }
+            if $0.propertyName != $1.propertyName {
+                return $0.propertyName < $1.propertyName
+            }
+            return $0.shotID.uuidString < $1.shotID.uuidString
+        }
+
+        return MediaRecoveryInspectionSummary(
+            inspectedAt: inspectedAt,
+            activeOrganizationID: activeOrganizationID,
+            remotePreflightAvailable: remote != nil,
+            candidates: candidates
+        )
+    }
+
+    private func mediaRecoveryDivergenceCandidateReasons(
+        _ divergenceAuditSummary: DivergenceAuditSummary?
+    ) -> [String: Set<String>] {
+        guard let divergenceAuditSummary else { return [:] }
+        var reasonsByShotID: [String: Set<String>] = [:]
+        for item in divergenceAuditSummary.items {
+            guard let shotID = item.shotID else { continue }
+            let shotKey = divergenceKey(shotID)
+            switch item.category {
+            case .localOnlyShot:
+                reasonsByShotID[shotKey, default: []].insert("divergence_local_only_shot")
+            case .mediaDrift:
+                if item.reason.localizedCaseInsensitiveContains("retry-capped") {
+                    reasonsByShotID[shotKey, default: []].insert("divergence_retry_capped_media_drift")
+                }
+            default:
+                continue
+            }
+        }
+        return reasonsByShotID
+    }
+
+    private func localMediaFileExists(
+        propertyID: UUID,
+        sessionID: UUID,
+        shot: ShotMetadata
+    ) -> Bool {
+        let relativePath = shot.originalRelativePath.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let resolved = localStore.resolveSessionRelativeFileURL(
+            propertyID: propertyID,
+            sessionID: sessionID,
+            relativePath: relativePath
+        ) {
+            return FileManager.default.fileExists(atPath: resolved.path)
+        }
+        if !relativePath.isEmpty {
+            let fallback = localStore
+                .sessionFolderURL(propertyID: propertyID, sessionID: sessionID)
+                .appendingPathComponent(relativePath, isDirectory: false)
+            if FileManager.default.fileExists(atPath: fallback.path) {
+                return true
+            }
+        }
+        let filename = Self.safeDiagnosticsFilename(
+            originalFilename: shot.originalFilename,
+            originalRelativePath: shot.originalRelativePath
+        )
+        guard let filename else { return false }
+        let originalsFallback = localStore
+            .originalsFolderURL(propertyID: propertyID, sessionID: sessionID)
+            .appendingPathComponent(filename, isDirectory: false)
+        return FileManager.default.fileExists(atPath: originalsFallback.path)
+    }
+
+    private func isStaleLocalMediaRecoveryOrg(
+        activeOrganizationID: UUID?,
+        propertyOrgID: UUID?,
+        sessionOrgID: UUID?
+    ) -> Bool {
+        guard let activeOrganizationID else { return false }
+        if let propertyOrgID, propertyOrgID != activeOrganizationID {
+            return true
+        }
+        if let sessionOrgID, sessionOrgID != activeOrganizationID {
+            return true
+        }
+        return false
+    }
+
+    nonisolated static func mediaRecoveryClassification(
+        fileExists: Bool,
+        staleLocalOrg: Bool,
+        remotePreflightAvailable: Bool,
+        remotePropertyExists: Bool?,
+        remoteSessionExists: Bool?,
+        remoteShotExists: Bool?,
+        remoteStoragePathPresent: Bool?,
+        remoteUploadState: String?
+    ) -> MediaRecoveryClassification {
+        guard fileExists else { return .missingLocalFile }
+
+        let normalizedRemoteUploadState = remoteUploadState?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        if remoteShotExists == true,
+           remoteStoragePathPresent == true,
+           normalizedRemoteUploadState == "uploaded" {
+            return .alreadyRemoteComplete
+        }
+
+        if staleLocalOrg {
+            return .needsOrgReconciliation
+        }
+
+        guard remotePreflightAvailable else {
+            return .needsManualReview
+        }
+
+        if remotePropertyExists == false || remoteSessionExists == false {
+            return .missingRemoteParent
+        }
+
+        if remotePropertyExists == true, remoteSessionExists == true {
+            return .retryable
+        }
+
+        return .needsManualReview
     }
 
     private func makeDivergenceAuditSummary(
@@ -17693,6 +18000,36 @@ final class AppState: ObservableObject {
                 }
             ),
             remote: remote.map(debugRemoteDivergenceSnapshot)
+        )
+    }
+
+    func _debugMediaRecoveryInspectionSummaryForTests(
+        properties: [Property],
+        sessions: [Session],
+        shots: [DebugDivergenceLocalShotInput],
+        remote: DebugDivergenceRemoteInput? = nil,
+        divergenceAuditSummary: DivergenceAuditSummary? = nil,
+        activeOrganizationID: UUID? = nil,
+        inspectedAt: Date = Date()
+    ) -> MediaRecoveryInspectionSummary {
+        makeMediaRecoveryInspectionSummary(
+            inspectedAt: inspectedAt,
+            activeOrganizationID: activeOrganizationID,
+            local: LocalDivergenceSnapshot(
+                properties: properties,
+                sessions: sessions,
+                shots: shots.map {
+                    LocalDivergenceShot(
+                        shot: $0.shot,
+                        propertyID: $0.propertyID,
+                        sessionID: $0.sessionID,
+                        metadataOrgID: $0.metadataOrgID,
+                        metadataCaptureProfile: $0.metadataCaptureProfile
+                    )
+                }
+            ),
+            remote: remote.map(debugRemoteDivergenceSnapshot),
+            divergenceAuditSummary: divergenceAuditSummary
         )
     }
 
