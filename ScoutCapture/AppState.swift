@@ -352,6 +352,7 @@ final class AppState: ObservableObject {
         let fileExists: Bool
         let localFilename: String?
         let activeOrganizationID: UUID?
+        let reconciledOrganizationID: UUID?
         let propertyOrgID: UUID?
         let sessionOrgID: UUID?
         let staleLocalOrg: Bool
@@ -383,6 +384,18 @@ final class AppState: ObservableObject {
         private nonisolated func count(_ classification: MediaRecoveryClassification) -> Int {
             candidates.filter { $0.classification == classification }.count
         }
+    }
+
+    enum MediaRecoveryRetryStatus: String, Equatable {
+        case blocked
+        case success
+        case failed
+    }
+
+    struct MediaRecoveryRetryResult: Equatable {
+        let status: MediaRecoveryRetryStatus
+        let message: String
+        let shotID: UUID
     }
 
     enum DivergenceAuditCategory: String, CaseIterable, Equatable {
@@ -508,6 +521,16 @@ final class AppState: ObservableObject {
     typealias CaptureProfileRemotePropertyIDsFetchOverride = (UUID) async throws -> Set<UUID>
     typealias CaptureProfileBackfillEnsureOverride = (UUID, UUID, UUID, CaptureProfile) async throws -> Void
     typealias CaptureProfileBackfillWriteOverride = (UUID, UUID, UUID?, CaptureProfile?, CaptureProfile?) async throws -> Void
+#if DEBUG
+    typealias MediaRecoveryUploadOverride = (UUID, UUID, UUID, UUID) async throws -> Void
+#endif
+    private struct MediaRecoveryRetryPreflight {
+        let isAllowed: Bool
+        let message: String
+        let resolvedOrganizationID: UUID?
+        let metadata: SessionMetadata?
+        let shot: ShotMetadata?
+    }
     private enum CaptureProfileSessionProfileScanState {
         case known(CaptureProfile)
         case missingMetadata
@@ -2263,7 +2286,8 @@ final class AppState: ObservableObject {
     }
 
     func inspectMediaRecoveryCandidates(
-        divergenceAuditSummary: DivergenceAuditSummary? = nil
+        divergenceAuditSummary: DivergenceAuditSummary? = nil,
+        previousSnapshotOrgID: UUID? = nil
     ) async -> MediaRecoveryInspectionSummary {
         let inspectedAt = Date()
         let organizationID = activeOrganizationID
@@ -2276,7 +2300,8 @@ final class AppState: ObservableObject {
             activeOrganizationID: organizationID,
             local: localSnapshot,
             remote: remoteSnapshot,
-            divergenceAuditSummary: divergenceAuditSummary
+            divergenceAuditSummary: divergenceAuditSummary,
+            previousSnapshotOrgID: previousSnapshotOrgID
         )
 
         print(
@@ -2293,6 +2318,96 @@ final class AppState: ObservableObject {
         )
 
         return summary
+    }
+
+    func retryMediaRecoveryCandidate(
+        propertyID: UUID,
+        sessionID: UUID,
+        shotID: UUID
+    ) async -> MediaRecoveryRetryResult {
+        print(
+            "[MediaRecovery] event=retry_attempt " +
+            "propertyID=\(propertyID.uuidString) " +
+            "sessionID=\(sessionID.uuidString) " +
+            "shotID=\(shotID.uuidString) " +
+            "activeOrganizationID=\(activeOrganizationID?.uuidString ?? "nil")"
+        )
+
+        let preflight = await mediaRecoveryRetryPreflight(
+            propertyID: propertyID,
+            sessionID: sessionID,
+            shotID: shotID
+        )
+        guard preflight.isAllowed,
+              let orgID = preflight.resolvedOrganizationID,
+              let metadata = preflight.metadata,
+              let shot = preflight.shot else {
+            print(
+                "[MediaRecovery] event=retry_blocked " +
+                "propertyID=\(propertyID.uuidString) " +
+                "sessionID=\(sessionID.uuidString) " +
+                "shotID=\(shotID.uuidString) " +
+                "reason=\(preflight.message)"
+            )
+            return MediaRecoveryRetryResult(
+                status: .blocked,
+                message: preflight.message,
+                shotID: shotID
+            )
+        }
+
+        let operationKey = supabaseUploadOperationKey(sessionID: sessionID, shotID: shotID)
+        guard beginSupabaseMediaOperation(operationKey) else {
+            let message = "A media operation is already in progress for this shot."
+            print(
+                "[MediaRecovery] event=retry_blocked " +
+                "propertyID=\(propertyID.uuidString) " +
+                "sessionID=\(sessionID.uuidString) " +
+                "shotID=\(shotID.uuidString) " +
+                "reason=\(message)"
+            )
+            return MediaRecoveryRetryResult(status: .blocked, message: message, shotID: shotID)
+        }
+        defer { endSupabaseMediaOperation(operationKey) }
+
+        do {
+            try await performMediaRecoveryRetryUpload(
+                propertyID: propertyID,
+                sessionID: sessionID,
+                shotID: shotID,
+                orgID: orgID,
+                metadata: metadata,
+                shot: shot
+            )
+            print(
+                "[MediaRecovery] event=retry_success " +
+                "propertyID=\(propertyID.uuidString) " +
+                "sessionID=\(sessionID.uuidString) " +
+                "shotID=\(shotID.uuidString) " +
+                "orgID=\(orgID.uuidString)"
+            )
+            recordMediaUploadSuccessDiagnostics()
+            return MediaRecoveryRetryResult(
+                status: .success,
+                message: "Media recovery retry completed and remote upload was verified.",
+                shotID: shotID
+            )
+        } catch {
+            print(
+                "[MediaRecovery] event=retry_failed " +
+                "propertyID=\(propertyID.uuidString) " +
+                "sessionID=\(sessionID.uuidString) " +
+                "shotID=\(shotID.uuidString) " +
+                "orgID=\(orgID.uuidString) " +
+                "error=\(error.localizedDescription)"
+            )
+            recordMediaUploadFailureDiagnostics(error)
+            return MediaRecoveryRetryResult(
+                status: .failed,
+                message: Self.sanitizedDiagnosticsErrorMessage(error.localizedDescription),
+                shotID: shotID
+            )
+        }
     }
 
     func runDivergenceAudit() async -> DivergenceAuditSummary {
@@ -2421,6 +2536,8 @@ final class AppState: ObservableObject {
     private var recentlyDeletedSessionsFetchOverride: RecentlyDeletedSessionsFetchOverride?
     private var sessionRestoreRPCOverride: SessionRestoreRPCOverride?
     private var sessionRestoreRefreshOverride: SessionRestoreRefreshOverride?
+    private var mediaRecoveryUploadOverride: MediaRecoveryUploadOverride?
+    private var mediaRecoveryRemoteSnapshotForTests: RemoteDivergenceSnapshot?
     private var sessionCoordinationDebugRemoteRecords: [UUID: RemoteSessionCoordinationRecord] = [:]
 #endif
     private var authStateChangesTask: Task<Void, Never>?
@@ -6536,6 +6653,11 @@ final class AppState: ObservableObject {
     private func fetchRemoteDivergenceSnapshotIfAvailable(
         activeOrganizationID: UUID?
     ) async -> RemoteDivergenceSnapshot? {
+#if DEBUG
+        if let mediaRecoveryRemoteSnapshotForTests {
+            return mediaRecoveryRemoteSnapshotForTests
+        }
+#endif
         guard backendFeatureFlags.supabaseEnabled,
               isOrganizationContextReady,
               let activeOrganizationID,
@@ -6585,24 +6707,63 @@ final class AppState: ObservableObject {
         activeOrganizationID: UUID?,
         local: LocalDivergenceSnapshot,
         remote: RemoteDivergenceSnapshot?,
-        divergenceAuditSummary: DivergenceAuditSummary?
+        divergenceAuditSummary: DivergenceAuditSummary?,
+        previousSnapshotOrgID: UUID? = nil
     ) -> MediaRecoveryInspectionSummary {
         let localPropertiesByID = dictionaryByNormalizedID(local.properties, id: \.id)
         let localSessionsByID = dictionaryByNormalizedID(local.sessions, id: \.id)
         let remotePropertiesByID = dictionaryByNormalizedID(remote?.properties ?? [], id: \.id)
         let remoteSessionsByID = dictionaryByNormalizedID(remote?.sessions ?? [], id: \.id)
         let remoteShotsByID = dictionaryByNormalizedID(remote?.shots ?? [], id: \.id)
-        let divergenceCandidateReasons = mediaRecoveryDivergenceCandidateReasons(divergenceAuditSummary)
+        let remotePropertyIDs = Set(remotePropertiesByID.keys)
+        let remoteSessionIDs = Set(remoteSessionsByID.keys)
+        print(
+            "[MediaRecovery] event=inspect_scope " +
+            "activeOrgID=\(activeOrganizationID?.uuidString ?? "nil") " +
+            "previousSnapshotOrgID=\(previousSnapshotOrgID?.uuidString ?? "nil")"
+        )
+        if let previousSnapshotOrgID,
+           previousSnapshotOrgID != activeOrganizationID {
+            print(
+                "[MediaRecovery] event=inspect_skipped_stale_snapshot " +
+                "activeOrgID=\(activeOrganizationID?.uuidString ?? "nil") " +
+                "snapshotOrgID=\(previousSnapshotOrgID.uuidString)"
+            )
+        }
+        let divergenceCandidateReasons: [String: Set<String>]
+        if let divergenceAuditSummary,
+           divergenceAuditSummary.activeOrganizationID != activeOrganizationID {
+            print(
+                "[MediaRecovery] event=inspect_skipped_stale_snapshot " +
+                "activeOrgID=\(activeOrganizationID?.uuidString ?? "nil") " +
+                "snapshotOrgID=\(divergenceAuditSummary.activeOrganizationID?.uuidString ?? "nil")"
+            )
+            divergenceCandidateReasons = [:]
+        } else {
+            divergenceCandidateReasons = mediaRecoveryDivergenceCandidateReasons(divergenceAuditSummary)
+        }
 
         var candidateReasonsByShotID: [String: Set<String>] = [:]
         for localShot in local.shots {
             let shot = localShot.shot
             let shotKey = divergenceKey(shot.shotID)
+            let propertyKey = divergenceKey(localShot.propertyID)
+            let sessionKey = divergenceKey(localShot.sessionID)
+            guard localMediaRecoveryShotBelongsToActiveScope(
+                localShot,
+                activeOrganizationID: activeOrganizationID,
+                localPropertiesByID: localPropertiesByID,
+                remotePropertyIDs: remotePropertyIDs,
+                remoteSessionIDs: remoteSessionIDs
+            ) else {
+                continue
+            }
             if shot.uploadState != "uploaded",
                shot.uploadAttempts >= maximumSupabaseMediaUploadAttempts {
                 candidateReasonsByShotID[shotKey, default: []].insert("retry_capped_media")
             }
-            if let reasons = divergenceCandidateReasons[shotKey] {
+            if let reasons = divergenceCandidateReasons[shotKey],
+               remotePropertyIDs.contains(propertyKey) || remoteSessionIDs.contains(sessionKey) {
                 candidateReasonsByShotID[shotKey, default: []].formUnion(reasons)
             }
         }
@@ -6631,6 +6792,13 @@ final class AppState: ObservableObject {
                 activeOrganizationID: activeOrganizationID,
                 propertyOrgID: propertyOrgID,
                 sessionOrgID: sessionOrgID
+            )
+            let reconciledOrgID = mediaRecoveryReconciledOrganizationID(
+                activeOrganizationID: activeOrganizationID,
+                localPropertyID: localShot.propertyID,
+                localSessionID: localShot.sessionID,
+                remoteProperty: remoteProperty,
+                remoteSession: remoteSession
             )
             let remotePreflightAvailable = remote != nil
             let remoteStoragePathPresent = remoteShot.map { normalizedSupabaseText($0.storagePath) != nil }
@@ -6664,6 +6832,7 @@ final class AppState: ObservableObject {
                     originalRelativePath: shot.originalRelativePath
                 ),
                 activeOrganizationID: activeOrganizationID,
+                reconciledOrganizationID: reconciledOrgID,
                 propertyOrgID: propertyOrgID,
                 sessionOrgID: sessionOrgID,
                 staleLocalOrg: staleLocalOrg,
@@ -6697,6 +6866,293 @@ final class AppState: ObservableObject {
             remotePreflightAvailable: remote != nil,
             candidates: candidates
         )
+    }
+
+    private func mediaRecoveryRetryPreflight(
+        propertyID: UUID,
+        sessionID: UUID,
+        shotID: UUID
+    ) async -> MediaRecoveryRetryPreflight {
+        guard let activeOrganizationID else {
+            return MediaRecoveryRetryPreflight(
+                isAllowed: false,
+                message: "Active organization is unavailable.",
+                resolvedOrganizationID: nil,
+                metadata: nil,
+                shot: nil
+            )
+        }
+        guard canAccessOrganization(activeOrganizationID) else {
+            return MediaRecoveryRetryPreflight(
+                isAllowed: false,
+                message: "Active organization is not accessible.",
+                resolvedOrganizationID: nil,
+                metadata: nil,
+                shot: nil
+            )
+        }
+        guard let metadata = try? localStore.loadSessionMetadata(propertyID: propertyID, sessionID: sessionID),
+              let shot = metadata.shots.first(where: { $0.shotID == shotID }) else {
+            return MediaRecoveryRetryPreflight(
+                isAllowed: false,
+                message: "Local session metadata or shot is unavailable.",
+                resolvedOrganizationID: activeOrganizationID,
+                metadata: nil,
+                shot: nil
+            )
+        }
+        guard resolveMediaRecoveryFileURL(propertyID: propertyID, sessionID: sessionID, shot: shot) != nil else {
+            return MediaRecoveryRetryPreflight(
+                isAllowed: false,
+                message: "Local media file is missing.",
+                resolvedOrganizationID: activeOrganizationID,
+                metadata: metadata,
+                shot: shot
+            )
+        }
+
+        guard let remote = await fetchRemoteDivergenceSnapshotIfAvailable(activeOrganizationID: activeOrganizationID) else {
+            return MediaRecoveryRetryPreflight(
+                isAllowed: false,
+                message: "Remote preflight is unavailable.",
+                resolvedOrganizationID: activeOrganizationID,
+                metadata: metadata,
+                shot: shot
+            )
+        }
+
+        let remotePropertiesByID = dictionaryByNormalizedID(remote.properties, id: \.id)
+        let remoteSessionsByID = dictionaryByNormalizedID(remote.sessions, id: \.id)
+        let remoteShotsByID = dictionaryByNormalizedID(remote.shots, id: \.id)
+        let propertyKey = divergenceKey(propertyID)
+        let sessionKey = divergenceKey(sessionID)
+        let shotKey = divergenceKey(shotID)
+
+        guard remotePropertiesByID[propertyKey]?.orgID == activeOrganizationID else {
+            return MediaRecoveryRetryPreflight(
+                isAllowed: false,
+                message: "Remote property was not found under the active organization.",
+                resolvedOrganizationID: activeOrganizationID,
+                metadata: metadata,
+                shot: shot
+            )
+        }
+
+        if let remoteShot = remoteShotsByID[shotKey],
+           normalizedSupabaseText(remoteShot.uploadState)?.lowercased() == "uploaded",
+           normalizedSupabaseText(remoteShot.storagePath) != nil {
+            return MediaRecoveryRetryPreflight(
+                isAllowed: false,
+                message: "Remote shot already appears complete.",
+                resolvedOrganizationID: activeOrganizationID,
+                metadata: metadata,
+                shot: shot
+            )
+        }
+
+        if let remoteSession = remoteSessionsByID[sessionKey],
+           remoteSession.orgID != activeOrganizationID || remoteSession.propertyID != propertyID {
+            return MediaRecoveryRetryPreflight(
+                isAllowed: false,
+                message: "Remote session belongs to a different property or organization.",
+                resolvedOrganizationID: activeOrganizationID,
+                metadata: metadata,
+                shot: shot
+            )
+        }
+
+        return MediaRecoveryRetryPreflight(
+            isAllowed: true,
+            message: remoteSessionsByID[sessionKey] == nil
+                ? "Remote property exists; session will be safely ensured under the active organization."
+                : "Remote property and session preflight passed.",
+            resolvedOrganizationID: activeOrganizationID,
+            metadata: metadata,
+            shot: shot
+        )
+    }
+
+    private func performMediaRecoveryRetryUpload(
+        propertyID: UUID,
+        sessionID: UUID,
+        shotID: UUID,
+        orgID: UUID,
+        metadata: SessionMetadata,
+        shot: ShotMetadata
+    ) async throws {
+#if DEBUG
+        if let mediaRecoveryUploadOverride {
+            try await mediaRecoveryUploadOverride(orgID, propertyID, sessionID, shotID)
+            try? localStore.updateShotStorageMetadata(propertyID: propertyID, sessionID: sessionID, shotID: shotID) { shot in
+                shot.storageBucket = self.supabaseOperationalMediaBucket
+                shot.storagePath = self.operationalMediaStoragePath(
+                    sessionID: sessionID,
+                    shotID: shotID,
+                    originalFilename: shot.originalFilename
+                )
+                shot.uploadState = "uploaded"
+                shot.uploadAttempts += 1
+                shot.lastUploadError = nil
+                shot.updatedAt = Date()
+            }
+            return
+        }
+#endif
+        guard let client = supabaseClient else {
+            throw NSError(domain: "ScoutCapture.MediaRecovery", code: 1, userInfo: [
+                NSLocalizedDescriptionKey: "Supabase client is unavailable."
+            ])
+        }
+        guard let localFileURL = resolveMediaRecoveryFileURL(
+            propertyID: propertyID,
+            sessionID: sessionID,
+            shot: shot
+        ) else {
+            throw NSError(domain: "ScoutCapture.MediaRecovery", code: 2, userInfo: [
+                NSLocalizedDescriptionKey: "Local media file is missing."
+            ])
+        }
+
+        let fileData = try Data(contentsOf: localFileURL, options: [.mappedIfSafe])
+        let checksum = sha256Hex(for: fileData)
+        let byteSize = fileData.count
+        let storagePath = operationalMediaStoragePath(
+            sessionID: sessionID,
+            shotID: shotID,
+            originalFilename: shot.originalFilename
+        )
+
+        try await ensureSupabaseSessionPrerequisites(
+            propertyID: propertyID,
+            sessionID: sessionID,
+            metadata: metadata,
+            orgID: orgID
+        )
+        try await persistShotRichMetadataToSupabase(
+            orgID: orgID,
+            propertyID: propertyID,
+            sessionID: sessionID,
+            metadata: metadata,
+            shot: shot,
+            allowInsert: true
+        )
+        _ = try await client.storage.from(supabaseOperationalMediaBucket).upload(
+            storagePath,
+            fileURL: localFileURL,
+            options: FileOptions(
+                cacheControl: "31536000",
+                contentType: contentType(for: localFileURL),
+                upsert: true
+            )
+        )
+        try await persistShotStorageMetadataToSupabase(
+            orgID: orgID,
+            propertyID: propertyID,
+            sessionID: sessionID,
+            shotID: shotID,
+            storageBucket: supabaseOperationalMediaBucket,
+            storagePath: storagePath,
+            checksumSHA256: checksum,
+            byteSize: byteSize,
+            uploadState: "uploaded",
+            uploadAttempts: shot.uploadAttempts + 1,
+            lastUploadError: nil
+        )
+
+        let verified = try await fetchShotFinalizeReadinessRecord(
+            client: client,
+            shotID: shotID,
+            sessionID: sessionID,
+            activeOrganizationID: orgID
+        )
+        guard normalizedSupabaseText(verified?.storageBucket) == supabaseOperationalMediaBucket,
+              normalizedSupabaseText(verified?.storagePath) == storagePath,
+              normalizedSupabaseText(verified?.uploadState)?.lowercased() == "uploaded" else {
+            throw NSError(domain: "ScoutCapture.MediaRecovery", code: 3, userInfo: [
+                NSLocalizedDescriptionKey: "Remote upload verification failed."
+            ])
+        }
+
+        try? localStore.updateShotStorageMetadata(propertyID: propertyID, sessionID: sessionID, shotID: shotID) { shot in
+            shot.storageBucket = self.supabaseOperationalMediaBucket
+            shot.storagePath = storagePath
+            shot.checksumSHA256 = checksum
+            shot.byteSize = byteSize
+            shot.uploadState = "uploaded"
+            shot.lastUploadError = nil
+            shot.updatedAt = Date()
+        }
+    }
+
+    private func resolveMediaRecoveryFileURL(
+        propertyID: UUID,
+        sessionID: UUID,
+        shot: ShotMetadata
+    ) -> URL? {
+        let relativePath = shot.originalRelativePath.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let resolved = localStore.resolveSessionRelativeFileURL(
+            propertyID: propertyID,
+            sessionID: sessionID,
+            relativePath: relativePath
+        ), FileManager.default.fileExists(atPath: resolved.path) {
+            return resolved
+        }
+        if !relativePath.isEmpty {
+            let fallback = localStore
+                .sessionFolderURL(propertyID: propertyID, sessionID: sessionID)
+                .appendingPathComponent(relativePath, isDirectory: false)
+            if FileManager.default.fileExists(atPath: fallback.path) {
+                return fallback
+            }
+        }
+        guard let filename = Self.safeDiagnosticsFilename(
+            originalFilename: shot.originalFilename,
+            originalRelativePath: shot.originalRelativePath
+        ) else {
+            return nil
+        }
+        let originalsFallback = localStore
+            .originalsFolderURL(propertyID: propertyID, sessionID: sessionID)
+            .appendingPathComponent(filename, isDirectory: false)
+        return FileManager.default.fileExists(atPath: originalsFallback.path) ? originalsFallback : nil
+    }
+
+    private func localMediaRecoveryShotBelongsToActiveScope(
+        _ localShot: LocalDivergenceShot,
+        activeOrganizationID: UUID?,
+        localPropertiesByID: [String: Property],
+        remotePropertyIDs: Set<String>,
+        remoteSessionIDs: Set<String>
+    ) -> Bool {
+        guard let activeOrganizationID else { return false }
+        let propertyKey = divergenceKey(localShot.propertyID)
+        let sessionKey = divergenceKey(localShot.sessionID)
+        if localPropertiesByID[propertyKey]?.orgId == activeOrganizationID {
+            return true
+        }
+        if localShot.metadataOrgID == activeOrganizationID {
+            return true
+        }
+        return remotePropertyIDs.contains(propertyKey) || remoteSessionIDs.contains(sessionKey)
+    }
+
+    private func mediaRecoveryReconciledOrganizationID(
+        activeOrganizationID: UUID?,
+        localPropertyID: UUID,
+        localSessionID: UUID,
+        remoteProperty: DivergenceRemotePropertyRecord?,
+        remoteSession: DivergenceRemoteSessionRecord?
+    ) -> UUID? {
+        guard let activeOrganizationID else { return nil }
+        if remoteProperty?.id == localPropertyID,
+           remoteProperty?.orgID == activeOrganizationID {
+            return activeOrganizationID
+        }
+        if remoteSession?.id == localSessionID,
+           remoteSession?.orgID == activeOrganizationID {
+            return activeOrganizationID
+        }
+        return nil
     }
 
     private func mediaRecoveryDivergenceCandidateReasons(
@@ -18073,6 +18529,21 @@ final class AppState: ObservableObject {
             ),
             remote: remote.map(debugRemoteDivergenceSnapshot)
         )
+    }
+
+    func _debugSetMediaRecoveryRemoteSnapshotForTests(_ input: DebugDivergenceRemoteInput?) {
+        mediaRecoveryRemoteSnapshotForTests = input.map(debugRemoteDivergenceSnapshot)
+    }
+
+    func _debugSetMediaRecoveryUploadOverrideForTests(_ override: MediaRecoveryUploadOverride?) {
+        mediaRecoveryUploadOverride = override
+    }
+
+    func _debugLoadSessionMetadataForTests(
+        propertyID: UUID,
+        sessionID: UUID
+    ) throws -> SessionMetadata {
+        try localStore.loadSessionMetadata(propertyID: propertyID, sessionID: sessionID)
     }
 
     func _debugMediaRecoveryInspectionSummaryForTests(

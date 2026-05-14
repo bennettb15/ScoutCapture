@@ -141,6 +141,18 @@ final class Phase2C07bMediaBackfillTests: XCTestCase {
         return (appState, propertyID, sessionID, metadata.shots, storageRoot)
     }
 
+    private func createOriginalFile(
+        storageRoot: URL,
+        propertyID: UUID,
+        sessionID: UUID,
+        shot: ShotMetadata
+    ) throws {
+        let originals = storageRoot
+            .appendingPathComponent("SCOUT/Properties/\(propertyID.uuidString)/Sessions/\(sessionID.uuidString)/Originals", isDirectory: true)
+        try FileManager.default.createDirectory(at: originals, withIntermediateDirectories: true)
+        try Data("media".utf8).write(to: originals.appendingPathComponent(shot.originalFilename))
+    }
+
     func testBackfillDiscoveryIncludesPendingAndUploadingStates() throws {
         let now = Date()
         let fixture = try makeAppStateWithSingleSession(
@@ -602,10 +614,12 @@ final class Phase2C07bMediaBackfillTests: XCTestCase {
         }
 
         let shot = try XCTUnwrap(fixture.shots.first)
-        let originals = fixture.storageRoot
-            .appendingPathComponent("SCOUT/Properties/\(fixture.propertyID.uuidString)/Sessions/\(fixture.sessionID.uuidString)/Originals", isDirectory: true)
-        try FileManager.default.createDirectory(at: originals, withIntermediateDirectories: true)
-        try Data("media".utf8).write(to: originals.appendingPathComponent(shot.originalFilename))
+        try createOriginalFile(
+            storageRoot: fixture.storageRoot,
+            propertyID: fixture.propertyID,
+            sessionID: fixture.sessionID,
+            shot: shot
+        )
 
         let summary = await fixture.appState.inspectMediaRecoveryCandidates()
 
@@ -634,10 +648,12 @@ final class Phase2C07bMediaBackfillTests: XCTestCase {
         }
 
         let shot = try XCTUnwrap(fixture.shots.first)
-        let originals = fixture.storageRoot
-            .appendingPathComponent("SCOUT/Properties/\(fixture.propertyID.uuidString)/Sessions/\(fixture.sessionID.uuidString)/Originals", isDirectory: true)
-        try FileManager.default.createDirectory(at: originals, withIntermediateDirectories: true)
-        try Data("media".utf8).write(to: originals.appendingPathComponent(shot.originalFilename))
+        try createOriginalFile(
+            storageRoot: fixture.storageRoot,
+            propertyID: fixture.propertyID,
+            sessionID: fixture.sessionID,
+            shot: shot
+        )
 
         let summary = fixture.appState._debugMediaRecoveryInspectionSummaryForTests(
             properties: [
@@ -864,6 +880,381 @@ final class Phase2C07bMediaBackfillTests: XCTestCase {
         XCTAssertFalse(candidate.localFilename?.contains("/") ?? true)
         XCTAssertFalse(candidate.lastUploadError?.contains("/private/tmp") ?? true)
         XCTAssertFalse(candidate.lastUploadError?.contains("abc") ?? true)
+    }
+
+    func testMediaRecoveryRetryBlockedWhenLocalFileMissing() async throws {
+        let now = Date()
+        let activeOrganizationID = UUID()
+        let fixture = try makeAppStateWithSingleSession(
+            uploadStates: [("failed", 5, now)],
+            propertyOrganizationID: activeOrganizationID
+        )
+        defer {
+            fixture.appState.shutdown()
+            try? FileManager.default.removeItem(at: fixture.storageRoot)
+        }
+        await fixture.appState._debugSetOfflineReplayEnvironmentForTests(
+            activeOrganizationID: activeOrganizationID,
+            clientConfigured: false
+        )
+        fixture.appState._debugSetMediaRecoveryRemoteSnapshotForTests(
+            AppState.DebugDivergenceRemoteInput(
+                propertyIDs: [fixture.propertyID.uuidString],
+                sessions: [(fixture.sessionID.uuidString, fixture.propertyID.uuidString)],
+                orgID: activeOrganizationID
+            )
+        )
+
+        let result = await fixture.appState.retryMediaRecoveryCandidate(
+            propertyID: fixture.propertyID,
+            sessionID: fixture.sessionID,
+            shotID: try XCTUnwrap(fixture.shots.first?.shotID)
+        )
+
+        XCTAssertEqual(result.status, .blocked)
+        XCTAssertTrue(result.message.localizedCaseInsensitiveContains("local media file is missing"))
+    }
+
+    func testMediaRecoveryRetryBlockedWhenRemoteParentMissing() async throws {
+        let now = Date()
+        let activeOrganizationID = UUID()
+        let fixture = try makeAppStateWithSingleSession(
+            uploadStates: [("failed", 5, now)],
+            propertyOrganizationID: activeOrganizationID
+        )
+        defer {
+            fixture.appState.shutdown()
+            try? FileManager.default.removeItem(at: fixture.storageRoot)
+        }
+        let shot = try XCTUnwrap(fixture.shots.first)
+        try createOriginalFile(
+            storageRoot: fixture.storageRoot,
+            propertyID: fixture.propertyID,
+            sessionID: fixture.sessionID,
+            shot: shot
+        )
+        await fixture.appState._debugSetOfflineReplayEnvironmentForTests(
+            activeOrganizationID: activeOrganizationID,
+            clientConfigured: false
+        )
+        fixture.appState._debugSetMediaRecoveryRemoteSnapshotForTests(
+            AppState.DebugDivergenceRemoteInput(
+                propertyIDs: [],
+                orgID: activeOrganizationID
+            )
+        )
+
+        let result = await fixture.appState.retryMediaRecoveryCandidate(
+            propertyID: fixture.propertyID,
+            sessionID: fixture.sessionID,
+            shotID: shot.shotID
+        )
+
+        XCTAssertEqual(result.status, .blocked)
+        XCTAssertTrue(result.message.localizedCaseInsensitiveContains("remote property"))
+    }
+
+    func testMediaRecoveryRetryBlockedWhenAlreadyRemoteComplete() async throws {
+        let now = Date()
+        let activeOrganizationID = UUID()
+        let fixture = try makeAppStateWithSingleSession(
+            uploadStates: [("failed", 5, now)],
+            propertyOrganizationID: activeOrganizationID
+        )
+        defer {
+            fixture.appState.shutdown()
+            try? FileManager.default.removeItem(at: fixture.storageRoot)
+        }
+        let shot = try XCTUnwrap(fixture.shots.first)
+        try createOriginalFile(
+            storageRoot: fixture.storageRoot,
+            propertyID: fixture.propertyID,
+            sessionID: fixture.sessionID,
+            shot: shot
+        )
+        await fixture.appState._debugSetOfflineReplayEnvironmentForTests(
+            activeOrganizationID: activeOrganizationID,
+            clientConfigured: false
+        )
+        fixture.appState._debugSetMediaRecoveryRemoteSnapshotForTests(
+            AppState.DebugDivergenceRemoteInput(
+                propertyIDs: [fixture.propertyID.uuidString],
+                sessions: [(fixture.sessionID.uuidString, fixture.propertyID.uuidString)],
+                shots: [(shot.shotID.uuidString, fixture.propertyID.uuidString, fixture.sessionID.uuidString)],
+                orgID: activeOrganizationID
+            )
+        )
+
+        let result = await fixture.appState.retryMediaRecoveryCandidate(
+            propertyID: fixture.propertyID,
+            sessionID: fixture.sessionID,
+            shotID: shot.shotID
+        )
+
+        XCTAssertEqual(result.status, .blocked)
+        XCTAssertTrue(result.message.localizedCaseInsensitiveContains("already"))
+    }
+
+    func testMediaRecoveryRetryUsesActiveReconciledOrgAndMarksUploadedAfterSuccess() async throws {
+        let now = Date()
+        let staleOrganizationID = UUID()
+        let activeOrganizationID = UUID()
+        let fixture = try makeAppStateWithSingleSession(
+            uploadStates: [("failed", 5, now)],
+            propertyOrganizationID: staleOrganizationID,
+            metadataOrganizationID: staleOrganizationID,
+            extraOrganizationIDs: [activeOrganizationID]
+        )
+        defer {
+            fixture.appState.shutdown()
+            try? FileManager.default.removeItem(at: fixture.storageRoot)
+        }
+        let shot = try XCTUnwrap(fixture.shots.first)
+        try createOriginalFile(
+            storageRoot: fixture.storageRoot,
+            propertyID: fixture.propertyID,
+            sessionID: fixture.sessionID,
+            shot: shot
+        )
+        await fixture.appState._debugSetOfflineReplayEnvironmentForTests(
+            activeOrganizationID: activeOrganizationID,
+            clientConfigured: false
+        )
+        fixture.appState._debugSetMediaRecoveryRemoteSnapshotForTests(
+            AppState.DebugDivergenceRemoteInput(
+                propertyIDs: [fixture.propertyID.uuidString],
+                sessions: [(fixture.sessionID.uuidString, fixture.propertyID.uuidString)],
+                orgID: activeOrganizationID
+            )
+        )
+        var retryOrgID: UUID?
+        fixture.appState._debugSetMediaRecoveryUploadOverrideForTests { orgID, _, _, _ in
+            retryOrgID = orgID
+        }
+
+        let result = await fixture.appState.retryMediaRecoveryCandidate(
+            propertyID: fixture.propertyID,
+            sessionID: fixture.sessionID,
+            shotID: shot.shotID
+        )
+        let metadata = try fixture.appState._debugLoadSessionMetadataForTests(
+            propertyID: fixture.propertyID,
+            sessionID: fixture.sessionID
+        )
+        let updatedShot = try XCTUnwrap(metadata.shots.first { $0.shotID == shot.shotID })
+
+        XCTAssertEqual(result.status, .success)
+        XCTAssertEqual(retryOrgID, activeOrganizationID)
+        XCTAssertEqual(updatedShot.uploadState, "uploaded")
+        XCTAssertNil(updatedShot.lastUploadError)
+    }
+
+    func testMediaRecoveryInspectionAfterOrgSwitchDropsPreviousOrgCandidates() throws {
+        let now = Date()
+        let oldOrganizationID = UUID()
+        let newOrganizationID = UUID()
+        let fixture = try makeAppStateWithSingleSession(
+            uploadStates: [("failed", 5, now)],
+            propertyOrganizationID: oldOrganizationID,
+            metadataOrganizationID: oldOrganizationID,
+            extraOrganizationIDs: [newOrganizationID]
+        )
+        defer {
+            fixture.appState.shutdown()
+            try? FileManager.default.removeItem(at: fixture.storageRoot)
+        }
+        let shot = try XCTUnwrap(fixture.shots.first)
+
+        let oldSummary = fixture.appState._debugMediaRecoveryInspectionSummaryForTests(
+            properties: [Property(id: fixture.propertyID, orgId: oldOrganizationID, name: "Property", address: "123 Main")],
+            sessions: [Session(id: fixture.sessionID, propertyID: fixture.propertyID, startedAt: now, status: .draft)],
+            shots: [
+                AppState.DebugDivergenceLocalShotInput(
+                    shot: shot,
+                    propertyID: fixture.propertyID,
+                    sessionID: fixture.sessionID,
+                    metadataOrgID: oldOrganizationID,
+                    metadataCaptureProfile: nil
+                )
+            ],
+            remote: AppState.DebugDivergenceRemoteInput(
+                propertyIDs: [fixture.propertyID.uuidString],
+                sessions: [(fixture.sessionID.uuidString, fixture.propertyID.uuidString)],
+                orgID: oldOrganizationID
+            ),
+            activeOrganizationID: oldOrganizationID
+        )
+        let newSummary = fixture.appState._debugMediaRecoveryInspectionSummaryForTests(
+            properties: [Property(id: fixture.propertyID, orgId: oldOrganizationID, name: "Property", address: "123 Main")],
+            sessions: [Session(id: fixture.sessionID, propertyID: fixture.propertyID, startedAt: now, status: .draft)],
+            shots: [
+                AppState.DebugDivergenceLocalShotInput(
+                    shot: shot,
+                    propertyID: fixture.propertyID,
+                    sessionID: fixture.sessionID,
+                    metadataOrgID: oldOrganizationID,
+                    metadataCaptureProfile: nil
+                )
+            ],
+            remote: AppState.DebugDivergenceRemoteInput(propertyIDs: [], orgID: newOrganizationID),
+            activeOrganizationID: newOrganizationID
+        )
+
+        XCTAssertEqual(oldSummary.candidatesFound, 1)
+        XCTAssertEqual(newSummary.candidatesFound, 0)
+    }
+
+    func testMediaRecoveryInspectionIgnoresStaleDivergenceAuditSnapshot() throws {
+        let now = Date()
+        let oldOrganizationID = UUID()
+        let activeOrganizationID = UUID()
+        let fixture = try makeAppStateWithSingleSession(uploadStates: [])
+        defer {
+            fixture.appState.shutdown()
+            try? FileManager.default.removeItem(at: fixture.storageRoot)
+        }
+        let shot = makeShot(
+            propertyID: fixture.propertyID,
+            sessionID: fixture.sessionID,
+            uploadState: "failed",
+            uploadAttempts: 1,
+            angleIndex: 1,
+            shotKey: "building|front|overview|1",
+            updatedAt: now
+        )
+        let staleAudit = AppState.DivergenceAuditSummary(
+            ranAt: now,
+            activeOrganizationID: oldOrganizationID,
+            remoteScopeAvailable: true,
+            localPropertyCount: 1,
+            remotePropertyCount: 1,
+            localSessionCount: 1,
+            remoteSessionCount: 1,
+            localShotCount: 1,
+            remoteShotCount: 0,
+            matchedPropertyCount: 1,
+            matchedSessionCount: 1,
+            matchedShotCount: 0,
+            localOnlyPropertyCount: 0,
+            remoteOnlyPropertyCount: 0,
+            localOnlySessionCount: 0,
+            remoteOnlySessionCount: 0,
+            localOnlyShotCount: 1,
+            remoteOnlyShotCount: 0,
+            staleOrgReconciledPropertyCount: 0,
+            staleOrgReconciledShotCount: 0,
+            items: [
+                AppState.DivergenceAuditItem(
+                    category: .localOnlyShot,
+                    entityType: "shot",
+                    entityID: shot.shotID,
+                    propertyID: fixture.propertyID,
+                    sessionID: fixture.sessionID,
+                    shotID: shot.shotID,
+                    orgID: oldOrganizationID,
+                    reason: "Local-only shot."
+                )
+            ]
+        )
+        let summary = fixture.appState._debugMediaRecoveryInspectionSummaryForTests(
+            properties: [Property(id: fixture.propertyID, orgId: activeOrganizationID, name: "Property", address: "123 Main")],
+            sessions: [Session(id: fixture.sessionID, propertyID: fixture.propertyID, startedAt: now, status: .draft)],
+            shots: [
+                AppState.DebugDivergenceLocalShotInput(
+                    shot: shot,
+                    propertyID: fixture.propertyID,
+                    sessionID: fixture.sessionID,
+                    metadataOrgID: activeOrganizationID,
+                    metadataCaptureProfile: nil
+                )
+            ],
+            remote: AppState.DebugDivergenceRemoteInput(
+                propertyIDs: [fixture.propertyID.uuidString],
+                sessions: [(fixture.sessionID.uuidString, fixture.propertyID.uuidString)],
+                orgID: activeOrganizationID
+            ),
+            divergenceAuditSummary: staleAudit,
+            activeOrganizationID: activeOrganizationID
+        )
+
+        XCTAssertEqual(summary.candidatesFound, 0)
+    }
+
+    func testMediaRecoveryInspectionExcludesRetryCappedMediaFromWrongOrg() throws {
+        let now = Date()
+        let wrongOrganizationID = UUID()
+        let activeOrganizationID = UUID()
+        let fixture = try makeAppStateWithSingleSession(
+            uploadStates: [("failed", 5, now)],
+            propertyOrganizationID: wrongOrganizationID,
+            metadataOrganizationID: wrongOrganizationID,
+            extraOrganizationIDs: [activeOrganizationID]
+        )
+        defer {
+            fixture.appState.shutdown()
+            try? FileManager.default.removeItem(at: fixture.storageRoot)
+        }
+        let shot = try XCTUnwrap(fixture.shots.first)
+        let summary = fixture.appState._debugMediaRecoveryInspectionSummaryForTests(
+            properties: [Property(id: fixture.propertyID, orgId: wrongOrganizationID, name: "Property", address: "123 Main")],
+            sessions: [Session(id: fixture.sessionID, propertyID: fixture.propertyID, startedAt: now, status: .draft)],
+            shots: [
+                AppState.DebugDivergenceLocalShotInput(
+                    shot: shot,
+                    propertyID: fixture.propertyID,
+                    sessionID: fixture.sessionID,
+                    metadataOrgID: wrongOrganizationID,
+                    metadataCaptureProfile: nil
+                )
+            ],
+            remote: AppState.DebugDivergenceRemoteInput(propertyIDs: [], orgID: activeOrganizationID),
+            activeOrganizationID: activeOrganizationID
+        )
+
+        XCTAssertEqual(summary.candidatesFound, 0)
+    }
+
+    func testMediaRecoveryRetryBlockedForCandidateOrgMismatch() async throws {
+        let now = Date()
+        let wrongOrganizationID = UUID()
+        let activeOrganizationID = UUID()
+        let fixture = try makeAppStateWithSingleSession(
+            uploadStates: [("failed", 5, now)],
+            propertyOrganizationID: wrongOrganizationID,
+            metadataOrganizationID: wrongOrganizationID,
+            extraOrganizationIDs: [activeOrganizationID]
+        )
+        defer {
+            fixture.appState.shutdown()
+            try? FileManager.default.removeItem(at: fixture.storageRoot)
+        }
+        let shot = try XCTUnwrap(fixture.shots.first)
+        try createOriginalFile(
+            storageRoot: fixture.storageRoot,
+            propertyID: fixture.propertyID,
+            sessionID: fixture.sessionID,
+            shot: shot
+        )
+        await fixture.appState._debugSetOfflineReplayEnvironmentForTests(
+            activeOrganizationID: activeOrganizationID,
+            clientConfigured: false
+        )
+        fixture.appState._debugSetMediaRecoveryRemoteSnapshotForTests(
+            AppState.DebugDivergenceRemoteInput(
+                propertyIDs: [fixture.propertyID.uuidString],
+                sessions: [(fixture.sessionID.uuidString, fixture.propertyID.uuidString)],
+                orgID: wrongOrganizationID
+            )
+        )
+
+        let result = await fixture.appState.retryMediaRecoveryCandidate(
+            propertyID: fixture.propertyID,
+            sessionID: fixture.sessionID,
+            shotID: shot.shotID
+        )
+
+        XCTAssertEqual(result.status, .blocked)
+        XCTAssertTrue(result.message.localizedCaseInsensitiveContains("remote property"))
     }
 
     func testBackfillRunIsSingletonGuarded() async throws {

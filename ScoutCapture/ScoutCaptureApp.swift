@@ -6242,6 +6242,7 @@ private struct DebugMediaRecoverySnapshotItem: Identifiable, Equatable {
     let fileExists: String
     let localFilename: String
     let activeOrganizationID: String
+    let reconciledOrganizationID: String
     let propertyOrgID: String
     let sessionOrgID: String
     let staleLocalOrg: String
@@ -6253,6 +6254,8 @@ private struct DebugMediaRecoverySnapshotItem: Identifiable, Equatable {
     let classification: String
     let importanceHint: String
     let sourceReasons: String
+    let canRetry: Bool
+    let retryUnavailableReason: String
 
     nonisolated init(_ candidate: AppState.MediaRecoveryCandidate) {
         id = candidate.id
@@ -6271,6 +6274,7 @@ private struct DebugMediaRecoverySnapshotItem: Identifiable, Equatable {
         fileExists = candidate.fileExists ? "yes" : "no"
         localFilename = candidate.localFilename ?? "unknown"
         activeOrganizationID = candidate.activeOrganizationID?.uuidString ?? "none"
+        reconciledOrganizationID = candidate.reconciledOrganizationID?.uuidString ?? "none"
         propertyOrgID = candidate.propertyOrgID?.uuidString ?? "none"
         sessionOrgID = candidate.sessionOrgID?.uuidString ?? "none"
         staleLocalOrg = candidate.staleLocalOrg ? "yes" : "no"
@@ -6282,11 +6286,35 @@ private struct DebugMediaRecoverySnapshotItem: Identifiable, Equatable {
         classification = candidate.classification.rawValue
         importanceHint = candidate.importanceHint
         sourceReasons = candidate.sourceReasons.joined(separator: ", ")
+        let remoteParentReady = candidate.remotePropertyExists == true
+        let sessionReadyOrEnsureable = candidate.remoteSessionExists == true || candidate.remotePropertyExists == true
+        canRetry = candidate.fileExists &&
+            candidate.activeOrganizationID != nil &&
+            candidate.reconciledOrganizationID == candidate.activeOrganizationID &&
+            remoteParentReady &&
+            sessionReadyOrEnsureable &&
+            candidate.classification != .alreadyRemoteComplete &&
+            candidate.classification != .missingLocalFile &&
+            candidate.classification != .missingRemoteParent
+        retryUnavailableReason = Self.retryUnavailableReason(for: candidate)
     }
 
     private nonisolated static func optionalBool(_ value: Bool?) -> String {
         guard let value else { return "not scanned" }
         return value ? "yes" : "no"
+    }
+
+    private nonisolated static func retryUnavailableReason(for candidate: AppState.MediaRecoveryCandidate) -> String {
+        if !candidate.fileExists { return "Local file is missing." }
+        if candidate.activeOrganizationID == nil { return "Active organization is unavailable." }
+        if candidate.reconciledOrganizationID != candidate.activeOrganizationID {
+            return "Candidate is not reconciled to the current active organization."
+        }
+        if candidate.classification == .alreadyRemoteComplete { return "Remote shot already appears complete." }
+        if candidate.remotePropertyExists == false { return "Remote property is missing under the active organization." }
+        if candidate.remotePreflightAvailable == false { return "Remote preflight is unavailable." }
+        if candidate.classification == .missingRemoteParent { return "Remote parent preflight failed." }
+        return "Preflight does not currently allow retry."
     }
 }
 
@@ -6686,6 +6714,12 @@ private struct DebugLocalDiagnosticsView: View {
         .task {
             refreshDiagnosticDetailSnapshots()
         }
+        .onChange(of: appState.activeOrganizationID) { _, _ in
+            mediaRecoverySnapshot = nil
+            divergenceAuditSummary = nil
+            divergenceAuditSnapshot = nil
+            refreshDiagnosticDetailSnapshots()
+        }
         .alert("Clear Local Diagnostics?", isPresented: $showClearConfirm) {
             Button("Clear", role: .destructive) {
                 appState.clearLocalDiagnostics()
@@ -6719,9 +6753,12 @@ private struct DebugLocalDiagnosticsView: View {
         guard !isInspectingMediaRecovery else { return }
         isInspectingMediaRecovery = true
         let currentDivergenceSummary = divergenceAuditSummary
+        let previousSnapshotOrgID = mediaRecoverySnapshot
+            .flatMap { UUID(uuidString: $0.activeOrganizationID) }
         Task {
             let summary = await appState.inspectMediaRecoveryCandidates(
-                divergenceAuditSummary: currentDivergenceSummary
+                divergenceAuditSummary: currentDivergenceSummary,
+                previousSnapshotOrgID: previousSnapshotOrgID
             )
             await MainActor.run {
                 mediaRecoverySnapshot = DebugMediaRecoverySnapshot(summary)
@@ -7167,14 +7204,40 @@ private struct DebugMediaDiagnosticItemDetailView: View {
 }
 
 private struct DebugMediaRecoveryCandidateDetailView: View {
+    @EnvironmentObject private var appState: AppState
     let item: DebugMediaRecoverySnapshotItem
+    @State private var showRetryConfirm: Bool = false
+    @State private var isRetrying: Bool = false
+    @State private var retryResultMessage: String?
 
     var body: some View {
         List {
+            Section {
+                Text("Selected-candidate recovery only. This screen never retries all candidates, deletes media, resets retry caps globally, or marks items ignored.")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(.secondary)
+                Text("Draft or test sessions should be reviewed before retry.")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(.secondary)
+                if item.canRetry {
+                    Button(isRetrying ? "Retrying..." : "Retry This Candidate") {
+                        showRetryConfirm = true
+                    }
+                    .disabled(isRetrying)
+                    .font(.system(size: 14, weight: .semibold))
+                } else {
+                    diagnosticRow("Retry Unavailable", item.retryUnavailableReason)
+                }
+                if let retryResultMessage {
+                    diagnosticBlock("Last Retry Result", retryResultMessage)
+                }
+            }
+
             Section("Classification") {
                 diagnosticRow("Classification", item.classification)
                 diagnosticRow("Sources", item.sourceReasons)
                 diagnosticRow("Active Org", item.activeOrganizationID)
+                diagnosticRow("Reconciled Org", item.reconciledOrganizationID)
                 diagnosticRow("Stale Local Org", item.staleLocalOrg)
             }
 
@@ -7219,6 +7282,36 @@ private struct DebugMediaRecoveryCandidateDetailView: View {
         }
         .navigationTitle("Recovery Candidate")
         .navigationBarTitleDisplayMode(.inline)
+        .alert("Retry Media Candidate?", isPresented: $showRetryConfirm) {
+            Button("Retry", role: .destructive) {
+                runRetry()
+            }
+            Button("Cancel", role: .cancel) { }
+        } message: {
+            Text("This retries only this selected candidate after preflight. It does not retry all candidates, delete media, reset retry caps globally, or mark anything ignored.")
+        }
+    }
+
+    private func runRetry() {
+        guard !isRetrying,
+              let propertyID = UUID(uuidString: item.propertyID),
+              let sessionID = UUID(uuidString: item.sessionID),
+              let shotID = UUID(uuidString: item.shotID) else {
+            retryResultMessage = "Retry could not start because one or more IDs were invalid."
+            return
+        }
+        isRetrying = true
+        Task {
+            let result = await appState.retryMediaRecoveryCandidate(
+                propertyID: propertyID,
+                sessionID: sessionID,
+                shotID: shotID
+            )
+            await MainActor.run {
+                retryResultMessage = "\(result.status.rawValue): \(result.message)"
+                isRetrying = false
+            }
+        }
     }
 }
 
