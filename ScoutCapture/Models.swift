@@ -637,15 +637,29 @@ struct ShotMetadata: Codable, Identifiable, Equatable {
     var accuracyMeters: Double?
     var imageWidth: Int?
     var imageHeight: Int?
+    var lifecycleState: ShotLifecycleState
+    var retiredAt: Date?
+    var retiredReason: String?
+    var retiredByUserID: UUID?
+    var supersededByShotID: UUID?
+    var supersedesShotID: UUID?
+    var replacementReason: String?
+    var hiddenFromReports: Bool?
+    var hiddenFromGallery: Bool?
+    var lifecycleUpdatedAt: Date?
 
     var id: UUID { shotID }
-    var isActiveForDefaultWorkflows: Bool { ShotLifecycleState.active.isActiveForDefaultWorkflows }
-    var isHistorical: Bool { ShotLifecycleState.active.isHistorical }
-    var isRetired: Bool { ShotLifecycleState.active.isRetired }
-    var isSuperseded: Bool { ShotLifecycleState.active.isSuperseded }
-    var shouldAppearInDefaultGallery: Bool { ShotLifecycleState.active.shouldAppearInDefaultGallery }
-    var shouldAppearInDefaultReports: Bool { ShotLifecycleState.active.shouldAppearInDefaultReports }
-    var shouldAppearInDefaultExports: Bool { ShotLifecycleState.active.shouldAppearInDefaultExports }
+    var isActiveForDefaultWorkflows: Bool { lifecycleState.isActiveForDefaultWorkflows }
+    var isHistorical: Bool { lifecycleState.isHistorical }
+    var isRetired: Bool { lifecycleState.isRetired }
+    var isSuperseded: Bool { lifecycleState.isSuperseded }
+    var shouldAppearInDefaultGallery: Bool {
+        hiddenFromGallery.map { !$0 } ?? lifecycleState.shouldAppearInDefaultGallery
+    }
+    var shouldAppearInDefaultReports: Bool {
+        hiddenFromReports.map { !$0 } ?? lifecycleState.shouldAppearInDefaultReports
+    }
+    var shouldAppearInDefaultExports: Bool { lifecycleState.shouldAppearInDefaultExports }
 
     var logicalShotIdentity: String {
         let normalizedKey = shotKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -722,6 +736,16 @@ struct ShotMetadata: Codable, Identifiable, Equatable {
         case accuracyMeters
         case imageWidth
         case imageHeight
+        case lifecycleState
+        case retiredAt
+        case retiredReason
+        case retiredByUserID
+        case supersededByShotID
+        case supersedesShotID
+        case replacementReason
+        case hiddenFromReports
+        case hiddenFromGallery
+        case lifecycleUpdatedAt
         case logicalShotIdentity
         case trade
         case priority
@@ -769,7 +793,17 @@ struct ShotMetadata: Codable, Identifiable, Equatable {
         longitude: Double?,
         accuracyMeters: Double?,
         imageWidth: Int?,
-        imageHeight: Int?
+        imageHeight: Int?,
+        lifecycleState: ShotLifecycleState = .active,
+        retiredAt: Date? = nil,
+        retiredReason: String? = nil,
+        retiredByUserID: UUID? = nil,
+        supersededByShotID: UUID? = nil,
+        supersedesShotID: UUID? = nil,
+        replacementReason: String? = nil,
+        hiddenFromReports: Bool? = nil,
+        hiddenFromGallery: Bool? = nil,
+        lifecycleUpdatedAt: Date? = nil
     ) {
         self.shotID = shotID
         self.propertyID = propertyID
@@ -813,6 +847,16 @@ struct ShotMetadata: Codable, Identifiable, Equatable {
         self.accuracyMeters = accuracyMeters
         self.imageWidth = imageWidth
         self.imageHeight = imageHeight
+        self.lifecycleState = lifecycleState
+        self.retiredAt = retiredAt
+        self.retiredReason = ShotMetadata.trimmedNonEmpty(retiredReason)
+        self.retiredByUserID = retiredByUserID
+        self.supersededByShotID = supersededByShotID
+        self.supersedesShotID = supersedesShotID
+        self.replacementReason = ShotMetadata.trimmedNonEmpty(replacementReason)
+        self.hiddenFromReports = hiddenFromReports
+        self.hiddenFromGallery = hiddenFromGallery
+        self.lifecycleUpdatedAt = lifecycleUpdatedAt
     }
 
     init(from decoder: Decoder) throws {
@@ -899,6 +943,16 @@ struct ShotMetadata: Codable, Identifiable, Equatable {
         accuracyMeters = try c.decodeIfPresent(Double.self, forKey: .accuracyMeters)
         imageWidth = try c.decodeIfPresent(Int.self, forKey: .imageWidth)
         imageHeight = try c.decodeIfPresent(Int.self, forKey: .imageHeight)
+        lifecycleState = try ShotMetadata.decodeLifecycleState(from: c)
+        retiredAt = try c.decodeIfPresent(Date.self, forKey: .retiredAt)
+        retiredReason = ShotMetadata.trimmedNonEmpty(try c.decodeIfPresent(String.self, forKey: .retiredReason))
+        retiredByUserID = try c.decodeIfPresent(UUID.self, forKey: .retiredByUserID)
+        supersededByShotID = try c.decodeIfPresent(UUID.self, forKey: .supersededByShotID)
+        supersedesShotID = try c.decodeIfPresent(UUID.self, forKey: .supersedesShotID)
+        replacementReason = ShotMetadata.trimmedNonEmpty(try c.decodeIfPresent(String.self, forKey: .replacementReason))
+        hiddenFromReports = try c.decodeIfPresent(Bool.self, forKey: .hiddenFromReports)
+        hiddenFromGallery = try c.decodeIfPresent(Bool.self, forKey: .hiddenFromGallery)
+        lifecycleUpdatedAt = try c.decodeIfPresent(Date.self, forKey: .lifecycleUpdatedAt)
     }
 
     func encode(to encoder: Encoder) throws {
@@ -945,6 +999,18 @@ struct ShotMetadata: Codable, Identifiable, Equatable {
         try c.encodeIfPresent(accuracyMeters, forKey: .accuracyMeters)
         try c.encodeIfPresent(imageWidth, forKey: .imageWidth)
         try c.encodeIfPresent(imageHeight, forKey: .imageHeight)
+        if lifecycleState != .active {
+            try c.encode(lifecycleState, forKey: .lifecycleState)
+        }
+        try c.encodeIfPresent(retiredAt, forKey: .retiredAt)
+        try c.encodeIfPresent(ShotMetadata.trimmedNonEmpty(retiredReason), forKey: .retiredReason)
+        try c.encodeIfPresent(retiredByUserID, forKey: .retiredByUserID)
+        try c.encodeIfPresent(supersededByShotID, forKey: .supersededByShotID)
+        try c.encodeIfPresent(supersedesShotID, forKey: .supersedesShotID)
+        try c.encodeIfPresent(ShotMetadata.trimmedNonEmpty(replacementReason), forKey: .replacementReason)
+        try c.encodeIfPresent(hiddenFromReports, forKey: .hiddenFromReports)
+        try c.encodeIfPresent(hiddenFromGallery, forKey: .hiddenFromGallery)
+        try c.encodeIfPresent(lifecycleUpdatedAt, forKey: .lifecycleUpdatedAt)
         try c.encode(logicalShotIdentity, forKey: .logicalShotIdentity)
         try c.encodeIfPresent(ShotMetadata.trimmedNonEmpty(trade), forKey: .trade)
         try c.encodeIfPresent(ShotMetadata.normalizedPriority(priority), forKey: .priority)
@@ -985,6 +1051,18 @@ struct ShotMetadata: Codable, Identifiable, Equatable {
         guard let value else { return nil }
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? nil : trimmed
+    }
+
+    private static func decodeLifecycleState(
+        from container: KeyedDecodingContainer<CodingKeys>
+    ) throws -> ShotLifecycleState {
+        guard let rawValue = try container.decodeIfPresent(String.self, forKey: .lifecycleState)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased(),
+              !rawValue.isEmpty else {
+            return .active
+        }
+        return ShotLifecycleState(rawValue: rawValue) ?? .active
     }
 
     private static func normalizedUploadState(_ value: String?) -> String {
