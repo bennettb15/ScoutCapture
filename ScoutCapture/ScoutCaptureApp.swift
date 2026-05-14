@@ -6339,6 +6339,9 @@ private struct DebugDivergenceAuditSnapshot {
     let remoteOnlyShotCount: String
     let staleOrgReconciledPropertyCount: String
     let staleOrgReconciledShotCount: String
+    let activeSyncIssueCount: String
+    let recoverableIssueCount: String
+    let historicalInformationalCount: String
     let totalFindings: String
     let categoryCounts: [(AppState.DivergenceAuditCategory, Int)]
     let items: [DebugDivergenceAuditSnapshotItem]
@@ -6365,6 +6368,9 @@ private struct DebugDivergenceAuditSnapshot {
         remoteOnlyShotCount = String(summary.remoteOnlyShotCount)
         staleOrgReconciledPropertyCount = String(summary.staleOrgReconciledPropertyCount)
         staleOrgReconciledShotCount = String(summary.staleOrgReconciledShotCount)
+        activeSyncIssueCount = String(summary.activeSyncIssueCount)
+        recoverableIssueCount = String(summary.recoverableIssueCount)
+        historicalInformationalCount = String(summary.historicalInformationalCount)
         totalFindings = String(summary.items.count)
         let counts = summary.countsByCategory
         categoryCounts = AppState.DivergenceAuditCategory.allCases
@@ -6380,10 +6386,6 @@ private struct DebugDivergenceAuditSnapshot {
 
     var coreSessionStatus: String {
         remoteOnlySessionCount == "0" && localOnlySessionCount == "0" ? "OK" : "Needs Review"
-    }
-
-    var legacyReviewCount: Int {
-        items.filter { $0.filterMatches(.needsReview) }.count
     }
 
 }
@@ -6428,11 +6430,14 @@ private struct DebugDivergenceAuditSnapshotItem: Identifiable, Equatable {
                 category == AppState.DivergenceAuditCategory.remoteOnlyShot.rawValue ||
                 category == AppState.DivergenceAuditCategory.mediaDrift.rawValue
         case .captureProfile:
-            return category == AppState.DivergenceAuditCategory.captureProfile.rawValue
+            return category == AppState.DivergenceAuditCategory.captureProfile.rawValue ||
+                category == AppState.DivergenceAuditCategory.legacyCaptureProfile.rawValue
         case .parentMissing:
-            return category == AppState.DivergenceAuditCategory.missingParent.rawValue
+            return category == AppState.DivergenceAuditCategory.missingParent.rawValue ||
+                category == AppState.DivergenceAuditCategory.legacyRemoteSchema.rawValue
         case .orgReconciliation:
-            return category == AppState.DivergenceAuditCategory.staleOrgMismatch.rawValue
+            return category == AppState.DivergenceAuditCategory.staleOrgMismatch.rawValue ||
+                category == AppState.DivergenceAuditCategory.legacyOrgReconciliation.rawValue
         }
     }
 }
@@ -6649,19 +6654,33 @@ private struct DebugLocalDiagnosticsView: View {
                             .foregroundStyle(.secondary)
                     }
 
-                    Section("Legacy / Needs Review") {
+                    Section("Active Sync Issues") {
+                        diagnosticRow("Actionable Findings", snapshot.activeSyncIssueCount)
+                        diagnosticRow("Property Match Status", snapshot.corePropertyStatus)
+                        diagnosticRow("Session Match Status", snapshot.coreSessionStatus)
+                        Text(snapshot.activeSyncIssueCount == "0" ? "No active sync failures are currently classified by this audit." : "Warning and critical findings should be reviewed before treating historical findings as operational failures.")
+                            .font(.system(size: 13, weight: .medium))
+                            .foregroundStyle(.secondary)
+                    }
+
+                    Section("Recoverable Issues") {
+                        diagnosticRow("Recoverable Findings", snapshot.recoverableIssueCount)
                         diagnosticRow("Matched Shots", snapshot.matchedShotCount)
                         diagnosticRow("Local-Only Shots", snapshot.localOnlyShotCount)
-                        Text("Local-only shots may be legacy captures or uploads that have not reached remote storage yet.")
+                        diagnosticRow("Remote-Only Shots", snapshot.remoteOnlyShotCount)
+                        Text("Local-only shots may be legacy captures or uploads that have not reached remote storage yet. Media drift means pending, failed, or uploaded state does not line up with storage path state.")
                             .font(.system(size: 13, weight: .medium))
                             .foregroundStyle(.secondary)
-                        diagnosticRow("Remote-Only Shots", snapshot.remoteOnlyShotCount)
+                    }
+
+                    Section("Historical / Informational States") {
+                        diagnosticRow("Historical Findings", snapshot.historicalInformationalCount)
                         diagnosticRow("Stale Org Reconciled Properties", snapshot.staleOrgReconciledPropertyCount)
                         diagnosticRow("Stale Org Reconciled Shots", snapshot.staleOrgReconciledShotCount)
-                        Text("Stale org reconciled means remote active-org ownership proved the local historical org metadata safe for this audit. It is not treated as an active sync failure.")
+                        Text("Stale org reconciled means remote active-org ownership proved historical local org metadata safe for this audit. Legacy capture_profile and remote schema findings remain visible but are not treated as active sync failures.")
                             .font(.system(size: 13, weight: .medium))
                             .foregroundStyle(.secondary)
-                        diagnosticRow("Findings", snapshot.totalFindings)
+                        diagnosticRow("All Findings", snapshot.totalFindings)
                         ForEach(snapshot.categoryCounts, id: \.0) { category, count in
                             diagnosticRow(label(for: category), count)
                         }
@@ -6823,10 +6842,16 @@ private struct DebugLocalDiagnosticsView: View {
             return "Media drift"
         case .staleOrgMismatch:
             return "Stale org needs review"
+        case .legacyOrgReconciliation:
+            return "Stale org reconciled"
         case .captureProfile:
             return "Capture profile"
+        case .legacyCaptureProfile:
+            return "Legacy capture profile"
         case .missingParent:
             return "Parent/missing"
+        case .legacyRemoteSchema:
+            return "Legacy remote schema"
         default:
             return category.rawValue
         }

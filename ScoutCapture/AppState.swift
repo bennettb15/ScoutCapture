@@ -408,6 +408,9 @@ final class AppState: ObservableObject {
         case missingParent = "missing_parent"
         case staleOrgMismatch = "stale_org_mismatch"
         case captureProfile = "capture_profile"
+        case legacyCaptureProfile = "legacy_capture_profile"
+        case legacyRemoteSchema = "legacy_remote_schema"
+        case legacyOrgReconciliation = "legacy_org_reconciliation"
         case mediaDrift = "media_drift"
         case deletedHiddenMismatch = "deleted_hidden_mismatch"
         case remoteUnavailable = "remote_unavailable"
@@ -419,6 +422,14 @@ final class AppState: ObservableObject {
         case needsReview = "Needs Review"
         case warning = "Warning"
         case critical = "Critical"
+    }
+
+    enum DivergenceAuditLifecycle: String, CaseIterable, Equatable {
+        case activeSyncFailure = "Active Sync Failure"
+        case recoverableIssue = "Recoverable Issue"
+        case historicalLegacyState = "Historical Legacy State"
+        case informationalMigrationState = "Informational Migration State"
+        case toleratedHistoricalSchemaState = "Tolerated Historical Schema State"
     }
 
     struct DivergenceAuditItem: Equatable, Identifiable {
@@ -465,8 +476,26 @@ final class AppState: ObservableObject {
                 return .needsReview
             case .missingParent, .deletedHiddenMismatch, .remoteUnavailable:
                 return .warning
-            case .staleOrgMismatch, .captureProfile:
+            case .staleOrgMismatch, .captureProfile, .legacyCaptureProfile, .legacyRemoteSchema, .legacyOrgReconciliation:
                 return .info
+            }
+        }
+
+        nonisolated var lifecycle: DivergenceAuditLifecycle {
+            switch category {
+            case .legacyRemoteSchema:
+                return .toleratedHistoricalSchemaState
+            case .legacyCaptureProfile:
+                return .informationalMigrationState
+            case .legacyOrgReconciliation:
+                return .historicalLegacyState
+            case .staleOrgMismatch, .captureProfile:
+                return .informationalMigrationState
+            case .localOnlyShot, .remoteOnlyShot, .mediaDrift:
+                return .recoverableIssue
+            case .missingParent, .deletedHiddenMismatch, .remoteUnavailable,
+                 .localOnlyProperty, .remoteOnlyProperty, .localOnlySession, .remoteOnlySession:
+                return .activeSyncFailure
             }
         }
     }
@@ -494,8 +523,28 @@ final class AppState: ObservableObject {
         let staleOrgReconciledShotCount: Int
         let items: [DivergenceAuditItem]
 
-        var countsByCategory: [DivergenceAuditCategory: Int] {
+        nonisolated var countsByCategory: [DivergenceAuditCategory: Int] {
             Dictionary(grouping: items, by: \.category).mapValues(\.count)
+        }
+
+        nonisolated var countsByLifecycle: [DivergenceAuditLifecycle: Int] {
+            Dictionary(grouping: items, by: \.lifecycle).mapValues(\.count)
+        }
+
+        nonisolated var activeSyncIssueCount: Int {
+            items.filter { $0.lifecycle == .activeSyncFailure }.count
+        }
+
+        nonisolated var recoverableIssueCount: Int {
+            items.filter { $0.lifecycle == .recoverableIssue }.count
+        }
+
+        nonisolated var historicalInformationalCount: Int {
+            items.filter {
+                $0.lifecycle == .historicalLegacyState ||
+                    $0.lifecycle == .informationalMigrationState ||
+                    $0.lifecycle == .toleratedHistoricalSchemaState
+            }.count
         }
     }
 
@@ -7402,12 +7451,12 @@ final class AppState: ObservableObject {
             if property.captureProfile == nil {
                 items.append(
                     DivergenceAuditItem(
-                        category: .captureProfile,
+                        category: .legacyCaptureProfile,
                         entityType: "property",
                         entityID: property.id,
                         propertyID: property.id,
                         orgID: property.orgId,
-                        reason: "Local property capture_profile is null."
+                        reason: "Local property capture_profile is a legacy null metadata state."
                     )
                 )
             }
@@ -7432,13 +7481,13 @@ final class AppState: ObservableObject {
             if session.captureProfile == nil {
                 items.append(
                     DivergenceAuditItem(
-                        category: .captureProfile,
+                        category: .legacyCaptureProfile,
                         entityType: "session",
                         entityID: session.id,
                         propertyID: session.propertyID,
                         sessionID: session.id,
                         orgID: propertyOrgID,
-                        reason: "Local session capture_profile is null."
+                        reason: "Local session capture_profile is a legacy null metadata state."
                     )
                 )
             }
@@ -7502,13 +7551,13 @@ final class AppState: ObservableObject {
                sessionMetadataProfileFindingIDs.insert(localShot.sessionID).inserted {
                 items.append(
                     DivergenceAuditItem(
-                        category: .captureProfile,
+                        category: .legacyCaptureProfile,
                         entityType: "session_metadata",
                         entityID: localShot.sessionID,
                         propertyID: localShot.propertyID,
                         sessionID: localShot.sessionID,
                         orgID: localShot.metadataOrgID,
-                        reason: "Local session metadata capture_profile is null or unknown."
+                        reason: "Local session metadata capture_profile is a legacy null or unknown metadata state."
                     )
                 )
             }
@@ -7640,6 +7689,40 @@ final class AppState: ObservableObject {
                 shot.metadataOrgID != activeOrganizationID &&
                 remoteShotsByID[divergenceKey(shot.shot.shotID)] != nil
         }.count
+
+        if let activeOrganizationID {
+            for property in localProperties
+                where property.orgId != activeOrganizationID &&
+                    remotePropertiesByID[divergenceKey(property.id)] != nil {
+                items.append(
+                    DivergenceAuditItem(
+                        category: .legacyOrgReconciliation,
+                        entityType: "property",
+                        entityID: property.id,
+                        propertyID: property.id,
+                        orgID: property.orgId,
+                        reason: "Local historical org metadata differs, but remote active-org ownership reconciled this property for audit."
+                    )
+                )
+            }
+            for localShot in localShots
+                where localShot.metadataOrgID != nil &&
+                    localShot.metadataOrgID != activeOrganizationID &&
+                    remoteShotsByID[divergenceKey(localShot.shot.shotID)] != nil {
+                items.append(
+                    DivergenceAuditItem(
+                        category: .legacyOrgReconciliation,
+                        entityType: "shot",
+                        entityID: localShot.shot.shotID,
+                        propertyID: localShot.propertyID,
+                        sessionID: localShot.sessionID,
+                        shotID: localShot.shot.shotID,
+                        orgID: localShot.metadataOrgID,
+                        reason: "Local shot historical org metadata differs, but remote active-org ownership reconciled this shot for audit."
+                    )
+                )
+            }
+        }
 
         for property in localProperties where remotePropertiesByID[divergenceKey(property.id)] == nil {
             counts.localOnlyProperties += 1
@@ -7780,17 +7863,34 @@ final class AppState: ObservableObject {
                 )
             }
             if shot.propertyID == nil {
-                items.append(
-                    DivergenceAuditItem(
-                        category: .missingParent,
-                        entityType: "shot",
-                        entityID: shot.id,
-                        sessionID: shot.sessionID,
-                        shotID: shot.id,
-                        orgID: shot.orgID,
-                        reason: "Remote shot has a null property_id."
+                if let sessionID = shot.sessionID,
+                   let remoteSession = remoteSessionsByID[divergenceKey(sessionID)],
+                   remotePropertiesByID[divergenceKey(remoteSession.propertyID)] != nil {
+                    items.append(
+                        DivergenceAuditItem(
+                            category: .legacyRemoteSchema,
+                            entityType: "shot",
+                            entityID: shot.id,
+                            propertyID: remoteSession.propertyID,
+                            sessionID: sessionID,
+                            shotID: shot.id,
+                            orgID: shot.orgID,
+                            reason: "Remote shot has a legacy null property_id, but its session resolves to an active-org property."
+                        )
                     )
-                )
+                } else {
+                    items.append(
+                        DivergenceAuditItem(
+                            category: .missingParent,
+                            entityType: "shot",
+                            entityID: shot.id,
+                            sessionID: shot.sessionID,
+                            shotID: shot.id,
+                            orgID: shot.orgID,
+                            reason: "Remote shot has a null property_id with unresolved active-org lineage."
+                        )
+                    )
+                }
             }
             if shot.sessionID == nil {
                 items.append(
@@ -7882,7 +7982,10 @@ final class AppState: ObservableObject {
     ) {
         for (propertyKey, remoteProperty) in remotePropertiesByID {
             guard let localProperty = localPropertiesByID[propertyKey] else { continue }
-            if localProperty.captureProfile?.rawValue != normalizedSupabaseText(remoteProperty.captureProfile) {
+            let localProfile = localProperty.captureProfile?.rawValue
+            let remoteProfile = normalizedSupabaseText(remoteProperty.captureProfile)
+            guard localProfile != nil || remoteProfile == nil else { continue }
+            if localProfile != remoteProfile {
                 items.append(
                     DivergenceAuditItem(
                         category: .captureProfile,
@@ -7897,7 +8000,10 @@ final class AppState: ObservableObject {
         }
         for (sessionKey, remoteSession) in remoteSessionsByID {
             guard let localSession = localSessionsByID[sessionKey] else { continue }
-            if localSession.captureProfile?.rawValue != normalizedSupabaseText(remoteSession.captureProfile) {
+            let localProfile = localSession.captureProfile?.rawValue
+            let remoteProfile = normalizedSupabaseText(remoteSession.captureProfile)
+            guard localProfile != nil || remoteProfile == nil else { continue }
+            if localProfile != remoteProfile {
                 items.append(
                     DivergenceAuditItem(
                         category: .captureProfile,
@@ -8118,11 +8224,19 @@ final class AppState: ObservableObject {
         lines.append("Local-Only Sessions: \(summary.localOnlySessionCount)")
         lines.append("Remote-Only Sessions: \(summary.remoteOnlySessionCount)")
         lines.append("")
-        lines.append("Legacy / Needs Review")
+        lines.append("Active Sync Issues")
+        lines.append("Actionable Failure Findings: \(summary.activeSyncIssueCount)")
+        lines.append("")
+        lines.append("Recoverable Issues")
+        lines.append("Recoverable Findings: \(summary.recoverableIssueCount)")
         lines.append("Local-Only Shots: \(summary.localOnlyShotCount)")
         lines.append("Remote-Only Shots: \(summary.remoteOnlyShotCount)")
+        lines.append("")
+        lines.append("Historical / Informational States")
+        lines.append("Historical or Informational Findings: \(summary.historicalInformationalCount)")
         lines.append("Stale Org Reconciled Properties: \(summary.staleOrgReconciledPropertyCount)")
         lines.append("Stale Org Reconciled Shots: \(summary.staleOrgReconciledShotCount)")
+        lines.append("Stale org reconciled means remote active-org ownership proved historical local org metadata safe for audit.")
         lines.append("")
         lines.append("Category Counts")
         let counts = Dictionary(grouping: summary.items, by: \.category).mapValues(\.count)
@@ -18488,17 +18602,23 @@ final class AppState: ObservableObject {
         let propertyIDs: [String]
         let sessions: [(id: String, propertyID: String)]
         let shots: [(id: String, propertyID: String?, sessionID: String?)]
+        let propertyCaptureProfiles: [String: String]
+        let sessionCaptureProfiles: [String: String]
         let orgID: UUID
 
         init(
             propertyIDs: [String],
             sessions: [(id: String, propertyID: String)] = [],
             shots: [(id: String, propertyID: String?, sessionID: String?)] = [],
+            propertyCaptureProfiles: [String: String] = [:],
+            sessionCaptureProfiles: [String: String] = [:],
             orgID: UUID
         ) {
             self.propertyIDs = propertyIDs
             self.sessions = sessions
             self.shots = shots
+            self.propertyCaptureProfiles = propertyCaptureProfiles
+            self.sessionCaptureProfiles = sessionCaptureProfiles
             self.orgID = orgID
         }
     }
@@ -18585,7 +18705,7 @@ final class AppState: ObservableObject {
                 return DivergenceRemotePropertyRecord(
                     id: propertyID,
                     orgID: input.orgID,
-                    captureProfile: nil,
+                    captureProfile: input.propertyCaptureProfiles[divergenceKey(propertyID)] ?? input.propertyCaptureProfiles[id],
                     isArchived: false,
                     deletedAt: nil
                 )
@@ -18597,7 +18717,7 @@ final class AppState: ObservableObject {
                     id: sessionID,
                     orgID: input.orgID,
                     propertyID: propertyID,
-                    captureProfile: nil,
+                    captureProfile: input.sessionCaptureProfiles[divergenceKey(sessionID)] ?? input.sessionCaptureProfiles[session.id],
                     deletedAt: nil
                 )
             },

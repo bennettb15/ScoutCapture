@@ -452,6 +452,117 @@ final class Phase2C07bMediaBackfillTests: XCTestCase {
         XCTAssertFalse(summary.items.contains { $0.category == .remoteOnlyProperty })
         XCTAssertFalse(summary.items.contains { $0.category == .missingParent })
         XCTAssertFalse(summary.items.contains { $0.category == .staleOrgMismatch })
+        XCTAssertTrue(summary.items.contains {
+            $0.category == .legacyOrgReconciliation &&
+                $0.propertyID == propertyID &&
+                $0.severity == .info
+        })
+        XCTAssertTrue(summary.items.contains {
+            $0.category == .legacyOrgReconciliation &&
+                $0.shotID == shotID &&
+                $0.severity == .info
+        })
+    }
+
+    func testDivergenceAuditDeduplicatesLegacyCaptureProfileNullAgainstRemoteValue() throws {
+        let activeOrganizationID = UUID()
+        let propertyID = UUID()
+        let sessionID = UUID()
+        let fixture = try makeAppStateWithSingleSession(uploadStates: [])
+        defer {
+            fixture.appState.shutdown()
+            try? FileManager.default.removeItem(at: fixture.storageRoot)
+        }
+
+        let summary = fixture.appState._debugDivergenceAuditSummaryForTests(
+            properties: [
+                Property(
+                    id: propertyID,
+                    orgId: activeOrganizationID,
+                    captureProfile: nil,
+                    name: "Local",
+                    address: "123 Main Street"
+                )
+            ],
+            sessions: [
+                Session(id: sessionID, propertyID: propertyID, captureProfile: nil)
+            ],
+            shots: [],
+            remote: AppState.DebugDivergenceRemoteInput(
+                propertyIDs: [propertyID.uuidString],
+                sessions: [(id: sessionID.uuidString, propertyID: propertyID.uuidString)],
+                propertyCaptureProfiles: [propertyID.uuidString.lowercased(): CaptureProfile.residential.rawValue],
+                sessionCaptureProfiles: [sessionID.uuidString.lowercased(): CaptureProfile.residential.rawValue],
+                orgID: activeOrganizationID
+            ),
+            activeOrganizationID: activeOrganizationID
+        )
+
+        XCTAssertEqual(summary.items.filter { $0.category == .captureProfile }.count, 0)
+        XCTAssertEqual(summary.items.filter { $0.category == .legacyCaptureProfile }.count, 2)
+        XCTAssertTrue(summary.items.allSatisfy { $0.category != .legacyCaptureProfile || $0.severity == .info })
+    }
+
+    func testDivergenceAuditReclassifiesResolvableRemoteShotNullPropertyAsLegacySchema() throws {
+        let activeOrganizationID = UUID()
+        let propertyID = UUID()
+        let sessionID = UUID()
+        let shotID = UUID()
+        let fixture = try makeAppStateWithSingleSession(uploadStates: [])
+        defer {
+            fixture.appState.shutdown()
+            try? FileManager.default.removeItem(at: fixture.storageRoot)
+        }
+
+        let summary = fixture.appState._debugDivergenceAuditSummaryForTests(
+            properties: [],
+            sessions: [],
+            shots: [],
+            remote: AppState.DebugDivergenceRemoteInput(
+                propertyIDs: [propertyID.uuidString],
+                sessions: [(id: sessionID.uuidString, propertyID: propertyID.uuidString)],
+                shots: [(id: shotID.uuidString, propertyID: nil, sessionID: sessionID.uuidString)],
+                orgID: activeOrganizationID
+            ),
+            activeOrganizationID: activeOrganizationID
+        )
+
+        XCTAssertTrue(summary.items.contains {
+            $0.category == .legacyRemoteSchema &&
+                $0.shotID == shotID &&
+                $0.propertyID == propertyID &&
+                $0.sessionID == sessionID &&
+                $0.severity == .info
+        })
+        XCTAssertFalse(summary.items.contains { $0.category == .missingParent && $0.shotID == shotID })
+    }
+
+    func testDivergenceAuditKeepsTrueRemoteShotMissingParentAsWarning() throws {
+        let activeOrganizationID = UUID()
+        let shotID = UUID()
+        let fixture = try makeAppStateWithSingleSession(uploadStates: [])
+        defer {
+            fixture.appState.shutdown()
+            try? FileManager.default.removeItem(at: fixture.storageRoot)
+        }
+
+        let summary = fixture.appState._debugDivergenceAuditSummaryForTests(
+            properties: [],
+            sessions: [],
+            shots: [],
+            remote: AppState.DebugDivergenceRemoteInput(
+                propertyIDs: [],
+                shots: [(id: shotID.uuidString, propertyID: nil, sessionID: nil)],
+                orgID: activeOrganizationID
+            ),
+            activeOrganizationID: activeOrganizationID
+        )
+
+        XCTAssertTrue(summary.items.contains {
+            $0.category == .missingParent &&
+                $0.shotID == shotID &&
+                $0.severity == .warning
+        })
     }
 
     func testDivergenceAuditStillReportsTrueRemoteOnlyRows() throws {
@@ -556,6 +667,9 @@ final class Phase2C07bMediaBackfillTests: XCTestCase {
         XCTAssertEqual(fixture.appState._debugDivergenceSeverityForTests(category: .localOnlyShot), .needsReview)
         XCTAssertEqual(fixture.appState._debugDivergenceSeverityForTests(category: .mediaDrift), .needsReview)
         XCTAssertEqual(fixture.appState._debugDivergenceSeverityForTests(category: .captureProfile), .info)
+        XCTAssertEqual(fixture.appState._debugDivergenceSeverityForTests(category: .legacyCaptureProfile), .info)
+        XCTAssertEqual(fixture.appState._debugDivergenceSeverityForTests(category: .legacyRemoteSchema), .info)
+        XCTAssertEqual(fixture.appState._debugDivergenceSeverityForTests(category: .legacyOrgReconciliation), .info)
         XCTAssertEqual(fixture.appState._debugDivergenceSeverityForTests(category: .staleOrgMismatch), .info)
         XCTAssertEqual(fixture.appState._debugDivergenceSeverityForTests(category: .missingParent), .warning)
     }
@@ -589,6 +703,12 @@ final class Phase2C07bMediaBackfillTests: XCTestCase {
                     entityType: "shot",
                     entityID: propertyID,
                     reason: "failed at /private/tmp/source.heic with token abc"
+                ),
+                AppState.DivergenceAuditItem(
+                    category: .legacyRemoteSchema,
+                    entityType: "shot",
+                    entityID: propertyID,
+                    reason: "legacy remote row remains inspectable"
                 )
             ]
         )
@@ -596,11 +716,76 @@ final class Phase2C07bMediaBackfillTests: XCTestCase {
         let snapshot = AppState.divergenceAuditSnapshotText(summary)
 
         XCTAssertTrue(snapshot.contains("Core Sync Health"))
+        XCTAssertTrue(snapshot.contains("Active Sync Issues"))
+        XCTAssertTrue(snapshot.contains("Recoverable Issues"))
+        XCTAssertTrue(snapshot.contains("Historical / Informational States"))
         XCTAssertTrue(snapshot.contains("Matched Properties: 1"))
         XCTAssertTrue(snapshot.contains("Needs Review | media_drift"))
+        XCTAssertTrue(snapshot.contains("Info | legacy_remote_schema"))
         XCTAssertTrue(snapshot.contains("[path]"))
         XCTAssertFalse(snapshot.contains("/private/tmp"))
         XCTAssertFalse(snapshot.contains("abc"))
+    }
+
+    func testDivergenceAuditSummarySeparatesOperationalAndHistoricalCounts() throws {
+        let summary = AppState.DivergenceAuditSummary(
+            ranAt: Date(timeIntervalSince1970: 0),
+            activeOrganizationID: UUID(),
+            remoteScopeAvailable: true,
+            localPropertyCount: 0,
+            remotePropertyCount: 0,
+            localSessionCount: 0,
+            remoteSessionCount: 0,
+            localShotCount: 0,
+            remoteShotCount: 0,
+            matchedPropertyCount: 0,
+            matchedSessionCount: 0,
+            matchedShotCount: 0,
+            localOnlyPropertyCount: 0,
+            remoteOnlyPropertyCount: 0,
+            localOnlySessionCount: 0,
+            remoteOnlySessionCount: 0,
+            localOnlyShotCount: 0,
+            remoteOnlyShotCount: 0,
+            staleOrgReconciledPropertyCount: 0,
+            staleOrgReconciledShotCount: 0,
+            items: [
+                AppState.DivergenceAuditItem(
+                    category: .missingParent,
+                    entityType: "shot",
+                    entityID: UUID(),
+                    reason: "true missing parent"
+                ),
+                AppState.DivergenceAuditItem(
+                    category: .mediaDrift,
+                    entityType: "shot",
+                    entityID: UUID(),
+                    reason: "retry-capped"
+                ),
+                AppState.DivergenceAuditItem(
+                    category: .legacyCaptureProfile,
+                    entityType: "property",
+                    entityID: UUID(),
+                    reason: "legacy null"
+                ),
+                AppState.DivergenceAuditItem(
+                    category: .legacyRemoteSchema,
+                    entityType: "shot",
+                    entityID: UUID(),
+                    reason: "legacy null property_id"
+                ),
+                AppState.DivergenceAuditItem(
+                    category: .legacyOrgReconciliation,
+                    entityType: "property",
+                    entityID: UUID(),
+                    reason: "historical org metadata reconciled"
+                )
+            ]
+        )
+
+        XCTAssertEqual(summary.activeSyncIssueCount, 1)
+        XCTAssertEqual(summary.recoverableIssueCount, 1)
+        XCTAssertEqual(summary.historicalInformationalCount, 3)
     }
 
     func testMediaRecoveryInspectionMapsRetryCappedLocalMediaAndFileExists() async throws {
