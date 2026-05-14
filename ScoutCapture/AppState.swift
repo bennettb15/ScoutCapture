@@ -551,6 +551,43 @@ final class AppState: ObservableObject {
             Self.groupedHistoricalFindings(in: items)
         }
 
+        nonisolated func filteredItems(
+            matching filter: DivergenceAuditFindingFilter
+        ) -> [DivergenceAuditItem] {
+            Self.filteredItems(items, matching: filter)
+        }
+
+        nonisolated static func filteredItems(
+            _ items: [DivergenceAuditItem],
+            matching filter: DivergenceAuditFindingFilter
+        ) -> [DivergenceAuditItem] {
+            let normalizedSearch = filter.searchText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            return items.filter { item in
+                if let severity = filter.severity, item.severity != severity { return false }
+                if let category = filter.category, item.category != category { return false }
+                if let entityType = filter.entityType,
+                   item.entityType.caseInsensitiveCompare(entityType) != .orderedSame {
+                    return false
+                }
+                guard !normalizedSearch.isEmpty else { return true }
+                let searchableText = [
+                    item.entityID?.uuidString,
+                    item.propertyID?.uuidString,
+                    item.sessionID?.uuidString,
+                    item.shotID?.uuidString,
+                    item.orgID?.uuidString,
+                    item.reason,
+                    item.category.rawValue,
+                    item.severity.rawValue,
+                    item.entityType
+                ]
+                    .compactMap { $0 }
+                    .joined(separator: " ")
+                    .lowercased()
+                return searchableText.contains(normalizedSearch)
+            }
+        }
+
         nonisolated static func groupedHistoricalFindings(
             in items: [DivergenceAuditItem],
             sampleLimit: Int = 5
@@ -583,6 +620,25 @@ final class AppState: ObservableObject {
         let affectedSessionCount: Int
         let affectedShotCount: Int
         let sampleItems: [DivergenceAuditItem]
+    }
+
+    struct DivergenceAuditFindingFilter: Equatable {
+        var severity: DivergenceAuditSeverity?
+        var category: DivergenceAuditCategory?
+        var entityType: String?
+        var searchText: String
+
+        init(
+            severity: DivergenceAuditSeverity? = nil,
+            category: DivergenceAuditCategory? = nil,
+            entityType: String? = nil,
+            searchText: String = ""
+        ) {
+            self.severity = severity
+            self.category = category
+            self.entityType = entityType
+            self.searchText = searchText
+        }
     }
 
     struct CaptureProfileBackfillRemoteState {

@@ -6427,26 +6427,51 @@ private struct DebugDivergenceAuditHistoricalGroup: Identifiable, Equatable {
             .map(DebugDivergenceAuditSnapshotItem.init)
     }
 
+    init(
+        category: String,
+        items: [DebugDivergenceAuditSnapshotItem],
+        sampleLimit: Int = 5
+    ) {
+        id = category
+        self.category = category
+        title = Self.title(for: category)
+        context = Self.context(for: category)
+        totalCount = String(items.count)
+        affectedPropertyCount = String(Set(items.map(\.propertyID).filter { $0 != "none" }).count)
+        affectedSessionCount = String(Set(items.map(\.sessionID).filter { $0 != "none" }).count)
+        affectedShotCount = String(Set(items.map(\.shotID).filter { $0 != "none" }).count)
+        sampleItems = Array(items.prefix(max(0, sampleLimit)))
+        allItems = items
+    }
+
     private static func title(for category: AppState.DivergenceAuditCategory) -> String {
+        title(for: category.rawValue)
+    }
+
+    private static func title(for category: String) -> String {
         switch category {
-        case .legacyOrgReconciliation:
+        case AppState.DivergenceAuditCategory.legacyOrgReconciliation.rawValue:
             return "Stale Org Reconciled"
-        case .legacyRemoteSchema:
+        case AppState.DivergenceAuditCategory.legacyRemoteSchema.rawValue:
             return "Legacy Remote Schema"
-        case .legacyCaptureProfile:
+        case AppState.DivergenceAuditCategory.legacyCaptureProfile.rawValue:
             return "Legacy Capture Profile"
         default:
-            return category.rawValue
+            return category
         }
     }
 
     private static func context(for category: AppState.DivergenceAuditCategory) -> String {
+        context(for: category.rawValue)
+    }
+
+    private static func context(for category: String) -> String {
         switch category {
-        case .legacyOrgReconciliation:
+        case AppState.DivergenceAuditCategory.legacyOrgReconciliation.rawValue:
             return "Historical local org metadata differed, but remote active-org ownership reconciled these records for audit."
-        case .legacyRemoteSchema:
+        case AppState.DivergenceAuditCategory.legacyRemoteSchema.rawValue:
             return "Remote rows use an older schema shape, but lineage resolves through accessible active-org sessions/properties."
-        case .legacyCaptureProfile:
+        case AppState.DivergenceAuditCategory.legacyCaptureProfile.rawValue:
             return "Local capture_profile metadata is legacy/null from before canonical profile propagation."
         default:
             return "Historical informational finding group."
@@ -6466,6 +6491,23 @@ private struct DebugDivergenceAuditSnapshotItem: Identifiable, Equatable {
     let reasonPreview: String
     let reasonFull: String
     let severity: String
+
+    var searchableText: String {
+        [
+            entityID,
+            propertyID,
+            sessionID,
+            shotID,
+            orgID,
+            reasonFull,
+            reasonPreview,
+            category,
+            severity,
+            entityType
+        ]
+            .joined(separator: " ")
+            .lowercased()
+    }
 
     var isGroupedHistorical: Bool {
         category == AppState.DivergenceAuditCategory.legacyOrgReconciliation.rawValue ||
@@ -6509,6 +6551,39 @@ private struct DebugDivergenceAuditSnapshotItem: Identifiable, Equatable {
             return category == AppState.DivergenceAuditCategory.staleOrgMismatch.rawValue ||
                 category == AppState.DivergenceAuditCategory.legacyOrgReconciliation.rawValue
         }
+    }
+
+    func matches(_ filters: DebugDivergenceAuditFindingFilters) -> Bool {
+        if filters.severity != DebugDivergenceAuditFindingFilters.allValue,
+           severity != filters.severity {
+            return false
+        }
+        if filters.category != DebugDivergenceAuditFindingFilters.allValue,
+           category != filters.category {
+            return false
+        }
+        if filters.entityType != DebugDivergenceAuditFindingFilters.allValue,
+           entityType != filters.entityType {
+            return false
+        }
+        let search = filters.searchText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return search.isEmpty || searchableText.contains(search)
+    }
+}
+
+private struct DebugDivergenceAuditFindingFilters: Equatable {
+    static let allValue = "All"
+
+    var severity: String = allValue
+    var category: String = allValue
+    var entityType: String = allValue
+    var searchText: String = ""
+
+    var isDefault: Bool {
+        severity == Self.allValue &&
+            category == Self.allValue &&
+            entityType == Self.allValue &&
+            searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 }
 
@@ -7147,13 +7222,28 @@ private struct DebugDivergenceAuditItemsView: View {
     let items: [DebugDivergenceAuditSnapshotItem]
     let historicalGroups: [DebugDivergenceAuditHistoricalGroup]
     @State private var filter: DebugDivergenceAuditFilter = .all
+    @State private var findingFilters = DebugDivergenceAuditFindingFilters()
+    @State private var filteredItemsCache: [DebugDivergenceAuditSnapshotItem] = []
+    @State private var foregroundItemsCache: [DebugDivergenceAuditSnapshotItem] = []
+    @State private var historicalGroupsCache: [DebugDivergenceAuditHistoricalGroup] = []
 
-    private var filteredItems: [DebugDivergenceAuditSnapshotItem] {
-        items.filter { $0.filterMatches(filter) }
+    private var severityOptions: [String] {
+        [DebugDivergenceAuditFindingFilters.allValue] +
+            Array(Set(items.map(\.severity))).sorted()
     }
 
-    private var foregroundItems: [DebugDivergenceAuditSnapshotItem] {
-        filteredItems.filter { !$0.isGroupedHistorical }
+    private var categoryOptions: [String] {
+        [DebugDivergenceAuditFindingFilters.allValue] +
+            Array(Set(items.map(\.category))).sorted()
+    }
+
+    private var entityTypeOptions: [String] {
+        [DebugDivergenceAuditFindingFilters.allValue] +
+            Array(Set(items.map(\.entityType))).sorted()
+    }
+
+    private var displaysGroupedDefaultView: Bool {
+        filter == .all && findingFilters.isDefault
     }
 
     var body: some View {
@@ -7170,22 +7260,49 @@ private struct DebugDivergenceAuditItemsView: View {
                 .pickerStyle(.menu)
             }
 
-            if filter == .all {
-                if foregroundItems.isEmpty {
+            Section("Search / Filters") {
+                TextField("Search IDs or reasons", text: $findingFilters.searchText)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                Picker("Severity", selection: $findingFilters.severity) {
+                    ForEach(severityOptions, id: \.self) { severity in
+                        Text(severity).tag(severity)
+                    }
+                }
+                Picker("Category", selection: $findingFilters.category) {
+                    ForEach(categoryOptions, id: \.self) { category in
+                        Text(category).tag(category)
+                    }
+                }
+                Picker("Entity Type", selection: $findingFilters.entityType) {
+                    ForEach(entityTypeOptions, id: \.self) { entityType in
+                        Text(entityType).tag(entityType)
+                    }
+                }
+                Button("Clear Filters") {
+                    filter = .all
+                    findingFilters = DebugDivergenceAuditFindingFilters()
+                }
+                .font(.system(size: 14, weight: .semibold))
+                .disabled(filter == .all && findingFilters.isDefault)
+            }
+
+            if displaysGroupedDefaultView {
+                if foregroundItemsCache.isEmpty {
                     Section("Active / Recoverable Findings") {
-                        Text("No active or recoverable findings. Historical findings are grouped below.")
+                        Text("No active sync issues or recoverable findings.")
                             .font(.system(size: 14, weight: .medium))
                             .foregroundStyle(.secondary)
                     }
                 } else {
                     Section("Active / Recoverable Findings") {
-                        ForEach(foregroundItems) { item in
+                        ForEach(foregroundItemsCache) { item in
                             DebugDivergenceAuditFindingRow(item: item)
                         }
                     }
                 }
 
-                if historicalGroups.isEmpty {
+                if historicalGroupsCache.isEmpty {
                     Section("Grouped Historical Findings") {
                         Text("No grouped historical findings.")
                             .font(.system(size: 14, weight: .medium))
@@ -7196,7 +7313,7 @@ private struct DebugDivergenceAuditItemsView: View {
                         Text("Historical groups are informational and non-operational unless a separate active finding is present.")
                             .font(.system(size: 13, weight: .medium))
                             .foregroundStyle(.secondary)
-                        ForEach(historicalGroups) { group in
+                        ForEach(historicalGroupsCache) { group in
                             NavigationLink {
                                 DebugDivergenceAuditHistoricalGroupView(group: group)
                             } label: {
@@ -7238,15 +7355,49 @@ private struct DebugDivergenceAuditItemsView: View {
                 } footer: {
                     Text("Raw findings preserve every forensic ID and category.")
                 }
-            } else if filteredItems.isEmpty {
+            } else if filteredItemsCache.isEmpty {
                 Section {
-                    Text("No findings for this filter.")
+                    Text("No findings match this filter.")
                         .font(.system(size: 14, weight: .medium))
                         .foregroundStyle(.secondary)
                 }
             } else {
+                if foregroundItemsCache.isEmpty {
+                    Section("Active / Recoverable Findings") {
+                        Text(activeRecoverableEmptyText)
+                            .font(.system(size: 14, weight: .medium))
+                            .foregroundStyle(.secondary)
+                    }
+                } else {
+                    Section("Active / Recoverable Findings") {
+                        ForEach(foregroundItemsCache) { item in
+                            DebugDivergenceAuditFindingRow(item: item)
+                        }
+                    }
+                }
+
+                if !historicalGroupsCache.isEmpty {
+                    Section("Grouped Historical Findings") {
+                        ForEach(historicalGroupsCache) { group in
+                            NavigationLink {
+                                DebugDivergenceAuditHistoricalGroupView(group: group)
+                            } label: {
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text("\(group.title) (\(group.totalCount))")
+                                        .font(.system(size: 14, weight: .semibold))
+                                        .foregroundStyle(.primary)
+                                    Text("Properties \(group.affectedPropertyCount) / Sessions \(group.affectedSessionCount) / Shots \(group.affectedShotCount)")
+                                        .font(.system(size: 12, weight: .medium, design: .monospaced))
+                                        .foregroundStyle(.secondary)
+                                }
+                                .padding(.vertical, 6)
+                            }
+                        }
+                    }
+                }
+
                 Section("Findings") {
-                    ForEach(filteredItems) { item in
+                    ForEach(filteredItemsCache) { item in
                         DebugDivergenceAuditFindingRow(item: item)
                     }
                 }
@@ -7254,6 +7405,53 @@ private struct DebugDivergenceAuditItemsView: View {
         }
         .navigationTitle("Divergence Audit")
         .navigationBarTitleDisplayMode(.inline)
+        .onAppear {
+            refreshFilteredItems()
+        }
+        .onChange(of: filter) { _, _ in
+            refreshFilteredItems()
+        }
+        .onChange(of: findingFilters) { _, _ in
+            refreshFilteredItems()
+        }
+    }
+
+    private var activeRecoverableEmptyText: String {
+        if filter == .needsReview {
+            return "No active sync issues or recoverable findings."
+        }
+        return "No active or recoverable findings match this filter."
+    }
+
+    private func refreshFilteredItems() {
+        let filtered = items.filter { item in
+            item.filterMatches(filter) && item.matches(findingFilters)
+        }
+        filteredItemsCache = filtered
+        foregroundItemsCache = filtered.filter { !$0.isGroupedHistorical }
+        if displaysGroupedDefaultView {
+            historicalGroupsCache = historicalGroups
+        } else {
+            historicalGroupsCache = Self.makeHistoricalGroups(from: filtered)
+        }
+    }
+
+    private static func makeHistoricalGroups(
+        from items: [DebugDivergenceAuditSnapshotItem]
+    ) -> [DebugDivergenceAuditHistoricalGroup] {
+        let categories = [
+            AppState.DivergenceAuditCategory.legacyOrgReconciliation.rawValue,
+            AppState.DivergenceAuditCategory.legacyRemoteSchema.rawValue,
+            AppState.DivergenceAuditCategory.legacyCaptureProfile.rawValue
+        ]
+        return categories.compactMap { category in
+            let categoryItems = items.filter { $0.category == category }
+            guard !categoryItems.isEmpty else { return nil }
+            return DebugDivergenceAuditHistoricalGroup(
+                category: category,
+                items: categoryItems
+            )
+        }
     }
 }
 

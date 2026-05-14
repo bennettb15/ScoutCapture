@@ -892,6 +892,116 @@ final class Phase2C07bMediaBackfillTests: XCTestCase {
         XCTAssertEqual(group.affectedSessionCount, 8)
     }
 
+    func testDivergenceAuditFindingFilterMatchesSeverityCategoryAndText() throws {
+        let propertyID = UUID()
+        let sessionID = UUID()
+        let shotID = UUID()
+        let items: [AppState.DivergenceAuditItem] = [
+            AppState.DivergenceAuditItem(
+                category: .missingParent,
+                entityType: "shot",
+                entityID: shotID,
+                propertyID: propertyID,
+                sessionID: sessionID,
+                shotID: shotID,
+                reason: "True parent break"
+            ),
+            AppState.DivergenceAuditItem(
+                category: .legacyCaptureProfile,
+                entityType: "session",
+                entityID: sessionID,
+                propertyID: propertyID,
+                sessionID: sessionID,
+                reason: "Legacy profile null"
+            ),
+            AppState.DivergenceAuditItem(
+                category: .mediaDrift,
+                entityType: "shot",
+                entityID: UUID(),
+                reason: "Retry-capped upload"
+            )
+        ]
+
+        let warnings = AppState.DivergenceAuditSummary.filteredItems(
+            items,
+            matching: AppState.DivergenceAuditFindingFilter(severity: .warning)
+        )
+        let legacyProfiles = AppState.DivergenceAuditSummary.filteredItems(
+            items,
+            matching: AppState.DivergenceAuditFindingFilter(category: .legacyCaptureProfile)
+        )
+        let sessionMatches = AppState.DivergenceAuditSummary.filteredItems(
+            items,
+            matching: AppState.DivergenceAuditFindingFilter(entityType: "session")
+        )
+        let idSearchMatches = AppState.DivergenceAuditSummary.filteredItems(
+            items,
+            matching: AppState.DivergenceAuditFindingFilter(searchText: shotID.uuidString.lowercased())
+        )
+        let reasonSearchMatches = AppState.DivergenceAuditSummary.filteredItems(
+            items,
+            matching: AppState.DivergenceAuditFindingFilter(searchText: "retry-capped")
+        )
+
+        XCTAssertEqual(warnings.map(\.category), [.missingParent])
+        XCTAssertEqual(legacyProfiles.map(\.category), [.legacyCaptureProfile])
+        XCTAssertEqual(sessionMatches.map(\.entityType), ["session"])
+        XCTAssertEqual(idSearchMatches.map(\.shotID), [shotID])
+        XCTAssertEqual(reasonSearchMatches.map(\.category), [.mediaDrift])
+        XCTAssertEqual(items.count, 3)
+    }
+
+    func testDivergenceAuditFindingFilterDoesNotChangeSnapshotOutput() throws {
+        let shotID = UUID()
+        let summary = AppState.DivergenceAuditSummary(
+            ranAt: Date(timeIntervalSince1970: 0),
+            activeOrganizationID: UUID(),
+            remoteScopeAvailable: true,
+            localPropertyCount: 0,
+            remotePropertyCount: 0,
+            localSessionCount: 0,
+            remoteSessionCount: 0,
+            localShotCount: 0,
+            remoteShotCount: 0,
+            matchedPropertyCount: 0,
+            matchedSessionCount: 0,
+            matchedShotCount: 0,
+            localOnlyPropertyCount: 0,
+            remoteOnlyPropertyCount: 0,
+            localOnlySessionCount: 0,
+            remoteOnlySessionCount: 0,
+            localOnlyShotCount: 0,
+            remoteOnlyShotCount: 0,
+            staleOrgReconciledPropertyCount: 0,
+            staleOrgReconciledShotCount: 0,
+            items: [
+                AppState.DivergenceAuditItem(
+                    category: .missingParent,
+                    entityType: "shot",
+                    entityID: shotID,
+                    shotID: shotID,
+                    reason: "True parent break"
+                ),
+                AppState.DivergenceAuditItem(
+                    category: .legacyCaptureProfile,
+                    entityType: "session",
+                    entityID: UUID(),
+                    reason: "Legacy profile null"
+                )
+            ]
+        )
+
+        let filtered = summary.filteredItems(
+            matching: AppState.DivergenceAuditFindingFilter(category: .missingParent)
+        )
+        let snapshot = AppState.divergenceAuditSnapshotText(summary)
+
+        XCTAssertEqual(filtered.count, 1)
+        XCTAssertEqual(summary.items.count, 2)
+        XCTAssertTrue(snapshot.contains("Warning | missing_parent"))
+        XCTAssertTrue(snapshot.contains("Info | legacy_capture_profile"))
+    }
+
     func testMediaRecoveryInspectionMapsRetryCappedLocalMediaAndFileExists() async throws {
         let now = Date()
         let fixture = try makeAppStateWithSingleSession(
