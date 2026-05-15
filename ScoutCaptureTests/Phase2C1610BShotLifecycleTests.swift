@@ -2,7 +2,20 @@ import XCTest
 @testable import ScoutCapture
 
 final class Phase2C1610BShotLifecycleTests: XCTestCase {
+    private func makeTempStorageRoot() throws -> URL {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ScoutCapture-2C1610Lifecycle-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        return root
+    }
+
     private func makeShot(
+        shotID: UUID = UUID(),
+        propertyID: UUID = UUID(),
+        sessionID: UUID = UUID(),
+        createdAt: Date = Date(timeIntervalSinceReferenceDate: 100),
+        originalFilename: String = "shot.heic",
+        originalRelativePath: String = "Originals/shot.heic",
         lifecycleState: ShotLifecycleState = .active,
         retiredAt: Date? = nil,
         retiredReason: String? = nil,
@@ -15,12 +28,12 @@ final class Phase2C1610BShotLifecycleTests: XCTestCase {
         lifecycleUpdatedAt: Date? = nil
     ) -> ShotMetadata {
         ShotMetadata(
-            shotID: UUID(),
-            propertyID: UUID(),
-            sessionID: UUID(),
-            createdAt: Date(timeIntervalSinceReferenceDate: 100),
+            shotID: shotID,
+            propertyID: propertyID,
+            sessionID: sessionID,
+            createdAt: createdAt,
             capturedAtLocal: nil,
-            updatedAt: Date(timeIntervalSinceReferenceDate: 100),
+            updatedAt: createdAt,
             building: "Building",
             elevation: "North",
             detailType: "Overview",
@@ -36,8 +49,8 @@ final class Phase2C1610BShotLifecycleTests: XCTestCase {
             firstCaptureKind: nil,
             noteText: nil,
             noteCategory: nil,
-            originalFilename: "shot.heic",
-            originalRelativePath: "Originals/shot.heic",
+            originalFilename: originalFilename,
+            originalRelativePath: originalRelativePath,
             originalByteSize: 128,
             storageBucket: nil,
             storagePath: nil,
@@ -68,6 +81,48 @@ final class Phase2C1610BShotLifecycleTests: XCTestCase {
             hiddenFromGallery: hiddenFromGallery,
             lifecycleUpdatedAt: lifecycleUpdatedAt
         )
+    }
+
+    @MainActor
+    private func makeLocalStoreFixture() throws -> (
+        localStore: LocalStore,
+        storageRoot: URL,
+        propertyID: UUID,
+        sessionID: UUID
+    ) {
+        let storageRoot = try makeTempStorageRoot()
+        let localStore = LocalStore(testStorageRootURL: storageRoot)
+        let orgID = UUID()
+        let propertyID = UUID()
+        let sessionID = UUID()
+
+        _ = try localStore.createOrganization(Organization(id: orgID, name: "Org"))
+        _ = try localStore.createProperty(
+            Property(
+                id: propertyID,
+                orgId: orgID,
+                name: "Property",
+                address: "123 Main"
+            )
+        )
+        _ = try localStore.upsertSession(
+            Session(
+                id: sessionID,
+                propertyID: propertyID,
+                startedAt: Date(timeIntervalSinceReferenceDate: 50),
+                status: .draft
+            )
+        )
+        try localStore.ensureSessionMetadata(
+            for: Session(
+                id: sessionID,
+                propertyID: propertyID,
+                startedAt: Date(timeIntervalSinceReferenceDate: 50),
+                status: .draft
+            )
+        )
+
+        return (localStore, storageRoot, propertyID, sessionID)
     }
 
     private func roundTrip(_ shot: ShotMetadata) throws -> ShotMetadata {
@@ -234,6 +289,210 @@ final class Phase2C1610BShotLifecycleTests: XCTestCase {
         XCTAssertEqual(decodedNewShot.supersedesShotID, olderShotID)
         XCTAssertNil(decodedNewShot.supersededByShotID)
         XCTAssertEqual(decodedNewShot.replacementReason, "Retake requested")
+    }
+
+    @MainActor
+    func testSameSessionRetakeReplacesCurrentShotWithoutLifecycleLinks() throws {
+        let fixture = try makeLocalStoreFixture()
+        let shotID = UUID()
+        let firstShot = makeShot(
+            shotID: shotID,
+            propertyID: fixture.propertyID,
+            sessionID: fixture.sessionID,
+            createdAt: Date(timeIntervalSinceReferenceDate: 100),
+            originalFilename: "\(shotID.uuidString).heic",
+            originalRelativePath: "Originals/\(shotID.uuidString).heic"
+        )
+        let retakenShot = makeShot(
+            shotID: shotID,
+            propertyID: fixture.propertyID,
+            sessionID: fixture.sessionID,
+            createdAt: Date(timeIntervalSinceReferenceDate: 200),
+            originalFilename: "\(shotID.uuidString).heic",
+            originalRelativePath: "Originals/\(shotID.uuidString).heic"
+        )
+
+        try fixture.localStore.upsertShot(
+            propertyID: fixture.propertyID,
+            sessionID: fixture.sessionID,
+            shot: firstShot,
+            matchMode: .append
+        )
+        try fixture.localStore.upsertShot(
+            propertyID: fixture.propertyID,
+            sessionID: fixture.sessionID,
+            shot: retakenShot,
+            matchMode: .append
+        )
+
+        let metadata = try fixture.localStore.loadSessionMetadata(
+            propertyID: fixture.propertyID,
+            sessionID: fixture.sessionID
+        )
+        let stored = try XCTUnwrap(metadata.shots.first { $0.shotID == shotID })
+
+        XCTAssertEqual(metadata.shots.count, 1)
+        XCTAssertEqual(stored.lifecycleState, .active)
+        XCTAssertNil(stored.supersedesShotID)
+        XCTAssertNil(stored.supersededByShotID)
+        XCTAssertNil(stored.replacementReason)
+        XCTAssertNil(stored.lifecycleUpdatedAt)
+    }
+
+    @MainActor
+    func testSameSessionGuidedRetakeDoesNotLeaveExtraActiveDuplicate() throws {
+        let fixture = try makeLocalStoreFixture()
+        let shotID = UUID()
+        let firstShot = makeShot(
+            shotID: shotID,
+            propertyID: fixture.propertyID,
+            sessionID: fixture.sessionID,
+            createdAt: Date(timeIntervalSinceReferenceDate: 100),
+            originalFilename: "\(shotID.uuidString).heic",
+            originalRelativePath: "Originals/\(shotID.uuidString).heic"
+        )
+        var retakenShot = makeShot(
+            shotID: shotID,
+            propertyID: fixture.propertyID,
+            sessionID: fixture.sessionID,
+            createdAt: Date(timeIntervalSinceReferenceDate: 200),
+            originalFilename: "\(shotID.uuidString).heic",
+            originalRelativePath: "Originals/\(shotID.uuidString).heic"
+        )
+        retakenShot.isGuided = true
+
+        try fixture.localStore.upsertShot(
+            propertyID: fixture.propertyID,
+            sessionID: fixture.sessionID,
+            shot: firstShot,
+            matchMode: .append
+        )
+        try fixture.localStore.upsertShot(
+            propertyID: fixture.propertyID,
+            sessionID: fixture.sessionID,
+            shot: retakenShot,
+            matchMode: .replaceGuidedKey
+        )
+
+        let metadata = try fixture.localStore.loadSessionMetadata(
+            propertyID: fixture.propertyID,
+            sessionID: fixture.sessionID
+        )
+
+        XCTAssertEqual(metadata.shots.count, 1)
+        XCTAssertEqual(metadata.shots.first?.shotID, shotID)
+        XCTAssertEqual(metadata.shots.filter(\.isActiveForDefaultWorkflows).count, 1)
+        XCTAssertNil(metadata.shots.first?.supersedesShotID)
+        XCTAssertNil(metadata.shots.first?.supersededByShotID)
+    }
+
+    @MainActor
+    func testGuidedLinkagePointsToCurrentRetakenImageWithoutLifecycleLinks() throws {
+        let fixture = try makeLocalStoreFixture()
+        let shotID = UUID()
+        let retaken = Shot(
+            id: shotID,
+            capturedAt: Date(timeIntervalSinceReferenceDate: 200),
+            imageLocalIdentifier: "Originals/\(shotID.uuidString).heic"
+        )
+        let guided = GuidedShot(
+            title: "North Overview",
+            shot: retaken,
+            isCompleted: true
+        )
+
+        try fixture.localStore.syncGuidedShotsToSessionMetadata(
+            propertyID: fixture.propertyID,
+            sessionID: fixture.sessionID,
+            guidedShots: [guided]
+        )
+
+        let metadata = try fixture.localStore.loadSessionMetadata(
+            propertyID: fixture.propertyID,
+            sessionID: fixture.sessionID
+        )
+
+        XCTAssertEqual(metadata.guidedShots.first?.shot?.id, shotID)
+        XCTAssertEqual(metadata.guidedShots.first?.shot?.imageLocalIdentifier, retaken.imageLocalIdentifier)
+        XCTAssertTrue(metadata.shots.allSatisfy { $0.supersedesShotID == nil && $0.supersededByShotID == nil })
+    }
+
+    @MainActor
+    func testFlaggedLinkageAndHistoryPointToCurrentRetakenImageWithoutLifecycleLinks() throws {
+        let fixture = try makeLocalStoreFixture()
+        let observationID = UUID()
+        let shotID = UUID()
+        let retaken = Shot(
+            id: shotID,
+            capturedAt: Date(timeIntervalSinceReferenceDate: 200),
+            imageLocalIdentifier: "Originals/\(shotID.uuidString).heic"
+        )
+        let event = ObservationHistoryEvent(
+            timestamp: retaken.capturedAt,
+            sessionID: fixture.sessionID,
+            kind: .retake,
+            shotID: shotID
+        )
+        let observation = Observation(
+            id: observationID,
+            propertyID: fixture.propertyID,
+            sessionID: fixture.sessionID,
+            linkedShotID: shotID,
+            historyEvents: [event],
+            shots: [retaken]
+        )
+
+        _ = try fixture.localStore.createObservation(observation)
+        let stored = try XCTUnwrap(
+            fixture.localStore.fetchObservations(propertyID: fixture.propertyID).first { $0.id == observationID }
+        )
+        let metadata = try fixture.localStore.loadSessionMetadata(
+            propertyID: fixture.propertyID,
+            sessionID: fixture.sessionID
+        )
+
+        XCTAssertEqual(stored.linkedShotID, shotID)
+        XCTAssertEqual(stored.historyEvents.last?.shotID, shotID)
+        XCTAssertEqual(stored.shots.last?.imageLocalIdentifier, retaken.imageLocalIdentifier)
+        XCTAssertTrue(metadata.shots.allSatisfy { $0.supersedesShotID == nil && $0.supersededByShotID == nil })
+    }
+
+    @MainActor
+    func testExportedSessionMetadataDoesNotIncludeDanglingSupersessionLinksForRoutineRetake() throws {
+        let fixture = try makeLocalStoreFixture()
+        let shotID = UUID()
+        try fixture.localStore.upsertShot(
+            propertyID: fixture.propertyID,
+            sessionID: fixture.sessionID,
+            shot: makeShot(
+                shotID: shotID,
+                propertyID: fixture.propertyID,
+                sessionID: fixture.sessionID,
+                createdAt: Date(timeIntervalSinceReferenceDate: 100)
+            ),
+            matchMode: .append
+        )
+        try fixture.localStore.upsertShot(
+            propertyID: fixture.propertyID,
+            sessionID: fixture.sessionID,
+            shot: makeShot(
+                shotID: shotID,
+                propertyID: fixture.propertyID,
+                sessionID: fixture.sessionID,
+                createdAt: Date(timeIntervalSinceReferenceDate: 200)
+            ),
+            matchMode: .append
+        )
+
+        let metadata = try fixture.localStore.loadSessionMetadata(
+            propertyID: fixture.propertyID,
+            sessionID: fixture.sessionID
+        )
+        let encoded = try JSONEncoder().encode(metadata)
+        let decoded = try JSONDecoder().decode(SessionMetadata.self, from: encoded)
+
+        XCTAssertEqual(decoded.shots.count, 1)
+        XCTAssertTrue(decoded.shots.allSatisfy { $0.supersedesShotID == nil && $0.supersededByShotID == nil })
     }
 
     func testShotLifecycleMigrationAddsNullSafeRemoteColumns() throws {
@@ -445,6 +704,32 @@ final class Phase2C1610BShotLifecycleTests: XCTestCase {
         XCTAssertNil(payload["hidden_from_reports"])
         XCTAssertNil(payload["hidden_from_gallery"])
         XCTAssertNil(payload["lifecycle_updated_at"])
+    }
+
+    func testNewActiveReplacementPayloadLinksBackWithoutStorageFields() throws {
+        let appState = AppState(disableCloudBackupForTests: true)
+        let oldShotID = UUID()
+        let shot = makeShot(
+            supersedesShotID: oldShotID,
+            replacementReason: "Retake"
+        )
+
+        let payload = try appState._debugEncodeShotRichMetadataPayloadForTests(
+            orgID: UUID(),
+            propertyID: UUID(),
+            sessionID: UUID(),
+            shot: shot,
+            includeInsertDefaults: false,
+            updatedBy: UUID()
+        )
+
+        XCTAssertEqual(payload["lifecycle_state"] as? String, "active")
+        XCTAssertEqual(payload["supersedes_shot_id"] as? String, oldShotID.uuidString)
+        XCTAssertEqual(payload["replacement_reason"] as? String, "Retake")
+        XCTAssertNil(payload["storage_bucket"])
+        XCTAssertNil(payload["storage_path"])
+        XCTAssertNil(payload["checksum_sha256"])
+        XCTAssertNil(payload["byte_size"])
     }
 
     func testSelfSupersessionIsInvalid() {

@@ -1930,7 +1930,17 @@ final class LocalStore {
                 longitude: shot.longitude,
                 accuracyMeters: shot.accuracyMeters,
                 imageWidth: shot.imageWidth,
-                imageHeight: shot.imageHeight
+                imageHeight: shot.imageHeight,
+                lifecycleState: shot.lifecycleState,
+                retiredAt: shot.retiredAt,
+                retiredReason: shot.retiredReason,
+                retiredByUserID: shot.retiredByUserID,
+                supersededByShotID: shot.supersededByShotID,
+                supersedesShotID: shot.supersedesShotID,
+                replacementReason: shot.replacementReason,
+                hiddenFromReports: shot.hiddenFromReports,
+                hiddenFromGallery: shot.hiddenFromGallery,
+                lifecycleUpdatedAt: shot.lifecycleUpdatedAt
             )
             metadata.shots = LocalConflictRules.applyAppendOnlyMediaRef(
                 current: metadata.shots,
@@ -1995,7 +2005,17 @@ final class LocalStore {
                 longitude: shot.longitude,
                 accuracyMeters: shot.accuracyMeters,
                 imageWidth: shot.imageWidth,
-                imageHeight: shot.imageHeight
+                imageHeight: shot.imageHeight,
+                lifecycleState: shot.lifecycleState,
+                retiredAt: shot.retiredAt,
+                retiredReason: shot.retiredReason,
+                retiredByUserID: shot.retiredByUserID,
+                supersededByShotID: shot.supersededByShotID,
+                supersedesShotID: shot.supersedesShotID,
+                replacementReason: shot.replacementReason,
+                hiddenFromReports: shot.hiddenFromReports,
+                hiddenFromGallery: shot.hiddenFromGallery,
+                lifecycleUpdatedAt: shot.lifecycleUpdatedAt
             )
             metadata.shots.remove(at: index)
             metadata.shots = LocalConflictRules.applyAppendOnlyMediaRef(
@@ -4329,7 +4349,17 @@ final class LocalStore {
             longitude: shot.longitude,
             accuracyMeters: shot.accuracyMeters,
             imageWidth: shot.imageWidth,
-            imageHeight: shot.imageHeight
+            imageHeight: shot.imageHeight,
+            lifecycleState: shot.lifecycleState,
+            retiredAt: shot.retiredAt,
+            retiredReason: shot.retiredReason,
+            retiredByUserID: shot.retiredByUserID,
+            supersededByShotID: shot.supersededByShotID,
+            supersedesShotID: shot.supersedesShotID,
+            replacementReason: shot.replacementReason,
+            hiddenFromReports: shot.hiddenFromReports,
+            hiddenFromGallery: shot.hiddenFromGallery,
+            lifecycleUpdatedAt: shot.lifecycleUpdatedAt
         )
     }
 
@@ -4394,7 +4424,10 @@ final class LocalStore {
     private func deduplicatedShots(_ shots: [ShotMetadata]) -> [ShotMetadata] {
         var byIdentity: [String: ShotMetadata] = [:]
         for shot in shots {
-            let identity = logicalShotIdentity(for: shot)
+            var identity = logicalShotIdentity(for: shot)
+            if shot.isHistorical || shot.supersededByShotID != nil || shot.supersedesShotID != nil {
+                identity += "|shot|\(shot.shotID.uuidString.lowercased())"
+            }
             guard let existing = byIdentity[identity] else {
                 byIdentity[identity] = shot
                 continue
