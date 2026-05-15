@@ -19,6 +19,7 @@ final class Phase2C1610BShotLifecycleTests: XCTestCase {
         detailType: String = "Overview",
         angleIndex: Int = 1,
         shotKey: String? = nil,
+        isGuided: Bool = false,
         originalFilename: String = "shot.heic",
         originalRelativePath: String = "Originals/shot.heic",
         lifecycleState: ShotLifecycleState = .active,
@@ -51,7 +52,7 @@ final class Phase2C1610BShotLifecycleTests: XCTestCase {
                 detailType: detailType,
                 angleIndex: angleIndex
             ),
-            isGuided: false,
+            isGuided: isGuided,
             isFlagged: false,
             issueID: nil,
             issueStatus: nil,
@@ -604,6 +605,230 @@ final class Phase2C1610BShotLifecycleTests: XCTestCase {
         XCTAssertEqual(stored.retiredAt, retiredAt)
         XCTAssertEqual(stored.retiredReason, "Not relevant")
         XCTAssertEqual(stored.retiredByUserID, retiredBy)
+    }
+
+    @MainActor
+    func testRetireGuidedShotRetiresLinkedShotAndHidesGuidedFromActiveFlow() throws {
+        let fixture = try makeLocalStoreFixture()
+        let shotID = UUID()
+        let retiredAt = Date(timeIntervalSinceReferenceDate: 760)
+        let originalFilename = "\(shotID.uuidString).heic"
+        let shot = Shot(
+            id: shotID,
+            capturedAt: Date(timeIntervalSinceReferenceDate: 120),
+            imageLocalIdentifier: "Originals/\(originalFilename)"
+        )
+        let guided = GuidedShot(
+            id: UUID(),
+            title: "North Overview",
+            building: "Building",
+            targetElevation: "North",
+            detailType: "Overview",
+            angleIndex: 1,
+            shot: shot,
+            isCompleted: true
+        )
+
+        try fixture.localStore.upsertShot(
+            propertyID: fixture.propertyID,
+            sessionID: fixture.sessionID,
+            shot: makeShot(
+                shotID: shotID,
+                propertyID: fixture.propertyID,
+                sessionID: fixture.sessionID,
+                isGuided: true,
+                originalFilename: originalFilename,
+                originalRelativePath: "Originals/\(originalFilename)"
+            ),
+            matchMode: .append
+        )
+        try fixture.localStore.saveGuidedShots([guided], propertyID: fixture.propertyID)
+        try fixture.localStore.syncGuidedShotsToSessionMetadata(
+            propertyID: fixture.propertyID,
+            sessionID: fixture.sessionID,
+            guidedShots: [guided]
+        )
+
+        let retiredGuided = try fixture.localStore.retireGuidedShot(
+            propertyID: fixture.propertyID,
+            sessionID: fixture.sessionID,
+            guidedShotID: guided.id,
+            reason: "duplicate",
+            retiredAt: retiredAt
+        )
+        let allGuided = try fixture.localStore.fetchGuidedShots(propertyID: fixture.propertyID)
+        let storedGuided = try XCTUnwrap(allGuided.first { $0.id == guided.id })
+        let metadata = try fixture.localStore.loadSessionMetadata(
+            propertyID: fixture.propertyID,
+            sessionID: fixture.sessionID
+        )
+        let storedShot = try XCTUnwrap(metadata.shots.first { $0.shotID == shotID })
+
+        XCTAssertEqual(retiredGuided.status, .retired)
+        XCTAssertTrue(storedGuided.isRetired)
+        XCTAssertEqual(storedGuided.status, .retired)
+        XCTAssertEqual(storedGuided.retiredAt, retiredAt)
+        XCTAssertEqual(storedGuided.retiredInSessionID, fixture.sessionID)
+        XCTAssertTrue(allGuided.filter { !$0.isRetired && $0.status != .retired }.isEmpty)
+        XCTAssertEqual(storedShot.lifecycleState, .retired)
+        XCTAssertEqual(storedShot.retiredReason, "duplicate")
+        XCTAssertEqual(storedShot.retiredAt, retiredAt)
+        XCTAssertFalse(storedShot.shouldAppearInDefaultGallery)
+        XCTAssertEqual(metadata.guidedShots.first?.status, .retired)
+    }
+
+    @MainActor
+    func testRetirePendingGuidedShotWithoutPhotoSucceedsWithReason() throws {
+        let fixture = try makeLocalStoreFixture()
+        let retiredAt = Date(timeIntervalSinceReferenceDate: 765)
+        let guided = GuidedShot(
+            id: UUID(),
+            title: "South Context",
+            building: "Building",
+            targetElevation: "South",
+            detailType: "Context",
+            angleIndex: 1,
+            shot: nil,
+            isCompleted: false
+        )
+
+        try fixture.localStore.saveGuidedShots([guided], propertyID: fixture.propertyID)
+
+        XCTAssertThrowsError(
+            try fixture.localStore.retireGuidedShot(
+                propertyID: fixture.propertyID,
+                sessionID: fixture.sessionID,
+                guidedShotID: guided.id,
+                reason: "   "
+            )
+        ) { error in
+            guard case LocalStore.StoreError.shotLifecycleBlankReason = error else {
+                return XCTFail("Expected blank-reason lifecycle block, got \(error)")
+            }
+        }
+
+        let retired = try fixture.localStore.retireGuidedShot(
+            propertyID: fixture.propertyID,
+            sessionID: fixture.sessionID,
+            guidedShotID: guided.id,
+            reason: "not relevant",
+            retiredAt: retiredAt
+        )
+        let allGuided = try fixture.localStore.fetchGuidedShots(propertyID: fixture.propertyID)
+        let metadata = try fixture.localStore.loadSessionMetadata(
+            propertyID: fixture.propertyID,
+            sessionID: fixture.sessionID
+        )
+
+        XCTAssertEqual(retired.status, .retired)
+        XCTAssertTrue(retired.isRetired)
+        XCTAssertNil(retired.shot)
+        XCTAssertFalse(retired.isCompleted)
+        XCTAssertEqual(retired.retiredAt, retiredAt)
+        XCTAssertEqual(allGuided.filter { !$0.isRetired && $0.status != .retired }.count, 0)
+        XCTAssertTrue(metadata.shots.isEmpty)
+        XCTAssertEqual(metadata.guidedShots.first?.status, .retired)
+    }
+
+    @MainActor
+    func testRestoreRetiredGuidedShotRestoresLinkedShotToActiveFlow() throws {
+        let fixture = try makeLocalStoreFixture()
+        let shotID = UUID()
+        let retiredAt = Date(timeIntervalSinceReferenceDate: 770)
+        let restoredAt = Date(timeIntervalSinceReferenceDate: 780)
+        let shot = Shot(
+            id: shotID,
+            capturedAt: Date(timeIntervalSinceReferenceDate: 120),
+            imageLocalIdentifier: "Originals/\(shotID.uuidString).heic"
+        )
+        let guided = GuidedShot(
+            id: UUID(),
+            title: "North Overview",
+            building: "Building",
+            targetElevation: "North",
+            detailType: "Overview",
+            angleIndex: 1,
+            shot: shot,
+            isCompleted: true
+        )
+
+        try fixture.localStore.upsertShot(
+            propertyID: fixture.propertyID,
+            sessionID: fixture.sessionID,
+            shot: makeShot(
+                shotID: shotID,
+                propertyID: fixture.propertyID,
+                sessionID: fixture.sessionID,
+                isGuided: true,
+                originalFilename: "\(shotID.uuidString).heic",
+                originalRelativePath: "Originals/\(shotID.uuidString).heic"
+            ),
+            matchMode: .append
+        )
+        try fixture.localStore.saveGuidedShots([guided], propertyID: fixture.propertyID)
+        try fixture.localStore.retireGuidedShot(
+            propertyID: fixture.propertyID,
+            sessionID: fixture.sessionID,
+            guidedShotID: guided.id,
+            reason: "duplicate",
+            retiredAt: retiredAt
+        )
+
+        let restoredGuided = try fixture.localStore.restoreRetiredGuidedShot(
+            propertyID: fixture.propertyID,
+            sessionID: fixture.sessionID,
+            guidedShotID: guided.id,
+            restoredAt: restoredAt
+        )
+        let allGuided = try fixture.localStore.fetchGuidedShots(propertyID: fixture.propertyID)
+        let storedGuided = try XCTUnwrap(allGuided.first { $0.id == guided.id })
+        let metadata = try fixture.localStore.loadSessionMetadata(
+            propertyID: fixture.propertyID,
+            sessionID: fixture.sessionID
+        )
+        let storedShot = try XCTUnwrap(metadata.shots.first { $0.shotID == shotID })
+
+        XCTAssertEqual(restoredGuided.status, .active)
+        XCTAssertFalse(storedGuided.isRetired)
+        XCTAssertTrue(storedGuided.isCompleted)
+        XCTAssertEqual(allGuided.filter { !$0.isRetired && $0.status != .retired }.count, 1)
+        XCTAssertEqual(storedShot.lifecycleState, .active)
+        XCTAssertEqual(storedShot.retiredAt, retiredAt)
+        XCTAssertEqual(storedShot.retiredReason, "duplicate")
+        XCTAssertEqual(storedShot.lifecycleUpdatedAt, restoredAt)
+        XCTAssertTrue(storedShot.shouldAppearInDefaultGallery)
+        XCTAssertEqual(metadata.guidedShots.first?.status, .active)
+    }
+
+    @MainActor
+    func testRetireGuidedShotBlockedForCompletedSealedSession() throws {
+        let fixture = try makeLocalStoreFixture()
+        let guided = GuidedShot(title: "North Overview")
+        try fixture.localStore.saveGuidedShots([guided], propertyID: fixture.propertyID)
+        _ = try fixture.localStore.upsertSession(
+            Session(
+                id: fixture.sessionID,
+                propertyID: fixture.propertyID,
+                startedAt: Date(timeIntervalSinceReferenceDate: 50),
+                status: .completed,
+                endedAt: Date(timeIntervalSinceReferenceDate: 60),
+                isSealed: true
+            )
+        )
+
+        XCTAssertThrowsError(
+            try fixture.localStore.retireGuidedShot(
+                propertyID: fixture.propertyID,
+                sessionID: fixture.sessionID,
+                guidedShotID: guided.id,
+                reason: "duplicate"
+            )
+        ) { error in
+            guard case LocalStore.StoreError.shotLifecycleBlockedForSealedSession(let blockedSessionID) = error else {
+                return XCTFail("Expected sealed-session lifecycle block, got \(error)")
+            }
+            XCTAssertEqual(blockedSessionID, fixture.sessionID)
+        }
     }
 
     @MainActor

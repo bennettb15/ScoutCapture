@@ -544,10 +544,12 @@ final class ReportLibraryModel: ObservableObject {
         // Fast path: build the gallery list from session metadata without touching image bytes.
         // This keeps current/previous toggles responsive even when iCloud files are cold.
         var out: [ReportAsset] = []
-        if let metadata = try? localStore.loadSessionMetadata(propertyID: propertyID, sessionID: sessionID),
-           !metadata.shots.isEmpty {
+        let loadedMetadata = try? localStore.loadSessionMetadata(propertyID: propertyID, sessionID: sessionID)
+        let hasMetadataRows = !(loadedMetadata?.shots.isEmpty ?? true)
+        if let metadata = loadedMetadata, hasMetadataRows {
             var missingRequests: [AppState.OperationalMediaHydrationRequest] = []
             out = metadata.shots
+                .filter { $0.isActiveForDefaultWorkflows }
                 .sorted { lhs, rhs in
                     if lhs.createdAt != rhs.createdAt { return lhs.createdAt < rhs.createdAt }
                     return lhs.shotID.uuidString < rhs.shotID.uuidString
@@ -616,7 +618,7 @@ final class ReportLibraryModel: ObservableObject {
         }
 
         // Fallback for older/missing metadata: enumerate originals folder, still avoiding dimension reads.
-        if out.isEmpty, fileManager.fileExists(atPath: originals.path) {
+        if out.isEmpty, !hasMetadataRows, fileManager.fileExists(atPath: originals.path) {
             let urls = (try? fileManager.contentsOfDirectory(
                 at: originals,
                 includingPropertiesForKeys: [.creationDateKey, .contentModificationDateKey],
@@ -1695,6 +1697,7 @@ private struct ReportPhotoViewer: View {
     let metadataSessionID: UUID?
     @ObservedObject var cache: AssetImageCache
     let viewerToken: Int
+    let onLifecycleChange: (() -> Void)?
 
     @Environment(\.dismiss) private var dismiss
     @EnvironmentObject private var appState: AppState
@@ -1783,6 +1786,10 @@ private struct ReportPhotoViewer: View {
     @State private var shotMetadataByKey: [String: ShotMetadata] = [:]
     @State private var shotMetadataByShotID: [UUID: ShotMetadata] = [:]
     @State private var previousMetadataReady: Bool = false
+    @State private var retireSheetShot: ShotMetadata? = nil
+    @State private var restoreConfirmShot: ShotMetadata? = nil
+    @State private var lifecycleErrorMessage: String? = nil
+    @State private var showLifecycleError: Bool = false
 
     // Per-page zoom reset tokens.
     // When you swipe away from a page, we increment that page's token so returning to it is back at fit.
@@ -1796,7 +1803,8 @@ private struct ReportPhotoViewer: View {
         metadataPropertyID: UUID? = nil,
         metadataSessionID: UUID? = nil,
         cache: AssetImageCache,
-        viewerToken: Int
+        viewerToken: Int,
+        onLifecycleChange: (() -> Void)? = nil
     ) {
         self.title = title
         self.assets = assets
@@ -1806,6 +1814,7 @@ private struct ReportPhotoViewer: View {
         self.metadataSessionID = metadataSessionID
         self.cache = cache
         self.viewerToken = viewerToken
+        self.onLifecycleChange = onLifecycleChange
         _index = State(initialValue: min(max(0, startIndex), max(0, assets.count - 1)))
     }
        
@@ -1930,6 +1939,44 @@ private struct ReportPhotoViewer: View {
         .onChange(of: viewerToken) { _, _ in
             loadShotMetadataCache()
         }
+        .sheet(item: $retireSheetShot) { shot in
+            RetireShotSheet(
+                shot: shot,
+                requiresEvidenceAcknowledgement: retiringOnlyActiveLinkedEvidence(shot),
+                onCancel: {
+                    retireSheetShot = nil
+                },
+                onConfirm: { reason in
+                    retireSheetShot = nil
+                    retireShot(shot, reason: reason)
+                }
+            )
+        }
+        .confirmationDialog(
+            "Restore Shot?",
+            isPresented: Binding(
+                get: { restoreConfirmShot != nil },
+                set: { if !$0 { restoreConfirmShot = nil } }
+            ),
+            titleVisibility: .visible
+        ) {
+            Button("Restore Shot") {
+                if let shot = restoreConfirmShot {
+                    restoreConfirmShot = nil
+                    restoreShot(shot)
+                }
+            }
+            Button("Cancel", role: .cancel) {
+                restoreConfirmShot = nil
+            }
+        } message: {
+            Text("This returns the shot to active lifecycle state. It does not move or recreate media files.")
+        }
+        .alert("Shot Lifecycle Failed", isPresented: $showLifecycleError) {
+            Button("OK", role: .cancel) { }
+        } message: {
+            Text(lifecycleErrorMessage ?? "Unable to update shot lifecycle.")
+        }
     }
 
     private func filmStrip() -> some View {
@@ -1947,6 +1994,8 @@ private struct ReportPhotoViewer: View {
         let shotLabel: String
         let flaggedNote: String
         let photoCount: String
+        let isRetired: Bool
+        let retiredReason: String?
     }
 
     private var isPreviousMetadataMode: Bool {
@@ -1966,7 +2015,9 @@ private struct ReportPhotoViewer: View {
                 propertyName: propertyName,
                 shotLabel: "Loading...",
                 flaggedNote: "",
-                photoCount: photoCount
+                photoCount: photoCount,
+                isRetired: false,
+                retiredReason: nil
             )
         }
 
@@ -2004,14 +2055,22 @@ private struct ReportPhotoViewer: View {
 
         let photoCount = "Photo \(index + 1) of \(max(assets.count, 1))"
 
-        return HeaderMeta(propertyName: propertyName, shotLabel: shotLabel, flaggedNote: flaggedNote, photoCount: photoCount)
+        return HeaderMeta(
+            propertyName: propertyName,
+            shotLabel: shotLabel,
+            flaggedNote: flaggedNote,
+            photoCount: photoCount,
+            isRetired: metadata?.isRetired == true,
+            retiredReason: metadata?.retiredReason
+        )
     }
 
     @ViewBuilder
     private func headerOverlay() -> some View {
         let safeIndex = min(max(0, index), max(0, assets.count - 1))
-        let meta = assets.isEmpty ? HeaderMeta(propertyName: title, shotLabel: "Shot", flaggedNote: "", photoCount: "Photo 0 of 0")
+        let meta = assets.isEmpty ? HeaderMeta(propertyName: title, shotLabel: "Shot", flaggedNote: "", photoCount: "Photo 0 of 0", isRetired: false, retiredReason: nil)
                                 : headerMeta(for: assets[safeIndex], index: safeIndex)
+        let currentMetadata = assets.isEmpty ? nil : metadataForAsset(assets[safeIndex])
 
         ZStack(alignment: .top) {
             // Background gradient should never intercept gestures.
@@ -2054,9 +2113,44 @@ private struct ReportPhotoViewer: View {
                         .foregroundColor(.white.opacity(0.78))
                         .lineLimit(1)
                         .minimumScaleFactor(0.75)
+
+                    if meta.isRetired {
+                        Text(retiredStatusText(reason: meta.retiredReason))
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundColor(.white)
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.75)
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 4)
+                            .background(Color.orange.opacity(0.78))
+                            .clipShape(Capsule())
+                    }
                 }
 
                 Spacer(minLength: 0)
+
+                if let currentMetadata, canShowLifecycleAction(for: currentMetadata) {
+                    Button {
+                        if currentMetadata.isRetired {
+                            restoreConfirmShot = currentMetadata
+                        } else {
+                            retireSheetShot = currentMetadata
+                        }
+                    } label: {
+                        Text(currentMetadata.isRetired ? "Restore" : "Retire")
+                            .font(.system(size: 17, weight: .medium))
+                            .foregroundColor(.white)
+                            .frame(minHeight: 42)
+                            .padding(.horizontal, 14)
+                            .background((currentMetadata.isRetired ? Color.green : Color.orange).opacity(0.72))
+                            .clipShape(Capsule())
+                            .overlay(
+                                Capsule()
+                                    .stroke(Color.white.opacity(0.28), lineWidth: 1)
+                            )
+                    }
+                    .buttonStyle(.plain)
+                }
 
                 Button {
                     dismiss()
@@ -2081,7 +2175,7 @@ private struct ReportPhotoViewer: View {
         }
         // Critical: do NOT make this a full-screen view.
         // Keeping it to its intrinsic height prevents it from competing with TabView paging.
-        .frame(height: 96, alignment: .top)
+        .frame(height: meta.isRetired ? 126 : 96, alignment: .top)
     }
 
     private func loadShotMetadataCache() {
@@ -2155,6 +2249,261 @@ private struct ReportPhotoViewer: View {
             }
         }
         return nil
+    }
+
+    private func canShowLifecycleAction(for shot: ShotMetadata) -> Bool {
+        guard !isPreviousMetadataMode else { return false }
+        guard let currentSession = appState.currentSession else { return false }
+        let displayedSessionID = metadataSessionID ?? currentSession.id
+        guard displayedSessionID == currentSession.id else { return false }
+        guard shot.sessionID == currentSession.id else { return false }
+        guard !shot.isFlagged else { return false }
+        guard shot.lifecycleState == .active || shot.lifecycleState == .retired else { return false }
+        return currentSession.status == .draft && !currentSession.isSealed
+    }
+
+    private func retiredStatusText(reason: String?) -> String {
+        let trimmed = reason?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return trimmed.isEmpty ? "Retired" : "Retired: \(trimmed)"
+    }
+
+    private func retiringOnlyActiveLinkedEvidence(_ shot: ShotMetadata) -> Bool {
+        guard let propertyID = metadataPropertyID ?? appState.selectedPropertyID else { return false }
+        guard shot.isActiveForDefaultWorkflows else { return false }
+        let observations = (try? localStore.fetchObservations(propertyID: propertyID)) ?? []
+        let activeMetadataByID = shotMetadataByShotID.filter { _, metadata in
+            metadata.isActiveForDefaultWorkflows
+        }
+
+        return observations.contains { observation in
+            guard observation.status == .active else { return false }
+            guard observation.linkedShotID == shot.shotID else { return false }
+            let otherActiveEvidence = observation.shots.contains { linkedShot in
+                guard linkedShot.id != shot.shotID else { return false }
+                return activeMetadataByID[linkedShot.id] != nil
+            }
+            return !otherActiveEvidence
+        }
+    }
+
+    private func retireShot(_ shot: ShotMetadata, reason: String) {
+        guard canShowLifecycleAction(for: shot) else {
+            presentLifecycleError(LocalStore.StoreError.shotLifecycleBlockedForSealedSession(shot.sessionID))
+            return
+        }
+        do {
+            _ = try localStore.retireShot(
+                propertyID: shot.propertyID,
+                sessionID: shot.sessionID,
+                shotID: shot.shotID,
+                reason: reason,
+                retiredByUserID: appState.authenticatedSupabaseUser?.id
+            )
+            retireMatchingGuidedItemIfNeeded(for: shot, reason: reason)
+            loadShotMetadataCache()
+            onLifecycleChange?()
+        } catch {
+            presentLifecycleError(error)
+        }
+    }
+
+    private func restoreShot(_ shot: ShotMetadata) {
+        guard canShowLifecycleAction(for: shot) else {
+            presentLifecycleError(LocalStore.StoreError.shotLifecycleBlockedForSealedSession(shot.sessionID))
+            return
+        }
+        do {
+            _ = try localStore.restoreRetiredShot(
+                propertyID: shot.propertyID,
+                sessionID: shot.sessionID,
+                shotID: shot.shotID
+            )
+            restoreMatchingGuidedItemIfNeeded(for: shot)
+            loadShotMetadataCache()
+            onLifecycleChange?()
+        } catch {
+            presentLifecycleError(error)
+        }
+    }
+
+    private func retireMatchingGuidedItemIfNeeded(for shot: ShotMetadata, reason: String) {
+        guard shot.isGuided else { return }
+        do {
+            let guided = try localStore.fetchGuidedShots(propertyID: shot.propertyID)
+            guard let matching = guided.first(where: { guidedShot in
+                guidedShot.shot?.id == shot.shotID ||
+                guidedShot.id == shot.shotID ||
+                guidedKey(guidedShot) == shot.shotKey
+            }) else { return }
+            _ = try localStore.retireGuidedShot(
+                propertyID: shot.propertyID,
+                sessionID: shot.sessionID,
+                guidedShotID: matching.id,
+                reason: reason,
+                retiredByUserID: appState.authenticatedSupabaseUser?.id
+            )
+        } catch {
+            presentLifecycleError(error)
+        }
+    }
+
+    private func restoreMatchingGuidedItemIfNeeded(for shot: ShotMetadata) {
+        guard shot.isGuided else { return }
+        do {
+            let guided = try localStore.fetchGuidedShots(propertyID: shot.propertyID)
+            guard let matching = guided.first(where: { guidedShot in
+                guidedShot.shot?.id == shot.shotID ||
+                guidedShot.id == shot.shotID ||
+                guidedKey(guidedShot) == shot.shotKey
+            }) else { return }
+            _ = try localStore.restoreRetiredGuidedShot(
+                propertyID: shot.propertyID,
+                sessionID: shot.sessionID,
+                guidedShotID: matching.id
+            )
+        } catch {
+            presentLifecycleError(error)
+        }
+    }
+
+    private func guidedKey(_ guidedShot: GuidedShot) -> String {
+        ShotMetadata.makeShotKey(
+            building: guidedShot.building ?? "",
+            elevation: guidedShot.targetElevation ?? "",
+            detailType: guidedShot.detailType ?? "",
+            angleIndex: max(1, guidedShot.angleIndex ?? 1)
+        )
+    }
+
+    private func presentLifecycleError(_ error: Error) {
+        lifecycleErrorMessage = lifecycleErrorText(error)
+        showLifecycleError = true
+    }
+
+    private func lifecycleErrorText(_ error: Error) -> String {
+        guard let storeError = error as? LocalStore.StoreError else {
+            return error.localizedDescription
+        }
+        switch storeError {
+        case .shotLifecycleBlockedForSealedSession:
+            return "Shot retirement is only available in draft, unsealed sessions."
+        case .shotNotFound:
+            return "That shot no longer exists in this session."
+        case .guidedShotNotFound:
+            return "That guided checkpoint no longer exists."
+        case .guidedShotLifecycleInvalidState:
+            return "That guided checkpoint cannot be changed from its current lifecycle state."
+        case .shotLifecycleBlankReason:
+            return "Choose a retirement reason before retiring the shot."
+        case .shotLifecycleInvalidState(_, let expected, let actual):
+            switch (expected, actual) {
+            case (.active, .retired):
+                return "This shot is already retired."
+            case (.retired, .active):
+                return "This shot is already active."
+            default:
+                return "This shot cannot be changed from \(actual.rawValue) to \(expected.rawValue)."
+            }
+        case .sessionNotFound:
+            return "The current session could not be found."
+        default:
+            return "Unable to update shot lifecycle."
+        }
+    }
+
+    private enum RetireReasonPreset: String, CaseIterable, Identifiable {
+        case accidentalCapture = "accidental capture"
+        case duplicate = "duplicate"
+        case obstructedUnusable = "obstructed/unusable"
+        case privacySensitive = "privacy/sensitive"
+        case notRelevant = "not relevant"
+        case other = "other"
+
+        var id: String { rawValue }
+        var title: String { rawValue }
+    }
+
+    private struct RetireShotSheet: View {
+        let shot: ShotMetadata
+        let requiresEvidenceAcknowledgement: Bool
+        let onCancel: () -> Void
+        let onConfirm: (String) -> Void
+
+        @State private var selectedReason: RetireReasonPreset = .accidentalCapture
+        @State private var otherNote: String = ""
+        @State private var acknowledgedEvidenceWarning: Bool = false
+
+        private var normalizedOtherNote: String? {
+            let trimmed = otherNote.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty ? nil : trimmed
+        }
+
+        private var retirementReason: String? {
+            if selectedReason == .other {
+                guard let normalizedOtherNote else { return nil }
+                return "other: \(normalizedOtherNote)"
+            }
+            return selectedReason.rawValue
+        }
+
+        private var canRetire: Bool {
+            retirementReason != nil && (!requiresEvidenceAcknowledgement || acknowledgedEvidenceWarning)
+        }
+
+        var body: some View {
+            NavigationStack {
+                Form {
+                    Section {
+                        Picker("Reason", selection: $selectedReason) {
+                            ForEach(RetireReasonPreset.allCases) { reason in
+                                Text(reason.title).tag(reason)
+                            }
+                        }
+                        .pickerStyle(.inline)
+
+                        if selectedReason == .other {
+                            TextField("Required note", text: $otherNote, axis: .vertical)
+                                .lineLimit(2...4)
+                        }
+                    } header: {
+                        Text("Retirement Reason")
+                    }
+
+                    if requiresEvidenceAcknowledgement {
+                        Section {
+                            Toggle(isOn: $acknowledgedEvidenceWarning) {
+                                Text("I understand this is the only active linked evidence for its flagged issue.")
+                            }
+                        } header: {
+                            Text("Flagged Issue Warning")
+                        } footer: {
+                            Text("Retiring is allowed, but the issue may be left without active linked evidence until another photo is captured or restored.")
+                        }
+                    }
+
+                    Section {
+                        Text("The shot metadata and original media file will be preserved. This does not delete files. Retired shots are hidden from the normal gallery.")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .navigationTitle("Retire Shot")
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button("Cancel", action: onCancel)
+                    }
+                    ToolbarItem(placement: .confirmationAction) {
+                        Button("Retire", role: .destructive) {
+                            if let retirementReason {
+                                onConfirm(retirementReason)
+                            }
+                        }
+                        .disabled(!canRetire)
+                    }
+                }
+            }
+        }
     }
 
     private struct FilmStrip: View {
@@ -3284,6 +3633,7 @@ struct ContentView: View {
     @State private var flaggedUpdatedIDsThisSession: Set<UUID> = []
     @State private var showGuidedChecklist: Bool = false
     @State private var guidedShots: [GuidedShot] = []
+    @State private var retiredGuidedShots: [GuidedShot] = []
     @State private var guidedResolvedThumbnailPathByID: [UUID: String] = [:]
     @State private var guidedReferencePathByID: [UUID: String] = [:]
     @State private var flaggedResolvedThumbnailPathByID: [UUID: String] = [:]
@@ -5775,6 +6125,12 @@ struct ContentView: View {
                     onAfterDelete: {
                         refreshActiveIssues()
                         refreshGuidedShots()
+                    },
+                    onAfterLifecycleChange: {
+                        refreshActiveIssues()
+                        refreshGuidedShots()
+                        gridThumbnailRefreshToken = UUID()
+                        guidedThumbnailRefreshToken = UUID()
                     }
                 )
             }
@@ -6089,9 +6445,6 @@ struct ContentView: View {
             buildingCodeForOption: buildingCode(from:),
             buildingDisplayNameForOption: buildingDisplayName(for:),
             cache: imageCache,
-            onRefresh: {
-                refreshActiveIssues()
-            },
             onSelectIssue: { observation in
                 beginFlaggedIssueInteraction(observation)
             },
@@ -6112,11 +6465,13 @@ struct ContentView: View {
     private var guidedChecklistSheetView: some View {
         GuidedChecklistOverlay(
             guidedShots: guidedShots,
+            retiredGuidedShots: retiredGuidedShots,
             resolvedThumbnailPathByID: guidedResolvedThumbnailPathByID,
             referencePathByID: guidedReferencePathByID,
             currentSessionID: appState.currentSession?.id,
             currentSessionStartedAt: appState.currentSession?.startedAt,
             currentSessionEndedAt: appState.currentSession?.endedAt,
+            canChangeShotLifecycle: appState.currentSession?.status == .draft && appState.currentSession?.isSealed == false,
             isBaselineSession: isCurrentSessionBaselineFromPersisted,
             allowReferenceFallback: shouldAllowChecklistReferenceFallback,
             captureProfile: captureProfile,
@@ -6128,9 +6483,6 @@ struct ContentView: View {
             cache: imageCache,
             onClose: {
                 showGuidedChecklist = false
-            },
-            onRefresh: {
-                refreshGuidedShots()
             },
             onSelectGuided: { guidedShot in
                 armGuidedShot(guidedShot)
@@ -6144,8 +6496,11 @@ struct ContentView: View {
             onRetake: { guidedShot in
                 armGuidedRetake(guidedShot)
             },
-            onRetire: { guidedShot in
-                retireGuidedShot(guidedShot)
+            onRetire: { guidedShot, reason in
+                retireGuidedShot(guidedShot, reason: reason)
+            },
+            onRestoreRetired: { guidedShot in
+                restoreRetiredGuidedShot(guidedShot)
             },
             onReclassify: { guidedShot, building, elevation, detailType in
                 reclassifyGuidedShot(
@@ -10009,6 +10364,7 @@ extension ContentView {
     private func refreshGuidedShots() {
         guard let propertyID = appState.selectedPropertyID else {
             guidedShots = []
+            retiredGuidedShots = []
             guidedResolvedThumbnailPathByID = [:]
             guidedReferencePathByID = [:]
             activeSessionShotIDs = []
@@ -10032,6 +10388,7 @@ extension ContentView {
                 sessionID: activeSessionID,
                 baselineState: baselineState
             )
+            retiredGuidedShots = retiredGuidedShotsForProperty(propertyID)
             guidedResolvedThumbnailPathByID = [:]
             guidedReferencePathByID = [:]
             if armedGuidedShotID != nil || armedGuidedRetakeShotID != nil {
@@ -10158,6 +10515,7 @@ extension ContentView {
         }
         activeSessionShotIDs = sessionShotIDs
         guidedShots = fetchedGuidedShots
+        retiredGuidedShots = retiredGuidedShotsForProperty(propertyID)
         guidedResolvedThumbnailPathByID = resolvedMap
         guidedReferencePathByID = referenceMap
 
@@ -10466,18 +10824,17 @@ extension ContentView {
         }
     }
 
-    private func retireGuidedShot(_ guidedShot: GuidedShot) {
-        guard let propertyID = appState.selectedPropertyID else { return }
+    private func retireGuidedShot(_ guidedShot: GuidedShot, reason: String) {
+        guard let propertyID = appState.selectedPropertyID,
+              let sessionID = appState.currentSession?.id else { return }
         do {
-            var allGuidedShots = try localStore.fetchGuidedShots(propertyID: propertyID)
-            guard let idx = allGuidedShots.firstIndex(where: { $0.id == guidedShot.id }) else { return }
-            allGuidedShots[idx].status = .retired
-            allGuidedShots[idx].isRetired = true
-            allGuidedShots[idx].retiredAt = Date()
-            allGuidedShots[idx].retiredInSessionID = appState.currentSession?.id
-            allGuidedShots[idx].skipReason = nil
-            allGuidedShots[idx].skipReasonNote = nil
-            allGuidedShots[idx].skipSessionID = nil
+            _ = try localStore.retireGuidedShot(
+                propertyID: propertyID,
+                sessionID: sessionID,
+                guidedShotID: guidedShot.id,
+                reason: reason,
+                retiredByUserID: appState.authenticatedSupabaseUser?.id
+            )
 
             if armedGuidedShotID == guidedShot.id {
                 clearGuidedAndRetakeArming()
@@ -10488,13 +10845,36 @@ extension ContentView {
                 showGuidedAlignmentOverlay = false
             }
 
-            _ = try saveNormalizedGuidedShots(allGuidedShots, propertyID: propertyID)
-            refreshGuidedShots()
-            guidedThumbnailRefreshToken = UUID()
-            refreshSessionActionsSummaryIfVisible()
+            refreshAfterGuidedLifecycleChange(propertyID: propertyID, sessionID: sessionID)
         } catch {
             print("Failed to retire guided shot: \(error)")
         }
+    }
+
+    private func restoreRetiredGuidedShot(_ guidedShot: GuidedShot) {
+        guard let propertyID = appState.selectedPropertyID,
+              let sessionID = appState.currentSession?.id else { return }
+        do {
+            _ = try localStore.restoreRetiredGuidedShot(
+                propertyID: propertyID,
+                sessionID: sessionID,
+                guidedShotID: guidedShot.id
+            )
+            refreshAfterGuidedLifecycleChange(propertyID: propertyID, sessionID: sessionID)
+        } catch {
+            print("Failed to restore guided shot: \(error)")
+        }
+    }
+
+    private func refreshAfterGuidedLifecycleChange(propertyID: UUID, sessionID: UUID) {
+        allowReferenceThumbnailResolution = true
+        referenceResolutionToken += 1
+        refreshGuidedShots()
+        refreshReferenceSetsAndPendingCounts()
+        reportLibrary.reloadSessionAssets(propertyID: propertyID, sessionID: sessionID)
+        guidedThumbnailRefreshToken = UUID()
+        gridThumbnailRefreshToken = UUID()
+        refreshSessionActionsSummaryIfVisible()
     }
 
     private func reclassifyGuidedShot(
@@ -10914,7 +11294,8 @@ extension ContentView {
                 allGuidedShots[idx].angleIndex = 1
             }
             let normalizedGuidedShots = try saveNormalizedGuidedShots(allGuidedShots, propertyID: propertyID)
-            guidedShots = normalizedGuidedShots
+            guidedShots = visibleGuidedShots(from: normalizedGuidedShots)
+            retiredGuidedShots = retiredGuidedShots(from: normalizedGuidedShots)
             refreshSessionActionsSummaryIfVisible()
 
             if isRetake {
@@ -10981,7 +11362,8 @@ extension ContentView {
             )
             allGuidedShots.append(guided)
             let normalizedGuidedShots = try saveNormalizedGuidedShots(allGuidedShots, propertyID: propertyID)
-            guidedShots = normalizedGuidedShots
+            guidedShots = visibleGuidedShots(from: normalizedGuidedShots)
+            retiredGuidedShots = retiredGuidedShots(from: normalizedGuidedShots)
         } catch {
             // Keep capture resilient if guided persistence fails.
         }
@@ -11049,6 +11431,15 @@ extension ContentView {
 
     private func visibleGuidedShots(from guidedShots: [GuidedShot]) -> [GuidedShot] {
         guidedShots.filter { !$0.isRetired && $0.status != .retired }
+    }
+
+    private func retiredGuidedShots(from guidedShots: [GuidedShot]) -> [GuidedShot] {
+        guidedShots.filter { $0.isRetired || $0.status == .retired }
+    }
+
+    private func retiredGuidedShotsForProperty(_ propertyID: UUID) -> [GuidedShot] {
+        let allGuidedShots = (try? localStore.fetchGuidedShots(propertyID: propertyID)) ?? []
+        return retiredGuidedShots(from: allGuidedShots)
     }
 
     private func saveNormalizedGuidedShots(_ guidedShots: [GuidedShot], propertyID: UUID) throws -> [GuidedShot] {
@@ -11612,7 +12003,8 @@ extension ContentView {
             if didChange {
                 let normalizedGuidedShots = try saveNormalizedGuidedShots(allGuidedShots, propertyID: propertyID)
                 if appState.selectedPropertyID == propertyID {
-                    guidedShots = normalizedGuidedShots
+                    guidedShots = visibleGuidedShots(from: normalizedGuidedShots)
+                    retiredGuidedShots = retiredGuidedShots(from: normalizedGuidedShots)
                 }
             }
         } catch {
@@ -13847,6 +14239,7 @@ extension ContentView {
         @ObservedObject var cache: AssetImageCache
         let thumbnailRefreshToken: UUID
         let onAfterDelete: () -> Void
+        let onAfterLifecycleChange: () -> Void
         @EnvironmentObject private var appState: AppState
         private let localStore = LocalStore()
         
@@ -14114,7 +14507,16 @@ extension ContentView {
                     metadataPropertyID: appState.selectedPropertyID,
                     metadataSessionID: metadataSessionID,
                     cache: cache,
-                    viewerToken: state.startIndex
+                    viewerToken: state.startIndex,
+                    onLifecycleChange: {
+                        if let propertyID = appState.selectedPropertyID,
+                           let sessionID = displayedGridSessionID() {
+                            reportLibrary.reloadSessionAssets(propertyID: propertyID, sessionID: sessionID)
+                        } else {
+                            reportLibrary.reloadAssets()
+                        }
+                        onAfterLifecycleChange()
+                    }
                 )
             }
             .confirmationDialog(
@@ -16436,11 +16838,13 @@ extension ContentView {
 
     private struct GuidedChecklistOverlay: View {
         let guidedShots: [GuidedShot]
+        let retiredGuidedShots: [GuidedShot]
         let resolvedThumbnailPathByID: [UUID: String]
         let referencePathByID: [UUID: String]
         let currentSessionID: UUID?
         let currentSessionStartedAt: Date?
         let currentSessionEndedAt: Date?
+        let canChangeShotLifecycle: Bool
         let isBaselineSession: Bool
         let allowReferenceFallback: Bool
         let captureProfile: CaptureProfile
@@ -16453,12 +16857,12 @@ extension ContentView {
         @Environment(\.colorScheme) private var colorScheme
         private var theme: SheetControlTheme { .forScheme(colorScheme) }
         let onClose: () -> Void
-        let onRefresh: () -> Void
         let onSelectGuided: (GuidedShot) -> Void
         let onSkip: (GuidedShot, SkipReason, String?) -> Void
         let onUndoSkip: (GuidedShot) -> Void
         let onRetake: (GuidedShot) -> Void
-        let onRetire: (GuidedShot) -> Void
+        let onRetire: (GuidedShot, String) -> Void
+        let onRestoreRetired: (GuidedShot) -> Void
         let onReclassify: (GuidedShot, String, String, String) -> Void
 
         @State private var skipTarget: GuidedShot? = nil
@@ -16466,8 +16870,10 @@ extension ContentView {
         @State private var showSkipOtherSheet: Bool = false
         @State private var skipOtherText: String = ""
         @State private var guidedViewerState: GuidedViewerState? = nil
+        @State private var retiredGuidedViewerState: GuidedViewerState? = nil
         @State private var retireTarget: GuidedShot? = nil
-        @State private var showRetireConfirmation: Bool = false
+        @State private var showRestoreRetiredList: Bool = false
+        @State private var restoreRetiredTarget: GuidedShot? = nil
         @State private var reclassifyTarget: GuidedShot? = nil
         @State private var inlineToastText: String? = nil
         @State private var inlineToastToken: Int = 0
@@ -16509,44 +16915,49 @@ extension ContentView {
                         Color(uiColor: .secondarySystemGroupedBackground)
                             .ignoresSafeArea()
 
-                        List(guidedShots) { item in
-                            GuidedChecklistRow(
-                                guidedShot: item,
-                                resolvedThumbnailPath: resolvedThumbnailPathByID[item.id],
-                                referencePath: referencePathByID[item.id],
-                                currentSessionID: currentSessionID,
-                                isBaselineSession: isBaselineSession,
-                                allowReferenceFallback: allowReferenceFallback,
-                                isCapturedInCurrentSession: isCapturedInCurrentSession(item),
-                                onTapRow: {
-                                    onSelectGuided(item)
-                                },
-                                refreshToken: refreshToken,
-                                cache: cache,
-                                onTapSkip: {
-                                    skipTarget = item
-                                    showSkipReasonDialog = true
-                                },
-                                onTapRetake: {
-                                    onRetake(item)
-                                },
-                                onTapUndoSkip: {
-                                    onUndoSkip(item)
-                                },
-                                onTapViewReferenceImage: {
-                                    showGuidedReferencePreview(for: item)
-                                },
-                                onTapViewCapturedImage: {
-                                    showGuidedCapturedPreview(for: item)
-                                },
-                                onTapRetire: {
-                                    retireTarget = item
-                                    showRetireConfirmation = true
-                                },
-                                onTapReclassify: {
-                                    reclassifyTarget = item
+                        List {
+                            Section {
+                                ForEach(guidedShots) { item in
+                                    GuidedChecklistRow(
+                                        guidedShot: item,
+                                        resolvedThumbnailPath: resolvedThumbnailPathByID[item.id],
+                                        referencePath: referencePathByID[item.id],
+                                        currentSessionID: currentSessionID,
+                                        isBaselineSession: isBaselineSession,
+                                        allowReferenceFallback: allowReferenceFallback,
+                                        isCapturedInCurrentSession: isCapturedInCurrentSession(item),
+                                        canRetire: canChangeShotLifecycle,
+                                        onTapRow: {
+                                            onSelectGuided(item)
+                                        },
+                                        refreshToken: refreshToken,
+                                        cache: cache,
+                                        onTapSkip: {
+                                            skipTarget = item
+                                            showSkipReasonDialog = true
+                                        },
+                                        onTapRetake: {
+                                            onRetake(item)
+                                        },
+                                        onTapUndoSkip: {
+                                            onUndoSkip(item)
+                                        },
+                                        onTapViewReferenceImage: {
+                                            showGuidedReferencePreview(for: item)
+                                        },
+                                        onTapViewCapturedImage: {
+                                            showGuidedCapturedPreview(for: item)
+                                        },
+                                        onTapRetire: {
+                                            retireTarget = item
+                                        },
+                                        onTapReclassify: {
+                                            reclassifyTarget = item
+                                        }
+                                    )
                                 }
-                            )
+                            }
+
                         }
                         .listStyle(.insetGrouped)
                         .scrollIndicators(.hidden)
@@ -16555,44 +16966,49 @@ extension ContentView {
                     }
                     .toolbar(.hidden, for: .navigationBar)
                     .safeAreaInset(edge: .top, spacing: 0) {
-                        HStack(spacing: 10) {
-                            Button(action: onRefresh) {
-                                Image(systemName: "arrow.clockwise")
-                                    .font(.system(size: 19, weight: .medium))
-                                    .foregroundColor(theme.label)
-                                    .frame(width: 44, height: 42)
-                                    .background(theme.fill)
-                                    .clipShape(Capsule())
-                                    .overlay(
-                                        Capsule()
-                                            .stroke(theme.stroke, lineWidth: 1)
-                                    )
-                            }
-                            .buttonStyle(.plain)
-
-                            Spacer(minLength: 0)
-
+                        ZStack {
                             Text("Guided Checklist")
                                 .font(.system(size: 18, weight: .medium))
                                 .foregroundColor(theme.label)
                                 .minimumScaleFactor(0.75)
                                 .lineLimit(1)
+                                .frame(maxWidth: .infinity, alignment: .center)
 
-                            Spacer(minLength: 0)
+                            HStack(spacing: 10) {
+                                if !retiredGuidedShots.isEmpty {
+                                    Button {
+                                        showRestoreRetiredList = true
+                                    } label: {
+                                        Text("Restore")
+                                            .font(.system(size: 17, weight: .medium))
+                                            .foregroundColor(theme.label)
+                                            .frame(width: 88, height: 42)
+                                            .background(theme.fill)
+                                            .clipShape(Capsule())
+                                            .overlay(
+                                                Capsule()
+                                                    .stroke(theme.stroke, lineWidth: 1)
+                                            )
+                                    }
+                                    .buttonStyle(.plain)
+                                }
 
-                            Button(action: onClose) {
-                                Text("Done")
-                                    .font(.system(size: 18, weight: .medium))
-                                    .foregroundColor(theme.label)
-                                    .frame(width: 72, height: 42)
-                                    .background(theme.fill)
-                                    .clipShape(Capsule())
-                                    .overlay(
-                                        Capsule()
-                                            .stroke(theme.stroke, lineWidth: 1)
-                                    )
+                                Spacer(minLength: 0)
+
+                                Button(action: onClose) {
+                                    Text("Done")
+                                        .font(.system(size: 18, weight: .medium))
+                                        .foregroundColor(theme.label)
+                                        .frame(width: 72, height: 42)
+                                        .background(theme.fill)
+                                        .clipShape(Capsule())
+                                        .overlay(
+                                            Capsule()
+                                                .stroke(theme.stroke, lineWidth: 1)
+                                        )
+                                }
+                                .buttonStyle(.plain)
                             }
-                            .buttonStyle(.plain)
                         }
                         .padding(.horizontal, 14)
                         .padding(.top, 14)
@@ -16636,6 +17052,78 @@ extension ContentView {
                             }
                         }
                         .presentationDetents([.height(280)])
+                    }
+                    .sheet(item: $retireTarget) { target in
+                        GuidedRetireReasonSheet(
+                            guidedShot: target,
+                            onCancel: {
+                                retireTarget = nil
+                            },
+                            onConfirm: { reason in
+                                onRetire(target, reason)
+                                retireTarget = nil
+                            }
+                        )
+                    }
+                    .sheet(isPresented: $showRestoreRetiredList) {
+                        NavigationStack {
+                            List(retiredGuidedShots) { item in
+                                RetiredGuidedChecklistRow(
+                                    guidedShot: item,
+                                    resolvedThumbnailPath: resolvedThumbnailPathByID[item.id],
+                                    referencePath: referencePathByID[item.id],
+                                    canRestore: canChangeShotLifecycle,
+                                    refreshToken: refreshToken,
+                                    cache: cache,
+                                    onTapRestore: {
+                                        restoreRetiredTarget = item
+                                    },
+                                    onTapViewCapturedImage: {
+                                        showRetiredGuidedCapturedPreview(for: item)
+                                    }
+                                )
+                            }
+                            .listStyle(.insetGrouped)
+                            .navigationTitle("Retired Guided")
+                            .navigationBarTitleDisplayMode(.inline)
+                            .toolbar {
+                                ToolbarItem(placement: .topBarTrailing) {
+                                    Button("Done") {
+                                        showRestoreRetiredList = false
+                                    }
+                                }
+                            }
+                        }
+                        .alert(
+                            "Restore Guided Checkpoint?",
+                            isPresented: Binding(
+                                get: { restoreRetiredTarget != nil },
+                                set: { if !$0 { restoreRetiredTarget = nil } }
+                            )
+                        ) {
+                            Button("Cancel", role: .cancel) {
+                                restoreRetiredTarget = nil
+                            }
+                            Button("Restore", role: .destructive) {
+                                if let item = restoreRetiredTarget {
+                                    restoreRetiredTarget = nil
+                                    showRestoreRetiredList = false
+                                    onRestoreRetired(item)
+                                }
+                            }
+                        } message: {
+                            Text("This returns the checkpoint and its preserved photo to the active guided workflow.")
+                        }
+                        .fullScreenCover(item: $retiredGuidedViewerState) { state in
+                            ReportPhotoViewer(
+                                title: state.title,
+                                assets: state.assets,
+                                startIndex: state.startIndex,
+                                detailIdOverride: state.detailId,
+                                cache: cache,
+                                viewerToken: state.viewerToken
+                            )
+                        }
                     }
                     .sheet(item: $reclassifyTarget) { target in
                         ChecklistReclassifySheet(
@@ -16693,16 +17181,6 @@ extension ContentView {
                                     skipTarget = nil
                                 }
                             skipReasonDialogCard()
-                                .padding(.horizontal, 18)
-                        }
-                        if showRetireConfirmation {
-                            Color.black.opacity(0.42)
-                                .ignoresSafeArea()
-                                .onTapGesture {
-                                    showRetireConfirmation = false
-                                    retireTarget = nil
-                                }
-                            retireConfirmationDialogCard()
                                 .padding(.horizontal, 18)
                         }
                     }
@@ -16763,45 +17241,6 @@ extension ContentView {
             .frame(maxWidth: 360)
         }
 
-        private func retireConfirmationDialogCard() -> some View {
-            VStack(spacing: 0) {
-                Text("Retire this guided checkpoint?")
-                    .font(.system(size: 18, weight: .semibold))
-                    .foregroundColor(.primary)
-                    .multilineTextAlignment(.center)
-                    .padding(.horizontal, 14)
-                    .padding(.top, 14)
-                    .padding(.bottom, 8)
-
-                Text("This removes the checkpoint from future guided sessions and records the change in SCOUT JSON.")
-                    .font(.system(size: 14, weight: .regular))
-                    .foregroundColor(.secondary)
-                    .multilineTextAlignment(.center)
-                    .padding(.horizontal, 14)
-                    .padding(.bottom, 12)
-
-                dialogDivider()
-                dialogButton("Retire", destructive: true) {
-                    guard let item = retireTarget else { return }
-                    onRetire(item)
-                    showRetireConfirmation = false
-                    retireTarget = nil
-                }
-                dialogDivider()
-                dialogButton("Cancel") {
-                    showRetireConfirmation = false
-                    retireTarget = nil
-                }
-            }
-            .background(Color(uiColor: .systemBackground))
-            .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: 16, style: .continuous)
-                    .stroke(Color.primary.opacity(0.12), lineWidth: 1)
-            )
-            .frame(maxWidth: 360)
-        }
-
         private func dialogButton(_ title: String, destructive: Bool = false, action: @escaping () -> Void) -> some View {
             Button(action: action) {
                 Text(title)
@@ -16833,6 +17272,20 @@ extension ContentView {
             )
         }
 
+        private func showRetiredImagePreview(localIdentifier: String?, title: String, detailId: String) {
+            let trimmed = localIdentifier?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            guard !trimmed.isEmpty else { return }
+
+            guard let asset = ContentView.reportAsset(from: trimmed) ?? ContentView.reportAsset(fromPath: trimmed) else { return }
+            retiredGuidedViewerState = GuidedViewerState(
+                title: title,
+                detailId: detailId,
+                assets: [asset],
+                startIndex: 0,
+                viewerToken: trimmed.hashValue
+            )
+        }
+
         private func showGuidedReferencePreview(for guidedShot: GuidedShot) {
             guard let source = referencePathByID[guidedShot.id]?.trimmingCharacters(in: .whitespacesAndNewlines),
                   !source.isEmpty else {
@@ -16854,6 +17307,19 @@ extension ContentView {
             showImagePreview(
                 localIdentifier: guidedShot.shot?.imageLocalIdentifier,
                 title: "Captured Image",
+                detailId: guidedDisplayLabel(for: guidedShot)
+            )
+        }
+
+        private func showRetiredGuidedCapturedPreview(for guidedShot: GuidedShot) {
+            let path = guidedShot.shot?.imageLocalIdentifier?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            guard !path.isEmpty else {
+                showInlineToast("No captured image yet.")
+                return
+            }
+            showRetiredImagePreview(
+                localIdentifier: path,
+                title: "Retired Image",
                 detailId: guidedDisplayLabel(for: guidedShot)
             )
         }
@@ -16910,6 +17376,89 @@ extension ContentView {
             guard let newValue else { return }
             guard newValue != lastValidOrientation else { return }
             lastValidOrientation = newValue
+        }
+
+        private enum GuidedRetireReasonPreset: String, CaseIterable, Identifiable {
+            case duplicate = "duplicate"
+            case obstructedUnusable = "obstructed/unusable"
+            case privacySensitive = "privacy/sensitive"
+            case notRelevant = "not relevant"
+            case accidentalCapture = "accidental capture"
+            case other = "other"
+
+            var id: String { rawValue }
+            var title: String { rawValue }
+        }
+
+        private struct GuidedRetireReasonSheet: View {
+            let guidedShot: GuidedShot
+            let onCancel: () -> Void
+            let onConfirm: (String) -> Void
+
+            @State private var selectedReason: GuidedRetireReasonPreset = .notRelevant
+            @State private var otherNote: String = ""
+
+            private var normalizedOtherNote: String? {
+                let trimmed = otherNote.trimmingCharacters(in: .whitespacesAndNewlines)
+                return trimmed.isEmpty ? nil : trimmed
+            }
+
+            private var retirementReason: String? {
+                if selectedReason == .other {
+                    guard let normalizedOtherNote else { return nil }
+                    return "other: \(normalizedOtherNote)"
+                }
+                return selectedReason.rawValue
+            }
+
+            private var hasLinkedPhoto: Bool {
+                guidedShot.shot != nil
+            }
+
+            var body: some View {
+                NavigationStack {
+                    Form {
+                        Section {
+                            Picker("Reason", selection: $selectedReason) {
+                                ForEach(GuidedRetireReasonPreset.allCases) { reason in
+                                    Text(reason.title).tag(reason)
+                                }
+                            }
+                            .pickerStyle(.inline)
+
+                            if selectedReason == .other {
+                                TextField("Required note", text: $otherNote, axis: .vertical)
+                                    .lineLimit(2...4)
+                            }
+                        } header: {
+                            Text("Retirement Reason")
+                        }
+
+                        Section {
+                            Text(hasLinkedPhoto
+                                 ? "This hides the guided checkpoint and linked photo from normal capture flow. The original file and SCOUT JSON are preserved."
+                                 : "This hides the guided checkpoint from normal capture flow. No photo is required to retire a checkpoint.")
+                                .font(.footnote)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    .navigationTitle("Retire Guided")
+                    .navigationBarTitleDisplayMode(.inline)
+                    .toolbar {
+                        ToolbarItem(placement: .cancellationAction) {
+                            Button("Cancel", action: onCancel)
+                        }
+                        ToolbarItem(placement: .confirmationAction) {
+                            Button("Retire", role: .destructive) {
+                                if let retirementReason {
+                                    onConfirm(retirementReason)
+                                }
+                            }
+                            .disabled(retirementReason == nil)
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -16972,6 +17521,165 @@ extension ContentView {
         }
     }
 
+    private struct RetiredGuidedChecklistRow: View {
+        let guidedShot: GuidedShot
+        let resolvedThumbnailPath: String?
+        let referencePath: String?
+        let canRestore: Bool
+        let refreshToken: UUID
+        @ObservedObject var cache: AssetImageCache
+        let onTapRestore: () -> Void
+        let onTapViewCapturedImage: () -> Void
+
+        @State private var thumbnail: UIImage? = nil
+        @State private var loadedID: String = ""
+        @State private var isThumbnailLoading: Bool = false
+
+        private var title: String {
+            let composed = ContentView.conciseContextLabel(
+                building: guidedShot.building,
+                elevation: guidedShot.targetElevation,
+                detailType: guidedShot.detailType
+            )
+            if !composed.isEmpty { return composed }
+            let fallback = guidedShot.title.trimmingCharacters(in: .whitespacesAndNewlines)
+            return fallback.isEmpty ? "Guided Shot" : fallback
+        }
+
+        private var retiredAtLabel: String? {
+            guard let retiredAt = guidedShot.retiredAt else { return nil }
+            return retiredAt.formatted(date: .abbreviated, time: .shortened)
+        }
+
+        private var thumbnailPath: String? {
+            let shotPath = guidedShot.shot?.imageLocalIdentifier?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            if !shotPath.isEmpty { return shotPath }
+
+            let resolved = resolvedThumbnailPath?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            if !resolved.isEmpty { return resolved }
+
+            let reference = referencePath?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            return reference.isEmpty ? nil : reference
+        }
+
+        var body: some View {
+            HStack(spacing: 12) {
+                thumbnailView
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(title)
+                        .font(.system(size: 15, weight: .medium))
+                        .foregroundStyle(.primary)
+                        .lineLimit(1)
+
+                    Text(retiredAtLabel.map { "Retired \($0)" } ?? "Retired")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(.secondary)
+                }
+
+                Spacer(minLength: 0)
+
+                if guidedShot.shot?.imageLocalIdentifier?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false {
+                    Button(action: onTapViewCapturedImage) {
+                        Image(systemName: "photo")
+                            .font(.system(size: 16, weight: .semibold))
+                            .foregroundStyle(.blue)
+                            .frame(width: 34, height: 34)
+                    }
+                    .buttonStyle(.plain)
+                }
+
+                if canRestore {
+                    Button(action: onTapRestore) {
+                        Text("Restore")
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundStyle(.green)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 7)
+                            .background(Color.green.opacity(0.12))
+                            .clipShape(Capsule())
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Color.black.opacity(0.35))
+            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .stroke(Color.orange.opacity(0.18), lineWidth: 1)
+            )
+            .listRowInsets(EdgeInsets(top: 6, leading: 12, bottom: 6, trailing: 12))
+            .listRowBackground(Color.clear)
+            .onAppear {
+                loadThumbnailIfNeeded()
+            }
+            .onChange(of: thumbnailPath ?? "") { _, _ in
+                loadedID = ""
+                thumbnail = nil
+                loadThumbnailIfNeeded()
+            }
+            .onChange(of: refreshToken) { _, _ in
+                loadedID = ""
+                thumbnail = nil
+                loadThumbnailIfNeeded()
+            }
+        }
+
+        private var thumbnailView: some View {
+            Group {
+                if let thumbnail {
+                    Image(uiImage: thumbnail)
+                        .resizable()
+                        .scaledToFill()
+                } else if isThumbnailLoading {
+                    ZStack {
+                        Color.orange.opacity(0.10)
+                        ProgressView()
+                            .progressViewStyle(.circular)
+                            .scaleEffect(0.75)
+                    }
+                } else {
+                    ZStack {
+                        Color.orange.opacity(0.10)
+                        Image(systemName: "archivebox")
+                            .font(.system(size: 18, weight: .semibold))
+                            .foregroundStyle(.orange)
+                    }
+                }
+            }
+            .frame(width: 48, height: 48)
+            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .stroke(Color.orange.opacity(0.18), lineWidth: 1)
+            )
+        }
+
+        private func loadThumbnailIfNeeded() {
+            let source = thumbnailPath ?? ""
+            guard source != loadedID || (thumbnail == nil && !isThumbnailLoading) else { return }
+            loadedID = source
+
+            guard !source.isEmpty, let asset = ContentView.reportAsset(from: source) ?? ContentView.reportAsset(fromPath: source) else {
+                thumbnail = nil
+                isThumbnailLoading = false
+                return
+            }
+
+            isThumbnailLoading = true
+            let px = max(120, 48 * UIScreen.currentScale * 2.0)
+            cache.requestThumbnail(for: asset, pixelSize: px) { image in
+                DispatchQueue.main.async {
+                    self.thumbnail = image
+                    self.isThumbnailLoading = false
+                }
+            }
+        }
+    }
+
     private struct GuidedChecklistRow: View {
         enum RowStatus {
             case pending
@@ -16986,6 +17694,7 @@ extension ContentView {
         let isBaselineSession: Bool
         let allowReferenceFallback: Bool
         let isCapturedInCurrentSession: Bool
+        let canRetire: Bool
         let onTapRow: () -> Void
         let refreshToken: UUID
         @ObservedObject var cache: AssetImageCache
@@ -17056,12 +17765,14 @@ extension ContentView {
                 onTapRow()
             }
             .swipeActions(edge: .leading, allowsFullSwipe: false) {
-                Button {
-                    onTapRetire()
-                } label: {
-                    Label("Retire", systemImage: "archivebox")
+                if canRetire {
+                    Button {
+                        onTapRetire()
+                    } label: {
+                        Label("Retire", systemImage: "archivebox")
+                    }
+                    .tint(.red)
                 }
-                .tint(.red)
 
                 Button {
                     onTapReclassify()
@@ -17339,7 +18050,6 @@ extension ContentView {
         let buildingCodeForOption: (String) -> String
         let buildingDisplayNameForOption: (String) -> String
         let cache: AssetImageCache
-        let onRefresh: () -> Void
         let onSelectIssue: (Observation) -> Void
         let onRetakeIssue: (Observation) -> Void
         let onReclassifyIssue: (Observation, String, String, String) -> Void
@@ -17442,20 +18152,6 @@ extension ContentView {
                     .toolbar(.hidden, for: .navigationBar)
                     .safeAreaInset(edge: .top, spacing: 0) {
                         HStack(spacing: 10) {
-                            Button(action: onRefresh) {
-                                Image(systemName: "arrow.clockwise")
-                                    .font(.system(size: 19, weight: .medium))
-                                    .foregroundColor(theme.label)
-                                    .frame(width: 44, height: 42)
-                                    .background(theme.fill)
-                                    .clipShape(Capsule())
-                                    .overlay(
-                                        Capsule()
-                                            .stroke(theme.stroke, lineWidth: 1)
-                                    )
-                            }
-                            .buttonStyle(.plain)
-
                             Spacer(minLength: 0)
 
                             Text("Active Issues")

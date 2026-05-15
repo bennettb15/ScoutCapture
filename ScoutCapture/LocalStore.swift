@@ -463,6 +463,8 @@ final class LocalStore {
         case observationNotFound(UUID)
         case sessionNotFound(UUID)
         case shotNotFound(UUID)
+        case guidedShotNotFound(UUID)
+        case guidedShotLifecycleInvalidState(UUID)
         case shotLifecycleBlockedForSealedSession(UUID)
         case shotLifecycleBlankReason
         case shotLifecycleInvalidState(UUID, expected: ShotLifecycleState, actual: ShotLifecycleState)
@@ -2129,6 +2131,108 @@ final class LocalStore {
         guard session.status == .draft && !session.isSealed else {
             throw StoreError.shotLifecycleBlockedForSealedSession(sessionID)
         }
+    }
+
+    @discardableResult
+    func retireGuidedShot(
+        propertyID: UUID,
+        sessionID: UUID,
+        guidedShotID: UUID,
+        reason: String,
+        retiredByUserID: UUID? = nil,
+        retiredAt: Date = Date()
+    ) throws -> GuidedShot {
+        try validateSessionAllowsShotLifecycleChange(propertyID: propertyID, sessionID: sessionID)
+        guard let normalizedReason = trimmedNonEmpty(reason) else {
+            throw StoreError.shotLifecycleBlankReason
+        }
+
+        var guidedShots = try fetchGuidedShots(propertyID: propertyID)
+        guard let guidedIndex = guidedShots.firstIndex(where: { $0.id == guidedShotID }) else {
+            throw StoreError.guidedShotNotFound(guidedShotID)
+        }
+        guard guidedShots[guidedIndex].status != .retired && !guidedShots[guidedIndex].isRetired else {
+            throw StoreError.guidedShotLifecycleInvalidState(guidedShotID)
+        }
+
+        var metadata = try loadSessionMetadata(propertyID: propertyID, sessionID: sessionID)
+        if let shotID = guidedShots[guidedIndex].shot?.id,
+           let shotIndex = metadata.shots.firstIndex(where: { $0.shotID == shotID }) {
+            if metadata.shots[shotIndex].lifecycleState == .active {
+                metadata.shots[shotIndex].lifecycleState = .retired
+                metadata.shots[shotIndex].retiredAt = retiredAt
+                metadata.shots[shotIndex].retiredReason = normalizedReason
+                metadata.shots[shotIndex].retiredByUserID = retiredByUserID
+                metadata.shots[shotIndex].lifecycleUpdatedAt = retiredAt
+                metadata.shots[shotIndex].updatedAt = max(metadata.shots[shotIndex].updatedAt, retiredAt)
+            } else if metadata.shots[shotIndex].lifecycleState != .retired {
+                throw StoreError.shotLifecycleInvalidState(
+                    shotID,
+                    expected: .active,
+                    actual: metadata.shots[shotIndex].lifecycleState
+                )
+            }
+        }
+
+        guidedShots[guidedIndex].status = .retired
+        guidedShots[guidedIndex].isRetired = true
+        guidedShots[guidedIndex].retiredAt = retiredAt
+        guidedShots[guidedIndex].retiredInSessionID = sessionID
+        guidedShots[guidedIndex].skipReason = nil
+        guidedShots[guidedIndex].skipReasonNote = nil
+        guidedShots[guidedIndex].skipSessionID = nil
+
+        let normalizedGuided = LocalConflictRules.normalizeGuidedCompletionStates(guidedShots)
+        try saveGuidedShots(normalizedGuided, propertyID: propertyID)
+        metadata.guidedShots = normalizedGuided
+        try saveSessionMetadataAtomically(propertyID: propertyID, sessionID: sessionID, metadata: metadata)
+        return normalizedGuided.first(where: { $0.id == guidedShotID }) ?? guidedShots[guidedIndex]
+    }
+
+    @discardableResult
+    func restoreRetiredGuidedShot(
+        propertyID: UUID,
+        sessionID: UUID,
+        guidedShotID: UUID,
+        restoredAt: Date = Date()
+    ) throws -> GuidedShot {
+        try validateSessionAllowsShotLifecycleChange(propertyID: propertyID, sessionID: sessionID)
+
+        var guidedShots = try fetchGuidedShots(propertyID: propertyID)
+        guard let guidedIndex = guidedShots.firstIndex(where: { $0.id == guidedShotID }) else {
+            throw StoreError.guidedShotNotFound(guidedShotID)
+        }
+        guard guidedShots[guidedIndex].status == .retired || guidedShots[guidedIndex].isRetired else {
+            throw StoreError.guidedShotLifecycleInvalidState(guidedShotID)
+        }
+
+        var metadata = try loadSessionMetadata(propertyID: propertyID, sessionID: sessionID)
+        if let shotID = guidedShots[guidedIndex].shot?.id,
+           let shotIndex = metadata.shots.firstIndex(where: { $0.shotID == shotID }) {
+            if metadata.shots[shotIndex].lifecycleState == .retired {
+                metadata.shots[shotIndex].lifecycleState = .active
+                metadata.shots[shotIndex].lifecycleUpdatedAt = restoredAt
+                metadata.shots[shotIndex].updatedAt = max(metadata.shots[shotIndex].updatedAt, restoredAt)
+            } else if metadata.shots[shotIndex].lifecycleState != .active {
+                throw StoreError.shotLifecycleInvalidState(
+                    shotID,
+                    expected: .retired,
+                    actual: metadata.shots[shotIndex].lifecycleState
+                )
+            }
+        }
+
+        guidedShots[guidedIndex].status = .active
+        guidedShots[guidedIndex].isRetired = false
+        if guidedShots[guidedIndex].shot != nil {
+            guidedShots[guidedIndex].isCompleted = true
+        }
+
+        let normalizedGuided = LocalConflictRules.normalizeGuidedCompletionStates(guidedShots)
+        try saveGuidedShots(normalizedGuided, propertyID: propertyID)
+        metadata.guidedShots = normalizedGuided
+        try saveSessionMetadataAtomically(propertyID: propertyID, sessionID: sessionID, metadata: metadata)
+        return normalizedGuided.first(where: { $0.id == guidedShotID }) ?? guidedShots[guidedIndex]
     }
 
     func removeShotMetadata(
