@@ -14,6 +14,11 @@ final class Phase2C1610BShotLifecycleTests: XCTestCase {
         propertyID: UUID = UUID(),
         sessionID: UUID = UUID(),
         createdAt: Date = Date(timeIntervalSinceReferenceDate: 100),
+        building: String = "Building",
+        elevation: String = "North",
+        detailType: String = "Overview",
+        angleIndex: Int = 1,
+        shotKey: String? = nil,
         originalFilename: String = "shot.heic",
         originalRelativePath: String = "Originals/shot.heic",
         lifecycleState: ShotLifecycleState = .active,
@@ -34,13 +39,18 @@ final class Phase2C1610BShotLifecycleTests: XCTestCase {
             createdAt: createdAt,
             capturedAtLocal: nil,
             updatedAt: createdAt,
-            building: "Building",
-            elevation: "North",
-            detailType: "Overview",
-            angleIndex: 1,
+            building: building,
+            elevation: elevation,
+            detailType: detailType,
+            angleIndex: angleIndex,
             trade: nil,
             priority: nil,
-            shotKey: "building|north|overview|1",
+            shotKey: shotKey ?? ShotMetadata.makeShotKey(
+                building: building,
+                elevation: elevation,
+                detailType: detailType,
+                angleIndex: angleIndex
+            ),
             isGuided: false,
             isFlagged: false,
             issueID: nil,
@@ -493,6 +503,329 @@ final class Phase2C1610BShotLifecycleTests: XCTestCase {
 
         XCTAssertEqual(decoded.shots.count, 1)
         XCTAssertTrue(decoded.shots.allSatisfy { $0.supersedesShotID == nil && $0.supersededByShotID == nil })
+    }
+
+    @MainActor
+    func testRetireActiveShotInDraftSessionPreservesMetadataAndOriginalPath() throws {
+        let fixture = try makeLocalStoreFixture()
+        let shotID = UUID()
+        let retiredBy = UUID()
+        let retiredAt = Date(timeIntervalSinceReferenceDate: 700)
+        let originalFilename = "\(shotID.uuidString).heic"
+        let originalRelativePath = "Originals/\(originalFilename)"
+        let originalURL = fixture.localStore.originalsFolderURL(
+            propertyID: fixture.propertyID,
+            sessionID: fixture.sessionID
+        ).appendingPathComponent(originalFilename)
+        try Data([1, 2, 3]).write(to: originalURL)
+
+        try fixture.localStore.upsertShot(
+            propertyID: fixture.propertyID,
+            sessionID: fixture.sessionID,
+            shot: makeShot(
+                shotID: shotID,
+                propertyID: fixture.propertyID,
+                sessionID: fixture.sessionID,
+                originalFilename: originalFilename,
+                originalRelativePath: originalRelativePath
+            ),
+            matchMode: .append
+        )
+
+        let retired = try fixture.localStore.retireShot(
+            propertyID: fixture.propertyID,
+            sessionID: fixture.sessionID,
+            shotID: shotID,
+            reason: "  Duplicate capture  ",
+            retiredByUserID: retiredBy,
+            retiredAt: retiredAt
+        )
+        let metadata = try fixture.localStore.loadSessionMetadata(
+            propertyID: fixture.propertyID,
+            sessionID: fixture.sessionID
+        )
+        let stored = try XCTUnwrap(metadata.shots.first { $0.shotID == shotID })
+
+        XCTAssertEqual(metadata.shots.count, 1)
+        XCTAssertEqual(retired.lifecycleState, .retired)
+        XCTAssertEqual(stored.lifecycleState, .retired)
+        XCTAssertTrue(stored.isRetired)
+        XCTAssertEqual(stored.retiredAt, retiredAt)
+        XCTAssertEqual(stored.retiredReason, "Duplicate capture")
+        XCTAssertEqual(stored.retiredByUserID, retiredBy)
+        XCTAssertEqual(stored.lifecycleUpdatedAt, retiredAt)
+        XCTAssertEqual(stored.originalFilename, originalFilename)
+        XCTAssertEqual(stored.originalRelativePath, originalRelativePath)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: originalURL.path))
+    }
+
+    @MainActor
+    func testRestoreRetiredShotPreservesRetirementMetadata() throws {
+        let fixture = try makeLocalStoreFixture()
+        let shotID = UUID()
+        let retiredBy = UUID()
+        let retiredAt = Date(timeIntervalSinceReferenceDate: 710)
+        let restoredAt = Date(timeIntervalSinceReferenceDate: 720)
+        try fixture.localStore.upsertShot(
+            propertyID: fixture.propertyID,
+            sessionID: fixture.sessionID,
+            shot: makeShot(
+                shotID: shotID,
+                propertyID: fixture.propertyID,
+                sessionID: fixture.sessionID
+            ),
+            matchMode: .append
+        )
+        try fixture.localStore.retireShot(
+            propertyID: fixture.propertyID,
+            sessionID: fixture.sessionID,
+            shotID: shotID,
+            reason: "Not relevant",
+            retiredByUserID: retiredBy,
+            retiredAt: retiredAt
+        )
+
+        let restored = try fixture.localStore.restoreRetiredShot(
+            propertyID: fixture.propertyID,
+            sessionID: fixture.sessionID,
+            shotID: shotID,
+            restoredAt: restoredAt
+        )
+        let metadata = try fixture.localStore.loadSessionMetadata(
+            propertyID: fixture.propertyID,
+            sessionID: fixture.sessionID
+        )
+        let stored = try XCTUnwrap(metadata.shots.first { $0.shotID == shotID })
+
+        XCTAssertEqual(metadata.shots.count, 1)
+        XCTAssertEqual(restored.lifecycleState, .active)
+        XCTAssertEqual(stored.lifecycleState, .active)
+        XCTAssertEqual(stored.lifecycleUpdatedAt, restoredAt)
+        XCTAssertEqual(stored.retiredAt, retiredAt)
+        XCTAssertEqual(stored.retiredReason, "Not relevant")
+        XCTAssertEqual(stored.retiredByUserID, retiredBy)
+    }
+
+    @MainActor
+    func testRetireShotBlockedForCompletedSealedSession() throws {
+        let fixture = try makeLocalStoreFixture()
+        let shotID = UUID()
+        try fixture.localStore.upsertShot(
+            propertyID: fixture.propertyID,
+            sessionID: fixture.sessionID,
+            shot: makeShot(
+                shotID: shotID,
+                propertyID: fixture.propertyID,
+                sessionID: fixture.sessionID
+            ),
+            matchMode: .append
+        )
+        _ = try fixture.localStore.upsertSession(
+            Session(
+                id: fixture.sessionID,
+                propertyID: fixture.propertyID,
+                startedAt: Date(timeIntervalSinceReferenceDate: 50),
+                status: .completed,
+                endedAt: Date(timeIntervalSinceReferenceDate: 60),
+                isSealed: true
+            )
+        )
+
+        XCTAssertThrowsError(
+            try fixture.localStore.retireShot(
+                propertyID: fixture.propertyID,
+                sessionID: fixture.sessionID,
+                shotID: shotID,
+                reason: "Duplicate"
+            )
+        ) { error in
+            guard case LocalStore.StoreError.shotLifecycleBlockedForSealedSession(let blockedSessionID) = error else {
+                return XCTFail("Expected sealed-session lifecycle block, got \(error)")
+            }
+            XCTAssertEqual(blockedSessionID, fixture.sessionID)
+        }
+    }
+
+    @MainActor
+    func testRetireMissingShotAndBlankReasonAreBlocked() throws {
+        let fixture = try makeLocalStoreFixture()
+        let existingShotID = UUID()
+        let missingShotID = UUID()
+        try fixture.localStore.upsertShot(
+            propertyID: fixture.propertyID,
+            sessionID: fixture.sessionID,
+            shot: makeShot(
+                shotID: existingShotID,
+                propertyID: fixture.propertyID,
+                sessionID: fixture.sessionID
+            ),
+            matchMode: .append
+        )
+
+        XCTAssertThrowsError(
+            try fixture.localStore.retireShot(
+                propertyID: fixture.propertyID,
+                sessionID: fixture.sessionID,
+                shotID: missingShotID,
+                reason: "Duplicate"
+            )
+        ) { error in
+            guard case LocalStore.StoreError.shotNotFound(let blockedShotID) = error else {
+                return XCTFail("Expected missing-shot lifecycle block, got \(error)")
+            }
+            XCTAssertEqual(blockedShotID, missingShotID)
+        }
+
+        XCTAssertThrowsError(
+            try fixture.localStore.retireShot(
+                propertyID: fixture.propertyID,
+                sessionID: fixture.sessionID,
+                shotID: existingShotID,
+                reason: "   "
+            )
+        ) { error in
+            guard case LocalStore.StoreError.shotLifecycleBlankReason = error else {
+                return XCTFail("Expected blank-reason lifecycle block, got \(error)")
+            }
+        }
+    }
+
+    @MainActor
+    func testRetireAlreadyRetiredAndRestoreActiveFailClearly() throws {
+        let fixture = try makeLocalStoreFixture()
+        let shotID = UUID()
+        let activeShotID = UUID()
+        try fixture.localStore.upsertShot(
+            propertyID: fixture.propertyID,
+            sessionID: fixture.sessionID,
+            shot: makeShot(
+                shotID: shotID,
+                propertyID: fixture.propertyID,
+                sessionID: fixture.sessionID
+            ),
+            matchMode: .append
+        )
+        try fixture.localStore.upsertShot(
+            propertyID: fixture.propertyID,
+            sessionID: fixture.sessionID,
+            shot: makeShot(
+                shotID: activeShotID,
+                propertyID: fixture.propertyID,
+                sessionID: fixture.sessionID,
+                detailType: "Context",
+                angleIndex: 2
+            ),
+            matchMode: .append
+        )
+        try fixture.localStore.retireShot(
+            propertyID: fixture.propertyID,
+            sessionID: fixture.sessionID,
+            shotID: shotID,
+            reason: "Duplicate"
+        )
+
+        XCTAssertThrowsError(
+            try fixture.localStore.retireShot(
+                propertyID: fixture.propertyID,
+                sessionID: fixture.sessionID,
+                shotID: shotID,
+                reason: "Duplicate"
+            )
+        ) { error in
+            guard case LocalStore.StoreError.shotLifecycleInvalidState(
+                let blockedShotID,
+                expected: let expected,
+                actual: let actual
+            ) = error else {
+                return XCTFail("Expected already-retired lifecycle state block, got \(error)")
+            }
+            XCTAssertEqual(blockedShotID, shotID)
+            XCTAssertEqual(expected, .active)
+            XCTAssertEqual(actual, .retired)
+        }
+
+        XCTAssertThrowsError(
+            try fixture.localStore.restoreRetiredShot(
+                propertyID: fixture.propertyID,
+                sessionID: fixture.sessionID,
+                shotID: activeShotID
+            )
+        ) { error in
+            guard case LocalStore.StoreError.shotLifecycleInvalidState(
+                let blockedShotID,
+                expected: let expected,
+                actual: let actual
+            ) = error else {
+                return XCTFail("Expected active restore lifecycle state block, got \(error)")
+            }
+            XCTAssertEqual(blockedShotID, activeShotID)
+            XCTAssertEqual(expected, .retired)
+            XCTAssertEqual(actual, .active)
+        }
+    }
+
+    @MainActor
+    func testRetireAndRestoreDoNotMutateUnrelatedShots() throws {
+        let fixture = try makeLocalStoreFixture()
+        let targetShotID = UUID()
+        let unrelatedShotID = UUID()
+        try fixture.localStore.upsertShot(
+            propertyID: fixture.propertyID,
+            sessionID: fixture.sessionID,
+            shot: makeShot(
+                shotID: targetShotID,
+                propertyID: fixture.propertyID,
+                sessionID: fixture.sessionID,
+                originalFilename: "target.heic",
+                originalRelativePath: "Originals/target.heic"
+            ),
+            matchMode: .append
+        )
+        try fixture.localStore.upsertShot(
+            propertyID: fixture.propertyID,
+            sessionID: fixture.sessionID,
+            shot: makeShot(
+                shotID: unrelatedShotID,
+                propertyID: fixture.propertyID,
+                sessionID: fixture.sessionID,
+                building: "Garage",
+                detailType: "Context",
+                angleIndex: 2,
+                originalFilename: "unrelated.heic",
+                originalRelativePath: "Originals/unrelated.heic"
+            ),
+            matchMode: .append
+        )
+        let beforeMetadata = try fixture.localStore.loadSessionMetadata(
+            propertyID: fixture.propertyID,
+            sessionID: fixture.sessionID
+        )
+        let unrelatedBefore = try XCTUnwrap(beforeMetadata.shots.first { $0.shotID == unrelatedShotID })
+
+        try fixture.localStore.retireShot(
+            propertyID: fixture.propertyID,
+            sessionID: fixture.sessionID,
+            shotID: targetShotID,
+            reason: "Duplicate",
+            retiredAt: Date(timeIntervalSinceReferenceDate: 730)
+        )
+        var afterMetadata = try fixture.localStore.loadSessionMetadata(
+            propertyID: fixture.propertyID,
+            sessionID: fixture.sessionID
+        )
+        XCTAssertEqual(afterMetadata.shots.first { $0.shotID == unrelatedShotID }, unrelatedBefore)
+
+        try fixture.localStore.restoreRetiredShot(
+            propertyID: fixture.propertyID,
+            sessionID: fixture.sessionID,
+            shotID: targetShotID,
+            restoredAt: Date(timeIntervalSinceReferenceDate: 740)
+        )
+        afterMetadata = try fixture.localStore.loadSessionMetadata(
+            propertyID: fixture.propertyID,
+            sessionID: fixture.sessionID
+        )
+        XCTAssertEqual(afterMetadata.shots.first { $0.shotID == unrelatedShotID }, unrelatedBefore)
     }
 
     func testShotLifecycleMigrationAddsNullSafeRemoteColumns() throws {

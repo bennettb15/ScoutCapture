@@ -462,6 +462,10 @@ final class LocalStore {
         case organizationNotFound(UUID)
         case observationNotFound(UUID)
         case sessionNotFound(UUID)
+        case shotNotFound(UUID)
+        case shotLifecycleBlockedForSealedSession(UUID)
+        case shotLifecycleBlankReason
+        case shotLifecycleInvalidState(UUID, expected: ShotLifecycleState, actual: ShotLifecycleState)
         case noAvailableFolderID
         case deleteVerificationFailed(URL)
     }
@@ -2047,6 +2051,84 @@ final class LocalStore {
         }
         update(&metadata.shots[index])
         try saveSessionMetadataAtomically(propertyID: propertyID, sessionID: sessionID, metadata: metadata)
+    }
+
+    @discardableResult
+    func retireShot(
+        propertyID: UUID,
+        sessionID: UUID,
+        shotID: UUID,
+        reason: String,
+        retiredByUserID: UUID? = nil,
+        retiredAt: Date = Date()
+    ) throws -> ShotMetadata {
+        try validateSessionAllowsShotLifecycleChange(propertyID: propertyID, sessionID: sessionID)
+        guard let normalizedReason = trimmedNonEmpty(reason) else {
+            throw StoreError.shotLifecycleBlankReason
+        }
+
+        var metadata = try loadSessionMetadata(propertyID: propertyID, sessionID: sessionID)
+        guard let index = metadata.shots.firstIndex(where: { $0.shotID == shotID }) else {
+            throw StoreError.shotNotFound(shotID)
+        }
+        guard metadata.shots[index].lifecycleState == .active else {
+            throw StoreError.shotLifecycleInvalidState(
+                shotID,
+                expected: .active,
+                actual: metadata.shots[index].lifecycleState
+            )
+        }
+
+        metadata.shots[index].lifecycleState = .retired
+        metadata.shots[index].retiredAt = retiredAt
+        metadata.shots[index].retiredReason = normalizedReason
+        metadata.shots[index].retiredByUserID = retiredByUserID
+        metadata.shots[index].lifecycleUpdatedAt = retiredAt
+        metadata.shots[index].updatedAt = max(metadata.shots[index].updatedAt, retiredAt)
+
+        let retired = metadata.shots[index]
+        try saveSessionMetadataAtomically(propertyID: propertyID, sessionID: sessionID, metadata: metadata)
+        return retired
+    }
+
+    @discardableResult
+    func restoreRetiredShot(
+        propertyID: UUID,
+        sessionID: UUID,
+        shotID: UUID,
+        restoredAt: Date = Date()
+    ) throws -> ShotMetadata {
+        try validateSessionAllowsShotLifecycleChange(propertyID: propertyID, sessionID: sessionID)
+
+        var metadata = try loadSessionMetadata(propertyID: propertyID, sessionID: sessionID)
+        guard let index = metadata.shots.firstIndex(where: { $0.shotID == shotID }) else {
+            throw StoreError.shotNotFound(shotID)
+        }
+        guard metadata.shots[index].lifecycleState == .retired else {
+            throw StoreError.shotLifecycleInvalidState(
+                shotID,
+                expected: .retired,
+                actual: metadata.shots[index].lifecycleState
+            )
+        }
+
+        metadata.shots[index].lifecycleState = .active
+        metadata.shots[index].lifecycleUpdatedAt = restoredAt
+        metadata.shots[index].updatedAt = max(metadata.shots[index].updatedAt, restoredAt)
+
+        let restored = metadata.shots[index]
+        try saveSessionMetadataAtomically(propertyID: propertyID, sessionID: sessionID, metadata: metadata)
+        return restored
+    }
+
+    private func validateSessionAllowsShotLifecycleChange(propertyID: UUID, sessionID: UUID) throws {
+        let sessions = try fetchSessionsForCacheBuild(propertyID: propertyID)
+        guard let session = sessions.first(where: { $0.id == sessionID && $0.deletedAt == nil }) else {
+            throw StoreError.sessionNotFound(sessionID)
+        }
+        guard session.status == .draft && !session.isSealed else {
+            throw StoreError.shotLifecycleBlockedForSealedSession(sessionID)
+        }
     }
 
     func removeShotMetadata(
