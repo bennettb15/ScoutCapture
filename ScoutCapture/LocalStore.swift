@@ -862,7 +862,7 @@ final class LocalStore {
         let originalsRoot = originalsFolderURL(propertyID: metadata.propertyID, sessionID: metadata.sessionID)
         var seen = Set<String>()
 
-        return metadata.shots.compactMap { shot in
+        return clientExportShots(in: metadata).compactMap { shot in
             let filename = exportOriginalFilename(for: shot)
             guard !filename.isEmpty else { return nil }
             guard seen.insert(filename).inserted else { return nil }
@@ -940,6 +940,14 @@ final class LocalStore {
             return directName
         }
         return URL(fileURLWithPath: shot.originalRelativePath).lastPathComponent
+    }
+
+    private func clientExportShots(in metadata: SessionMetadata) -> [ShotMetadata] {
+        metadata.shots.filter { $0.shouldAppearInDefaultExports }
+    }
+
+    private func clientExportGuidedRows(in metadata: SessionMetadata) -> [GuidedShot] {
+        metadata.guidedShots.filter { !$0.isRetired && $0.status != .retired }
     }
 
     func exportCSVFiles(for metadata: SessionMetadata) -> [(filename: String, data: Data)] {
@@ -1053,7 +1061,7 @@ final class LocalStore {
         let propertyCity = metadata.propertyCityAtCapture ?? property?.city ?? ""
         let propertyState = metadata.propertyStateAtCapture ?? property?.state ?? ""
         let propertyZip = metadata.propertyZipAtCapture ?? property?.zip ?? ""
-        let rows = metadata.shots.map { shot in
+        let rows = clientExportShots(in: metadata).map { shot in
             [
                 shot.shotID.uuidString,
                 metadata.sessionID.uuidString,
@@ -1112,7 +1120,8 @@ final class LocalStore {
         let propertyCity = metadata.propertyCityAtCapture ?? property?.city ?? ""
         let propertyState = metadata.propertyStateAtCapture ?? property?.state ?? ""
         let propertyZip = metadata.propertyZipAtCapture ?? property?.zip ?? ""
-        let shotsByIssueID = Dictionary(grouping: metadata.shots.compactMap { shot -> (UUID, ShotMetadata)? in
+        let exportShots = clientExportShots(in: metadata)
+        let shotsByIssueID = Dictionary(grouping: exportShots.compactMap { shot -> (UUID, ShotMetadata)? in
             guard let issueID = shot.issueID else { return nil }
             return (issueID, shot)
         }, by: \.0).mapValues { pairs in
@@ -1158,8 +1167,9 @@ final class LocalStore {
             "logical_shot_identity"
         ]
 
-        let shotsByID = Dictionary(uniqueKeysWithValues: metadata.shots.map { ($0.shotID.uuidString.lowercased(), $0) })
-        let shotsByIssueID = Dictionary(grouping: metadata.shots.compactMap { shot -> (UUID, ShotMetadata)? in
+        let exportShots = clientExportShots(in: metadata)
+        let shotsByID = Dictionary(uniqueKeysWithValues: exportShots.map { ($0.shotID.uuidString.lowercased(), $0) })
+        let shotsByIssueID = Dictionary(grouping: exportShots.compactMap { shot -> (UUID, ShotMetadata)? in
             guard let issueID = shot.issueID else { return nil }
             return (issueID, shot)
         }, by: \.0).mapValues { pairs in
@@ -1220,13 +1230,14 @@ final class LocalStore {
         let propertyCity = metadata.propertyCityAtCapture ?? property?.city ?? ""
         let propertyState = metadata.propertyStateAtCapture ?? property?.state ?? ""
         let propertyZip = metadata.propertyZipAtCapture ?? property?.zip ?? ""
-        let tradeByShotID = Dictionary(uniqueKeysWithValues: metadata.shots.map { ($0.shotID, $0.trade ?? "") })
+        let exportShots = clientExportShots(in: metadata)
+        let tradeByShotID = Dictionary(uniqueKeysWithValues: exportShots.map { ($0.shotID, $0.trade ?? "") })
         let priorityByShotID = Dictionary(
-            uniqueKeysWithValues: metadata.shots.map { shot in
+            uniqueKeysWithValues: exportShots.map { shot in
                 (shot.shotID, shot.isFlagged ? (shot.priority ?? "") : "")
             }
         )
-        let rows = metadata.guidedShots.map { row in
+        let rows = clientExportGuidedRows(in: metadata).map { row in
             [
                 row.id.uuidString,
                 metadata.sessionID.uuidString,

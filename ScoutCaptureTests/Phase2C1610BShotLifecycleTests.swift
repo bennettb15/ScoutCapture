@@ -20,6 +20,10 @@ final class Phase2C1610BShotLifecycleTests: XCTestCase {
         angleIndex: Int = 1,
         shotKey: String? = nil,
         isGuided: Bool = false,
+        isFlagged: Bool = false,
+        issueID: UUID? = nil,
+        issueStatus: String? = nil,
+        priority: String? = nil,
         originalFilename: String = "shot.heic",
         originalRelativePath: String = "Originals/shot.heic",
         lifecycleState: ShotLifecycleState = .active,
@@ -45,7 +49,7 @@ final class Phase2C1610BShotLifecycleTests: XCTestCase {
             detailType: detailType,
             angleIndex: angleIndex,
             trade: nil,
-            priority: nil,
+            priority: priority,
             shotKey: shotKey ?? ShotMetadata.makeShotKey(
                 building: building,
                 elevation: elevation,
@@ -53,9 +57,9 @@ final class Phase2C1610BShotLifecycleTests: XCTestCase {
                 angleIndex: angleIndex
             ),
             isGuided: isGuided,
-            isFlagged: false,
-            issueID: nil,
-            issueStatus: nil,
+            isFlagged: isFlagged,
+            issueID: issueID,
+            issueStatus: issueStatus,
             captureKind: nil,
             firstCaptureKind: nil,
             noteText: nil,
@@ -985,6 +989,143 @@ final class Phase2C1610BShotLifecycleTests: XCTestCase {
         XCTAssertEqual(payload.lifecycleUpdatedAt, restoredAt.ISO8601Format())
         XCTAssertNil(payload.uploadState)
         XCTAssertNil(payload.uploadAttempts)
+    }
+
+    @MainActor
+    func testClientExportOmitsRetiredShotsButPreservesSessionJSONRows() throws {
+        let fixture = try makeLocalStoreFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.storageRoot) }
+        let activeShotID = UUID()
+        let retiredShotID = UUID()
+        let activeFilename = "active-export.heic"
+        let retiredFilename = "retired-export.heic"
+        let originalsURL = fixture.localStore.originalsDirectoryURL(
+            propertyID: fixture.propertyID,
+            sessionID: fixture.sessionID
+        )
+        try FileManager.default.createDirectory(at: originalsURL, withIntermediateDirectories: true)
+        try Data("active".utf8).write(to: originalsURL.appendingPathComponent(activeFilename))
+        try Data("retired".utf8).write(to: originalsURL.appendingPathComponent(retiredFilename))
+
+        try fixture.localStore.upsertShot(
+            propertyID: fixture.propertyID,
+            sessionID: fixture.sessionID,
+            shot: makeShot(
+                shotID: activeShotID,
+                propertyID: fixture.propertyID,
+                sessionID: fixture.sessionID,
+                isGuided: true,
+                originalFilename: activeFilename,
+                originalRelativePath: "Originals/\(activeFilename)"
+            ),
+            matchMode: .append
+        )
+        try fixture.localStore.upsertShot(
+            propertyID: fixture.propertyID,
+            sessionID: fixture.sessionID,
+            shot: makeShot(
+                shotID: retiredShotID,
+                propertyID: fixture.propertyID,
+                sessionID: fixture.sessionID,
+                isGuided: true,
+                originalFilename: retiredFilename,
+                originalRelativePath: "Originals/\(retiredFilename)",
+                lifecycleState: .retired,
+                retiredAt: Date(timeIntervalSinceReferenceDate: 820),
+                retiredReason: "duplicate",
+                lifecycleUpdatedAt: Date(timeIntervalSinceReferenceDate: 820)
+            ),
+            matchMode: .append
+        )
+
+        let artifacts = try fixture.localStore.validatedSessionExportArtifacts(
+            for: Session(id: fixture.sessionID, propertyID: fixture.propertyID, status: .draft)
+        )
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let exportedSession = try decoder.decode(SessionMetadata.self, from: artifacts.sessionData)
+        let csvFiles = Dictionary(uniqueKeysWithValues: fixture.localStore.exportCSVFiles(for: artifacts.metadata).map { ($0.filename, $0.data) })
+        let shotsCSV = String(data: try XCTUnwrap(csvFiles["shots.csv"]), encoding: .utf8) ?? ""
+
+        XCTAssertEqual(Set(artifacts.originalFiles.map(\.filename)), [activeFilename])
+        XCTAssertTrue(shotsCSV.contains(activeShotID.uuidString))
+        XCTAssertFalse(shotsCSV.contains(retiredShotID.uuidString))
+        XCTAssertTrue(exportedSession.shots.contains { $0.shotID == activeShotID })
+        XCTAssertTrue(exportedSession.shots.contains { $0.shotID == retiredShotID })
+        XCTAssertEqual(exportedSession.shots.first { $0.shotID == retiredShotID }?.lifecycleState, .retired)
+    }
+
+    @MainActor
+    func testClientExportKeepsActiveFlaggedIssueRows() throws {
+        let fixture = try makeLocalStoreFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.storageRoot) }
+        let issueID = UUID()
+        let shotID = UUID()
+        let filename = "flagged-active.heic"
+        let originalsURL = fixture.localStore.originalsDirectoryURL(
+            propertyID: fixture.propertyID,
+            sessionID: fixture.sessionID
+        )
+        try FileManager.default.createDirectory(at: originalsURL, withIntermediateDirectories: true)
+        try Data("flagged".utf8).write(to: originalsURL.appendingPathComponent(filename))
+
+        let shotKey = ShotMetadata.makeShotKey(
+            building: "Building",
+            elevation: "North",
+            detailType: "Issue",
+            angleIndex: 1
+        )
+        try fixture.localStore.upsertShot(
+            propertyID: fixture.propertyID,
+            sessionID: fixture.sessionID,
+            shot: makeShot(
+                shotID: shotID,
+                propertyID: fixture.propertyID,
+                sessionID: fixture.sessionID,
+                detailType: "Issue",
+                shotKey: shotKey,
+                isFlagged: true,
+                issueID: issueID,
+                issueStatus: "active",
+                priority: "High",
+                originalFilename: filename,
+                originalRelativePath: "Originals/\(filename)"
+            ),
+            matchMode: .append
+        )
+        var metadata = try fixture.localStore.loadSessionMetadata(
+            propertyID: fixture.propertyID,
+            sessionID: fixture.sessionID
+        )
+        metadata.issues = [
+            IssueMetadata(
+                issueID: issueID,
+                issueStatus: "active",
+                currentReason: "Needs repair",
+                firstSeenAt: Date(timeIntervalSinceReferenceDate: 830),
+                lastSeenAt: Date(timeIntervalSinceReferenceDate: 830),
+                lastCaptureSessionId: fixture.sessionID,
+                shotKey: shotKey
+            )
+        ]
+        try fixture.localStore.saveSessionMetadataAtomically(
+            propertyID: fixture.propertyID,
+            sessionID: fixture.sessionID,
+            metadata: metadata
+        )
+
+        let artifacts = try fixture.localStore.validatedSessionExportArtifacts(
+            for: Session(id: fixture.sessionID, propertyID: fixture.propertyID, status: .draft)
+        )
+        let csvFiles = Dictionary(uniqueKeysWithValues: fixture.localStore.exportCSVFiles(for: artifacts.metadata).map { ($0.filename, $0.data) })
+        let shotsCSV = String(data: try XCTUnwrap(csvFiles["shots.csv"]), encoding: .utf8) ?? ""
+        let issuesCSV = String(data: try XCTUnwrap(csvFiles["issues.csv"]), encoding: .utf8) ?? ""
+
+        XCTAssertEqual(Set(artifacts.originalFiles.map(\.filename)), [filename])
+        XCTAssertTrue(shotsCSV.contains(shotID.uuidString))
+        XCTAssertTrue(shotsCSV.contains(issueID.uuidString))
+        XCTAssertTrue(issuesCSV.contains(issueID.uuidString))
+        XCTAssertTrue(issuesCSV.contains(shotKey))
     }
 
     @MainActor
