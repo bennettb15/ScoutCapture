@@ -2257,8 +2257,9 @@ private struct ReportPhotoViewer: View {
         let displayedSessionID = metadataSessionID ?? currentSession.id
         guard displayedSessionID == currentSession.id else { return false }
         guard shot.sessionID == currentSession.id else { return false }
+        guard shot.isGuided else { return false }
         guard !shot.isFlagged else { return false }
-        guard shot.lifecycleState == .active || shot.lifecycleState == .retired else { return false }
+        guard shot.lifecycleState == .active else { return false }
         return currentSession.status == .draft && !currentSession.isSealed
     }
 
