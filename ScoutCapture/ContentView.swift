@@ -2301,6 +2301,12 @@ private struct ReportPhotoViewer: View {
                 retiredByUserID: appState.authenticatedSupabaseUser?.id
             )
             retireMatchingGuidedItemIfNeeded(for: shot, reason: reason)
+            appState.scheduleShotMetadataSupabaseWriteIfNeeded(
+                propertyID: shot.propertyID,
+                sessionID: shot.sessionID,
+                shotID: shot.shotID,
+                reason: "guided_lifecycle_retire"
+            )
             loadShotMetadataCache()
             onLifecycleChange?()
         } catch {
@@ -2320,6 +2326,12 @@ private struct ReportPhotoViewer: View {
                 shotID: shot.shotID
             )
             restoreMatchingGuidedItemIfNeeded(for: shot)
+            appState.scheduleShotMetadataSupabaseWriteIfNeeded(
+                propertyID: shot.propertyID,
+                sessionID: shot.sessionID,
+                shotID: shot.shotID,
+                reason: "guided_lifecycle_restore"
+            )
             loadShotMetadataCache()
             onLifecycleChange?()
         } catch {
@@ -10829,7 +10841,7 @@ extension ContentView {
         guard let propertyID = appState.selectedPropertyID,
               let sessionID = appState.currentSession?.id else { return }
         do {
-            _ = try localStore.retireGuidedShot(
+            let retired = try localStore.retireGuidedShot(
                 propertyID: propertyID,
                 sessionID: sessionID,
                 guidedShotID: guidedShot.id,
@@ -10846,6 +10858,12 @@ extension ContentView {
                 showGuidedAlignmentOverlay = false
             }
 
+            appState.scheduleGuidedLifecycleShotMetadataSupabaseWriteIfNeeded(
+                propertyID: propertyID,
+                sessionID: sessionID,
+                guidedShot: retired,
+                reason: "guided_lifecycle_retire"
+            )
             refreshAfterGuidedLifecycleChange(propertyID: propertyID, sessionID: sessionID)
         } catch {
             print("Failed to retire guided shot: \(error)")
@@ -10856,10 +10874,16 @@ extension ContentView {
         guard let propertyID = appState.selectedPropertyID,
               let sessionID = appState.currentSession?.id else { return }
         do {
-            _ = try localStore.restoreRetiredGuidedShot(
+            let restored = try localStore.restoreRetiredGuidedShot(
                 propertyID: propertyID,
                 sessionID: sessionID,
                 guidedShotID: guidedShot.id
+            )
+            appState.scheduleGuidedLifecycleShotMetadataSupabaseWriteIfNeeded(
+                propertyID: propertyID,
+                sessionID: sessionID,
+                guidedShot: restored,
+                reason: "guided_lifecycle_restore"
             )
             refreshAfterGuidedLifecycleChange(propertyID: propertyID, sessionID: sessionID)
         } catch {

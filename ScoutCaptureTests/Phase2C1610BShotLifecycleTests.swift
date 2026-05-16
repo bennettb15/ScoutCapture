@@ -136,6 +136,15 @@ final class Phase2C1610BShotLifecycleTests: XCTestCase {
         return (localStore, storageRoot, propertyID, sessionID)
     }
 
+    private func makeLifecycleWriteDefaults() -> (suiteName: String, defaults: UserDefaults) {
+        let suiteName = "Phase2C1610LifecycleRemote-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName) ?? .standard
+        defaults.removePersistentDomain(forName: suiteName)
+        defaults.set(true, forKey: "supabase_enabled")
+        defaults.set(true, forKey: "shadow_write_enabled")
+        return (suiteName, defaults)
+    }
+
     private func roundTrip(_ shot: ShotMetadata) throws -> ShotMetadata {
         let data = try JSONEncoder().encode(shot)
         return try JSONDecoder().decode(ShotMetadata.self, from: data)
@@ -798,6 +807,184 @@ final class Phase2C1610BShotLifecycleTests: XCTestCase {
         XCTAssertEqual(storedShot.lifecycleUpdatedAt, restoredAt)
         XCTAssertTrue(storedShot.shouldAppearInDefaultGallery)
         XCTAssertEqual(metadata.guidedShots.first?.status, .active)
+    }
+
+    @MainActor
+    func testGuidedRetireSchedulesLifecycleMetadataWrite() async throws {
+        let fixture = try makeLocalStoreFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.storageRoot) }
+        let property = try XCTUnwrap(fixture.localStore.fetchProperties().first { $0.id == fixture.propertyID })
+        let orgID = try XCTUnwrap(property.orgId)
+        let shotID = UUID()
+        let retiredAt = Date(timeIntervalSinceReferenceDate: 790)
+        let retiredBy = UUID()
+        let shot = Shot(
+            id: shotID,
+            capturedAt: Date(timeIntervalSinceReferenceDate: 120),
+            imageLocalIdentifier: "Originals/\(shotID.uuidString).heic"
+        )
+        let guided = GuidedShot(
+            id: UUID(),
+            title: "North Overview",
+            building: "Building",
+            targetElevation: "North",
+            detailType: "Overview",
+            angleIndex: 1,
+            shot: shot,
+            isCompleted: true
+        )
+        try fixture.localStore.upsertShot(
+            propertyID: fixture.propertyID,
+            sessionID: fixture.sessionID,
+            shot: makeShot(
+                shotID: shotID,
+                propertyID: fixture.propertyID,
+                sessionID: fixture.sessionID,
+                isGuided: true,
+                originalFilename: "\(shotID.uuidString).heic",
+                originalRelativePath: "Originals/\(shotID.uuidString).heic"
+            ),
+            matchMode: .append
+        )
+        try fixture.localStore.saveGuidedShots([guided], propertyID: fixture.propertyID)
+        let retired = try fixture.localStore.retireGuidedShot(
+            propertyID: fixture.propertyID,
+            sessionID: fixture.sessionID,
+            guidedShotID: guided.id,
+            reason: "duplicate",
+            retiredByUserID: retiredBy,
+            retiredAt: retiredAt
+        )
+
+        let defaultsFixture = makeLifecycleWriteDefaults()
+        defer { defaultsFixture.defaults.removePersistentDomain(forName: defaultsFixture.suiteName) }
+        let writeExpectation = expectation(description: "guided retire lifecycle metadata write")
+        var capturedPayload: AppState.SupabaseShotRichMetadataPayload?
+        let appState = AppState(
+            localStore: fixture.localStore,
+            userDefaults: defaultsFixture.defaults,
+            shotMetadataWriteOverride: { _, _, payload, allowInsert in
+                XCTAssertFalse(allowInsert)
+                capturedPayload = payload
+                writeExpectation.fulfill()
+            },
+            disableCloudBackupForTests: true
+        )
+        appState.refreshProperties()
+        appState._debugSetOrganizationContextForTests(
+            memberships: [ActiveOrganizationMembership(id: orgID, name: "Org", role: "owner")],
+            activeOrganizationID: orgID,
+            ready: true
+        )
+
+        appState.scheduleGuidedLifecycleShotMetadataSupabaseWriteIfNeeded(
+            propertyID: fixture.propertyID,
+            sessionID: fixture.sessionID,
+            guidedShot: retired,
+            reason: "guided_lifecycle_retire"
+        )
+        await fulfillment(of: [writeExpectation], timeout: 2.0)
+
+        let payload = try XCTUnwrap(capturedPayload)
+        XCTAssertEqual(payload.id, shotID)
+        XCTAssertEqual(payload.lifecycleState, ShotLifecycleState.retired.rawValue)
+        XCTAssertEqual(payload.retiredReason, "duplicate")
+        XCTAssertEqual(payload.retiredBy, retiredBy)
+        XCTAssertEqual(payload.retiredAt, retiredAt.ISO8601Format())
+        XCTAssertEqual(payload.lifecycleUpdatedAt, retiredAt.ISO8601Format())
+        XCTAssertNil(payload.uploadState)
+        XCTAssertNil(payload.uploadAttempts)
+    }
+
+    @MainActor
+    func testGuidedRestoreSchedulesActiveLifecycleMetadataWrite() async throws {
+        let fixture = try makeLocalStoreFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.storageRoot) }
+        let property = try XCTUnwrap(fixture.localStore.fetchProperties().first { $0.id == fixture.propertyID })
+        let orgID = try XCTUnwrap(property.orgId)
+        let shotID = UUID()
+        let retiredAt = Date(timeIntervalSinceReferenceDate: 800)
+        let restoredAt = Date(timeIntervalSinceReferenceDate: 810)
+        let shot = Shot(
+            id: shotID,
+            capturedAt: Date(timeIntervalSinceReferenceDate: 120),
+            imageLocalIdentifier: "Originals/\(shotID.uuidString).heic"
+        )
+        let guided = GuidedShot(
+            id: UUID(),
+            title: "North Overview",
+            building: "Building",
+            targetElevation: "North",
+            detailType: "Overview",
+            angleIndex: 1,
+            shot: shot,
+            isCompleted: true
+        )
+        try fixture.localStore.upsertShot(
+            propertyID: fixture.propertyID,
+            sessionID: fixture.sessionID,
+            shot: makeShot(
+                shotID: shotID,
+                propertyID: fixture.propertyID,
+                sessionID: fixture.sessionID,
+                isGuided: true,
+                originalFilename: "\(shotID.uuidString).heic",
+                originalRelativePath: "Originals/\(shotID.uuidString).heic"
+            ),
+            matchMode: .append
+        )
+        try fixture.localStore.saveGuidedShots([guided], propertyID: fixture.propertyID)
+        try fixture.localStore.retireGuidedShot(
+            propertyID: fixture.propertyID,
+            sessionID: fixture.sessionID,
+            guidedShotID: guided.id,
+            reason: "duplicate",
+            retiredAt: retiredAt
+        )
+        let restored = try fixture.localStore.restoreRetiredGuidedShot(
+            propertyID: fixture.propertyID,
+            sessionID: fixture.sessionID,
+            guidedShotID: guided.id,
+            restoredAt: restoredAt
+        )
+
+        let defaultsFixture = makeLifecycleWriteDefaults()
+        defer { defaultsFixture.defaults.removePersistentDomain(forName: defaultsFixture.suiteName) }
+        let writeExpectation = expectation(description: "guided restore lifecycle metadata write")
+        var capturedPayload: AppState.SupabaseShotRichMetadataPayload?
+        let appState = AppState(
+            localStore: fixture.localStore,
+            userDefaults: defaultsFixture.defaults,
+            shotMetadataWriteOverride: { _, _, payload, allowInsert in
+                XCTAssertFalse(allowInsert)
+                capturedPayload = payload
+                writeExpectation.fulfill()
+            },
+            disableCloudBackupForTests: true
+        )
+        appState.refreshProperties()
+        appState._debugSetOrganizationContextForTests(
+            memberships: [ActiveOrganizationMembership(id: orgID, name: "Org", role: "owner")],
+            activeOrganizationID: orgID,
+            ready: true
+        )
+
+        appState.scheduleGuidedLifecycleShotMetadataSupabaseWriteIfNeeded(
+            propertyID: fixture.propertyID,
+            sessionID: fixture.sessionID,
+            guidedShot: restored,
+            reason: "guided_lifecycle_restore"
+        )
+        await fulfillment(of: [writeExpectation], timeout: 2.0)
+
+        let payload = try XCTUnwrap(capturedPayload)
+        XCTAssertEqual(payload.id, shotID)
+        XCTAssertEqual(payload.lifecycleState, ShotLifecycleState.active.rawValue)
+        XCTAssertEqual(payload.retiredReason, "duplicate")
+        XCTAssertEqual(payload.retiredAt, retiredAt.ISO8601Format())
+        XCTAssertEqual(payload.lifecycleUpdatedAt, restoredAt.ISO8601Format())
+        XCTAssertNil(payload.uploadState)
+        XCTAssertNil(payload.uploadAttempts)
     }
 
     @MainActor

@@ -9499,6 +9499,27 @@ final class AppState: ObservableObject {
         }
     }
 
+    func scheduleGuidedLifecycleShotMetadataSupabaseWriteIfNeeded(
+        propertyID: UUID,
+        sessionID: UUID,
+        guidedShot: GuidedShot,
+        reason: String
+    ) {
+        guard let shotID = guidedShot.shot?.id else {
+            print(
+                "[ShotMetadataWrite] skipped reason=guided_lifecycle_no_linked_shot " +
+                "guidedShotID=\(guidedShot.id.uuidString) sessionID=\(sessionID.uuidString)"
+            )
+            return
+        }
+        scheduleShotMetadataSupabaseWriteIfNeeded(
+            propertyID: propertyID,
+            sessionID: sessionID,
+            shotID: shotID,
+            reason: reason
+        )
+    }
+
     private func persistShotRichMetadataToSupabase(
         orgID: UUID,
         propertyID: UUID,
