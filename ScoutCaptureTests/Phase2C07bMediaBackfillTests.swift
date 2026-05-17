@@ -728,6 +728,158 @@ final class Phase2C07bMediaBackfillTests: XCTestCase {
         XCTAssertFalse(snapshot.contains("abc"))
     }
 
+    @MainActor
+    func testSyncDebtInspectorClassifiesOldRemoteOnlySessionAsHistorical() throws {
+        let activeOrganizationID = UUID()
+        let propertyID = UUID()
+        let remoteSessionID = UUID()
+        let remoteUpdatedAt = Date(timeIntervalSinceReferenceDate: 100)
+        let cursor = Date(timeIntervalSinceReferenceDate: 200)
+        let fixture = try makeAppStateWithSingleSession(uploadStates: [], extraOrganizationIDs: [activeOrganizationID])
+        defer {
+            fixture.appState.shutdown()
+            try? FileManager.default.removeItem(at: fixture.storageRoot)
+        }
+
+        fixture.appState._debugWriteSyncCursorForTests(entity: "sessions", orgID: activeOrganizationID, date: cursor)
+        let localProperties = [
+            Property(
+                id: propertyID,
+                orgId: activeOrganizationID,
+                name: "Local",
+                address: "123 Main Street"
+            )
+        ]
+        let remote = AppState.DebugDivergenceRemoteInput(
+            propertyIDs: [propertyID.uuidString],
+            sessions: [(id: remoteSessionID.uuidString, propertyID: propertyID.uuidString)],
+            sessionUpdatedAts: [remoteSessionID.uuidString.lowercased(): remoteUpdatedAt],
+            orgID: activeOrganizationID
+        )
+        let summary = fixture.appState._debugDivergenceAuditSummaryForTests(
+            properties: localProperties,
+            sessions: [],
+            shots: [],
+            remote: remote,
+            activeOrganizationID: activeOrganizationID
+        )
+
+        let report = fixture.appState._debugSyncDebtInspectionReportForTests(
+            properties: localProperties,
+            sessions: [],
+            shots: [],
+            remote: remote,
+            divergenceAuditSummary: summary,
+            activeOrganizationID: activeOrganizationID
+        )
+
+        let item = try XCTUnwrap(report.divergenceItems.first { $0.category == .remoteOnlySession })
+        XCTAssertEqual(item.classification, .historicalRemoteOnly)
+        XCTAssertTrue(item.classificationReason.contains("sync cursor"))
+    }
+
+    @MainActor
+    func testSyncDebtInspectorClassifiesRemoteOnlySessionWithLocalParentAsHydrationDebt() throws {
+        let activeOrganizationID = UUID()
+        let propertyID = UUID()
+        let remoteSessionID = UUID()
+        let fixture = try makeAppStateWithSingleSession(uploadStates: [], extraOrganizationIDs: [activeOrganizationID])
+        defer {
+            fixture.appState.shutdown()
+            try? FileManager.default.removeItem(at: fixture.storageRoot)
+        }
+
+        let localProperties = [
+            Property(
+                id: propertyID,
+                orgId: activeOrganizationID,
+                name: "Local",
+                address: "123 Main Street"
+            )
+        ]
+        let remote = AppState.DebugDivergenceRemoteInput(
+            propertyIDs: [propertyID.uuidString],
+            sessions: [(id: remoteSessionID.uuidString, propertyID: propertyID.uuidString)],
+            sessionUpdatedAts: [remoteSessionID.uuidString.lowercased(): Date(timeIntervalSinceReferenceDate: 300)],
+            orgID: activeOrganizationID
+        )
+        let summary = fixture.appState._debugDivergenceAuditSummaryForTests(
+            properties: localProperties,
+            sessions: [],
+            shots: [],
+            remote: remote,
+            activeOrganizationID: activeOrganizationID
+        )
+
+        let report = fixture.appState._debugSyncDebtInspectionReportForTests(
+            properties: localProperties,
+            sessions: [],
+            shots: [],
+            remote: remote,
+            divergenceAuditSummary: summary,
+            activeOrganizationID: activeOrganizationID
+        )
+
+        let item = try XCTUnwrap(report.divergenceItems.first { $0.category == .remoteOnlySession })
+        XCTAssertEqual(item.classification, .missingLocalHydration)
+        XCTAssertTrue(item.classificationReason.contains("local property"))
+    }
+
+    @MainActor
+    func testSyncDebtInspectorClassifiesRemoteOnlyShotLegacyArtifactAndManualReviewFallback() throws {
+        let activeOrganizationID = UUID()
+        let propertyID = UUID()
+        let sessionID = UUID()
+        let legacyShotID = UUID()
+        let unknownShotID = UUID()
+        let fixture = try makeAppStateWithSingleSession(uploadStates: [], extraOrganizationIDs: [activeOrganizationID])
+        defer {
+            fixture.appState.shutdown()
+            try? FileManager.default.removeItem(at: fixture.storageRoot)
+        }
+
+        let localProperties = [
+            Property(
+                id: propertyID,
+                orgId: activeOrganizationID,
+                name: "Local",
+                address: "123 Main Street"
+            )
+        ]
+        let localSessions = [Session(id: sessionID, propertyID: propertyID)]
+        let remote = AppState.DebugDivergenceRemoteInput(
+            propertyIDs: [propertyID.uuidString],
+            sessions: [(id: sessionID.uuidString, propertyID: propertyID.uuidString)],
+            shots: [
+                (id: legacyShotID.uuidString, propertyID: propertyID.uuidString, sessionID: sessionID.uuidString),
+                (id: unknownShotID.uuidString, propertyID: propertyID.uuidString, sessionID: sessionID.uuidString)
+            ],
+            shotLifecycleStates: [legacyShotID.uuidString.lowercased(): "superseded"],
+            orgID: activeOrganizationID
+        )
+        let summary = fixture.appState._debugDivergenceAuditSummaryForTests(
+            properties: localProperties,
+            sessions: localSessions,
+            shots: [],
+            remote: remote,
+            activeOrganizationID: activeOrganizationID
+        )
+
+        let report = fixture.appState._debugSyncDebtInspectionReportForTests(
+            properties: localProperties,
+            sessions: localSessions,
+            shots: [],
+            remote: remote,
+            divergenceAuditSummary: summary,
+            activeOrganizationID: activeOrganizationID
+        )
+
+        let legacy = try XCTUnwrap(report.divergenceItems.first { $0.shotID == legacyShotID })
+        let unknown = try XCTUnwrap(report.divergenceItems.first { $0.shotID == unknownShotID })
+        XCTAssertEqual(legacy.classification, .knownLegacyArtifact)
+        XCTAssertEqual(unknown.classification, .manualReview)
+    }
+
     func testDivergenceAuditSummarySeparatesOperationalAndHistoricalCounts() throws {
         let summary = AppState.DivergenceAuditSummary(
             ranAt: Date(timeIntervalSince1970: 0),

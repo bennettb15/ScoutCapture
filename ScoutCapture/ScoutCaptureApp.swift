@@ -6397,6 +6397,34 @@ private struct DebugDivergenceAuditSnapshot {
 
 }
 
+private struct DebugSyncDebtInspectionSnapshot {
+    let ranAt: String
+    let activeOrganizationID: String
+    let failedQueueItemCount: String
+    let divergenceItemCount: String
+    let groupedHistoricalCount: String
+    let queueClassificationCounts: [(AppState.QueueDebtClassification, Int)]
+    let divergenceClassificationCounts: [(AppState.DivergenceDebtClassification, Int)]
+    let snapshotText: String
+
+    init(_ report: AppState.SyncDebtInspectionReport) {
+        ranAt = formattedDate(report.ranAt)
+        activeOrganizationID = report.activeOrganizationID?.uuidString ?? "none"
+        failedQueueItemCount = String(report.failedQueueItems.count)
+        divergenceItemCount = String(report.divergenceItems.count)
+        groupedHistoricalCount = String(report.groupedHistoricalFindings.count)
+        let queueCounts = Dictionary(grouping: report.failedQueueItems, by: \.classification).mapValues(\.count)
+        queueClassificationCounts = AppState.QueueDebtClassification.allCases
+            .map { ($0, queueCounts[$0] ?? 0) }
+            .filter { $0.1 > 0 }
+        let divergenceCounts = Dictionary(grouping: report.divergenceItems, by: \.classification).mapValues(\.count)
+        divergenceClassificationCounts = AppState.DivergenceDebtClassification.allCases
+            .map { ($0, divergenceCounts[$0] ?? 0) }
+            .filter { $0.1 > 0 }
+        snapshotText = AppState.syncDebtInspectionReportText(report)
+    }
+}
+
 private struct DebugDivergenceAuditHistoricalGroup: Identifiable, Equatable {
     let id: String
     let category: String
@@ -6605,12 +6633,14 @@ private struct DebugLocalDiagnosticsView: View {
     @State private var showClearConfirm: Bool = false
     @State private var isRunningDivergenceAudit: Bool = false
     @State private var isInspectingMediaRecovery: Bool = false
+    @State private var isInspectingSyncDebt: Bool = false
     @State private var failedQueueItems: [DebugQueueDiagnosticSnapshotItem] = []
     @State private var retryCappedMediaItems: [DebugMediaDiagnosticSnapshotItem] = []
     @State private var pendingMediaItems: [DebugMediaDiagnosticSnapshotItem] = []
     @State private var mediaRecoverySnapshot: DebugMediaRecoverySnapshot?
     @State private var divergenceAuditSummary: AppState.DivergenceAuditSummary?
     @State private var divergenceAuditSnapshot: DebugDivergenceAuditSnapshot?
+    @State private var syncDebtSnapshot: DebugSyncDebtInspectionSnapshot?
 
     private var diagnostics: AppState.LocalDiagnosticsState {
         appState.localDiagnostics
@@ -6628,6 +6658,7 @@ private struct DebugLocalDiagnosticsView: View {
                 Section("Overview / Summary") {
                     diagnosticRow("Active Sync Issues", divergenceAuditSnapshot?.activeSyncIssueCount ?? "not run")
                     diagnosticRow("Recoverable Findings", divergenceAuditSnapshot?.recoverableIssueCount ?? "not run")
+                    diagnosticRow("Debt Report Findings", syncDebtSnapshot?.divergenceItemCount ?? "not run")
                     diagnosticRow("Failed Queue Items", failedQueueItems.count)
                     diagnosticRow("Retry-Capped Media", retryCappedMediaItems.count)
                     diagnosticRow("Pending Media", pendingMediaItems.count)
@@ -6704,6 +6735,7 @@ private struct DebugLocalDiagnosticsView: View {
             mediaRecoverySnapshot = nil
             divergenceAuditSummary = nil
             divergenceAuditSnapshot = nil
+            syncDebtSnapshot = nil
             refreshDiagnosticDetailSnapshots()
         }
         .alert("Clear Local Diagnostics?", isPresented: $showClearConfirm) {
@@ -6850,6 +6882,40 @@ private struct DebugLocalDiagnosticsView: View {
                     }
                 } else {
                     Text("No divergence audit has been run in this view.")
+                        .font(.system(size: 14, weight: .medium))
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            Section("Queue and Divergence Debt Inspector") {
+                Text("Read-only classifier for failed queue items and divergence findings. It does not retry, clear, archive, hydrate, delete, or change sync behavior.")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(.secondary)
+                Button(isInspectingSyncDebt ? "Inspecting..." : "Inspect Sync Debt") {
+                    inspectSyncDebt()
+                }
+                .disabled(isInspectingSyncDebt)
+
+                if let snapshot = syncDebtSnapshot {
+                    diagnosticRow("Inspected", snapshot.ranAt)
+                    diagnosticRow("Active Org", snapshot.activeOrganizationID)
+                    diagnosticRow("Failed Queue Items", snapshot.failedQueueItemCount)
+                    diagnosticRow("Divergence Findings", snapshot.divergenceItemCount)
+                    diagnosticRow("Grouped Historical", snapshot.groupedHistoricalCount)
+                    ForEach(snapshot.queueClassificationCounts, id: \.0) { classification, count in
+                        diagnosticRow(classification.rawValue, count)
+                    }
+                    ForEach(snapshot.divergenceClassificationCounts, id: \.0) { classification, count in
+                        diagnosticRow(classification.rawValue, count)
+                    }
+                    NavigationLink {
+                        DebugSyncDebtInspectionSnapshotTextView(snapshotText: snapshot.snapshotText)
+                    } label: {
+                        Text("View Copyable Debt Report")
+                            .font(.system(size: 14, weight: .semibold))
+                    }
+                } else {
+                    Text("No sync debt inspection has been run in this view.")
                         .font(.system(size: 14, weight: .medium))
                         .foregroundStyle(.secondary)
                 }
@@ -7029,6 +7095,23 @@ private struct DebugLocalDiagnosticsView: View {
             await MainActor.run {
                 mediaRecoverySnapshot = DebugMediaRecoverySnapshot(summary)
                 isInspectingMediaRecovery = false
+            }
+        }
+    }
+
+    private func inspectSyncDebt() {
+        guard !isInspectingSyncDebt else { return }
+        isInspectingSyncDebt = true
+        let currentDivergenceSummary = divergenceAuditSummary
+        Task {
+            let report = await appState.inspectSyncDebt(divergenceAuditSummary: currentDivergenceSummary)
+            await MainActor.run {
+                syncDebtSnapshot = DebugSyncDebtInspectionSnapshot(report)
+                if currentDivergenceSummary == nil {
+                    divergenceAuditSummary = nil
+                    divergenceAuditSnapshot = nil
+                }
+                isInspectingSyncDebt = false
             }
         }
     }
@@ -7717,6 +7800,34 @@ private struct DebugMediaRecoverySnapshotTextView: View {
             }
         }
         .navigationTitle("Media Snapshot")
+        .navigationBarTitleDisplayMode(.inline)
+    }
+}
+
+private struct DebugSyncDebtInspectionSnapshotTextView: View {
+    let snapshotText: String
+    @State private var didCopySnapshot: Bool = false
+
+    var body: some View {
+        List {
+            Section {
+                Button(didCopySnapshot ? "Copied Plain Text" : "Copy Report") {
+                    UIPasteboard.general.string = snapshotText
+                    didCopySnapshot = true
+                }
+                .font(.system(size: 14, weight: .semibold))
+            } footer: {
+                Text("Copies the sanitized sync debt report as plain text only.")
+            }
+
+            Section {
+                Text(snapshotText)
+                    .font(.system(size: 12, weight: .regular, design: .monospaced))
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .textSelection(.enabled)
+            }
+        }
+        .navigationTitle("Debt Report")
         .navigationBarTitleDisplayMode(.inline)
     }
 }

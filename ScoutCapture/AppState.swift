@@ -315,6 +315,77 @@ final class AppState: ObservableObject {
         let ageSeconds: TimeInterval?
     }
 
+    enum QueueDebtClassification: String, CaseIterable, Equatable {
+        case staleRLSPropertyUpsert = "stale_rls_property_upsert"
+        case staleRLSSessionParentProperty = "stale_rls_session_parent_property"
+        case retryCandidate = "retry_candidate"
+        case manualReview = "manual_review"
+        case unknown
+    }
+
+    enum DivergenceDebtClassification: String, CaseIterable, Equatable {
+        case historicalRemoteOnly = "historical_remote_only"
+        case missingLocalHydration = "missing_local_hydration"
+        case trueParityDebt = "true_parity_debt"
+        case knownLegacyArtifact = "known_legacy_artifact"
+        case informationalHistorical = "informational_historical"
+        case manualReview = "manual_review"
+    }
+
+    struct QueueDebtPayloadSummary: Equatable {
+        let payloadKind: String
+        let payloadOrgID: UUID?
+        let payloadPropertyID: UUID?
+        let payloadSessionID: UUID?
+        let propertyName: String?
+        let sessionStatus: String?
+        let sessionStartedAt: String?
+        let updatedBy: UUID?
+        let decodeError: String?
+    }
+
+    struct QueueDebtInspectionItem: Equatable, Identifiable {
+        let id: UUID
+        let entityType: String
+        let entityID: UUID
+        let operation: String
+        let orgID: UUID
+        let propertyID: UUID?
+        let sessionID: UUID?
+        let idempotencyKey: String
+        let attemptCount: Int
+        let createdAt: Date
+        let lastAttemptAt: Date?
+        let nextAttemptAt: Date?
+        let lastErrorCategory: DiagnosticErrorCategory
+        let lastErrorMessage: String?
+        let payloadSummary: QueueDebtPayloadSummary
+        let updatedBy: UUID?
+        let classification: QueueDebtClassification
+    }
+
+    struct DivergenceDebtInspectionItem: Equatable, Identifiable {
+        let id: UUID
+        let category: DivergenceAuditCategory
+        let entityType: String
+        let entityID: UUID?
+        let propertyID: UUID?
+        let sessionID: UUID?
+        let shotID: UUID?
+        let orgID: UUID?
+        let reason: String
+        let classification: DivergenceDebtClassification
+        let classificationReason: String
+    }
+
+    struct SyncDebtInspectionReport: Equatable {
+        let ranAt: Date
+        let activeOrganizationID: UUID?
+        let failedQueueItems: [QueueDebtInspectionItem]
+        let divergenceItems: [DivergenceDebtInspectionItem]
+        let groupedHistoricalFindings: [DivergenceAuditFindingGroupSummary]
+    }
+
     struct MediaDiagnosticItem: Equatable, Identifiable {
         let id: UUID
         let shotID: UUID
@@ -2025,6 +2096,7 @@ final class AppState: ObservableObject {
         let orgID: UUID
         let propertyID: UUID
         let captureProfile: String?
+        let updatedAt: Date?
         let deletedAt: Date?
 
         enum CodingKeys: String, CodingKey {
@@ -2032,6 +2104,7 @@ final class AppState: ObservableObject {
             case orgID = "org_id"
             case propertyID = "property_id"
             case captureProfile = "capture_profile"
+            case updatedAt = "updated_at"
             case deletedAt = "deleted_at"
         }
     }
@@ -2044,6 +2117,10 @@ final class AppState: ObservableObject {
         let uploadState: String?
         let storagePath: String?
         let uploadAttempts: Int?
+        let lifecycleState: String?
+        let supersededByShotID: UUID?
+        let supersedesShotID: UUID?
+        let replacementReason: String?
         let deletedAt: Date?
 
         enum CodingKeys: String, CodingKey {
@@ -2054,6 +2131,10 @@ final class AppState: ObservableObject {
             case uploadState = "upload_state"
             case storagePath = "storage_path"
             case uploadAttempts = "upload_attempts"
+            case lifecycleState = "lifecycle_state"
+            case supersededByShotID = "superseded_by_shot_id"
+            case supersedesShotID = "supersedes_shot_id"
+            case replacementReason = "replacement_reason"
             case deletedAt = "deleted_at"
         }
     }
@@ -2440,6 +2521,28 @@ final class AppState: ObservableObject {
                     ageSeconds: now.timeIntervalSince(item.createdAt)
                 )
             }
+    }
+
+    func inspectSyncDebt(
+        divergenceAuditSummary: DivergenceAuditSummary? = nil
+    ) async -> SyncDebtInspectionReport {
+        let ranAt = Date()
+        let organizationID = activeOrganizationID
+        let localSnapshot = makeLocalDivergenceSnapshot()
+        let remoteSnapshot = await fetchRemoteDivergenceSnapshotIfAvailable(activeOrganizationID: organizationID)
+        let summary = divergenceAuditSummary ?? makeDivergenceAuditSummary(
+            ranAt: ranAt,
+            activeOrganizationID: organizationID,
+            local: localSnapshot,
+            remote: remoteSnapshot
+        )
+        return makeSyncDebtInspectionReport(
+            ranAt: ranAt,
+            activeOrganizationID: organizationID,
+            local: localSnapshot,
+            remote: remoteSnapshot,
+            divergenceAuditSummary: summary
+        )
     }
 
     func diagnosticsRetryCappedMediaItems() -> [MediaDiagnosticItem] {
@@ -6849,7 +6952,7 @@ final class AppState: ObservableObject {
 
             async let sessions: [DivergenceRemoteSessionRecord] = client
                 .from("sessions")
-                .select("id, org_id, property_id, capture_profile, deleted_at")
+                .select("id, org_id, property_id, capture_profile, updated_at, deleted_at")
                 .eq("org_id", value: orgValue)
                 .limit(1_000)
                 .execute()
@@ -6857,7 +6960,7 @@ final class AppState: ObservableObject {
 
             async let shots: [DivergenceRemoteShotRecord] = client
                 .from("shots")
-                .select("id, org_id, property_id, session_id, upload_state, storage_path, upload_attempts, deleted_at")
+                .select("id, org_id, property_id, session_id, upload_state, storage_path, upload_attempts, lifecycle_state, superseded_by_shot_id, supersedes_shot_id, replacement_reason, deleted_at")
                 .eq("org_id", value: orgValue)
                 .limit(1_000)
                 .execute()
@@ -8183,6 +8286,273 @@ final class AppState: ObservableObject {
         }
     }
 
+    private func makeSyncDebtInspectionReport(
+        ranAt: Date,
+        activeOrganizationID: UUID?,
+        local: LocalDivergenceSnapshot,
+        remote: RemoteDivergenceSnapshot?,
+        divergenceAuditSummary: DivergenceAuditSummary
+    ) -> SyncDebtInspectionReport {
+        let failedQueueItems = ((try? localStore.fetchQueuedMutations()) ?? [])
+            .filter { $0.status == .failed }
+            .sorted {
+                let lhsDate = $0.lastAttemptAt ?? $0.updatedAt
+                let rhsDate = $1.lastAttemptAt ?? $1.updatedAt
+                if lhsDate != rhsDate { return lhsDate < rhsDate }
+                return $0.id.uuidString < $1.id.uuidString
+            }
+            .map(makeQueueDebtInspectionItem)
+
+        let remotePropertiesByID = dictionaryByNormalizedID(remote?.properties ?? [], id: \.id)
+        let remoteSessionsByID = dictionaryByNormalizedID(remote?.sessions ?? [], id: \.id)
+        let remoteShotsByID = dictionaryByNormalizedID(remote?.shots ?? [], id: \.id)
+        let localPropertiesByID = dictionaryByNormalizedID(local.properties, id: \.id)
+        let localSessionsByID = dictionaryByNormalizedID(local.sessions, id: \.id)
+        let sessionCursor = activeOrganizationID.flatMap { readSyncCursor(entity: "sessions", orgID: $0) }
+
+        let divergenceItems = divergenceAuditSummary.items.map { item in
+            makeDivergenceDebtInspectionItem(
+                item,
+                localPropertiesByID: localPropertiesByID,
+                localSessionsByID: localSessionsByID,
+                remotePropertiesByID: remotePropertiesByID,
+                remoteSessionsByID: remoteSessionsByID,
+                remoteShotsByID: remoteShotsByID,
+                sessionCursor: sessionCursor
+            )
+        }
+
+        return SyncDebtInspectionReport(
+            ranAt: ranAt,
+            activeOrganizationID: activeOrganizationID,
+            failedQueueItems: failedQueueItems,
+            divergenceItems: divergenceItems,
+            groupedHistoricalFindings: divergenceAuditSummary.groupedHistoricalFindings
+        )
+    }
+
+    private func makeQueueDebtInspectionItem(_ item: LocalStore.QueuedMutation) -> QueueDebtInspectionItem {
+        let payloadSummary = queueDebtPayloadSummary(for: item)
+        let lastErrorMessage = item.lastError.map(Self.sanitizedDiagnosticsErrorMessage)
+        let category = item.lastError
+            .map { Self.diagnosticErrorCategory(for: NSError(domain: "ScoutCapture.QueueDebt", code: 0, userInfo: [NSLocalizedDescriptionKey: $0])) }
+            ?? .unknown
+        let classification = queueDebtClassification(
+            operation: item.operation,
+            lastErrorCategory: category,
+            lastErrorMessage: lastErrorMessage,
+            payloadSummary: payloadSummary
+        )
+        return QueueDebtInspectionItem(
+            id: item.id,
+            entityType: item.entityType,
+            entityID: item.entityID,
+            operation: item.operation,
+            orgID: item.organizationID,
+            propertyID: item.propertyID,
+            sessionID: item.sessionID,
+            idempotencyKey: item.idempotencyKey,
+            attemptCount: item.attemptCount,
+            createdAt: item.createdAt,
+            lastAttemptAt: item.lastAttemptAt,
+            nextAttemptAt: item.nextAttemptAt,
+            lastErrorCategory: category,
+            lastErrorMessage: lastErrorMessage,
+            payloadSummary: payloadSummary,
+            updatedBy: payloadSummary.updatedBy,
+            classification: classification
+        )
+    }
+
+    private func queueDebtPayloadSummary(for item: LocalStore.QueuedMutation) -> QueueDebtPayloadSummary {
+        switch item.operation {
+        case "upsert_property":
+            do {
+                let payload = try JSONDecoder().decode(QueuedPropertyMutationPayload.self, from: item.payloadData)
+                return QueueDebtPayloadSummary(
+                    payloadKind: "property",
+                    payloadOrgID: payload.property.orgID,
+                    payloadPropertyID: payload.property.id,
+                    payloadSessionID: nil,
+                    propertyName: normalizedSupabaseText(payload.property.name),
+                    sessionStatus: nil,
+                    sessionStartedAt: nil,
+                    updatedBy: payload.property.updatedBy,
+                    decodeError: nil
+                )
+            } catch {
+                return failedQueueDebtPayloadSummary(kind: "property", error: error)
+            }
+        case "upsert_session":
+            do {
+                let payload = try JSONDecoder().decode(QueuedSessionMutationPayload.self, from: item.payloadData)
+                return QueueDebtPayloadSummary(
+                    payloadKind: "session",
+                    payloadOrgID: payload.session.orgID,
+                    payloadPropertyID: payload.session.propertyID,
+                    payloadSessionID: payload.session.id,
+                    propertyName: normalizedSupabaseText(payload.property.name),
+                    sessionStatus: normalizedSupabaseText(payload.session.status),
+                    sessionStartedAt: normalizedSupabaseText(payload.session.startedAt),
+                    updatedBy: payload.session.updatedBy ?? payload.property.updatedBy,
+                    decodeError: nil
+                )
+            } catch {
+                return failedQueueDebtPayloadSummary(kind: "session", error: error)
+            }
+        default:
+            return QueueDebtPayloadSummary(
+                payloadKind: "unsupported",
+                payloadOrgID: nil,
+                payloadPropertyID: nil,
+                payloadSessionID: nil,
+                propertyName: nil,
+                sessionStatus: nil,
+                sessionStartedAt: nil,
+                updatedBy: nil,
+                decodeError: "Unsupported queued operation: \(item.operation)"
+            )
+        }
+    }
+
+    private func failedQueueDebtPayloadSummary(kind: String, error: Error) -> QueueDebtPayloadSummary {
+        QueueDebtPayloadSummary(
+            payloadKind: kind,
+            payloadOrgID: nil,
+            payloadPropertyID: nil,
+            payloadSessionID: nil,
+            propertyName: nil,
+            sessionStatus: nil,
+            sessionStartedAt: nil,
+            updatedBy: nil,
+            decodeError: Self.sanitizedDiagnosticsErrorMessage(error.localizedDescription)
+        )
+    }
+
+    private func queueDebtClassification(
+        operation: String,
+        lastErrorCategory: DiagnosticErrorCategory,
+        lastErrorMessage: String?,
+        payloadSummary: QueueDebtPayloadSummary
+    ) -> QueueDebtClassification {
+        let normalizedError = (lastErrorMessage ?? "").lowercased()
+        let isRLSFailure = lastErrorCategory == .authOrRLS ||
+            normalizedError.contains("row-level security") ||
+            normalizedError.contains("row level security") ||
+            normalizedError.contains("rls")
+        if operation == "upsert_property", isRLSFailure {
+            return .staleRLSPropertyUpsert
+        }
+        if operation == "upsert_session", isRLSFailure {
+            return .staleRLSSessionParentProperty
+        }
+        if lastErrorCategory == .network {
+            return .retryCandidate
+        }
+        if payloadSummary.decodeError != nil {
+            return .unknown
+        }
+        return .manualReview
+    }
+
+    private func makeDivergenceDebtInspectionItem(
+        _ item: DivergenceAuditItem,
+        localPropertiesByID: [String: Property],
+        localSessionsByID: [String: Session],
+        remotePropertiesByID: [String: DivergenceRemotePropertyRecord],
+        remoteSessionsByID: [String: DivergenceRemoteSessionRecord],
+        remoteShotsByID: [String: DivergenceRemoteShotRecord],
+        sessionCursor: Date?
+    ) -> DivergenceDebtInspectionItem {
+        let classification = divergenceDebtClassification(
+            for: item,
+            localPropertiesByID: localPropertiesByID,
+            localSessionsByID: localSessionsByID,
+            remotePropertiesByID: remotePropertiesByID,
+            remoteSessionsByID: remoteSessionsByID,
+            remoteShotsByID: remoteShotsByID,
+            sessionCursor: sessionCursor
+        )
+        return DivergenceDebtInspectionItem(
+            id: item.id,
+            category: item.category,
+            entityType: item.entityType,
+            entityID: item.entityID,
+            propertyID: item.propertyID,
+            sessionID: item.sessionID,
+            shotID: item.shotID,
+            orgID: item.orgID,
+            reason: Self.sanitizedDiagnosticsErrorMessage(item.reason),
+            classification: classification.value,
+            classificationReason: classification.reason
+        )
+    }
+
+    private func divergenceDebtClassification(
+        for item: DivergenceAuditItem,
+        localPropertiesByID: [String: Property],
+        localSessionsByID: [String: Session],
+        remotePropertiesByID: [String: DivergenceRemotePropertyRecord],
+        remoteSessionsByID: [String: DivergenceRemoteSessionRecord],
+        remoteShotsByID: [String: DivergenceRemoteShotRecord],
+        sessionCursor: Date?
+    ) -> (value: DivergenceDebtClassification, reason: String) {
+        switch item.category {
+        case .legacyCaptureProfile, .legacyRemoteSchema, .legacyOrgReconciliation, .staleOrgMismatch, .captureProfile:
+            return (.informationalHistorical, "Historical or informational finding; not promoted to actionable debt.")
+        case .remoteOnlySession:
+            guard let sessionID = item.sessionID ?? item.entityID,
+                  let remoteSession = remoteSessionsByID[divergenceKey(sessionID)] else {
+                return (.manualReview, "Remote-only session details were unavailable in the read-only snapshot.")
+            }
+            if remoteSession.deletedAt != nil {
+                return (.historicalRemoteOnly, "Remote session is deleted remotely and absent locally.")
+            }
+            if let cursor = sessionCursor,
+               let updatedAt = remoteSession.updatedAt,
+               updatedAt <= cursor {
+                return (.historicalRemoteOnly, "Remote session updated_at is not newer than the local session sync cursor.")
+            }
+            if localPropertiesByID[divergenceKey(remoteSession.propertyID)] != nil {
+                return (.missingLocalHydration, "Remote session belongs to a local property but is absent from local session cache.")
+            }
+            if remotePropertiesByID[divergenceKey(remoteSession.propertyID)] == nil {
+                return (.trueParityDebt, "Remote session references a property missing from the remote active-org snapshot.")
+            }
+            return (.manualReview, "Remote session is absent locally but lacks enough cursor/local-parent context.")
+        case .remoteOnlyShot:
+            guard let shotID = item.shotID ?? item.entityID,
+                  let remoteShot = remoteShotsByID[divergenceKey(shotID)] else {
+                return (.manualReview, "Remote-only shot details were unavailable in the read-only snapshot.")
+            }
+            if remoteShotLooksLikeKnownLegacyArtifact(remoteShot) {
+                return (.knownLegacyArtifact, "Remote shot has retired/superseded lifecycle markers.")
+            }
+            if let propertyID = remoteShot.propertyID,
+               remotePropertiesByID[divergenceKey(propertyID)] == nil {
+                return (.trueParityDebt, "Remote shot references a property missing from the remote active-org snapshot.")
+            }
+            if let sessionID = remoteShot.sessionID,
+               remoteSessionsByID[divergenceKey(sessionID)] == nil {
+                return (.trueParityDebt, "Remote shot references a session missing from the remote active-org snapshot.")
+            }
+            return (.manualReview, "Remote shot is absent locally without legacy lifecycle markers.")
+        case .missingParent, .deletedHiddenMismatch, .localOnlyProperty, .remoteOnlyProperty,
+             .localOnlySession, .localOnlyShot, .mediaDrift, .remoteUnavailable:
+            return (.manualReview, "Finding remains actionable or recoverable and needs explicit review.")
+        }
+    }
+
+    private func remoteShotLooksLikeKnownLegacyArtifact(_ shot: DivergenceRemoteShotRecord) -> Bool {
+        let lifecycle = normalizedSupabaseText(shot.lifecycleState)?.lowercased()
+        let replacementReason = normalizedSupabaseText(shot.replacementReason)?.lowercased()
+        return lifecycle == "retired" ||
+            lifecycle == "superseded" ||
+            shot.supersededByShotID != nil ||
+            replacementReason?.contains("superseded") == true ||
+            replacementReason?.contains("retake") == true
+    }
+
     private func dictionaryByNormalizedID<Value>(
         _ values: [Value],
         id: (Value) -> UUID
@@ -8406,6 +8776,88 @@ final class AppState: ObservableObject {
                 item.orgID?.uuidString ?? "none",
                 diagnosticsPreviewText(item.reason, maxLength: 240) ?? "none"
             ].joined(separator: " | "))
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    nonisolated static func syncDebtInspectionReportText(_ report: SyncDebtInspectionReport) -> String {
+        var lines: [String] = []
+        lines.append("ScoutCapture Local Health - Sync Debt Inspection")
+        lines.append("Ran: \(report.ranAt.formatted(date: .abbreviated, time: .standard))")
+        lines.append("Active Org: \(report.activeOrganizationID?.uuidString ?? "none")")
+        lines.append("")
+        lines.append("Failed Queue Debt")
+        lines.append("Failed Queue Items: \(report.failedQueueItems.count)")
+        if report.failedQueueItems.isEmpty {
+            lines.append("none")
+        } else {
+            for item in report.failedQueueItems {
+                let payload = item.payloadSummary
+                lines.append([
+                    item.classification.rawValue,
+                    item.entityType,
+                    item.entityID.uuidString,
+                    item.operation,
+                    "queue_id \(item.id.uuidString)",
+                    "org \(item.orgID.uuidString)",
+                    "property \(item.propertyID?.uuidString ?? payload.payloadPropertyID?.uuidString ?? "none")",
+                    "session \(item.sessionID?.uuidString ?? payload.payloadSessionID?.uuidString ?? "none")",
+                    "idempotency \(item.idempotencyKey)",
+                    "attempts \(item.attemptCount)",
+                    "created \(item.createdAt.formatted(date: .abbreviated, time: .standard))",
+                    "last_attempt \(item.lastAttemptAt?.formatted(date: .abbreviated, time: .standard) ?? "none")",
+                    "next_attempt \(item.nextAttemptAt?.formatted(date: .abbreviated, time: .standard) ?? "none")",
+                    "error_category \(item.lastErrorCategory.rawValue)",
+                    "error \(diagnosticsPreviewText(item.lastErrorMessage, maxLength: 180) ?? "none")",
+                    "payload_kind \(payload.payloadKind)",
+                    "payload_org \(payload.payloadOrgID?.uuidString ?? "none")",
+                    "payload_property \(payload.payloadPropertyID?.uuidString ?? "none")",
+                    "payload_session \(payload.payloadSessionID?.uuidString ?? "none")",
+                    "property_name \(diagnosticsPreviewText(payload.propertyName, maxLength: 80) ?? "none")",
+                    "session_status \(diagnosticsPreviewText(payload.sessionStatus, maxLength: 40) ?? "none")",
+                    "session_started_at \(diagnosticsPreviewText(payload.sessionStartedAt, maxLength: 60) ?? "none")",
+                    "updated_by \(item.updatedBy?.uuidString ?? "none")",
+                    "decode_error \(diagnosticsPreviewText(payload.decodeError, maxLength: 120) ?? "none")"
+                ].joined(separator: " | "))
+            }
+        }
+
+        lines.append("")
+        lines.append("Divergence Debt")
+        lines.append("Findings: \(report.divergenceItems.count)")
+        if report.divergenceItems.isEmpty {
+            lines.append("none")
+        } else {
+            for item in report.divergenceItems {
+                lines.append([
+                    item.classification.rawValue,
+                    item.category.rawValue,
+                    item.entityType,
+                    "entity \(item.entityID?.uuidString ?? "none")",
+                    "property \(item.propertyID?.uuidString ?? "none")",
+                    "session \(item.sessionID?.uuidString ?? "none")",
+                    "shot \(item.shotID?.uuidString ?? "none")",
+                    "org \(item.orgID?.uuidString ?? "none")",
+                    "reason \(diagnosticsPreviewText(item.reason, maxLength: 180) ?? "none")",
+                    "classification_reason \(diagnosticsPreviewText(item.classificationReason, maxLength: 180) ?? "none")"
+                ].joined(separator: " | "))
+            }
+        }
+
+        lines.append("")
+        lines.append("Grouped Historical / Informational Findings")
+        if report.groupedHistoricalFindings.isEmpty {
+            lines.append("none")
+        } else {
+            for group in report.groupedHistoricalFindings {
+                lines.append([
+                    group.category.rawValue,
+                    "total \(group.totalCount)",
+                    "properties \(group.affectedPropertyCount)",
+                    "sessions \(group.affectedSessionCount)",
+                    "shots \(group.affectedShotCount)"
+                ].joined(separator: " | "))
+            }
         }
         return lines.joined(separator: "\n")
     }
@@ -18817,6 +19269,11 @@ final class AppState: ObservableObject {
         let shots: [(id: String, propertyID: String?, sessionID: String?)]
         let propertyCaptureProfiles: [String: String]
         let sessionCaptureProfiles: [String: String]
+        let sessionUpdatedAts: [String: Date]
+        let shotLifecycleStates: [String: String]
+        let shotSupersededByShotIDs: [String: UUID]
+        let shotSupersedesShotIDs: [String: UUID]
+        let shotReplacementReasons: [String: String]
         let orgID: UUID
 
         init(
@@ -18825,6 +19282,11 @@ final class AppState: ObservableObject {
             shots: [(id: String, propertyID: String?, sessionID: String?)] = [],
             propertyCaptureProfiles: [String: String] = [:],
             sessionCaptureProfiles: [String: String] = [:],
+            sessionUpdatedAts: [String: Date] = [:],
+            shotLifecycleStates: [String: String] = [:],
+            shotSupersededByShotIDs: [String: UUID] = [:],
+            shotSupersedesShotIDs: [String: UUID] = [:],
+            shotReplacementReasons: [String: String] = [:],
             orgID: UUID
         ) {
             self.propertyIDs = propertyIDs
@@ -18832,6 +19294,11 @@ final class AppState: ObservableObject {
             self.shots = shots
             self.propertyCaptureProfiles = propertyCaptureProfiles
             self.sessionCaptureProfiles = sessionCaptureProfiles
+            self.sessionUpdatedAts = sessionUpdatedAts
+            self.shotLifecycleStates = shotLifecycleStates
+            self.shotSupersededByShotIDs = shotSupersededByShotIDs
+            self.shotSupersedesShotIDs = shotSupersedesShotIDs
+            self.shotReplacementReasons = shotReplacementReasons
             self.orgID = orgID
         }
     }
@@ -18909,6 +19376,36 @@ final class AppState: ObservableObject {
         )
     }
 
+    func _debugSyncDebtInspectionReportForTests(
+        properties: [Property],
+        sessions: [Session],
+        shots: [DebugDivergenceLocalShotInput],
+        remote: DebugDivergenceRemoteInput? = nil,
+        divergenceAuditSummary: DivergenceAuditSummary,
+        activeOrganizationID: UUID? = nil,
+        ranAt: Date = Date()
+    ) -> SyncDebtInspectionReport {
+        makeSyncDebtInspectionReport(
+            ranAt: ranAt,
+            activeOrganizationID: activeOrganizationID,
+            local: LocalDivergenceSnapshot(
+                properties: properties,
+                sessions: sessions,
+                shots: shots.map {
+                    LocalDivergenceShot(
+                        shot: $0.shot,
+                        propertyID: $0.propertyID,
+                        sessionID: $0.sessionID,
+                        metadataOrgID: $0.metadataOrgID,
+                        metadataCaptureProfile: $0.metadataCaptureProfile
+                    )
+                }
+            ),
+            remote: remote.map(debugRemoteDivergenceSnapshot),
+            divergenceAuditSummary: divergenceAuditSummary
+        )
+    }
+
     private func debugRemoteDivergenceSnapshot(
         _ input: DebugDivergenceRemoteInput
     ) -> RemoteDivergenceSnapshot {
@@ -18931,11 +19428,13 @@ final class AppState: ObservableObject {
                     orgID: input.orgID,
                     propertyID: propertyID,
                     captureProfile: input.sessionCaptureProfiles[divergenceKey(sessionID)] ?? input.sessionCaptureProfiles[session.id],
+                    updatedAt: input.sessionUpdatedAts[divergenceKey(sessionID)] ?? input.sessionUpdatedAts[session.id],
                     deletedAt: nil
                 )
             },
             shots: input.shots.compactMap { shot in
                 guard let shotID = UUID(uuidString: shot.id) else { return nil }
+                let shotKey = divergenceKey(shotID)
                 return DivergenceRemoteShotRecord(
                     id: shotID,
                     orgID: input.orgID,
@@ -18944,6 +19443,10 @@ final class AppState: ObservableObject {
                     uploadState: "uploaded",
                     storagePath: "debug/path",
                     uploadAttempts: 0,
+                    lifecycleState: input.shotLifecycleStates[shotKey] ?? input.shotLifecycleStates[shot.id],
+                    supersededByShotID: input.shotSupersededByShotIDs[shotKey] ?? input.shotSupersededByShotIDs[shot.id],
+                    supersedesShotID: input.shotSupersedesShotIDs[shotKey] ?? input.shotSupersedesShotIDs[shot.id],
+                    replacementReason: input.shotReplacementReasons[shotKey] ?? input.shotReplacementReasons[shot.id],
                     deletedAt: nil
                 )
             }

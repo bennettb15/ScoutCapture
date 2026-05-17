@@ -114,6 +114,32 @@ final class Phase2C10OfflineReplayTests: XCTestCase {
         }
     }
 
+    private func emptyDivergenceSummary(orgID: UUID) -> AppState.DivergenceAuditSummary {
+        AppState.DivergenceAuditSummary(
+            ranAt: Date(timeIntervalSince1970: 0),
+            activeOrganizationID: orgID,
+            remoteScopeAvailable: true,
+            localPropertyCount: 0,
+            remotePropertyCount: 0,
+            localSessionCount: 0,
+            remoteSessionCount: 0,
+            localShotCount: 0,
+            remoteShotCount: 0,
+            matchedPropertyCount: 0,
+            matchedSessionCount: 0,
+            matchedShotCount: 0,
+            localOnlyPropertyCount: 0,
+            remoteOnlyPropertyCount: 0,
+            localOnlySessionCount: 0,
+            remoteOnlySessionCount: 0,
+            localOnlyShotCount: 0,
+            remoteOnlyShotCount: 0,
+            staleOrgReconciledPropertyCount: 0,
+            staleOrgReconciledShotCount: 0,
+            items: []
+        )
+    }
+
     private func waitForQueueCount(
         _ expectedCount: Int,
         localStore: LocalStore,
@@ -467,6 +493,111 @@ final class Phase2C10OfflineReplayTests: XCTestCase {
         XCTAssertEqual(items[0].lastError, "local write failed at [path]")
         XCTAssertFalse(items[0].lastError?.contains("/private") ?? true)
         XCTAssertGreaterThanOrEqual(items[0].ageSeconds ?? 0, 100)
+    }
+
+    func testSyncDebtInspectorClassifiesOldRLSPropertyUpsert() async throws {
+        let fixture = try makeFixture()
+        defer { tearDownFixture(fixture) }
+
+        var mutation = try await createQueuedPropertyMutation(fixture: fixture, name: "Debt Property")
+        mutation.status = .failed
+        mutation.attemptCount = 7
+        mutation.lastError = "new row violates row-level security policy for table properties"
+        mutation.lastAttemptAt = Date(timeIntervalSinceReferenceDate: 100)
+        _ = try fixture.localStore.updateQueuedMutation(mutation)
+
+        let appState = makeAppState(fixture: fixture)
+        let report = appState._debugSyncDebtInspectionReportForTests(
+            properties: [],
+            sessions: [],
+            shots: [],
+            divergenceAuditSummary: emptyDivergenceSummary(orgID: fixture.organizationID),
+            activeOrganizationID: fixture.organizationID
+        )
+
+        let item = try XCTUnwrap(report.failedQueueItems.first)
+        XCTAssertEqual(report.failedQueueItems.count, 1)
+        XCTAssertEqual(item.classification, .staleRLSPropertyUpsert)
+        XCTAssertEqual(item.entityType, "property")
+        XCTAssertEqual(item.operation, "upsert_property")
+        XCTAssertEqual(item.payloadSummary.payloadKind, "property")
+        XCTAssertEqual(item.payloadSummary.propertyName, "Debt Property")
+        XCTAssertNotNil(item.updatedBy)
+    }
+
+    func testSyncDebtInspectorClassifiesSessionFailureCausedByParentPropertyRLS() async throws {
+        let fixture = try makeFixture()
+        defer { tearDownFixture(fixture) }
+
+        var mutation = try await createQueuedSessionMutation(fixture: fixture)
+        mutation.status = .failed
+        mutation.attemptCount = 7
+        mutation.lastError = "new row violates row-level security policy for table properties"
+        mutation.lastAttemptAt = Date(timeIntervalSinceReferenceDate: 200)
+        _ = try fixture.localStore.updateQueuedMutation(mutation)
+
+        let appState = makeAppState(fixture: fixture)
+        let report = appState._debugSyncDebtInspectionReportForTests(
+            properties: [],
+            sessions: [],
+            shots: [],
+            divergenceAuditSummary: emptyDivergenceSummary(orgID: fixture.organizationID),
+            activeOrganizationID: fixture.organizationID
+        )
+
+        let item = try XCTUnwrap(report.failedQueueItems.first)
+        XCTAssertEqual(report.failedQueueItems.count, 1)
+        XCTAssertEqual(item.classification, .staleRLSSessionParentProperty)
+        XCTAssertEqual(item.entityType, "session")
+        XCTAssertEqual(item.operation, "upsert_session")
+        XCTAssertEqual(item.payloadSummary.payloadKind, "session")
+        XCTAssertEqual(item.propertyID, mutation.propertyID)
+        XCTAssertEqual(item.sessionID, mutation.sessionID)
+        XCTAssertNotNil(item.updatedBy)
+    }
+
+    func testSyncDebtInspectionReportTextRedactsSensitiveQueueDetails() throws {
+        let fixture = try makeFixture()
+        defer { tearDownFixture(fixture) }
+
+        let queueItemID = UUID()
+        let entityID = UUID()
+        _ = try fixture.localStore.appendQueuedMutation(
+            LocalStore.QueuedMutation(
+                id: queueItemID,
+                entityType: "property",
+                entityID: entityID,
+                organizationID: fixture.organizationID,
+                propertyID: entityID,
+                operation: "upsert_property",
+                payloadData: Data("{}".utf8),
+                idempotencyKey: "property-test-key",
+                createdAt: Date(timeIntervalSinceReferenceDate: 10),
+                updatedAt: Date(timeIntervalSinceReferenceDate: 20),
+                attemptCount: 1,
+                lastAttemptAt: Date(timeIntervalSinceReferenceDate: 20),
+                nextAttemptAt: nil,
+                lastError: "failed at /private/tmp/secret.json with token abc",
+                status: .failed
+            )
+        )
+
+        let appState = makeAppState(fixture: fixture)
+        let report = appState._debugSyncDebtInspectionReportForTests(
+            properties: [],
+            sessions: [],
+            shots: [],
+            divergenceAuditSummary: emptyDivergenceSummary(orgID: fixture.organizationID),
+            activeOrganizationID: fixture.organizationID
+        )
+        let text = AppState.syncDebtInspectionReportText(report)
+
+        XCTAssertTrue(text.contains("Sync Debt Inspection"))
+        XCTAssertTrue(text.contains(queueItemID.uuidString))
+        XCTAssertTrue(text.contains("[path]"))
+        XCTAssertTrue(text.contains("[redacted]"))
+        XCTAssertFalse(text.contains("/private/tmp"))
+        XCTAssertFalse(text.contains("abc"))
     }
 
     func testDiagnosticsErrorClassificationMapsObviousCasesAndResetClearsState() throws {
