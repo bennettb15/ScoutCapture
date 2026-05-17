@@ -378,6 +378,10 @@ final class LocalStore {
         var nextAttemptAt: Date?
         var lastError: String?
         var status: Status
+        var acknowledgedAt: Date?
+        var acknowledgedReason: String?
+        var acknowledgedClassification: String?
+        var acknowledgementSource: String?
 
         init(
             id: UUID = UUID(),
@@ -395,7 +399,11 @@ final class LocalStore {
             lastAttemptAt: Date? = nil,
             nextAttemptAt: Date? = nil,
             lastError: String? = nil,
-            status: Status = .pending
+            status: Status = .pending,
+            acknowledgedAt: Date? = nil,
+            acknowledgedReason: String? = nil,
+            acknowledgedClassification: String? = nil,
+            acknowledgementSource: String? = nil
         ) {
             self.id = id
             self.entityType = entityType
@@ -413,6 +421,14 @@ final class LocalStore {
             self.nextAttemptAt = nextAttemptAt
             self.lastError = lastError
             self.status = status
+            self.acknowledgedAt = acknowledgedAt
+            self.acknowledgedReason = acknowledgedReason
+            self.acknowledgedClassification = acknowledgedClassification
+            self.acknowledgementSource = acknowledgementSource
+        }
+
+        var isAcknowledgedHistoricalDebt: Bool {
+            acknowledgedAt != nil
         }
     }
 

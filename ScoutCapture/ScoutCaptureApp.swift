@@ -6151,6 +6151,11 @@ private struct DebugQueueDiagnosticSnapshotItem: Identifiable, Equatable {
     let age: String
     let lastErrorPreview: String
     let lastErrorFull: String?
+    let acknowledgedAt: String
+    let acknowledgedReason: String
+    let acknowledgedClassification: String
+    let acknowledgementSource: String
+    let isAcknowledged: Bool
 
     nonisolated init(_ item: AppState.OfflineQueueDiagnosticItem) {
         id = item.id
@@ -6164,6 +6169,11 @@ private struct DebugQueueDiagnosticSnapshotItem: Identifiable, Equatable {
         age = formattedAge(item.ageSeconds)
         lastErrorPreview = AppState.diagnosticsPreviewText(item.lastError) ?? "none"
         lastErrorFull = item.lastError
+        acknowledgedAt = formattedDate(item.acknowledgedAt)
+        acknowledgedReason = AppState.diagnosticsPreviewText(item.acknowledgedReason, maxLength: 160) ?? "none"
+        acknowledgedClassification = item.acknowledgedClassification ?? "none"
+        acknowledgementSource = item.acknowledgementSource ?? "none"
+        isAcknowledged = item.acknowledgedAt != nil
     }
 }
 
@@ -6659,7 +6669,8 @@ private struct DebugLocalDiagnosticsView: View {
                     diagnosticRow("Active Sync Issues", divergenceAuditSnapshot?.activeSyncIssueCount ?? "not run")
                     diagnosticRow("Recoverable Findings", divergenceAuditSnapshot?.recoverableIssueCount ?? "not run")
                     diagnosticRow("Debt Report Findings", syncDebtSnapshot?.divergenceItemCount ?? "not run")
-                    diagnosticRow("Failed Queue Items", failedQueueItems.count)
+                    diagnosticRow("Retryable Failed Queue Items", diagnostics.offlineQueue.failedCount)
+                    diagnosticRow("Acknowledged Historical Queue Debt", diagnostics.offlineQueue.acknowledgedHistoricalCount)
                     diagnosticRow("Retry-Capped Media", retryCappedMediaItems.count)
                     diagnosticRow("Pending Media", pendingMediaItems.count)
                     diagnosticRow("Last Error", diagnostics.lastError?.category.rawValue ?? "none")
@@ -6677,7 +6688,7 @@ private struct DebugLocalDiagnosticsView: View {
                         localHealthAreaLabel(
                             "Offline Queue",
                             subtitle: "Replay counters, queue totals, failed items",
-                            value: "\(diagnostics.offlineQueue.failedCount) failed items"
+                            value: "\(diagnostics.offlineQueue.failedCount) retryable failed"
                         )
                     }
                     NavigationLink {
@@ -6763,11 +6774,15 @@ private struct DebugLocalDiagnosticsView: View {
             Section("Offline Queue") {
                 diagnosticRow("Total", diagnostics.offlineQueue.totalQueued)
                 diagnosticRow("Pending", diagnostics.offlineQueue.pendingCount)
-                diagnosticRow("Failed Items", diagnostics.offlineQueue.failedCount)
+                diagnosticRow("Retryable Failed Items", diagnostics.offlineQueue.failedCount)
+                diagnosticRow("Acknowledged Historical Queue Debt", diagnostics.offlineQueue.acknowledgedHistoricalCount)
                 diagnosticRow("Oldest Failure Age", formattedAge(diagnostics.offlineQueue.oldestFailureAgeSeconds))
                 diagnosticRow("Refreshed", formattedRunDate(diagnostics.offlineQueue.refreshedAt))
                 NavigationLink {
-                    DebugOfflineQueueItemsView(items: failedQueueItems)
+                    DebugOfflineQueueItemsView(items: failedQueueItems) {
+                        refreshDiagnosticDetailSnapshots()
+                        syncDebtSnapshot = nil
+                    }
                 } label: {
                     diagnosticNavigationLabel("Failed Queue Items", count: failedQueueItems.count)
                 }
@@ -7248,11 +7263,12 @@ private struct DebugLocalDiagnosticsView: View {
 
 private struct DebugOfflineQueueItemsView: View {
     let items: [DebugQueueDiagnosticSnapshotItem]
+    let onAcknowledged: () -> Void
 
     var body: some View {
         List {
             Section {
-                Text("Read-only local queue diagnostics. No queue items can be deleted, reset, or retried from this screen.")
+                Text("Local queue diagnostics. Eligible stale RLS debt can be acknowledged to stop replay; queue items, payloads, local records, and remote data are preserved.")
                     .font(.system(size: 13, weight: .medium))
                     .foregroundStyle(.secondary)
             }
@@ -7267,7 +7283,7 @@ private struct DebugOfflineQueueItemsView: View {
                 Section("Failed Items") {
                     ForEach(items) { item in
                         NavigationLink {
-                            DebugOfflineQueueItemDetailView(item: item)
+                            DebugOfflineQueueItemDetailView(item: item, onAcknowledged: onAcknowledged)
                         } label: {
                             VStack(alignment: .leading, spacing: 4) {
                                 Text("\(item.entityType) / \(item.operation)")
@@ -7280,6 +7296,11 @@ private struct DebugOfflineQueueItemsView: View {
                                 Text("attempts \(item.attemptCount) | next \(item.nextAttempt)")
                                     .font(.system(size: 12, weight: .medium))
                                     .foregroundStyle(.secondary)
+                                if item.isAcknowledged {
+                                    Text("acknowledged historical queue debt")
+                                        .font(.system(size: 12, weight: .semibold))
+                                        .foregroundStyle(.secondary)
+                                }
                                 Text(item.lastErrorPreview)
                                     .font(.system(size: 12, weight: .regular, design: .monospaced))
                                     .foregroundStyle(.secondary)
@@ -7833,7 +7854,12 @@ private struct DebugSyncDebtInspectionSnapshotTextView: View {
 }
 
 private struct DebugOfflineQueueItemDetailView: View {
+    @EnvironmentObject private var appState: AppState
     let item: DebugQueueDiagnosticSnapshotItem
+    let onAcknowledged: () -> Void
+
+    @State private var showAcknowledgeConfirmation = false
+    @State private var acknowledgementMessage: String?
 
     var body: some View {
         List {
@@ -7846,6 +7872,7 @@ private struct DebugOfflineQueueItemDetailView: View {
                 diagnosticRow("Last Attempt", item.lastAttempt)
                 diagnosticRow("Next Attempt", item.nextAttempt)
                 diagnosticRow("Age", item.age)
+                diagnosticRow("Acknowledged", item.isAcknowledged ? "yes" : "no")
             }
 
             Section("Last Error") {
@@ -7857,9 +7884,65 @@ private struct DebugOfflineQueueItemDetailView: View {
                         .foregroundStyle(.secondary)
                 }
             }
+
+            if item.isAcknowledged {
+                Section("Acknowledgement") {
+                    diagnosticRow("Acknowledged At", item.acknowledgedAt)
+                    diagnosticRow("Classification", item.acknowledgedClassification)
+                    diagnosticRow("Source", item.acknowledgementSource)
+                    diagnosticBlock("Reason", item.acknowledgedReason)
+                    Text("This queue item is preserved for audit and skipped by offline replay.")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(.secondary)
+                }
+            } else {
+                Section("Acknowledge Historical Queue Debt") {
+                    Text("Only failed stale RLS property/session upserts can be acknowledged. This preserves the queue item and stops replay without changing local records or remote data.")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(.secondary)
+                    Button("Acknowledge Historical Queue Debt") {
+                        showAcknowledgeConfirmation = true
+                    }
+                    .font(.system(size: 14, weight: .semibold))
+                }
+            }
+
+            if let acknowledgementMessage {
+                Section {
+                    Text(acknowledgementMessage)
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(.secondary)
+                }
+            }
         }
         .navigationTitle("Queue Item")
         .navigationBarTitleDisplayMode(.inline)
+        .confirmationDialog(
+            "Acknowledge Historical Queue Debt?",
+            isPresented: $showAcknowledgeConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button("Acknowledge Historical Queue Debt") {
+                acknowledgeHistoricalQueueDebt()
+            }
+            Button("Cancel", role: .cancel) { }
+        } message: {
+            Text("The queue item, payload, last error, attempts, idempotency key, and local records will be preserved. Offline replay will skip only this acknowledged item.")
+        }
+    }
+
+    private func acknowledgeHistoricalQueueDebt() {
+        do {
+            _ = try appState.acknowledgeHistoricalQueueDebt(
+                queueItemID: item.id,
+                reason: "Acknowledged as historical stale RLS queue debt from Local Health.",
+                acknowledgementSource: "local_health"
+            )
+            acknowledgementMessage = "Acknowledged. This queue item is preserved for audit and will be skipped by offline replay."
+            onAcknowledged()
+        } catch {
+            acknowledgementMessage = AppState.diagnosticsPreviewText(error.localizedDescription, maxLength: 240) ?? "Unable to acknowledge this queue item."
+        }
     }
 }
 

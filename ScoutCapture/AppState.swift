@@ -267,6 +267,7 @@ final class AppState: ObservableObject {
         var totalQueued: Int = 0
         var pendingCount: Int = 0
         var failedCount: Int = 0
+        var acknowledgedHistoricalCount: Int = 0
         var oldestFailureAgeSeconds: TimeInterval?
         var refreshedAt: Date?
     }
@@ -313,6 +314,10 @@ final class AppState: ObservableObject {
         let lastAttemptAt: Date?
         let nextAttemptAt: Date?
         let ageSeconds: TimeInterval?
+        let acknowledgedAt: Date?
+        let acknowledgedReason: String?
+        let acknowledgedClassification: String?
+        let acknowledgementSource: String?
     }
 
     enum QueueDebtClassification: String, CaseIterable, Equatable {
@@ -362,6 +367,10 @@ final class AppState: ObservableObject {
         let payloadSummary: QueueDebtPayloadSummary
         let updatedBy: UUID?
         let classification: QueueDebtClassification
+        let acknowledgedAt: Date?
+        let acknowledgedReason: String?
+        let acknowledgedClassification: String?
+        let acknowledgementSource: String?
     }
 
     struct DivergenceDebtInspectionItem: Equatable, Identifiable {
@@ -384,6 +393,32 @@ final class AppState: ObservableObject {
         let failedQueueItems: [QueueDebtInspectionItem]
         let divergenceItems: [DivergenceDebtInspectionItem]
         let groupedHistoricalFindings: [DivergenceAuditFindingGroupSummary]
+    }
+
+    enum QueueDebtAcknowledgementError: LocalizedError, Equatable {
+        case notFound
+        case notFailed
+        case ineligibleClassification(String)
+        case unsupportedOperation(String)
+        case missingRLSError
+        case payloadMismatch(String)
+
+        var errorDescription: String? {
+            switch self {
+            case .notFound:
+                return "Queue item was not found."
+            case .notFailed:
+                return "Only failed queue items can be acknowledged as historical debt."
+            case .ineligibleClassification(let classification):
+                return "Queue item classification is not eligible for historical acknowledgement: \(classification)."
+            case .unsupportedOperation(let operation):
+                return "Queue operation is not eligible for historical acknowledgement: \(operation)."
+            case .missingRLSError:
+                return "Queue item does not have a row-level security failure message."
+            case .payloadMismatch(let reason):
+                return "Queue payload did not match queue metadata: \(reason)."
+            }
+        }
     }
 
     struct MediaDiagnosticItem: Equatable, Identifiable {
@@ -2518,9 +2553,35 @@ final class AppState: ObservableObject {
                     lastError: item.lastError.map(Self.sanitizedDiagnosticsErrorMessage),
                     lastAttemptAt: item.lastAttemptAt,
                     nextAttemptAt: item.nextAttemptAt,
-                    ageSeconds: now.timeIntervalSince(item.createdAt)
+                    ageSeconds: now.timeIntervalSince(item.createdAt),
+                    acknowledgedAt: item.acknowledgedAt,
+                    acknowledgedReason: item.acknowledgedReason.map(Self.sanitizedDiagnosticsErrorMessage),
+                    acknowledgedClassification: item.acknowledgedClassification,
+                    acknowledgementSource: item.acknowledgementSource
                 )
             }
+    }
+
+    @discardableResult
+    func acknowledgeHistoricalQueueDebt(
+        queueItemID: UUID,
+        reason: String,
+        acknowledgementSource: String = "local_health"
+    ) throws -> QueueDebtInspectionItem {
+        let queued = try localStore.fetchQueuedMutations()
+        guard var item = queued.first(where: { $0.id == queueItemID }) else {
+            throw QueueDebtAcknowledgementError.notFound
+        }
+        let inspectionItem = makeQueueDebtInspectionItem(item)
+        try validateHistoricalQueueDebtAcknowledgement(item: item, inspectionItem: inspectionItem)
+
+        item.acknowledgedAt = Date()
+        item.acknowledgedReason = Self.sanitizedDiagnosticsErrorMessage(reason)
+        item.acknowledgedClassification = inspectionItem.classification.rawValue
+        item.acknowledgementSource = Self.sanitizedDiagnosticsErrorMessage(acknowledgementSource)
+        _ = try localStore.updateQueuedMutation(item)
+        refreshOfflineQueueDiagnostics()
+        return makeQueueDebtInspectionItem(item)
     }
 
     func inspectSyncDebt(
@@ -6248,6 +6309,18 @@ final class AppState: ObservableObject {
         let now = Date()
         var skippedBackoffCount = 0
         let replayable = orgMutations.filter { mutation in
+            if mutation.isAcknowledgedHistoricalDebt {
+                print(
+                    "[OfflineReplay] skipped " +
+                    "source=\(source) " +
+                    "reason=acknowledged_historical_queue_debt " +
+                    "queueItemID=\(mutation.id.uuidString) " +
+                    "entityType=\(mutation.entityType) " +
+                    "entityID=\(mutation.entityID.uuidString) " +
+                    "operation=\(mutation.operation)"
+                )
+                return false
+            }
             if mutation.status == .failed,
                let nextAttemptAt = mutation.nextAttemptAt,
                now < nextAttemptAt {
@@ -6721,6 +6794,9 @@ final class AppState: ObservableObject {
     }
 
     private func shouldReplayMutation(_ mutation: LocalStore.QueuedMutation, now: Date) -> Bool {
+        if mutation.isAcknowledgedHistoricalDebt {
+            return false
+        }
         switch mutation.status {
         case .pending:
             return true
@@ -6774,14 +6850,17 @@ final class AppState: ObservableObject {
             let queued = try localStore.fetchQueuedMutations()
             let now = Date()
             let failed = queued.filter { $0.status == .failed }
-            let oldestFailureDate = failed
+            let acknowledgedHistorical = failed.filter(\.isAcknowledgedHistoricalDebt)
+            let retryableFailed = failed.filter { !$0.isAcknowledgedHistoricalDebt }
+            let oldestFailureDate = retryableFailed
                 .map { $0.lastAttemptAt ?? $0.updatedAt }
                 .min()
             mutateLocalDiagnostics { diagnostics in
                 diagnostics.offlineQueue = OfflineQueueDiagnostics(
                     totalQueued: queued.filter { $0.status != .completed }.count,
                     pendingCount: queued.filter { $0.status == .pending }.count,
-                    failedCount: failed.count,
+                    failedCount: retryableFailed.count,
+                    acknowledgedHistoricalCount: acknowledgedHistorical.count,
                     oldestFailureAgeSeconds: oldestFailureDate.map { now.timeIntervalSince($0) },
                     refreshedAt: now
                 )
@@ -8360,7 +8439,11 @@ final class AppState: ObservableObject {
             lastErrorMessage: lastErrorMessage,
             payloadSummary: payloadSummary,
             updatedBy: payloadSummary.updatedBy,
-            classification: classification
+            classification: classification,
+            acknowledgedAt: item.acknowledgedAt,
+            acknowledgedReason: item.acknowledgedReason.map(Self.sanitizedDiagnosticsErrorMessage),
+            acknowledgedClassification: item.acknowledgedClassification,
+            acknowledgementSource: item.acknowledgementSource
         )
     }
 
@@ -8453,6 +8536,95 @@ final class AppState: ObservableObject {
             return .unknown
         }
         return .manualReview
+    }
+
+    private func validateHistoricalQueueDebtAcknowledgement(
+        item: LocalStore.QueuedMutation,
+        inspectionItem: QueueDebtInspectionItem
+    ) throws {
+        guard item.status == .failed else {
+            throw QueueDebtAcknowledgementError.notFailed
+        }
+        guard item.operation == "upsert_property" || item.operation == "upsert_session" else {
+            throw QueueDebtAcknowledgementError.unsupportedOperation(item.operation)
+        }
+        guard inspectionItem.classification == .staleRLSPropertyUpsert ||
+                inspectionItem.classification == .staleRLSSessionParentProperty else {
+            throw QueueDebtAcknowledgementError.ineligibleClassification(inspectionItem.classification.rawValue)
+        }
+        let normalizedError = (item.lastError ?? "").lowercased()
+        guard normalizedError.contains("row-level security") ||
+                normalizedError.contains("row level security") ||
+                normalizedError.contains("rls") else {
+            throw QueueDebtAcknowledgementError.missingRLSError
+        }
+        guard inspectionItem.payloadSummary.decodeError == nil else {
+            throw QueueDebtAcknowledgementError.payloadMismatch(inspectionItem.payloadSummary.decodeError ?? "decode failed")
+        }
+
+        switch item.operation {
+        case "upsert_property":
+            let payload = try decodedPropertyDebtPayload(for: item)
+            guard inspectionItem.payloadSummary.payloadPropertyID == item.entityID else {
+                throw QueueDebtAcknowledgementError.payloadMismatch("property payload ID does not match queue entity ID")
+            }
+            guard payload.property.id == item.entityID else {
+                throw QueueDebtAcknowledgementError.payloadMismatch("decoded property ID does not match queue entity ID")
+            }
+            guard item.propertyID == nil || inspectionItem.payloadSummary.payloadPropertyID == item.propertyID else {
+                throw QueueDebtAcknowledgementError.payloadMismatch("property payload ID does not match queue property ID")
+            }
+            guard item.propertyID == nil || payload.property.id == item.propertyID else {
+                throw QueueDebtAcknowledgementError.payloadMismatch("decoded property ID does not match queue property ID")
+            }
+            guard inspectionItem.payloadSummary.payloadOrgID == item.organizationID else {
+                throw QueueDebtAcknowledgementError.payloadMismatch("property payload org ID does not match queue org ID")
+            }
+            guard payload.property.orgID == item.organizationID else {
+                throw QueueDebtAcknowledgementError.payloadMismatch("decoded property org ID does not match queue org ID")
+            }
+        case "upsert_session":
+            let payload = try decodedSessionDebtPayload(for: item)
+            let queueSessionID = item.sessionID ?? item.entityID
+            guard inspectionItem.payloadSummary.payloadSessionID == queueSessionID else {
+                throw QueueDebtAcknowledgementError.payloadMismatch("session payload ID does not match queue session ID")
+            }
+            guard payload.session.id == queueSessionID else {
+                throw QueueDebtAcknowledgementError.payloadMismatch("decoded session ID does not match queue session ID")
+            }
+            guard inspectionItem.payloadSummary.payloadPropertyID == item.propertyID else {
+                throw QueueDebtAcknowledgementError.payloadMismatch("session payload property ID does not match queue property ID")
+            }
+            guard payload.session.propertyID == item.propertyID,
+                  payload.property.id == item.propertyID else {
+                throw QueueDebtAcknowledgementError.payloadMismatch("decoded session parent property ID does not match queue property ID")
+            }
+            guard inspectionItem.payloadSummary.payloadOrgID == item.organizationID else {
+                throw QueueDebtAcknowledgementError.payloadMismatch("session payload org ID does not match queue org ID")
+            }
+            guard payload.session.orgID == item.organizationID,
+                  payload.property.orgID == item.organizationID else {
+                throw QueueDebtAcknowledgementError.payloadMismatch("decoded session org ID does not match queue org ID")
+            }
+        default:
+            throw QueueDebtAcknowledgementError.unsupportedOperation(item.operation)
+        }
+    }
+
+    private func decodedPropertyDebtPayload(for item: LocalStore.QueuedMutation) throws -> QueuedPropertyMutationPayload {
+        do {
+            return try JSONDecoder().decode(QueuedPropertyMutationPayload.self, from: item.payloadData)
+        } catch {
+            throw QueueDebtAcknowledgementError.payloadMismatch(Self.sanitizedDiagnosticsErrorMessage(error.localizedDescription))
+        }
+    }
+
+    private func decodedSessionDebtPayload(for item: LocalStore.QueuedMutation) throws -> QueuedSessionMutationPayload {
+        do {
+            return try JSONDecoder().decode(QueuedSessionMutationPayload.self, from: item.payloadData)
+        } catch {
+            throw QueueDebtAcknowledgementError.payloadMismatch(Self.sanitizedDiagnosticsErrorMessage(error.localizedDescription))
+        }
     }
 
     private func makeDivergenceDebtInspectionItem(
@@ -8817,7 +8989,11 @@ final class AppState: ObservableObject {
                     "session_status \(diagnosticsPreviewText(payload.sessionStatus, maxLength: 40) ?? "none")",
                     "session_started_at \(diagnosticsPreviewText(payload.sessionStartedAt, maxLength: 60) ?? "none")",
                     "updated_by \(item.updatedBy?.uuidString ?? "none")",
-                    "decode_error \(diagnosticsPreviewText(payload.decodeError, maxLength: 120) ?? "none")"
+                    "decode_error \(diagnosticsPreviewText(payload.decodeError, maxLength: 120) ?? "none")",
+                    "acknowledged_at \(item.acknowledgedAt?.formatted(date: .abbreviated, time: .standard) ?? "none")",
+                    "acknowledged_classification \(item.acknowledgedClassification ?? "none")",
+                    "acknowledgement_source \(diagnosticsPreviewText(item.acknowledgementSource, maxLength: 80) ?? "none")",
+                    "acknowledged_reason \(diagnosticsPreviewText(item.acknowledgedReason, maxLength: 120) ?? "none")"
                 ].joined(separator: " | "))
             }
         }

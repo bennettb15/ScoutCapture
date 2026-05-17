@@ -672,6 +672,215 @@ final class Phase2C10OfflineReplayTests: XCTestCase {
         XCTAssertEqual(try fixture.localStore.fetchQueuedMutations().count, 1)
     }
 
+    func testReplaySkipsAcknowledgedHistoricalQueueDebt() async throws {
+        let fixture = try makeFixture()
+        defer { tearDownFixture(fixture) }
+
+        var mutation = try await createQueuedPropertyMutation(fixture: fixture, name: "Historical RLS")
+        mutation.status = .failed
+        mutation.attemptCount = 7
+        mutation.lastError = "new row violates row-level security policy for table properties"
+        mutation.nextAttemptAt = Date().addingTimeInterval(-60)
+        _ = try fixture.localStore.updateQueuedMutation(mutation)
+
+        let appState = makeSuccessfulReplayAppState(fixture: fixture)
+        _ = try appState.acknowledgeHistoricalQueueDebt(
+            queueItemID: mutation.id,
+            reason: "test acknowledgement",
+            acknowledgementSource: "unit_test"
+        )
+        await configureReplayEnvironment(appState, orgID: fixture.organizationID)
+
+        let summary = await appState._debugPerformOfflineReplayForTests(source: "acknowledged_skip_test")
+        let queued = try fixture.localStore.fetchQueuedMutations()
+        let preserved = try XCTUnwrap(queued.first)
+
+        XCTAssertTrue(summary.didStart)
+        XCTAssertEqual(summary.attemptedCount, 0)
+        XCTAssertEqual(summary.succeededCount, 0)
+        XCTAssertEqual(summary.failedCount, 0)
+        XCTAssertEqual(preserved.id, mutation.id)
+        XCTAssertEqual(preserved.status, .failed)
+        XCTAssertEqual(preserved.attemptCount, 7)
+        XCTAssertNotNil(preserved.acknowledgedAt)
+    }
+
+    func testReplayStillRetriesNonAcknowledgedFailedItemAfterBackoff() async throws {
+        let fixture = try makeFixture()
+        defer { tearDownFixture(fixture) }
+
+        var mutation = try await createQueuedPropertyMutation(fixture: fixture, name: "Retryable RLS")
+        mutation.status = .failed
+        mutation.attemptCount = 2
+        mutation.lastError = "new row violates row-level security policy for table properties"
+        mutation.nextAttemptAt = Date().addingTimeInterval(-60)
+        _ = try fixture.localStore.updateQueuedMutation(mutation)
+
+        let replayAppState = makeAppState(
+            fixture: fixture,
+            propertyOverride: { _ in
+                struct ForcedFailure: LocalizedError {
+                    var errorDescription: String? { "forced retry failure" }
+                }
+                throw ForcedFailure()
+            }
+        )
+        await configureReplayEnvironment(replayAppState, orgID: fixture.organizationID)
+
+        let summary = await replayAppState._debugPerformOfflineReplayForTests(source: "non_acknowledged_retry_test")
+        let queued = try fixture.localStore.fetchQueuedMutations()
+        let retried = try XCTUnwrap(queued.first)
+
+        XCTAssertTrue(summary.didStart)
+        XCTAssertEqual(summary.attemptedCount, 1)
+        XCTAssertEqual(summary.failedCount, 1)
+        XCTAssertEqual(retried.id, mutation.id)
+        XCTAssertEqual(retried.attemptCount, 3)
+        XCTAssertNil(retried.acknowledgedAt)
+    }
+
+    func testAcknowledgementPreservesOriginalQueueMetadataAndReportVisibility() async throws {
+        let fixture = try makeFixture()
+        defer { tearDownFixture(fixture) }
+
+        var mutation = try await createQueuedSessionMutation(fixture: fixture)
+        mutation.status = .failed
+        mutation.attemptCount = 9
+        mutation.lastError = "new row violates row-level security policy for table properties"
+        mutation.lastAttemptAt = Date(timeIntervalSinceReferenceDate: 1_000)
+        mutation.nextAttemptAt = Date(timeIntervalSinceReferenceDate: 2_000)
+        _ = try fixture.localStore.updateQueuedMutation(mutation)
+
+        let originalPayload = mutation.payloadData
+        let originalIdempotencyKey = mutation.idempotencyKey
+        let originalLastError = mutation.lastError
+        let appState = makeAppState(fixture: fixture)
+
+        _ = try appState.acknowledgeHistoricalQueueDebt(
+            queueItemID: mutation.id,
+            reason: "preserve metadata",
+            acknowledgementSource: "unit_test"
+        )
+
+        let acknowledged = try XCTUnwrap(try fixture.localStore.fetchQueuedMutations().first)
+        XCTAssertEqual(acknowledged.status, .failed)
+        XCTAssertEqual(acknowledged.payloadData, originalPayload)
+        XCTAssertEqual(acknowledged.idempotencyKey, originalIdempotencyKey)
+        XCTAssertEqual(acknowledged.lastError, originalLastError)
+        XCTAssertEqual(acknowledged.attemptCount, 9)
+        XCTAssertEqual(acknowledged.lastAttemptAt, mutation.lastAttemptAt)
+        XCTAssertEqual(acknowledged.nextAttemptAt, mutation.nextAttemptAt)
+        XCTAssertNotNil(acknowledged.acknowledgedAt)
+        XCTAssertEqual(acknowledged.acknowledgedClassification, AppState.QueueDebtClassification.staleRLSSessionParentProperty.rawValue)
+
+        appState._debugRefreshOfflineQueueDiagnosticsForTests()
+        let diagnostics = appState._debugLocalDiagnosticsForTests().offlineQueue
+        XCTAssertEqual(diagnostics.totalQueued, 1)
+        XCTAssertEqual(diagnostics.failedCount, 0)
+        XCTAssertEqual(diagnostics.acknowledgedHistoricalCount, 1)
+
+        let diagnosticItems = appState.diagnosticsFailedQueueItems()
+        XCTAssertEqual(diagnosticItems.count, 1)
+        XCTAssertNotNil(diagnosticItems[0].acknowledgedAt)
+
+        let report = appState._debugSyncDebtInspectionReportForTests(
+            properties: [],
+            sessions: [],
+            shots: [],
+            divergenceAuditSummary: emptyDivergenceSummary(orgID: fixture.organizationID),
+            activeOrganizationID: fixture.organizationID
+        )
+        let reportItem = try XCTUnwrap(report.failedQueueItems.first)
+        XCTAssertNotNil(reportItem.acknowledgedAt)
+        XCTAssertEqual(reportItem.acknowledgedClassification, AppState.QueueDebtClassification.staleRLSSessionParentProperty.rawValue)
+        XCTAssertTrue(AppState.syncDebtInspectionReportText(report).contains("acknowledged_at"))
+    }
+
+    func testIneligibleQueueDebtCannotBeAcknowledged() async throws {
+        let fixture = try makeFixture()
+        defer { tearDownFixture(fixture) }
+
+        var nonRLS = try await createQueuedPropertyMutation(fixture: fixture, name: "Non RLS")
+        nonRLS.status = .failed
+        nonRLS.lastError = "server returned 500"
+        _ = try fixture.localStore.updateQueuedMutation(nonRLS)
+
+        let appState = makeAppState(fixture: fixture)
+        XCTAssertThrowsError(
+            try appState.acknowledgeHistoricalQueueDebt(
+                queueItemID: nonRLS.id,
+                reason: "not eligible",
+                acknowledgementSource: "unit_test"
+            )
+        ) { error in
+            XCTAssertEqual(error as? AppState.QueueDebtAcknowledgementError, .ineligibleClassification(AppState.QueueDebtClassification.manualReview.rawValue))
+        }
+
+        let unchanged = try XCTUnwrap(try fixture.localStore.fetchQueuedMutations().first)
+        XCTAssertNil(unchanged.acknowledgedAt)
+    }
+
+    func testPendingQueueDebtCannotBeAcknowledged() async throws {
+        let fixture = try makeFixture()
+        defer { tearDownFixture(fixture) }
+
+        var pending = try await createQueuedPropertyMutation(fixture: fixture, name: "Pending RLS")
+        pending.lastError = "new row violates row-level security policy for table properties"
+        _ = try fixture.localStore.updateQueuedMutation(pending)
+
+        let appState = makeAppState(fixture: fixture)
+        XCTAssertThrowsError(
+            try appState.acknowledgeHistoricalQueueDebt(
+                queueItemID: pending.id,
+                reason: "not failed",
+                acknowledgementSource: "unit_test"
+            )
+        ) { error in
+            XCTAssertEqual(error as? AppState.QueueDebtAcknowledgementError, .notFailed)
+        }
+
+        let unchanged = try XCTUnwrap(try fixture.localStore.fetchQueuedMutations().first)
+        XCTAssertNil(unchanged.acknowledgedAt)
+    }
+
+    func testPayloadMismatchQueueDebtCannotBeAcknowledged() throws {
+        let fixture = try makeFixture()
+        defer { tearDownFixture(fixture) }
+
+        let queueID = UUID()
+        _ = try fixture.localStore.appendQueuedMutation(
+            LocalStore.QueuedMutation(
+                id: queueID,
+                entityType: "property",
+                entityID: UUID(),
+                organizationID: fixture.organizationID,
+                propertyID: UUID(),
+                operation: "upsert_property",
+                payloadData: Data("{}".utf8),
+                idempotencyKey: "property:mismatch",
+                attemptCount: 4,
+                lastError: "new row violates row-level security policy for table properties",
+                status: .failed
+            )
+        )
+
+        let appState = makeAppState(fixture: fixture)
+        XCTAssertThrowsError(
+            try appState.acknowledgeHistoricalQueueDebt(
+                queueItemID: queueID,
+                reason: "payload mismatch",
+                acknowledgementSource: "unit_test"
+            )
+        ) { error in
+            guard case AppState.QueueDebtAcknowledgementError.payloadMismatch = error else {
+                return XCTFail("Expected payload mismatch, got \(error)")
+            }
+        }
+
+        let unchanged = try XCTUnwrap(try fixture.localStore.fetchQueuedMutations().first)
+        XCTAssertNil(unchanged.acknowledgedAt)
+    }
+
     func testReplayBypassesFutureBackoffForDifferentEligibleItems() async throws {
         let fixture = try makeFixture()
         defer { tearDownFixture(fixture) }
