@@ -355,12 +355,21 @@ final class AppState: ObservableObject {
         let shotID: UUID?
         let state: CompletenessGateState
         let freshness: CompletenessFreshnessState
+        let rowScope: CompletenessDiagnosticRowScope
         let reason: String
+        let context: [String: String]
     }
 
     enum CompletenessDiagnosticClassification: String, CaseIterable, Equatable, Hashable {
         case actionable = "actionable_needs_review"
+        case preExportWarning = "pre_export_warning"
+        case sessionRollup = "session_rollup"
         case informational = "historical_informational"
+    }
+
+    enum CompletenessDiagnosticRowScope: String, CaseIterable, Equatable, Hashable {
+        case childDetail = "child_detail"
+        case sessionRollup = "session_rollup"
     }
 
     struct CompletenessDiagnosticSummaryRow: Equatable, Identifiable {
@@ -372,9 +381,11 @@ final class AppState: ObservableObject {
         let shotID: UUID?
         let state: CompletenessGateState
         let freshness: CompletenessFreshnessState
+        let rowScope: CompletenessDiagnosticRowScope
         let reason: String
         let duplicateCount: Int
         let classification: CompletenessDiagnosticClassification
+        let context: [String: String]
     }
 
     struct CompletenessDiagnosticReasonCount: Equatable, Identifiable {
@@ -9490,7 +9501,8 @@ final class AppState: ObservableObject {
                     propertyID: property.id,
                     state: propertyState,
                     freshness: propertyFreshness,
-                    reason: "property_deleted"
+                    reason: "property_deleted",
+                    context: [:]
                 ))
             } else if property.isArchived {
                 diagnosticRows.append(Self.completenessRow(
@@ -9499,7 +9511,8 @@ final class AppState: ObservableObject {
                     propertyID: property.id,
                     state: propertyState,
                     freshness: propertyFreshness,
-                    reason: "property_archived"
+                    reason: "property_archived",
+                    context: [:]
                 ))
             } else if propertyState != .metadataComplete {
                 diagnosticRows.append(Self.completenessRow(
@@ -9508,11 +9521,13 @@ final class AppState: ObservableObject {
                     propertyID: property.id,
                     state: propertyState,
                     freshness: propertyFreshness,
-                    reason: "property_minimum_metadata_missing"
+                    reason: "property_minimum_metadata_missing",
+                    context: [:]
                 ))
             }
 
             let sessions = (try? localStore.fetchSessionsForCacheBuild(propertyID: property.id)) ?? []
+            let localSessionIDs = Set(sessions.map(\.id))
             let guidedRows = (try? localStore.fetchGuidedShots(propertyID: property.id)) ?? []
             for guided in guidedRows {
                 let guidedEvaluation = Self.evaluateGuidedCompleteness(guided)
@@ -9525,12 +9540,14 @@ final class AppState: ObservableObject {
                         sessionID: guided.retiredInSessionID ?? guided.skipSessionID,
                         state: guidedEvaluation.state,
                         freshness: propertyFreshness,
-                        reason: guidedEvaluation.reason
+                        reason: guidedEvaluation.reason,
+                        context: guidedEvaluation.context
                     ))
                 }
             }
 
             for session in sessions {
+                let sessionContext = Self.completenessSessionContext(for: session, inspectedAt: inspectedAt)
                 if session.deletedAt != nil {
                     sessionStates.append(.localOnly)
                     freshnessStates.append(propertyFreshness)
@@ -9542,7 +9559,8 @@ final class AppState: ObservableObject {
                         sessionID: session.id,
                         state: .localOnly,
                         freshness: propertyFreshness,
-                        reason: "session_deleted"
+                        reason: "session_deleted",
+                        context: sessionContext
                     ))
                     continue
                 }
@@ -9569,7 +9587,8 @@ final class AppState: ObservableObject {
                         sessionID: session.id,
                         state: .localOnly,
                         freshness: propertyFreshness,
-                        reason: "session_json_missing_or_unreadable"
+                        reason: "session_json_missing_or_unreadable",
+                        context: sessionContext
                     ))
                     continue
                 }
@@ -9587,7 +9606,8 @@ final class AppState: ObservableObject {
                         sessionID: session.id,
                         state: .localOnly,
                         freshness: .needsReview,
-                        reason: "session_json_id_mismatch"
+                        reason: "session_json_id_mismatch",
+                        context: sessionContext
                     ))
                     continue
                 }
@@ -9631,7 +9651,11 @@ final class AppState: ObservableObject {
                             shotID: shot.shotID,
                             state: shotEvaluation.state,
                             freshness: shotEvaluation.freshness,
-                            reason: shotEvaluation.reason
+                            reason: shotEvaluation.reason,
+                            context: Self.mergedCompletenessContext(
+                                sessionContext,
+                                shotEvaluation.context
+                            )
                         ))
                     }
                     if shot.shouldAppearInDefaultExports {
@@ -9647,10 +9671,13 @@ final class AppState: ObservableObject {
 
                 var allIssuesComplete = true
                 var issueHistoryExportBlocker = false
+                let allSessionShotIDs = Set(metadata.shots.map(\.shotID))
                 for issue in metadata.issues {
                     let issueEvaluation = Self.evaluateIssueCompleteness(
                         issue,
                         sessionID: session.id,
+                        localSessionIDs: localSessionIDs,
+                        allSessionShotIDs: allSessionShotIDs,
                         exportedShotIDs: exportShotIDs
                     )
                     issueStates.append(issueEvaluation.state)
@@ -9665,7 +9692,11 @@ final class AppState: ObservableObject {
                             sessionID: session.id,
                             state: issueEvaluation.state,
                             freshness: issueEvaluation.freshness,
-                            reason: issueEvaluation.reason
+                            reason: issueEvaluation.reason,
+                            context: Self.mergedCompletenessContext(
+                                sessionContext,
+                                issueEvaluation.context
+                            )
                         ))
                     }
                 }
@@ -9689,7 +9720,11 @@ final class AppState: ObservableObject {
                             sessionID: guided.retiredInSessionID ?? guided.skipSessionID ?? session.id,
                             state: guidedEvaluation.state,
                             freshness: propertyFreshness,
-                            reason: guidedEvaluation.reason
+                            reason: guidedEvaluation.reason,
+                            context: Self.mergedCompletenessContext(
+                                sessionContext,
+                                guidedEvaluation.context
+                            )
                         ))
                     }
                 }
@@ -9720,7 +9755,12 @@ final class AppState: ObservableObject {
                         sessionID: session.id,
                         state: sessionState,
                         freshness: sessionFreshness,
-                        reason: sessionExportBlockers.first ?? "session_metadata_incomplete"
+                        rowScope: .sessionRollup,
+                        reason: sessionExportBlockers.first ?? "session_metadata_incomplete",
+                        context: Self.mergedCompletenessContext(
+                            sessionContext,
+                            ["session_rollup_reason_count": String(sessionExportBlockers.count)]
+                        )
                     ))
                 }
                 sessionStates.append(sessionState)
@@ -9764,6 +9804,49 @@ final class AppState: ObservableObject {
         }
     }
 
+    private static func completenessSessionContext(
+        for session: Session,
+        inspectedAt: Date
+    ) -> [String: String] {
+        [
+            "session_status": session.status.rawValue,
+            "is_sealed": String(session.isSealed),
+            "ended_at": session.endedAt.map(completenessDateString) ?? "none",
+            "completed_at": session.endedAt.map(completenessDateString) ?? "none",
+            "exported_at": session.exportedAt.map(completenessDateString) ?? "none",
+            "first_delivered_at": session.firstDeliveredAt.map(completenessDateString) ?? "none",
+            "is_export_eligible": String(session.status == .completed && session.isSealed),
+            "session_age_bucket": completenessAgeBucket(startedAt: session.startedAt, inspectedAt: inspectedAt)
+        ]
+    }
+
+    private nonisolated static func completenessDateString(_ date: Date) -> String {
+        ISO8601DateFormatter().string(from: date)
+    }
+
+    private nonisolated static func completenessAgeBucket(startedAt: Date, inspectedAt: Date) -> String {
+        let age = max(0, inspectedAt.timeIntervalSince(startedAt))
+        switch age {
+        case ..<86400:
+            return "lt_1d"
+        case ..<(7 * 86400):
+            return "lt_7d"
+        case ..<(30 * 86400):
+            return "lt_30d"
+        case ..<(90 * 86400):
+            return "lt_90d"
+        default:
+            return "gte_90d"
+        }
+    }
+
+    private nonisolated static func mergedCompletenessContext(
+        _ lhs: [String: String],
+        _ rhs: [String: String]
+    ) -> [String: String] {
+        lhs.merging(rhs) { _, new in new }
+    }
+
     private static func completenessStateForLocalProperty(_ property: Property) -> CompletenessGateState {
         guard property.deletedAt == nil, !property.isArchived else { return .localOnly }
         return trimmedNonEmpty(property.name) == nil ? .localOnly : .metadataComplete
@@ -9776,6 +9859,7 @@ final class AppState: ObservableObject {
         let mediaComplete: Bool
         let diagnosticOnly: Bool
         let reason: String
+        let context: [String: String]
     }
 
     private static func evaluateShotCompleteness(
@@ -9799,7 +9883,8 @@ final class AppState: ObservableObject {
         }
 
         let metadataComplete = reasons.isEmpty
-        let mediaComplete: Bool = {
+        let originalFilenamePresent = trimmedNonEmpty(shot.originalFilename) != nil
+        let localOriginalExists: Bool = {
             guard shot.shouldAppearInDefaultExports else { return false }
             guard let relative = trimmedNonEmpty(shot.originalRelativePath) else { return false }
             guard let url = localStore.resolveSessionRelativeFileURL(
@@ -9811,6 +9896,7 @@ final class AppState: ObservableObject {
             }
             return FileManager.default.fileExists(atPath: url.path)
         }()
+        let mediaComplete = localOriginalExists
 
         let diagnosticOnly = shot.isHistorical || shot.hiddenFromGallery == true || shot.hiddenFromReports == true
         let state: CompletenessGateState
@@ -9839,7 +9925,13 @@ final class AppState: ObservableObject {
             metadataComplete: metadataComplete,
             mediaComplete: mediaComplete,
             diagnosticOnly: diagnosticOnly,
-            reason: reason
+            reason: reason,
+            context: [
+                "shot_lifecycle_state": shot.lifecycleState.rawValue,
+                "shot_original_filename_present": String(originalFilenamePresent),
+                "local_original_exists": String(localOriginalExists),
+                "should_appear_in_default_exports": String(shot.shouldAppearInDefaultExports)
+            ]
         )
     }
 
@@ -9850,14 +9942,18 @@ final class AppState: ObservableObject {
         let exportBlocked: Bool
         let diagnosticOnly: Bool
         let reason: String
+        let context: [String: String]
     }
 
     private static func evaluateIssueCompleteness(
         _ issue: IssueMetadata,
         sessionID: UUID,
+        localSessionIDs: Set<UUID>,
+        allSessionShotIDs: Set<UUID>,
         exportedShotIDs: Set<UUID>
     ) -> IssueCompletenessEvaluation {
         var reasons: [String] = []
+        var context: [String: String] = [:]
         if trimmedNonEmpty(issue.currentReason) == nil {
             reasons.append("issue_current_reason_missing")
         }
@@ -9870,30 +9966,53 @@ final class AppState: ObservableObject {
         for event in issue.historyEvents where event.sessionId == sessionID {
             let rawShotID = trimmedNonEmpty(event.details["shotId"] ?? event.details["shotID"])
             if let rawShotID {
-                guard let shotID = UUID(uuidString: rawShotID), exportedShotIDs.contains(shotID) else {
+                guard let shotID = UUID(uuidString: rawShotID) else {
                     exportBlocked = true
+                    context["referenced_issue_history_shot_exists_in_all_session_shots"] = "false"
+                    context["referenced_issue_history_shot_exists_in_default_export_shots"] = "false"
                     reasons.append("issue_history_orphan_shot_reference")
+                    break
+                }
+                let existsInAllSessionShots = allSessionShotIDs.contains(shotID)
+                let existsInDefaultExportShots = exportedShotIDs.contains(shotID)
+                context["referenced_issue_history_shot_exists_in_all_session_shots"] = String(existsInAllSessionShots)
+                context["referenced_issue_history_shot_exists_in_default_export_shots"] = String(existsInDefaultExportShots)
+                guard existsInDefaultExportShots else {
+                    exportBlocked = true
+                    reasons.append(existsInAllSessionShots ? "issue_history_non_export_shot_reference" : "issue_history_orphan_shot_reference")
                     break
                 }
             }
         }
         for event in issue.historyEvents {
             if let eventSessionID = event.sessionId, eventSessionID != sessionID {
-                exportBlocked = true
-                reasons.append("issue_history_orphan_session_reference")
+                let referencedSessionExistsLocally = localSessionIDs.contains(eventSessionID)
+                context["referenced_issue_history_session_exists_locally"] = String(referencedSessionExistsLocally)
+                if referencedSessionExistsLocally {
+                    reasons.append("issue_history_cross_session_reference")
+                } else {
+                    exportBlocked = true
+                    reasons.append("issue_history_missing_session_reference")
+                }
                 break
             }
         }
 
-        let metadataComplete = reasons.filter { !$0.hasPrefix("issue_history_orphan") }.isEmpty
+        let metadataComplete = reasons.filter {
+            !$0.hasPrefix("issue_history_orphan")
+                && $0 != "issue_history_missing_session_reference"
+                && $0 != "issue_history_non_export_shot_reference"
+        }.isEmpty
         let state: CompletenessGateState = metadataComplete ? .metadataComplete : .localOnly
+        let reason = reasons.first ?? "issue_metadata_complete"
         return IssueCompletenessEvaluation(
             state: state,
             freshness: exportBlocked ? .needsReview : .unknown,
             metadataComplete: metadataComplete,
             exportBlocked: exportBlocked,
-            diagnosticOnly: normalizedStatus == "resolved",
-            reason: reasons.first ?? "issue_metadata_complete"
+            diagnosticOnly: normalizedStatus == "resolved" || reason == "issue_history_cross_session_reference",
+            reason: reason,
+            context: context
         )
     }
 
@@ -9902,6 +10021,7 @@ final class AppState: ObservableObject {
         let metadataComplete: Bool
         let diagnosticOnly: Bool
         let reason: String
+        let context: [String: String]
     }
 
     private static func evaluateGuidedCompleteness(_ guided: GuidedShot) -> GuidedCompletenessEvaluation {
@@ -9910,7 +10030,8 @@ final class AppState: ObservableObject {
                 state: .metadataComplete,
                 metadataComplete: true,
                 diagnosticOnly: true,
-                reason: "guided_retired"
+                reason: "guided_retired",
+                context: ["guided_status": guided.status.rawValue]
             )
         }
 
@@ -9926,7 +10047,8 @@ final class AppState: ObservableObject {
             state: complete ? .metadataComplete : .localOnly,
             metadataComplete: complete,
             diagnosticOnly: false,
-            reason: reasons.first ?? "guided_metadata_complete"
+            reason: reasons.first ?? "guided_metadata_complete",
+            context: ["guided_status": guided.status.rawValue]
         )
     }
 
@@ -9938,7 +10060,34 @@ final class AppState: ObservableObject {
         shotID: UUID? = nil,
         state: CompletenessGateState,
         freshness: CompletenessFreshnessState,
+        rowScope: CompletenessDiagnosticRowScope = .childDetail,
         reason: String
+    ) -> CompletenessDiagnosticRow {
+        completenessRow(
+            entityType: entityType,
+            entityID: entityID,
+            propertyID: propertyID,
+            sessionID: sessionID,
+            shotID: shotID,
+            state: state,
+            freshness: freshness,
+            rowScope: rowScope,
+            reason: reason,
+            context: [:]
+        )
+    }
+
+    private nonisolated static func completenessRow(
+        entityType: String,
+        entityID: UUID?,
+        propertyID: UUID? = nil,
+        sessionID: UUID? = nil,
+        shotID: UUID? = nil,
+        state: CompletenessGateState,
+        freshness: CompletenessFreshnessState,
+        rowScope: CompletenessDiagnosticRowScope = .childDetail,
+        reason: String,
+        context: [String: String]
     ) -> CompletenessDiagnosticRow {
         CompletenessDiagnosticRow(
             id: UUID(),
@@ -9949,7 +10098,13 @@ final class AppState: ObservableObject {
             shotID: shotID,
             state: state,
             freshness: freshness,
-            reason: sanitizedDiagnosticsErrorMessage(reason)
+            rowScope: rowScope,
+            reason: sanitizedDiagnosticsErrorMessage(reason),
+            context: context.reduce(into: [:]) { sanitizedContext, element in
+                let key = sanitizedDiagnosticsErrorMessage(element.key)
+                let value = sanitizedDiagnosticsErrorMessage(element.value)
+                sanitizedContext[key] = value
+            }
         )
     }
 
@@ -9990,9 +10145,11 @@ final class AppState: ObservableObject {
                 shotID: value.row.shotID,
                 state: value.row.state,
                 freshness: value.row.freshness,
+                rowScope: value.row.rowScope,
                 reason: value.row.reason,
                 duplicateCount: value.count,
-                classification: completenessDiagnosticClassification(for: value.row)
+                classification: completenessDiagnosticClassification(for: value.row),
+                context: value.row.context
             )
         }
         .sorted { lhs, rhs in
@@ -10035,6 +10192,7 @@ final class AppState: ObservableObject {
             row.shotID?.uuidString ?? "none",
             row.state.rawValue,
             row.freshness.rawValue,
+            row.rowScope.rawValue,
             row.reason
         ].joined(separator: "|")
     }
@@ -10042,14 +10200,19 @@ final class AppState: ObservableObject {
     private nonisolated static func completenessDiagnosticClassification(
         for row: CompletenessDiagnosticRow
     ) -> CompletenessDiagnosticClassification {
+        if row.rowScope == .sessionRollup {
+            return .sessionRollup
+        }
         switch row.reason {
-        case "active_export_shot_original_missing",
-             "issue_history_orphan_session_reference",
+        case "active_export_shot_original_missing":
+            return row.context["is_export_eligible"] == "true" ? .actionable : .preExportWarning
+        case "issue_history_orphan_session_reference",
+             "issue_history_missing_session_reference",
              "issue_history_orphan_shot_reference",
+             "issue_history_non_export_shot_reference",
              "issue_history_orphan_reference",
              "export_validation_failed",
              "active_export_shot_metadata_incomplete",
-             "active_export_shot_media_incomplete",
              "guided_metadata_incomplete",
              "guided_title_missing",
              "guided_building_missing",
@@ -10061,6 +10224,9 @@ final class AppState: ObservableObject {
              "session_json_id_mismatch",
              "session_json_missing_or_unreadable":
             return .actionable
+        case "active_export_shot_media_incomplete",
+             "issue_history_cross_session_reference":
+            return .informational
         case "guided_retired",
              "shot_historical_lifecycle",
              "session_not_completed_and_sealed",
@@ -10077,6 +10243,8 @@ final class AppState: ObservableObject {
         let dedupedRows = dedupedCompletenessDiagnosticRows(report.diagnosticOnlyRows)
         let reasonCounts = completenessDiagnosticReasonCounts(dedupedRows)
         let actionableRows = dedupedRows.filter { $0.classification == .actionable }
+        let preExportWarningRows = dedupedRows.filter { $0.classification == .preExportWarning }
+        let sessionRollupRows = dedupedRows.filter { $0.classification == .sessionRollup }
         let informationalRows = dedupedRows.filter { $0.classification == .informational }
         let unknownFreshnessCount = report.freshnessCounts.first { $0.state == .unknown }?.count ?? 0
         var lines: [String] = []
@@ -10089,6 +10257,8 @@ final class AppState: ObservableObject {
         lines.append("- raw_diagnostic_rows: \(report.diagnosticOnlyRows.count)")
         lines.append("- deduped_diagnostic_rows: \(dedupedRows.count)")
         lines.append("- actionable_needs_review_rows: \(actionableRows.count)")
+        lines.append("- pre_export_warning_rows: \(preExportWarningRows.count)")
+        lines.append("- session_rollup_rows: \(sessionRollupRows.count)")
         lines.append("- historical_informational_rows: \(informationalRows.count)")
         lines.append("- export_complete_sessions: \(report.exportCompleteSessionCount)")
         lines.append("- not_export_complete_sessions: \(report.notExportCompleteSessionCount)")
@@ -10111,6 +10281,11 @@ final class AppState: ObservableObject {
             lines.append("No unknown freshness rows were counted in this snapshot. Freshness remains scoped to property-open checks unless broader child metadata freshness is added later.")
         }
         lines.append("")
+        lines.append("Classification Notes")
+        lines.append("- active_export_shot_media_incomplete is a session-level rollup; inspect child shot rows for the missing-original detail.")
+        lines.append("- Issue history can legitimately reference other sessions. Cross-session references are informational when the referenced session exists locally and actionable only when the referenced session or shot is missing or unresolvable.")
+        lines.append("- Missing originals on draft, unsealed, or otherwise non-export-eligible sessions are pre-export warnings, not immediate export blockers in this diagnostics report.")
+        lines.append("")
         lines.append("Diagnostic Reason Counts")
         if reasonCounts.isEmpty {
             lines.append("none")
@@ -10122,6 +10297,12 @@ final class AppState: ObservableObject {
         lines.append("")
         lines.append("Actionable / Needs Review Diagnostics")
         appendCompletenessDiagnosticRows(actionableRows, to: &lines)
+        lines.append("")
+        lines.append("Pre-Export Warning Diagnostics")
+        appendCompletenessDiagnosticRows(preExportWarningRows, to: &lines)
+        lines.append("")
+        lines.append("Session Rollup Diagnostics")
+        appendCompletenessDiagnosticRows(sessionRollupRows, to: &lines)
         lines.append("")
         lines.append("Historical / Informational Diagnostics")
         appendCompletenessDiagnosticRows(informationalRows, to: &lines)
@@ -10162,10 +10343,22 @@ final class AppState: ObservableObject {
                 "state=\(row.state.rawValue)",
                 "freshness=\(row.freshness.rawValue)",
                 "classification=\(row.classification.rawValue)",
+                "row_scope=\(row.rowScope.rawValue)",
                 "duplicates=\(row.duplicateCount)",
-                "reason=\(diagnosticsPreviewText(row.reason, maxLength: 120) ?? "none")"
+                "reason=\(diagnosticsPreviewText(row.reason, maxLength: 120) ?? "none")",
+                "context=\(completenessContextText(row.context))"
             ].joined(separator: " | "))
         }
+    }
+
+    private nonisolated static func completenessContextText(_ context: [String: String]) -> String {
+        guard !context.isEmpty else { return "none" }
+        return context
+            .sorted { $0.key < $1.key }
+            .map { key, value in
+                "\(diagnosticsPreviewText(key, maxLength: 80) ?? "unknown")=\(diagnosticsPreviewText(value, maxLength: 120) ?? "none")"
+            }
+            .joined(separator: ",")
     }
 
     nonisolated static func makeCanonicalReadinessReport(

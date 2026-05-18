@@ -9,7 +9,10 @@ final class Phase2C20ACompletenessGatesTests: XCTestCase {
         return root
     }
 
-    private func makeFixture() throws -> (store: LocalStore, appState: AppState, root: URL, property: Property, session: Session) {
+    private func makeFixture(
+        sessionStatus: Session.Status = .completed,
+        isSealed: Bool = true
+    ) throws -> (store: LocalStore, appState: AppState, root: URL, property: Property, session: Session) {
         let root = try makeTempStorageRoot()
         let store = LocalStore(testStorageRootURL: root)
         let orgID = UUID()
@@ -19,9 +22,9 @@ final class Phase2C20ACompletenessGatesTests: XCTestCase {
                 id: UUID(),
                 propertyID: property.id,
                 startedAt: Date(timeIntervalSinceReferenceDate: 100),
-                status: .completed,
-                endedAt: Date(timeIntervalSinceReferenceDate: 200),
-                isSealed: true
+                status: sessionStatus,
+                endedAt: sessionStatus == .completed ? Date(timeIntervalSinceReferenceDate: 200) : nil,
+                isSealed: isSealed
             )
         )
         let defaults = UserDefaults(suiteName: "ScoutCapture-2C20A-\(UUID().uuidString)") ?? .standard
@@ -195,6 +198,36 @@ final class Phase2C20ACompletenessGatesTests: XCTestCase {
         XCTAssertEqual(report.exportCompleteSessionCount, 0)
     }
 
+    func testMissingOriginalInDraftUnsealedSessionIsPreExportWarning() throws {
+        let fixture = try makeFixture(sessionStatus: .draft, isSealed: false)
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let shot = makeShot(propertyID: fixture.property.id, sessionID: fixture.session.id)
+        try saveMetadata(store: fixture.store, property: fixture.property, session: fixture.session, shots: [shot])
+
+        let report = fixture.appState.inspectCompletenessGates()
+        let row = try XCTUnwrap(AppState.dedupedCompletenessDiagnosticRows(report.diagnosticOnlyRows).first {
+            $0.reason == "active_export_shot_original_missing"
+        })
+
+        XCTAssertEqual(row.classification, .preExportWarning)
+        XCTAssertEqual(row.context["is_export_eligible"], "false")
+    }
+
+    func testMissingOriginalInCompletedSealedSessionRemainsActionable() throws {
+        let fixture = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let shot = makeShot(propertyID: fixture.property.id, sessionID: fixture.session.id)
+        try saveMetadata(store: fixture.store, property: fixture.property, session: fixture.session, shots: [shot])
+
+        let report = fixture.appState.inspectCompletenessGates()
+        let row = try XCTUnwrap(AppState.dedupedCompletenessDiagnosticRows(report.diagnosticOnlyRows).first {
+            $0.reason == "active_export_shot_original_missing"
+        })
+
+        XCTAssertEqual(row.classification, .actionable)
+        XCTAssertEqual(row.context["is_export_eligible"], "true")
+    }
+
     func testRetiredShotIsPreservedButDoesNotBlockDefaultExportCompleteness() throws {
         let fixture = try makeFixture()
         defer { try? FileManager.default.removeItem(at: fixture.root) }
@@ -238,6 +271,73 @@ final class Phase2C20ACompletenessGatesTests: XCTestCase {
 
         XCTAssertEqual(report.exportCompleteSessionCount, 0)
         XCTAssertTrue(report.diagnosticOnlyRows.contains { $0.reason == "issue_history_orphan_shot_reference" })
+    }
+
+    func testCrossSessionIssueHistoryWithExistingReferencedSessionIsInformational() throws {
+        let fixture = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let referencedSession = try fixture.store.upsertSession(
+            Session(
+                id: UUID(),
+                propertyID: fixture.property.id,
+                startedAt: Date(timeIntervalSinceReferenceDate: 50),
+                status: .completed,
+                endedAt: Date(timeIntervalSinceReferenceDate: 90),
+                isSealed: true
+            )
+        )
+        let shot = makeShot(propertyID: fixture.property.id, sessionID: fixture.session.id)
+        try writeOriginal(store: fixture.store, propertyID: fixture.property.id, sessionID: fixture.session.id, filename: "shot.heic")
+        let issue = IssueMetadata(
+            issueID: UUID(),
+            issueStatus: "active",
+            currentReason: "Crack",
+            historyEvents: [
+                IssueHistoryEvent(
+                    timestamp: Date(timeIntervalSinceReferenceDate: 160),
+                    sessionId: referencedSession.id,
+                    type: "reason_updated"
+                )
+            ]
+        )
+        try saveMetadata(store: fixture.store, property: fixture.property, session: fixture.session, shots: [shot], issues: [issue])
+
+        let report = fixture.appState.inspectCompletenessGates()
+        let row = try XCTUnwrap(AppState.dedupedCompletenessDiagnosticRows(report.diagnosticOnlyRows).first {
+            $0.reason == "issue_history_cross_session_reference"
+        })
+
+        XCTAssertEqual(row.classification, .informational)
+        XCTAssertEqual(row.context["referenced_issue_history_session_exists_locally"], "true")
+        XCTAssertFalse(report.diagnosticOnlyRows.contains { $0.reason == "issue_history_orphan_session_reference" })
+    }
+
+    func testMissingReferencedIssueHistorySessionRemainsActionable() throws {
+        let fixture = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let shot = makeShot(propertyID: fixture.property.id, sessionID: fixture.session.id)
+        try writeOriginal(store: fixture.store, propertyID: fixture.property.id, sessionID: fixture.session.id, filename: "shot.heic")
+        let issue = IssueMetadata(
+            issueID: UUID(),
+            issueStatus: "active",
+            currentReason: "Crack",
+            historyEvents: [
+                IssueHistoryEvent(
+                    timestamp: Date(timeIntervalSinceReferenceDate: 160),
+                    sessionId: UUID(),
+                    type: "reason_updated"
+                )
+            ]
+        )
+        try saveMetadata(store: fixture.store, property: fixture.property, session: fixture.session, shots: [shot], issues: [issue])
+
+        let report = fixture.appState.inspectCompletenessGates()
+        let row = try XCTUnwrap(AppState.dedupedCompletenessDiagnosticRows(report.diagnosticOnlyRows).first {
+            $0.reason == "issue_history_missing_session_reference"
+        })
+
+        XCTAssertEqual(row.classification, .actionable)
+        XCTAssertEqual(row.context["referenced_issue_history_session_exists_locally"], "false")
     }
 
     func testGuidedRowMissingCaptureFieldsBlocksGuidedMetadataCompleteness() throws {
@@ -305,7 +405,12 @@ final class Phase2C20ACompletenessGatesTests: XCTestCase {
         let report = makeSyntheticReport(rows: [
             diagnosticRow(entityType: "guided", reason: "guided_retired"),
             diagnosticRow(entityType: "guided", reason: "guided_retired"),
-            diagnosticRow(entityType: "shot", freshness: .needsReview, reason: "active_export_shot_original_missing")
+            diagnosticRow(
+                entityType: "shot",
+                freshness: .needsReview,
+                context: ["is_export_eligible": "true"],
+                reason: "active_export_shot_original_missing"
+            )
         ])
 
         let text = AppState.completenessGatesReportText(report)
@@ -324,11 +429,27 @@ final class Phase2C20ACompletenessGatesTests: XCTestCase {
         XCTAssertEqual(Set(rows.map { $0.classification }), [.informational])
     }
 
+    func testSessionRollupIsLabeledAsRollup() {
+        let report = makeSyntheticReport(rows: [
+            diagnosticRow(
+                entityType: "session",
+                rowScope: .sessionRollup,
+                reason: "active_export_shot_media_incomplete"
+            )
+        ])
+
+        let row = AppState.dedupedCompletenessDiagnosticRows(report.diagnosticOnlyRows).first
+
+        XCTAssertEqual(row?.classification, .sessionRollup)
+        XCTAssertEqual(row?.rowScope, .sessionRollup)
+    }
+
     func testActiveMissingOriginalIsActionableNeedsReview() {
         let row = AppState.dedupedCompletenessDiagnosticRows([
             diagnosticRow(
                 entityType: "shot",
                 freshness: .unknown,
+                context: ["is_export_eligible": "true"],
                 reason: "active_export_shot_original_missing"
             )
         ]).first
@@ -341,7 +462,7 @@ final class Phase2C20ACompletenessGatesTests: XCTestCase {
             diagnosticRow(
                 entityType: "issue",
                 freshness: .unknown,
-                reason: "issue_history_orphan_session_reference"
+                reason: "issue_history_missing_session_reference"
             ),
             diagnosticRow(
                 entityType: "issue",
@@ -351,6 +472,20 @@ final class Phase2C20ACompletenessGatesTests: XCTestCase {
         ])
 
         XCTAssertEqual(Set(rows.map { $0.classification }), [.actionable])
+    }
+
+    func testLocalOriginalExistenceIsReportedWithoutFullPaths() throws {
+        let fixture = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let shot = makeShot(propertyID: fixture.property.id, sessionID: fixture.session.id)
+        try saveMetadata(store: fixture.store, property: fixture.property, session: fixture.session, shots: [shot])
+
+        let report = fixture.appState.inspectCompletenessGates()
+        let text = AppState.completenessGatesReportText(report)
+
+        XCTAssertTrue(text.contains("local_original_exists=false"))
+        XCTAssertTrue(text.contains("shot_original_filename_present=true"))
+        XCTAssertFalse(text.contains(fixture.root.path))
     }
 
     func testFreshnessExplanationAppearsWhenUnknownFreshnessCountIsHigh() {
@@ -381,6 +516,8 @@ final class Phase2C20ACompletenessGatesTests: XCTestCase {
         shotID: UUID? = nil,
         state: AppState.CompletenessGateState = .localOnly,
         freshness: AppState.CompletenessFreshnessState = .unknown,
+        rowScope: AppState.CompletenessDiagnosticRowScope = .childDetail,
+        context: [String: String] = [:],
         reason: String
     ) -> AppState.CompletenessDiagnosticRow {
         AppState.CompletenessDiagnosticRow(
@@ -392,7 +529,9 @@ final class Phase2C20ACompletenessGatesTests: XCTestCase {
             shotID: shotID,
             state: state,
             freshness: freshness,
-            reason: reason
+            rowScope: rowScope,
+            reason: reason,
+            context: context
         )
     }
 
