@@ -395,6 +395,54 @@ final class AppState: ObservableObject {
         let groupedHistoricalFindings: [DivergenceAuditFindingGroupSummary]
     }
 
+    enum RemoteOnlySessionDetailLabel: String, CaseIterable, Equatable {
+        case historicalDeleted = "historical_deleted"
+        case historicalStale = "historical_stale"
+        case cautionDraftIncomplete = "caution_draft_incomplete"
+        case completedNoRemoteShots = "completed_no_remote_shots"
+        case possibleHydrationCandidate = "possible_future_hydration_candidate"
+        case parentMissingLocally = "parent_property_missing_locally"
+        case localShellPresent = "local_session_row_present"
+    }
+
+    struct RemoteOnlySessionDetailItem: Equatable, Identifiable {
+        let id: UUID
+        let sessionID: UUID
+        let propertyID: UUID
+        let orgID: UUID
+        let remoteStatus: String
+        let startedAt: String
+        let completedAt: String?
+        let updatedAt: Date?
+        let deletedAt: Date?
+        let captureProfile: String?
+        let parentPropertyExistsLocally: Bool
+        let localPropertyName: String?
+        let localSessionRowExists: Bool
+        let localSessionFolderExists: Bool
+        let localSessionJSONExists: Bool
+        let localOriginalsFolderExists: Bool
+        let remoteShotCount: Int
+        let remoteIssueObservationCount: Int?
+        let remoteShotsWithStoragePathCount: Int
+        let remoteShotsMissingStoragePathCount: Int
+        let appearsDeleted: Bool
+        let appearsStale: Bool
+        let appearsDraft: Bool
+        let appearsCompleted: Bool
+        let classification: DivergenceDebtClassification
+        let classificationReason: String
+        let labels: [RemoteOnlySessionDetailLabel]
+    }
+
+    struct RemoteOnlySessionDetailReport: Equatable {
+        let inspectedAt: Date
+        let activeOrganizationID: UUID?
+        let remoteScopeAvailable: Bool
+        let unavailableReason: String?
+        let items: [RemoteOnlySessionDetailItem]
+    }
+
     enum QueueDebtAcknowledgementError: LocalizedError, Equatable {
         case notFound
         case notFailed
@@ -2376,6 +2424,65 @@ final class AppState: ObservableObject {
         }
     }
 
+    private struct RemoteOnlySessionDetailSessionRecord: Decodable {
+        let id: UUID
+        let orgID: UUID
+        let propertyID: UUID
+        let status: String
+        let startedAt: String
+        let completedAt: String?
+        let captureProfile: String?
+        let updatedAt: Date?
+        let deletedAt: Date?
+
+        enum CodingKeys: String, CodingKey {
+            case id
+            case orgID = "org_id"
+            case propertyID = "property_id"
+            case status
+            case startedAt = "started_at"
+            case completedAt = "completed_at"
+            case captureProfile = "capture_profile"
+            case updatedAt = "updated_at"
+            case deletedAt = "deleted_at"
+        }
+    }
+
+    private struct RemoteOnlySessionDetailShotRecord: Decodable {
+        let id: UUID
+        let sessionID: UUID?
+        let storageBucket: String?
+        let storagePath: String?
+        let deletedAt: Date?
+
+        enum CodingKeys: String, CodingKey {
+            case id
+            case sessionID = "session_id"
+            case storageBucket = "storage_bucket"
+            case storagePath = "storage_path"
+            case deletedAt = "deleted_at"
+        }
+    }
+
+    private struct RemoteOnlySessionDetailObservationRecord: Decodable {
+        let id: UUID
+        let sessionID: UUID?
+        let deletedAt: Date?
+
+        enum CodingKeys: String, CodingKey {
+            case id
+            case sessionID = "session_id"
+            case deletedAt = "deleted_at"
+        }
+    }
+
+    private struct RemoteOnlySessionDetailRemoteSnapshot {
+        let properties: [DivergenceRemotePropertyRecord]
+        let sessions: [RemoteOnlySessionDetailSessionRecord]
+        let shots: [RemoteOnlySessionDetailShotRecord]
+        let observations: [RemoteOnlySessionDetailObservationRecord]?
+    }
+
     private struct SupabaseRowUpdatedAtRecord: Decodable {
         let id: UUID
         let updatedAt: Date
@@ -2603,6 +2710,28 @@ final class AppState: ObservableObject {
             local: localSnapshot,
             remote: remoteSnapshot,
             divergenceAuditSummary: summary
+        )
+    }
+
+    func inspectRemoteOnlySessionDetails() async -> RemoteOnlySessionDetailReport {
+        let inspectedAt = Date()
+        let organizationID = activeOrganizationID
+        let localSnapshot = makeLocalDivergenceSnapshot()
+        guard let remoteSnapshot = await fetchRemoteOnlySessionDetailSnapshotIfAvailable(activeOrganizationID: organizationID) else {
+            return RemoteOnlySessionDetailReport(
+                inspectedAt: inspectedAt,
+                activeOrganizationID: organizationID,
+                remoteScopeAvailable: false,
+                unavailableReason: "Remote scope unavailable for read-only session detail inspection.",
+                items: []
+            )
+        }
+
+        return makeRemoteOnlySessionDetailReport(
+            inspectedAt: inspectedAt,
+            activeOrganizationID: organizationID,
+            local: localSnapshot,
+            remote: remoteSnapshot
         )
     }
 
@@ -7056,6 +7185,69 @@ final class AppState: ObservableObject {
         }
     }
 
+    private func fetchRemoteOnlySessionDetailSnapshotIfAvailable(
+        activeOrganizationID: UUID?
+    ) async -> RemoteOnlySessionDetailRemoteSnapshot? {
+        guard backendFeatureFlags.supabaseEnabled,
+              isOrganizationContextReady,
+              let activeOrganizationID,
+              let client = supabaseClient else {
+            return nil
+        }
+
+        let orgValue = activeOrganizationID.uuidString.lowercased()
+
+        async let observations: [RemoteOnlySessionDetailObservationRecord]? = {
+            do {
+                return try await client
+                    .from("observations")
+                    .select("id, session_id, deleted_at")
+                    .eq("org_id", value: orgValue)
+                    .limit(5_000)
+                    .execute()
+                    .value as [RemoteOnlySessionDetailObservationRecord]
+            } catch {
+                return nil
+            }
+        }()
+
+        do {
+            async let properties: [DivergenceRemotePropertyRecord] = client
+                .from("properties")
+                .select("id, org_id, capture_profile, is_archived, deleted_at")
+                .eq("org_id", value: orgValue)
+                .limit(1_000)
+                .execute()
+                .value
+
+            async let sessions: [RemoteOnlySessionDetailSessionRecord] = client
+                .from("sessions")
+                .select("id, org_id, property_id, status, started_at, completed_at, capture_profile, updated_at, deleted_at")
+                .eq("org_id", value: orgValue)
+                .limit(1_000)
+                .execute()
+                .value
+
+            async let shots: [RemoteOnlySessionDetailShotRecord] = client
+                .from("shots")
+                .select("id, session_id, storage_bucket, storage_path, deleted_at")
+                .eq("org_id", value: orgValue)
+                .limit(5_000)
+                .execute()
+                .value
+
+            return try await RemoteOnlySessionDetailRemoteSnapshot(
+                properties: properties,
+                sessions: sessions,
+                shots: shots,
+                observations: observations
+            )
+        } catch {
+            recordDiagnosticsError(error)
+            return nil
+        }
+    }
+
     private func makeMediaRecoveryInspectionSummary(
         inspectedAt: Date,
         activeOrganizationID: UUID?,
@@ -8410,6 +8602,178 @@ final class AppState: ObservableObject {
         )
     }
 
+    private func makeRemoteOnlySessionDetailReport(
+        inspectedAt: Date,
+        activeOrganizationID: UUID?,
+        local: LocalDivergenceSnapshot,
+        remote: RemoteOnlySessionDetailRemoteSnapshot
+    ) -> RemoteOnlySessionDetailReport {
+        let localPropertiesByID = dictionaryByNormalizedID(local.properties, id: \.id)
+        let localSessionsByID = dictionaryByNormalizedID(local.sessions, id: \.id)
+        let remotePropertiesByID = dictionaryByNormalizedID(remote.properties, id: \.id)
+        let shotsBySessionID = Dictionary(grouping: remote.shots) { shot in
+            shot.sessionID.map(divergenceKey) ?? ""
+        }
+        let observationsBySessionID = Dictionary(grouping: remote.observations ?? []) { observation in
+            observation.sessionID.map(divergenceKey) ?? ""
+        }
+        let sessionCursor = activeOrganizationID.flatMap { readSyncCursor(entity: "sessions", orgID: $0) }
+        let fileManager = FileManager.default
+
+        let items = remote.sessions
+            .filter { localSessionsByID[divergenceKey($0.id)] == nil }
+            .sorted {
+                if ($0.updatedAt ?? .distantPast) != ($1.updatedAt ?? .distantPast) {
+                    return ($0.updatedAt ?? .distantPast) > ($1.updatedAt ?? .distantPast)
+                }
+                return $0.id.uuidString < $1.id.uuidString
+            }
+            .map { remoteSession -> RemoteOnlySessionDetailItem in
+                let sessionKey = divergenceKey(remoteSession.id)
+                let propertyKey = divergenceKey(remoteSession.propertyID)
+                let localProperty = localPropertiesByID[propertyKey]
+                let localSession = localSessionsByID[sessionKey]
+                let sessionFolder = localStore.sessionFolderURL(
+                    propertyID: remoteSession.propertyID,
+                    sessionID: remoteSession.id
+                )
+                let sessionJSON = localStore.sessionJSONURL(
+                    propertyID: remoteSession.propertyID,
+                    sessionID: remoteSession.id
+                )
+                let originalsFolder = localStore.originalsFolderURL(
+                    propertyID: remoteSession.propertyID,
+                    sessionID: remoteSession.id
+                )
+                let sessionShots = shotsBySessionID[sessionKey] ?? []
+                let activeSessionShots = sessionShots.filter { $0.deletedAt == nil }
+                let shotsWithStorage = activeSessionShots.filter { normalizedSupabaseText($0.storagePath) != nil }
+                let remoteObservationCount = remote.observations == nil
+                    ? nil
+                    : (observationsBySessionID[sessionKey] ?? []).filter { $0.deletedAt == nil }.count
+                let normalizedStatus = remoteSession.status.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+                let appearsDeleted = remoteSession.deletedAt != nil
+                let appearsStale = sessionCursor.flatMap { cursor -> Bool? in
+                    guard let updatedAt = remoteSession.updatedAt else { return nil }
+                    return updatedAt <= cursor
+                } ?? false
+                let appearsDraft = normalizedStatus == Session.Status.draft.rawValue
+                let appearsCompleted = normalizedStatus == Session.Status.completed.rawValue
+                let classification = remoteOnlySessionDetailClassification(
+                    remoteSession: remoteSession,
+                    localPropertyExists: localProperty != nil,
+                    remotePropertyExists: remotePropertiesByID[propertyKey] != nil,
+                    sessionCursor: sessionCursor
+                )
+                let labels = remoteOnlySessionDetailLabels(
+                    localSessionExists: localSession != nil,
+                    localPropertyExists: localProperty != nil,
+                    appearsDeleted: appearsDeleted,
+                    appearsStale: appearsStale,
+                    appearsDraft: appearsDraft,
+                    appearsCompleted: appearsCompleted,
+                    remoteShotCount: activeSessionShots.count,
+                    remoteShotsWithStoragePathCount: shotsWithStorage.count
+                )
+
+                return RemoteOnlySessionDetailItem(
+                    id: remoteSession.id,
+                    sessionID: remoteSession.id,
+                    propertyID: remoteSession.propertyID,
+                    orgID: remoteSession.orgID,
+                    remoteStatus: normalizedStatus.isEmpty ? "unknown" : normalizedStatus,
+                    startedAt: remoteSession.startedAt,
+                    completedAt: remoteSession.completedAt,
+                    updatedAt: remoteSession.updatedAt,
+                    deletedAt: remoteSession.deletedAt,
+                    captureProfile: normalizedSupabaseText(remoteSession.captureProfile),
+                    parentPropertyExistsLocally: localProperty != nil,
+                    localPropertyName: localProperty?.name,
+                    localSessionRowExists: localSession != nil,
+                    localSessionFolderExists: fileManager.fileExists(atPath: sessionFolder.path),
+                    localSessionJSONExists: fileManager.fileExists(atPath: sessionJSON.path),
+                    localOriginalsFolderExists: fileManager.fileExists(atPath: originalsFolder.path),
+                    remoteShotCount: activeSessionShots.count,
+                    remoteIssueObservationCount: remoteObservationCount,
+                    remoteShotsWithStoragePathCount: shotsWithStorage.count,
+                    remoteShotsMissingStoragePathCount: max(0, activeSessionShots.count - shotsWithStorage.count),
+                    appearsDeleted: appearsDeleted,
+                    appearsStale: appearsStale,
+                    appearsDraft: appearsDraft,
+                    appearsCompleted: appearsCompleted,
+                    classification: classification.value,
+                    classificationReason: classification.reason,
+                    labels: labels
+                )
+            }
+
+        return RemoteOnlySessionDetailReport(
+            inspectedAt: inspectedAt,
+            activeOrganizationID: activeOrganizationID,
+            remoteScopeAvailable: true,
+            unavailableReason: nil,
+            items: items
+        )
+    }
+
+    private func remoteOnlySessionDetailClassification(
+        remoteSession: RemoteOnlySessionDetailSessionRecord,
+        localPropertyExists: Bool,
+        remotePropertyExists: Bool,
+        sessionCursor: Date?
+    ) -> (value: DivergenceDebtClassification, reason: String) {
+        if remoteSession.deletedAt != nil {
+            return (.historicalRemoteOnly, "Remote session is deleted remotely and absent locally.")
+        }
+        if let sessionCursor,
+           let updatedAt = remoteSession.updatedAt,
+           updatedAt <= sessionCursor {
+            return (.historicalRemoteOnly, "Remote session updated_at is not newer than the local session sync cursor.")
+        }
+        if localPropertyExists {
+            return (.missingLocalHydration, "Remote session belongs to a local property but is absent from local session cache.")
+        }
+        if !remotePropertyExists {
+            return (.trueParityDebt, "Remote session references a property missing from the remote active-org snapshot.")
+        }
+        return (.manualReview, "Remote session parent is not available locally; shell hydration is not suggested.")
+    }
+
+    private func remoteOnlySessionDetailLabels(
+        localSessionExists: Bool,
+        localPropertyExists: Bool,
+        appearsDeleted: Bool,
+        appearsStale: Bool,
+        appearsDraft: Bool,
+        appearsCompleted: Bool,
+        remoteShotCount: Int,
+        remoteShotsWithStoragePathCount: Int
+    ) -> [RemoteOnlySessionDetailLabel] {
+        var labels: [RemoteOnlySessionDetailLabel] = []
+        if appearsDeleted {
+            labels.append(.historicalDeleted)
+        }
+        if appearsStale {
+            labels.append(.historicalStale)
+        }
+        if appearsDraft {
+            labels.append(.cautionDraftIncomplete)
+        }
+        if appearsCompleted && remoteShotCount == 0 {
+            labels.append(.completedNoRemoteShots)
+        }
+        if appearsCompleted && remoteShotCount > 0 && remoteShotsWithStoragePathCount > 0 && localPropertyExists {
+            labels.append(.possibleHydrationCandidate)
+        }
+        if !localPropertyExists {
+            labels.append(.parentMissingLocally)
+        }
+        if localSessionExists {
+            labels.append(.localShellPresent)
+        }
+        return labels
+    }
+
     private func makeQueueDebtInspectionItem(_ item: LocalStore.QueuedMutation) -> QueueDebtInspectionItem {
         let payloadSummary = queueDebtPayloadSummary(for: item)
         let lastErrorMessage = item.lastError.map(Self.sanitizedDiagnosticsErrorMessage)
@@ -8848,10 +9212,19 @@ final class AppState: ObservableObject {
                 if token.hasPrefix("/") || token.hasPrefix("file:") {
                     return "[path]"
                 }
+                if lower.hasPrefix("http://") || lower.hasPrefix("https://") {
+                    return "[url]"
+                }
                 if previousLower == "token" || previousLower == "bearer" || previousLower == "jwt" {
                     return "[redacted]"
                 }
-                if lower.hasPrefix("token=") || lower.hasPrefix("access_token=") || lower.hasPrefix("authorization=") {
+                if lower.hasPrefix("token=") ||
+                    lower.hasPrefix("access_token=") ||
+                    lower.hasPrefix("authorization=") ||
+                    lower.hasPrefix("signedurl=") ||
+                    lower.contains("token=") ||
+                    lower.contains("access_token=") ||
+                    lower.contains("signature=") {
                     return "[redacted]"
                 }
                 return token
@@ -8871,6 +9244,55 @@ final class AppState: ObservableObject {
         guard !sanitized.isEmpty else { return nil }
         guard sanitized.count > maxLength else { return sanitized }
         return String(sanitized.prefix(max(0, maxLength))) + "..."
+    }
+
+    nonisolated static func remoteOnlySessionDetailReportText(_ report: RemoteOnlySessionDetailReport) -> String {
+        var lines: [String] = []
+        lines.append("ScoutCapture Local Health - Remote-Only Session Detail Inspector")
+        lines.append("Inspected: \(report.inspectedAt.formatted(date: .abbreviated, time: .standard))")
+        lines.append("Active Org: \(report.activeOrganizationID?.uuidString ?? "none")")
+        lines.append("Remote Scope Available: \(report.remoteScopeAvailable ? "yes" : "no")")
+        if let unavailableReason = diagnosticsPreviewText(report.unavailableReason, maxLength: 160) {
+            lines.append("Unavailable Reason: \(unavailableReason)")
+        }
+        lines.append("Remote-Only Sessions: \(report.items.count)")
+
+        if report.items.isEmpty {
+            lines.append("none")
+            return lines.joined(separator: "\n")
+        }
+
+        for item in report.items {
+            lines.append("")
+            lines.append("Session \(item.sessionID.uuidString)")
+            lines.append("  property_id: \(item.propertyID.uuidString)")
+            lines.append("  org_id: \(item.orgID.uuidString)")
+            lines.append("  remote_status: \(diagnosticsPreviewText(item.remoteStatus, maxLength: 60) ?? "unknown")")
+            lines.append("  started_at: \(diagnosticsPreviewText(item.startedAt, maxLength: 80) ?? "none")")
+            lines.append("  completed_at: \(diagnosticsPreviewText(item.completedAt, maxLength: 80) ?? "none")")
+            lines.append("  updated_at: \(item.updatedAt?.formatted(date: .abbreviated, time: .standard) ?? "none")")
+            lines.append("  deleted_at: \(item.deletedAt?.formatted(date: .abbreviated, time: .standard) ?? "none")")
+            lines.append("  capture_profile: \(diagnosticsPreviewText(item.captureProfile, maxLength: 60) ?? "none")")
+            lines.append("  parent_property_exists_locally: \(item.parentPropertyExistsLocally ? "yes" : "no")")
+            lines.append("  local_property_name: \(diagnosticsPreviewText(item.localPropertyName, maxLength: 80) ?? "none")")
+            lines.append("  local_session_row_exists: \(item.localSessionRowExists ? "yes" : "no")")
+            lines.append("  local_session_folder_exists: \(item.localSessionFolderExists ? "yes" : "no")")
+            lines.append("  local_session_json_exists: \(item.localSessionJSONExists ? "yes" : "no")")
+            lines.append("  local_originals_folder_exists: \(item.localOriginalsFolderExists ? "yes" : "no")")
+            lines.append("  remote_shot_count: \(item.remoteShotCount)")
+            lines.append("  remote_issue_observation_count: \(item.remoteIssueObservationCount.map(String.init) ?? "unavailable")")
+            lines.append("  remote_shots_with_storage_path: \(item.remoteShotsWithStoragePathCount)")
+            lines.append("  remote_shots_missing_storage_path: \(item.remoteShotsMissingStoragePathCount)")
+            lines.append("  appears_deleted: \(item.appearsDeleted ? "yes" : "no")")
+            lines.append("  appears_stale: \(item.appearsStale ? "yes" : "no")")
+            lines.append("  appears_draft: \(item.appearsDraft ? "yes" : "no")")
+            lines.append("  appears_completed: \(item.appearsCompleted ? "yes" : "no")")
+            lines.append("  classification: \(item.classification.rawValue)")
+            lines.append("  classification_reason: \(diagnosticsPreviewText(item.classificationReason, maxLength: 180) ?? "none")")
+            lines.append("  labels: \(item.labels.map(\.rawValue).joined(separator: ", "))")
+        }
+
+        return lines.joined(separator: "\n")
     }
 
     nonisolated static func divergenceAuditSnapshotText(_ summary: DivergenceAuditSummary) -> String {
@@ -19009,6 +19431,93 @@ final class AppState: ObservableObject {
     }
 
 #if DEBUG
+    struct DebugRemoteOnlySessionDetailInput {
+        let properties: [Property]
+        let sessions: [DebugRemoteOnlySessionInput]
+        let shots: [DebugRemoteOnlySessionShotInput]
+        let observations: [DebugRemoteOnlySessionObservationInput]?
+        let orgID: UUID
+
+        init(
+            properties: [Property],
+            sessions: [DebugRemoteOnlySessionInput],
+            shots: [DebugRemoteOnlySessionShotInput] = [],
+            observations: [DebugRemoteOnlySessionObservationInput]? = [],
+            orgID: UUID
+        ) {
+            self.properties = properties
+            self.sessions = sessions
+            self.shots = shots
+            self.observations = observations
+            self.orgID = orgID
+        }
+    }
+
+    struct DebugRemoteOnlySessionInput {
+        let id: UUID
+        let propertyID: UUID
+        let status: String
+        let startedAt: String
+        let completedAt: String?
+        let captureProfile: String?
+        let updatedAt: Date?
+        let deletedAt: Date?
+
+        init(
+            id: UUID,
+            propertyID: UUID,
+            status: String,
+            startedAt: String = "2026-01-01T00:00:00Z",
+            completedAt: String? = nil,
+            captureProfile: String? = nil,
+            updatedAt: Date? = nil,
+            deletedAt: Date? = nil
+        ) {
+            self.id = id
+            self.propertyID = propertyID
+            self.status = status
+            self.startedAt = startedAt
+            self.completedAt = completedAt
+            self.captureProfile = captureProfile
+            self.updatedAt = updatedAt
+            self.deletedAt = deletedAt
+        }
+    }
+
+    struct DebugRemoteOnlySessionShotInput {
+        let id: UUID
+        let sessionID: UUID
+        let storageBucket: String?
+        let storagePath: String?
+        let deletedAt: Date?
+
+        init(
+            id: UUID = UUID(),
+            sessionID: UUID,
+            storageBucket: String? = nil,
+            storagePath: String? = nil,
+            deletedAt: Date? = nil
+        ) {
+            self.id = id
+            self.sessionID = sessionID
+            self.storageBucket = storageBucket
+            self.storagePath = storagePath
+            self.deletedAt = deletedAt
+        }
+    }
+
+    struct DebugRemoteOnlySessionObservationInput {
+        let id: UUID
+        let sessionID: UUID
+        let deletedAt: Date?
+
+        init(id: UUID = UUID(), sessionID: UUID, deletedAt: Date? = nil) {
+            self.id = id
+            self.sessionID = sessionID
+            self.deletedAt = deletedAt
+        }
+    }
+
     func _debugEncodeShotRichMetadataPayloadForTests(
         orgID: UUID,
         propertyID: UUID,
@@ -19579,6 +20088,64 @@ final class AppState: ObservableObject {
             ),
             remote: remote.map(debugRemoteDivergenceSnapshot),
             divergenceAuditSummary: divergenceAuditSummary
+        )
+    }
+
+    func _debugRemoteOnlySessionDetailReportForTests(
+        localProperties: [Property],
+        localSessions: [Session],
+        remote: DebugRemoteOnlySessionDetailInput,
+        activeOrganizationID: UUID? = nil,
+        inspectedAt: Date = Date()
+    ) -> RemoteOnlySessionDetailReport {
+        makeRemoteOnlySessionDetailReport(
+            inspectedAt: inspectedAt,
+            activeOrganizationID: activeOrganizationID,
+            local: LocalDivergenceSnapshot(
+                properties: localProperties,
+                sessions: localSessions,
+                shots: []
+            ),
+            remote: RemoteOnlySessionDetailRemoteSnapshot(
+                properties: remote.properties.map { property in
+                    DivergenceRemotePropertyRecord(
+                        id: property.id,
+                        orgID: property.orgId ?? remote.orgID,
+                        captureProfile: property.captureProfile?.rawValue,
+                        isArchived: property.isArchived,
+                        deletedAt: property.deletedAt
+                    )
+                },
+                sessions: remote.sessions.map { session in
+                    RemoteOnlySessionDetailSessionRecord(
+                        id: session.id,
+                        orgID: remote.orgID,
+                        propertyID: session.propertyID,
+                        status: session.status,
+                        startedAt: session.startedAt,
+                        completedAt: session.completedAt,
+                        captureProfile: session.captureProfile,
+                        updatedAt: session.updatedAt,
+                        deletedAt: session.deletedAt
+                    )
+                },
+                shots: remote.shots.map { shot in
+                    RemoteOnlySessionDetailShotRecord(
+                        id: shot.id,
+                        sessionID: shot.sessionID,
+                        storageBucket: shot.storageBucket,
+                        storagePath: shot.storagePath,
+                        deletedAt: shot.deletedAt
+                    )
+                },
+                observations: remote.observations?.map { observation in
+                    RemoteOnlySessionDetailObservationRecord(
+                        id: observation.id,
+                        sessionID: observation.sessionID,
+                        deletedAt: observation.deletedAt
+                    )
+                }
+            )
         )
     }
 

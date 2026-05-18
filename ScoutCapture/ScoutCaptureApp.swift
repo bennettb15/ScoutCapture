@@ -6435,6 +6435,34 @@ private struct DebugSyncDebtInspectionSnapshot {
     }
 }
 
+private struct DebugRemoteOnlySessionDetailSnapshot {
+    let inspectedAt: String
+    let activeOrganizationID: String
+    let remoteScopeAvailable: String
+    let remoteOnlySessionCount: String
+    let missingLocalHydrationCount: String
+    let historicalRemoteOnlyCount: String
+    let trueParityDebtCount: String
+    let manualReviewCount: String
+    let possibleHydrationCandidateCount: String
+    let draftCautionCount: String
+    let snapshotText: String
+
+    init(_ report: AppState.RemoteOnlySessionDetailReport) {
+        inspectedAt = report.inspectedAt.formatted(date: .abbreviated, time: .standard)
+        activeOrganizationID = report.activeOrganizationID?.uuidString ?? "none"
+        remoteScopeAvailable = report.remoteScopeAvailable ? "yes" : "no"
+        remoteOnlySessionCount = String(report.items.count)
+        missingLocalHydrationCount = String(report.items.filter { $0.classification == .missingLocalHydration }.count)
+        historicalRemoteOnlyCount = String(report.items.filter { $0.classification == .historicalRemoteOnly }.count)
+        trueParityDebtCount = String(report.items.filter { $0.classification == .trueParityDebt }.count)
+        manualReviewCount = String(report.items.filter { $0.classification == .manualReview }.count)
+        possibleHydrationCandidateCount = String(report.items.filter { $0.labels.contains(.possibleHydrationCandidate) }.count)
+        draftCautionCount = String(report.items.filter { $0.labels.contains(.cautionDraftIncomplete) }.count)
+        snapshotText = AppState.remoteOnlySessionDetailReportText(report)
+    }
+}
+
 private struct DebugDivergenceAuditHistoricalGroup: Identifiable, Equatable {
     let id: String
     let category: String
@@ -6644,6 +6672,7 @@ private struct DebugLocalDiagnosticsView: View {
     @State private var isRunningDivergenceAudit: Bool = false
     @State private var isInspectingMediaRecovery: Bool = false
     @State private var isInspectingSyncDebt: Bool = false
+    @State private var isInspectingRemoteOnlySessions: Bool = false
     @State private var failedQueueItems: [DebugQueueDiagnosticSnapshotItem] = []
     @State private var retryCappedMediaItems: [DebugMediaDiagnosticSnapshotItem] = []
     @State private var pendingMediaItems: [DebugMediaDiagnosticSnapshotItem] = []
@@ -6651,6 +6680,7 @@ private struct DebugLocalDiagnosticsView: View {
     @State private var divergenceAuditSummary: AppState.DivergenceAuditSummary?
     @State private var divergenceAuditSnapshot: DebugDivergenceAuditSnapshot?
     @State private var syncDebtSnapshot: DebugSyncDebtInspectionSnapshot?
+    @State private var remoteOnlySessionDetailSnapshot: DebugRemoteOnlySessionDetailSnapshot?
 
     private var diagnostics: AppState.LocalDiagnosticsState {
         appState.localDiagnostics
@@ -6669,6 +6699,7 @@ private struct DebugLocalDiagnosticsView: View {
                     diagnosticRow("Active Sync Issues", divergenceAuditSnapshot?.activeSyncIssueCount ?? "not run")
                     diagnosticRow("Recoverable Findings", divergenceAuditSnapshot?.recoverableIssueCount ?? "not run")
                     diagnosticRow("Debt Report Findings", syncDebtSnapshot?.divergenceItemCount ?? "not run")
+                    diagnosticRow("Remote-Only Detail Items", remoteOnlySessionDetailSnapshot?.remoteOnlySessionCount ?? "not run")
                     diagnosticRow("Retryable Failed Queue Items", diagnostics.offlineQueue.failedCount)
                     diagnosticRow("Acknowledged Historical Queue Debt", diagnostics.offlineQueue.acknowledgedHistoricalCount)
                     diagnosticRow("Retry-Capped Media", retryCappedMediaItems.count)
@@ -6747,6 +6778,7 @@ private struct DebugLocalDiagnosticsView: View {
             divergenceAuditSummary = nil
             divergenceAuditSnapshot = nil
             syncDebtSnapshot = nil
+            remoteOnlySessionDetailSnapshot = nil
             refreshDiagnosticDetailSnapshots()
         }
         .alert("Clear Local Diagnostics?", isPresented: $showClearConfirm) {
@@ -6931,6 +6963,39 @@ private struct DebugLocalDiagnosticsView: View {
                     }
                 } else {
                     Text("No sync debt inspection has been run in this view.")
+                        .font(.system(size: 14, weight: .medium))
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            Section("Remote-Only Session Detail Inspector") {
+                Text("Read-only detail report for remote sessions missing locally. It uses Supabase selects and local existence checks only; it does not hydrate, create folders, download media, retry queues, delete data, or change sync behavior.")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(.secondary)
+                Button(isInspectingRemoteOnlySessions ? "Inspecting..." : "Inspect Remote-Only Sessions") {
+                    inspectRemoteOnlySessionDetails()
+                }
+                .disabled(isInspectingRemoteOnlySessions)
+
+                if let snapshot = remoteOnlySessionDetailSnapshot {
+                    diagnosticRow("Inspected", snapshot.inspectedAt)
+                    diagnosticRow("Active Org", snapshot.activeOrganizationID)
+                    diagnosticRow("Remote Scope", snapshot.remoteScopeAvailable)
+                    diagnosticRow("Remote-Only Sessions", snapshot.remoteOnlySessionCount)
+                    diagnosticRow("Missing Local Hydration", snapshot.missingLocalHydrationCount)
+                    diagnosticRow("Historical Remote-Only", snapshot.historicalRemoteOnlyCount)
+                    diagnosticRow("True Parity Debt", snapshot.trueParityDebtCount)
+                    diagnosticRow("Manual Review", snapshot.manualReviewCount)
+                    diagnosticRow("Possible Hydration Candidate", snapshot.possibleHydrationCandidateCount)
+                    diagnosticRow("Draft Caution", snapshot.draftCautionCount)
+                    NavigationLink {
+                        DebugRemoteOnlySessionDetailSnapshotTextView(snapshotText: snapshot.snapshotText)
+                    } label: {
+                        Text("View Copyable Remote-Only Detail Report")
+                            .font(.system(size: 14, weight: .semibold))
+                    }
+                } else {
+                    Text("No remote-only session detail inspection has been run in this view.")
                         .font(.system(size: 14, weight: .medium))
                         .foregroundStyle(.secondary)
                 }
@@ -7127,6 +7192,18 @@ private struct DebugLocalDiagnosticsView: View {
                     divergenceAuditSnapshot = nil
                 }
                 isInspectingSyncDebt = false
+            }
+        }
+    }
+
+    private func inspectRemoteOnlySessionDetails() {
+        guard !isInspectingRemoteOnlySessions else { return }
+        isInspectingRemoteOnlySessions = true
+        Task {
+            let report = await appState.inspectRemoteOnlySessionDetails()
+            await MainActor.run {
+                remoteOnlySessionDetailSnapshot = DebugRemoteOnlySessionDetailSnapshot(report)
+                isInspectingRemoteOnlySessions = false
             }
         }
     }
@@ -7849,6 +7926,34 @@ private struct DebugSyncDebtInspectionSnapshotTextView: View {
             }
         }
         .navigationTitle("Debt Report")
+        .navigationBarTitleDisplayMode(.inline)
+    }
+}
+
+private struct DebugRemoteOnlySessionDetailSnapshotTextView: View {
+    let snapshotText: String
+    @State private var didCopySnapshot: Bool = false
+
+    var body: some View {
+        List {
+            Section {
+                Button(didCopySnapshot ? "Copied Plain Text" : "Copy Report") {
+                    UIPasteboard.general.string = snapshotText
+                    didCopySnapshot = true
+                }
+                .font(.system(size: 14, weight: .semibold))
+            } footer: {
+                Text("Copies the sanitized remote-only session detail report as plain text only. It does not include local paths, signed URLs, media, or auth material.")
+            }
+
+            Section {
+                Text(snapshotText)
+                    .font(.system(size: 12, weight: .regular, design: .monospaced))
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .textSelection(.enabled)
+            }
+        }
+        .navigationTitle("Session Details")
         .navigationBarTitleDisplayMode(.inline)
     }
 }

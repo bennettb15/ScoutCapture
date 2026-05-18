@@ -826,6 +826,288 @@ final class Phase2C07bMediaBackfillTests: XCTestCase {
     }
 
     @MainActor
+    func testRemoteOnlySessionDetailReportRedactsSensitiveText() throws {
+        let activeOrganizationID = UUID()
+        let propertyID = UUID()
+        let remoteSessionID = UUID()
+        let fixture = try makeAppStateWithSingleSession(uploadStates: [], extraOrganizationIDs: [activeOrganizationID])
+        defer {
+            fixture.appState.shutdown()
+            try? FileManager.default.removeItem(at: fixture.storageRoot)
+        }
+
+        let localProperties = [
+            Property(
+                id: propertyID,
+                orgId: activeOrganizationID,
+                name: "/private/tmp token abc https://example.test/media?signature=secret",
+                address: "123 Main Street"
+            )
+        ]
+        let report = fixture.appState._debugRemoteOnlySessionDetailReportForTests(
+            localProperties: localProperties,
+            localSessions: [],
+            remote: AppState.DebugRemoteOnlySessionDetailInput(
+                properties: localProperties,
+                sessions: [
+                    AppState.DebugRemoteOnlySessionInput(
+                        id: remoteSessionID,
+                        propertyID: propertyID,
+                        status: "completed",
+                        completedAt: "2026-01-01T01:00:00Z",
+                        updatedAt: Date(timeIntervalSinceReferenceDate: 400)
+                    )
+                ],
+                orgID: activeOrganizationID
+            ),
+            activeOrganizationID: activeOrganizationID
+        )
+
+        let text = AppState.remoteOnlySessionDetailReportText(report)
+        XCTAssertTrue(text.contains("[path]"))
+        XCTAssertTrue(text.contains("[redacted]"))
+        XCTAssertTrue(text.contains("[url]"))
+        XCTAssertFalse(text.contains("/private/tmp"))
+        XCTAssertFalse(text.contains("abc"))
+        XCTAssertFalse(text.contains("signature=secret"))
+    }
+
+    @MainActor
+    func testRemoteOnlySessionDetailClassifiesDeletedAsHistorical() throws {
+        let activeOrganizationID = UUID()
+        let propertyID = UUID()
+        let remoteSessionID = UUID()
+        let fixture = try makeAppStateWithSingleSession(uploadStates: [], extraOrganizationIDs: [activeOrganizationID])
+        defer {
+            fixture.appState.shutdown()
+            try? FileManager.default.removeItem(at: fixture.storageRoot)
+        }
+
+        let localProperties = [Property(id: propertyID, orgId: activeOrganizationID, name: "Local")]
+        let report = fixture.appState._debugRemoteOnlySessionDetailReportForTests(
+            localProperties: localProperties,
+            localSessions: [],
+            remote: AppState.DebugRemoteOnlySessionDetailInput(
+                properties: localProperties,
+                sessions: [
+                    AppState.DebugRemoteOnlySessionInput(
+                        id: remoteSessionID,
+                        propertyID: propertyID,
+                        status: "completed",
+                        updatedAt: Date(timeIntervalSinceReferenceDate: 400),
+                        deletedAt: Date(timeIntervalSinceReferenceDate: 450)
+                    )
+                ],
+                orgID: activeOrganizationID
+            ),
+            activeOrganizationID: activeOrganizationID
+        )
+
+        let item = try XCTUnwrap(report.items.first)
+        XCTAssertEqual(item.classification, .historicalRemoteOnly)
+        XCTAssertTrue(item.appearsDeleted)
+        XCTAssertTrue(item.labels.contains(.historicalDeleted))
+    }
+
+    @MainActor
+    func testRemoteOnlySessionDetailClassifiesLocalParentAsMissingHydration() throws {
+        let activeOrganizationID = UUID()
+        let propertyID = UUID()
+        let remoteSessionID = UUID()
+        let fixture = try makeAppStateWithSingleSession(uploadStates: [], extraOrganizationIDs: [activeOrganizationID])
+        defer {
+            fixture.appState.shutdown()
+            try? FileManager.default.removeItem(at: fixture.storageRoot)
+        }
+
+        let localProperties = [Property(id: propertyID, orgId: activeOrganizationID, name: "Local")]
+        let report = fixture.appState._debugRemoteOnlySessionDetailReportForTests(
+            localProperties: localProperties,
+            localSessions: [],
+            remote: AppState.DebugRemoteOnlySessionDetailInput(
+                properties: localProperties,
+                sessions: [
+                    AppState.DebugRemoteOnlySessionInput(
+                        id: remoteSessionID,
+                        propertyID: propertyID,
+                        status: "completed",
+                        updatedAt: Date(timeIntervalSinceReferenceDate: 500)
+                    )
+                ],
+                orgID: activeOrganizationID
+            ),
+            activeOrganizationID: activeOrganizationID
+        )
+
+        let item = try XCTUnwrap(report.items.first)
+        XCTAssertEqual(item.classification, .missingLocalHydration)
+        XCTAssertTrue(item.parentPropertyExistsLocally)
+        XCTAssertEqual(item.localPropertyName, "Local")
+    }
+
+    @MainActor
+    func testRemoteOnlySessionDetailMissingParentStaysTrueParityOrManualReview() throws {
+        let activeOrganizationID = UUID()
+        let missingPropertyID = UUID()
+        let remoteSessionID = UUID()
+        let fixture = try makeAppStateWithSingleSession(uploadStates: [], extraOrganizationIDs: [activeOrganizationID])
+        defer {
+            fixture.appState.shutdown()
+            try? FileManager.default.removeItem(at: fixture.storageRoot)
+        }
+
+        let report = fixture.appState._debugRemoteOnlySessionDetailReportForTests(
+            localProperties: [],
+            localSessions: [],
+            remote: AppState.DebugRemoteOnlySessionDetailInput(
+                properties: [],
+                sessions: [
+                    AppState.DebugRemoteOnlySessionInput(
+                        id: remoteSessionID,
+                        propertyID: missingPropertyID,
+                        status: "completed",
+                        updatedAt: Date(timeIntervalSinceReferenceDate: 500)
+                    )
+                ],
+                orgID: activeOrganizationID
+            ),
+            activeOrganizationID: activeOrganizationID
+        )
+
+        let item = try XCTUnwrap(report.items.first)
+        XCTAssertEqual(item.classification, .trueParityDebt)
+        XCTAssertFalse(item.parentPropertyExistsLocally)
+        XCTAssertTrue(item.labels.contains(.parentMissingLocally))
+    }
+
+    @MainActor
+    func testRemoteOnlySessionDetailMarksDraftAsCautionIncomplete() throws {
+        let activeOrganizationID = UUID()
+        let propertyID = UUID()
+        let remoteSessionID = UUID()
+        let fixture = try makeAppStateWithSingleSession(uploadStates: [], extraOrganizationIDs: [activeOrganizationID])
+        defer {
+            fixture.appState.shutdown()
+            try? FileManager.default.removeItem(at: fixture.storageRoot)
+        }
+
+        let localProperties = [Property(id: propertyID, orgId: activeOrganizationID, name: "Local")]
+        let report = fixture.appState._debugRemoteOnlySessionDetailReportForTests(
+            localProperties: localProperties,
+            localSessions: [],
+            remote: AppState.DebugRemoteOnlySessionDetailInput(
+                properties: localProperties,
+                sessions: [
+                    AppState.DebugRemoteOnlySessionInput(
+                        id: remoteSessionID,
+                        propertyID: propertyID,
+                        status: "draft",
+                        updatedAt: Date(timeIntervalSinceReferenceDate: 500)
+                    )
+                ],
+                orgID: activeOrganizationID
+            ),
+            activeOrganizationID: activeOrganizationID
+        )
+
+        let item = try XCTUnwrap(report.items.first)
+        XCTAssertTrue(item.appearsDraft)
+        XCTAssertTrue(item.labels.contains(.cautionDraftIncomplete))
+    }
+
+    @MainActor
+    func testRemoteOnlySessionDetailCompletedWithStoragePathsMarksCandidate() throws {
+        let activeOrganizationID = UUID()
+        let propertyID = UUID()
+        let remoteSessionID = UUID()
+        let fixture = try makeAppStateWithSingleSession(uploadStates: [], extraOrganizationIDs: [activeOrganizationID])
+        defer {
+            fixture.appState.shutdown()
+            try? FileManager.default.removeItem(at: fixture.storageRoot)
+        }
+
+        let localProperties = [Property(id: propertyID, orgId: activeOrganizationID, name: "Local")]
+        let report = fixture.appState._debugRemoteOnlySessionDetailReportForTests(
+            localProperties: localProperties,
+            localSessions: [],
+            remote: AppState.DebugRemoteOnlySessionDetailInput(
+                properties: localProperties,
+                sessions: [
+                    AppState.DebugRemoteOnlySessionInput(
+                        id: remoteSessionID,
+                        propertyID: propertyID,
+                        status: "completed",
+                        completedAt: "2026-01-01T01:00:00Z",
+                        updatedAt: Date(timeIntervalSinceReferenceDate: 500)
+                    )
+                ],
+                shots: [
+                    AppState.DebugRemoteOnlySessionShotInput(
+                        sessionID: remoteSessionID,
+                        storageBucket: "operational-media",
+                        storagePath: "org/session/shot.heic"
+                    ),
+                    AppState.DebugRemoteOnlySessionShotInput(sessionID: remoteSessionID)
+                ],
+                observations: [
+                    AppState.DebugRemoteOnlySessionObservationInput(sessionID: remoteSessionID)
+                ],
+                orgID: activeOrganizationID
+            ),
+            activeOrganizationID: activeOrganizationID
+        )
+
+        let item = try XCTUnwrap(report.items.first)
+        XCTAssertTrue(item.appearsCompleted)
+        XCTAssertEqual(item.remoteShotCount, 2)
+        XCTAssertEqual(item.remoteShotsWithStoragePathCount, 1)
+        XCTAssertEqual(item.remoteIssueObservationCount, 1)
+        XCTAssertTrue(item.labels.contains(.possibleHydrationCandidate))
+    }
+
+    @MainActor
+    func testRemoteOnlySessionDetailInspectorDoesNotCreateLocalFolders() throws {
+        let activeOrganizationID = UUID()
+        let propertyID = UUID()
+        let remoteSessionID = UUID()
+        let fixture = try makeAppStateWithSingleSession(uploadStates: [], extraOrganizationIDs: [activeOrganizationID])
+        defer {
+            fixture.appState.shutdown()
+            try? FileManager.default.removeItem(at: fixture.storageRoot)
+        }
+
+        let remoteSessionFolder = fixture.storageRoot
+            .appendingPathComponent("SCOUT/Properties/\(propertyID.uuidString)/Sessions/\(remoteSessionID.uuidString)", isDirectory: true)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: remoteSessionFolder.path))
+
+        let localProperties = [Property(id: propertyID, orgId: activeOrganizationID, name: "Local")]
+        let report = fixture.appState._debugRemoteOnlySessionDetailReportForTests(
+            localProperties: localProperties,
+            localSessions: [],
+            remote: AppState.DebugRemoteOnlySessionDetailInput(
+                properties: localProperties,
+                sessions: [
+                    AppState.DebugRemoteOnlySessionInput(
+                        id: remoteSessionID,
+                        propertyID: propertyID,
+                        status: "completed",
+                        updatedAt: Date(timeIntervalSinceReferenceDate: 500)
+                    )
+                ],
+                orgID: activeOrganizationID
+            ),
+            activeOrganizationID: activeOrganizationID
+        )
+
+        let item = try XCTUnwrap(report.items.first)
+        XCTAssertFalse(item.localSessionFolderExists)
+        XCTAssertFalse(item.localSessionJSONExists)
+        XCTAssertFalse(item.localOriginalsFolderExists)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: remoteSessionFolder.path))
+        XCTAssertEqual(fixture.appState.sessions(for: fixture.propertyID).count, 1)
+    }
+
+    @MainActor
     func testSyncDebtInspectorClassifiesRemoteOnlyShotLegacyArtifactAndManualReviewFallback() throws {
         let activeOrganizationID = UUID()
         let propertyID = UUID()
