@@ -6465,6 +6465,22 @@ private struct DebugRemoteOnlySessionDetailSnapshot {
     }
 }
 
+private struct DebugCanonicalReadinessSnapshot {
+    let inspectedAt: String
+    let activeOrganizationID: String
+    let overallStatus: String
+    let sections: [AppState.CanonicalReadinessSection]
+    let snapshotText: String
+
+    init(_ report: AppState.CanonicalReadinessReport) {
+        inspectedAt = report.inspectedAt.formatted(date: .abbreviated, time: .standard)
+        activeOrganizationID = report.activeOrganizationID?.uuidString ?? "none"
+        overallStatus = report.overallStatus.rawValue
+        sections = report.sections
+        snapshotText = AppState.canonicalReadinessReportText(report)
+    }
+}
+
 private struct DebugDivergenceAuditHistoricalGroup: Identifiable, Equatable {
     let id: String
     let category: String
@@ -6679,10 +6695,14 @@ private struct DebugLocalDiagnosticsView: View {
     @State private var retryCappedMediaItems: [DebugMediaDiagnosticSnapshotItem] = []
     @State private var pendingMediaItems: [DebugMediaDiagnosticSnapshotItem] = []
     @State private var mediaRecoverySnapshot: DebugMediaRecoverySnapshot?
+    @State private var mediaRecoverySummary: AppState.MediaRecoveryInspectionSummary?
     @State private var divergenceAuditSummary: AppState.DivergenceAuditSummary?
     @State private var divergenceAuditSnapshot: DebugDivergenceAuditSnapshot?
+    @State private var syncDebtReport: AppState.SyncDebtInspectionReport?
     @State private var syncDebtSnapshot: DebugSyncDebtInspectionSnapshot?
+    @State private var remoteOnlySessionDetailReport: AppState.RemoteOnlySessionDetailReport?
     @State private var remoteOnlySessionDetailSnapshot: DebugRemoteOnlySessionDetailSnapshot?
+    @State private var canonicalReadinessSnapshot: DebugCanonicalReadinessSnapshot?
 
     private var diagnostics: AppState.LocalDiagnosticsState {
         appState.localDiagnostics
@@ -6715,6 +6735,15 @@ private struct DebugLocalDiagnosticsView: View {
                 }
 
                 Section("Health Areas") {
+                    NavigationLink {
+                        canonicalReadinessPage
+                    } label: {
+                        localHealthAreaLabel(
+                            "Canonical Readiness",
+                            subtitle: "Read-only Phase C readiness gates and blockers",
+                            value: canonicalReadinessSnapshot?.overallStatus ?? "not inspected"
+                        )
+                    }
                     NavigationLink {
                         offlineQueuePage
                     } label: {
@@ -6777,10 +6806,14 @@ private struct DebugLocalDiagnosticsView: View {
         }
         .onChange(of: appState.activeOrganizationID) { _, _ in
             mediaRecoverySnapshot = nil
+            mediaRecoverySummary = nil
             divergenceAuditSummary = nil
             divergenceAuditSnapshot = nil
+            syncDebtReport = nil
             syncDebtSnapshot = nil
+            remoteOnlySessionDetailReport = nil
             remoteOnlySessionDetailSnapshot = nil
+            canonicalReadinessSnapshot = nil
             refreshDiagnosticDetailSnapshots()
         }
         .alert("Clear Local Diagnostics?", isPresented: $showClearConfirm) {
@@ -6823,6 +6856,63 @@ private struct DebugLocalDiagnosticsView: View {
             }
         }
         .navigationTitle("Offline Queue")
+        .navigationBarTitleDisplayMode(.inline)
+    }
+
+    private var canonicalReadinessPage: some View {
+        List {
+            Section("Canonical Readiness") {
+                Text("Read-only Phase C readiness panel. It does not switch canonical reads, change flags, hydrate sessions, retry queues, download media, change exports, change sync, or reduce iCloud fallback.")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(.secondary)
+
+                if let snapshot = canonicalReadinessSnapshot {
+                    diagnosticRow("Inspected", snapshot.inspectedAt)
+                    diagnosticRow("Active Org", snapshot.activeOrganizationID)
+                    diagnosticRow("Overall Status", snapshot.overallStatus)
+                    NavigationLink {
+                        DebugCanonicalReadinessSnapshotTextView(snapshotText: snapshot.snapshotText)
+                    } label: {
+                        Text("View Copyable Readiness Report")
+                            .font(.system(size: 14, weight: .semibold))
+                    }
+                } else {
+                    Text("No canonical readiness snapshot has been generated in this view.")
+                        .font(.system(size: 14, weight: .medium))
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            if let snapshot = canonicalReadinessSnapshot {
+                ForEach(snapshot.sections) { section in
+                    Section(section.title) {
+                        diagnosticRow("Status", section.status.rawValue)
+                        Text(section.summary)
+                            .font(.system(size: 13, weight: .medium))
+                            .foregroundStyle(.secondary)
+                        ForEach(section.rows) { row in
+                            VStack(alignment: .leading, spacing: 4) {
+                                HStack(alignment: .firstTextBaseline, spacing: 12) {
+                                    Text(row.label)
+                                        .font(.system(size: 14, weight: .semibold))
+                                    Spacer(minLength: 12)
+                                    Text("\(row.status.rawValue): \(row.value)")
+                                        .font(.system(size: 13, weight: .medium, design: .monospaced))
+                                        .foregroundStyle(.secondary)
+                                        .multilineTextAlignment(.trailing)
+                                        .textSelection(.enabled)
+                                }
+                                Text(row.detail)
+                                    .font(.system(size: 12, weight: .medium))
+                                    .foregroundStyle(.secondary)
+                            }
+                            .padding(.vertical, 3)
+                        }
+                    }
+                }
+            }
+        }
+        .navigationTitle("Canonical Readiness")
         .navigationBarTitleDisplayMode(.inline)
     }
 
@@ -7149,6 +7239,21 @@ private struct DebugLocalDiagnosticsView: View {
         failedQueueItems = appState.diagnosticsFailedQueueItems().map(DebugQueueDiagnosticSnapshotItem.init)
         retryCappedMediaItems = appState.diagnosticsRetryCappedMediaItems().map(DebugMediaDiagnosticSnapshotItem.init)
         pendingMediaItems = appState.diagnosticsPendingMediaItems().map(DebugMediaDiagnosticSnapshotItem.init)
+        refreshCanonicalReadinessSnapshot()
+    }
+
+    private func refreshCanonicalReadinessSnapshot() {
+        let report = AppState.makeCanonicalReadinessReport(
+            activeOrganizationID: appState.activeOrganizationID,
+            diagnostics: diagnostics,
+            retryCappedMediaCount: retryCappedMediaItems.count,
+            pendingMediaCount: pendingMediaItems.count,
+            mediaRecoveryCandidateCount: mediaRecoverySummary?.candidatesFound,
+            divergenceAuditSummary: divergenceAuditSummary,
+            syncDebtInspectionReport: syncDebtReport,
+            remoteOnlySessionDetailReport: remoteOnlySessionDetailReport
+        )
+        canonicalReadinessSnapshot = DebugCanonicalReadinessSnapshot(report)
     }
 
     private func runDivergenceAudit() {
@@ -7159,6 +7264,7 @@ private struct DebugLocalDiagnosticsView: View {
             await MainActor.run {
                 divergenceAuditSummary = summary
                 divergenceAuditSnapshot = DebugDivergenceAuditSnapshot(summary)
+                refreshCanonicalReadinessSnapshot()
                 isRunningDivergenceAudit = false
             }
         }
@@ -7177,6 +7283,8 @@ private struct DebugLocalDiagnosticsView: View {
             )
             await MainActor.run {
                 mediaRecoverySnapshot = DebugMediaRecoverySnapshot(summary)
+                mediaRecoverySummary = summary
+                refreshCanonicalReadinessSnapshot()
                 isInspectingMediaRecovery = false
             }
         }
@@ -7189,11 +7297,13 @@ private struct DebugLocalDiagnosticsView: View {
         Task {
             let report = await appState.inspectSyncDebt(divergenceAuditSummary: currentDivergenceSummary)
             await MainActor.run {
+                syncDebtReport = report
                 syncDebtSnapshot = DebugSyncDebtInspectionSnapshot(report)
                 if currentDivergenceSummary == nil {
                     divergenceAuditSummary = nil
                     divergenceAuditSnapshot = nil
                 }
+                refreshCanonicalReadinessSnapshot()
                 isInspectingSyncDebt = false
             }
         }
@@ -7205,7 +7315,9 @@ private struct DebugLocalDiagnosticsView: View {
         Task {
             let report = await appState.inspectRemoteOnlySessionDetails()
             await MainActor.run {
+                remoteOnlySessionDetailReport = report
                 remoteOnlySessionDetailSnapshot = DebugRemoteOnlySessionDetailSnapshot(report)
+                refreshCanonicalReadinessSnapshot()
                 isInspectingRemoteOnlySessions = false
             }
         }
@@ -7957,6 +8069,34 @@ private struct DebugRemoteOnlySessionDetailSnapshotTextView: View {
             }
         }
         .navigationTitle("Session Details")
+        .navigationBarTitleDisplayMode(.inline)
+    }
+}
+
+private struct DebugCanonicalReadinessSnapshotTextView: View {
+    let snapshotText: String
+    @State private var didCopySnapshot: Bool = false
+
+    var body: some View {
+        List {
+            Section {
+                Button(didCopySnapshot ? "Copied Plain Text" : "Copy Report") {
+                    UIPasteboard.general.string = snapshotText
+                    didCopySnapshot = true
+                }
+                .font(.system(size: 14, weight: .semibold))
+            } footer: {
+                Text("Copies the sanitized canonical readiness report as plain text only. It does not include local paths, signed URLs, media, or auth material.")
+            }
+
+            Section {
+                Text(snapshotText)
+                    .font(.system(size: 12, weight: .regular, design: .monospaced))
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .textSelection(.enabled)
+            }
+        }
+        .navigationTitle("Readiness Report")
         .navigationBarTitleDisplayMode(.inline)
     }
 }

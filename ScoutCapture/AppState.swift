@@ -445,6 +445,45 @@ final class AppState: ObservableObject {
         let items: [RemoteOnlySessionDetailItem]
     }
 
+    enum CanonicalReadinessOverallStatus: String, CaseIterable, Equatable {
+        case readyForScopedPropertyCanonicalReads = "ready_for_scoped_property_canonical_reads"
+        case notReadyForBroadCanonicalReads = "not_ready_for_broad_canonical_reads"
+        case blocked
+        case unknown
+    }
+
+    enum CanonicalReadinessGateStatus: String, CaseIterable, Equatable {
+        case pass
+        case warn
+        case block
+        case unknown
+    }
+
+    struct CanonicalReadinessRow: Equatable, Identifiable {
+        let id: String
+        let label: String
+        let status: CanonicalReadinessGateStatus
+        let value: String
+        let detail: String
+    }
+
+    struct CanonicalReadinessSection: Equatable, Identifiable {
+        let id: String
+        let title: String
+        let status: CanonicalReadinessGateStatus
+        let summary: String
+        let rows: [CanonicalReadinessRow]
+    }
+
+    struct CanonicalReadinessReport: Equatable {
+        let inspectedAt: Date
+        let activeOrganizationID: UUID?
+        let overallStatus: CanonicalReadinessOverallStatus
+        let sections: [CanonicalReadinessSection]
+        let recommendedNextSlices: [String]
+        let noBehaviorChangedText: String
+    }
+
     enum QueueDebtAcknowledgementError: LocalizedError, Equatable {
         case notFound
         case notFailed
@@ -9273,6 +9312,324 @@ final class AppState: ObservableObject {
         guard !sanitized.isEmpty else { return nil }
         guard sanitized.count > maxLength else { return sanitized }
         return String(sanitized.prefix(max(0, maxLength))) + "..."
+    }
+
+    nonisolated static func makeCanonicalReadinessReport(
+        inspectedAt: Date = Date(),
+        activeOrganizationID: UUID?,
+        diagnostics: LocalDiagnosticsState,
+        retryCappedMediaCount: Int,
+        pendingMediaCount: Int,
+        mediaRecoveryCandidateCount: Int?,
+        divergenceAuditSummary: DivergenceAuditSummary?,
+        syncDebtInspectionReport: SyncDebtInspectionReport?,
+        remoteOnlySessionDetailReport: RemoteOnlySessionDetailReport?
+    ) -> CanonicalReadinessReport {
+        let queueSection = canonicalQueueReadinessSection(diagnostics: diagnostics)
+        let mediaSection = canonicalMediaReadinessSection(
+            retryCappedMediaCount: retryCappedMediaCount,
+            pendingMediaCount: pendingMediaCount,
+            mediaRecoveryCandidateCount: mediaRecoveryCandidateCount
+        )
+        let divergenceSection = canonicalDivergenceReadinessSection(
+            divergenceAuditSummary: divergenceAuditSummary,
+            syncDebtInspectionReport: syncDebtInspectionReport,
+            remoteOnlySessionDetailReport: remoteOnlySessionDetailReport
+        )
+        let remoteScopeSection = canonicalRemoteScopeReadinessSection(
+            activeOrganizationID: activeOrganizationID,
+            divergenceAuditSummary: divergenceAuditSummary,
+            remoteOnlySessionDetailReport: remoteOnlySessionDetailReport
+        )
+        let propertySection = canonicalStaticReadinessSection(
+            id: "property_metadata",
+            title: "Property Metadata Readiness",
+            status: .warn,
+            summary: "Mostly ready for scoped property canonical reads.",
+            rows: [
+                canonicalRow("property_reads", "Supabase property reads", .pass, "available", "Foreground/background property refresh can read Supabase and preserve local fallback."),
+                canonicalRow("property_writes", "Supabase property writes", .pass, "healthy", "Property shadow writes/upserts are established."),
+                canonicalRow("property_scope", "Recommended scope", .warn, "scoped only", "Broad metadata canonical switching should not be inferred from property readiness alone.")
+            ]
+        )
+        let sessionSection = canonicalStaticReadinessSection(
+            id: "session_metadata",
+            title: "Session Metadata Readiness",
+            status: .block,
+            summary: "Blocked for broad canonical reads because full session.json remains local-first.",
+            rows: [
+                canonicalRow("session_rows", "Supabase session rows", .pass, "available", "Session row deltas and writes cover lifecycle basics."),
+                canonicalRow("session_json", "Full session.json", .block, "local-first", "The export/session UI package is not reconstructed canonically from Supabase."),
+                canonicalRow("session_hydration", "Session hydration", .block, "not enabled", "Remote sessions are not hydrated into local shells by normal sync.")
+            ]
+        )
+        let shotSection = canonicalStaticReadinessSection(
+            id: "shot_metadata",
+            title: "Shot Metadata Readiness",
+            status: .warn,
+            summary: "Partial: rich writes exist, but remote read reconstruction is not complete.",
+            rows: [
+                canonicalRow("shot_writes", "Rich shot metadata writes", .pass, "available", "Shot metadata and storage fields are written to Supabase."),
+                canonicalRow("shot_reconstruction", "Remote-to-local shot reconstruction", .block, "missing", "Remote shot rows do not yet rebuild local SessionMetadata.shots for normal history."),
+                canonicalRow("shot_media", "Media reads", .warn, "lazy/by-need", "Downloads require local shot metadata and storage paths.")
+            ]
+        )
+        let issuesGuidedSection = canonicalStaticReadinessSection(
+            id: "issues_guided",
+            title: "Issues/Guided Readiness",
+            status: .block,
+            summary: "Blocked: issues, observations, and guided checkpoints remain local/session JSON based.",
+            rows: [
+                canonicalRow("issues", "Issues/observations", .block, "local-first", "Issue history and observation state are not fully canonical remote read sources."),
+                canonicalRow("guided", "Guided rows/checkpoints", .block, "local-first", "Guided rows and reference state remain local/session metadata based.")
+            ]
+        )
+        let exportSection = canonicalStaticReadinessSection(
+            id: "export_scoutprocess",
+            title: "Export/ScoutProcess Safety",
+            status: .block,
+            summary: "Protected from canonical switching until complete local packages are guaranteed.",
+            rows: [
+                canonicalRow("export_package", "Export package", .block, "local complete required", "ScoutProcess/export requires session.json, CSVs, issue history, guided rows, and local media."),
+                canonicalRow("export_guard", "Rollout guard", .pass, "protected", "Canonical read rollout should not change export eligibility.")
+            ]
+        )
+        let iCloudSection = canonicalStaticReadinessSection(
+            id: "icloud_fallback",
+            title: "iCloud Fallback Status",
+            status: .warn,
+            summary: "Required during transition.",
+            rows: [
+                canonicalRow("icloud_role", "iCloud role", .warn, "required", "iCloud remains backup, fallback, and transition safety net."),
+                canonicalRow("icloud_reduction", "Fallback reduction", .pass, "none", "Canonical readiness reporting does not remove or reduce iCloud behavior.")
+            ]
+        )
+        let uxSection = canonicalStaticReadinessSection(
+            id: "ux_freshness",
+            title: "UX/Freshness Readiness",
+            status: .block,
+            summary: "Blocked/partial until cached property opens perform remote freshness checks.",
+            rows: [
+                canonicalRow("freshness_check", "Property open freshness check", .block, "not implemented", "Cached local property opens do not yet guarantee online metadata freshness."),
+                canonicalRow("conflict_rules", "Web portal conflict rules", .block, "deferred", "Future portal edits need freshness and conflict UX before broad canonical reads.")
+            ]
+        )
+
+        let sections = [
+            queueSection,
+            mediaSection,
+            divergenceSection,
+            remoteScopeSection,
+            propertySection,
+            sessionSection,
+            shotSection,
+            issuesGuidedSection,
+            exportSection,
+            iCloudSection,
+            uxSection
+        ]
+
+        let blockingOperationalGate = [queueSection, mediaSection, divergenceSection, remoteScopeSection].contains { $0.status == .block }
+        let overall: CanonicalReadinessOverallStatus
+        if activeOrganizationID == nil {
+            overall = .unknown
+        } else if blockingOperationalGate {
+            overall = .blocked
+        } else {
+            overall = .notReadyForBroadCanonicalReads
+        }
+
+        return CanonicalReadinessReport(
+            inspectedAt: inspectedAt,
+            activeOrganizationID: activeOrganizationID,
+            overallStatus: overall,
+            sections: sections,
+            recommendedNextSlices: [
+                "Add read-only canonical readiness trend/report history.",
+                "Add property-open remote freshness check before showing cached metadata as current.",
+                "Define metadata completeness gates for session, shot, issue, and guided rows.",
+                "Prototype metadata-only session/shot hydration behind manual review.",
+                "Keep export and ScoutProcess local-package gated until metadata/media completeness is proven."
+            ],
+            noBehaviorChangedText: "No behavior changed: this report is read-only diagnostics and does not switch canonical reads, hydrate sessions, retry queues, download media, change exports, change sync, change iCloud fallback, or mutate local/remote data."
+        )
+    }
+
+    nonisolated static func canonicalReadinessReportText(_ report: CanonicalReadinessReport) -> String {
+        var lines: [String] = []
+        lines.append("ScoutCapture Local Health - Canonical Readiness")
+        lines.append("Inspected: \(report.inspectedAt.formatted(date: .abbreviated, time: .standard))")
+        lines.append("Active Org: \(report.activeOrganizationID?.uuidString ?? "none")")
+        lines.append("Overall Status: \(report.overallStatus.rawValue)")
+        lines.append(report.noBehaviorChangedText)
+        lines.append("")
+        lines.append("Readiness Gates")
+        for section in report.sections {
+            lines.append("")
+            lines.append("\(section.title): \(section.status.rawValue)")
+            lines.append("Summary: \(diagnosticsPreviewText(section.summary, maxLength: 180) ?? "none")")
+            for row in section.rows {
+                lines.append([
+                    row.status.rawValue,
+                    diagnosticsPreviewText(row.label, maxLength: 80) ?? "row",
+                    diagnosticsPreviewText(row.value, maxLength: 80) ?? "none",
+                    diagnosticsPreviewText(row.detail, maxLength: 180) ?? "none"
+                ].joined(separator: " | "))
+            }
+        }
+        lines.append("")
+        lines.append("Recommended Next Slices")
+        for slice in report.recommendedNextSlices {
+            lines.append("- \(diagnosticsPreviewText(slice, maxLength: 180) ?? "next slice")")
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    private nonisolated static func canonicalQueueReadinessSection(
+        diagnostics: LocalDiagnosticsState
+    ) -> CanonicalReadinessSection {
+        let retryableFailed = diagnostics.offlineQueue.failedCount
+        let status: CanonicalReadinessGateStatus = retryableFailed == 0 ? .pass : .block
+        return canonicalStaticReadinessSection(
+            id: "queue_health",
+            title: "Queue Health",
+            status: status,
+            summary: retryableFailed == 0
+                ? "Retryable failed queue is clean; acknowledged historical debt is informational."
+                : "Retryable failed queue must be zero before canonical reads expand.",
+            rows: [
+                canonicalRow("retryable_failed_queue", "Retryable failed queue", retryableFailed == 0 ? .pass : .block, String(retryableFailed), "Must be 0."),
+                canonicalRow("acknowledged_historical_queue_debt", "Acknowledged historical debt", .warn, String(diagnostics.offlineQueue.acknowledgedHistoricalCount), "Allowed but listed separately; does not block readiness."),
+                canonicalRow("pending_queue", "Pending queue", diagnostics.offlineQueue.pendingCount == 0 ? .pass : .warn, String(diagnostics.offlineQueue.pendingCount), "Pending queue is operational cache, not canonical read proof.")
+            ]
+        )
+    }
+
+    private nonisolated static func canonicalMediaReadinessSection(
+        retryCappedMediaCount: Int,
+        pendingMediaCount: Int,
+        mediaRecoveryCandidateCount: Int?
+    ) -> CanonicalReadinessSection {
+        let mediaRecoveryStatus: CanonicalReadinessGateStatus
+        if let mediaRecoveryCandidateCount {
+            mediaRecoveryStatus = mediaRecoveryCandidateCount == 0 ? .pass : .block
+        } else {
+            mediaRecoveryStatus = .unknown
+        }
+        let status: CanonicalReadinessGateStatus
+        if pendingMediaCount > 0 || retryCappedMediaCount > 0 || (mediaRecoveryCandidateCount ?? 0) > 0 {
+            status = .block
+        } else if mediaRecoveryCandidateCount == nil {
+            status = .unknown
+        } else {
+            status = .pass
+        }
+        return canonicalStaticReadinessSection(
+            id: "media_health",
+            title: "Media Health",
+            status: status,
+            summary: status == .pass
+                ? "Pending, retry-capped, and recovery candidate media counts are clean."
+                : "Media readiness requires pending, retry-capped, and recovery candidate counts to be zero.",
+            rows: [
+                canonicalRow("pending_media", "Pending media", pendingMediaCount == 0 ? .pass : .block, String(pendingMediaCount), "Must be 0."),
+                canonicalRow("retry_capped_media", "Retry-capped media", retryCappedMediaCount == 0 ? .pass : .block, String(retryCappedMediaCount), "Must be 0."),
+                canonicalRow("media_recovery_candidates", "Media recovery candidates", mediaRecoveryStatus, mediaRecoveryCandidateCount.map(String.init) ?? "not inspected", "Must be 0 after inspection.")
+            ]
+        )
+    }
+
+    private nonisolated static func canonicalDivergenceReadinessSection(
+        divergenceAuditSummary: DivergenceAuditSummary?,
+        syncDebtInspectionReport: SyncDebtInspectionReport?,
+        remoteOnlySessionDetailReport: RemoteOnlySessionDetailReport?
+    ) -> CanonicalReadinessSection {
+        let missingHydrationCount =
+            remoteOnlySessionDetailReport?.items.filter { $0.classification == .missingLocalHydration }.count ??
+            syncDebtInspectionReport?.divergenceItems.filter { $0.classification == .missingLocalHydration }.count
+        let emptyShellCount = remoteOnlySessionDetailReport?.items.filter { $0.classification == .emptyRemoteDraftShell }.count ?? 0
+        let remoteOnlyActionable = remoteOnlySessionDetailReport?.items.filter {
+            $0.classification == .missingLocalHydration ||
+                $0.classification == .trueParityDebt ||
+                $0.classification == .manualReview ||
+                $0.labels.contains(.possibleHydrationCandidate)
+        }.count
+        let activeParityFindings = divergenceAuditSummary?.items.filter { item in
+            item.lifecycle == .activeSyncFailure &&
+                item.category != .remoteUnavailable &&
+                item.category != .remoteOnlySession
+        }.count
+        let status: CanonicalReadinessGateStatus
+        if (missingHydrationCount ?? 0) > 0 || (remoteOnlyActionable ?? 0) > 0 || (activeParityFindings ?? 0) > 0 {
+            status = .block
+        } else if missingHydrationCount == nil || activeParityFindings == nil {
+            status = .unknown
+        } else {
+            status = .pass
+        }
+        return canonicalStaticReadinessSection(
+            id: "divergence_health",
+            title: "Divergence Health",
+            status: status,
+            summary: status == .pass
+                ? "No actionable hydration/parity debt is currently indicated; empty remote draft shells are informational."
+                : "Divergence readiness requires missing hydration and actionable parity findings to be zero.",
+            rows: [
+                canonicalRow("missing_local_hydration", "Missing local hydration", missingHydrationCount == nil ? .unknown : ((missingHydrationCount ?? 0) == 0 ? .pass : .block), missingHydrationCount.map(String.init) ?? "not inspected", "Must be 0."),
+                canonicalRow("empty_remote_draft_shells", "Empty remote draft shells", .warn, String(emptyShellCount), "Informational and not recommended for hydration; does not block."),
+                canonicalRow("remote_only_actionable", "Actionable remote-only sessions", remoteOnlyActionable == nil ? .unknown : ((remoteOnlyActionable ?? 0) == 0 ? .pass : .block), remoteOnlyActionable.map(String.init) ?? "not inspected", "Must be 0, excluding empty draft shells/historical rows."),
+                canonicalRow("active_parity_findings", "Active property/session parity findings", activeParityFindings == nil ? .unknown : ((activeParityFindings ?? 0) == 0 ? .pass : .block), activeParityFindings.map(String.init) ?? "not inspected", "Must be 0 before broad canonical reads.")
+            ]
+        )
+    }
+
+    private nonisolated static func canonicalRemoteScopeReadinessSection(
+        activeOrganizationID: UUID?,
+        divergenceAuditSummary: DivergenceAuditSummary?,
+        remoteOnlySessionDetailReport: RemoteOnlySessionDetailReport?
+    ) -> CanonicalReadinessSection {
+        let remoteAvailable = divergenceAuditSummary?.remoteScopeAvailable ?? remoteOnlySessionDetailReport?.remoteScopeAvailable
+        let status: CanonicalReadinessGateStatus = {
+            guard activeOrganizationID != nil else { return .unknown }
+            guard let remoteAvailable else { return .unknown }
+            return remoteAvailable ? .pass : .block
+        }()
+        return canonicalStaticReadinessSection(
+            id: "remote_scope_org",
+            title: "Remote Scope/Org Health",
+            status: status,
+            summary: status == .pass ? "Active org and remote diagnostic scope are available." : "Remote scope and active org must be available before rollout.",
+            rows: [
+                canonicalRow("active_org", "Active org", activeOrganizationID == nil ? .unknown : .pass, activeOrganizationID?.uuidString ?? "none", "Required for scoped Supabase canonical reads."),
+                canonicalRow("remote_scope", "Remote scope available", remoteAvailable == nil ? .unknown : (remoteAvailable == true ? .pass : .block), remoteAvailable.map { $0 ? "yes" : "no" } ?? "not inspected", "Required for trustworthy readiness decisions.")
+            ]
+        )
+    }
+
+    private nonisolated static func canonicalStaticReadinessSection(
+        id: String,
+        title: String,
+        status: CanonicalReadinessGateStatus,
+        summary: String,
+        rows: [CanonicalReadinessRow]
+    ) -> CanonicalReadinessSection {
+        CanonicalReadinessSection(
+            id: id,
+            title: title,
+            status: status,
+            summary: summary,
+            rows: rows
+        )
+    }
+
+    private nonisolated static func canonicalRow(
+        _ id: String,
+        _ label: String,
+        _ status: CanonicalReadinessGateStatus,
+        _ value: String,
+        _ detail: String
+    ) -> CanonicalReadinessRow {
+        CanonicalReadinessRow(id: id, label: label, status: status, value: value, detail: detail)
     }
 
     nonisolated static func remoteOnlySessionDetailReportText(_ report: RemoteOnlySessionDetailReport) -> String {
