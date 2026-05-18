@@ -6481,6 +6481,38 @@ private struct DebugCanonicalReadinessSnapshot {
     }
 }
 
+private struct DebugCompletenessGatesSnapshot {
+    let inspectedAt: String
+    let activeOrganizationID: String
+    let propertyCounts: [AppState.CompletenessGateCount]
+    let sessionCounts: [AppState.CompletenessGateCount]
+    let shotCounts: [AppState.CompletenessGateCount]
+    let issueCounts: [AppState.CompletenessGateCount]
+    let guidedCounts: [AppState.CompletenessGateCount]
+    let mediaCounts: [AppState.CompletenessGateCount]
+    let freshnessCounts: [AppState.CompletenessFreshnessCount]
+    let exportCompleteSessionCount: String
+    let notExportCompleteSessionCount: String
+    let diagnosticOnlyRowCount: String
+    let snapshotText: String
+
+    init(_ report: AppState.CompletenessGatesReport) {
+        inspectedAt = report.inspectedAt.formatted(date: .abbreviated, time: .standard)
+        activeOrganizationID = report.activeOrganizationID?.uuidString ?? "none"
+        propertyCounts = report.propertyCounts
+        sessionCounts = report.sessionCounts
+        shotCounts = report.shotCounts
+        issueCounts = report.issueCounts
+        guidedCounts = report.guidedCounts
+        mediaCounts = report.mediaCounts
+        freshnessCounts = report.freshnessCounts
+        exportCompleteSessionCount = String(report.exportCompleteSessionCount)
+        notExportCompleteSessionCount = String(report.notExportCompleteSessionCount)
+        diagnosticOnlyRowCount = String(report.totalDiagnosticOnlyRows)
+        snapshotText = AppState.completenessGatesReportText(report)
+    }
+}
+
 private struct DebugDivergenceAuditHistoricalGroup: Identifiable, Equatable {
     let id: String
     let category: String
@@ -6703,6 +6735,7 @@ private struct DebugLocalDiagnosticsView: View {
     @State private var remoteOnlySessionDetailReport: AppState.RemoteOnlySessionDetailReport?
     @State private var remoteOnlySessionDetailSnapshot: DebugRemoteOnlySessionDetailSnapshot?
     @State private var canonicalReadinessSnapshot: DebugCanonicalReadinessSnapshot?
+    @State private var completenessGatesSnapshot: DebugCompletenessGatesSnapshot?
 
     private var diagnostics: AppState.LocalDiagnosticsState {
         appState.localDiagnostics
@@ -6742,6 +6775,15 @@ private struct DebugLocalDiagnosticsView: View {
                             "Canonical Readiness",
                             subtitle: "Read-only Phase C readiness gates and blockers",
                             value: canonicalReadinessSnapshot?.overallStatus ?? "not inspected"
+                        )
+                    }
+                    NavigationLink {
+                        completenessGatesPage
+                    } label: {
+                        localHealthAreaLabel(
+                            "Completeness Gates",
+                            subtitle: "Read-only local metadata/media/export completeness",
+                            value: completenessGatesSnapshot.map { "\($0.diagnosticOnlyRowCount) diagnostic rows" } ?? "not inspected"
                         )
                     }
                     NavigationLink {
@@ -6814,6 +6856,7 @@ private struct DebugLocalDiagnosticsView: View {
             remoteOnlySessionDetailReport = nil
             remoteOnlySessionDetailSnapshot = nil
             canonicalReadinessSnapshot = nil
+            completenessGatesSnapshot = nil
             refreshDiagnosticDetailSnapshots()
         }
         .alert("Clear Local Diagnostics?", isPresented: $showClearConfirm) {
@@ -6913,6 +6956,50 @@ private struct DebugLocalDiagnosticsView: View {
             }
         }
         .navigationTitle("Canonical Readiness")
+        .navigationBarTitleDisplayMode(.inline)
+    }
+
+    private var completenessGatesPage: some View {
+        List {
+            Section("Completeness Gates") {
+                Text("Read-only local completeness diagnostics. It does not enforce gates, block export or sealing, change history visibility, switch canonical reads, hydrate sessions, download media, alter sync, media recovery, iCloud fallback, migrations, RLS, or data.")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(.secondary)
+
+                if let snapshot = completenessGatesSnapshot {
+                    diagnosticRow("Inspected", snapshot.inspectedAt)
+                    diagnosticRow("Active Org", snapshot.activeOrganizationID)
+                    diagnosticRow("Export Complete Sessions", snapshot.exportCompleteSessionCount)
+                    diagnosticRow("Not Export Complete Sessions", snapshot.notExportCompleteSessionCount)
+                    diagnosticRow("Diagnostic-Only Rows", snapshot.diagnosticOnlyRowCount)
+                    NavigationLink {
+                        DebugCompletenessGatesSnapshotTextView(snapshotText: snapshot.snapshotText)
+                    } label: {
+                        Text("View Copyable Completeness Report")
+                            .font(.system(size: 14, weight: .semibold))
+                    }
+                } else {
+                    Text("No completeness gates snapshot has been generated in this view.")
+                        .font(.system(size: 14, weight: .medium))
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            if let snapshot = completenessGatesSnapshot {
+                completenessCountsSection("Properties", snapshot.propertyCounts)
+                completenessCountsSection("Sessions", snapshot.sessionCounts)
+                completenessCountsSection("Shots", snapshot.shotCounts)
+                completenessCountsSection("Issues", snapshot.issueCounts)
+                completenessCountsSection("Guided Rows", snapshot.guidedCounts)
+                completenessCountsSection("Media", snapshot.mediaCounts)
+                Section("Freshness") {
+                    ForEach(snapshot.freshnessCounts) { count in
+                        diagnosticRow(count.state.rawValue, count.count)
+                    }
+                }
+            }
+        }
+        .navigationTitle("Completeness")
         .navigationBarTitleDisplayMode(.inline)
     }
 
@@ -7239,6 +7326,7 @@ private struct DebugLocalDiagnosticsView: View {
         failedQueueItems = appState.diagnosticsFailedQueueItems().map(DebugQueueDiagnosticSnapshotItem.init)
         retryCappedMediaItems = appState.diagnosticsRetryCappedMediaItems().map(DebugMediaDiagnosticSnapshotItem.init)
         pendingMediaItems = appState.diagnosticsPendingMediaItems().map(DebugMediaDiagnosticSnapshotItem.init)
+        completenessGatesSnapshot = DebugCompletenessGatesSnapshot(appState.inspectCompletenessGates())
         refreshCanonicalReadinessSnapshot()
     }
 
@@ -7350,6 +7438,18 @@ private struct DebugLocalDiagnosticsView: View {
                 .textSelection(.enabled)
         }
         .padding(.vertical, 2)
+    }
+
+    @ViewBuilder
+    private func completenessCountsSection(
+        _ title: String,
+        _ counts: [AppState.CompletenessGateCount]
+    ) -> some View {
+        Section(title) {
+            ForEach(counts) { count in
+                diagnosticRow(count.state.rawValue, count.count)
+            }
+        }
     }
 
     @ViewBuilder
@@ -8097,6 +8197,34 @@ private struct DebugCanonicalReadinessSnapshotTextView: View {
             }
         }
         .navigationTitle("Readiness Report")
+        .navigationBarTitleDisplayMode(.inline)
+    }
+}
+
+private struct DebugCompletenessGatesSnapshotTextView: View {
+    let snapshotText: String
+    @State private var didCopySnapshot: Bool = false
+
+    var body: some View {
+        List {
+            Section {
+                Button(didCopySnapshot ? "Copied Plain Text" : "Copy Report") {
+                    UIPasteboard.general.string = snapshotText
+                    didCopySnapshot = true
+                }
+                .font(.system(size: 14, weight: .semibold))
+            } footer: {
+                Text("Copies the sanitized completeness gates report as plain text only. It does not include local paths, signed URLs, media, or auth material.")
+            }
+
+            Section {
+                Text(snapshotText)
+                    .font(.system(size: 12, weight: .regular, design: .monospaced))
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .textSelection(.enabled)
+            }
+        }
+        .navigationTitle("Completeness Report")
         .navigationBarTitleDisplayMode(.inline)
     }
 }

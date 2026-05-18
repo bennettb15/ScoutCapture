@@ -313,6 +313,95 @@ final class AppState: ObservableObject {
         case unknown
     }
 
+    enum CompletenessGateState: String, CaseIterable, Equatable {
+        case localOnly = "local_only"
+        case remoteOnly = "remote_only"
+        case localRemoteMatched = "local_remote_matched"
+        case shellHydrated = "shell_hydrated"
+        case metadataComplete = "metadata_complete"
+        case mediaComplete = "media_complete"
+        case exportComplete = "export_complete"
+    }
+
+    enum CompletenessFreshnessState: String, CaseIterable, Equatable {
+        case current
+        case remoteUpdatesAvailable = "remote_updates_available"
+        case needsReview = "needs_review"
+        case usingLocalCache = "using_local_cache"
+        case offline
+        case unknown
+    }
+
+    struct CompletenessGateCount: Equatable, Identifiable {
+        let state: CompletenessGateState
+        let count: Int
+
+        var id: String { state.rawValue }
+    }
+
+    struct CompletenessFreshnessCount: Equatable, Identifiable {
+        let state: CompletenessFreshnessState
+        let count: Int
+
+        var id: String { state.rawValue }
+    }
+
+    struct CompletenessDiagnosticRow: Equatable, Identifiable {
+        let id: UUID
+        let entityType: String
+        let entityID: UUID?
+        let propertyID: UUID?
+        let sessionID: UUID?
+        let shotID: UUID?
+        let state: CompletenessGateState
+        let freshness: CompletenessFreshnessState
+        let reason: String
+    }
+
+    enum CompletenessDiagnosticClassification: String, CaseIterable, Equatable, Hashable {
+        case actionable = "actionable_needs_review"
+        case informational = "historical_informational"
+    }
+
+    struct CompletenessDiagnosticSummaryRow: Equatable, Identifiable {
+        let id: String
+        let entityType: String
+        let entityID: UUID?
+        let propertyID: UUID?
+        let sessionID: UUID?
+        let shotID: UUID?
+        let state: CompletenessGateState
+        let freshness: CompletenessFreshnessState
+        let reason: String
+        let duplicateCount: Int
+        let classification: CompletenessDiagnosticClassification
+    }
+
+    struct CompletenessDiagnosticReasonCount: Equatable, Identifiable {
+        let reason: String
+        let count: Int
+        let classification: CompletenessDiagnosticClassification
+
+        var id: String { "\(classification.rawValue)|\(reason)" }
+    }
+
+    struct CompletenessGatesReport: Equatable {
+        let inspectedAt: Date
+        let activeOrganizationID: UUID?
+        let propertyCounts: [CompletenessGateCount]
+        let sessionCounts: [CompletenessGateCount]
+        let shotCounts: [CompletenessGateCount]
+        let issueCounts: [CompletenessGateCount]
+        let guidedCounts: [CompletenessGateCount]
+        let mediaCounts: [CompletenessGateCount]
+        let freshnessCounts: [CompletenessFreshnessCount]
+        let exportCompleteSessionCount: Int
+        let notExportCompleteSessionCount: Int
+        let diagnosticOnlyRows: [CompletenessDiagnosticRow]
+
+        var totalDiagnosticOnlyRows: Int { diagnosticOnlyRows.count }
+    }
+
     struct PropertyOpenFreshnessRemoteSnapshot: Equatable {
         let propertyID: UUID
         let orgID: UUID
@@ -9364,6 +9453,719 @@ final class AppState: ObservableObject {
         guard !sanitized.isEmpty else { return nil }
         guard sanitized.count > maxLength else { return sanitized }
         return String(sanitized.prefix(max(0, maxLength))) + "..."
+    }
+
+    private nonisolated static func trimmedNonEmpty(_ value: String?) -> String? {
+        guard let value else { return nil }
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    func inspectCompletenessGates(inspectedAt: Date = Date()) -> CompletenessGatesReport {
+        makeCompletenessGatesReport(inspectedAt: inspectedAt)
+    }
+
+    private func makeCompletenessGatesReport(inspectedAt: Date = Date()) -> CompletenessGatesReport {
+        let properties = (try? localStore.fetchProperties()) ?? []
+        var propertyStates: [CompletenessGateState] = []
+        var sessionStates: [CompletenessGateState] = []
+        var shotStates: [CompletenessGateState] = []
+        var issueStates: [CompletenessGateState] = []
+        var guidedStates: [CompletenessGateState] = []
+        var mediaStates: [CompletenessGateState] = []
+        var freshnessStates: [CompletenessFreshnessState] = []
+        var diagnosticRows: [CompletenessDiagnosticRow] = []
+        var exportCompleteSessions = 0
+        var notExportCompleteSessions = 0
+
+        for property in properties {
+            let propertyFreshness = completenessFreshness(for: property.id)
+            freshnessStates.append(propertyFreshness)
+            let propertyState = Self.completenessStateForLocalProperty(property)
+            propertyStates.append(propertyState)
+            if property.deletedAt != nil {
+                diagnosticRows.append(Self.completenessRow(
+                    entityType: "property",
+                    entityID: property.id,
+                    propertyID: property.id,
+                    state: propertyState,
+                    freshness: propertyFreshness,
+                    reason: "property_deleted"
+                ))
+            } else if property.isArchived {
+                diagnosticRows.append(Self.completenessRow(
+                    entityType: "property",
+                    entityID: property.id,
+                    propertyID: property.id,
+                    state: propertyState,
+                    freshness: propertyFreshness,
+                    reason: "property_archived"
+                ))
+            } else if propertyState != .metadataComplete {
+                diagnosticRows.append(Self.completenessRow(
+                    entityType: "property",
+                    entityID: property.id,
+                    propertyID: property.id,
+                    state: propertyState,
+                    freshness: propertyFreshness,
+                    reason: "property_minimum_metadata_missing"
+                ))
+            }
+
+            let sessions = (try? localStore.fetchSessionsForCacheBuild(propertyID: property.id)) ?? []
+            let guidedRows = (try? localStore.fetchGuidedShots(propertyID: property.id)) ?? []
+            for guided in guidedRows {
+                let guidedEvaluation = Self.evaluateGuidedCompleteness(guided)
+                guidedStates.append(guidedEvaluation.state)
+                if guidedEvaluation.diagnosticOnly || guidedEvaluation.state != .metadataComplete {
+                    diagnosticRows.append(Self.completenessRow(
+                        entityType: "guided",
+                        entityID: guided.id,
+                        propertyID: property.id,
+                        sessionID: guided.retiredInSessionID ?? guided.skipSessionID,
+                        state: guidedEvaluation.state,
+                        freshness: propertyFreshness,
+                        reason: guidedEvaluation.reason
+                    ))
+                }
+            }
+
+            for session in sessions {
+                if session.deletedAt != nil {
+                    sessionStates.append(.localOnly)
+                    freshnessStates.append(propertyFreshness)
+                    notExportCompleteSessions += 1
+                    diagnosticRows.append(Self.completenessRow(
+                        entityType: "session",
+                        entityID: session.id,
+                        propertyID: property.id,
+                        sessionID: session.id,
+                        state: .localOnly,
+                        freshness: propertyFreshness,
+                        reason: "session_deleted"
+                    ))
+                    continue
+                }
+
+                let sessionURL = localStore.sessionJSONURL(propertyID: property.id, sessionID: session.id)
+                let rawMetadata: SessionMetadata? = {
+                    guard FileManager.default.fileExists(atPath: sessionURL.path),
+                          let data = try? Data(contentsOf: sessionURL) else {
+                        return nil
+                    }
+                    let decoder = JSONDecoder()
+                    decoder.dateDecodingStrategy = .iso8601
+                    return try? decoder.decode(SessionMetadata.self, from: data)
+                }()
+                guard let rawMetadata,
+                      let metadata = try? localStore.loadSessionMetadata(propertyID: property.id, sessionID: session.id) else {
+                    sessionStates.append(.localOnly)
+                    freshnessStates.append(propertyFreshness)
+                    notExportCompleteSessions += 1
+                    diagnosticRows.append(Self.completenessRow(
+                        entityType: "session",
+                        entityID: session.id,
+                        propertyID: property.id,
+                        sessionID: session.id,
+                        state: .localOnly,
+                        freshness: propertyFreshness,
+                        reason: "session_json_missing_or_unreadable"
+                    ))
+                    continue
+                }
+
+                let sessionMismatch = rawMetadata.propertyID != property.id || rawMetadata.sessionID != session.id
+                let sessionFreshness: CompletenessFreshnessState = sessionMismatch ? .needsReview : propertyFreshness
+                freshnessStates.append(sessionFreshness)
+                if sessionMismatch {
+                    sessionStates.append(.localOnly)
+                    notExportCompleteSessions += 1
+                    diagnosticRows.append(Self.completenessRow(
+                        entityType: "session",
+                        entityID: session.id,
+                        propertyID: property.id,
+                        sessionID: session.id,
+                        state: .localOnly,
+                        freshness: .needsReview,
+                        reason: "session_json_id_mismatch"
+                    ))
+                    continue
+                }
+
+                var sessionExportBlockers: [String] = []
+                var exportValidationMetadata = metadata
+                exportValidationMetadata.shots = metadata.shots.filter(\.shouldAppearInDefaultExports)
+                let validationReport = localStore.validateExport(
+                    exportValidationMetadata,
+                    phase: "completeness_diagnostics"
+                )
+                if !validationReport.passed {
+                    sessionExportBlockers.append("export_validation_failed")
+                }
+                if session.status != .completed || !session.isSealed {
+                    sessionExportBlockers.append("session_not_completed_and_sealed")
+                }
+
+                let exportShotIDs = Set(metadata.shots.filter(\.shouldAppearInDefaultExports).map(\.shotID))
+                var allDefaultShotMediaComplete = true
+                var allDefaultShotMetadataComplete = true
+                for shot in metadata.shots {
+                    let shotEvaluation = Self.evaluateShotCompleteness(
+                        shot,
+                        propertyID: property.id,
+                        sessionID: session.id,
+                        localStore: localStore
+                    )
+                    shotStates.append(shotEvaluation.state)
+                    freshnessStates.append(shotEvaluation.freshness)
+                    if shot.shouldAppearInDefaultExports {
+                        allDefaultShotMediaComplete = allDefaultShotMediaComplete && shotEvaluation.mediaComplete
+                        allDefaultShotMetadataComplete = allDefaultShotMetadataComplete && shotEvaluation.metadataComplete
+                    }
+                    if shotEvaluation.diagnosticOnly || !shotEvaluation.metadataComplete || (shot.shouldAppearInDefaultExports && !shotEvaluation.mediaComplete) {
+                        diagnosticRows.append(Self.completenessRow(
+                            entityType: "shot",
+                            entityID: shot.shotID,
+                            propertyID: property.id,
+                            sessionID: session.id,
+                            shotID: shot.shotID,
+                            state: shotEvaluation.state,
+                            freshness: shotEvaluation.freshness,
+                            reason: shotEvaluation.reason
+                        ))
+                    }
+                    if shot.shouldAppearInDefaultExports {
+                        mediaStates.append(shotEvaluation.mediaComplete ? .mediaComplete : .metadataComplete)
+                    }
+                }
+                if !allDefaultShotMetadataComplete {
+                    sessionExportBlockers.append("active_export_shot_metadata_incomplete")
+                }
+                if !allDefaultShotMediaComplete {
+                    sessionExportBlockers.append("active_export_shot_media_incomplete")
+                }
+
+                var allIssuesComplete = true
+                var issueHistoryExportBlocker = false
+                for issue in metadata.issues {
+                    let issueEvaluation = Self.evaluateIssueCompleteness(
+                        issue,
+                        sessionID: session.id,
+                        exportedShotIDs: exportShotIDs
+                    )
+                    issueStates.append(issueEvaluation.state)
+                    freshnessStates.append(issueEvaluation.freshness)
+                    allIssuesComplete = allIssuesComplete && issueEvaluation.metadataComplete
+                    issueHistoryExportBlocker = issueHistoryExportBlocker || issueEvaluation.exportBlocked
+                    if issueEvaluation.diagnosticOnly || !issueEvaluation.metadataComplete || issueEvaluation.exportBlocked {
+                        diagnosticRows.append(Self.completenessRow(
+                            entityType: "issue",
+                            entityID: issue.issueID,
+                            propertyID: property.id,
+                            sessionID: session.id,
+                            state: issueEvaluation.state,
+                            freshness: issueEvaluation.freshness,
+                            reason: issueEvaluation.reason
+                        ))
+                    }
+                }
+                if issueHistoryExportBlocker {
+                    sessionExportBlockers.append("issue_history_orphan_reference")
+                }
+
+                let sessionGuidedRows = metadata.guidedShots.isEmpty ? guidedRows : metadata.guidedShots
+                var allGuidedComplete = true
+                for guided in sessionGuidedRows {
+                    let guidedEvaluation = Self.evaluateGuidedCompleteness(guided)
+                    allGuidedComplete = allGuidedComplete && guidedEvaluation.metadataComplete
+                    if guidedEvaluation.state == .metadataComplete, !guidedRows.contains(where: { $0.id == guided.id }) {
+                        guidedStates.append(guidedEvaluation.state)
+                    }
+                    if guidedEvaluation.diagnosticOnly || !guidedEvaluation.metadataComplete {
+                        diagnosticRows.append(Self.completenessRow(
+                            entityType: "guided",
+                            entityID: guided.id,
+                            propertyID: property.id,
+                            sessionID: guided.retiredInSessionID ?? guided.skipSessionID ?? session.id,
+                            state: guidedEvaluation.state,
+                            freshness: propertyFreshness,
+                            reason: guidedEvaluation.reason
+                        ))
+                    }
+                }
+                if !allGuidedComplete {
+                    sessionExportBlockers.append("guided_metadata_incomplete")
+                }
+
+                let sessionMetadataComplete = allDefaultShotMetadataComplete && allIssuesComplete && allGuidedComplete
+                let sessionMediaComplete = sessionMetadataComplete && allDefaultShotMediaComplete
+                let sessionExportComplete = sessionMediaComplete && sessionExportBlockers.isEmpty
+                let sessionState: CompletenessGateState
+                if sessionExportComplete {
+                    sessionState = .exportComplete
+                    exportCompleteSessions += 1
+                } else {
+                    notExportCompleteSessions += 1
+                    if sessionMediaComplete {
+                        sessionState = .mediaComplete
+                    } else if sessionMetadataComplete {
+                        sessionState = .metadataComplete
+                    } else {
+                        sessionState = .localOnly
+                    }
+                    diagnosticRows.append(Self.completenessRow(
+                        entityType: "session",
+                        entityID: session.id,
+                        propertyID: property.id,
+                        sessionID: session.id,
+                        state: sessionState,
+                        freshness: sessionFreshness,
+                        reason: sessionExportBlockers.first ?? "session_metadata_incomplete"
+                    ))
+                }
+                sessionStates.append(sessionState)
+            }
+        }
+
+        return CompletenessGatesReport(
+            inspectedAt: inspectedAt,
+            activeOrganizationID: activeOrganizationID,
+            propertyCounts: Self.completenessCounts(propertyStates),
+            sessionCounts: Self.completenessCounts(sessionStates),
+            shotCounts: Self.completenessCounts(shotStates),
+            issueCounts: Self.completenessCounts(issueStates),
+            guidedCounts: Self.completenessCounts(guidedStates),
+            mediaCounts: Self.completenessCounts(mediaStates),
+            freshnessCounts: Self.freshnessCounts(freshnessStates),
+            exportCompleteSessionCount: exportCompleteSessions,
+            notExportCompleteSessionCount: notExportCompleteSessions,
+            diagnosticOnlyRows: diagnosticRows.sorted { lhs, rhs in
+                if lhs.entityType != rhs.entityType { return lhs.entityType < rhs.entityType }
+                return (lhs.entityID?.uuidString ?? "") < (rhs.entityID?.uuidString ?? "")
+            }
+        )
+    }
+
+    private func completenessFreshness(for propertyID: UUID) -> CompletenessFreshnessState {
+        guard let snapshot = propertyOpenFreshnessByPropertyID[propertyID] else { return .unknown }
+        switch snapshot.status {
+        case .current:
+            return .current
+        case .remoteUpdatesAvailable:
+            return .remoteUpdatesAvailable
+        case .needsReview:
+            return .needsReview
+        case .usingLocalCache:
+            return .usingLocalCache
+        case .offline:
+            return .offline
+        case .checkingCloudStatus, .unknown:
+            return .unknown
+        }
+    }
+
+    private static func completenessStateForLocalProperty(_ property: Property) -> CompletenessGateState {
+        guard property.deletedAt == nil, !property.isArchived else { return .localOnly }
+        return trimmedNonEmpty(property.name) == nil ? .localOnly : .metadataComplete
+    }
+
+    private struct ShotCompletenessEvaluation {
+        let state: CompletenessGateState
+        let freshness: CompletenessFreshnessState
+        let metadataComplete: Bool
+        let mediaComplete: Bool
+        let diagnosticOnly: Bool
+        let reason: String
+    }
+
+    private static func evaluateShotCompleteness(
+        _ shot: ShotMetadata,
+        propertyID: UUID,
+        sessionID: UUID,
+        localStore: LocalStore
+    ) -> ShotCompletenessEvaluation {
+        var reasons: [String] = []
+        if shot.propertyID != propertyID { reasons.append("shot_property_id_mismatch") }
+        if shot.sessionID != sessionID { reasons.append("shot_session_id_mismatch") }
+        if trimmedNonEmpty(shot.building) == nil { reasons.append("shot_building_missing") }
+        if trimmedNonEmpty(shot.elevation) == nil { reasons.append("shot_elevation_missing") }
+        if trimmedNonEmpty(shot.detailType) == nil { reasons.append("shot_detail_type_missing") }
+        if shot.angleIndex < 1 { reasons.append("shot_angle_index_invalid") }
+        if trimmedNonEmpty(shot.shotKey) == nil { reasons.append("shot_key_missing") }
+        if trimmedNonEmpty(shot.originalRelativePath) == nil { reasons.append("shot_original_relative_path_missing") }
+        if shot.isFlagged {
+            if trimmedNonEmpty(shot.firstCaptureKind) == nil { reasons.append("flagged_shot_first_capture_kind_missing") }
+            if trimmedNonEmpty(shot.priority) == nil { reasons.append("flagged_shot_priority_missing") }
+        }
+
+        let metadataComplete = reasons.isEmpty
+        let mediaComplete: Bool = {
+            guard shot.shouldAppearInDefaultExports else { return false }
+            guard let relative = trimmedNonEmpty(shot.originalRelativePath) else { return false }
+            guard let url = localStore.resolveSessionRelativeFileURL(
+                propertyID: propertyID,
+                sessionID: sessionID,
+                relativePath: relative
+            ) else {
+                return false
+            }
+            return FileManager.default.fileExists(atPath: url.path)
+        }()
+
+        let diagnosticOnly = shot.isHistorical || shot.hiddenFromGallery == true || shot.hiddenFromReports == true
+        let state: CompletenessGateState
+        if shot.shouldAppearInDefaultExports, metadataComplete, mediaComplete {
+            state = .mediaComplete
+        } else if metadataComplete {
+            state = .metadataComplete
+        } else {
+            state = .localOnly
+        }
+
+        let reason: String
+        if diagnosticOnly {
+            reason = shot.isHistorical ? "shot_historical_lifecycle" : "shot_hidden_from_default_workflows"
+        } else if !metadataComplete {
+            reason = reasons.first ?? "shot_metadata_incomplete"
+        } else if shot.shouldAppearInDefaultExports && !mediaComplete {
+            reason = "active_export_shot_original_missing"
+        } else {
+            reason = "shot_metadata_complete"
+        }
+
+        return ShotCompletenessEvaluation(
+            state: state,
+            freshness: reasons.contains { $0.contains("mismatch") } ? .needsReview : .unknown,
+            metadataComplete: metadataComplete,
+            mediaComplete: mediaComplete,
+            diagnosticOnly: diagnosticOnly,
+            reason: reason
+        )
+    }
+
+    private struct IssueCompletenessEvaluation {
+        let state: CompletenessGateState
+        let freshness: CompletenessFreshnessState
+        let metadataComplete: Bool
+        let exportBlocked: Bool
+        let diagnosticOnly: Bool
+        let reason: String
+    }
+
+    private static func evaluateIssueCompleteness(
+        _ issue: IssueMetadata,
+        sessionID: UUID,
+        exportedShotIDs: Set<UUID>
+    ) -> IssueCompletenessEvaluation {
+        var reasons: [String] = []
+        if trimmedNonEmpty(issue.currentReason) == nil {
+            reasons.append("issue_current_reason_missing")
+        }
+        let normalizedStatus = trimmedNonEmpty(issue.issueStatus)?.lowercased()
+        if normalizedStatus != "active" && normalizedStatus != "resolved" {
+            reasons.append("issue_status_invalid")
+        }
+
+        var exportBlocked = false
+        for event in issue.historyEvents where event.sessionId == sessionID {
+            let rawShotID = trimmedNonEmpty(event.details["shotId"] ?? event.details["shotID"])
+            if let rawShotID {
+                guard let shotID = UUID(uuidString: rawShotID), exportedShotIDs.contains(shotID) else {
+                    exportBlocked = true
+                    reasons.append("issue_history_orphan_shot_reference")
+                    break
+                }
+            }
+        }
+        for event in issue.historyEvents {
+            if let eventSessionID = event.sessionId, eventSessionID != sessionID {
+                exportBlocked = true
+                reasons.append("issue_history_orphan_session_reference")
+                break
+            }
+        }
+
+        let metadataComplete = reasons.filter { !$0.hasPrefix("issue_history_orphan") }.isEmpty
+        let state: CompletenessGateState = metadataComplete ? .metadataComplete : .localOnly
+        return IssueCompletenessEvaluation(
+            state: state,
+            freshness: exportBlocked ? .needsReview : .unknown,
+            metadataComplete: metadataComplete,
+            exportBlocked: exportBlocked,
+            diagnosticOnly: normalizedStatus == "resolved",
+            reason: reasons.first ?? "issue_metadata_complete"
+        )
+    }
+
+    private struct GuidedCompletenessEvaluation {
+        let state: CompletenessGateState
+        let metadataComplete: Bool
+        let diagnosticOnly: Bool
+        let reason: String
+    }
+
+    private static func evaluateGuidedCompleteness(_ guided: GuidedShot) -> GuidedCompletenessEvaluation {
+        if guided.status == .retired || guided.isRetired {
+            return GuidedCompletenessEvaluation(
+                state: .metadataComplete,
+                metadataComplete: true,
+                diagnosticOnly: true,
+                reason: "guided_retired"
+            )
+        }
+
+        var reasons: [String] = []
+        if trimmedNonEmpty(guided.title) == nil { reasons.append("guided_title_missing") }
+        if trimmedNonEmpty(guided.building) == nil { reasons.append("guided_building_missing") }
+        if trimmedNonEmpty(guided.targetElevation) == nil { reasons.append("guided_elevation_missing") }
+        if trimmedNonEmpty(guided.detailType) == nil { reasons.append("guided_detail_type_missing") }
+        if (guided.angleIndex ?? 0) < 1 { reasons.append("guided_angle_index_missing") }
+
+        let complete = reasons.isEmpty
+        return GuidedCompletenessEvaluation(
+            state: complete ? .metadataComplete : .localOnly,
+            metadataComplete: complete,
+            diagnosticOnly: false,
+            reason: reasons.first ?? "guided_metadata_complete"
+        )
+    }
+
+    private nonisolated static func completenessRow(
+        entityType: String,
+        entityID: UUID?,
+        propertyID: UUID? = nil,
+        sessionID: UUID? = nil,
+        shotID: UUID? = nil,
+        state: CompletenessGateState,
+        freshness: CompletenessFreshnessState,
+        reason: String
+    ) -> CompletenessDiagnosticRow {
+        CompletenessDiagnosticRow(
+            id: UUID(),
+            entityType: entityType,
+            entityID: entityID,
+            propertyID: propertyID,
+            sessionID: sessionID,
+            shotID: shotID,
+            state: state,
+            freshness: freshness,
+            reason: sanitizedDiagnosticsErrorMessage(reason)
+        )
+    }
+
+    private nonisolated static func completenessCounts(_ states: [CompletenessGateState]) -> [CompletenessGateCount] {
+        let grouped = Dictionary(grouping: states, by: { $0 }).mapValues(\.count)
+        return CompletenessGateState.allCases.map { state in
+            CompletenessGateCount(state: state, count: grouped[state] ?? 0)
+        }
+    }
+
+    private nonisolated static func freshnessCounts(_ states: [CompletenessFreshnessState]) -> [CompletenessFreshnessCount] {
+        let grouped = Dictionary(grouping: states, by: { $0 }).mapValues(\.count)
+        return CompletenessFreshnessState.allCases.map { state in
+            CompletenessFreshnessCount(state: state, count: grouped[state] ?? 0)
+        }
+    }
+
+    nonisolated static func dedupedCompletenessDiagnosticRows(
+        _ rows: [CompletenessDiagnosticRow]
+    ) -> [CompletenessDiagnosticSummaryRow] {
+        var grouped: [String: (row: CompletenessDiagnosticRow, count: Int)] = [:]
+        for row in rows {
+            let key = completenessDiagnosticKey(for: row)
+            if let existing = grouped[key] {
+                grouped[key] = (existing.row, existing.count + 1)
+            } else {
+                grouped[key] = (row, 1)
+            }
+        }
+
+        return grouped.map { key, value in
+            CompletenessDiagnosticSummaryRow(
+                id: key,
+                entityType: value.row.entityType,
+                entityID: value.row.entityID,
+                propertyID: value.row.propertyID,
+                sessionID: value.row.sessionID,
+                shotID: value.row.shotID,
+                state: value.row.state,
+                freshness: value.row.freshness,
+                reason: value.row.reason,
+                duplicateCount: value.count,
+                classification: completenessDiagnosticClassification(for: value.row)
+            )
+        }
+        .sorted { lhs, rhs in
+            if lhs.classification != rhs.classification {
+                return lhs.classification.rawValue < rhs.classification.rawValue
+            }
+            if lhs.reason != rhs.reason { return lhs.reason < rhs.reason }
+            if lhs.entityType != rhs.entityType { return lhs.entityType < rhs.entityType }
+            return lhs.id < rhs.id
+        }
+    }
+
+    nonisolated static func completenessDiagnosticReasonCounts(
+        _ rows: [CompletenessDiagnosticSummaryRow]
+    ) -> [CompletenessDiagnosticReasonCount] {
+        let grouped = Dictionary(grouping: rows, by: { "\($0.classification.rawValue)|\($0.reason)" })
+        return grouped.map { key, rows in
+            let first = rows[0]
+            return CompletenessDiagnosticReasonCount(
+                reason: first.reason,
+                count: rows.reduce(0) { $0 + $1.duplicateCount },
+                classification: first.classification
+            )
+        }
+        .sorted { lhs, rhs in
+            if lhs.classification != rhs.classification {
+                return lhs.classification.rawValue < rhs.classification.rawValue
+            }
+            if lhs.count != rhs.count { return lhs.count > rhs.count }
+            return lhs.reason < rhs.reason
+        }
+    }
+
+    private nonisolated static func completenessDiagnosticKey(for row: CompletenessDiagnosticRow) -> String {
+        [
+            row.entityType,
+            row.entityID?.uuidString ?? "none",
+            row.propertyID?.uuidString ?? "none",
+            row.sessionID?.uuidString ?? "none",
+            row.shotID?.uuidString ?? "none",
+            row.state.rawValue,
+            row.freshness.rawValue,
+            row.reason
+        ].joined(separator: "|")
+    }
+
+    private nonisolated static func completenessDiagnosticClassification(
+        for row: CompletenessDiagnosticRow
+    ) -> CompletenessDiagnosticClassification {
+        switch row.reason {
+        case "active_export_shot_original_missing",
+             "issue_history_orphan_session_reference",
+             "issue_history_orphan_shot_reference",
+             "issue_history_orphan_reference",
+             "export_validation_failed",
+             "active_export_shot_metadata_incomplete",
+             "active_export_shot_media_incomplete",
+             "guided_metadata_incomplete",
+             "guided_title_missing",
+             "guided_building_missing",
+             "guided_elevation_missing",
+             "guided_detail_type_missing",
+             "guided_angle_index_missing",
+             "issue_current_reason_missing",
+             "issue_status_invalid",
+             "session_json_id_mismatch",
+             "session_json_missing_or_unreadable":
+            return .actionable
+        case "guided_retired",
+             "shot_historical_lifecycle",
+             "session_not_completed_and_sealed",
+             "property_archived",
+             "property_deleted",
+             "session_deleted":
+            return .informational
+        default:
+            return row.freshness == .needsReview ? .actionable : .informational
+        }
+    }
+
+    nonisolated static func completenessGatesReportText(_ report: CompletenessGatesReport) -> String {
+        let dedupedRows = dedupedCompletenessDiagnosticRows(report.diagnosticOnlyRows)
+        let reasonCounts = completenessDiagnosticReasonCounts(dedupedRows)
+        let actionableRows = dedupedRows.filter { $0.classification == .actionable }
+        let informationalRows = dedupedRows.filter { $0.classification == .informational }
+        let unknownFreshnessCount = report.freshnessCounts.first { $0.state == .unknown }?.count ?? 0
+        var lines: [String] = []
+        lines.append("ScoutCapture Local Health - Completeness Gates")
+        lines.append("Inspected: \(report.inspectedAt.formatted(date: .abbreviated, time: .standard))")
+        lines.append("Active Org: \(report.activeOrganizationID?.uuidString ?? "none")")
+        lines.append("Read-only diagnostics. This report does not enforce gates, block export, block sealing, change history visibility, switch canonical reads, hydrate data, download media, change sync, media recovery, iCloud fallback, migrations, RLS, or local/remote data.")
+        lines.append("")
+        lines.append("Summary Counts")
+        lines.append("- raw_diagnostic_rows: \(report.diagnosticOnlyRows.count)")
+        lines.append("- deduped_diagnostic_rows: \(dedupedRows.count)")
+        lines.append("- actionable_needs_review_rows: \(actionableRows.count)")
+        lines.append("- historical_informational_rows: \(informationalRows.count)")
+        lines.append("- export_complete_sessions: \(report.exportCompleteSessionCount)")
+        lines.append("- not_export_complete_sessions: \(report.notExportCompleteSessionCount)")
+        appendCompletenessCounts("Properties", report.propertyCounts, to: &lines)
+        appendCompletenessCounts("Sessions", report.sessionCounts, to: &lines)
+        appendCompletenessCounts("Shots", report.shotCounts, to: &lines)
+        appendCompletenessCounts("Issues", report.issueCounts, to: &lines)
+        appendCompletenessCounts("Guided Rows", report.guidedCounts, to: &lines)
+        appendCompletenessCounts("Media", report.mediaCounts, to: &lines)
+        lines.append("")
+        lines.append("Freshness Counts")
+        for count in report.freshnessCounts {
+            lines.append("- \(count.state.rawValue): \(count.count)")
+        }
+        lines.append("")
+        lines.append("Freshness Explanation")
+        if unknownFreshnessCount > 0 {
+            lines.append("Many historical entities may show unknown freshness because property-open freshness is checked only for opened properties, not every historical entity. Unknown freshness alone is not treated as an active regression in this diagnostics report.")
+        } else {
+            lines.append("No unknown freshness rows were counted in this snapshot. Freshness remains scoped to property-open checks unless broader child metadata freshness is added later.")
+        }
+        lines.append("")
+        lines.append("Diagnostic Reason Counts")
+        if reasonCounts.isEmpty {
+            lines.append("none")
+        } else {
+            for reason in reasonCounts {
+                lines.append("- \(reason.classification.rawValue) | \(diagnosticsPreviewText(reason.reason, maxLength: 120) ?? "none"): \(reason.count)")
+            }
+        }
+        lines.append("")
+        lines.append("Actionable / Needs Review Diagnostics")
+        appendCompletenessDiagnosticRows(actionableRows, to: &lines)
+        lines.append("")
+        lines.append("Historical / Informational Diagnostics")
+        appendCompletenessDiagnosticRows(informationalRows, to: &lines)
+        lines.append("")
+        lines.append("Full Diagnostic Rows, Deduped: \(dedupedRows.count)")
+        appendCompletenessDiagnosticRows(dedupedRows, to: &lines)
+        return lines.joined(separator: "\n")
+    }
+
+    private nonisolated static func appendCompletenessCounts(
+        _ title: String,
+        _ counts: [CompletenessGateCount],
+        to lines: inout [String]
+    ) {
+        lines.append("")
+        lines.append("\(title) Completeness")
+        for count in counts {
+            lines.append("- \(count.state.rawValue): \(count.count)")
+        }
+    }
+
+    private nonisolated static func appendCompletenessDiagnosticRows(
+        _ rows: [CompletenessDiagnosticSummaryRow],
+        to lines: inout [String]
+    ) {
+        if rows.isEmpty {
+            lines.append("none")
+            return
+        }
+
+        for row in rows {
+            lines.append([
+                "- entity=\(diagnosticsPreviewText(row.entityType, maxLength: 60) ?? "unknown")",
+                "entity_id=\(row.entityID?.uuidString ?? "none")",
+                "property_id=\(row.propertyID?.uuidString ?? "none")",
+                "session_id=\(row.sessionID?.uuidString ?? "none")",
+                "shot_id=\(row.shotID?.uuidString ?? "none")",
+                "state=\(row.state.rawValue)",
+                "freshness=\(row.freshness.rawValue)",
+                "classification=\(row.classification.rawValue)",
+                "duplicates=\(row.duplicateCount)",
+                "reason=\(diagnosticsPreviewText(row.reason, maxLength: 120) ?? "none")"
+            ].joined(separator: " | "))
+        }
     }
 
     nonisolated static func makeCanonicalReadinessReport(
