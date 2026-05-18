@@ -303,6 +303,37 @@ final class AppState: ObservableObject {
         var lastError: DiagnosticErrorSnapshot?
     }
 
+    enum PropertyOpenFreshnessStatus: String, CaseIterable, Equatable {
+        case checkingCloudStatus = "checking_cloud_status"
+        case current
+        case usingLocalCache = "using_local_cache"
+        case remoteUpdatesAvailable = "remote_updates_available"
+        case needsReview = "needs_review"
+        case offline
+        case unknown
+    }
+
+    struct PropertyOpenFreshnessRemoteSnapshot: Equatable {
+        let propertyID: UUID
+        let orgID: UUID
+        let updatedAt: Date
+        let revision: Int64?
+        let deletedAt: Date?
+        let isArchived: Bool
+        let captureProfile: String?
+    }
+
+    struct PropertyOpenFreshnessSnapshot: Equatable {
+        let propertyID: UUID
+        let status: PropertyOpenFreshnessStatus
+        let checkedAt: Date
+        let localUpdatedAt: Date?
+        let remoteUpdatedAt: Date?
+        let remoteRevision: Int64?
+        let hasUnsyncedLocalPropertyWork: Bool
+        let reason: String
+    }
+
     struct OfflineQueueDiagnosticItem: Equatable, Identifiable {
         let id: UUID
         let entityType: String
@@ -2363,6 +2394,26 @@ final class AppState: ObservableObject {
         }
     }
 
+    private struct RemotePropertyFreshnessRecord: Decodable {
+        let id: UUID
+        let orgID: UUID
+        let updatedAt: Date
+        let revision: Int64?
+        let deletedAt: Date?
+        let isArchived: Bool
+        let captureProfile: String?
+
+        enum CodingKeys: String, CodingKey {
+            case id
+            case orgID = "org_id"
+            case updatedAt = "updated_at"
+            case revision
+            case deletedAt = "deleted_at"
+            case isArchived = "is_archived"
+            case captureProfile = "capture_profile"
+        }
+    }
+
     private struct SupabaseOrgIdentityRecord: Decodable {
         let id: UUID
     }
@@ -2645,6 +2696,7 @@ final class AppState: ObservableObject {
     @Published private(set) var activeOrganizationMembers: [OrganizationAccessMember] = []
     @Published private(set) var pendingOrganizationInvitations: [PendingOrganizationInvitation] = []
     @Published private(set) var localDiagnostics = LocalDiagnosticsState()
+    @Published private(set) var propertyOpenFreshnessByPropertyID: [UUID: PropertyOpenFreshnessSnapshot] = [:]
 
     @Published var selectedPropertyID: UUID? {
         didSet {
@@ -17299,6 +17351,288 @@ final class AppState: ObservableObject {
     func selectProperty(id: UUID) {
         selectedPropertyID = id
         markPropertyActivated(id: id)
+    }
+
+    func propertyOpenFreshness(for propertyID: UUID) -> PropertyOpenFreshnessSnapshot? {
+        propertyOpenFreshnessByPropertyID[propertyID]
+    }
+
+    func beginPropertyOpenFreshnessCheck(propertyID: UUID) {
+        guard let localProperty = properties.first(where: { $0.id == propertyID }) ??
+                allProperties.first(where: { $0.id == propertyID }) else {
+            propertyOpenFreshnessByPropertyID[propertyID] = PropertyOpenFreshnessSnapshot(
+                propertyID: propertyID,
+                status: .unknown,
+                checkedAt: Date(),
+                localUpdatedAt: nil,
+                remoteUpdatedAt: nil,
+                remoteRevision: nil,
+                hasUnsyncedLocalPropertyWork: false,
+                reason: "local_property_missing"
+            )
+            return
+        }
+
+        guard isRemotePropertyRefreshEnabled,
+              let activeOrganizationID else {
+            propertyOpenFreshnessByPropertyID[propertyID] = PropertyOpenFreshnessSnapshot(
+                propertyID: propertyID,
+                status: .usingLocalCache,
+                checkedAt: Date(),
+                localUpdatedAt: localProperty.updatedAt,
+                remoteUpdatedAt: nil,
+                remoteRevision: nil,
+                hasUnsyncedLocalPropertyWork: false,
+                reason: "remote_scope_unavailable"
+            )
+            print("[PropertyFreshness] propertyID=\(propertyID.uuidString) status=using_local_cache reason=remote_scope_unavailable")
+            return
+        }
+
+        propertyOpenFreshnessByPropertyID[propertyID] = PropertyOpenFreshnessSnapshot(
+            propertyID: propertyID,
+            status: .checkingCloudStatus,
+            checkedAt: Date(),
+            localUpdatedAt: localProperty.updatedAt,
+            remoteUpdatedAt: nil,
+            remoteRevision: nil,
+            hasUnsyncedLocalPropertyWork: false,
+            reason: "checking"
+        )
+
+        Task { [weak self] in
+            await self?.performPropertyOpenFreshnessCheck(
+                propertyID: propertyID,
+                activeOrganizationID: activeOrganizationID
+            )
+        }
+    }
+
+    private func performPropertyOpenFreshnessCheck(propertyID: UUID, activeOrganizationID: UUID) async {
+        guard let localProperty = properties.first(where: { $0.id == propertyID }) ??
+                allProperties.first(where: { $0.id == propertyID }) else {
+            await MainActor.run {
+                self.propertyOpenFreshnessByPropertyID[propertyID] = PropertyOpenFreshnessSnapshot(
+                    propertyID: propertyID,
+                    status: .unknown,
+                    checkedAt: Date(),
+                    localUpdatedAt: nil,
+                    remoteUpdatedAt: nil,
+                    remoteRevision: nil,
+                    hasUnsyncedLocalPropertyWork: false,
+                    reason: "local_property_missing"
+                )
+            }
+            return
+        }
+
+        let hasUnsyncedLocalPropertyWork = Self.hasUnsyncedLocalPropertyWork(
+            propertyID: propertyID,
+            queuedMutations: (try? localStore.fetchQueuedMutations()) ?? []
+        )
+
+        do {
+            let remote = try await fetchRemotePropertyFreshness(
+                propertyID: propertyID,
+                activeOrganizationID: activeOrganizationID
+            )
+            let evaluation = Self.evaluatePropertyOpenFreshness(
+                localPropertyID: localProperty.id,
+                localOrgID: localProperty.orgId,
+                localUpdatedAt: localProperty.updatedAt,
+                localIsArchived: localProperty.isArchived,
+                activeOrganizationID: activeOrganizationID,
+                remote: remote,
+                hasUnsyncedLocalPropertyWork: hasUnsyncedLocalPropertyWork
+            )
+            await MainActor.run {
+                self.propertyOpenFreshnessByPropertyID[propertyID] = PropertyOpenFreshnessSnapshot(
+                    propertyID: propertyID,
+                    status: evaluation.status,
+                    checkedAt: Date(),
+                    localUpdatedAt: localProperty.updatedAt,
+                    remoteUpdatedAt: remote?.updatedAt,
+                    remoteRevision: remote?.revision,
+                    hasUnsyncedLocalPropertyWork: hasUnsyncedLocalPropertyWork,
+                    reason: evaluation.reason
+                )
+            }
+            print(
+                "[PropertyFreshness] propertyID=\(propertyID.uuidString) " +
+                "status=\(evaluation.status.rawValue) reason=\(evaluation.reason)"
+            )
+        } catch {
+            let status = Self.propertyOpenFreshnessStatusForRemoteFailure(error)
+            await MainActor.run {
+                self.propertyOpenFreshnessByPropertyID[propertyID] = PropertyOpenFreshnessSnapshot(
+                    propertyID: propertyID,
+                    status: status,
+                    checkedAt: Date(),
+                    localUpdatedAt: localProperty.updatedAt,
+                    remoteUpdatedAt: nil,
+                    remoteRevision: nil,
+                    hasUnsyncedLocalPropertyWork: hasUnsyncedLocalPropertyWork,
+                    reason: Self.diagnosticErrorCategory(for: error).rawValue
+                )
+            }
+            print(
+                "[PropertyFreshness] propertyID=\(propertyID.uuidString) " +
+                "status=\(status.rawValue) reason=remote_check_failed category=\(Self.diagnosticErrorCategory(for: error).rawValue)"
+            )
+        }
+    }
+
+    private func fetchRemotePropertyFreshness(
+        propertyID: UUID,
+        activeOrganizationID: UUID
+    ) async throws -> PropertyOpenFreshnessRemoteSnapshot? {
+        guard let client = supabaseClient else {
+            throw RemotePropertyFetchError.missingClient
+        }
+
+        let records = try await withThrowingTaskGroup(of: [RemotePropertyFreshnessRecord].self) { group in
+            group.addTask {
+                try await client
+                    .from("properties")
+                    .select(
+                        """
+                        id,
+                        org_id,
+                        updated_at,
+                        revision,
+                        deleted_at,
+                        is_archived,
+                        capture_profile
+                        """
+                    )
+                    .eq("id", value: propertyID.uuidString.lowercased())
+                    .eq("org_id", value: activeOrganizationID.uuidString.lowercased())
+                    .limit(1)
+                    .execute()
+                    .value as [RemotePropertyFreshnessRecord]
+            }
+
+            group.addTask {
+                try await Task.sleep(nanoseconds: 3_000_000_000)
+                throw RemotePropertyFetchError.timedOut
+            }
+
+            guard let firstResult = try await group.next() else {
+                throw RemotePropertyFetchError.timedOut
+            }
+            group.cancelAll()
+            return firstResult
+        }
+
+        guard let record = records.first else { return nil }
+        return PropertyOpenFreshnessRemoteSnapshot(
+            propertyID: record.id,
+            orgID: record.orgID,
+            updatedAt: record.updatedAt,
+            revision: record.revision,
+            deletedAt: record.deletedAt,
+            isArchived: record.isArchived,
+            captureProfile: record.captureProfile
+        )
+    }
+
+    nonisolated static func evaluatePropertyOpenFreshness(
+        localPropertyID: UUID,
+        localOrgID: UUID?,
+        localUpdatedAt: Date?,
+        localIsArchived: Bool,
+        activeOrganizationID: UUID?,
+        remote: PropertyOpenFreshnessRemoteSnapshot?,
+        hasUnsyncedLocalPropertyWork: Bool
+    ) -> (status: PropertyOpenFreshnessStatus, reason: String) {
+        guard let remote else {
+            return (.needsReview, "remote_property_missing")
+        }
+        guard remote.propertyID == localPropertyID else {
+            return (.needsReview, "remote_property_id_mismatch")
+        }
+        if let activeOrganizationID, remote.orgID != activeOrganizationID {
+            return (.needsReview, "remote_org_mismatch")
+        }
+        if let localOrgID, remote.orgID != localOrgID {
+            return (.needsReview, "local_org_mismatch")
+        }
+        if remote.deletedAt != nil {
+            return (.needsReview, "remote_deleted")
+        }
+        if remote.isArchived != localIsArchived {
+            return (.needsReview, "remote_archived_conflict")
+        }
+        guard let localUpdatedAt else {
+            return hasUnsyncedLocalPropertyWork
+                ? (.needsReview, "local_updated_at_missing_with_unsynced_work")
+                : (.remoteUpdatesAvailable, "local_updated_at_missing")
+        }
+
+        if remote.updatedAt.timeIntervalSince(localUpdatedAt) > 0.001 {
+            if hasUnsyncedLocalPropertyWork {
+                return (.needsReview, "remote_newer_with_unsynced_local_property_work")
+            }
+            return (.remoteUpdatesAvailable, "remote_updated_at_newer")
+        }
+
+        return (.current, "remote_not_newer")
+    }
+
+    nonisolated static func hasUnsyncedLocalPropertyWork(
+        propertyID: UUID,
+        queuedMutations: [LocalStore.QueuedMutation]
+    ) -> Bool {
+        queuedMutations.contains { item in
+            guard item.acknowledgedAt == nil else { return false }
+            guard item.status == .pending || item.status == .failed || item.status == .inFlight else { return false }
+            let entityType = item.entityType.lowercased()
+            let operation = item.operation.lowercased()
+            guard entityType == "property" || operation.contains("property") else { return false }
+            return item.entityID == propertyID || item.propertyID == propertyID
+        }
+    }
+
+    nonisolated static func propertyOpenFreshnessStatusForRemoteFailure(_ error: Error) -> PropertyOpenFreshnessStatus {
+        diagnosticErrorCategory(for: error) == .network ? .offline : .usingLocalCache
+    }
+
+    nonisolated static func propertyOpenFreshnessDisplayLabel(for status: PropertyOpenFreshnessStatus) -> String {
+        switch status {
+        case .checkingCloudStatus:
+            return "Checking cloud status"
+        case .current:
+            return "Current"
+        case .usingLocalCache:
+            return "Using local cache"
+        case .remoteUpdatesAvailable:
+            return "Remote updates available"
+        case .needsReview:
+            return "Needs review"
+        case .offline:
+            return "Offline"
+        case .unknown:
+            return "Unknown"
+        }
+    }
+
+    nonisolated static func propertyOpenFreshnessSymbolName(for status: PropertyOpenFreshnessStatus) -> String {
+        switch status {
+        case .checkingCloudStatus:
+            return "icloud"
+        case .current:
+            return "checkmark.icloud"
+        case .usingLocalCache:
+            return "internaldrive"
+        case .remoteUpdatesAvailable:
+            return "arrow.down.icloud"
+        case .needsReview:
+            return "exclamationmark.icloud"
+        case .offline:
+            return "wifi.slash"
+        case .unknown:
+            return "questionmark.circle"
+        }
     }
 
     @discardableResult

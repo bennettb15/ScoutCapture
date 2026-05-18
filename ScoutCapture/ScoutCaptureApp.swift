@@ -9161,6 +9161,7 @@ struct PropertySessionView: View {
                 guard !didSetup else { return }
                 didSetup = true
                 appState.selectProperty(id: propertyID)
+                appState.beginPropertyOpenFreshnessCheck(propertyID: propertyID)
                 if resumeDraft {
                     if appState.currentSession?.propertyID != propertyID || appState.currentSession?.status != .draft {
                         _ = appState.loadDraftSession(for: propertyID)

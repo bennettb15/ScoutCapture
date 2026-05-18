@@ -6555,7 +6555,7 @@ struct ContentView: View {
         let topContentLift: CGFloat = isLandscapeUI ? -14 : -14
 
         // Compact header height.
-        let topBarH: CGFloat = topInset + 56
+        let topBarH: CGFloat = topInset + (usesLandscapeChrome ? 62 : 68)
 
         // Bottom mask should extend fully to the physical bottom of screen.
         let bottomBarH: CGFloat = 178
@@ -6580,13 +6580,13 @@ struct ContentView: View {
             Color.black
 
             let rowPadding: CGFloat = 16
-            let titleFontSize: CGFloat = usesLandscapeChrome ? 38 : 34
-            let titleSideInset: CGFloat = usesLandscapeChrome ? 126 : 132
+            let titleFontSize: CGFloat = usesLandscapeChrome ? 36 : 33
+            let titleSideInset: CGFloat = usesLandscapeChrome ? 78 : 70
 
             VStack(spacing: usesLandscapeChrome ? 0 : 10) {
                 VStack(spacing: 2) {
                     ZStack {
-                        VStack(spacing: -2) {
+                        VStack(spacing: usesLandscapeChrome ? -1 : 1) {
                             Text(captureProfile.title)
                                 .font(.system(size: 11, weight: .semibold))
                                 .tracking(0.5)
@@ -6595,12 +6595,14 @@ struct ContentView: View {
                                 .minimumScaleFactor(0.8)
 
                             Text(headerPropertyName)
-                                .font(.system(size: titleFontSize, weight: .medium))
+                                .font(.system(size: titleFontSize, weight: .semibold))
                                 .tracking(0.4)
                                 .foregroundColor(.white.opacity(0.66))
                                 .lineLimit(1)
                                 .minimumScaleFactor(0.54)
                                 .truncationMode(.tail)
+
+                            propertyOpenFreshnessHeaderIndicator
                         }
                         .padding(.horizontal, titleSideInset)
                         .frame(maxWidth: .infinity, alignment: .center)
@@ -6613,7 +6615,7 @@ struct ContentView: View {
                                 .padding(.trailing, rowPadding)
                         }
                     }
-                    .frame(height: usesLandscapeChrome ? 44 : nil)
+                    .frame(height: usesLandscapeChrome ? 52 : nil)
                 }
 
                 if !usesLandscapeChrome {
@@ -6629,6 +6631,40 @@ struct ContentView: View {
             .offset(y: usesLandscapeChrome ? -8 : topContentLift)
         }
         .frame(height: topBarH + 6)
+    }
+
+    private var propertyOpenFreshnessHUDSnapshot: AppState.PropertyOpenFreshnessSnapshot? {
+        guard let propertyID = appState.selectedPropertyID else { return nil }
+        return appState.propertyOpenFreshness(for: propertyID)
+    }
+
+    private func propertyOpenFreshnessHUDColor(for status: AppState.PropertyOpenFreshnessStatus) -> Color {
+        switch status {
+        case .checkingCloudStatus, .usingLocalCache, .offline, .unknown:
+            return .white.opacity(0.72)
+        case .current:
+            return .green.opacity(0.9)
+        case .remoteUpdatesAvailable:
+            return .blue.opacity(0.95)
+        case .needsReview:
+            return .orange.opacity(0.95)
+        }
+    }
+
+    @ViewBuilder
+    private var propertyOpenFreshnessHeaderIndicator: some View {
+        if let freshness = propertyOpenFreshnessHUDSnapshot {
+            HStack(spacing: 4) {
+                Image(systemName: AppState.propertyOpenFreshnessSymbolName(for: freshness.status))
+                    .font(.system(size: 11, weight: .semibold))
+                Text(AppState.propertyOpenFreshnessDisplayLabel(for: freshness.status))
+                    .font(.system(size: 11, weight: .bold))
+            }
+            .foregroundColor(propertyOpenFreshnessHUDColor(for: freshness.status))
+            .lineLimit(1)
+            .minimumScaleFactor(0.82)
+            .accessibilityLabel("Cloud status \(AppState.propertyOpenFreshnessDisplayLabel(for: freshness.status))")
+        }
     }
 
     private func metadataHUDStrip(isLandscapeStyle: Bool) -> some View {
