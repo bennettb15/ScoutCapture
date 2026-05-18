@@ -330,6 +330,7 @@ final class AppState: ObservableObject {
 
     enum DivergenceDebtClassification: String, CaseIterable, Equatable {
         case historicalRemoteOnly = "historical_remote_only"
+        case emptyRemoteDraftShell = "empty_remote_draft_shell"
         case missingLocalHydration = "missing_local_hydration"
         case trueParityDebt = "true_parity_debt"
         case knownLegacyArtifact = "known_legacy_artifact"
@@ -401,6 +402,7 @@ final class AppState: ObservableObject {
         case cautionDraftIncomplete = "caution_draft_incomplete"
         case completedNoRemoteShots = "completed_no_remote_shots"
         case possibleHydrationCandidate = "possible_future_hydration_candidate"
+        case notRecommendedForHydration = "not_recommended_for_hydration"
         case parentMissingLocally = "parent_property_missing_locally"
         case localShellPresent = "local_session_row_present"
     }
@@ -8662,10 +8664,16 @@ final class AppState: ObservableObject {
                 let classification = remoteOnlySessionDetailClassification(
                     remoteSession: remoteSession,
                     localPropertyExists: localProperty != nil,
+                    localSessionExists: localSession != nil,
                     remotePropertyExists: remotePropertiesByID[propertyKey] != nil,
+                    remoteShotCount: activeSessionShots.count,
+                    remoteObservationCount: remoteObservationCount,
+                    remoteShotsWithStoragePathCount: shotsWithStorage.count,
+                    remoteShotsMissingStoragePathCount: max(0, activeSessionShots.count - shotsWithStorage.count),
                     sessionCursor: sessionCursor
                 )
                 let labels = remoteOnlySessionDetailLabels(
+                    classification: classification.value,
                     localSessionExists: localSession != nil,
                     localPropertyExists: localProperty != nil,
                     appearsDeleted: appearsDeleted,
@@ -8719,7 +8727,12 @@ final class AppState: ObservableObject {
     private func remoteOnlySessionDetailClassification(
         remoteSession: RemoteOnlySessionDetailSessionRecord,
         localPropertyExists: Bool,
+        localSessionExists: Bool,
         remotePropertyExists: Bool,
+        remoteShotCount: Int,
+        remoteObservationCount: Int?,
+        remoteShotsWithStoragePathCount: Int,
+        remoteShotsMissingStoragePathCount: Int,
         sessionCursor: Date?
     ) -> (value: DivergenceDebtClassification, reason: String) {
         if remoteSession.deletedAt != nil {
@@ -8729,6 +8742,18 @@ final class AppState: ObservableObject {
            let updatedAt = remoteSession.updatedAt,
            updatedAt <= sessionCursor {
             return (.historicalRemoteOnly, "Remote session updated_at is not newer than the local session sync cursor.")
+        }
+        let normalizedStatus = remoteSession.status.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let remoteObservationScopeIsEmpty = remoteObservationCount == nil || remoteObservationCount == 0
+        if normalizedStatus == Session.Status.draft.rawValue,
+           remoteSession.completedAt == nil,
+           localPropertyExists,
+           !localSessionExists,
+           remoteShotCount == 0,
+           remoteObservationScopeIsEmpty,
+           remoteShotsWithStoragePathCount == 0,
+           remoteShotsMissingStoragePathCount == 0 {
+            return (.emptyRemoteDraftShell, "Remote draft has no completion timestamp, no local session row, no remote shots, no storage paths, and no queryable observations; hydration is not recommended.")
         }
         if localPropertyExists {
             return (.missingLocalHydration, "Remote session belongs to a local property but is absent from local session cache.")
@@ -8740,6 +8765,7 @@ final class AppState: ObservableObject {
     }
 
     private func remoteOnlySessionDetailLabels(
+        classification: DivergenceDebtClassification,
         localSessionExists: Bool,
         localPropertyExists: Bool,
         appearsDeleted: Bool,
@@ -8764,6 +8790,9 @@ final class AppState: ObservableObject {
         }
         if appearsCompleted && remoteShotCount > 0 && remoteShotsWithStoragePathCount > 0 && localPropertyExists {
             labels.append(.possibleHydrationCandidate)
+        }
+        if classification == .emptyRemoteDraftShell {
+            labels.append(.notRecommendedForHydration)
         }
         if !localPropertyExists {
             labels.append(.parentMissingLocally)

@@ -910,7 +910,89 @@ final class Phase2C07bMediaBackfillTests: XCTestCase {
     }
 
     @MainActor
-    func testRemoteOnlySessionDetailClassifiesLocalParentAsMissingHydration() throws {
+    func testRemoteOnlySessionDetailClassifiesEmptyDraftShellAsInformational() throws {
+        let activeOrganizationID = UUID()
+        let propertyID = UUID()
+        let remoteSessionID = UUID()
+        let fixture = try makeAppStateWithSingleSession(uploadStates: [], extraOrganizationIDs: [activeOrganizationID])
+        defer {
+            fixture.appState.shutdown()
+            try? FileManager.default.removeItem(at: fixture.storageRoot)
+        }
+
+        let localProperties = [Property(id: propertyID, orgId: activeOrganizationID, name: "Local")]
+        let report = fixture.appState._debugRemoteOnlySessionDetailReportForTests(
+            localProperties: localProperties,
+            localSessions: [],
+            remote: AppState.DebugRemoteOnlySessionDetailInput(
+                properties: localProperties,
+                sessions: [
+                    AppState.DebugRemoteOnlySessionInput(
+                        id: remoteSessionID,
+                        propertyID: propertyID,
+                        status: "draft",
+                        updatedAt: Date(timeIntervalSinceReferenceDate: 500)
+                    )
+                ],
+                observations: [],
+                orgID: activeOrganizationID
+            ),
+            activeOrganizationID: activeOrganizationID
+        )
+
+        let item = try XCTUnwrap(report.items.first)
+        XCTAssertEqual(item.classification, .emptyRemoteDraftShell)
+        XCTAssertTrue(item.parentPropertyExistsLocally)
+        XCTAssertEqual(item.localPropertyName, "Local")
+        XCTAssertEqual(item.remoteShotCount, 0)
+        XCTAssertEqual(item.remoteIssueObservationCount, 0)
+        XCTAssertTrue(item.labels.contains(.cautionDraftIncomplete))
+        XCTAssertTrue(item.labels.contains(.notRecommendedForHydration))
+    }
+
+    @MainActor
+    func testRemoteOnlySessionDetailDraftWithRemoteShotsStaysHydrationDebt() throws {
+        let activeOrganizationID = UUID()
+        let propertyID = UUID()
+        let remoteSessionID = UUID()
+        let fixture = try makeAppStateWithSingleSession(uploadStates: [], extraOrganizationIDs: [activeOrganizationID])
+        defer {
+            fixture.appState.shutdown()
+            try? FileManager.default.removeItem(at: fixture.storageRoot)
+        }
+
+        let localProperties = [Property(id: propertyID, orgId: activeOrganizationID, name: "Local")]
+        let report = fixture.appState._debugRemoteOnlySessionDetailReportForTests(
+            localProperties: localProperties,
+            localSessions: [],
+            remote: AppState.DebugRemoteOnlySessionDetailInput(
+                properties: localProperties,
+                sessions: [
+                    AppState.DebugRemoteOnlySessionInput(
+                        id: remoteSessionID,
+                        propertyID: propertyID,
+                        status: "draft",
+                        updatedAt: Date(timeIntervalSinceReferenceDate: 500)
+                    )
+                ],
+                shots: [
+                    AppState.DebugRemoteOnlySessionShotInput(sessionID: remoteSessionID)
+                ],
+                observations: [],
+                orgID: activeOrganizationID
+            ),
+            activeOrganizationID: activeOrganizationID
+        )
+
+        let item = try XCTUnwrap(report.items.first)
+        XCTAssertEqual(item.classification, .missingLocalHydration)
+        XCTAssertTrue(item.appearsDraft)
+        XCTAssertEqual(item.remoteShotCount, 1)
+        XCTAssertFalse(item.labels.contains(.notRecommendedForHydration))
+    }
+
+    @MainActor
+    func testRemoteOnlySessionDetailCompletedEmptySessionDoesNotClassifyAsShell() throws {
         let activeOrganizationID = UUID()
         let propertyID = UUID()
         let remoteSessionID = UUID()
@@ -931,9 +1013,11 @@ final class Phase2C07bMediaBackfillTests: XCTestCase {
                         id: remoteSessionID,
                         propertyID: propertyID,
                         status: "completed",
+                        completedAt: "2026-01-01T01:00:00Z",
                         updatedAt: Date(timeIntervalSinceReferenceDate: 500)
                     )
                 ],
+                observations: [],
                 orgID: activeOrganizationID
             ),
             activeOrganizationID: activeOrganizationID
@@ -941,8 +1025,9 @@ final class Phase2C07bMediaBackfillTests: XCTestCase {
 
         let item = try XCTUnwrap(report.items.first)
         XCTAssertEqual(item.classification, .missingLocalHydration)
-        XCTAssertTrue(item.parentPropertyExistsLocally)
-        XCTAssertEqual(item.localPropertyName, "Local")
+        XCTAssertTrue(item.appearsCompleted)
+        XCTAssertTrue(item.labels.contains(.completedNoRemoteShots))
+        XCTAssertFalse(item.labels.contains(.notRecommendedForHydration))
     }
 
     @MainActor
@@ -965,10 +1050,11 @@ final class Phase2C07bMediaBackfillTests: XCTestCase {
                     AppState.DebugRemoteOnlySessionInput(
                         id: remoteSessionID,
                         propertyID: missingPropertyID,
-                        status: "completed",
+                        status: "draft",
                         updatedAt: Date(timeIntervalSinceReferenceDate: 500)
                     )
                 ],
+                observations: [],
                 orgID: activeOrganizationID
             ),
             activeOrganizationID: activeOrganizationID
@@ -978,6 +1064,7 @@ final class Phase2C07bMediaBackfillTests: XCTestCase {
         XCTAssertEqual(item.classification, .trueParityDebt)
         XCTAssertFalse(item.parentPropertyExistsLocally)
         XCTAssertTrue(item.labels.contains(.parentMissingLocally))
+        XCTAssertFalse(item.labels.contains(.notRecommendedForHydration))
     }
 
     @MainActor
@@ -1013,6 +1100,95 @@ final class Phase2C07bMediaBackfillTests: XCTestCase {
         let item = try XCTUnwrap(report.items.first)
         XCTAssertTrue(item.appearsDraft)
         XCTAssertTrue(item.labels.contains(.cautionDraftIncomplete))
+    }
+
+    @MainActor
+    func testRemoteOnlySessionDetailDeletedDraftStaysHistorical() throws {
+        let activeOrganizationID = UUID()
+        let propertyID = UUID()
+        let remoteSessionID = UUID()
+        let fixture = try makeAppStateWithSingleSession(uploadStates: [], extraOrganizationIDs: [activeOrganizationID])
+        defer {
+            fixture.appState.shutdown()
+            try? FileManager.default.removeItem(at: fixture.storageRoot)
+        }
+
+        let localProperties = [Property(id: propertyID, orgId: activeOrganizationID, name: "Local")]
+        let report = fixture.appState._debugRemoteOnlySessionDetailReportForTests(
+            localProperties: localProperties,
+            localSessions: [],
+            remote: AppState.DebugRemoteOnlySessionDetailInput(
+                properties: localProperties,
+                sessions: [
+                    AppState.DebugRemoteOnlySessionInput(
+                        id: remoteSessionID,
+                        propertyID: propertyID,
+                        status: "draft",
+                        updatedAt: Date(timeIntervalSinceReferenceDate: 500),
+                        deletedAt: Date(timeIntervalSinceReferenceDate: 600)
+                    )
+                ],
+                observations: [],
+                orgID: activeOrganizationID
+            ),
+            activeOrganizationID: activeOrganizationID
+        )
+
+        let item = try XCTUnwrap(report.items.first)
+        XCTAssertEqual(item.classification, .historicalRemoteOnly)
+        XCTAssertTrue(item.appearsDeleted)
+        XCTAssertTrue(item.labels.contains(.historicalDeleted))
+        XCTAssertFalse(item.labels.contains(.notRecommendedForHydration))
+    }
+
+    @MainActor
+    func testRemoteOnlySessionDetailActionableHydrationCountDropsForShellsAndReportIncludesRows() throws {
+        let activeOrganizationID = UUID()
+        let propertyID = UUID()
+        let shellSessionID = UUID()
+        let actionableSessionID = UUID()
+        let fixture = try makeAppStateWithSingleSession(uploadStates: [], extraOrganizationIDs: [activeOrganizationID])
+        defer {
+            fixture.appState.shutdown()
+            try? FileManager.default.removeItem(at: fixture.storageRoot)
+        }
+
+        let localProperties = [Property(id: propertyID, orgId: activeOrganizationID, name: "Local")]
+        let report = fixture.appState._debugRemoteOnlySessionDetailReportForTests(
+            localProperties: localProperties,
+            localSessions: [],
+            remote: AppState.DebugRemoteOnlySessionDetailInput(
+                properties: localProperties,
+                sessions: [
+                    AppState.DebugRemoteOnlySessionInput(
+                        id: shellSessionID,
+                        propertyID: propertyID,
+                        status: "draft",
+                        updatedAt: Date(timeIntervalSinceReferenceDate: 500)
+                    ),
+                    AppState.DebugRemoteOnlySessionInput(
+                        id: actionableSessionID,
+                        propertyID: propertyID,
+                        status: "draft",
+                        updatedAt: Date(timeIntervalSinceReferenceDate: 600)
+                    )
+                ],
+                shots: [
+                    AppState.DebugRemoteOnlySessionShotInput(sessionID: actionableSessionID)
+                ],
+                observations: [],
+                orgID: activeOrganizationID
+            ),
+            activeOrganizationID: activeOrganizationID
+        )
+
+        XCTAssertEqual(report.items.filter { $0.classification == .emptyRemoteDraftShell }.count, 1)
+        XCTAssertEqual(report.items.filter { $0.classification == .missingLocalHydration }.count, 1)
+
+        let text = AppState.remoteOnlySessionDetailReportText(report)
+        XCTAssertTrue(text.contains(shellSessionID.uuidString))
+        XCTAssertTrue(text.contains("classification: empty_remote_draft_shell"))
+        XCTAssertTrue(text.contains("not_recommended_for_hydration"))
     }
 
     @MainActor

@@ -6440,6 +6440,7 @@ private struct DebugRemoteOnlySessionDetailSnapshot {
     let activeOrganizationID: String
     let remoteScopeAvailable: String
     let remoteOnlySessionCount: String
+    let emptyRemoteDraftShellCount: String
     let missingLocalHydrationCount: String
     let historicalRemoteOnlyCount: String
     let trueParityDebtCount: String
@@ -6453,6 +6454,7 @@ private struct DebugRemoteOnlySessionDetailSnapshot {
         activeOrganizationID = report.activeOrganizationID?.uuidString ?? "none"
         remoteScopeAvailable = report.remoteScopeAvailable ? "yes" : "no"
         remoteOnlySessionCount = String(report.items.count)
+        emptyRemoteDraftShellCount = String(report.items.filter { $0.classification == .emptyRemoteDraftShell }.count)
         missingLocalHydrationCount = String(report.items.filter { $0.classification == .missingLocalHydration }.count)
         historicalRemoteOnlyCount = String(report.items.filter { $0.classification == .historicalRemoteOnly }.count)
         trueParityDebtCount = String(report.items.filter { $0.classification == .trueParityDebt }.count)
@@ -6982,6 +6984,7 @@ private struct DebugLocalDiagnosticsView: View {
                     diagnosticRow("Active Org", snapshot.activeOrganizationID)
                     diagnosticRow("Remote Scope", snapshot.remoteScopeAvailable)
                     diagnosticRow("Remote-Only Sessions", snapshot.remoteOnlySessionCount)
+                    diagnosticRow("Empty Remote Draft Shells", snapshot.emptyRemoteDraftShellCount)
                     diagnosticRow("Missing Local Hydration", snapshot.missingLocalHydrationCount)
                     diagnosticRow("Historical Remote-Only", snapshot.historicalRemoteOnlyCount)
                     diagnosticRow("True Parity Debt", snapshot.trueParityDebtCount)
