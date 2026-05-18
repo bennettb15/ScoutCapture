@@ -171,6 +171,38 @@ final class Phase2C19CanonicalReadinessTests: XCTestCase {
         XCTAssertEqual(report.sections.first { $0.id == "export_scoutprocess" }?.status, .block)
     }
 
+    func testPropertyOpenFreshnessIsScopedPartialWhileBroadCanonicalReadsRemainNotReady() {
+        let report = cleanReport()
+        let uxFreshness = report.sections.first { $0.id == "ux_freshness" }
+        let freshnessRow = uxFreshness?.rows.first { $0.id == "freshness_check" }
+        let conflictRow = uxFreshness?.rows.first { $0.id == "conflict_rules" }
+
+        XCTAssertEqual(report.overallStatus, .notReadyForBroadCanonicalReads)
+        XCTAssertEqual(uxFreshness?.status, .block)
+        XCTAssertEqual(freshnessRow?.status, .warn)
+        XCTAssertEqual(freshnessRow?.value, "scoped property-only implemented")
+        XCTAssertEqual(
+            freshnessRow?.detail,
+            "Checks Supabase property row on open without auto-merge; broader child metadata freshness remains deferred."
+        )
+        XCTAssertNotEqual(freshnessRow?.value, "not implemented")
+        XCTAssertEqual(conflictRow?.status, .block)
+        XCTAssertEqual(conflictRow?.value, "deferred")
+    }
+
+    func testCanonicalReadinessReportTextDescribesScopedPropertyOpenFreshness() {
+        let report = cleanReport()
+        let text = AppState.canonicalReadinessReportText(report)
+
+        XCTAssertTrue(text.contains("Property open freshness check"))
+        XCTAssertTrue(text.contains("scoped property-only implemented"))
+        XCTAssertTrue(text.contains("without auto-merge"))
+        XCTAssertTrue(text.contains("broader child metadata freshness remains deferred"))
+        XCTAssertTrue(text.contains("Web portal conflict rules"))
+        XCTAssertTrue(text.contains("deferred"))
+        XCTAssertFalse(text.contains("Property open freshness check | block | not implemented"))
+    }
+
     func testCanonicalReadinessReportTextRedactsSensitiveValues() {
         let report = AppState.CanonicalReadinessReport(
             inspectedAt: Date(timeIntervalSinceReferenceDate: 400),

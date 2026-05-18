@@ -9460,9 +9460,9 @@ final class AppState: ObservableObject {
             id: "ux_freshness",
             title: "UX/Freshness Readiness",
             status: .block,
-            summary: "Blocked/partial until cached property opens perform remote freshness checks.",
+            summary: "Partial: property-open freshness exists for property rows; broader child metadata freshness and portal conflict rules remain blocked.",
             rows: [
-                canonicalRow("freshness_check", "Property open freshness check", .block, "not implemented", "Cached local property opens do not yet guarantee online metadata freshness."),
+                canonicalRow("freshness_check", "Property open freshness check", .warn, "scoped property-only implemented", "Checks Supabase property row on open without auto-merge; broader child metadata freshness remains deferred."),
                 canonicalRow("conflict_rules", "Web portal conflict rules", .block, "deferred", "Future portal edits need freshness and conflict UX before broad canonical reads.")
             ]
         )
