@@ -87,6 +87,27 @@ struct BackendFeatureFlags {
     let mediaSupabaseUploadEnabled: Bool
     let syncDeltaEnabled: Bool
     let sessionCoordinationEnabled: Bool
+    let sessionSnapshotShadowWriteEnabled: Bool
+
+    init(
+        supabaseEnabled: Bool,
+        shadowWriteEnabled: Bool,
+        supabaseReadEnabled: Bool,
+        supabasePropertyReadEnabled: Bool,
+        mediaSupabaseUploadEnabled: Bool,
+        syncDeltaEnabled: Bool,
+        sessionCoordinationEnabled: Bool,
+        sessionSnapshotShadowWriteEnabled: Bool = false
+    ) {
+        self.supabaseEnabled = supabaseEnabled
+        self.shadowWriteEnabled = shadowWriteEnabled
+        self.supabaseReadEnabled = supabaseReadEnabled
+        self.supabasePropertyReadEnabled = supabasePropertyReadEnabled
+        self.mediaSupabaseUploadEnabled = mediaSupabaseUploadEnabled
+        self.syncDeltaEnabled = syncDeltaEnabled
+        self.sessionCoordinationEnabled = sessionCoordinationEnabled
+        self.sessionSnapshotShadowWriteEnabled = sessionSnapshotShadowWriteEnabled
+    }
 
     // The cutover phase is derived from the existing backend flags. Property-list
     // remote reads remain separately controlled by `supabase_property_read_enabled`
@@ -118,7 +139,8 @@ struct BackendFeatureFlags {
             supabasePropertyReadEnabled: Self.boolValue(for: "supabase_property_read_enabled", bundle: bundle, userDefaults: userDefaults),
             mediaSupabaseUploadEnabled: Self.boolValue(for: "media_supabase_upload_enabled", bundle: bundle, userDefaults: userDefaults),
             syncDeltaEnabled: Self.boolValue(for: "sync_delta_enabled", bundle: bundle, userDefaults: userDefaults),
-            sessionCoordinationEnabled: Self.boolValue(for: "session_coordination_enabled", bundle: bundle, userDefaults: userDefaults)
+            sessionCoordinationEnabled: Self.boolValue(for: "session_coordination_enabled", bundle: bundle, userDefaults: userDefaults),
+            sessionSnapshotShadowWriteEnabled: Self.boolValue(for: "session_snapshot_shadow_write_enabled", bundle: bundle, userDefaults: userDefaults)
         )
     }
 
@@ -216,6 +238,128 @@ final class AppState: ObservableObject {
     typealias PropertyRemoteInsertOverride = (Property) async throws -> Void
     typealias SessionShadowWriteOverride = (Property, Session, SessionMetadata) async throws -> Void
     typealias ShotMetadataWriteOverride = (UUID, UUID, SupabaseShotRichMetadataPayload, Bool) async throws -> Void
+    typealias SessionSnapshotStorageUploadOverride = (SessionSnapshotStorageObject) async throws -> Void
+    typealias SessionSnapshotRowInsertOverride = (SessionSnapshotUploadRow) async throws -> Void
+
+    enum SessionSnapshotKind: String, Codable, CaseIterable, Equatable {
+        case draft
+        case completed
+        case export
+        case delivery
+        case manual
+    }
+
+    enum SessionSnapshotUploadOutcome: String, Equatable {
+        case disabled
+        case unavailable
+        case succeeded
+        case failed
+        case orphanRisk
+    }
+
+    struct SessionSnapshotUploadResult: Equatable {
+        let outcome: SessionSnapshotUploadOutcome
+        let snapshotID: UUID?
+        let sessionID: UUID?
+        let propertyID: UUID?
+        let storagePath: String?
+        let message: String?
+    }
+
+    struct SessionSnapshotStorageObject: Equatable {
+        let bucket: String
+        let path: String
+        let payloadData: Data
+        let contentType: String
+        let payloadSHA256: String
+    }
+
+    struct SessionSnapshotUploadManifest: Codable, Equatable {
+        let media: [SessionSnapshotMediaManifestItem]
+    }
+
+    struct SessionSnapshotUploadRow: Codable, Equatable, Identifiable {
+        let id: UUID
+        let orgID: UUID
+        let propertyID: UUID
+        let sessionID: UUID
+        let snapshotKind: String
+        let snapshotSchemaVersion: Int
+        let sessionMetadataSchemaVersion: Int?
+        let trigger: String
+        let sessionStatus: String
+        let isSealed: Bool
+        let exportedAt: Date?
+        let firstDeliveredAt: Date?
+        let reExportExpiresAt: Date?
+        let payloadStorageBucket: String
+        let payloadStoragePath: String
+        let payloadByteSize: Int
+        let rawSessionJSONSHA256: String
+        let snapshotPayloadSHA256: String
+        let manifest: SessionSnapshotUploadManifest
+        let shotCount: Int
+        let issueCount: Int
+        let guidedCount: Int
+        let mediaManifestCount: Int
+        let missingLocalOriginalsCount: Int
+        let supabaseStorageMetadataCount: Int
+        let createdBy: UUID?
+        let updatedBy: UUID?
+
+        enum CodingKeys: String, CodingKey {
+            case id
+            case orgID = "org_id"
+            case propertyID = "property_id"
+            case sessionID = "session_id"
+            case snapshotKind = "snapshot_kind"
+            case snapshotSchemaVersion = "snapshot_schema_version"
+            case sessionMetadataSchemaVersion = "session_metadata_schema_version"
+            case trigger
+            case sessionStatus = "session_status"
+            case isSealed = "is_sealed"
+            case exportedAt = "exported_at"
+            case firstDeliveredAt = "first_delivered_at"
+            case reExportExpiresAt = "re_export_expires_at"
+            case payloadStorageBucket = "payload_storage_bucket"
+            case payloadStoragePath = "payload_storage_path"
+            case payloadByteSize = "payload_byte_size"
+            case rawSessionJSONSHA256 = "raw_session_json_sha256"
+            case snapshotPayloadSHA256 = "snapshot_payload_sha256"
+            case manifest
+            case shotCount = "shot_count"
+            case issueCount = "issue_count"
+            case guidedCount = "guided_count"
+            case mediaManifestCount = "media_manifest_count"
+            case missingLocalOriginalsCount = "missing_local_originals_count"
+            case supabaseStorageMetadataCount = "supabase_storage_metadata_count"
+            case createdBy = "created_by"
+            case updatedBy = "updated_by"
+        }
+    }
+
+    enum SessionSnapshotUploadError: LocalizedError, Equatable {
+        case disabled
+        case missingSupabaseClient
+        case missingOrgID
+        case notPreviewable(String)
+        case remoteUnavailable(String)
+
+        var errorDescription: String? {
+            switch self {
+            case .disabled:
+                return "Session snapshot shadow-write is disabled."
+            case .missingSupabaseClient:
+                return "Supabase client is unavailable for session snapshot upload."
+            case .missingOrgID:
+                return "Session snapshot upload requires an org_id."
+            case .notPreviewable(let reason):
+                return "Session snapshot is not previewable: \(reason)"
+            case .remoteUnavailable(let reason):
+                return "Session snapshot remote table or bucket is unavailable: \(reason)"
+            }
+        }
+    }
     struct CaptureProfileMaintenanceBackfillResult: Equatable {
         var localPropertiesFound: Int = 0
         var propertiesScanned: Int = 0
@@ -294,11 +438,31 @@ final class AppState: ObservableObject {
         var captureProfile = ShadowWriteEntityDiagnostics()
     }
 
+    struct SessionSnapshotUploadDiagnostics: Equatable {
+        var flagEnabled: Bool = false
+        var remoteAvailability: String = "not_checked"
+        var attemptedCount: Int = 0
+        var successCount: Int = 0
+        var failureCount: Int = 0
+        var orphanRiskCount: Int = 0
+        var lastAttemptAt: Date?
+        var lastSuccessAt: Date?
+        var lastFailureAt: Date?
+        var lastFailureMessage: String?
+        var lastSnapshotID: UUID?
+        var lastPropertyID: UUID?
+        var lastSessionID: UUID?
+        var lastUploadPath: String?
+        var lastKind: String?
+        var lastTrigger: String?
+    }
+
     struct LocalDiagnosticsState: Equatable {
         var offlineReplay = OfflineReplayDiagnostics()
         var offlineQueue = OfflineQueueDiagnostics()
         var media = MediaDiagnostics()
         var shadowWrites = ShadowWriteDiagnostics()
+        var sessionSnapshotUpload = SessionSnapshotUploadDiagnostics()
         var captureProfileMaintenance: CaptureProfileMaintenanceBackfillResult?
         var lastError: DiagnosticErrorSnapshot?
     }
@@ -3526,6 +3690,8 @@ final class AppState: ObservableObject {
     private let propertyRemoteInsertOverride: PropertyRemoteInsertOverride?
     private let sessionShadowWriteOverride: SessionShadowWriteOverride?
     private let shotMetadataWriteOverride: ShotMetadataWriteOverride?
+    private let sessionSnapshotStorageUploadOverride: SessionSnapshotStorageUploadOverride?
+    private let sessionSnapshotRowInsertOverride: SessionSnapshotRowInsertOverride?
     private let captureProfileBackfillFetchOverride: CaptureProfileBackfillFetchOverride?
     private let captureProfileRemotePropertyIDsFetchOverride: CaptureProfileRemotePropertyIDsFetchOverride?
     private let captureProfileBackfillEnsureOverride: CaptureProfileBackfillEnsureOverride?
@@ -3571,6 +3737,7 @@ final class AppState: ObservableObject {
     // Keep a short grace for non-empty in-memory states, but do not stall first-load empty hubs.
     private let startupFallbackGraceWindow: TimeInterval = 25.0
     private let supabaseOperationalMediaBucket = "scoutcapture-originals"
+    private let sessionSnapshotStorageBucket = "scoutcapture-session-snapshots"
     private let maximumSupabaseMediaUploadAttempts = 5
     private let failedSupabaseMediaRetryCooldown: TimeInterval = 30
     private var inFlightSupabaseMediaOperations: Set<String> = []
@@ -3869,6 +4036,8 @@ final class AppState: ObservableObject {
         propertyRemoteInsertOverride: PropertyRemoteInsertOverride? = nil,
         sessionShadowWriteOverride: SessionShadowWriteOverride? = nil,
         shotMetadataWriteOverride: ShotMetadataWriteOverride? = nil,
+        sessionSnapshotStorageUploadOverride: SessionSnapshotStorageUploadOverride? = nil,
+        sessionSnapshotRowInsertOverride: SessionSnapshotRowInsertOverride? = nil,
         captureProfileBackfillFetchOverride: CaptureProfileBackfillFetchOverride? = nil,
         captureProfileRemotePropertyIDsFetchOverride: CaptureProfileRemotePropertyIDsFetchOverride? = nil,
         captureProfileBackfillEnsureOverride: CaptureProfileBackfillEnsureOverride? = nil,
@@ -3891,6 +4060,8 @@ final class AppState: ObservableObject {
         self.propertyRemoteInsertOverride = propertyRemoteInsertOverride
         self.sessionShadowWriteOverride = sessionShadowWriteOverride
         self.shotMetadataWriteOverride = shotMetadataWriteOverride
+        self.sessionSnapshotStorageUploadOverride = sessionSnapshotStorageUploadOverride
+        self.sessionSnapshotRowInsertOverride = sessionSnapshotRowInsertOverride
         self.captureProfileBackfillFetchOverride = captureProfileBackfillFetchOverride
         self.captureProfileRemotePropertyIDsFetchOverride = captureProfileRemotePropertyIDsFetchOverride
         self.captureProfileBackfillEnsureOverride = captureProfileBackfillEnsureOverride
@@ -10008,12 +10179,31 @@ final class AppState: ObservableObject {
         let mediaManifest: [SessionSnapshotMediaManifestItem]
     }
 
+    private struct SessionSnapshotBuildResult {
+        let envelope: SessionSnapshotEnvelope
+        let payloadData: Data
+    }
+
     private func makeSessionSnapshotEnvelope(
         propertyID: UUID,
         session: Session,
         generatedAt: Date,
         trigger: String
     ) throws -> SessionSnapshotEnvelope {
+        try makeSessionSnapshotBuildResult(
+            propertyID: propertyID,
+            session: session,
+            generatedAt: generatedAt,
+            trigger: trigger
+        ).envelope
+    }
+
+    private func makeSessionSnapshotBuildResult(
+        propertyID: UUID,
+        session: Session,
+        generatedAt: Date,
+        trigger: String
+    ) throws -> SessionSnapshotBuildResult {
         let sessionJSONURL = localStore.sessionJSONURL(propertyID: propertyID, sessionID: session.id)
         guard FileManager.default.fileExists(atPath: sessionJSONURL.path),
               let rawData = try? Data(contentsOf: sessionJSONURL) else {
@@ -10079,7 +10269,7 @@ final class AppState: ObservableObject {
             throw SessionSnapshotPreviewError.checksumGenerationFailed
         }
 
-        return SessionSnapshotEnvelope(
+        let envelope = SessionSnapshotEnvelope(
             id: session.id,
             snapshotSchemaVersion: payload.snapshotSchemaVersion,
             sessionMetadataSchemaVersion: payload.sessionMetadataSchemaVersion,
@@ -10108,6 +10298,374 @@ final class AppState: ObservableObject {
             snapshotPayloadByteCount: payloadData.count,
             mediaManifest: manifest
         )
+        return SessionSnapshotBuildResult(envelope: envelope, payloadData: payloadData)
+    }
+
+    nonisolated static func sessionSnapshotStoragePath(
+        orgID: UUID,
+        propertyID: UUID,
+        sessionID: UUID,
+        snapshotKind: SessionSnapshotKind,
+        snapshotID: UUID
+    ) -> String {
+        [
+            "orgs/\(orgID.uuidString.lowercased())",
+            "properties/\(propertyID.uuidString.lowercased())",
+            "sessions/\(sessionID.uuidString.lowercased())",
+            "snapshots/\(snapshotKind.rawValue)",
+            "\(snapshotID.uuidString.lowercased()).json"
+        ].joined(separator: "/")
+    }
+
+    @discardableResult
+    func uploadCurrentSessionSnapshotShadowWrite(
+        kind: SessionSnapshotKind = .manual,
+        trigger: String = "manual_diagnostic"
+    ) async -> SessionSnapshotUploadResult {
+        guard let propertyID = selectedPropertyID,
+              let session = currentSession,
+              session.propertyID == propertyID else {
+            let message = "No active local session is available for manual session snapshot upload."
+            recordSessionSnapshotUploadFailure(
+                outcome: .failed,
+                snapshotID: nil,
+                propertyID: selectedPropertyID,
+                sessionID: currentSession?.id,
+                path: nil,
+                kind: kind,
+                trigger: trigger,
+                error: SessionSnapshotUploadError.notPreviewable(message)
+            )
+            return SessionSnapshotUploadResult(
+                outcome: .failed,
+                snapshotID: nil,
+                sessionID: currentSession?.id,
+                propertyID: selectedPropertyID,
+                storagePath: nil,
+                message: message
+            )
+        }
+        return await uploadSessionSnapshotShadowWrite(
+            propertyID: propertyID,
+            sessionID: session.id,
+            kind: kind,
+            trigger: trigger
+        )
+    }
+
+    @discardableResult
+    func uploadSessionSnapshotShadowWrite(
+        propertyID: UUID,
+        sessionID: UUID,
+        kind: SessionSnapshotKind = .manual,
+        trigger: String = "manual_diagnostic",
+        generatedAt: Date = Date()
+    ) async -> SessionSnapshotUploadResult {
+        guard backendFeatureFlags.sessionSnapshotShadowWriteEnabled else {
+            mutateLocalDiagnostics { diagnostics in
+                diagnostics.sessionSnapshotUpload.flagEnabled = false
+                diagnostics.sessionSnapshotUpload.remoteAvailability = "disabled"
+                diagnostics.sessionSnapshotUpload.lastKind = kind.rawValue
+                diagnostics.sessionSnapshotUpload.lastTrigger = trigger
+            }
+            return SessionSnapshotUploadResult(
+                outcome: .disabled,
+                snapshotID: nil,
+                sessionID: sessionID,
+                propertyID: propertyID,
+                storagePath: nil,
+                message: SessionSnapshotUploadError.disabled.localizedDescription
+            )
+        }
+
+        let snapshotID = UUID()
+        var storagePath: String?
+        recordSessionSnapshotUploadAttempt(
+            snapshotID: snapshotID,
+            propertyID: propertyID,
+            sessionID: sessionID,
+            path: nil,
+            kind: kind,
+            trigger: trigger
+        )
+
+        do {
+            let session = try localSessionForSnapshotUpload(propertyID: propertyID, sessionID: sessionID)
+            let buildResult = try makeSessionSnapshotBuildResult(
+                propertyID: propertyID,
+                session: session,
+                generatedAt: generatedAt,
+                trigger: trigger
+            )
+            let envelope = buildResult.envelope
+            guard let orgID = envelope.orgID else {
+                throw SessionSnapshotUploadError.missingOrgID
+            }
+
+            storagePath = Self.sessionSnapshotStoragePath(
+                orgID: orgID,
+                propertyID: propertyID,
+                sessionID: sessionID,
+                snapshotKind: kind,
+                snapshotID: snapshotID
+            )
+            let storageObject = SessionSnapshotStorageObject(
+                bucket: sessionSnapshotStorageBucket,
+                path: storagePath ?? "",
+                payloadData: buildResult.payloadData,
+                contentType: "application/json",
+                payloadSHA256: envelope.snapshotPayloadSHA256
+            )
+            let uploadRow = makeSessionSnapshotUploadRow(
+                snapshotID: snapshotID,
+                kind: kind,
+                orgID: orgID,
+                envelope: envelope,
+                storagePath: storageObject.path
+            )
+
+            try await uploadSessionSnapshotStorageObject(storageObject)
+            do {
+                try await insertSessionSnapshotRow(uploadRow)
+            } catch {
+                let outcome: SessionSnapshotUploadOutcome = isSessionSnapshotRemoteUnavailable(error) ? .unavailable : .orphanRisk
+                recordSessionSnapshotUploadFailure(
+                    outcome: outcome,
+                    snapshotID: snapshotID,
+                    propertyID: propertyID,
+                    sessionID: sessionID,
+                    path: storageObject.path,
+                    kind: kind,
+                    trigger: trigger,
+                    error: error,
+                    orphanRisk: true
+                )
+                return SessionSnapshotUploadResult(
+                    outcome: outcome,
+                    snapshotID: snapshotID,
+                    sessionID: sessionID,
+                    propertyID: propertyID,
+                    storagePath: storageObject.path,
+                    message: Self.diagnosticsPreviewText(error.localizedDescription, maxLength: 160)
+                )
+            }
+
+            recordSessionSnapshotUploadSuccess(
+                snapshotID: snapshotID,
+                propertyID: propertyID,
+                sessionID: sessionID,
+                path: storageObject.path,
+                kind: kind,
+                trigger: trigger
+            )
+            return SessionSnapshotUploadResult(
+                outcome: .succeeded,
+                snapshotID: snapshotID,
+                sessionID: sessionID,
+                propertyID: propertyID,
+                storagePath: storageObject.path,
+                message: nil
+            )
+        } catch {
+            let outcome: SessionSnapshotUploadOutcome = isSessionSnapshotRemoteUnavailable(error) ? .unavailable : .failed
+            recordSessionSnapshotUploadFailure(
+                outcome: outcome,
+                snapshotID: snapshotID,
+                propertyID: propertyID,
+                sessionID: sessionID,
+                path: storagePath,
+                kind: kind,
+                trigger: trigger,
+                error: error
+            )
+            return SessionSnapshotUploadResult(
+                outcome: outcome,
+                snapshotID: snapshotID,
+                sessionID: sessionID,
+                propertyID: propertyID,
+                storagePath: storagePath,
+                message: Self.diagnosticsPreviewText(error.localizedDescription, maxLength: 160)
+            )
+        }
+    }
+
+    private func localSessionForSnapshotUpload(propertyID: UUID, sessionID: UUID) throws -> Session {
+        if let currentSession, currentSession.propertyID == propertyID, currentSession.id == sessionID {
+            return currentSession
+        }
+        if let session = (try? localStore.fetchSessionsForCacheBuild(propertyID: propertyID))
+            .flatMap({ sessions in sessions.first { $0.id == sessionID } }) {
+            return session
+        }
+        throw SessionSnapshotUploadError.notPreviewable("local_session_not_found")
+    }
+
+    private func makeSessionSnapshotUploadRow(
+        snapshotID: UUID,
+        kind: SessionSnapshotKind,
+        orgID: UUID,
+        envelope: SessionSnapshotEnvelope,
+        storagePath: String
+    ) -> SessionSnapshotUploadRow {
+        SessionSnapshotUploadRow(
+            id: snapshotID,
+            orgID: orgID,
+            propertyID: envelope.propertyID,
+            sessionID: envelope.sessionID,
+            snapshotKind: kind.rawValue,
+            snapshotSchemaVersion: envelope.snapshotSchemaVersion,
+            sessionMetadataSchemaVersion: envelope.sessionMetadataSchemaVersion,
+            trigger: envelope.trigger,
+            sessionStatus: envelope.status.rawValue,
+            isSealed: envelope.isSealed,
+            exportedAt: envelope.exportedAt,
+            firstDeliveredAt: envelope.firstDeliveredAt,
+            reExportExpiresAt: envelope.reExportExpiresAt,
+            payloadStorageBucket: sessionSnapshotStorageBucket,
+            payloadStoragePath: storagePath,
+            payloadByteSize: envelope.snapshotPayloadByteCount,
+            rawSessionJSONSHA256: envelope.rawSessionJSONSHA256,
+            snapshotPayloadSHA256: envelope.snapshotPayloadSHA256,
+            manifest: SessionSnapshotUploadManifest(media: envelope.mediaManifest),
+            shotCount: envelope.shotCount,
+            issueCount: envelope.issueCount,
+            guidedCount: envelope.guidedCount,
+            mediaManifestCount: envelope.mediaManifestCount,
+            missingLocalOriginalsCount: envelope.missingLocalOriginalsCount,
+            supabaseStorageMetadataCount: envelope.supabaseStorageMetadataCount,
+            createdBy: authenticatedSupabaseUser?.id,
+            updatedBy: authenticatedSupabaseUser?.id
+        )
+    }
+
+    private func uploadSessionSnapshotStorageObject(_ object: SessionSnapshotStorageObject) async throws {
+        if let sessionSnapshotStorageUploadOverride {
+            try await sessionSnapshotStorageUploadOverride(object)
+            return
+        }
+        guard backendFeatureFlags.supabaseEnabled,
+              let client = supabaseClient else {
+            throw SessionSnapshotUploadError.missingSupabaseClient
+        }
+        _ = try await client.storage.from(object.bucket).upload(
+            object.path,
+            data: object.payloadData,
+            options: FileOptions(
+                cacheControl: "31536000",
+                contentType: object.contentType,
+                upsert: false
+            )
+        )
+    }
+
+    private func insertSessionSnapshotRow(_ row: SessionSnapshotUploadRow) async throws {
+        if let sessionSnapshotRowInsertOverride {
+            try await sessionSnapshotRowInsertOverride(row)
+            return
+        }
+        guard backendFeatureFlags.supabaseEnabled,
+              let client = supabaseClient else {
+            throw SessionSnapshotUploadError.missingSupabaseClient
+        }
+        try await client
+            .from("session_snapshots")
+            .insert(row, returning: .minimal)
+            .execute()
+    }
+
+    private func isSessionSnapshotRemoteUnavailable(_ error: Error) -> Bool {
+        if let snapshotError = error as? SessionSnapshotUploadError {
+            switch snapshotError {
+            case .remoteUnavailable, .missingSupabaseClient:
+                return true
+            case .disabled, .missingOrgID, .notPreviewable:
+                return false
+            }
+        }
+        let message = error.localizedDescription.lowercased()
+        return message.contains("session_snapshots") ||
+            message.contains("scoutcapture-session-snapshots") ||
+            message.contains("bucket") ||
+            message.contains("not found") ||
+            message.contains("does not exist") ||
+            message.contains("schema cache") ||
+            message.contains("pgrst205") ||
+            message.contains("404")
+    }
+
+    private func recordSessionSnapshotUploadAttempt(
+        snapshotID: UUID,
+        propertyID: UUID,
+        sessionID: UUID,
+        path: String?,
+        kind: SessionSnapshotKind,
+        trigger: String
+    ) {
+        mutateLocalDiagnostics { diagnostics in
+            diagnostics.sessionSnapshotUpload.flagEnabled = true
+            diagnostics.sessionSnapshotUpload.remoteAvailability = "not_checked"
+            diagnostics.sessionSnapshotUpload.attemptedCount += 1
+            diagnostics.sessionSnapshotUpload.lastAttemptAt = Date()
+            diagnostics.sessionSnapshotUpload.lastSnapshotID = snapshotID
+            diagnostics.sessionSnapshotUpload.lastPropertyID = propertyID
+            diagnostics.sessionSnapshotUpload.lastSessionID = sessionID
+            diagnostics.sessionSnapshotUpload.lastUploadPath = path
+            diagnostics.sessionSnapshotUpload.lastKind = kind.rawValue
+            diagnostics.sessionSnapshotUpload.lastTrigger = trigger
+        }
+    }
+
+    private func recordSessionSnapshotUploadSuccess(
+        snapshotID: UUID,
+        propertyID: UUID,
+        sessionID: UUID,
+        path: String,
+        kind: SessionSnapshotKind,
+        trigger: String
+    ) {
+        mutateLocalDiagnostics { diagnostics in
+            diagnostics.sessionSnapshotUpload.flagEnabled = true
+            diagnostics.sessionSnapshotUpload.remoteAvailability = "available"
+            diagnostics.sessionSnapshotUpload.successCount += 1
+            diagnostics.sessionSnapshotUpload.lastSuccessAt = Date()
+            diagnostics.sessionSnapshotUpload.lastSnapshotID = snapshotID
+            diagnostics.sessionSnapshotUpload.lastPropertyID = propertyID
+            diagnostics.sessionSnapshotUpload.lastSessionID = sessionID
+            diagnostics.sessionSnapshotUpload.lastUploadPath = path
+            diagnostics.sessionSnapshotUpload.lastKind = kind.rawValue
+            diagnostics.sessionSnapshotUpload.lastTrigger = trigger
+            diagnostics.sessionSnapshotUpload.lastFailureMessage = nil
+        }
+    }
+
+    private func recordSessionSnapshotUploadFailure(
+        outcome: SessionSnapshotUploadOutcome,
+        snapshotID: UUID?,
+        propertyID: UUID?,
+        sessionID: UUID?,
+        path: String?,
+        kind: SessionSnapshotKind,
+        trigger: String,
+        error: Error,
+        orphanRisk: Bool = false
+    ) {
+        recordDiagnosticsError(error)
+        mutateLocalDiagnostics { diagnostics in
+            diagnostics.sessionSnapshotUpload.flagEnabled = self.backendFeatureFlags.sessionSnapshotShadowWriteEnabled
+            diagnostics.sessionSnapshotUpload.remoteAvailability = outcome == .unavailable ? "unavailable" : diagnostics.sessionSnapshotUpload.remoteAvailability
+            diagnostics.sessionSnapshotUpload.failureCount += 1
+            if orphanRisk {
+                diagnostics.sessionSnapshotUpload.orphanRiskCount += 1
+            }
+            diagnostics.sessionSnapshotUpload.lastFailureAt = Date()
+            diagnostics.sessionSnapshotUpload.lastFailureMessage = Self.diagnosticsPreviewText(error.localizedDescription, maxLength: 160)
+            diagnostics.sessionSnapshotUpload.lastSnapshotID = snapshotID
+            diagnostics.sessionSnapshotUpload.lastPropertyID = propertyID
+            diagnostics.sessionSnapshotUpload.lastSessionID = sessionID
+            diagnostics.sessionSnapshotUpload.lastUploadPath = path
+            diagnostics.sessionSnapshotUpload.lastKind = kind.rawValue
+            diagnostics.sessionSnapshotUpload.lastTrigger = trigger
+        }
     }
 
     private static func makeSessionSnapshotMediaManifestItem(
@@ -11265,6 +11823,37 @@ final class AppState: ObservableObject {
         lines.append("Redaction Notes")
         lines.append("- Report rows intentionally omit raw session.json text, local paths, signed URLs, auth tokens, storage object paths, and media bytes.")
         lines.append("- Media manifest is represented by counts and per-shot provenance in memory only; the copyable report stays count-based.")
+        return lines.joined(separator: "\n")
+    }
+
+    nonisolated static func sessionSnapshotUploadReportText(_ diagnostics: SessionSnapshotUploadDiagnostics) -> String {
+        var lines: [String] = []
+        lines.append("ScoutCapture Local Health - Session Snapshot Upload")
+        lines.append("Shadow-write only diagnostics. This report does not switch canonical reads, hydrate sessions or shots, download media, relink files, repair data, change export behavior, change sealing/completion behavior, change sync, change media recovery, change iCloud fallback, apply migrations, delete local/remote data, or include media payloads.")
+        lines.append("")
+        lines.append("State")
+        lines.append("- flag_enabled: \(diagnostics.flagEnabled)")
+        lines.append("- remote_availability: \(diagnostics.remoteAvailability)")
+        lines.append("- attempted_count: \(diagnostics.attemptedCount)")
+        lines.append("- success_count: \(diagnostics.successCount)")
+        lines.append("- failure_count: \(diagnostics.failureCount)")
+        lines.append("- orphan_risk_count: \(diagnostics.orphanRiskCount)")
+        lines.append("- last_attempt_at: \(diagnostics.lastAttemptAt?.formatted(date: .abbreviated, time: .standard) ?? "none")")
+        lines.append("- last_success_at: \(diagnostics.lastSuccessAt?.formatted(date: .abbreviated, time: .standard) ?? "none")")
+        lines.append("- last_failure_at: \(diagnostics.lastFailureAt?.formatted(date: .abbreviated, time: .standard) ?? "none")")
+        lines.append("- last_failure: \(diagnosticsPreviewText(diagnostics.lastFailureMessage, maxLength: 160) ?? "none")")
+        lines.append("")
+        lines.append("Last Sanitized Attempt")
+        lines.append("- snapshot_id: \(diagnostics.lastSnapshotID?.uuidString ?? "none")")
+        lines.append("- property_id: \(diagnostics.lastPropertyID?.uuidString ?? "none")")
+        lines.append("- session_id: \(diagnostics.lastSessionID?.uuidString ?? "none")")
+        lines.append("- snapshot_kind: \(diagnosticsPreviewText(diagnostics.lastKind, maxLength: 40) ?? "none")")
+        lines.append("- trigger: \(diagnosticsPreviewText(diagnostics.lastTrigger, maxLength: 60) ?? "none")")
+        lines.append("- payload_storage_path_present: \(trimmedNonEmpty(diagnostics.lastUploadPath) != nil)")
+        lines.append("")
+        lines.append("Redaction Notes")
+        lines.append("- Report rows intentionally omit raw session.json text, local paths, storage object paths, signed URLs, auth tokens, and media bytes.")
+        lines.append("- If storage upload succeeds and table insert fails, the app does not delete the object; orphan risk is reported for later controlled cleanup.")
         return lines.joined(separator: "\n")
     }
 

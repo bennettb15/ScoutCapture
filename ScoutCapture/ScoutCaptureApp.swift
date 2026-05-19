@@ -6896,6 +6896,15 @@ private struct DebugLocalDiagnosticsView: View {
                         )
                     }
                     NavigationLink {
+                        DebugSessionSnapshotUploadDiagnosticsView(diagnostics: diagnostics.sessionSnapshotUpload)
+                    } label: {
+                        localHealthAreaLabel(
+                            "Session Snapshot Upload",
+                            subtitle: "Default-off shadow-write upload diagnostics",
+                            value: diagnostics.sessionSnapshotUpload.remoteAvailability
+                        )
+                    }
+                    NavigationLink {
                         exportSealPreflightPage
                     } label: {
                         localHealthAreaLabel(
@@ -8649,6 +8658,112 @@ private struct DebugSessionSnapshotPreviewTextView: View {
             }
         }
         .navigationTitle("Snapshot Preview Report")
+        .navigationBarTitleDisplayMode(.inline)
+    }
+}
+
+private struct DebugSessionSnapshotUploadDiagnosticsView: View {
+    let diagnostics: AppState.SessionSnapshotUploadDiagnostics
+
+    private var reportText: String {
+        AppState.sessionSnapshotUploadReportText(diagnostics)
+    }
+
+    var body: some View {
+        List {
+            Section("Session Snapshot Upload") {
+                Text("Shadow-write only diagnostics. The feature flag defaults off. Upload failures do not block capture, export, sealing, sync, media recovery, or iCloud fallback.")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(.secondary)
+                diagnosticRow("Flag Enabled", diagnostics.flagEnabled ? "true" : "false")
+                diagnosticRow("Remote Availability", diagnostics.remoteAvailability)
+                diagnosticRow("Attempts", diagnostics.attemptedCount)
+                diagnosticRow("Successes", diagnostics.successCount)
+                diagnosticRow("Failures", diagnostics.failureCount)
+                diagnosticRow("Orphan Risk", diagnostics.orphanRiskCount)
+                diagnosticRow("Last Attempt", formattedRunDate(diagnostics.lastAttemptAt))
+                diagnosticRow("Last Success", formattedRunDate(diagnostics.lastSuccessAt))
+                diagnosticRow("Last Failure", formattedRunDate(diagnostics.lastFailureAt))
+                if let failure = AppState.diagnosticsPreviewText(diagnostics.lastFailureMessage, maxLength: 160) {
+                    diagnosticRow("Last Failure Message", failure)
+                }
+                NavigationLink {
+                    DebugSessionSnapshotUploadTextView(snapshotText: reportText)
+                } label: {
+                    Text("View Copyable Upload Report")
+                        .font(.system(size: 14, weight: .semibold))
+                }
+            }
+
+            Section("Manual Diagnostic Trigger") {
+                Text("Manual upload is unavailable from this diagnostics panel while the shadow-write flag is off or the remote snapshot schema has not been intentionally applied.")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(.secondary)
+            }
+
+            Section("Last Sanitized Attempt") {
+                diagnosticRow("Snapshot ID", diagnostics.lastSnapshotID?.uuidString ?? "none")
+                diagnosticRow("Property ID", diagnostics.lastPropertyID?.uuidString ?? "none")
+                diagnosticRow("Session ID", diagnostics.lastSessionID?.uuidString ?? "none")
+                diagnosticRow("Snapshot Kind", diagnostics.lastKind ?? "none")
+                diagnosticRow("Trigger", diagnostics.lastTrigger ?? "none")
+                diagnosticRow("Payload Path Present", AppState.diagnosticsPreviewText(diagnostics.lastUploadPath) == nil ? "false" : "true")
+            }
+        }
+        .navigationTitle("Snapshot Upload")
+        .navigationBarTitleDisplayMode(.inline)
+    }
+
+    @ViewBuilder
+    private func diagnosticRow(_ label: String, _ value: Int) -> some View {
+        diagnosticRow(label, String(value))
+    }
+
+    @ViewBuilder
+    private func diagnosticRow(_ label: String, _ value: String) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 12) {
+            Text(label)
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundStyle(.primary)
+            Spacer(minLength: 12)
+            Text(value)
+                .font(.system(size: 14, weight: .medium, design: .monospaced))
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.trailing)
+                .textSelection(.enabled)
+        }
+        .padding(.vertical, 2)
+    }
+
+    private func formattedRunDate(_ date: Date?) -> String {
+        date?.formatted(date: .abbreviated, time: .standard) ?? "never"
+    }
+}
+
+private struct DebugSessionSnapshotUploadTextView: View {
+    let snapshotText: String
+    @State private var didCopySnapshot: Bool = false
+
+    var body: some View {
+        List {
+            Section {
+                Button(didCopySnapshot ? "Copied Plain Text" : "Copy Report") {
+                    UIPasteboard.general.string = snapshotText
+                    didCopySnapshot = true
+                }
+                .font(.system(size: 14, weight: .semibold))
+            } footer: {
+                Text("Copies the sanitized shadow-write upload report as plain text. It does not include raw session.json, local paths, signed URLs, auth material, storage object paths, or media payloads.")
+            }
+
+            Section {
+                Text(snapshotText)
+                    .font(.system(size: 12, weight: .regular, design: .monospaced))
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .textSelection(.enabled)
+            }
+        }
+        .navigationTitle("Snapshot Upload Report")
         .navigationBarTitleDisplayMode(.inline)
     }
 }
