@@ -623,7 +623,86 @@ final class AppState: ObservableObject {
         let inspectedAt: Date
         let sections: [EnforcementPolicyMatrixSection]
 
-        var rows: [EnforcementPolicyMatrixRow] { sections.flatMap(\.rows) }
+        nonisolated var rows: [EnforcementPolicyMatrixRow] { sections.flatMap(\.rows) }
+    }
+
+    enum EnforcementWarningGroup: String, CaseIterable, Equatable, Hashable, Identifiable {
+        case packageIntegrity = "package_integrity"
+        case metadataFreshness = "metadata_freshness"
+        case mediaProvenance = "media_provenance"
+        case portalReadiness = "portal_readiness"
+        case historicalNeverBlock = "historical_never_block"
+
+        var id: String { rawValue }
+
+        nonisolated var title: String {
+            switch self {
+            case .packageIntegrity:
+                return "Package Integrity Warnings"
+            case .metadataFreshness:
+                return "Metadata Freshness Warnings"
+            case .mediaProvenance:
+                return "Media Provenance Warnings"
+            case .portalReadiness:
+                return "Portal Readiness Warnings"
+            case .historicalNeverBlock:
+                return "Historical / Never-Block Context"
+            }
+        }
+
+        nonisolated var explanation: String {
+            switch self {
+            case .packageIntegrity:
+                return "Future guarded enforcement candidates for session/package validity, local originals, linkage, and target access."
+            case .metadataFreshness:
+                return "Freshness and parity signals that remain warning-only or deferred until stronger canonical/conflict rules exist."
+            case .mediaProvenance:
+                return "Read-only media provenance context; it does not download, relink, or prove local export readability."
+            case .portalReadiness:
+                return "Portal-edited trade, priority, and description must sync to iOS before trusted export or report generation; no portal behavior is implemented yet."
+            case .historicalNeverBlock:
+                return "Historical, retired, resolved, or empty-shell context retained for audit and not operational blocking."
+            }
+        }
+    }
+
+    enum EnforcementWarningPosture: String, CaseIterable, Equatable, Hashable {
+        case futureHardBlockCandidate = "future_hard_block_candidate"
+        case warningOnly = "warning_only"
+        case deferred
+        case neverBlock = "never_block"
+
+        nonisolated var visibleLabel: String {
+            switch self {
+            case .futureHardBlockCandidate:
+                return "future hard-block candidate"
+            case .warningOnly:
+                return "warning-only"
+            case .deferred:
+                return "deferred"
+            case .neverBlock:
+                return "never-block"
+            }
+        }
+    }
+
+    struct EnforcementWarningGroupSummary: Equatable, Identifiable {
+        let group: EnforcementWarningGroup
+        let count: Int
+        let posture: EnforcementWarningPosture
+        let rows: [EnforcementPolicyMatrixRow]
+
+        var id: String { group.rawValue }
+        nonisolated var title: String { group.title }
+        nonisolated var explanation: String { group.explanation }
+        nonisolated var conditionKeys: [String] {
+            Array(Set(rows.map(\.conditionKey))).sorted()
+        }
+    }
+
+    struct EnforcementWarningSummaryReport: Equatable {
+        let inspectedAt: Date
+        let groups: [EnforcementWarningGroupSummary]
     }
 
     nonisolated static func exportSealPreflightReasonSummaries(
@@ -11162,6 +11241,142 @@ final class AppState: ObservableObject {
             }
         }
         return lines.joined(separator: "\n")
+    }
+
+    nonisolated static func makeEnforcementWarningSummaryReport(
+        from matrix: EnforcementPolicyMatrixReport? = nil,
+        inspectedAt: Date = Date()
+    ) -> EnforcementWarningSummaryReport {
+        let matrixReport = matrix ?? makeEnforcementPolicyMatrixReport(inspectedAt: inspectedAt)
+        let groups = EnforcementWarningGroup.allCases.map { group in
+            let keys = enforcementWarningConditionKeys(for: group)
+            let rows = matrixReport.rows
+                .filter { keys.contains($0.conditionKey) }
+                .sorted { lhs, rhs in
+                    if lhs.conditionKey != rhs.conditionKey { return lhs.conditionKey < rhs.conditionKey }
+                    return lhs.operation.rawValue < rhs.operation.rawValue
+                }
+            return EnforcementWarningGroupSummary(
+                group: group,
+                count: Set(rows.map(\.conditionKey)).count,
+                posture: enforcementWarningPosture(for: rows),
+                rows: rows
+            )
+        }
+        return EnforcementWarningSummaryReport(
+            inspectedAt: matrixReport.inspectedAt,
+            groups: groups
+        )
+    }
+
+    nonisolated static func enforcementWarningSummaryReportText(
+        _ report: EnforcementWarningSummaryReport
+    ) -> String {
+        var lines: [String] = []
+        lines.append("ScoutCapture Local Health - Future Enforcement Warnings")
+        lines.append("Inspected: \(report.inspectedAt.formatted(date: .abbreviated, time: .standard))")
+        lines.append("Read-only warning diagnostics. No behavior changed. These warnings do not enforce gates, block export, block sealing, switch canonical reads, hydrate sessions or shots, download media, relink files, repair data, change sync, media recovery, iCloud fallback, migrations, RLS, or local/remote data.")
+        lines.append("")
+        lines.append("Portal Readiness Notes")
+        lines.append("- portal-edited trade/priority/description must sync to iOS before trusted export/report generation")
+        lines.append("- property_freshness_needs_review is deferred until portal conflict rules exist")
+        lines.append("- web_portal_conflict_unresolved is deferred until a simple resolution path exists")
+        lines.append("- no portal behavior is implemented yet")
+        lines.append("")
+        lines.append("Warning Groups")
+        for group in report.groups {
+            lines.append("")
+            lines.append([
+                "group=\(group.group.rawValue)",
+                "title=\(group.title)",
+                "count=\(group.count)",
+                "posture=\(group.posture.rawValue)",
+                "explanation=\(diagnosticsPreviewText(group.explanation, maxLength: 220) ?? "none")"
+            ].joined(separator: " | "))
+            for row in group.rows {
+                lines.append([
+                    "operation=\(row.operation.rawValue)",
+                    "condition_key=\(row.conditionKey)",
+                    "current_severity=\(row.currentSeverity.rawValue)",
+                    "eventual_severity=\(row.eventualSeverity.rawValue)",
+                    "readiness=\(row.readiness.rawValue)",
+                    "deferral_reason=\(diagnosticsPreviewText(row.deferralReason, maxLength: 160) ?? "none")",
+                    "notes=\(diagnosticsPreviewText(row.notes, maxLength: 180) ?? "none")"
+                ].joined(separator: " | "))
+            }
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    private nonisolated static func enforcementWarningConditionKeys(
+        for group: EnforcementWarningGroup
+    ) -> Set<String> {
+        switch group {
+        case .packageIntegrity:
+            return [
+                "missing_or_unreadable_session_json",
+                "session_property_identity_mismatch",
+                "active_export_shot_missing_local_original_pending_delivery",
+                "active_export_shot_missing_local_original_reexport_eligible",
+                "required_issue_export_linkage_missing",
+                "deleted_archived_or_inaccessible_property"
+            ]
+        case .metadataFreshness:
+            return [
+                "offline_or_unknown_freshness",
+                "property_freshness_needs_review",
+                "child_metadata_freshness_unknown",
+                "active_target_sync_parity_debt",
+                "remote_only_hydration_gap"
+            ]
+        case .mediaProvenance:
+            return [
+                "supabase_storage_candidate_without_local_media",
+                "duplicate_shot_id_context"
+            ]
+        case .portalReadiness:
+            return [
+                "property_freshness_needs_review",
+                "web_portal_conflict_unresolved",
+                "child_metadata_freshness_unknown",
+                "active_target_sync_parity_debt"
+            ]
+        case .historicalNeverBlock:
+            return [
+                "historical_archive_debt",
+                "retired_guided_rows",
+                "retired_or_historical_shots",
+                "cross_session_issue_history_reference_resolved",
+                "empty_remote_draft_shell"
+            ]
+        }
+    }
+
+    private nonisolated static func enforcementWarningPosture(
+        for rows: [EnforcementPolicyMatrixRow]
+    ) -> EnforcementWarningPosture {
+        guard !rows.isEmpty else { return .warningOnly }
+        if rows.contains(where: { row in
+            switch row.readiness {
+            case .deferredUntilSupabaseCanonicalReads,
+                 .deferredUntilWebPortalConflictRules,
+                 .deferredUntilRemoteHydration:
+                return true
+            case .readyForWarningOnly,
+                 .readyForFutureGuardedEnforcement,
+                 .neverEnforce:
+                return false
+            }
+        }) {
+            return .deferred
+        }
+        if rows.allSatisfy({ $0.eventualSeverity == .neverBlock || $0.readiness == .neverEnforce }) {
+            return .neverBlock
+        }
+        if rows.contains(where: { $0.eventualSeverity == .hardBlockCandidate }) {
+            return .futureHardBlockCandidate
+        }
+        return .warningOnly
     }
 
     private struct EnforcementPolicyConditionDefinition {

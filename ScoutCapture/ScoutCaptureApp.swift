@@ -6523,6 +6523,8 @@ private struct DebugExportSealPreflightSnapshot {
     let unknownNeedsReviewCount: String
     let statusMessage: String
     let sections: [AppState.ExportSealPreflightSection]
+    let futureWarningGroups: [AppState.EnforcementWarningGroupSummary]
+    let futureWarningsText: String
     let snapshotText: String
 
     init(_ report: AppState.ExportSealPreflightReport) {
@@ -6530,6 +6532,9 @@ private struct DebugExportSealPreflightSnapshot {
         activeOrganizationID = report.activeOrganizationID?.uuidString ?? "none"
         sections = report.sections
         snapshotText = AppState.exportSealPreflightReportText(report)
+        let warnings = AppState.makeEnforcementWarningSummaryReport(inspectedAt: report.inspectedAt)
+        futureWarningGroups = warnings.groups
+        futureWarningsText = AppState.enforcementWarningSummaryReportText(warnings)
         hardBlockCandidateRawCount = Self.countValue(.hardBlockCandidate, in: report.totalCounts)
         hardBlockCandidateCount = String(hardBlockCandidateRawCount)
         softWarningCandidateCount = Self.count(.softWarningCandidate, in: report.totalCounts)
@@ -7125,6 +7130,21 @@ private struct DebugLocalDiagnosticsView: View {
                     }
                 }
 
+                Section("Future Enforcement Warnings") {
+                    Text("Warning-only policy visibility. These warnings do not block export, re-export, sealing, or completion.")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(.secondary)
+                    NavigationLink {
+                        DebugFutureEnforcementWarningsSnapshotTextView(snapshotText: snapshot.futureWarningsText)
+                    } label: {
+                        Text("View Copyable Warning Report")
+                            .font(.system(size: 14, weight: .semibold))
+                    }
+                    ForEach(snapshot.futureWarningGroups) { group in
+                        futureEnforcementWarningGroupRow(group)
+                    }
+                }
+
                 ForEach(snapshot.sections) { section in
                     Section(section.scope.title) {
                         ForEach(section.counts) { count in
@@ -7145,6 +7165,29 @@ private struct DebugLocalDiagnosticsView: View {
         }
         .navigationTitle("Preflight")
         .navigationBarTitleDisplayMode(.inline)
+    }
+
+    private func futureEnforcementWarningGroupRow(
+        _ group: AppState.EnforcementWarningGroupSummary
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 5) {
+            HStack(alignment: .firstTextBaseline, spacing: 12) {
+                Text(group.title)
+                    .font(.system(size: 14, weight: .semibold))
+                Spacer(minLength: 12)
+                Text(String(group.count))
+                    .font(.system(size: 13, weight: .medium, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+            }
+            Text(group.explanation)
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(.secondary)
+            Text("Status: \(group.posture.visibleLabel)")
+                .font(.system(size: 12, weight: .medium, design: .monospaced))
+                .foregroundStyle(.secondary)
+        }
+        .padding(.vertical, 4)
     }
 
     private func preflightReasonSummaryRow(
@@ -8487,6 +8530,34 @@ private struct DebugExportSealPreflightSnapshotTextView: View {
             }
         }
         .navigationTitle("Preflight Report")
+        .navigationBarTitleDisplayMode(.inline)
+    }
+}
+
+private struct DebugFutureEnforcementWarningsSnapshotTextView: View {
+    let snapshotText: String
+    @State private var didCopySnapshot: Bool = false
+
+    var body: some View {
+        List {
+            Section {
+                Button(didCopySnapshot ? "Copied Plain Text" : "Copy Report") {
+                    UIPasteboard.general.string = snapshotText
+                    didCopySnapshot = true
+                }
+                .font(.system(size: 14, weight: .semibold))
+            } footer: {
+                Text("Copies the sanitized future enforcement warnings report as plain text only. It does not include local paths, signed URLs, media, or auth material.")
+            }
+
+            Section {
+                Text(snapshotText)
+                    .font(.system(size: 12, weight: .regular, design: .monospaced))
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .textSelection(.enabled)
+            }
+        }
+        .navigationTitle("Future Warnings")
         .navigationBarTitleDisplayMode(.inline)
     }
 }

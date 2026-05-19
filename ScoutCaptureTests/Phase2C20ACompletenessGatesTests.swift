@@ -1098,6 +1098,140 @@ final class Phase2C20ACompletenessGatesTests: XCTestCase {
         XCTAssertFalse(text.contains("seal button"))
     }
 
+    func testFutureEnforcementWarningGroupsAreGeneratedFromPolicyMatrix() {
+        let matrix = AppState.makeEnforcementPolicyMatrixReport(inspectedAt: Date(timeIntervalSinceReferenceDate: 300))
+        let report = AppState.makeEnforcementWarningSummaryReport(from: matrix)
+
+        XCTAssertEqual(report.groups.map(\.group), AppState.EnforcementWarningGroup.allCases)
+        XCTAssertTrue(report.groups.allSatisfy { !$0.rows.isEmpty })
+        XCTAssertTrue(report.groups.allSatisfy { $0.count == Set($0.rows.map(\.conditionKey)).count })
+    }
+
+    func testPackageIntegrityWarningsIncludeFutureHardBlockCandidates() throws {
+        let report = AppState.makeEnforcementWarningSummaryReport(
+            from: AppState.makeEnforcementPolicyMatrixReport(inspectedAt: Date(timeIntervalSinceReferenceDate: 300))
+        )
+        let group = try XCTUnwrap(warningGroup(report, .packageIntegrity))
+
+        XCTAssertEqual(group.posture, .futureHardBlockCandidate)
+        XCTAssertTrue(group.conditionKeys.contains("missing_or_unreadable_session_json"))
+        XCTAssertTrue(group.conditionKeys.contains("required_issue_export_linkage_missing"))
+        XCTAssertTrue(group.rows.contains { $0.eventualSeverity == .hardBlockCandidate })
+    }
+
+    func testMetadataFreshnessWarningsIncludeUnknownAndNeedsReviewDeferrals() throws {
+        let report = AppState.makeEnforcementWarningSummaryReport(
+            from: AppState.makeEnforcementPolicyMatrixReport(inspectedAt: Date(timeIntervalSinceReferenceDate: 300))
+        )
+        let group = try XCTUnwrap(warningGroup(report, .metadataFreshness))
+
+        XCTAssertEqual(group.posture, .deferred)
+        XCTAssertTrue(group.conditionKeys.contains("offline_or_unknown_freshness"))
+        XCTAssertTrue(group.conditionKeys.contains("property_freshness_needs_review"))
+        XCTAssertTrue(group.rows.contains { $0.readiness == .deferredUntilWebPortalConflictRules })
+    }
+
+    func testMediaProvenanceWarningsIncludeSupabaseCandidateAndDuplicateShotContext() throws {
+        let report = AppState.makeEnforcementWarningSummaryReport(
+            from: AppState.makeEnforcementPolicyMatrixReport(inspectedAt: Date(timeIntervalSinceReferenceDate: 300))
+        )
+        let group = try XCTUnwrap(warningGroup(report, .mediaProvenance))
+
+        XCTAssertEqual(group.posture, .neverBlock)
+        XCTAssertTrue(group.conditionKeys.contains("supabase_storage_candidate_without_local_media"))
+        XCTAssertTrue(group.conditionKeys.contains("duplicate_shot_id_context"))
+        XCTAssertTrue(group.rows.allSatisfy { $0.eventualSeverity == .neverBlock })
+    }
+
+    func testPortalReadinessWarningsMentionTradePriorityDescriptionSync() throws {
+        let report = AppState.makeEnforcementWarningSummaryReport(
+            from: AppState.makeEnforcementPolicyMatrixReport(inspectedAt: Date(timeIntervalSinceReferenceDate: 300))
+        )
+        let group = try XCTUnwrap(warningGroup(report, .portalReadiness))
+        let text = AppState.enforcementWarningSummaryReportText(report)
+
+        XCTAssertEqual(group.posture, .deferred)
+        XCTAssertTrue(text.contains("portal-edited trade/priority/description must sync to iOS"))
+        XCTAssertTrue(text.contains("property_freshness_needs_review is deferred until portal conflict rules exist"))
+        XCTAssertTrue(text.contains("web_portal_conflict_unresolved is deferred until a simple resolution path exists"))
+        XCTAssertTrue(text.contains("no portal behavior is implemented yet"))
+    }
+
+    func testHistoricalArchiveDebtRemainsNeverBlockContextInWarnings() throws {
+        let report = AppState.makeEnforcementWarningSummaryReport(
+            from: AppState.makeEnforcementPolicyMatrixReport(inspectedAt: Date(timeIntervalSinceReferenceDate: 300))
+        )
+        let group = try XCTUnwrap(warningGroup(report, .historicalNeverBlock))
+
+        XCTAssertEqual(group.posture, .neverBlock)
+        XCTAssertTrue(group.conditionKeys.contains("historical_archive_debt"))
+        XCTAssertTrue(group.rows.filter { $0.conditionKey == "historical_archive_debt" }.allSatisfy {
+            $0.eventualSeverity == .neverBlock && $0.readiness == .neverEnforce
+        })
+    }
+
+    func testFutureEnforcementWarningReportHasNoExportOrSealHooks() {
+        let report = AppState.makeEnforcementWarningSummaryReport(
+            from: AppState.makeEnforcementPolicyMatrixReport(inspectedAt: Date(timeIntervalSinceReferenceDate: 300))
+        )
+        let text = AppState.enforcementWarningSummaryReportText(report)
+
+        XCTAssertTrue(text.contains("Read-only warning diagnostics"))
+        XCTAssertTrue(text.contains("do not enforce gates"))
+        XCTAssertTrue(text.contains("block export"))
+        XCTAssertTrue(text.contains("block sealing"))
+        XCTAssertFalse(text.contains("export button"))
+        XCTAssertFalse(text.contains("seal button"))
+    }
+
+    func testFutureEnforcementWarningCopyableReportIncludesConditionKeysAndPortalNotes() {
+        let report = AppState.makeEnforcementWarningSummaryReport(
+            from: AppState.makeEnforcementPolicyMatrixReport(inspectedAt: Date(timeIntervalSinceReferenceDate: 300))
+        )
+        let text = AppState.enforcementWarningSummaryReportText(report)
+
+        XCTAssertTrue(text.contains("group=portal_readiness"))
+        XCTAssertTrue(text.contains("condition_key=web_portal_conflict_unresolved"))
+        XCTAssertTrue(text.contains("current_severity=deferred"))
+        XCTAssertTrue(text.contains("readiness=deferred_until_web_portal_conflict_rules"))
+        XCTAssertTrue(text.contains("portal-edited trade/priority/description"))
+    }
+
+    func testFutureEnforcementWarningReportRedactsSensitiveDetails() {
+        let row = AppState.EnforcementPolicyMatrixRow(
+            operation: .firstExportDelivery,
+            conditionKey: "web_portal_conflict_unresolved",
+            friendlyTitle: "Portal conflict",
+            currentSeverity: .deferred,
+            eventualSeverity: .hardBlockCandidate,
+            readiness: .deferredUntilWebPortalConflictRules,
+            deferralReason: "/private/tmp/secret token abc https://example.test/file?signature=secret",
+            notes: "data:image/jpeg;base64,abcdef"
+        )
+        let report = AppState.EnforcementWarningSummaryReport(
+            inspectedAt: Date(timeIntervalSinceReferenceDate: 300),
+            groups: [
+                AppState.EnforcementWarningGroupSummary(
+                    group: .portalReadiness,
+                    count: 1,
+                    posture: .deferred,
+                    rows: [row]
+                )
+            ]
+        )
+
+        let text = AppState.enforcementWarningSummaryReportText(report)
+
+        XCTAssertFalse(text.contains("/private/tmp/secret"))
+        XCTAssertFalse(text.contains("signature=secret"))
+        XCTAssertFalse(text.contains("token abc"))
+        XCTAssertFalse(text.contains("data:image"))
+        XCTAssertFalse(text.contains("abcdef"))
+        XCTAssertTrue(text.contains("[path]"))
+        XCTAssertTrue(text.contains("[redacted]"))
+        XCTAssertTrue(text.contains("[media]"))
+    }
+
     private func diagnosticRow(
         entityType: String,
         entityID: UUID = UUID(),
@@ -1187,6 +1321,13 @@ final class Phase2C20ACompletenessGatesTests: XCTestCase {
         report.rows.first {
             $0.conditionKey == conditionKey && $0.operation == operation
         }
+    }
+
+    private func warningGroup(
+        _ report: AppState.EnforcementWarningSummaryReport,
+        _ group: AppState.EnforcementWarningGroup
+    ) -> AppState.EnforcementWarningGroupSummary? {
+        report.groups.first { $0.group == group }
     }
 }
 
