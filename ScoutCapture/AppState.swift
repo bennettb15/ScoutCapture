@@ -444,6 +444,19 @@ final class AppState: ObservableObject {
                 return "Incomplete context that needs operator review before enforcement."
             }
         }
+
+        nonisolated var drilldownClassificationLabel: String {
+            switch self {
+            case .hardBlockCandidate:
+                return "hard block candidate"
+            case .softWarningCandidate:
+                return "advisory warning"
+            case .informationalOnly:
+                return "informational"
+            case .unknownNeedsReview:
+                return "unknown"
+            }
+        }
     }
 
     enum ExportSealPreflightScope: String, CaseIterable, Equatable, Hashable {
@@ -484,10 +497,19 @@ final class AppState: ObservableObject {
         let context: [String: String]
     }
 
+    struct ExportSealPreflightReasonSummary: Equatable, Identifiable {
+        let id: String
+        let title: String
+        let count: Int
+        let explanation: String
+        let category: ExportSealPreflightCategory
+    }
+
     struct ExportSealPreflightSection: Equatable, Identifiable {
         let scope: ExportSealPreflightScope
         let counts: [ExportSealPreflightCount]
         let findings: [ExportSealPreflightFinding]
+        let reasonSummaries: [ExportSealPreflightReasonSummary]
 
         var id: String { scope.rawValue }
     }
@@ -508,6 +530,47 @@ final class AppState: ObservableObject {
             return ExportSealPreflightCategory.allCases.map {
                 ExportSealPreflightCount(category: $0, count: grouped[$0] ?? 0)
             }
+        }
+    }
+
+    nonisolated static func exportSealPreflightReasonSummaries(
+        for findings: [ExportSealPreflightFinding]
+    ) -> [ExportSealPreflightReasonSummary] {
+        var grouped: [String: (title: String, explanation: String, category: ExportSealPreflightCategory, count: Int)] = [:]
+        for finding in findings {
+            let descriptor = exportSealPreflightReasonDescriptor(for: finding)
+            let key = "\(finding.category.rawValue)|\(descriptor.title)"
+            if let existing = grouped[key] {
+                grouped[key] = (
+                    existing.title,
+                    existing.explanation,
+                    existing.category,
+                    existing.count + finding.duplicateCount
+                )
+            } else {
+                grouped[key] = (
+                    descriptor.title,
+                    descriptor.explanation,
+                    finding.category,
+                    finding.duplicateCount
+                )
+            }
+        }
+        return grouped.map { key, value in
+            ExportSealPreflightReasonSummary(
+                id: key,
+                title: value.title,
+                count: value.count,
+                explanation: value.explanation,
+                category: value.category
+            )
+        }
+        .sorted { lhs, rhs in
+            if lhs.category != rhs.category {
+                return lhs.category.rawValue < rhs.category.rawValue
+            }
+            if lhs.count != rhs.count { return lhs.count > rhs.count }
+            return lhs.title < rhs.title
         }
     }
 
@@ -10742,7 +10805,8 @@ final class AppState: ObservableObject {
                     if lhs.reason != rhs.reason { return lhs.reason < rhs.reason }
                     if lhs.entityType != rhs.entityType { return lhs.entityType < rhs.entityType }
                     return lhs.id < rhs.id
-                }
+                },
+                reasonSummaries: exportSealPreflightReasonSummaries(for: findings)
             )
         }
         return ExportSealPreflightReport(
@@ -10833,6 +10897,111 @@ final class AppState: ObservableObject {
                 return .softWarningCandidate
             }
             return row.context["is_export_eligible"] == "false" ? .softWarningCandidate : .unknownNeedsReview
+        }
+    }
+
+    private nonisolated static func exportSealPreflightReasonDescriptor(
+        for finding: ExportSealPreflightFinding
+    ) -> (title: String, explanation: String) {
+        if finding.reason == "active_export_shot_original_missing" {
+            if finding.context["duplicate_shot_id_across_sessions"] == "true" {
+                return (
+                    "Duplicate shot ID context",
+                    "A missing-original finding has duplicate shot ID context, so it is advisory until a future policy decides how to interpret it."
+                )
+            }
+            if finding.context["supabase_storage_candidate"] == "true" {
+                return (
+                    "Supabase storage candidate",
+                    "Remote storage metadata exists while the local original is missing; this is informational for review and does not download or relink media."
+                )
+            }
+            switch finding.context["missing_original_risk"] {
+            case "historical_archive_debt":
+                return (
+                    "Historical archive debt",
+                    "Already delivered and re-export-expired missing originals are retained for audit/history and are not operational blockers."
+                )
+            case "active_delivery_risk":
+                return (
+                    "Pending delivery missing original",
+                    "A pending-delivery session has a local original missing; this is a future hard-block candidate only."
+                )
+            case "reexport_risk":
+                return (
+                    "Re-export eligible missing original",
+                    "A re-export-eligible session has a local original missing; this is a future hard-block candidate for re-export."
+                )
+            case "delivered_state_unknown":
+                return (
+                    "Delivery state unknown",
+                    "The delivery or re-export state could not be determined, so this needs operator review before enforcement."
+                )
+            default:
+                return (
+                    "Missing local original",
+                    "A referenced export original is not locally readable; this remains advisory in the current app behavior."
+                )
+            }
+        }
+
+        switch finding.reason {
+        case "guided_retired":
+            return (
+                "Retired guided rows",
+                "Retired guided rows are retained for history and are not operational blockers."
+            )
+        case "shot_historical_lifecycle",
+             "shot_hidden_from_default_workflows":
+            return (
+                "Retired or historical shots",
+                "Historical or hidden shots are preserved for audit and are not part of active export blocking."
+            )
+        case "issue_history_cross_session_reference":
+            return (
+                "Cross-session issue history",
+                "Issue history references another existing session, which is retained as context and does not block."
+            )
+        case "active_export_shot_media_incomplete":
+            return (
+                "Session rollup advisory",
+                "A session-level rollup points to child media findings; inspect the detailed rows for the specific missing-original context."
+            )
+        case "session_not_completed_and_sealed":
+            return (
+                "Completed/sealed state advisory",
+                "The session state is inconsistent with export readiness, but current export and sealing behavior is unchanged."
+            )
+        case "session_json_missing_or_unreadable":
+            return (
+                "Missing session metadata",
+                "The session metadata file is missing or unreadable and may later become a hard blocker."
+            )
+        case "session_json_id_mismatch":
+            return (
+                "Session identity mismatch",
+                "The session metadata identity does not match the local target and may later become a hard blocker."
+            )
+        case "issue_history_orphan_session_reference",
+             "issue_history_missing_session_reference",
+             "issue_history_orphan_shot_reference",
+             "issue_history_non_export_shot_reference",
+             "issue_history_orphan_reference":
+            return (
+                "Issue/export linkage missing references",
+                "Issue history or export linkage is missing required references and may later become a hard blocker."
+            )
+        default:
+            if finding.freshness == .unknown || finding.freshness == .offline || finding.freshness == .usingLocalCache {
+                return (
+                    "Unknown freshness",
+                    "Freshness is offline, unknown, or local-cache based; review may be useful, but this does not block export or sealing."
+                )
+            }
+            return (
+                diagnosticsPreviewText(finding.reason, maxLength: 80) ?? "Other preflight finding",
+                "This grouped diagnostic is advisory in the current app behavior; use the copyable report for technical details."
+            )
         }
     }
 

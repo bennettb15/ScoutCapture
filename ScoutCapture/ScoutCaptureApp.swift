@@ -7105,12 +7105,44 @@ private struct DebugLocalDiagnosticsView: View {
                         ForEach(section.counts) { count in
                             diagnosticRow(count.category.visibleLabel, count.count)
                         }
+                        if section.reasonSummaries.isEmpty {
+                            Text("No grouped preflight details for this section.")
+                                .font(.system(size: 13, weight: .medium))
+                                .foregroundStyle(.secondary)
+                        } else {
+                            ForEach(section.reasonSummaries) { summary in
+                                preflightReasonSummaryRow(summary)
+                            }
+                        }
                     }
                 }
             }
         }
         .navigationTitle("Preflight")
         .navigationBarTitleDisplayMode(.inline)
+    }
+
+    private func preflightReasonSummaryRow(
+        _ summary: AppState.ExportSealPreflightReasonSummary
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 5) {
+            HStack(alignment: .firstTextBaseline, spacing: 12) {
+                Text(summary.title)
+                    .font(.system(size: 14, weight: .semibold))
+                Spacer(minLength: 12)
+                Text(String(summary.count))
+                    .font(.system(size: 13, weight: .medium, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+            }
+            Text(summary.explanation)
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(.secondary)
+            Text("Classification: \(summary.category.drilldownClassificationLabel)")
+                .font(.system(size: 12, weight: .medium, design: .monospaced))
+                .foregroundStyle(.secondary)
+        }
+        .padding(.vertical, 4)
     }
 
     private var mediaHealthPage: some View {

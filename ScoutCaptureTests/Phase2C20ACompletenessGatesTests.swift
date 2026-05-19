@@ -817,6 +817,10 @@ final class Phase2C20ACompletenessGatesTests: XCTestCase {
             AppState.ExportSealPreflightCategory.unknownNeedsReview.visibleExplanation,
             "Incomplete context that needs operator review before enforcement."
         )
+        XCTAssertEqual(AppState.ExportSealPreflightCategory.hardBlockCandidate.drilldownClassificationLabel, "hard block candidate")
+        XCTAssertEqual(AppState.ExportSealPreflightCategory.softWarningCandidate.drilldownClassificationLabel, "advisory warning")
+        XCTAssertEqual(AppState.ExportSealPreflightCategory.informationalOnly.drilldownClassificationLabel, "informational")
+        XCTAssertEqual(AppState.ExportSealPreflightCategory.unknownNeedsReview.drilldownClassificationLabel, "unknown")
     }
 
     func testPreflightZeroHardBlockStatusMessageAppears() {
@@ -862,6 +866,121 @@ final class Phase2C20ACompletenessGatesTests: XCTestCase {
         XCTAssertTrue(text.contains("soft_warning_candidate"))
         XCTAssertTrue(text.contains("informational_only"))
         XCTAssertTrue(text.contains("unknown_needs_review"))
+    }
+
+    func testPreflightGroupedReasonSummariesAppear() {
+        let report = AppState.makeExportSealPreflightReport(from: makeSyntheticReport(rows: [
+            diagnosticRow(
+                entityType: "property",
+                freshness: .unknown,
+                reason: "property_minimum_metadata_missing"
+            ),
+            diagnosticRow(
+                entityType: "shot",
+                context: [
+                    "missing_original_risk": "historical_archive_debt",
+                    "is_export_eligible": "true"
+                ],
+                reason: "active_export_shot_original_missing"
+            ),
+            diagnosticRow(entityType: "guided", reason: "guided_retired"),
+            diagnosticRow(entityType: "issue", reason: "issue_history_cross_session_reference"),
+            diagnosticRow(entityType: "session", rowScope: .sessionRollup, reason: "active_export_shot_media_incomplete")
+        ]))
+
+        let titles = Set(preflightSummaries(report, scope: .export).map(\.title))
+
+        XCTAssertTrue(titles.contains("Unknown freshness"))
+        XCTAssertTrue(titles.contains("Historical archive debt"))
+        XCTAssertTrue(titles.contains("Retired guided rows"))
+        XCTAssertTrue(titles.contains("Cross-session issue history"))
+        XCTAssertTrue(titles.contains("Session rollup advisory"))
+    }
+
+    func testPreflightFriendlyTitlesMapFromTechnicalReasons() {
+        let report = AppState.makeExportSealPreflightReport(from: makeSyntheticReport(rows: [
+            diagnosticRow(entityType: "session", reason: "session_json_missing_or_unreadable"),
+            diagnosticRow(entityType: "session", freshness: .needsReview, reason: "session_json_id_mismatch"),
+            diagnosticRow(entityType: "issue", reason: "issue_history_orphan_shot_reference")
+        ]))
+
+        let summaries = preflightSummaries(report, scope: .export)
+
+        XCTAssertTrue(summaries.contains { $0.title == "Missing session metadata" && $0.category == .hardBlockCandidate })
+        XCTAssertTrue(summaries.contains { $0.title == "Session identity mismatch" && $0.category == .hardBlockCandidate })
+        XCTAssertTrue(summaries.contains { $0.title == "Issue/export linkage missing references" && $0.category == .hardBlockCandidate })
+    }
+
+    func testPreflightAdvisoryWarningsExplainWhyTheyAreWarnings() {
+        let report = AppState.makeExportSealPreflightReport(from: makeSyntheticReport(rows: [
+            diagnosticRow(
+                entityType: "shot",
+                context: [
+                    "is_export_eligible": "false",
+                    "supabase_storage_candidate": "true"
+                ],
+                reason: "active_export_shot_original_missing"
+            ),
+            diagnosticRow(
+                entityType: "shot",
+                context: [
+                    "is_export_eligible": "false",
+                    "duplicate_shot_id_across_sessions": "true"
+                ],
+                reason: "active_export_shot_original_missing"
+            )
+        ]))
+
+        let summaries = preflightSummaries(report, scope: .export)
+        let supabase = try? XCTUnwrap(summaries.first { $0.title == "Supabase storage candidate" })
+        let duplicate = try? XCTUnwrap(summaries.first { $0.title == "Duplicate shot ID context" })
+
+        XCTAssertEqual(supabase?.category, .softWarningCandidate)
+        XCTAssertTrue(supabase?.explanation.contains("does not download or relink media") == true)
+        XCTAssertEqual(duplicate?.category, .softWarningCandidate)
+        XCTAssertTrue(duplicate?.explanation.contains("advisory") == true)
+    }
+
+    func testPreflightInformationalRowsExplainWhyTheyDoNotBlock() {
+        let report = AppState.makeExportSealPreflightReport(from: makeSyntheticReport(rows: [
+            diagnosticRow(
+                entityType: "shot",
+                context: [
+                    "missing_original_risk": "historical_archive_debt",
+                    "is_export_eligible": "true"
+                ],
+                reason: "active_export_shot_original_missing"
+            ),
+            diagnosticRow(entityType: "guided", reason: "guided_retired")
+        ]))
+
+        let summaries = preflightSummaries(report, scope: .export)
+        let archiveDebt = try? XCTUnwrap(summaries.first { $0.title == "Historical archive debt" })
+        let retiredGuided = try? XCTUnwrap(summaries.first { $0.title == "Retired guided rows" })
+
+        XCTAssertEqual(archiveDebt?.category, .informationalOnly)
+        XCTAssertTrue(archiveDebt?.explanation.contains("not operational blockers") == true)
+        XCTAssertEqual(retiredGuided?.category, .informationalOnly)
+        XCTAssertTrue(retiredGuided?.explanation.contains("not operational blockers") == true)
+    }
+
+    func testPreflightRawReportStillContainsTechnicalReasonAndCategoryData() {
+        let report = AppState.makeExportSealPreflightReport(from: makeSyntheticReport(rows: [
+            diagnosticRow(
+                entityType: "shot",
+                context: [
+                    "missing_original_risk": "historical_archive_debt",
+                    "is_export_eligible": "true"
+                ],
+                reason: "active_export_shot_original_missing"
+            )
+        ]))
+
+        let text = AppState.exportSealPreflightReportText(report)
+
+        XCTAssertTrue(text.contains("informational_only"))
+        XCTAssertTrue(text.contains("active_export_shot_original_missing"))
+        XCTAssertTrue(text.contains("missing_original_risk=historical_archive_debt"))
     }
 
     private func diagnosticRow(
@@ -936,6 +1055,13 @@ final class Phase2C20ACompletenessGatesTests: XCTestCase {
         scope: AppState.ExportSealPreflightScope
     ) -> [AppState.ExportSealPreflightFinding] {
         report.sections.first { $0.scope == scope }?.findings ?? []
+    }
+
+    private func preflightSummaries(
+        _ report: AppState.ExportSealPreflightReport,
+        scope: AppState.ExportSealPreflightScope
+    ) -> [AppState.ExportSealPreflightReasonSummary] {
+        report.sections.first { $0.scope == scope }?.reasonSummaries ?? []
     }
 }
 
