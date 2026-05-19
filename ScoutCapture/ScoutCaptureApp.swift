@@ -6513,6 +6513,42 @@ private struct DebugCompletenessGatesSnapshot {
     }
 }
 
+private struct DebugSessionSnapshotPreviewSnapshot {
+    let inspectedAt: String
+    let activeOrganizationID: String
+    let sessionsInspected: String
+    let previewableSessions: String
+    let missingOrUnreadableSessionJSONCount: String
+    let checksumGenerationPassCount: String
+    let checksumGenerationFailCount: String
+    let totalShotCount: String
+    let totalIssueCount: String
+    let totalGuidedCount: String
+    let totalMediaManifestCount: String
+    let totalMissingLocalOriginalsCount: String
+    let totalSupabaseStorageMetadataCount: String
+    let rows: [AppState.SessionSnapshotPreviewRow]
+    let snapshotText: String
+
+    init(_ report: AppState.SessionSnapshotPreviewReport) {
+        inspectedAt = report.inspectedAt.formatted(date: .abbreviated, time: .standard)
+        activeOrganizationID = report.activeOrganizationID?.uuidString ?? "none"
+        sessionsInspected = String(report.sessionsInspected)
+        previewableSessions = String(report.previewableSessions)
+        missingOrUnreadableSessionJSONCount = String(report.missingOrUnreadableSessionJSONCount)
+        checksumGenerationPassCount = String(report.checksumGenerationPassCount)
+        checksumGenerationFailCount = String(report.checksumGenerationFailCount)
+        totalShotCount = String(report.totalShotCount)
+        totalIssueCount = String(report.totalIssueCount)
+        totalGuidedCount = String(report.totalGuidedCount)
+        totalMediaManifestCount = String(report.totalMediaManifestCount)
+        totalMissingLocalOriginalsCount = String(report.totalMissingLocalOriginalsCount)
+        totalSupabaseStorageMetadataCount = String(report.totalSupabaseStorageMetadataCount)
+        rows = report.rows
+        snapshotText = AppState.sessionSnapshotPreviewReportText(report)
+    }
+}
+
 private struct DebugExportSealPreflightSnapshot {
     let inspectedAt: String
     let activeOrganizationID: String
@@ -6797,6 +6833,7 @@ private struct DebugLocalDiagnosticsView: View {
     @State private var remoteOnlySessionDetailSnapshot: DebugRemoteOnlySessionDetailSnapshot?
     @State private var canonicalReadinessSnapshot: DebugCanonicalReadinessSnapshot?
     @State private var completenessGatesSnapshot: DebugCompletenessGatesSnapshot?
+    @State private var sessionSnapshotPreviewSnapshot: DebugSessionSnapshotPreviewSnapshot?
     @State private var exportSealPreflightSnapshot: DebugExportSealPreflightSnapshot?
     @State private var enforcementPolicyMatrixSnapshot: DebugEnforcementPolicyMatrixSnapshot?
 
@@ -6847,6 +6884,15 @@ private struct DebugLocalDiagnosticsView: View {
                             "Completeness Gates",
                             subtitle: "Read-only local metadata/media/export completeness",
                             value: completenessGatesSnapshot.map { "\($0.diagnosticOnlyRowCount) diagnostic rows" } ?? "not inspected"
+                        )
+                    }
+                    NavigationLink {
+                        sessionSnapshotPreviewPage
+                    } label: {
+                        localHealthAreaLabel(
+                            "Session Snapshot Preview",
+                            subtitle: "Read-only local session.json snapshot preview",
+                            value: sessionSnapshotPreviewSnapshot.map { "\($0.previewableSessions) previewable" } ?? "not inspected"
                         )
                     }
                     NavigationLink {
@@ -6938,6 +6984,7 @@ private struct DebugLocalDiagnosticsView: View {
             remoteOnlySessionDetailSnapshot = nil
             canonicalReadinessSnapshot = nil
             completenessGatesSnapshot = nil
+            sessionSnapshotPreviewSnapshot = nil
             exportSealPreflightSnapshot = nil
             enforcementPolicyMatrixSnapshot = nil
             refreshDiagnosticDetailSnapshots()
@@ -7083,6 +7130,75 @@ private struct DebugLocalDiagnosticsView: View {
             }
         }
         .navigationTitle("Completeness")
+        .navigationBarTitleDisplayMode(.inline)
+    }
+
+    private var sessionSnapshotPreviewPage: some View {
+        List {
+            Section("Session Snapshot Preview") {
+                Text("Read-only local-only session.json snapshot preview. It does not upload snapshots, change schema or RLS, switch canonical reads, hydrate sessions, download media, relink files, repair data, change export, sealing, sync, media recovery, or iCloud fallback.")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(.secondary)
+
+                if let snapshot = sessionSnapshotPreviewSnapshot {
+                    diagnosticRow("Inspected", snapshot.inspectedAt)
+                    diagnosticRow("Active Org", snapshot.activeOrganizationID)
+                    diagnosticRow("Sessions Inspected", snapshot.sessionsInspected)
+                    diagnosticRow("Previewable Sessions", snapshot.previewableSessions)
+                    diagnosticRow("Missing / Unreadable session.json", snapshot.missingOrUnreadableSessionJSONCount)
+                    diagnosticRow("Checksum Pass", snapshot.checksumGenerationPassCount)
+                    diagnosticRow("Checksum Fail", snapshot.checksumGenerationFailCount)
+                    NavigationLink {
+                        DebugSessionSnapshotPreviewTextView(snapshotText: snapshot.snapshotText)
+                    } label: {
+                        Text("View Copyable Snapshot Preview Report")
+                            .font(.system(size: 14, weight: .semibold))
+                    }
+                } else {
+                    Text("No session snapshot preview has been generated in this view.")
+                        .font(.system(size: 14, weight: .medium))
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            if let snapshot = sessionSnapshotPreviewSnapshot {
+                Section("Snapshot Counts") {
+                    diagnosticRow("Shots", snapshot.totalShotCount)
+                    diagnosticRow("Issues", snapshot.totalIssueCount)
+                    diagnosticRow("Guided Rows", snapshot.totalGuidedCount)
+                    diagnosticRow("Media Manifest", snapshot.totalMediaManifestCount)
+                    diagnosticRow("Missing Local Originals", snapshot.totalMissingLocalOriginalsCount)
+                    diagnosticRow("Supabase Storage Metadata", snapshot.totalSupabaseStorageMetadataCount)
+                }
+
+                Section("Sanitized Rows") {
+                    ForEach(snapshot.rows) { row in
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(AppState.diagnosticsPreviewText(row.localPropertyName, maxLength: 80) ?? "Unnamed Property")
+                                .font(.system(size: 13, weight: .semibold))
+                                .textSelection(.enabled)
+                            Text(row.sessionID.uuidString)
+                                .font(.system(size: 12, weight: .medium, design: .monospaced))
+                                .textSelection(.enabled)
+                            Text(row.isPreviewable ? "previewable" : "not previewable")
+                                .font(.system(size: 12, weight: .medium))
+                                .foregroundStyle(row.isPreviewable ? Color.secondary : Color.orange)
+                            if let envelope = row.envelope {
+                                Text("shots \(envelope.shotCount) | issues \(envelope.issueCount) | guided \(envelope.guidedCount) | missing originals \(envelope.missingLocalOriginalsCount)")
+                                    .font(.system(size: 12, weight: .medium))
+                                    .foregroundStyle(.secondary)
+                            } else if let reason = AppState.diagnosticsPreviewText(row.failureReason, maxLength: 120) {
+                                Text(reason)
+                                    .font(.system(size: 12, weight: .medium))
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                        .padding(.vertical, 3)
+                    }
+                }
+            }
+        }
+        .navigationTitle("Snapshot Preview")
         .navigationBarTitleDisplayMode(.inline)
     }
 
@@ -7598,6 +7714,9 @@ private struct DebugLocalDiagnosticsView: View {
         pendingMediaItems = appState.diagnosticsPendingMediaItems().map(DebugMediaDiagnosticSnapshotItem.init)
         let completenessReport = appState.inspectCompletenessGates()
         completenessGatesSnapshot = DebugCompletenessGatesSnapshot(completenessReport)
+        sessionSnapshotPreviewSnapshot = DebugSessionSnapshotPreviewSnapshot(
+            appState.inspectSessionSnapshotPreview()
+        )
         exportSealPreflightSnapshot = DebugExportSealPreflightSnapshot(
             AppState.makeExportSealPreflightReport(from: completenessReport)
         )
@@ -8502,6 +8621,34 @@ private struct DebugCompletenessGatesSnapshotTextView: View {
             }
         }
         .navigationTitle("Completeness Report")
+        .navigationBarTitleDisplayMode(.inline)
+    }
+}
+
+private struct DebugSessionSnapshotPreviewTextView: View {
+    let snapshotText: String
+    @State private var didCopySnapshot: Bool = false
+
+    var body: some View {
+        List {
+            Section {
+                Button(didCopySnapshot ? "Copied Plain Text" : "Copy Report") {
+                    UIPasteboard.general.string = snapshotText
+                    didCopySnapshot = true
+                }
+                .font(.system(size: 14, weight: .semibold))
+            } footer: {
+                Text("Copies the sanitized local-only snapshot preview report as plain text. It does not include raw session.json, local paths, signed URLs, auth material, storage object paths, or media payloads.")
+            }
+
+            Section {
+                Text(snapshotText)
+                    .font(.system(size: 12, weight: .regular, design: .monospaced))
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .textSelection(.enabled)
+            }
+        }
+        .navigationTitle("Snapshot Preview Report")
         .navigationBarTitleDisplayMode(.inline)
     }
 }

@@ -413,6 +413,76 @@ final class AppState: ObservableObject {
         var totalDiagnosticOnlyRows: Int { diagnosticOnlyRows.count }
     }
 
+    struct SessionSnapshotMediaManifestItem: Codable, Equatable, Identifiable {
+        let id: UUID
+        let originalFilenamePreview: String?
+        let originalRelativePathPresent: Bool
+        let originalByteSize: Int?
+        let localOriginalExists: Bool
+        let storageBucketPresent: Bool
+        let storagePathPresent: Bool
+        let checksumPresent: Bool
+        let storageByteSize: Int?
+    }
+
+    struct SessionSnapshotEnvelope: Codable, Equatable, Identifiable {
+        let id: UUID
+        let snapshotSchemaVersion: Int
+        let sessionMetadataSchemaVersion: Int?
+        let trigger: String
+        let generatedAt: Date
+        let appVersion: String?
+        let sourceDeviceID: String?
+        let orgID: UUID?
+        let propertyID: UUID
+        let sessionID: UUID
+        let status: Session.Status
+        let isSealed: Bool
+        let exportedAt: Date?
+        let firstDeliveredAt: Date?
+        let reExportExpiresAt: Date?
+        let shotCount: Int
+        let issueCount: Int
+        let guidedCount: Int
+        let mediaManifestCount: Int
+        let missingLocalOriginalsCount: Int
+        let supabaseStorageMetadataCount: Int
+        let rawSessionJSON: String
+        let rawSessionJSONSHA256: String
+        let snapshotPayloadSHA256: String
+        let rawSessionJSONByteCount: Int
+        let snapshotPayloadByteCount: Int
+        let mediaManifest: [SessionSnapshotMediaManifestItem]
+    }
+
+    struct SessionSnapshotPreviewRow: Equatable, Identifiable {
+        let id: UUID
+        let propertyID: UUID
+        let localPropertyName: String?
+        let sessionID: UUID
+        let status: Session.Status?
+        let isPreviewable: Bool
+        let failureReason: String?
+        let envelope: SessionSnapshotEnvelope?
+    }
+
+    struct SessionSnapshotPreviewReport: Equatable {
+        let inspectedAt: Date
+        let activeOrganizationID: UUID?
+        let sessionsInspected: Int
+        let previewableSessions: Int
+        let missingOrUnreadableSessionJSONCount: Int
+        let checksumGenerationPassCount: Int
+        let checksumGenerationFailCount: Int
+        let totalShotCount: Int
+        let totalIssueCount: Int
+        let totalGuidedCount: Int
+        let totalMediaManifestCount: Int
+        let totalMissingLocalOriginalsCount: Int
+        let totalSupabaseStorageMetadataCount: Int
+        let rows: [SessionSnapshotPreviewRow]
+    }
+
     enum ExportSealPreflightCategory: String, CaseIterable, Equatable, Hashable {
         case hardBlockCandidate = "hard_block_candidate"
         case softWarningCandidate = "soft_warning_candidate"
@@ -9829,6 +9899,266 @@ final class AppState: ObservableObject {
         Self.makeExportSealPreflightReport(from: inspectCompletenessGates(inspectedAt: inspectedAt))
     }
 
+    func inspectSessionSnapshotPreview(
+        inspectedAt: Date = Date(),
+        trigger: String = "preview"
+    ) -> SessionSnapshotPreviewReport {
+        let properties = (try? localStore.fetchProperties()) ?? []
+        var rows: [SessionSnapshotPreviewRow] = []
+        var checksumPassCount = 0
+        var checksumFailCount = 0
+        var missingOrUnreadableCount = 0
+
+        for property in properties {
+            let sessions = (try? localStore.fetchSessionsForCacheBuild(propertyID: property.id)) ?? []
+            for session in sessions {
+                do {
+                    let envelope = try makeSessionSnapshotEnvelope(
+                        propertyID: property.id,
+                        session: session,
+                        generatedAt: inspectedAt,
+                        trigger: trigger
+                    )
+                    checksumPassCount += 1
+                    rows.append(
+                        SessionSnapshotPreviewRow(
+                            id: session.id,
+                            propertyID: property.id,
+                            localPropertyName: property.name,
+                            sessionID: session.id,
+                            status: envelope.status,
+                            isPreviewable: true,
+                            failureReason: nil,
+                            envelope: envelope
+                        )
+                    )
+                } catch {
+                    missingOrUnreadableCount += 1
+                    if case SessionSnapshotPreviewError.checksumGenerationFailed = error {
+                        checksumFailCount += 1
+                    }
+                    rows.append(
+                        SessionSnapshotPreviewRow(
+                            id: session.id,
+                            propertyID: property.id,
+                            localPropertyName: property.name,
+                            sessionID: session.id,
+                            status: session.status,
+                            isPreviewable: false,
+                            failureReason: Self.sessionSnapshotPreviewReason(for: error),
+                            envelope: nil
+                        )
+                    )
+                }
+            }
+        }
+
+        let envelopes = rows.compactMap(\.envelope)
+        return SessionSnapshotPreviewReport(
+            inspectedAt: inspectedAt,
+            activeOrganizationID: activeOrganizationID,
+            sessionsInspected: rows.count,
+            previewableSessions: envelopes.count,
+            missingOrUnreadableSessionJSONCount: missingOrUnreadableCount,
+            checksumGenerationPassCount: checksumPassCount,
+            checksumGenerationFailCount: checksumFailCount,
+            totalShotCount: envelopes.reduce(0) { $0 + $1.shotCount },
+            totalIssueCount: envelopes.reduce(0) { $0 + $1.issueCount },
+            totalGuidedCount: envelopes.reduce(0) { $0 + $1.guidedCount },
+            totalMediaManifestCount: envelopes.reduce(0) { $0 + $1.mediaManifestCount },
+            totalMissingLocalOriginalsCount: envelopes.reduce(0) { $0 + $1.missingLocalOriginalsCount },
+            totalSupabaseStorageMetadataCount: envelopes.reduce(0) { $0 + $1.supabaseStorageMetadataCount },
+            rows: rows.sorted { lhs, rhs in
+                if lhs.propertyID != rhs.propertyID { return lhs.propertyID.uuidString < rhs.propertyID.uuidString }
+                return lhs.sessionID.uuidString < rhs.sessionID.uuidString
+            }
+        )
+    }
+
+    private enum SessionSnapshotPreviewError: Error {
+        case sessionJSONMissingOrUnreadable
+        case sessionJSONIDMismatch
+        case checksumGenerationFailed
+    }
+
+    private struct SessionSnapshotPayloadForChecksum: Codable {
+        let snapshotSchemaVersion: Int
+        let sessionMetadataSchemaVersion: Int?
+        let trigger: String
+        let generatedAt: Date
+        let appVersion: String?
+        let sourceDeviceID: String?
+        let orgID: UUID?
+        let propertyID: UUID
+        let sessionID: UUID
+        let status: Session.Status
+        let isSealed: Bool
+        let exportedAt: Date?
+        let firstDeliveredAt: Date?
+        let reExportExpiresAt: Date?
+        let shotCount: Int
+        let issueCount: Int
+        let guidedCount: Int
+        let mediaManifestCount: Int
+        let missingLocalOriginalsCount: Int
+        let supabaseStorageMetadataCount: Int
+        let rawSessionJSON: String
+        let rawSessionJSONSHA256: String
+        let rawSessionJSONByteCount: Int
+        let mediaManifest: [SessionSnapshotMediaManifestItem]
+    }
+
+    private func makeSessionSnapshotEnvelope(
+        propertyID: UUID,
+        session: Session,
+        generatedAt: Date,
+        trigger: String
+    ) throws -> SessionSnapshotEnvelope {
+        let sessionJSONURL = localStore.sessionJSONURL(propertyID: propertyID, sessionID: session.id)
+        guard FileManager.default.fileExists(atPath: sessionJSONURL.path),
+              let rawData = try? Data(contentsOf: sessionJSONURL) else {
+            throw SessionSnapshotPreviewError.sessionJSONMissingOrUnreadable
+        }
+
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        guard let rawMetadata = try? decoder.decode(SessionMetadata.self, from: rawData),
+              let metadata = try? localStore.loadSessionMetadata(propertyID: propertyID, sessionID: session.id) else {
+            throw SessionSnapshotPreviewError.sessionJSONMissingOrUnreadable
+        }
+        guard rawMetadata.propertyID == propertyID, rawMetadata.sessionID == session.id else {
+            throw SessionSnapshotPreviewError.sessionJSONIDMismatch
+        }
+
+        let rawSessionJSON = String(data: rawData, encoding: .utf8) ?? rawData.base64EncodedString()
+        let rawChecksum = Self.sessionSnapshotSHA256Hex(for: rawData)
+        let manifest = metadata.shots.map { shot in
+            Self.makeSessionSnapshotMediaManifestItem(
+                for: shot,
+                propertyID: propertyID,
+                sessionID: session.id,
+                localStore: localStore
+            )
+        }
+        let missingOriginals = manifest.filter { !$0.localOriginalExists }.count
+        let storageMetadataCount = manifest.filter { $0.storageBucketPresent && $0.storagePathPresent }.count
+        let payload = SessionSnapshotPayloadForChecksum(
+            snapshotSchemaVersion: 1,
+            sessionMetadataSchemaVersion: metadata.schemaVersion,
+            trigger: trigger,
+            generatedAt: generatedAt,
+            appVersion: Self.trimmedNonEmpty(metadata.appVersion),
+            sourceDeviceID: currentDeviceIdentifier(),
+            orgID: metadata.orgID,
+            propertyID: propertyID,
+            sessionID: session.id,
+            status: metadata.status,
+            isSealed: metadata.isSealed,
+            exportedAt: metadata.exportedAt,
+            firstDeliveredAt: metadata.firstDeliveredAt,
+            reExportExpiresAt: metadata.reExportExpiresAt,
+            shotCount: metadata.shots.count,
+            issueCount: metadata.issues.count,
+            guidedCount: metadata.guidedShots.count,
+            mediaManifestCount: manifest.count,
+            missingLocalOriginalsCount: missingOriginals,
+            supabaseStorageMetadataCount: storageMetadataCount,
+            rawSessionJSON: rawSessionJSON,
+            rawSessionJSONSHA256: rawChecksum,
+            rawSessionJSONByteCount: rawData.count,
+            mediaManifest: manifest
+        )
+
+        let payloadData: Data
+        do {
+            let encoder = JSONEncoder()
+            encoder.dateEncodingStrategy = .iso8601
+            encoder.outputFormatting = [.sortedKeys]
+            payloadData = try encoder.encode(payload)
+        } catch {
+            throw SessionSnapshotPreviewError.checksumGenerationFailed
+        }
+
+        return SessionSnapshotEnvelope(
+            id: session.id,
+            snapshotSchemaVersion: payload.snapshotSchemaVersion,
+            sessionMetadataSchemaVersion: payload.sessionMetadataSchemaVersion,
+            trigger: trigger,
+            generatedAt: generatedAt,
+            appVersion: payload.appVersion,
+            sourceDeviceID: payload.sourceDeviceID,
+            orgID: payload.orgID,
+            propertyID: payload.propertyID,
+            sessionID: payload.sessionID,
+            status: payload.status,
+            isSealed: payload.isSealed,
+            exportedAt: payload.exportedAt,
+            firstDeliveredAt: payload.firstDeliveredAt,
+            reExportExpiresAt: payload.reExportExpiresAt,
+            shotCount: payload.shotCount,
+            issueCount: payload.issueCount,
+            guidedCount: payload.guidedCount,
+            mediaManifestCount: payload.mediaManifestCount,
+            missingLocalOriginalsCount: payload.missingLocalOriginalsCount,
+            supabaseStorageMetadataCount: payload.supabaseStorageMetadataCount,
+            rawSessionJSON: rawSessionJSON,
+            rawSessionJSONSHA256: rawChecksum,
+            snapshotPayloadSHA256: Self.sessionSnapshotSHA256Hex(for: payloadData),
+            rawSessionJSONByteCount: rawData.count,
+            snapshotPayloadByteCount: payloadData.count,
+            mediaManifest: manifest
+        )
+    }
+
+    private static func makeSessionSnapshotMediaManifestItem(
+        for shot: ShotMetadata,
+        propertyID: UUID,
+        sessionID: UUID,
+        localStore: LocalStore
+    ) -> SessionSnapshotMediaManifestItem {
+        let relativePath = trimmedNonEmpty(shot.originalRelativePath)
+        let localOriginalExists: Bool
+        if let relativePath,
+           let fileURL = localStore.resolveSessionRelativeFileURL(
+            propertyID: propertyID,
+            sessionID: sessionID,
+            relativePath: relativePath
+           ) {
+            localOriginalExists = FileManager.default.fileExists(atPath: fileURL.path)
+        } else {
+            localOriginalExists = false
+        }
+        return SessionSnapshotMediaManifestItem(
+            id: shot.shotID,
+            originalFilenamePreview: diagnosticsPreviewText(shot.originalFilename, maxLength: 80),
+            originalRelativePathPresent: relativePath != nil,
+            originalByteSize: shot.originalByteSize,
+            localOriginalExists: localOriginalExists,
+            storageBucketPresent: trimmedNonEmpty(shot.storageBucket) != nil,
+            storagePathPresent: trimmedNonEmpty(shot.storagePath) != nil,
+            checksumPresent: trimmedNonEmpty(shot.checksumSHA256) != nil,
+            storageByteSize: shot.byteSize
+        )
+    }
+
+    private nonisolated static func sessionSnapshotPreviewReason(for error: Error) -> String {
+        guard let error = error as? SessionSnapshotPreviewError else {
+            return "session_snapshot_preview_failed"
+        }
+        switch error {
+        case .sessionJSONMissingOrUnreadable:
+            return "session_json_missing_or_unreadable"
+        case .sessionJSONIDMismatch:
+            return "session_json_id_mismatch"
+        case .checksumGenerationFailed:
+            return "checksum_generation_failed"
+        }
+    }
+
+    private nonisolated static func sessionSnapshotSHA256Hex(for data: Data) -> String {
+        SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+    }
+
     private func makeCompletenessGatesReport(inspectedAt: Date = Date()) -> CompletenessGatesReport {
         let properties = (try? localStore.fetchProperties()) ?? []
         let duplicateShotSessionIDs = completenessDuplicateShotSessionIDs(properties: properties)
@@ -10857,6 +11187,85 @@ final class AppState: ObservableObject {
         default:
             return row.freshness == .needsReview ? .actionable : .informational
         }
+    }
+
+    nonisolated static func sessionSnapshotPreviewReportText(_ report: SessionSnapshotPreviewReport) -> String {
+        var lines: [String] = []
+        lines.append("ScoutCapture Local Health - Session Snapshot Preview")
+        lines.append("Inspected: \(report.inspectedAt.formatted(date: .abbreviated, time: .standard))")
+        lines.append("Active Org: \(report.activeOrganizationID?.uuidString ?? "none")")
+        lines.append("Read-only local-only diagnostics. This preview does not upload snapshots, change Supabase schema, change RLS, switch canonical reads, hydrate sessions or shots, download media, relink files, repair data, change export behavior, change sealing/completion behavior, change sync, change media recovery, change iCloud fallback, delete local/remote data, or include media payloads.")
+        lines.append("")
+        lines.append("Summary Counts")
+        lines.append("- sessions_inspected: \(report.sessionsInspected)")
+        lines.append("- previewable_sessions: \(report.previewableSessions)")
+        lines.append("- missing_or_unreadable_session_json: \(report.missingOrUnreadableSessionJSONCount)")
+        lines.append("- checksum_generation_pass: \(report.checksumGenerationPassCount)")
+        lines.append("- checksum_generation_fail: \(report.checksumGenerationFailCount)")
+        lines.append("- total_shot_count: \(report.totalShotCount)")
+        lines.append("- total_issue_count: \(report.totalIssueCount)")
+        lines.append("- total_guided_count: \(report.totalGuidedCount)")
+        lines.append("- total_media_manifest_count: \(report.totalMediaManifestCount)")
+        lines.append("- total_missing_local_originals: \(report.totalMissingLocalOriginalsCount)")
+        lines.append("- total_supabase_storage_metadata_count: \(report.totalSupabaseStorageMetadataCount)")
+        lines.append("")
+        lines.append("Completeness Diagnostics Comparison")
+        lines.append("- Preview shot_count, issue_count, guided_count, missing_local_originals, and media_manifest_count are derived from local session.json and local original resolution, matching the same local-only evidence class used by completeness diagnostics where practical.")
+        lines.append("- This preview hashes raw session.json plus a deterministic snapshot payload for trust inspection only; it does not approve hydration or canonical-read changes.")
+        lines.append("")
+        lines.append("Per-Session Sanitized Rows")
+        if report.rows.isEmpty {
+            lines.append("none")
+        } else {
+            for row in report.rows {
+                if let envelope = row.envelope {
+                    lines.append(
+                        [
+                            "- property_id=\(row.propertyID.uuidString)",
+                            "local_property_name=\(diagnosticsPreviewText(row.localPropertyName, maxLength: 80) ?? "none")",
+                            "session_id=\(row.sessionID.uuidString)",
+                            "previewable=true",
+                            "trigger=\(diagnosticsPreviewText(envelope.trigger, maxLength: 40) ?? "none")",
+                            "schema=\(envelope.snapshotSchemaVersion)",
+                            "session_schema=\(envelope.sessionMetadataSchemaVersion.map(String.init) ?? "none")",
+                            "status=\(envelope.status.rawValue)",
+                            "sealed=\(envelope.isSealed)",
+                            "exported_at=\(envelope.exportedAt?.formatted(date: .abbreviated, time: .standard) ?? "none")",
+                            "first_delivered_at=\(envelope.firstDeliveredAt?.formatted(date: .abbreviated, time: .standard) ?? "none")",
+                            "re_export_expires_at=\(envelope.reExportExpiresAt?.formatted(date: .abbreviated, time: .standard) ?? "none")",
+                            "shots=\(envelope.shotCount)",
+                            "issues=\(envelope.issueCount)",
+                            "guided=\(envelope.guidedCount)",
+                            "media_manifest=\(envelope.mediaManifestCount)",
+                            "missing_local_originals=\(envelope.missingLocalOriginalsCount)",
+                            "storage_metadata=\(envelope.supabaseStorageMetadataCount)",
+                            "raw_json_sha256=\(envelope.rawSessionJSONSHA256)",
+                            "payload_sha256=\(envelope.snapshotPayloadSHA256)",
+                            "raw_json_bytes=\(envelope.rawSessionJSONByteCount)",
+                            "payload_bytes=\(envelope.snapshotPayloadByteCount)"
+                        ]
+                            .joined(separator: " ")
+                    )
+                } else {
+                    lines.append(
+                        [
+                            "- property_id=\(row.propertyID.uuidString)",
+                            "local_property_name=\(diagnosticsPreviewText(row.localPropertyName, maxLength: 80) ?? "none")",
+                            "session_id=\(row.sessionID.uuidString)",
+                            "previewable=false",
+                            "status=\(row.status?.rawValue ?? "unknown")",
+                            "reason=\(diagnosticsPreviewText(row.failureReason, maxLength: 120) ?? "none")"
+                        ]
+                            .joined(separator: " ")
+                    )
+                }
+            }
+        }
+        lines.append("")
+        lines.append("Redaction Notes")
+        lines.append("- Report rows intentionally omit raw session.json text, local paths, signed URLs, auth tokens, storage object paths, and media bytes.")
+        lines.append("- Media manifest is represented by counts and per-shot provenance in memory only; the copyable report stays count-based.")
+        return lines.joined(separator: "\n")
     }
 
     nonisolated static func completenessGatesReportText(_ report: CompletenessGatesReport) -> String {
