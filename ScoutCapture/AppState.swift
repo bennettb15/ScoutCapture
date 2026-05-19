@@ -533,6 +533,99 @@ final class AppState: ObservableObject {
         }
     }
 
+    enum EnforcementPolicyOperation: String, CaseIterable, Equatable, Hashable {
+        case sealComplete = "seal_complete"
+        case firstExportDelivery = "first_export_delivery"
+        case reExport = "re_export"
+
+        nonisolated var title: String {
+            switch self {
+            case .sealComplete:
+                return "Seal / Complete"
+            case .firstExportDelivery:
+                return "First Export / Delivery"
+            case .reExport:
+                return "Re-Export"
+            }
+        }
+    }
+
+    enum EnforcementPolicySeverity: String, CaseIterable, Equatable, Hashable {
+        case hardBlockCandidate = "hard_block_candidate"
+        case softWarningCandidate = "soft_warning_candidate"
+        case informationalOnly = "informational_only"
+        case neverBlock = "never_block"
+        case deferred
+
+        nonisolated var visibleLabel: String {
+            switch self {
+            case .hardBlockCandidate:
+                return "Future Hard Block"
+            case .softWarningCandidate:
+                return "Warning Only"
+            case .informationalOnly:
+                return "Informational"
+            case .neverBlock:
+                return "Never Block"
+            case .deferred:
+                return "Deferred"
+            }
+        }
+    }
+
+    enum EnforcementPolicyReadiness: String, CaseIterable, Equatable, Hashable {
+        case readyForWarningOnly = "ready_for_warning_only"
+        case readyForFutureGuardedEnforcement = "ready_for_future_guarded_enforcement"
+        case deferredUntilSupabaseCanonicalReads = "deferred_until_supabase_canonical_reads"
+        case deferredUntilWebPortalConflictRules = "deferred_until_web_portal_conflict_rules"
+        case deferredUntilRemoteHydration = "deferred_until_remote_hydration"
+        case neverEnforce = "never_enforce"
+
+        nonisolated var visibleLabel: String {
+            switch self {
+            case .readyForWarningOnly:
+                return "Ready for warning-only UI"
+            case .readyForFutureGuardedEnforcement:
+                return "Ready for future guarded enforcement"
+            case .deferredUntilSupabaseCanonicalReads:
+                return "Deferred until Supabase canonical reads"
+            case .deferredUntilWebPortalConflictRules:
+                return "Deferred until web portal conflict rules"
+            case .deferredUntilRemoteHydration:
+                return "Deferred until remote hydration"
+            case .neverEnforce:
+                return "Never enforce"
+            }
+        }
+    }
+
+    struct EnforcementPolicyMatrixRow: Equatable, Identifiable {
+        let operation: EnforcementPolicyOperation
+        let conditionKey: String
+        let friendlyTitle: String
+        let currentSeverity: EnforcementPolicySeverity
+        let eventualSeverity: EnforcementPolicySeverity
+        let readiness: EnforcementPolicyReadiness
+        let deferralReason: String
+        let notes: String
+
+        var id: String { "\(operation.rawValue)|\(conditionKey)" }
+    }
+
+    struct EnforcementPolicyMatrixSection: Equatable, Identifiable {
+        let operation: EnforcementPolicyOperation
+        let rows: [EnforcementPolicyMatrixRow]
+
+        var id: String { operation.rawValue }
+    }
+
+    struct EnforcementPolicyMatrixReport: Equatable {
+        let inspectedAt: Date
+        let sections: [EnforcementPolicyMatrixSection]
+
+        var rows: [EnforcementPolicyMatrixRow] { sections.flatMap(\.rows) }
+    }
+
     nonisolated static func exportSealPreflightReasonSummaries(
         for findings: [ExportSealPreflightFinding]
     ) -> [ExportSealPreflightReasonSummary] {
@@ -11028,6 +11121,287 @@ final class AppState: ObservableObject {
             lines.append("")
         }
         return lines.joined(separator: "\n")
+    }
+
+    nonisolated static func makeEnforcementPolicyMatrixReport(
+        inspectedAt: Date = Date()
+    ) -> EnforcementPolicyMatrixReport {
+        let sections = EnforcementPolicyOperation.allCases.map { operation in
+            EnforcementPolicyMatrixSection(
+                operation: operation,
+                rows: enforcementPolicyConditionDefinitions.map { definition in
+                    enforcementPolicyRow(for: definition, operation: operation)
+                }
+            )
+        }
+        return EnforcementPolicyMatrixReport(inspectedAt: inspectedAt, sections: sections)
+    }
+
+    nonisolated static func enforcementPolicyMatrixReportText(
+        _ report: EnforcementPolicyMatrixReport
+    ) -> String {
+        var lines: [String] = []
+        lines.append("ScoutCapture Local Health - Enforcement Policy Matrix")
+        lines.append("Inspected: \(report.inspectedAt.formatted(date: .abbreviated, time: .standard))")
+        lines.append("Read-only policy diagnostics. No behavior changed. This matrix does not enforce gates, block export, block sealing, change history visibility, switch canonical reads, hydrate sessions or shots, download media, relink files, repair data, change sync, media recovery, iCloud fallback, migrations, RLS, or local/remote data.")
+        lines.append("")
+        lines.append("Technical Policy Rows")
+        for section in report.sections {
+            lines.append("")
+            lines.append(section.operation.title)
+            for row in section.rows {
+                lines.append([
+                    "operation=\(row.operation.rawValue)",
+                    "condition_key=\(row.conditionKey)",
+                    "current_severity=\(row.currentSeverity.rawValue)",
+                    "eventual_severity=\(row.eventualSeverity.rawValue)",
+                    "readiness=\(row.readiness.rawValue)",
+                    "deferral_reason=\(diagnosticsPreviewText(row.deferralReason, maxLength: 160) ?? "none")",
+                    "notes=\(diagnosticsPreviewText(row.notes, maxLength: 180) ?? "none")"
+                ].joined(separator: " | "))
+            }
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    private struct EnforcementPolicyConditionDefinition {
+        let key: String
+        let title: String
+        let policy: EnforcementPolicyConditionPolicy
+        let deferralReason: String
+        let notes: String
+    }
+
+    private enum EnforcementPolicyConditionPolicy {
+        case futureHardAll
+        case pendingDeliveryMissingOriginal
+        case reExportMissingOriginal
+        case needsReviewFreshness
+        case warningOnly
+        case neverBlockInformational
+        case neverBlockWarning
+        case deferredSupabaseCanonicalReads
+        case deferredRemoteHydration
+        case activeParityDebt
+    }
+
+    private nonisolated static let enforcementPolicyConditionDefinitions: [EnforcementPolicyConditionDefinition] = [
+        .init(
+            key: "missing_or_unreadable_session_json",
+            title: "Missing or unreadable session metadata",
+            policy: .futureHardAll,
+            deferralReason: "Ready only for warning-only display until guarded enforcement is explicitly enabled.",
+            notes: "The local export package cannot be trusted without readable session.json."
+        ),
+        .init(
+            key: "session_property_identity_mismatch",
+            title: "Session/property identity mismatch",
+            policy: .futureHardAll,
+            deferralReason: "Ready only for warning-only display until guarded enforcement is explicitly enabled.",
+            notes: "Mismatched session.json identity can point export/seal work at the wrong target."
+        ),
+        .init(
+            key: "active_export_shot_missing_local_original_pending_delivery",
+            title: "Pending-delivery shot missing local original",
+            policy: .pendingDeliveryMissingOriginal,
+            deferralReason: "Ready only for warning-only display until guarded enforcement is explicitly enabled.",
+            notes: "First delivery needs the active local original to build the package."
+        ),
+        .init(
+            key: "active_export_shot_missing_local_original_reexport_eligible",
+            title: "Re-export-eligible shot missing local original",
+            policy: .reExportMissingOriginal,
+            deferralReason: "Ready only for warning-only display until guarded enforcement is explicitly enabled.",
+            notes: "Re-export needs the active local original while the delivery window is open."
+        ),
+        .init(
+            key: "required_issue_export_linkage_missing",
+            title: "Required issue/export linkage missing",
+            policy: .futureHardAll,
+            deferralReason: "Ready only for warning-only display until guarded enforcement is explicitly enabled.",
+            notes: "Issue history references required for the package must resolve to exported sessions or shots."
+        ),
+        .init(
+            key: "deleted_archived_or_inaccessible_property",
+            title: "Deleted, archived, or inaccessible property",
+            policy: .futureHardAll,
+            deferralReason: "Ready only for warning-only display until guarded enforcement is explicitly enabled.",
+            notes: "The target property must remain accessible before operational seal or export enforcement."
+        ),
+        .init(
+            key: "property_freshness_needs_review",
+            title: "Property freshness needs review",
+            policy: .needsReviewFreshness,
+            deferralReason: "Deferred until web portal conflict rules and operator conflict resolution exist.",
+            notes: "Needs-review freshness should not hard-block until the operator can resolve the conflict."
+        ),
+        .init(
+            key: "offline_or_unknown_freshness",
+            title: "Offline or unknown freshness",
+            policy: .warningOnly,
+            deferralReason: "Warning-only because unknown/offline can mean not inspected rather than unsafe.",
+            notes: "Keep advisory unless a future target-scoped conflict is proven."
+        ),
+        .init(
+            key: "duplicate_shot_id_context",
+            title: "Duplicate shot ID context",
+            policy: .neverBlockWarning,
+            deferralReason: "Never enforce by itself; use only as operator context.",
+            notes: "Duplicate context may help investigation but does not prove the current package is invalid."
+        ),
+        .init(
+            key: "historical_archive_debt",
+            title: "Historical archive debt",
+            policy: .neverBlockInformational,
+            deferralReason: "Never enforce; historical/provenance-only after delivery and re-export expiry.",
+            notes: "Retained for audit history and not operational eligibility."
+        ),
+        .init(
+            key: "supabase_storage_candidate_without_local_media",
+            title: "Supabase storage candidate without local media",
+            policy: .neverBlockWarning,
+            deferralReason: "Never enforce by itself; provenance-only until an explicit recovery workflow runs.",
+            notes: "Remote storage metadata does not download, relink, or prove local export readability."
+        ),
+        .init(
+            key: "pending_queue_not_target_session",
+            title: "Pending queue not tied to target session",
+            policy: .warningOnly,
+            deferralReason: "Warning-only until queue debt is proven to affect the target operation.",
+            notes: "General pending work is operational context, not target export proof."
+        ),
+        .init(
+            key: "retired_guided_rows",
+            title: "Retired guided rows",
+            policy: .neverBlockInformational,
+            deferralReason: "Never enforce; retained lifecycle history.",
+            notes: "Retired guided rows are not part of active export blocking."
+        ),
+        .init(
+            key: "retired_or_historical_shots",
+            title: "Retired or historical shots",
+            policy: .neverBlockInformational,
+            deferralReason: "Never enforce; retained lifecycle history.",
+            notes: "Historical shots are preserved for audit and excluded from active default export blocking."
+        ),
+        .init(
+            key: "cross_session_issue_history_reference_resolved",
+            title: "Resolved cross-session issue history",
+            policy: .neverBlockInformational,
+            deferralReason: "Never enforce when the referenced session exists.",
+            notes: "Cross-session issue history is valid context when the reference resolves."
+        ),
+        .init(
+            key: "empty_remote_draft_shell",
+            title: "Empty remote draft shell",
+            policy: .neverBlockInformational,
+            deferralReason: "Never enforce; not recommended for hydration and not operational export debt.",
+            notes: "Empty shells are remote scope context, not active local package failure."
+        ),
+        .init(
+            key: "remote_only_hydration_gap",
+            title: "Remote-only hydration gap",
+            policy: .deferredRemoteHydration,
+            deferralReason: "Deferred until remote session/shot hydration exists.",
+            notes: "Do not block local operations on remote-only data until hydration rules are implemented."
+        ),
+        .init(
+            key: "child_metadata_freshness_unknown",
+            title: "Child metadata freshness unknown",
+            policy: .deferredSupabaseCanonicalReads,
+            deferralReason: "Deferred until Supabase canonical child metadata reads are stronger.",
+            notes: "Child freshness is not broad enough yet to support enforcement."
+        ),
+        .init(
+            key: "web_portal_conflict_unresolved",
+            title: "Unresolved web portal conflict",
+            policy: .needsReviewFreshness,
+            deferralReason: "Deferred until web portal conflict rules and operator conflict resolution exist.",
+            notes: "Portal conflicts need a product rule and resolution path before enforcement."
+        ),
+        .init(
+            key: "active_target_sync_parity_debt",
+            title: "Active target sync/parity debt",
+            policy: .activeParityDebt,
+            deferralReason: "Deferred until Supabase canonical reads and portal conflict rules can prove target impact.",
+            notes: "Known target parity debt may become enforceable later, but current diagnostics remain advisory."
+        )
+    ]
+
+    private nonisolated static func enforcementPolicyRow(
+        for definition: EnforcementPolicyConditionDefinition,
+        operation: EnforcementPolicyOperation
+    ) -> EnforcementPolicyMatrixRow {
+        let severities = enforcementPolicySeverities(policy: definition.policy, operation: operation)
+        return EnforcementPolicyMatrixRow(
+            operation: operation,
+            conditionKey: definition.key,
+            friendlyTitle: definition.title,
+            currentSeverity: severities.current,
+            eventualSeverity: severities.eventual,
+            readiness: enforcementPolicyReadiness(policy: definition.policy, operation: operation),
+            deferralReason: definition.deferralReason,
+            notes: definition.notes
+        )
+    }
+
+    private nonisolated static func enforcementPolicySeverities(
+        policy: EnforcementPolicyConditionPolicy,
+        operation: EnforcementPolicyOperation
+    ) -> (current: EnforcementPolicySeverity, eventual: EnforcementPolicySeverity) {
+        switch policy {
+        case .futureHardAll:
+            return (.hardBlockCandidate, .hardBlockCandidate)
+        case .pendingDeliveryMissingOriginal:
+            if operation == .reExport {
+                return (.softWarningCandidate, .softWarningCandidate)
+            }
+            return (.hardBlockCandidate, .hardBlockCandidate)
+        case .reExportMissingOriginal:
+            if operation == .reExport {
+                return (.hardBlockCandidate, .hardBlockCandidate)
+            }
+            return (.softWarningCandidate, .softWarningCandidate)
+        case .needsReviewFreshness:
+            return (.deferred, .hardBlockCandidate)
+        case .warningOnly:
+            return (.softWarningCandidate, .softWarningCandidate)
+        case .neverBlockInformational:
+            return (.informationalOnly, .neverBlock)
+        case .neverBlockWarning:
+            return (.softWarningCandidate, .neverBlock)
+        case .deferredSupabaseCanonicalReads,
+             .deferredRemoteHydration,
+             .activeParityDebt:
+            return (.deferred, .deferred)
+        }
+    }
+
+    private nonisolated static func enforcementPolicyReadiness(
+        policy: EnforcementPolicyConditionPolicy,
+        operation: EnforcementPolicyOperation
+    ) -> EnforcementPolicyReadiness {
+        switch policy {
+        case .futureHardAll:
+            return .readyForFutureGuardedEnforcement
+        case .pendingDeliveryMissingOriginal:
+            return operation == .reExport ? .readyForWarningOnly : .readyForFutureGuardedEnforcement
+        case .reExportMissingOriginal:
+            return operation == .reExport ? .readyForFutureGuardedEnforcement : .readyForWarningOnly
+        case .needsReviewFreshness:
+            return .deferredUntilWebPortalConflictRules
+        case .warningOnly:
+            return .readyForWarningOnly
+        case .neverBlockInformational,
+             .neverBlockWarning:
+            return .neverEnforce
+        case .deferredSupabaseCanonicalReads:
+            return .deferredUntilSupabaseCanonicalReads
+        case .deferredRemoteHydration:
+            return .deferredUntilRemoteHydration
+        case .activeParityDebt:
+            return .deferredUntilSupabaseCanonicalReads
+        }
     }
 
     private nonisolated static func appendCompletenessCounts(

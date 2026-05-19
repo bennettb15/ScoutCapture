@@ -6555,6 +6555,20 @@ private struct DebugExportSealPreflightSnapshot {
     }
 }
 
+private struct DebugEnforcementPolicyMatrixSnapshot {
+    let inspectedAt: String
+    let sections: [AppState.EnforcementPolicyMatrixSection]
+    let rowCount: String
+    let snapshotText: String
+
+    init(_ report: AppState.EnforcementPolicyMatrixReport) {
+        inspectedAt = report.inspectedAt.formatted(date: .abbreviated, time: .standard)
+        sections = report.sections
+        rowCount = String(report.rows.count)
+        snapshotText = AppState.enforcementPolicyMatrixReportText(report)
+    }
+}
+
 private struct DebugDivergenceAuditHistoricalGroup: Identifiable, Equatable {
     let id: String
     let category: String
@@ -6779,6 +6793,7 @@ private struct DebugLocalDiagnosticsView: View {
     @State private var canonicalReadinessSnapshot: DebugCanonicalReadinessSnapshot?
     @State private var completenessGatesSnapshot: DebugCompletenessGatesSnapshot?
     @State private var exportSealPreflightSnapshot: DebugExportSealPreflightSnapshot?
+    @State private var enforcementPolicyMatrixSnapshot: DebugEnforcementPolicyMatrixSnapshot?
 
     private var diagnostics: AppState.LocalDiagnosticsState {
         appState.localDiagnostics
@@ -6836,6 +6851,15 @@ private struct DebugLocalDiagnosticsView: View {
                             "Export / Seal Preflight",
                             subtitle: "Read-only advisory export, re-export, and sealing candidates",
                             value: exportSealPreflightSnapshot.map { "\($0.hardBlockCandidateCount) future hard blocks" } ?? "not inspected"
+                        )
+                    }
+                    NavigationLink {
+                        enforcementPolicyMatrixPage
+                    } label: {
+                        localHealthAreaLabel(
+                            "Enforcement Policy Matrix",
+                            subtitle: "Read-only future enforcement policy by operation",
+                            value: enforcementPolicyMatrixSnapshot.map { "\($0.rowCount) policy rows" } ?? "not inspected"
                         )
                     }
                     NavigationLink {
@@ -6910,6 +6934,7 @@ private struct DebugLocalDiagnosticsView: View {
             canonicalReadinessSnapshot = nil
             completenessGatesSnapshot = nil
             exportSealPreflightSnapshot = nil
+            enforcementPolicyMatrixSnapshot = nil
             refreshDiagnosticDetailSnapshots()
         }
         .alert("Clear Local Diagnostics?", isPresented: $showClearConfirm) {
@@ -7140,6 +7165,66 @@ private struct DebugLocalDiagnosticsView: View {
                 .foregroundStyle(.secondary)
             Text("Classification: \(summary.category.drilldownClassificationLabel)")
                 .font(.system(size: 12, weight: .medium, design: .monospaced))
+                .foregroundStyle(.secondary)
+        }
+        .padding(.vertical, 4)
+    }
+
+    private var enforcementPolicyMatrixPage: some View {
+        List {
+            Section("Enforcement Policy Matrix") {
+                Text("Read-only policy diagnostics. This matrix documents future enforcement posture only; it does not enforce gates, block export, block sealing, hydrate data, download media, relink files, repair data, or change sync.")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(.secondary)
+
+                if let snapshot = enforcementPolicyMatrixSnapshot {
+                    diagnosticRow("Inspected", snapshot.inspectedAt)
+                    diagnosticRow("Policy Rows", snapshot.rowCount)
+                    NavigationLink {
+                        DebugEnforcementPolicyMatrixSnapshotTextView(snapshotText: snapshot.snapshotText)
+                    } label: {
+                        Text("View Copyable Policy Matrix")
+                            .font(.system(size: 14, weight: .semibold))
+                    }
+                } else {
+                    Text("No enforcement policy matrix snapshot has been generated in this view.")
+                        .font(.system(size: 14, weight: .medium))
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            if let snapshot = enforcementPolicyMatrixSnapshot {
+                ForEach(snapshot.sections) { section in
+                    Section(section.operation.title) {
+                        ForEach(section.rows) { row in
+                            enforcementPolicyMatrixRow(row)
+                        }
+                    }
+                }
+            }
+        }
+        .navigationTitle("Policy Matrix")
+        .navigationBarTitleDisplayMode(.inline)
+    }
+
+    private func enforcementPolicyMatrixRow(
+        _ row: AppState.EnforcementPolicyMatrixRow
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 5) {
+            Text(row.friendlyTitle)
+                .font(.system(size: 14, weight: .semibold))
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Text("Current: \(row.currentSeverity.visibleLabel)")
+                Spacer(minLength: 8)
+                Text("Eventual: \(row.eventualSeverity.visibleLabel)")
+            }
+            .font(.system(size: 12, weight: .medium))
+            .foregroundStyle(.secondary)
+            Text(row.readiness.visibleLabel)
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(.secondary)
+            Text(row.deferralReason)
+                .font(.system(size: 12, weight: .medium))
                 .foregroundStyle(.secondary)
         }
         .padding(.vertical, 4)
@@ -7472,6 +7557,9 @@ private struct DebugLocalDiagnosticsView: View {
         completenessGatesSnapshot = DebugCompletenessGatesSnapshot(completenessReport)
         exportSealPreflightSnapshot = DebugExportSealPreflightSnapshot(
             AppState.makeExportSealPreflightReport(from: completenessReport)
+        )
+        enforcementPolicyMatrixSnapshot = DebugEnforcementPolicyMatrixSnapshot(
+            AppState.makeEnforcementPolicyMatrixReport()
         )
         refreshCanonicalReadinessSnapshot()
     }
@@ -8399,6 +8487,34 @@ private struct DebugExportSealPreflightSnapshotTextView: View {
             }
         }
         .navigationTitle("Preflight Report")
+        .navigationBarTitleDisplayMode(.inline)
+    }
+}
+
+private struct DebugEnforcementPolicyMatrixSnapshotTextView: View {
+    let snapshotText: String
+    @State private var didCopySnapshot: Bool = false
+
+    var body: some View {
+        List {
+            Section {
+                Button(didCopySnapshot ? "Copied Plain Text" : "Copy Report") {
+                    UIPasteboard.general.string = snapshotText
+                    didCopySnapshot = true
+                }
+                .font(.system(size: 14, weight: .semibold))
+            } footer: {
+                Text("Copies the sanitized enforcement policy matrix as plain text only. It does not include local paths, signed URLs, media, or auth material.")
+            }
+
+            Section {
+                Text(snapshotText)
+                    .font(.system(size: 12, weight: .regular, design: .monospaced))
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .textSelection(.enabled)
+            }
+        }
+        .navigationTitle("Policy Matrix")
         .navigationBarTitleDisplayMode(.inline)
     }
 }

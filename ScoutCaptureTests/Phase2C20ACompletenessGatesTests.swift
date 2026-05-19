@@ -983,6 +983,121 @@ final class Phase2C20ACompletenessGatesTests: XCTestCase {
         XCTAssertTrue(text.contains("missing_original_risk=historical_archive_debt"))
     }
 
+    func testEnforcementPolicyMatrixContainsAllRequiredConditionKeys() {
+        let report = AppState.makeEnforcementPolicyMatrixReport(inspectedAt: Date(timeIntervalSinceReferenceDate: 300))
+        let keys = Set(report.rows.map(\.conditionKey))
+
+        XCTAssertEqual(keys, Set([
+            "missing_or_unreadable_session_json",
+            "session_property_identity_mismatch",
+            "active_export_shot_missing_local_original_pending_delivery",
+            "active_export_shot_missing_local_original_reexport_eligible",
+            "required_issue_export_linkage_missing",
+            "deleted_archived_or_inaccessible_property",
+            "property_freshness_needs_review",
+            "offline_or_unknown_freshness",
+            "duplicate_shot_id_context",
+            "historical_archive_debt",
+            "supabase_storage_candidate_without_local_media",
+            "pending_queue_not_target_session",
+            "retired_guided_rows",
+            "retired_or_historical_shots",
+            "cross_session_issue_history_reference_resolved",
+            "empty_remote_draft_shell",
+            "remote_only_hydration_gap",
+            "child_metadata_freshness_unknown",
+            "web_portal_conflict_unresolved",
+            "active_target_sync_parity_debt"
+        ]))
+        XCTAssertEqual(report.rows.count, 60)
+    }
+
+    func testEnforcementPolicyMissingSessionJSONEventualHardBlockerForExportAndSeal() throws {
+        let report = AppState.makeEnforcementPolicyMatrixReport(inspectedAt: Date(timeIntervalSinceReferenceDate: 300))
+        let seal = try XCTUnwrap(policyRow(report, "missing_or_unreadable_session_json", .sealComplete))
+        let export = try XCTUnwrap(policyRow(report, "missing_or_unreadable_session_json", .firstExportDelivery))
+
+        XCTAssertEqual(seal.eventualSeverity, .hardBlockCandidate)
+        XCTAssertEqual(export.eventualSeverity, .hardBlockCandidate)
+        XCTAssertEqual(seal.readiness, .readyForFutureGuardedEnforcement)
+        XCTAssertEqual(export.readiness, .readyForFutureGuardedEnforcement)
+    }
+
+    func testEnforcementPolicyHistoricalArchiveDebtIsNeverBlock() {
+        let report = AppState.makeEnforcementPolicyMatrixReport(inspectedAt: Date(timeIntervalSinceReferenceDate: 300))
+        let rows = report.rows.filter { $0.conditionKey == "historical_archive_debt" }
+
+        XCTAssertEqual(rows.count, 3)
+        XCTAssertTrue(rows.allSatisfy { $0.eventualSeverity == .neverBlock })
+        XCTAssertTrue(rows.allSatisfy { $0.readiness == .neverEnforce })
+    }
+
+    func testEnforcementPolicyDuplicateShotIDContextIsNotHardBlocker() {
+        let report = AppState.makeEnforcementPolicyMatrixReport(inspectedAt: Date(timeIntervalSinceReferenceDate: 300))
+        let rows = report.rows.filter { $0.conditionKey == "duplicate_shot_id_context" }
+
+        XCTAssertEqual(rows.count, 3)
+        XCTAssertTrue(rows.allSatisfy { $0.currentSeverity != .hardBlockCandidate })
+        XCTAssertTrue(rows.allSatisfy { $0.eventualSeverity == .neverBlock })
+        XCTAssertTrue(rows.allSatisfy { $0.readiness == .neverEnforce })
+    }
+
+    func testEnforcementPolicyNeedsReviewFreshnessDefersUntilWebPortalConflictRules() {
+        let report = AppState.makeEnforcementPolicyMatrixReport(inspectedAt: Date(timeIntervalSinceReferenceDate: 300))
+        let rows = report.rows.filter { $0.conditionKey == "property_freshness_needs_review" }
+
+        XCTAssertEqual(rows.count, 3)
+        XCTAssertTrue(rows.allSatisfy { $0.currentSeverity == .deferred })
+        XCTAssertTrue(rows.allSatisfy { $0.readiness == .deferredUntilWebPortalConflictRules })
+    }
+
+    func testEnforcementPolicyRemoteOnlyHydrationGapDefersUntilRemoteHydration() {
+        let report = AppState.makeEnforcementPolicyMatrixReport(inspectedAt: Date(timeIntervalSinceReferenceDate: 300))
+        let rows = report.rows.filter { $0.conditionKey == "remote_only_hydration_gap" }
+
+        XCTAssertEqual(rows.count, 3)
+        XCTAssertTrue(rows.allSatisfy { $0.currentSeverity == .deferred })
+        XCTAssertTrue(rows.allSatisfy { $0.eventualSeverity == .deferred })
+        XCTAssertTrue(rows.allSatisfy { $0.readiness == .deferredUntilRemoteHydration })
+    }
+
+    func testEnforcementPolicyCopyableReportIncludesTechnicalIdentifiers() {
+        let report = AppState.makeEnforcementPolicyMatrixReport(inspectedAt: Date(timeIntervalSinceReferenceDate: 300))
+        let text = AppState.enforcementPolicyMatrixReportText(report)
+
+        XCTAssertTrue(text.contains("ScoutCapture Local Health - Enforcement Policy Matrix"))
+        XCTAssertTrue(text.contains("operation=seal_complete"))
+        XCTAssertTrue(text.contains("condition_key=missing_or_unreadable_session_json"))
+        XCTAssertTrue(text.contains("current_severity=hard_block_candidate"))
+        XCTAssertTrue(text.contains("eventual_severity=hard_block_candidate"))
+        XCTAssertTrue(text.contains("readiness=ready_for_future_guarded_enforcement"))
+        XCTAssertTrue(text.contains("deferral_reason="))
+        XCTAssertTrue(text.contains("notes="))
+    }
+
+    func testEnforcementPolicyVisibleLabelsAreOperatorReadable() throws {
+        let report = AppState.makeEnforcementPolicyMatrixReport(inspectedAt: Date(timeIntervalSinceReferenceDate: 300))
+        let row = try XCTUnwrap(policyRow(report, "property_freshness_needs_review", .firstExportDelivery))
+
+        XCTAssertEqual(row.operation.title, "First Export / Delivery")
+        XCTAssertEqual(row.friendlyTitle, "Property freshness needs review")
+        XCTAssertEqual(row.currentSeverity.visibleLabel, "Deferred")
+        XCTAssertEqual(row.eventualSeverity.visibleLabel, "Future Hard Block")
+        XCTAssertEqual(row.readiness.visibleLabel, "Deferred until web portal conflict rules")
+    }
+
+    func testEnforcementPolicyReportRemainsReadOnlyAndNoBehaviorHooksAreAdded() {
+        let report = AppState.makeEnforcementPolicyMatrixReport(inspectedAt: Date(timeIntervalSinceReferenceDate: 300))
+        let text = AppState.enforcementPolicyMatrixReportText(report)
+
+        XCTAssertTrue(text.contains("Read-only policy diagnostics"))
+        XCTAssertTrue(text.contains("does not enforce gates"))
+        XCTAssertTrue(text.contains("block export"))
+        XCTAssertTrue(text.contains("block sealing"))
+        XCTAssertFalse(text.contains("export button"))
+        XCTAssertFalse(text.contains("seal button"))
+    }
+
     private func diagnosticRow(
         entityType: String,
         entityID: UUID = UUID(),
@@ -1062,6 +1177,16 @@ final class Phase2C20ACompletenessGatesTests: XCTestCase {
         scope: AppState.ExportSealPreflightScope
     ) -> [AppState.ExportSealPreflightReasonSummary] {
         report.sections.first { $0.scope == scope }?.reasonSummaries ?? []
+    }
+
+    private func policyRow(
+        _ report: AppState.EnforcementPolicyMatrixReport,
+        _ conditionKey: String,
+        _ operation: AppState.EnforcementPolicyOperation
+    ) -> AppState.EnforcementPolicyMatrixRow? {
+        report.rows.first {
+            $0.conditionKey == conditionKey && $0.operation == operation
+        }
     }
 }
 
