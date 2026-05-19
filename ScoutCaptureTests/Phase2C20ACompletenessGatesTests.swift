@@ -11,7 +11,10 @@ final class Phase2C20ACompletenessGatesTests: XCTestCase {
 
     private func makeFixture(
         sessionStatus: Session.Status = .completed,
-        isSealed: Bool = true
+        isSealed: Bool = true,
+        firstDeliveredAt: Date? = nil,
+        reExportExpiresAt: Date? = nil,
+        exportedAt: Date? = nil
     ) throws -> (store: LocalStore, appState: AppState, root: URL, property: Property, session: Session) {
         let root = try makeTempStorageRoot()
         let store = LocalStore(testStorageRootURL: root)
@@ -24,7 +27,10 @@ final class Phase2C20ACompletenessGatesTests: XCTestCase {
                 startedAt: Date(timeIntervalSinceReferenceDate: 100),
                 status: sessionStatus,
                 endedAt: sessionStatus == .completed ? Date(timeIntervalSinceReferenceDate: 200) : nil,
-                isSealed: isSealed
+                exportedAt: exportedAt,
+                isSealed: isSealed,
+                firstDeliveredAt: firstDeliveredAt,
+                reExportExpiresAt: reExportExpiresAt
             )
         )
         let defaults = UserDefaults(suiteName: "ScoutCapture-2C20A-\(UUID().uuidString)") ?? .standard
@@ -99,8 +105,10 @@ final class Phase2C20ACompletenessGatesTests: XCTestCase {
             endedAt: session.endedAt,
             status: session.status,
             isBaselineSession: false,
-            exportedAt: nil,
+            exportedAt: session.exportedAt,
             isSealed: session.isSealed,
+            firstDeliveredAt: session.firstDeliveredAt,
+            reExportExpiresAt: session.reExportExpiresAt,
             appVersion: "test",
             deviceModel: "test",
             osVersion: "test",
@@ -226,6 +234,141 @@ final class Phase2C20ACompletenessGatesTests: XCTestCase {
 
         XCTAssertEqual(row.classification, .actionable)
         XCTAssertEqual(row.context["is_export_eligible"], "true")
+    }
+
+    func testPendingDeliveryMissingOriginalClassifiedAsActiveDeliveryRisk() throws {
+        let fixture = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let shot = makeShot(propertyID: fixture.property.id, sessionID: fixture.session.id)
+        try saveMetadata(store: fixture.store, property: fixture.property, session: fixture.session, shots: [shot])
+
+        let report = fixture.appState.inspectCompletenessGates(inspectedAt: Date(timeIntervalSinceReferenceDate: 300))
+        let row = try XCTUnwrap(AppState.dedupedCompletenessDiagnosticRows(report.diagnosticOnlyRows).first {
+            $0.reason == "active_export_shot_original_missing"
+        })
+        let text = AppState.completenessGatesReportText(report)
+
+        XCTAssertEqual(row.context["missing_original_risk"], "active_delivery_risk")
+        XCTAssertEqual(row.context["is_pending_delivery"], "true")
+        XCTAssertEqual(row.classification, .actionable)
+        XCTAssertTrue(text.contains("active_delivery_risk: 1"))
+    }
+
+    func testReExportEligibleMissingOriginalClassifiedAsReexportRisk() throws {
+        let deliveredAt = Date(timeIntervalSinceReferenceDate: 200)
+        let fixture = try makeFixture(
+            firstDeliveredAt: deliveredAt,
+            reExportExpiresAt: Date(timeIntervalSinceReferenceDate: 500),
+            exportedAt: deliveredAt
+        )
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let shot = makeShot(propertyID: fixture.property.id, sessionID: fixture.session.id)
+        try saveMetadata(store: fixture.store, property: fixture.property, session: fixture.session, shots: [shot])
+
+        let report = fixture.appState.inspectCompletenessGates(inspectedAt: Date(timeIntervalSinceReferenceDate: 300))
+        let row = try XCTUnwrap(AppState.dedupedCompletenessDiagnosticRows(report.diagnosticOnlyRows).first {
+            $0.reason == "active_export_shot_original_missing"
+        })
+
+        XCTAssertEqual(row.context["missing_original_risk"], "reexport_risk")
+        XCTAssertEqual(row.context["is_reexport_eligible"], "true")
+        XCTAssertEqual(row.classification, .actionable)
+    }
+
+    func testDeliveredExpiredMissingOriginalClassifiedAsHistoricalArchiveDebt() throws {
+        let deliveredAt = Date(timeIntervalSinceReferenceDate: 100)
+        let fixture = try makeFixture(
+            firstDeliveredAt: deliveredAt,
+            reExportExpiresAt: Date(timeIntervalSinceReferenceDate: 200),
+            exportedAt: deliveredAt
+        )
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let shot = makeShot(propertyID: fixture.property.id, sessionID: fixture.session.id)
+        try saveMetadata(store: fixture.store, property: fixture.property, session: fixture.session, shots: [shot])
+
+        let report = fixture.appState.inspectCompletenessGates(inspectedAt: Date(timeIntervalSinceReferenceDate: 300))
+        let row = try XCTUnwrap(AppState.dedupedCompletenessDiagnosticRows(report.diagnosticOnlyRows).first {
+            $0.reason == "active_export_shot_original_missing"
+        })
+
+        XCTAssertEqual(row.context["missing_original_risk"], "historical_archive_debt")
+        XCTAssertEqual(row.context["reexport_window_expired"], "true")
+        XCTAssertEqual(row.classification, .informational)
+    }
+
+    func testArchiveSnapshotCandidateAppearsWithoutRestoringFiles() throws {
+        let fixture = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let shot = makeShot(propertyID: fixture.property.id, sessionID: fixture.session.id, filename: "archive-hit.heic")
+        try saveMetadata(store: fixture.store, property: fixture.property, session: fixture.session, shots: [shot])
+        let snapshotOriginals = fixture.root
+            .appendingPathComponent("Archives/Sessions", isDirectory: true)
+            .appendingPathComponent(fixture.property.id.uuidString, isDirectory: true)
+            .appendingPathComponent(fixture.session.id.uuidString, isDirectory: true)
+            .appendingPathComponent("20260101T000000Z-sealed-test/Payload/Originals", isDirectory: true)
+        try FileManager.default.createDirectory(at: snapshotOriginals, withIntermediateDirectories: true)
+        try Data("archived".utf8).write(to: snapshotOriginals.appendingPathComponent("archive-hit.heic"))
+
+        let report = fixture.appState.inspectCompletenessGates()
+        let row = try XCTUnwrap(AppState.dedupedCompletenessDiagnosticRows(report.diagnosticOnlyRows).first {
+            $0.reason == "active_export_shot_original_missing"
+        })
+
+        XCTAssertEqual(row.context["archive_snapshot_exists"], "true")
+        XCTAssertEqual(row.context["archive_snapshot_count"], "1")
+        XCTAssertEqual(row.context["archive_payload_originals_candidate_hit"], "true")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.store.originalsFolderURL(propertyID: fixture.property.id, sessionID: fixture.session.id).appendingPathComponent("archive-hit.heic").path))
+    }
+
+    func testSupabaseStorageCandidateAppearsWithoutSignedURL() throws {
+        let fixture = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        var shot = makeShot(propertyID: fixture.property.id, sessionID: fixture.session.id)
+        shot.storageBucket = "operational-media"
+        shot.storagePath = "sessions/\(fixture.session.id.uuidString.lowercased())/shots/\(shot.shotID.uuidString.lowercased())/shot.heic"
+        shot.checksumSHA256 = "abcdef"
+        shot.byteSize = 4
+        try saveMetadata(store: fixture.store, property: fixture.property, session: fixture.session, shots: [shot])
+
+        let report = fixture.appState.inspectCompletenessGates()
+        let row = try XCTUnwrap(AppState.dedupedCompletenessDiagnosticRows(report.diagnosticOnlyRows).first {
+            $0.reason == "active_export_shot_original_missing"
+        })
+        let text = AppState.completenessGatesReportText(report)
+
+        XCTAssertEqual(row.context["supabase_storage_candidate"], "true")
+        XCTAssertEqual(row.context["local_shot_storage_bucket_present"], "true")
+        XCTAssertEqual(row.context["local_shot_storage_path_present"], "true")
+        XCTAssertFalse(text.localizedCaseInsensitiveContains("signature="))
+        XCTAssertFalse(text.localizedCaseInsensitiveContains("signed"))
+    }
+
+    func testDuplicateShotIDGroupContextAppears() throws {
+        let fixture = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let sharedShotID = UUID()
+        let shot = makeShot(propertyID: fixture.property.id, sessionID: fixture.session.id, shotID: sharedShotID)
+        let secondSession = try fixture.store.upsertSession(
+            Session(
+                id: UUID(),
+                propertyID: fixture.property.id,
+                startedAt: Date(timeIntervalSinceReferenceDate: 120),
+                status: .draft
+            )
+        )
+        let duplicateShot = makeShot(propertyID: fixture.property.id, sessionID: secondSession.id, shotID: sharedShotID)
+        try saveMetadata(store: fixture.store, property: fixture.property, session: fixture.session, shots: [shot])
+        try saveMetadata(store: fixture.store, property: fixture.property, session: secondSession, shots: [duplicateShot])
+
+        let report = fixture.appState.inspectCompletenessGates()
+        let row = try XCTUnwrap(AppState.dedupedCompletenessDiagnosticRows(report.diagnosticOnlyRows).first {
+            $0.reason == "active_export_shot_original_missing" && $0.sessionID == fixture.session.id
+        })
+        let text = AppState.completenessGatesReportText(report)
+
+        XCTAssertEqual(row.context["duplicate_shot_id_group_size"], "2")
+        XCTAssertEqual(row.context["duplicate_shot_id_across_sessions"], "true")
+        XCTAssertTrue(text.contains("duplicate_shot_id_group"))
     }
 
     func testRetiredShotIsPreservedButDoesNotBlockDefaultExportCompleteness() throws {
@@ -365,6 +508,10 @@ final class Phase2C20ACompletenessGatesTests: XCTestCase {
             diagnosticRow(
                 entityType: "session",
                 freshness: .needsReview,
+                context: [
+                    "signed_url": "https://example.test/file?signature=secret",
+                    "payload": "data:image/jpeg;base64,abcdef"
+                ],
                 reason: "/private/tmp/secret token abc https://example.test/file?signature=secret"
             )
         ])
@@ -373,7 +520,10 @@ final class Phase2C20ACompletenessGatesTests: XCTestCase {
 
         XCTAssertFalse(text.contains("/private/tmp/secret"))
         XCTAssertFalse(text.contains("signature=secret"))
+        XCTAssertFalse(text.contains("data:image"))
+        XCTAssertFalse(text.contains("abcdef"))
         XCTAssertTrue(text.contains("[path]"))
+        XCTAssertTrue(text.contains("[media]"))
     }
 
     func testDuplicateDiagnosticRowsCollapseWithCount() {

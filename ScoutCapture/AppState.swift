@@ -9432,6 +9432,11 @@ final class AppState: ObservableObject {
                 if token.hasPrefix("/") || token.hasPrefix("file:") {
                     return "[path]"
                 }
+                if lower.hasPrefix("data:image") ||
+                    lower.hasPrefix("data:video") ||
+                    lower.hasPrefix("data:application/octet-stream") {
+                    return "[media]"
+                }
                 if lower.hasPrefix("http://") || lower.hasPrefix("https://") {
                     return "[url]"
                 }
@@ -9478,6 +9483,7 @@ final class AppState: ObservableObject {
 
     private func makeCompletenessGatesReport(inspectedAt: Date = Date()) -> CompletenessGatesReport {
         let properties = (try? localStore.fetchProperties()) ?? []
+        let duplicateShotSessionIDs = completenessDuplicateShotSessionIDs(properties: properties)
         var propertyStates: [CompletenessGateState] = []
         var sessionStates: [CompletenessGateState] = []
         var shotStates: [CompletenessGateState] = []
@@ -9632,8 +9638,12 @@ final class AppState: ObservableObject {
                 for shot in metadata.shots {
                     let shotEvaluation = Self.evaluateShotCompleteness(
                         shot,
+                        session: session,
                         propertyID: property.id,
                         sessionID: session.id,
+                        inspectedAt: inspectedAt,
+                        duplicateShotIDGroupSize: duplicateShotSessionIDs[shot.shotID]?.count ?? 1,
+                        duplicateShotIDAcrossSessions: (duplicateShotSessionIDs[shot.shotID]?.count ?? 1) > 1,
                         localStore: localStore
                     )
                     shotStates.append(shotEvaluation.state)
@@ -9786,6 +9796,22 @@ final class AppState: ObservableObject {
         )
     }
 
+    private func completenessDuplicateShotSessionIDs(properties: [Property]) -> [UUID: Set<UUID>] {
+        var sessionIDsByShotID: [UUID: Set<UUID>] = [:]
+        for property in properties where property.deletedAt == nil {
+            let sessions = (try? localStore.fetchSessionsForCacheBuild(propertyID: property.id)) ?? []
+            for session in sessions where session.deletedAt == nil {
+                guard let metadata = try? localStore.loadSessionMetadata(propertyID: property.id, sessionID: session.id) else {
+                    continue
+                }
+                for shot in metadata.shots {
+                    sessionIDsByShotID[shot.shotID, default: []].insert(session.id)
+                }
+            }
+        }
+        return sessionIDsByShotID
+    }
+
     private func completenessFreshness(for propertyID: UUID) -> CompletenessFreshnessState {
         guard let snapshot = propertyOpenFreshnessByPropertyID[propertyID] else { return .unknown }
         switch snapshot.status {
@@ -9864,8 +9890,12 @@ final class AppState: ObservableObject {
 
     private static func evaluateShotCompleteness(
         _ shot: ShotMetadata,
+        session: Session,
         propertyID: UUID,
         sessionID: UUID,
+        inspectedAt: Date,
+        duplicateShotIDGroupSize: Int,
+        duplicateShotIDAcrossSessions: Bool,
         localStore: LocalStore
     ) -> ShotCompletenessEvaluation {
         var reasons: [String] = []
@@ -9884,9 +9914,14 @@ final class AppState: ObservableObject {
 
         let metadataComplete = reasons.isEmpty
         let originalFilenamePresent = trimmedNonEmpty(shot.originalFilename) != nil
+        let originalFilename = safeDiagnosticsFilename(
+            originalFilename: shot.originalFilename,
+            originalRelativePath: shot.originalRelativePath
+        )
+        let originalRelativePath = trimmedNonEmpty(shot.originalRelativePath)
         let localOriginalExists: Bool = {
             guard shot.shouldAppearInDefaultExports else { return false }
-            guard let relative = trimmedNonEmpty(shot.originalRelativePath) else { return false }
+            guard let relative = originalRelativePath else { return false }
             guard let url = localStore.resolveSessionRelativeFileURL(
                 propertyID: propertyID,
                 sessionID: sessionID,
@@ -9897,6 +9932,27 @@ final class AppState: ObservableObject {
             return FileManager.default.fileExists(atPath: url.path)
         }()
         let mediaComplete = localOriginalExists
+        let resolverContext = missingOriginalResolverContext(
+            shot: shot,
+            propertyID: propertyID,
+            sessionID: sessionID,
+            localStore: localStore
+        )
+        let archiveContext = missingOriginalArchiveContext(
+            shot: shot,
+            propertyID: propertyID,
+            sessionID: sessionID,
+            localStore: localStore
+        )
+        let backupContext = missingOriginalICloudBackupContext(
+            shot: shot,
+            propertyID: propertyID,
+            sessionID: sessionID
+        )
+        let storageBucketPresent = trimmedNonEmpty(shot.storageBucket) != nil
+        let storagePathPresent = trimmedNonEmpty(shot.storagePath) != nil
+        let checksumPresent = trimmedNonEmpty(shot.checksumSHA256) != nil
+        let byteSizePresent = (shot.byteSize ?? shot.originalByteSize ?? 0) > 0
 
         let diagnosticOnly = shot.isHistorical || shot.hiddenFromGallery == true || shot.hiddenFromReports == true
         let state: CompletenessGateState
@@ -9919,6 +9975,27 @@ final class AppState: ObservableObject {
             reason = "shot_metadata_complete"
         }
 
+        var context = [
+                "shot_lifecycle_state": shot.lifecycleState.rawValue,
+                "shot_original_filename_present": String(originalFilenamePresent),
+                "local_original_exists": String(localOriginalExists),
+                "should_appear_in_default_exports": String(shot.shouldAppearInDefaultExports),
+                "sanitized_original_filename": originalFilename ?? "none",
+                "original_relative_path_present": String(originalRelativePath != nil),
+                "local_shot_storage_bucket_present": String(storageBucketPresent),
+                "local_shot_storage_path_present": String(storagePathPresent),
+                "local_shot_checksum_present": String(checksumPresent),
+                "local_shot_byte_size_present": String(byteSizePresent),
+                "supabase_storage_candidate": String(storageBucketPresent && storagePathPresent),
+                "duplicate_shot_id_group_size": String(max(duplicateShotIDGroupSize, 1)),
+                "duplicate_shot_id_across_sessions": String(duplicateShotIDAcrossSessions)
+            ]
+        context.merge(missingOriginalDeliveryRiskContext(for: session, inspectedAt: inspectedAt)) { _, new in new }
+        context.merge(resolverContext) { _, new in new }
+        context.merge(archiveContext) { _, new in new }
+        context.merge(backupContext) { _, new in new }
+        context["known_missing_original_provenance"] = knownMissingOriginalProvenance(context)
+
         return ShotCompletenessEvaluation(
             state: state,
             freshness: reasons.contains { $0.contains("mismatch") } ? .needsReview : .unknown,
@@ -9926,13 +10003,200 @@ final class AppState: ObservableObject {
             mediaComplete: mediaComplete,
             diagnosticOnly: diagnosticOnly,
             reason: reason,
-            context: [
-                "shot_lifecycle_state": shot.lifecycleState.rawValue,
-                "shot_original_filename_present": String(originalFilenamePresent),
-                "local_original_exists": String(localOriginalExists),
-                "should_appear_in_default_exports": String(shot.shouldAppearInDefaultExports)
-            ]
+            context: context
         )
+    }
+
+    private static func missingOriginalDeliveryRiskContext(
+        for session: Session,
+        inspectedAt: Date
+    ) -> [String: String] {
+        let isPendingDelivery = session.isSealed && session.firstDeliveredAt == nil
+        let isReExportEligible: Bool = {
+            guard session.firstDeliveredAt != nil, let expiresAt = session.reExportExpiresAt else { return false }
+            return inspectedAt < expiresAt
+        }()
+        let reExportWindowExpired: Bool = {
+            guard session.status == .completed,
+                  session.isSealed,
+                  session.firstDeliveredAt != nil,
+                  let expiresAt = session.reExportExpiresAt else {
+                return false
+            }
+            return inspectedAt >= expiresAt
+        }()
+        let classification: String
+        if isPendingDelivery {
+            classification = "active_delivery_risk"
+        } else if isReExportEligible {
+            classification = "reexport_risk"
+        } else if reExportWindowExpired {
+            classification = "historical_archive_debt"
+        } else {
+            classification = "delivered_state_unknown"
+        }
+        return [
+            "is_pending_delivery": String(isPendingDelivery),
+            "is_reexport_eligible": String(isReExportEligible),
+            "reexport_window_expired": String(reExportWindowExpired),
+            "first_delivered_at": session.firstDeliveredAt.map(completenessDateString) ?? "none",
+            "exported_at": session.exportedAt.map(completenessDateString) ?? "none",
+            "missing_original_risk": classification
+        ]
+    }
+
+    private static func missingOriginalResolverContext(
+        shot: ShotMetadata,
+        propertyID: UUID,
+        sessionID: UUID,
+        localStore: LocalStore
+    ) -> [String: String] {
+        let relative = trimmedNonEmpty(shot.originalRelativePath)
+        let filename = safeDiagnosticsFilename(
+            originalFilename: shot.originalFilename,
+            originalRelativePath: shot.originalRelativePath
+        )
+        let sessionRelativeResolverHit: Bool = {
+            guard let relative,
+                  let url = localStore.resolveSessionRelativeFileURL(
+                    propertyID: propertyID,
+                    sessionID: sessionID,
+                    relativePath: relative
+                  ) else {
+                return false
+            }
+            return FileManager.default.fileExists(atPath: url.path)
+        }()
+        let originalsFilenameFallbackHit: Bool = {
+            guard let filename else { return false }
+            let url = localStore
+                .originalsFolderURL(propertyID: propertyID, sessionID: sessionID)
+                .appendingPathComponent(filename, isDirectory: false)
+            return FileManager.default.fileExists(atPath: url.path)
+        }()
+        let activeScoutRootCandidateHit: Bool = {
+            guard let relative else { return false }
+            let url = localStore
+                .sessionFolderURL(propertyID: propertyID, sessionID: sessionID)
+                .appendingPathComponent(relative, isDirectory: false)
+            return FileManager.default.fileExists(atPath: url.path)
+        }()
+        let iCloudScoutRootCandidateHit: Bool = {
+            guard let relative else { return false }
+            let activePath = StorageRoot.scoutRootURL().standardizedFileURL.path
+            return StorageRoot.scoutRootCandidates()
+                .filter { $0.standardizedFileURL.path != activePath }
+                .contains { root in
+                    let candidate = root
+                        .appendingPathComponent("Properties", isDirectory: true)
+                        .appendingPathComponent(propertyID.uuidString, isDirectory: true)
+                        .appendingPathComponent("Sessions", isDirectory: true)
+                        .appendingPathComponent(sessionID.uuidString, isDirectory: true)
+                        .appendingPathComponent(relative, isDirectory: false)
+                    return FileManager.default.fileExists(atPath: candidate.path)
+                }
+        }()
+        return [
+            "session_relative_resolver_hit": String(sessionRelativeResolverHit),
+            "originals_filename_fallback_hit": String(originalsFilenameFallbackHit),
+            "active_scout_root_candidate_hit": String(activeScoutRootCandidateHit),
+            "icloud_scout_root_candidate_hit": String(iCloudScoutRootCandidateHit)
+        ]
+    }
+
+    private static func missingOriginalArchiveContext(
+        shot: ShotMetadata,
+        propertyID: UUID,
+        sessionID: UUID,
+        localStore: LocalStore
+    ) -> [String: String] {
+        let provenance = localStore.missingOriginalArchiveProvenance(
+            propertyID: propertyID,
+            sessionID: sessionID,
+            originalFilename: safeDiagnosticsFilename(
+                originalFilename: shot.originalFilename,
+                originalRelativePath: shot.originalRelativePath
+            ),
+            originalRelativePath: trimmedNonEmpty(shot.originalRelativePath)
+        )
+        return [
+            "archive_snapshot_exists": String(provenance.snapshotExists),
+            "archive_snapshot_count": String(provenance.snapshotCount),
+            "latest_archive_snapshot_date": provenance.latestSnapshotDate.map(completenessDateString) ?? "none",
+            "archive_payload_originals_candidate_hit": String(provenance.payloadOriginalsCandidateHit),
+            "archive_snapshot_candidate": String(provenance.payloadOriginalsCandidateHit)
+        ]
+    }
+
+    private static func missingOriginalICloudBackupContext(
+        shot: ShotMetadata,
+        propertyID: UUID,
+        sessionID: UUID
+    ) -> [String: String] {
+        guard let backupRoot = StorageRoot.cloudBackupRootURL() else {
+            return [
+                "icloud_backup_manifest_available": "false",
+                "icloud_backup_manifest_logical_path_hit": "false",
+                "icloud_backup_blob_checksum_candidate_hit": "false",
+                "icloud_backup_candidate": "false"
+            ]
+        }
+        let latest = backupRoot.appendingPathComponent("latest", isDirectory: true)
+        let manifestURL = latest.appendingPathComponent("manifest.json", isDirectory: false)
+        guard FileManager.default.fileExists(atPath: manifestURL.path),
+              let data = try? Data(contentsOf: manifestURL) else {
+            return [
+                "icloud_backup_manifest_available": "false",
+                "icloud_backup_manifest_logical_path_hit": "false",
+                "icloud_backup_blob_checksum_candidate_hit": "false",
+                "icloud_backup_candidate": "false"
+            ]
+        }
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        guard let manifest = try? decoder.decode(CloudBackupManifest.self, from: data) else {
+            return [
+                "icloud_backup_manifest_available": "false",
+                "icloud_backup_manifest_logical_path_hit": "false",
+                "icloud_backup_blob_checksum_candidate_hit": "false",
+                "icloud_backup_candidate": "false"
+            ]
+        }
+        let relative = trimmedNonEmpty(shot.originalRelativePath)
+        let filename = safeDiagnosticsFilename(
+            originalFilename: shot.originalFilename,
+            originalRelativePath: shot.originalRelativePath
+        )
+        var candidatePaths: Set<String> = []
+        if let relative {
+            candidatePaths.insert("storage-root/SCOUT/Properties/\(propertyID.uuidString)/Sessions/\(sessionID.uuidString)/\(relative)")
+        }
+        if let filename {
+            candidatePaths.insert("storage-root/SCOUT/Properties/\(propertyID.uuidString)/Sessions/\(sessionID.uuidString)/Originals/\(filename)")
+        }
+        let matchingRecords = manifest.files.filter { candidatePaths.contains($0.relativePath) }
+        let logicalHit = !matchingRecords.isEmpty
+        let blobHit = matchingRecords.contains { record in
+            guard let contentRelativePath = record.contentRelativePath else { return false }
+            let blobURL = latest.appendingPathComponent(contentRelativePath, isDirectory: false)
+            return FileManager.default.fileExists(atPath: blobURL.path)
+        }
+        return [
+            "icloud_backup_manifest_available": "true",
+            "icloud_backup_manifest_logical_path_hit": String(logicalHit),
+            "icloud_backup_blob_checksum_candidate_hit": String(blobHit),
+            "icloud_backup_candidate": String(logicalHit || blobHit)
+        ]
+    }
+
+    private static func knownMissingOriginalProvenance(_ context: [String: String]) -> String {
+        let hasKnown = context["archive_snapshot_candidate"] == "true" ||
+            context["icloud_backup_candidate"] == "true" ||
+            context["supabase_storage_candidate"] == "true" ||
+            context["originals_filename_fallback_hit"] == "true" ||
+            context["active_scout_root_candidate_hit"] == "true" ||
+            context["icloud_scout_root_candidate_hit"] == "true"
+        return hasKnown ? "true" : "false"
     }
 
     private struct IssueCompletenessEvaluation {
@@ -10205,7 +10469,15 @@ final class AppState: ObservableObject {
         }
         switch row.reason {
         case "active_export_shot_original_missing":
-            return row.context["is_export_eligible"] == "true" ? .actionable : .preExportWarning
+            guard row.context["is_export_eligible"] == "true" else { return .preExportWarning }
+            switch row.context["missing_original_risk"] {
+            case "historical_archive_debt":
+                return .informational
+            case "active_delivery_risk", "reexport_risk", "delivered_state_unknown":
+                return .actionable
+            default:
+                return .actionable
+            }
         case "issue_history_orphan_session_reference",
              "issue_history_missing_session_reference",
              "issue_history_orphan_shot_reference",
@@ -10242,6 +10514,7 @@ final class AppState: ObservableObject {
     nonisolated static func completenessGatesReportText(_ report: CompletenessGatesReport) -> String {
         let dedupedRows = dedupedCompletenessDiagnosticRows(report.diagnosticOnlyRows)
         let reasonCounts = completenessDiagnosticReasonCounts(dedupedRows)
+        let missingOriginalRiskCounts = completenessMissingOriginalRiskCounts(dedupedRows)
         let actionableRows = dedupedRows.filter { $0.classification == .actionable }
         let preExportWarningRows = dedupedRows.filter { $0.classification == .preExportWarning }
         let sessionRollupRows = dedupedRows.filter { $0.classification == .sessionRollup }
@@ -10285,6 +10558,8 @@ final class AppState: ObservableObject {
         lines.append("- active_export_shot_media_incomplete is a session-level rollup; inspect child shot rows for the missing-original detail.")
         lines.append("- Issue history can legitimately reference other sessions. Cross-session references are informational when the referenced session exists locally and actionable only when the referenced session or shot is missing or unresolvable.")
         lines.append("- Missing originals on draft, unsealed, or otherwise non-export-eligible sessions are pre-export warnings, not immediate export blockers in this diagnostics report.")
+        lines.append("- Missing-original provenance is read-only. Archive, iCloud backup, Supabase storage, and duplicate shot ID hints do not approve repair, relink, download, hydration, or automatic media equivalence.")
+        lines.append("- Pending delivery missing originals are active_delivery_risk; re-export window hits are reexport_risk; already delivered and expired rows are historical_archive_debt.")
         lines.append("")
         lines.append("Diagnostic Reason Counts")
         if reasonCounts.isEmpty {
@@ -10292,6 +10567,15 @@ final class AppState: ObservableObject {
         } else {
             for reason in reasonCounts {
                 lines.append("- \(reason.classification.rawValue) | \(diagnosticsPreviewText(reason.reason, maxLength: 120) ?? "none"): \(reason.count)")
+            }
+        }
+        lines.append("")
+        lines.append("Missing Original Risk / Provenance Counts")
+        if missingOriginalRiskCounts.isEmpty {
+            lines.append("none")
+        } else {
+            for count in missingOriginalRiskCounts {
+                lines.append("- \(count.key): \(count.value)")
             }
         }
         lines.append("")
@@ -10321,6 +10605,51 @@ final class AppState: ObservableObject {
         lines.append("\(title) Completeness")
         for count in counts {
             lines.append("- \(count.state.rawValue): \(count.count)")
+        }
+    }
+
+    private nonisolated static func completenessMissingOriginalRiskCounts(
+        _ rows: [CompletenessDiagnosticSummaryRow]
+    ) -> [(key: String, value: Int)] {
+        let missingOriginalRows = rows.filter { $0.reason == "active_export_shot_original_missing" }
+        guard !missingOriginalRows.isEmpty else { return [] }
+        let keys = [
+            "active_delivery_risk",
+            "reexport_risk",
+            "historical_archive_debt",
+            "delivered_state_unknown",
+            "archive_snapshot_candidate",
+            "icloud_backup_candidate",
+            "supabase_storage_candidate",
+            "no_known_provenance",
+            "duplicate_shot_id_group"
+        ]
+        var counts = Dictionary(uniqueKeysWithValues: keys.map { ($0, 0) })
+        for row in missingOriginalRows {
+            let duplicateCount = row.duplicateCount
+            let risk = row.context["missing_original_risk"] ?? "delivered_state_unknown"
+            if counts[risk] != nil {
+                counts[risk, default: 0] += duplicateCount
+            }
+            if row.context["archive_snapshot_candidate"] == "true" {
+                counts["archive_snapshot_candidate", default: 0] += duplicateCount
+            }
+            if row.context["icloud_backup_candidate"] == "true" {
+                counts["icloud_backup_candidate", default: 0] += duplicateCount
+            }
+            if row.context["supabase_storage_candidate"] == "true" {
+                counts["supabase_storage_candidate", default: 0] += duplicateCount
+            }
+            if row.context["known_missing_original_provenance"] != "true" {
+                counts["no_known_provenance", default: 0] += duplicateCount
+            }
+            if row.context["duplicate_shot_id_across_sessions"] == "true" {
+                counts["duplicate_shot_id_group", default: 0] += duplicateCount
+            }
+        }
+        return keys.compactMap { key in
+            guard let value = counts[key], value > 0 else { return nil }
+            return (key, value)
         }
     }
 

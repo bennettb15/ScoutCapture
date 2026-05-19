@@ -526,6 +526,13 @@ final class LocalStore {
         let totalBytes: Int64
     }
 
+    struct MissingOriginalArchiveProvenance {
+        let snapshotExists: Bool
+        let snapshotCount: Int
+        let latestSnapshotDate: Date?
+        let payloadOriginalsCandidateHit: Bool
+    }
+
     private struct SessionArchiveManifest: Codable {
         struct FileRecord: Codable {
             let relativePath: String
@@ -2885,6 +2892,87 @@ final class LocalStore {
                 "snapshot=\(snapshotName)"
             )
         }
+    }
+
+    func missingOriginalArchiveProvenance(
+        propertyID: UUID,
+        sessionID: UUID,
+        originalFilename: String?,
+        originalRelativePath: String?
+    ) -> MissingOriginalArchiveProvenance {
+        (try? performFileIOSync {
+            let sessionRoot = activeRootURL
+                .appendingPathComponent("Archives", isDirectory: true)
+                .appendingPathComponent("Sessions", isDirectory: true)
+                .appendingPathComponent(propertyID.uuidString, isDirectory: true)
+                .appendingPathComponent(sessionID.uuidString, isDirectory: true)
+            guard fileManager.fileExists(atPath: sessionRoot.path) else {
+                return MissingOriginalArchiveProvenance(
+                    snapshotExists: false,
+                    snapshotCount: 0,
+                    latestSnapshotDate: nil,
+                    payloadOriginalsCandidateHit: false
+                )
+            }
+
+            let snapshots = (try? fileManager.contentsOfDirectory(
+                at: sessionRoot,
+                includingPropertiesForKeys: [.isDirectoryKey],
+                options: [.skipsHiddenFiles]
+            )) ?? []
+            let snapshotFolders = snapshots.filter { url in
+                (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true
+            }
+
+            let decoder = JSONDecoder()
+            decoder.dateDecodingStrategy = .iso8601
+            var latestDate: Date?
+            var payloadHit = false
+            let candidateNames = [
+                originalFilename,
+                originalRelativePath.map { URL(fileURLWithPath: $0).lastPathComponent }
+            ]
+                .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+
+            for snapshot in snapshotFolders {
+                let manifestURL = snapshot.appendingPathComponent("manifest.json", isDirectory: false)
+                if fileManager.fileExists(atPath: manifestURL.path),
+                   let data = try? Data(contentsOf: manifestURL),
+                   let manifest = try? decoder.decode(SessionArchiveManifest.self, from: data) {
+                    latestDate = max(latestDate ?? manifest.createdAt, manifest.createdAt)
+                    for name in candidateNames {
+                        let expected = "Payload/Originals/\(name)"
+                        if manifest.files.contains(where: { $0.relativePath == expected }) {
+                            payloadHit = true
+                        }
+                    }
+                }
+                if !payloadHit {
+                    let originalsRoot = snapshot
+                        .appendingPathComponent("Payload", isDirectory: true)
+                        .appendingPathComponent("Originals", isDirectory: true)
+                    for name in candidateNames {
+                        if fileManager.fileExists(atPath: originalsRoot.appendingPathComponent(name).path) {
+                            payloadHit = true
+                            break
+                        }
+                    }
+                }
+            }
+
+            return MissingOriginalArchiveProvenance(
+                snapshotExists: !snapshotFolders.isEmpty,
+                snapshotCount: snapshotFolders.count,
+                latestSnapshotDate: latestDate,
+                payloadOriginalsCandidateHit: payloadHit
+            )
+        }) ?? MissingOriginalArchiveProvenance(
+            snapshotExists: false,
+            snapshotCount: 0,
+            latestSnapshotDate: nil,
+            payloadOriginalsCandidateHit: false
+        )
     }
 
     func restoreSessionArchiveSnapshot(
