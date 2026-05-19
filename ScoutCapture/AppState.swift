@@ -413,6 +413,78 @@ final class AppState: ObservableObject {
         var totalDiagnosticOnlyRows: Int { diagnosticOnlyRows.count }
     }
 
+    enum ExportSealPreflightCategory: String, CaseIterable, Equatable, Hashable {
+        case hardBlockCandidate = "hard_block_candidate"
+        case softWarningCandidate = "soft_warning_candidate"
+        case informationalOnly = "informational_only"
+        case unknownNeedsReview = "unknown_needs_review"
+    }
+
+    enum ExportSealPreflightScope: String, CaseIterable, Equatable, Hashable {
+        case sealComplete = "seal_complete"
+        case export = "export"
+        case reExport = "re_export"
+
+        nonisolated var title: String {
+            switch self {
+            case .sealComplete:
+                return "Seal / Complete Preflight"
+            case .export:
+                return "Export Preflight"
+            case .reExport:
+                return "Re-Export Preflight"
+            }
+        }
+    }
+
+    struct ExportSealPreflightCount: Equatable, Identifiable {
+        let category: ExportSealPreflightCategory
+        let count: Int
+
+        var id: String { category.rawValue }
+    }
+
+    struct ExportSealPreflightFinding: Equatable, Identifiable {
+        let id: String
+        let category: ExportSealPreflightCategory
+        let entityType: String
+        let entityID: UUID?
+        let propertyID: UUID?
+        let sessionID: UUID?
+        let shotID: UUID?
+        let freshness: CompletenessFreshnessState
+        let reason: String
+        let duplicateCount: Int
+        let context: [String: String]
+    }
+
+    struct ExportSealPreflightSection: Equatable, Identifiable {
+        let scope: ExportSealPreflightScope
+        let counts: [ExportSealPreflightCount]
+        let findings: [ExportSealPreflightFinding]
+
+        var id: String { scope.rawValue }
+    }
+
+    struct ExportSealPreflightReport: Equatable {
+        let inspectedAt: Date
+        let activeOrganizationID: UUID?
+        let sections: [ExportSealPreflightSection]
+
+        nonisolated var totalCounts: [ExportSealPreflightCount] {
+            Self.counts(for: sections.flatMap(\.findings))
+        }
+
+        nonisolated static func counts(for findings: [ExportSealPreflightFinding]) -> [ExportSealPreflightCount] {
+            let grouped = Dictionary(grouping: findings, by: \.category).mapValues { rows in
+                rows.reduce(0) { $0 + $1.duplicateCount }
+            }
+            return ExportSealPreflightCategory.allCases.map {
+                ExportSealPreflightCount(category: $0, count: grouped[$0] ?? 0)
+            }
+        }
+    }
+
     struct PropertyOpenFreshnessRemoteSnapshot: Equatable {
         let propertyID: UUID
         let orgID: UUID
@@ -9481,6 +9553,10 @@ final class AppState: ObservableObject {
         makeCompletenessGatesReport(inspectedAt: inspectedAt)
     }
 
+    func inspectExportSealPreflight(inspectedAt: Date = Date()) -> ExportSealPreflightReport {
+        Self.makeExportSealPreflightReport(from: inspectCompletenessGates(inspectedAt: inspectedAt))
+    }
+
     private func makeCompletenessGatesReport(inspectedAt: Date = Date()) -> CompletenessGatesReport {
         let properties = (try? localStore.fetchProperties()) ?? []
         let duplicateShotSessionIDs = completenessDuplicateShotSessionIDs(properties: properties)
@@ -10596,6 +10672,158 @@ final class AppState: ObservableObject {
         return lines.joined(separator: "\n")
     }
 
+    nonisolated static func makeExportSealPreflightReport(
+        from completenessReport: CompletenessGatesReport
+    ) -> ExportSealPreflightReport {
+        let rows = dedupedCompletenessDiagnosticRows(completenessReport.diagnosticOnlyRows)
+        let sections = ExportSealPreflightScope.allCases.map { scope in
+            let findings = rows.compactMap { row -> ExportSealPreflightFinding? in
+                guard let category = exportSealPreflightCategory(for: row, scope: scope) else {
+                    return nil
+                }
+                return ExportSealPreflightFinding(
+                    id: "\(scope.rawValue)|\(row.id)",
+                    category: category,
+                    entityType: row.entityType,
+                    entityID: row.entityID,
+                    propertyID: row.propertyID,
+                    sessionID: row.sessionID,
+                    shotID: row.shotID,
+                    freshness: row.freshness,
+                    reason: row.reason,
+                    duplicateCount: row.duplicateCount,
+                    context: row.context
+                )
+            }
+            return ExportSealPreflightSection(
+                scope: scope,
+                counts: ExportSealPreflightReport.counts(for: findings),
+                findings: findings.sorted { lhs, rhs in
+                    if lhs.category != rhs.category {
+                        return lhs.category.rawValue < rhs.category.rawValue
+                    }
+                    if lhs.reason != rhs.reason { return lhs.reason < rhs.reason }
+                    if lhs.entityType != rhs.entityType { return lhs.entityType < rhs.entityType }
+                    return lhs.id < rhs.id
+                }
+            )
+        }
+        return ExportSealPreflightReport(
+            inspectedAt: completenessReport.inspectedAt,
+            activeOrganizationID: completenessReport.activeOrganizationID,
+            sections: sections
+        )
+    }
+
+    private nonisolated static func exportSealPreflightCategory(
+        for row: CompletenessDiagnosticSummaryRow,
+        scope: ExportSealPreflightScope
+    ) -> ExportSealPreflightCategory? {
+        if row.entityType == "property" {
+            if row.reason == "property_deleted" || row.reason == "property_archived" {
+                return .hardBlockCandidate
+            }
+            if row.freshness == .needsReview {
+                return .hardBlockCandidate
+            }
+            if row.freshness == .offline || row.freshness == .unknown || row.freshness == .usingLocalCache {
+                return .softWarningCandidate
+            }
+        }
+
+        if row.freshness == .needsReview, row.entityType == "property" {
+            return .hardBlockCandidate
+        }
+
+        switch row.reason {
+        case "session_json_missing_or_unreadable",
+             "session_json_id_mismatch",
+             "issue_history_orphan_session_reference",
+             "issue_history_missing_session_reference",
+             "issue_history_orphan_shot_reference",
+             "issue_history_non_export_shot_reference",
+             "issue_history_orphan_reference",
+             "export_validation_failed",
+             "active_export_shot_metadata_incomplete",
+             "guided_metadata_incomplete",
+             "guided_title_missing",
+             "guided_building_missing",
+             "guided_elevation_missing",
+             "guided_detail_type_missing",
+             "guided_angle_index_missing",
+             "issue_current_reason_missing",
+             "issue_status_invalid":
+            return .hardBlockCandidate
+        case "active_export_shot_original_missing":
+            return exportSealPreflightMissingOriginalCategory(for: row, scope: scope)
+        case "active_export_shot_media_incomplete":
+            return .informationalOnly
+        case "session_not_completed_and_sealed":
+            return scope == .sealComplete ? .informationalOnly : .softWarningCandidate
+        case "issue_history_cross_session_reference",
+             "guided_retired",
+             "shot_historical_lifecycle",
+             "shot_hidden_from_default_workflows",
+             "session_deleted":
+            return .informationalOnly
+        default:
+            if row.freshness == .needsReview {
+                return .unknownNeedsReview
+            }
+            if row.freshness == .offline || row.freshness == .unknown || row.freshness == .usingLocalCache {
+                return .softWarningCandidate
+            }
+            return row.classification == .informational ? .informationalOnly : .unknownNeedsReview
+        }
+    }
+
+    private nonisolated static func exportSealPreflightMissingOriginalCategory(
+        for row: CompletenessDiagnosticSummaryRow,
+        scope: ExportSealPreflightScope
+    ) -> ExportSealPreflightCategory {
+        switch row.context["missing_original_risk"] {
+        case "active_delivery_risk":
+            return scope == .reExport ? .softWarningCandidate : .hardBlockCandidate
+        case "reexport_risk":
+            return scope == .reExport ? .hardBlockCandidate : .softWarningCandidate
+        case "historical_archive_debt":
+            return .informationalOnly
+        case "delivered_state_unknown":
+            return .unknownNeedsReview
+        default:
+            if row.context["supabase_storage_candidate"] == "true" ||
+                row.context["duplicate_shot_id_across_sessions"] == "true" {
+                return .softWarningCandidate
+            }
+            return row.context["is_export_eligible"] == "false" ? .softWarningCandidate : .unknownNeedsReview
+        }
+    }
+
+    nonisolated static func exportSealPreflightReportText(_ report: ExportSealPreflightReport) -> String {
+        var lines: [String] = []
+        lines.append("ScoutCapture Local Health - Export / Seal Preflight")
+        lines.append("Inspected: \(report.inspectedAt.formatted(date: .abbreviated, time: .standard))")
+        lines.append("Active Org: \(report.activeOrganizationID?.uuidString ?? "none")")
+        lines.append("Read-only advisory diagnostics. No behavior changed. Export is not blocked. Sealing is not blocked. This report does not enforce gates, block export, block sealing, change history visibility, switch canonical reads, hydrate sessions or shots, download media, relink files, repair data, change sync, media recovery, iCloud fallback, migrations, RLS, or local/remote data.")
+        lines.append("")
+        lines.append("Summary Counts")
+        appendExportSealPreflightCounts(report.totalCounts, to: &lines)
+        lines.append("")
+        lines.append("Preflight Category Definitions")
+        lines.append("- hard_block_candidate: would likely block a future strict seal/export rule, but does not block anything now.")
+        lines.append("- soft_warning_candidate: would likely warn or need operator awareness, but does not block anything now.")
+        lines.append("- informational_only: historical, retired, cross-session, or otherwise non-active advisory context.")
+        lines.append("- unknown_needs_review: context is unresolved enough that a future rule needs review before deciding.")
+        lines.append("")
+        for section in report.sections {
+            lines.append(section.scope.title)
+            appendExportSealPreflightCounts(section.counts, to: &lines)
+            appendExportSealPreflightFindings(section.findings, to: &lines)
+            lines.append("")
+        }
+        return lines.joined(separator: "\n")
+    }
+
     private nonisolated static func appendCompletenessCounts(
         _ title: String,
         _ counts: [CompletenessGateCount],
@@ -10605,6 +10833,40 @@ final class AppState: ObservableObject {
         lines.append("\(title) Completeness")
         for count in counts {
             lines.append("- \(count.state.rawValue): \(count.count)")
+        }
+    }
+
+    private nonisolated static func appendExportSealPreflightCounts(
+        _ counts: [ExportSealPreflightCount],
+        to lines: inout [String]
+    ) {
+        for count in counts {
+            lines.append("- \(count.category.rawValue): \(count.count)")
+        }
+    }
+
+    private nonisolated static func appendExportSealPreflightFindings(
+        _ findings: [ExportSealPreflightFinding],
+        to lines: inout [String]
+    ) {
+        if findings.isEmpty {
+            lines.append("none")
+            return
+        }
+
+        for finding in findings {
+            lines.append([
+                "- category=\(finding.category.rawValue)",
+                "entity=\(diagnosticsPreviewText(finding.entityType, maxLength: 60) ?? "unknown")",
+                "entity_id=\(finding.entityID?.uuidString ?? "none")",
+                "property_id=\(finding.propertyID?.uuidString ?? "none")",
+                "session_id=\(finding.sessionID?.uuidString ?? "none")",
+                "shot_id=\(finding.shotID?.uuidString ?? "none")",
+                "freshness=\(finding.freshness.rawValue)",
+                "duplicates=\(finding.duplicateCount)",
+                "reason=\(diagnosticsPreviewText(finding.reason, maxLength: 120) ?? "none")",
+                "context=\(completenessContextText(finding.context))"
+            ].joined(separator: " | "))
         }
     }
 

@@ -658,6 +658,144 @@ final class Phase2C20ACompletenessGatesTests: XCTestCase {
         XCTAssertTrue(text.contains("Unknown freshness alone is not treated as an active regression"))
     }
 
+    func testPreflightMissingSessionJSONIsHardBlockCandidateInReportOnly() throws {
+        let fixture = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        try? FileManager.default.removeItem(
+            at: fixture.store.sessionJSONURL(propertyID: fixture.property.id, sessionID: fixture.session.id)
+        )
+
+        let completenessReport = fixture.appState.inspectCompletenessGates()
+        let preflightReport = AppState.makeExportSealPreflightReport(from: completenessReport)
+        let text = AppState.exportSealPreflightReportText(preflightReport)
+
+        XCTAssertEqual(preflightCategoryCount(.hardBlockCandidate, in: preflightReport, scope: .export), 1)
+        XCTAssertTrue(text.contains("session_json_missing_or_unreadable"))
+        XCTAssertTrue(text.contains("Export is not blocked"))
+        XCTAssertTrue(text.contains("Sealing is not blocked"))
+    }
+
+    func testPreflightHistoricalArchiveDebtIsInformationalOnly() throws {
+        let deliveredAt = Date(timeIntervalSinceReferenceDate: 100)
+        let fixture = try makeFixture(
+            firstDeliveredAt: deliveredAt,
+            reExportExpiresAt: Date(timeIntervalSinceReferenceDate: 200),
+            exportedAt: deliveredAt
+        )
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let shot = makeShot(propertyID: fixture.property.id, sessionID: fixture.session.id)
+        try saveMetadata(store: fixture.store, property: fixture.property, session: fixture.session, shots: [shot])
+
+        let completenessReport = fixture.appState.inspectCompletenessGates(inspectedAt: Date(timeIntervalSinceReferenceDate: 300))
+        let preflightReport = AppState.makeExportSealPreflightReport(from: completenessReport)
+
+        XCTAssertEqual(preflightCategoryCount(.informationalOnly, in: preflightReport, scope: .export), 2)
+        XCTAssertTrue(AppState.exportSealPreflightReportText(preflightReport).contains("historical_archive_debt"))
+    }
+
+    func testPreflightPendingDeliveryMissingOriginalIsHardBlockCandidateInReportOnly() throws {
+        let fixture = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let shot = makeShot(propertyID: fixture.property.id, sessionID: fixture.session.id)
+        try saveMetadata(store: fixture.store, property: fixture.property, session: fixture.session, shots: [shot])
+
+        let preflightReport = AppState.makeExportSealPreflightReport(
+            from: fixture.appState.inspectCompletenessGates(inspectedAt: Date(timeIntervalSinceReferenceDate: 300))
+        )
+        let exportFindings = preflightFindings(preflightReport, scope: .export)
+
+        XCTAssertTrue(exportFindings.contains {
+            $0.reason == "active_export_shot_original_missing" &&
+                $0.category == .hardBlockCandidate &&
+                $0.context["missing_original_risk"] == "active_delivery_risk"
+        })
+        XCTAssertTrue(AppState.exportSealPreflightReportText(preflightReport).contains("No behavior changed"))
+    }
+
+    func testPreflightReExportEligibleMissingOriginalIsHardBlockCandidateInReportOnly() throws {
+        let deliveredAt = Date(timeIntervalSinceReferenceDate: 200)
+        let fixture = try makeFixture(
+            firstDeliveredAt: deliveredAt,
+            reExportExpiresAt: Date(timeIntervalSinceReferenceDate: 500),
+            exportedAt: deliveredAt
+        )
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let shot = makeShot(propertyID: fixture.property.id, sessionID: fixture.session.id)
+        try saveMetadata(store: fixture.store, property: fixture.property, session: fixture.session, shots: [shot])
+
+        let preflightReport = AppState.makeExportSealPreflightReport(
+            from: fixture.appState.inspectCompletenessGates(inspectedAt: Date(timeIntervalSinceReferenceDate: 300))
+        )
+        let reExportFindings = preflightFindings(preflightReport, scope: .reExport)
+
+        XCTAssertTrue(reExportFindings.contains {
+            $0.reason == "active_export_shot_original_missing" &&
+                $0.category == .hardBlockCandidate &&
+                $0.context["missing_original_risk"] == "reexport_risk"
+        })
+        XCTAssertTrue(AppState.exportSealPreflightReportText(preflightReport).contains("Export is not blocked"))
+    }
+
+    func testPreflightRetiredGuidedRowIsInformationalOnly() {
+        let report = makeSyntheticReport(rows: [
+            diagnosticRow(entityType: "guided", reason: "guided_retired")
+        ])
+        let preflightReport = AppState.makeExportSealPreflightReport(from: report)
+
+        XCTAssertEqual(preflightCategoryCount(.informationalOnly, in: preflightReport, scope: .sealComplete), 1)
+        XCTAssertEqual(preflightCategoryCount(.hardBlockCandidate, in: preflightReport, scope: .sealComplete), 0)
+    }
+
+    func testPreflightUnknownFreshnessIsSoftWarningCandidateNotHardBlock() {
+        let report = makeSyntheticReport(rows: [
+            diagnosticRow(entityType: "property", freshness: .unknown, reason: "property_minimum_metadata_missing")
+        ])
+        let preflightReport = AppState.makeExportSealPreflightReport(from: report)
+
+        XCTAssertEqual(preflightCategoryCount(.softWarningCandidate, in: preflightReport, scope: .export), 1)
+        XCTAssertEqual(preflightCategoryCount(.hardBlockCandidate, in: preflightReport, scope: .export), 0)
+    }
+
+    func testPreflightReportSaysAdvisoryAndNoBehaviorChanged() {
+        let preflightReport = AppState.makeExportSealPreflightReport(from: makeSyntheticReport(rows: []))
+        let text = AppState.exportSealPreflightReportText(preflightReport)
+
+        XCTAssertTrue(text.contains("Read-only advisory diagnostics"))
+        XCTAssertTrue(text.contains("No behavior changed"))
+        XCTAssertTrue(text.contains("Export is not blocked"))
+        XCTAssertTrue(text.contains("Sealing is not blocked"))
+        XCTAssertTrue(text.contains("Seal / Complete Preflight"))
+        XCTAssertTrue(text.contains("Export Preflight"))
+        XCTAssertTrue(text.contains("Re-Export Preflight"))
+    }
+
+    func testPreflightReportRedactsPathsSignedURLsTokensAndMediaPayloads() {
+        let report = makeSyntheticReport(rows: [
+            diagnosticRow(
+                entityType: "session",
+                freshness: .needsReview,
+                context: [
+                    "path": "/private/tmp/secret/file.heic",
+                    "signed_url": "https://example.test/file?signature=secret",
+                    "token": "token abc",
+                    "payload": "data:image/jpeg;base64,abcdef"
+                ],
+                reason: "/private/tmp/secret token abc https://example.test/file?signature=secret data:image/jpeg;base64,abcdef"
+            )
+        ])
+
+        let text = AppState.exportSealPreflightReportText(AppState.makeExportSealPreflightReport(from: report))
+
+        XCTAssertFalse(text.contains("/private/tmp/secret"))
+        XCTAssertFalse(text.contains("signature=secret"))
+        XCTAssertFalse(text.contains("token abc"))
+        XCTAssertFalse(text.contains("data:image"))
+        XCTAssertFalse(text.contains("abcdef"))
+        XCTAssertTrue(text.contains("[path]"))
+        XCTAssertTrue(text.contains("[redacted]"))
+        XCTAssertTrue(text.contains("[media]"))
+    }
+
     private func diagnosticRow(
         entityType: String,
         entityID: UUID = UUID(),
@@ -711,6 +849,25 @@ final class Phase2C20ACompletenessGatesTests: XCTestCase {
             diagnosticOnlyRows: rows
         )
         return report
+    }
+
+    private func preflightCategoryCount(
+        _ category: AppState.ExportSealPreflightCategory,
+        in report: AppState.ExportSealPreflightReport,
+        scope: AppState.ExportSealPreflightScope
+    ) -> Int {
+        report.sections
+            .first { $0.scope == scope }?
+            .counts
+            .first { $0.category == category }?
+            .count ?? 0
+    }
+
+    private func preflightFindings(
+        _ report: AppState.ExportSealPreflightReport,
+        scope: AppState.ExportSealPreflightScope
+    ) -> [AppState.ExportSealPreflightFinding] {
+        report.sections.first { $0.scope == scope }?.findings ?? []
     }
 }
 

@@ -6513,6 +6513,35 @@ private struct DebugCompletenessGatesSnapshot {
     }
 }
 
+private struct DebugExportSealPreflightSnapshot {
+    let inspectedAt: String
+    let activeOrganizationID: String
+    let hardBlockCandidateCount: String
+    let softWarningCandidateCount: String
+    let informationalOnlyCount: String
+    let unknownNeedsReviewCount: String
+    let sections: [AppState.ExportSealPreflightSection]
+    let snapshotText: String
+
+    init(_ report: AppState.ExportSealPreflightReport) {
+        inspectedAt = report.inspectedAt.formatted(date: .abbreviated, time: .standard)
+        activeOrganizationID = report.activeOrganizationID?.uuidString ?? "none"
+        sections = report.sections
+        snapshotText = AppState.exportSealPreflightReportText(report)
+        hardBlockCandidateCount = Self.count(.hardBlockCandidate, in: report.totalCounts)
+        softWarningCandidateCount = Self.count(.softWarningCandidate, in: report.totalCounts)
+        informationalOnlyCount = Self.count(.informationalOnly, in: report.totalCounts)
+        unknownNeedsReviewCount = Self.count(.unknownNeedsReview, in: report.totalCounts)
+    }
+
+    private static func count(
+        _ category: AppState.ExportSealPreflightCategory,
+        in counts: [AppState.ExportSealPreflightCount]
+    ) -> String {
+        String(counts.first { $0.category == category }?.count ?? 0)
+    }
+}
+
 private struct DebugDivergenceAuditHistoricalGroup: Identifiable, Equatable {
     let id: String
     let category: String
@@ -6736,6 +6765,7 @@ private struct DebugLocalDiagnosticsView: View {
     @State private var remoteOnlySessionDetailSnapshot: DebugRemoteOnlySessionDetailSnapshot?
     @State private var canonicalReadinessSnapshot: DebugCanonicalReadinessSnapshot?
     @State private var completenessGatesSnapshot: DebugCompletenessGatesSnapshot?
+    @State private var exportSealPreflightSnapshot: DebugExportSealPreflightSnapshot?
 
     private var diagnostics: AppState.LocalDiagnosticsState {
         appState.localDiagnostics
@@ -6784,6 +6814,15 @@ private struct DebugLocalDiagnosticsView: View {
                             "Completeness Gates",
                             subtitle: "Read-only local metadata/media/export completeness",
                             value: completenessGatesSnapshot.map { "\($0.diagnosticOnlyRowCount) diagnostic rows" } ?? "not inspected"
+                        )
+                    }
+                    NavigationLink {
+                        exportSealPreflightPage
+                    } label: {
+                        localHealthAreaLabel(
+                            "Export / Seal Preflight",
+                            subtitle: "Read-only advisory export, re-export, and sealing candidates",
+                            value: exportSealPreflightSnapshot.map { "\($0.hardBlockCandidateCount) hard candidates" } ?? "not inspected"
                         )
                     }
                     NavigationLink {
@@ -6857,6 +6896,7 @@ private struct DebugLocalDiagnosticsView: View {
             remoteOnlySessionDetailSnapshot = nil
             canonicalReadinessSnapshot = nil
             completenessGatesSnapshot = nil
+            exportSealPreflightSnapshot = nil
             refreshDiagnosticDetailSnapshots()
         }
         .alert("Clear Local Diagnostics?", isPresented: $showClearConfirm) {
@@ -7000,6 +7040,47 @@ private struct DebugLocalDiagnosticsView: View {
             }
         }
         .navigationTitle("Completeness")
+        .navigationBarTitleDisplayMode(.inline)
+    }
+
+    private var exportSealPreflightPage: some View {
+        List {
+            Section("Export / Seal Preflight") {
+                Text("Read-only advisory diagnostics. No behavior changed; export is not blocked and sealing is not blocked.")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(.secondary)
+
+                if let snapshot = exportSealPreflightSnapshot {
+                    diagnosticRow("Inspected", snapshot.inspectedAt)
+                    diagnosticRow("Active Org", snapshot.activeOrganizationID)
+                    diagnosticRow("Hard Block Candidates", snapshot.hardBlockCandidateCount)
+                    diagnosticRow("Soft Warning Candidates", snapshot.softWarningCandidateCount)
+                    diagnosticRow("Informational Only", snapshot.informationalOnlyCount)
+                    diagnosticRow("Unknown Needs Review", snapshot.unknownNeedsReviewCount)
+                    NavigationLink {
+                        DebugExportSealPreflightSnapshotTextView(snapshotText: snapshot.snapshotText)
+                    } label: {
+                        Text("View Copyable Preflight Report")
+                            .font(.system(size: 14, weight: .semibold))
+                    }
+                } else {
+                    Text("No export/seal preflight snapshot has been generated in this view.")
+                        .font(.system(size: 14, weight: .medium))
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            if let snapshot = exportSealPreflightSnapshot {
+                ForEach(snapshot.sections) { section in
+                    Section(section.scope.title) {
+                        ForEach(section.counts) { count in
+                            diagnosticRow(count.category.rawValue, count.count)
+                        }
+                    }
+                }
+            }
+        }
+        .navigationTitle("Preflight")
         .navigationBarTitleDisplayMode(.inline)
     }
 
@@ -7326,7 +7407,11 @@ private struct DebugLocalDiagnosticsView: View {
         failedQueueItems = appState.diagnosticsFailedQueueItems().map(DebugQueueDiagnosticSnapshotItem.init)
         retryCappedMediaItems = appState.diagnosticsRetryCappedMediaItems().map(DebugMediaDiagnosticSnapshotItem.init)
         pendingMediaItems = appState.diagnosticsPendingMediaItems().map(DebugMediaDiagnosticSnapshotItem.init)
-        completenessGatesSnapshot = DebugCompletenessGatesSnapshot(appState.inspectCompletenessGates())
+        let completenessReport = appState.inspectCompletenessGates()
+        completenessGatesSnapshot = DebugCompletenessGatesSnapshot(completenessReport)
+        exportSealPreflightSnapshot = DebugExportSealPreflightSnapshot(
+            AppState.makeExportSealPreflightReport(from: completenessReport)
+        )
         refreshCanonicalReadinessSnapshot()
     }
 
@@ -8225,6 +8310,34 @@ private struct DebugCompletenessGatesSnapshotTextView: View {
             }
         }
         .navigationTitle("Completeness Report")
+        .navigationBarTitleDisplayMode(.inline)
+    }
+}
+
+private struct DebugExportSealPreflightSnapshotTextView: View {
+    let snapshotText: String
+    @State private var didCopySnapshot: Bool = false
+
+    var body: some View {
+        List {
+            Section {
+                Button(didCopySnapshot ? "Copied Plain Text" : "Copy Report") {
+                    UIPasteboard.general.string = snapshotText
+                    didCopySnapshot = true
+                }
+                .font(.system(size: 14, weight: .semibold))
+            } footer: {
+                Text("Copies the sanitized advisory preflight report as plain text only. It does not include local paths, signed URLs, media, or auth material.")
+            }
+
+            Section {
+                Text(snapshotText)
+                    .font(.system(size: 12, weight: .regular, design: .monospaced))
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .textSelection(.enabled)
+            }
+        }
+        .navigationTitle("Preflight Report")
         .navigationBarTitleDisplayMode(.inline)
     }
 }
