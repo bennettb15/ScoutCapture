@@ -418,6 +418,32 @@ final class AppState: ObservableObject {
         case softWarningCandidate = "soft_warning_candidate"
         case informationalOnly = "informational_only"
         case unknownNeedsReview = "unknown_needs_review"
+
+        nonisolated var visibleLabel: String {
+            switch self {
+            case .hardBlockCandidate:
+                return "Future Hard Blocks"
+            case .softWarningCandidate:
+                return "Advisory Warnings"
+            case .informationalOnly:
+                return "Historical / Informational"
+            case .unknownNeedsReview:
+                return "Needs Review / Unknown"
+            }
+        }
+
+        nonisolated var visibleExplanation: String {
+            switch self {
+            case .hardBlockCandidate:
+                return "Conditions that may later become true blockers."
+            case .softWarningCandidate:
+                return "Conditions worth reviewing but not severe enough to block."
+            case .informationalOnly:
+                return "Retained for audit/history; not operational blockers."
+            case .unknownNeedsReview:
+                return "Incomplete context that needs operator review before enforcement."
+            }
+        }
     }
 
     enum ExportSealPreflightScope: String, CaseIterable, Equatable, Hashable {
@@ -483,6 +509,17 @@ final class AppState: ObservableObject {
                 ExportSealPreflightCount(category: $0, count: grouped[$0] ?? 0)
             }
         }
+    }
+
+    nonisolated static func exportSealPreflightAdvisoryMessage() -> String {
+        "Read-only advisory diagnostics. These counts do not block export or sealing."
+    }
+
+    nonisolated static func exportSealPreflightStatusMessage(hardBlockCandidateCount: Int) -> String {
+        if hardBlockCandidateCount == 0 {
+            return "No future hard-block conditions detected."
+        }
+        return "Potential future hard-block conditions found. Export/seal behavior is still unchanged."
     }
 
     struct PropertyOpenFreshnessRemoteSnapshot: Equatable {

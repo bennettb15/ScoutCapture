@@ -6516,10 +6516,12 @@ private struct DebugCompletenessGatesSnapshot {
 private struct DebugExportSealPreflightSnapshot {
     let inspectedAt: String
     let activeOrganizationID: String
+    let hardBlockCandidateRawCount: Int
     let hardBlockCandidateCount: String
     let softWarningCandidateCount: String
     let informationalOnlyCount: String
     let unknownNeedsReviewCount: String
+    let statusMessage: String
     let sections: [AppState.ExportSealPreflightSection]
     let snapshotText: String
 
@@ -6528,17 +6530,28 @@ private struct DebugExportSealPreflightSnapshot {
         activeOrganizationID = report.activeOrganizationID?.uuidString ?? "none"
         sections = report.sections
         snapshotText = AppState.exportSealPreflightReportText(report)
-        hardBlockCandidateCount = Self.count(.hardBlockCandidate, in: report.totalCounts)
+        hardBlockCandidateRawCount = Self.countValue(.hardBlockCandidate, in: report.totalCounts)
+        hardBlockCandidateCount = String(hardBlockCandidateRawCount)
         softWarningCandidateCount = Self.count(.softWarningCandidate, in: report.totalCounts)
         informationalOnlyCount = Self.count(.informationalOnly, in: report.totalCounts)
         unknownNeedsReviewCount = Self.count(.unknownNeedsReview, in: report.totalCounts)
+        statusMessage = AppState.exportSealPreflightStatusMessage(
+            hardBlockCandidateCount: hardBlockCandidateRawCount
+        )
     }
 
     private static func count(
         _ category: AppState.ExportSealPreflightCategory,
         in counts: [AppState.ExportSealPreflightCount]
     ) -> String {
-        String(counts.first { $0.category == category }?.count ?? 0)
+        String(countValue(category, in: counts))
+    }
+
+    private static func countValue(
+        _ category: AppState.ExportSealPreflightCategory,
+        in counts: [AppState.ExportSealPreflightCount]
+    ) -> Int {
+        counts.first { $0.category == category }?.count ?? 0
     }
 }
 
@@ -6822,7 +6835,7 @@ private struct DebugLocalDiagnosticsView: View {
                         localHealthAreaLabel(
                             "Export / Seal Preflight",
                             subtitle: "Read-only advisory export, re-export, and sealing candidates",
-                            value: exportSealPreflightSnapshot.map { "\($0.hardBlockCandidateCount) hard candidates" } ?? "not inspected"
+                            value: exportSealPreflightSnapshot.map { "\($0.hardBlockCandidateCount) future hard blocks" } ?? "not inspected"
                         )
                     }
                     NavigationLink {
@@ -7046,17 +7059,20 @@ private struct DebugLocalDiagnosticsView: View {
     private var exportSealPreflightPage: some View {
         List {
             Section("Export / Seal Preflight") {
-                Text("Read-only advisory diagnostics. No behavior changed; export is not blocked and sealing is not blocked.")
+                Text(AppState.exportSealPreflightAdvisoryMessage())
                     .font(.system(size: 13, weight: .medium))
                     .foregroundStyle(.secondary)
 
                 if let snapshot = exportSealPreflightSnapshot {
+                    Text(snapshot.statusMessage)
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(snapshot.hardBlockCandidateRawCount == 0 ? Color.secondary : Color.orange)
                     diagnosticRow("Inspected", snapshot.inspectedAt)
                     diagnosticRow("Active Org", snapshot.activeOrganizationID)
-                    diagnosticRow("Hard Block Candidates", snapshot.hardBlockCandidateCount)
-                    diagnosticRow("Soft Warning Candidates", snapshot.softWarningCandidateCount)
-                    diagnosticRow("Informational Only", snapshot.informationalOnlyCount)
-                    diagnosticRow("Unknown Needs Review", snapshot.unknownNeedsReviewCount)
+                    diagnosticRow(AppState.ExportSealPreflightCategory.hardBlockCandidate.visibleLabel, snapshot.hardBlockCandidateCount)
+                    diagnosticRow(AppState.ExportSealPreflightCategory.softWarningCandidate.visibleLabel, snapshot.softWarningCandidateCount)
+                    diagnosticRow(AppState.ExportSealPreflightCategory.informationalOnly.visibleLabel, snapshot.informationalOnlyCount)
+                    diagnosticRow(AppState.ExportSealPreflightCategory.unknownNeedsReview.visibleLabel, snapshot.unknownNeedsReviewCount)
                     NavigationLink {
                         DebugExportSealPreflightSnapshotTextView(snapshotText: snapshot.snapshotText)
                     } label: {
@@ -7071,10 +7087,23 @@ private struct DebugLocalDiagnosticsView: View {
             }
 
             if let snapshot = exportSealPreflightSnapshot {
+                Section("Category Guide") {
+                    ForEach(AppState.ExportSealPreflightCategory.allCases, id: \.self) { category in
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(category.visibleLabel)
+                                .font(.system(size: 14, weight: .semibold))
+                            Text(category.visibleExplanation)
+                                .font(.system(size: 12, weight: .medium))
+                                .foregroundStyle(.secondary)
+                        }
+                        .padding(.vertical, 3)
+                    }
+                }
+
                 ForEach(snapshot.sections) { section in
                     Section(section.scope.title) {
                         ForEach(section.counts) { count in
-                            diagnosticRow(count.category.rawValue, count.count)
+                            diagnosticRow(count.category.visibleLabel, count.count)
                         }
                     }
                 }

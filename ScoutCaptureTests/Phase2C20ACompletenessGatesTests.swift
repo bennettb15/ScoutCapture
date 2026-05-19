@@ -796,6 +796,74 @@ final class Phase2C20ACompletenessGatesTests: XCTestCase {
         XCTAssertTrue(text.contains("[media]"))
     }
 
+    func testPreflightVisibleLabelsMapFromRawEnumCategories() {
+        XCTAssertEqual(AppState.ExportSealPreflightCategory.hardBlockCandidate.visibleLabel, "Future Hard Blocks")
+        XCTAssertEqual(AppState.ExportSealPreflightCategory.softWarningCandidate.visibleLabel, "Advisory Warnings")
+        XCTAssertEqual(AppState.ExportSealPreflightCategory.informationalOnly.visibleLabel, "Historical / Informational")
+        XCTAssertEqual(AppState.ExportSealPreflightCategory.unknownNeedsReview.visibleLabel, "Needs Review / Unknown")
+        XCTAssertEqual(
+            AppState.ExportSealPreflightCategory.hardBlockCandidate.visibleExplanation,
+            "Conditions that may later become true blockers."
+        )
+        XCTAssertEqual(
+            AppState.ExportSealPreflightCategory.softWarningCandidate.visibleExplanation,
+            "Conditions worth reviewing but not severe enough to block."
+        )
+        XCTAssertEqual(
+            AppState.ExportSealPreflightCategory.informationalOnly.visibleExplanation,
+            "Retained for audit/history; not operational blockers."
+        )
+        XCTAssertEqual(
+            AppState.ExportSealPreflightCategory.unknownNeedsReview.visibleExplanation,
+            "Incomplete context that needs operator review before enforcement."
+        )
+    }
+
+    func testPreflightZeroHardBlockStatusMessageAppears() {
+        XCTAssertEqual(
+            AppState.exportSealPreflightStatusMessage(hardBlockCandidateCount: 0),
+            "No future hard-block conditions detected."
+        )
+    }
+
+    func testPreflightNonzeroHardBlockStatusMessageAppears() {
+        XCTAssertEqual(
+            AppState.exportSealPreflightStatusMessage(hardBlockCandidateCount: 2),
+            "Potential future hard-block conditions found. Export/seal behavior is still unchanged."
+        )
+    }
+
+    func testPreflightVisibleAdvisoryMessageRemainsNoBehaviorChanged() {
+        XCTAssertEqual(
+            AppState.exportSealPreflightAdvisoryMessage(),
+            "Read-only advisory diagnostics. These counts do not block export or sealing."
+        )
+    }
+
+    func testPreflightCopyableReportStillIncludesRawTechnicalCategories() {
+        let report = AppState.makeExportSealPreflightReport(from: makeSyntheticReport(rows: [
+            diagnosticRow(entityType: "session", reason: "session_json_missing_or_unreadable"),
+            diagnosticRow(
+                entityType: "property",
+                freshness: .unknown,
+                reason: "property_minimum_metadata_missing"
+            ),
+            diagnosticRow(entityType: "guided", reason: "guided_retired"),
+            diagnosticRow(
+                entityType: "shot",
+                freshness: .needsReview,
+                reason: "shot_provenance_unresolved"
+            )
+        ]))
+
+        let text = AppState.exportSealPreflightReportText(report)
+
+        XCTAssertTrue(text.contains("hard_block_candidate"))
+        XCTAssertTrue(text.contains("soft_warning_candidate"))
+        XCTAssertTrue(text.contains("informational_only"))
+        XCTAssertTrue(text.contains("unknown_needs_review"))
+    }
+
     private func diagnosticRow(
         entityType: String,
         entityID: UUID = UUID(),
