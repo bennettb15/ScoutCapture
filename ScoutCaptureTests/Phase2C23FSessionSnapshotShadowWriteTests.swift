@@ -19,7 +19,9 @@ final class Phase2C23FSessionSnapshotShadowWriteTests: XCTestCase {
     private func makeFixture(
         shadowWriteEnabled: Bool = true,
         storageUploadOverride: AppState.SessionSnapshotStorageUploadOverride? = nil,
-        rowInsertOverride: AppState.SessionSnapshotRowInsertOverride? = nil
+        rowInsertOverride: AppState.SessionSnapshotRowInsertOverride? = nil,
+        rowsFetchOverride: AppState.SessionSnapshotRowsFetchOverride? = nil,
+        storageDownloadOverride: AppState.SessionSnapshotStorageDownloadOverride? = nil
     ) throws -> (store: LocalStore, appState: AppState, root: URL, property: Property, session: Session) {
         let root = try makeTempStorageRoot()
         let store = LocalStore(testStorageRootURL: root)
@@ -43,6 +45,8 @@ final class Phase2C23FSessionSnapshotShadowWriteTests: XCTestCase {
             userDefaults: makeDefaults(shadowWriteEnabled: shadowWriteEnabled),
             sessionSnapshotStorageUploadOverride: storageUploadOverride ?? { _ in },
             sessionSnapshotRowInsertOverride: rowInsertOverride ?? { _ in },
+            sessionSnapshotRowsFetchOverride: rowsFetchOverride,
+            sessionSnapshotStorageDownloadOverride: storageDownloadOverride,
             disableCloudBackupForTests: true
         )
         return (store, appState, root, property, session)
@@ -159,12 +163,7 @@ final class Phase2C23FSessionSnapshotShadowWriteTests: XCTestCase {
     }
 
     func testPayloadChecksumMetadataMatchesPreview() async throws {
-        var uploadedObject: AppState.SessionSnapshotStorageObject?
-        var insertedRow: AppState.SessionSnapshotUploadRow?
-        let fixture = try makeFixture(
-            storageUploadOverride: { uploadedObject = $0 },
-            rowInsertOverride: { insertedRow = $0 }
-        )
+        let fixture = try makeFixture()
         defer { try? FileManager.default.removeItem(at: fixture.root) }
         let generatedAt = Date(timeIntervalSinceReferenceDate: 800)
 
@@ -172,20 +171,21 @@ final class Phase2C23FSessionSnapshotShadowWriteTests: XCTestCase {
             inspectedAt: generatedAt,
             trigger: "manual_diagnostic"
         )
-        let result = await fixture.appState.uploadSessionSnapshotShadowWrite(
+        let artifacts = try fixture.appState._debugMakeSessionSnapshotUploadArtifactsForTests(
             propertyID: fixture.property.id,
             sessionID: fixture.session.id,
+            snapshotID: UUID(uuidString: "00000000-0000-0000-0000-000000000123")!,
+            kind: .manual,
             trigger: "manual_diagnostic",
             generatedAt: generatedAt
         )
 
         let envelope = try XCTUnwrap(preview.rows.first?.envelope)
-        XCTAssertEqual(result.outcome, .succeeded)
-        XCTAssertEqual(uploadedObject?.bucket, "scoutcapture-session-snapshots")
-        XCTAssertEqual(uploadedObject?.payloadSHA256, envelope.snapshotPayloadSHA256)
-        XCTAssertEqual(insertedRow?.snapshotPayloadSHA256, envelope.snapshotPayloadSHA256)
-        XCTAssertEqual(insertedRow?.rawSessionJSONSHA256, envelope.rawSessionJSONSHA256)
-        XCTAssertEqual(insertedRow?.payloadByteSize, envelope.snapshotPayloadByteCount)
+        XCTAssertEqual(artifacts.object.bucket, "scoutcapture-session-snapshots")
+        XCTAssertEqual(artifacts.object.payloadSHA256, envelope.snapshotPayloadSHA256)
+        XCTAssertEqual(artifacts.row.snapshotPayloadSHA256, envelope.snapshotPayloadSHA256)
+        XCTAssertEqual(artifacts.row.rawSessionJSONSHA256, envelope.rawSessionJSONSHA256)
+        XCTAssertEqual(artifacts.row.payloadByteSize, envelope.snapshotPayloadByteCount)
     }
 
     func testStorageAndTableSuccessRecordsSuccess() async throws {
@@ -274,5 +274,109 @@ final class Phase2C23FSessionSnapshotShadowWriteTests: XCTestCase {
 
         XCTAssertEqual(result.outcome, .orphanRisk)
         XCTAssertEqual(fixture.appState.localDiagnostics.sessionSnapshotUpload.failureCount, 1)
+    }
+
+    func testReadbackRowObjectConsistencyAndChecksumVerification() async throws {
+        let fixture = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+
+        let artifacts = try fixture.appState._debugMakeSessionSnapshotUploadArtifactsForTests(
+            propertyID: fixture.property.id,
+            sessionID: fixture.session.id,
+            snapshotID: UUID(uuidString: "00000000-0000-0000-0000-000000000124")!,
+            kind: .manual,
+            trigger: "manual_diagnostic"
+        )
+        let result = AppState.makeSessionSnapshotReadbackResult(
+            row: artifacts.row,
+            payloadData: artifacts.object.payloadData,
+            checkedAt: Date(timeIntervalSinceReferenceDate: 900),
+            failureReason: nil
+        )
+
+        XCTAssertEqual(result.status, "verified")
+        XCTAssertTrue(result.rowFound)
+        XCTAssertTrue(result.payloadReadable)
+        XCTAssertTrue(result.checksumVerified)
+        XCTAssertTrue(result.byteSizeMatches)
+        XCTAssertTrue(result.countsValid)
+        XCTAssertTrue(result.rowObjectConsistent)
+        XCTAssertEqual(result.payloadByteSize, artifacts.row.payloadByteSize)
+    }
+
+    func testReadbackExistingRowMissingObjectIsDiagnosticOnly() async throws {
+        let fixture = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+
+        let artifacts = try fixture.appState._debugMakeSessionSnapshotUploadArtifactsForTests(
+            propertyID: fixture.property.id,
+            sessionID: fixture.session.id
+        )
+        let result = AppState.makeSessionSnapshotReadbackResult(
+            row: artifacts.row,
+            payloadData: nil,
+            checkedAt: Date(timeIntervalSinceReferenceDate: 901),
+            failureReason: "object missing"
+        )
+
+        XCTAssertEqual(result.status, "payload_unreadable")
+        XCTAssertTrue(result.rowFound)
+        XCTAssertFalse(result.payloadReadable)
+        XCTAssertFalse(result.checksumVerified)
+        XCTAssertFalse(result.rowObjectConsistent)
+        XCTAssertEqual(result.failureReason, "object missing")
+    }
+
+    func testReadbackExistingObjectMissingRowIsDiagnosticOnly() async throws {
+        let fixture = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+
+        let artifacts = try fixture.appState._debugMakeSessionSnapshotUploadArtifactsForTests(
+            propertyID: fixture.property.id,
+            sessionID: fixture.session.id
+        )
+        let result = AppState.makeSessionSnapshotReadbackResult(
+            row: nil,
+            payloadData: artifacts.object.payloadData,
+            checkedAt: Date(timeIntervalSinceReferenceDate: 902),
+            failureReason: "row missing"
+        )
+
+        XCTAssertEqual(result.status, "row_missing")
+        XCTAssertFalse(result.rowFound)
+        XCTAssertTrue(result.payloadReadable)
+        XCTAssertFalse(result.checksumVerified)
+        XCTAssertFalse(result.rowObjectConsistent)
+    }
+
+    func testReadbackPayloadFailureRemainsNonBlockingAndSanitized() async throws {
+        let fixture = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+
+        let artifacts = try fixture.appState._debugMakeSessionSnapshotUploadArtifactsForTests(
+            propertyID: fixture.property.id,
+            sessionID: fixture.session.id
+        )
+        let readbackFixture = try makeFixture(
+            rowsFetchOverride: { _, _, _ in [artifacts.row] },
+            storageDownloadOverride: { _, _ in
+                throw NSError(domain: "ScoutCaptureTests", code: 3, userInfo: [
+                    NSLocalizedDescriptionKey: "download failed /private/tmp/session.json token=abc https://example.supabase.co/signed?token=secret"
+                ])
+            }
+        )
+        defer { try? FileManager.default.removeItem(at: readbackFixture.root) }
+
+        let result = await readbackFixture.appState.validateLatestSessionSnapshotRemoteReadback()
+        let diagnostics = readbackFixture.appState.localDiagnostics.sessionSnapshotUpload
+        let report = AppState.sessionSnapshotUploadReportText(diagnostics)
+
+        XCTAssertEqual(result.status, "payload_unreadable")
+        XCTAssertEqual(diagnostics.lastReadbackStatus, "payload_unreadable")
+        XCTAssertEqual(diagnostics.failureCount, 0)
+        XCTAssertFalse(report.contains("/private/tmp"))
+        XCTAssertFalse(report.contains("token=abc"))
+        XCTAssertFalse(report.contains("https://example.supabase.co"))
+        XCTAssertTrue(report.contains("Remote Readback"))
     }
 }

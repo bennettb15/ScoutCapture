@@ -6896,7 +6896,7 @@ private struct DebugLocalDiagnosticsView: View {
                         )
                     }
                     NavigationLink {
-                        DebugSessionSnapshotUploadDiagnosticsView(diagnostics: diagnostics.sessionSnapshotUpload)
+                        DebugSessionSnapshotUploadDiagnosticsView(appState: appState, diagnostics: diagnostics.sessionSnapshotUpload)
                     } label: {
                         localHealthAreaLabel(
                             "Session Snapshot Upload",
@@ -8663,19 +8663,57 @@ private struct DebugSessionSnapshotPreviewTextView: View {
 }
 
 private struct DebugSessionSnapshotUploadDiagnosticsView: View {
+    @ObservedObject var appState: AppState
     let diagnostics: AppState.SessionSnapshotUploadDiagnostics
+    @State private var isUploadingSessionSnapshot: Bool = false
+    @State private var isCheckingSnapshotReadback: Bool = false
+    @State private var testSessionCreationMessage: String?
 
     private var reportText: String {
         AppState.sessionSnapshotUploadReportText(diagnostics)
     }
 
+    private var uploadAvailability: (isAvailable: Bool, reason: String) {
+        appState.manualSessionSnapshotUploadAvailability
+    }
+
+    private var uploadTarget: AppState.ManualSessionSnapshotUploadTarget? {
+        appState.manualSessionSnapshotUploadTarget
+    }
+
+    private var uploadTargetResolution: AppState.ManualSessionSnapshotUploadTargetResolution {
+        appState.manualSessionSnapshotUploadTargetResolution
+    }
+
+    private var testSessionCreationAvailability: (isAvailable: Bool, reason: String) {
+        appState.manualSessionSnapshotTestSessionCreationAvailability
+    }
+
+    private var effectiveFlagEnabled: Bool {
+        appState.backendFeatureFlags.sessionSnapshotShadowWriteEnabled
+    }
+
+    private var environmentFlagDetected: Bool {
+        ProcessInfo.processInfo.environment["session_snapshot_shadow_write_enabled"] != nil ||
+            ProcessInfo.processInfo.environment["SCOUTCAPTURE_SESSION_SNAPSHOT_SHADOW_WRITE_ENABLED"] != nil
+    }
+
     var body: some View {
         List {
+            Section("Supabase Target") {
+                diagnosticRow("URL", appState.supabaseConfiguration.sanitizedURLDisplay)
+                diagnosticRow("Target", appState.supabaseConfiguration.targetClassification.rawValue)
+                diagnosticRow("Override Active", appState.supabaseConfiguration.isOverrideActive ? "true" : "false")
+                diagnosticRow("Config Source", appState.supabaseConfiguration.source.rawValue)
+                diagnosticRow("Anon Key", appState.supabaseConfiguration.redactedAnonKeyDisplay)
+                diagnosticRow("Snapshot Flag Env", environmentFlagDetected ? "detected" : "not detected")
+            }
+
             Section("Session Snapshot Upload") {
                 Text("Shadow-write only diagnostics. The feature flag defaults off. Upload failures do not block capture, export, sealing, sync, media recovery, or iCloud fallback.")
                     .font(.system(size: 13, weight: .medium))
                     .foregroundStyle(.secondary)
-                diagnosticRow("Flag Enabled", diagnostics.flagEnabled ? "true" : "false")
+                diagnosticRow("Flag Enabled", effectiveFlagEnabled ? "true" : "false")
                 diagnosticRow("Remote Availability", diagnostics.remoteAvailability)
                 diagnosticRow("Attempts", diagnostics.attemptedCount)
                 diagnosticRow("Successes", diagnostics.successCount)
@@ -8695,8 +8733,53 @@ private struct DebugSessionSnapshotUploadDiagnosticsView: View {
                 }
             }
 
+            Section("Selected Upload Target") {
+                if let uploadTarget {
+                    diagnosticRow("Source", uploadTarget.source.rawValue)
+                    diagnosticRow("Property Name", uploadTarget.propertyName)
+                    diagnosticRow("Property ID", uploadTarget.propertyID.uuidString)
+                    diagnosticRow("Session ID", uploadTarget.sessionID.uuidString)
+                    diagnosticRow("Session Status", uploadTarget.sessionStatus.rawValue)
+                    diagnosticRow("Session Started", formattedRunDate(uploadTarget.sessionStartedAt))
+                } else {
+                    diagnosticRow("Target", "none")
+                    diagnosticRow("Selected Property ID", uploadTargetResolution.selectedPropertyID?.uuidString ?? "none")
+                    diagnosticRow("Sessions Found", uploadTargetResolution.sessionsFoundForPropertyCount)
+                    diagnosticRow("Session Index Available", uploadTargetResolution.localSessionIndexAvailable ? "true" : "false")
+                    diagnosticRow("Reason", uploadTargetResolution.reason)
+                }
+                Button("Create Local Snapshot Test Session") {
+                    let result = appState.createManualSessionSnapshotTestSessionForLocalDev()
+                    if let sessionID = result.sessionID {
+                        testSessionCreationMessage = "\(result.message): \(sessionID.uuidString)"
+                    } else {
+                        testSessionCreationMessage = result.message
+                    }
+                }
+                .disabled(!testSessionCreationAvailability.isAvailable)
+                .font(.system(size: 14, weight: .semibold))
+                Text(testSessionCreationMessage ?? testSessionCreationAvailability.reason)
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(.secondary)
+            }
+
             Section("Manual Diagnostic Trigger") {
-                Text("Manual upload is unavailable from this diagnostics panel while the shadow-write flag is off or the remote snapshot schema has not been intentionally applied.")
+                Button(isUploadingSessionSnapshot ? "Uploading..." : "Upload Selected Session Snapshot") {
+                    guard uploadAvailability.isAvailable else { return }
+                    isUploadingSessionSnapshot = true
+                    Task {
+                        _ = await appState.uploadCurrentSessionSnapshotShadowWrite(
+                            kind: .manual,
+                            trigger: "manual_diagnostic"
+                        )
+                        await MainActor.run {
+                            isUploadingSessionSnapshot = false
+                        }
+                    }
+                }
+                .disabled(!uploadAvailability.isAvailable || isUploadingSessionSnapshot)
+                .font(.system(size: 14, weight: .semibold))
+                Text(uploadAvailability.reason)
                     .font(.system(size: 13, weight: .medium))
                     .foregroundStyle(.secondary)
             }
@@ -8708,6 +8791,35 @@ private struct DebugSessionSnapshotUploadDiagnosticsView: View {
                 diagnosticRow("Snapshot Kind", diagnostics.lastKind ?? "none")
                 diagnosticRow("Trigger", diagnostics.lastTrigger ?? "none")
                 diagnosticRow("Payload Path Present", AppState.diagnosticsPreviewText(diagnostics.lastUploadPath) == nil ? "false" : "true")
+            }
+
+            Section("Remote Readback") {
+                Text("Read-only row and payload consistency check. It does not hydrate sessions, restore data, switch reads, download media, or change local session state.")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(.secondary)
+                diagnosticRow("Status", diagnostics.lastReadbackStatus)
+                diagnosticRow("Last Checked", formattedRunDate(diagnostics.lastReadbackAt))
+                diagnosticRow("Snapshot ID", diagnostics.lastReadbackSnapshotID?.uuidString ?? "none")
+                diagnosticRow("Row Found", diagnostics.lastReadbackRowFound ? "true" : "false")
+                diagnosticRow("Payload Readable", diagnostics.lastReadbackPayloadReadable ? "true" : "false")
+                diagnosticRow("Checksum Verified", diagnostics.lastReadbackChecksumVerified ? "true" : "false")
+                diagnosticRow("Row/Object Consistent", diagnostics.lastReadbackRowObjectConsistent ? "true" : "false")
+                diagnosticRow("Payload Byte Size", diagnostics.lastReadbackPayloadByteSize.map(String.init) ?? "none")
+                diagnosticRow("Snapshot Created", formattedRunDate(diagnostics.lastReadbackSnapshotCreatedAt))
+                if let failure = AppState.diagnosticsPreviewText(diagnostics.lastReadbackFailureMessage, maxLength: 160) {
+                    diagnosticRow("Readback Failure", failure)
+                }
+                Button(isCheckingSnapshotReadback ? "Checking..." : "Check Remote Readback") {
+                    isCheckingSnapshotReadback = true
+                    Task {
+                        _ = await appState.validateLatestSessionSnapshotRemoteReadback()
+                        await MainActor.run {
+                            isCheckingSnapshotReadback = false
+                        }
+                    }
+                }
+                .disabled(isCheckingSnapshotReadback)
+                .font(.system(size: 14, weight: .semibold))
             }
         }
         .navigationTitle("Snapshot Upload")

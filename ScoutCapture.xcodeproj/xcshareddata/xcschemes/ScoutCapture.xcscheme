@@ -78,6 +78,28 @@
             ReferencedContainer = "container:ScoutCapture.xcodeproj">
          </BuildableReference>
       </BuildableProductRunnable>
+      <EnvironmentVariables>
+         <EnvironmentVariable
+            key = "SCOUTCAPTURE_SUPABASE_URL"
+            value = "http://127.0.0.1:54321"
+            isEnabled = "YES">
+         </EnvironmentVariable>
+         <EnvironmentVariable
+            key = "SCOUTCAPTURE_SUPABASE_ANON_KEY"
+            value = "sb_publishable_ACJWlzQHlZjBrEguHvfOxg_3BJgxAaH"
+            isEnabled = "YES">
+         </EnvironmentVariable>
+         <EnvironmentVariable
+            key = "session_snapshot_shadow_write_enabled"
+            value = "true"
+            isEnabled = "YES">
+         </EnvironmentVariable>
+         <EnvironmentVariable
+            key = "SCOUTCAPTURE_SESSION_SNAPSHOT_SHADOW_WRITE_ENABLED"
+            value = "true"
+            isEnabled = "YES">
+         </EnvironmentVariable>
+      </EnvironmentVariables>
    </LaunchAction>
    <ProfileAction
       buildConfiguration = "Release"
