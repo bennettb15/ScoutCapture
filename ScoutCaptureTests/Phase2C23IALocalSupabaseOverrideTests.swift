@@ -39,6 +39,14 @@ final class Phase2C23IALocalSupabaseOverrideTests: XCTestCase {
         ]
     }
 
+    private func approvedStagingSnapshotEnvironment(flagValue: String = "true") -> [String: String] {
+        [
+            "SCOUTCAPTURE_SUPABASE_URL": "https://hpekjqqiyurrewfjvjmn.supabase.co",
+            "SCOUTCAPTURE_SUPABASE_ANON_KEY": "staging-anon-key",
+            "session_snapshot_shadow_write_enabled": flagValue
+        ]
+    }
+
     private func makeStoreWithPropertyAndSessions(
         sessionStarts: [TimeInterval]
     ) throws -> (store: LocalStore, property: Property, sessions: [Session]) {
@@ -116,10 +124,34 @@ final class Phase2C23IALocalSupabaseOverrideTests: XCTestCase {
         XCTAssertEqual(config.targetClassification, .invalid)
     }
 
-    func testLocalAndRemoteTargetsAreClassified() {
+    func testMalformedOverrideKeyIsRejected() {
+        let config = AppState.loadSupabaseConfiguration(
+            bundle: Phase2C23ITestBundle(values: [
+                "SUPABASE_URL": "https://remote.example.supabase.co",
+                "SUPABASE_ANON_KEY": "remote-anon-key"
+            ]),
+            environment: [
+                "SCOUTCAPTURE_SUPABASE_URL": "https://hpekjqqiyurrewfjvjmn.supabase.co",
+                "SCOUTCAPTURE_SUPABASE_ANON_KEY": ""
+            ],
+            debugOverrideAllowed: true
+        )
+
+        XCTAssertEqual(config.source, .invalidEnvironmentOverride)
+        XCTAssertFalse(config.isConfigured)
+        XCTAssertEqual(config.targetClassification, .invalid)
+        XCTAssertFalse(config.isSessionSnapshotShadowWriteOverrideAllowed)
+    }
+
+    func testLocalStagingAndRemoteTargetsAreClassified() {
         let local = SupabaseRuntimeConfiguration(
             url: URL(string: "http://127.0.0.1:54321"),
             anonKey: "local-anon-key",
+            source: .environmentOverride
+        )
+        let staging = SupabaseRuntimeConfiguration(
+            url: URL(string: "https://hpekjqqiyurrewfjvjmn.supabase.co"),
+            anonKey: "staging-anon-key",
             source: .environmentOverride
         )
         let remote = SupabaseRuntimeConfiguration(
@@ -130,8 +162,13 @@ final class Phase2C23IALocalSupabaseOverrideTests: XCTestCase {
 
         XCTAssertEqual(local.targetClassification, .localDev)
         XCTAssertTrue(local.isSafeLocalDevOverride)
+        XCTAssertTrue(local.isSessionSnapshotShadowWriteOverrideAllowed)
+        XCTAssertEqual(staging.targetClassification, .approvedStaging)
+        XCTAssertFalse(staging.isSafeLocalDevOverride)
+        XCTAssertTrue(staging.isSessionSnapshotShadowWriteOverrideAllowed)
         XCTAssertEqual(remote.targetClassification, .remote)
         XCTAssertFalse(remote.isSafeLocalDevOverride)
+        XCTAssertFalse(remote.isSessionSnapshotShadowWriteOverrideAllowed)
     }
 
     func testManualUploadRemainsDisabledUnlessFlagAndValidSafeTarget() {
@@ -225,6 +262,21 @@ final class Phase2C23IALocalSupabaseOverrideTests: XCTestCase {
         XCTAssertTrue(appState.manualSessionSnapshotUploadAvailability.reason.contains("no property context"))
     }
 
+    func testAppStateLocalHealthFlagPathReflectsApprovedStagingEnvironmentOverride() {
+        let store = LocalStore(testStorageRootURL: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString))
+        let appState = AppState(
+            localStore: store,
+            userDefaults: makeEmptyDefaults(),
+            environment: approvedStagingSnapshotEnvironment(),
+            disableCloudBackupForTests: true
+        )
+
+        XCTAssertEqual(appState.supabaseConfiguration.targetClassification, .approvedStaging)
+        XCTAssertTrue(appState.supabaseConfiguration.isSessionSnapshotShadowWriteOverrideAllowed)
+        XCTAssertTrue(appState.backendFeatureFlags.sessionSnapshotShadowWriteEnabled)
+        XCTAssertTrue(appState.manualSessionSnapshotUploadAvailability.reason.contains("no property context"))
+    }
+
     func testAppStateIgnoresSessionSnapshotEnvironmentOverrideWithoutLocalSupabaseOverride() {
         let store = LocalStore(testStorageRootURL: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString))
         let appState = AppState(
@@ -240,6 +292,25 @@ final class Phase2C23IALocalSupabaseOverrideTests: XCTestCase {
 
         XCTAssertEqual(appState.supabaseConfiguration.targetClassification, .remote)
         XCTAssertFalse(appState.supabaseConfiguration.isSafeLocalDevOverride)
+        XCTAssertFalse(appState.supabaseConfiguration.isSessionSnapshotShadowWriteOverrideAllowed)
+        XCTAssertFalse(appState.backendFeatureFlags.sessionSnapshotShadowWriteEnabled)
+    }
+
+    func testAppStateIgnoresSessionSnapshotEnvironmentOverrideForProductionRemote() {
+        let store = LocalStore(testStorageRootURL: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString))
+        let appState = AppState(
+            localStore: store,
+            userDefaults: makeEmptyDefaults(),
+            environment: [
+                "SCOUTCAPTURE_SUPABASE_URL": "https://chlvazmtucoszicehtnm.supabase.co",
+                "SCOUTCAPTURE_SUPABASE_ANON_KEY": "production-anon-key",
+                "session_snapshot_shadow_write_enabled": "true"
+            ],
+            disableCloudBackupForTests: true
+        )
+
+        XCTAssertEqual(appState.supabaseConfiguration.targetClassification, .remote)
+        XCTAssertFalse(appState.supabaseConfiguration.isSessionSnapshotShadowWriteOverrideAllowed)
         XCTAssertFalse(appState.backendFeatureFlags.sessionSnapshotShadowWriteEnabled)
     }
 

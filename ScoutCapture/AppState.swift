@@ -23,8 +23,11 @@ struct SupabaseRuntimeConfiguration {
         case missing
         case invalid
         case localDev = "local_dev"
+        case approvedStaging = "approved_staging"
         case remote
     }
+
+    static let approvedSessionSnapshotStagingProjectRef = "hpekjqqiyurrewfjvjmn"
 
     let url: URL?
     let anonKey: String?
@@ -48,11 +51,24 @@ struct SupabaseRuntimeConfiguration {
         if host == "127.0.0.1" || host == "localhost" || host == "::1" {
             return .localDev
         }
+        if host == "\(Self.approvedSessionSnapshotStagingProjectRef).supabase.co" {
+            return .approvedStaging
+        }
         return .remote
     }
 
     var isSafeLocalDevOverride: Bool {
         isOverrideActive && isConfigured && targetClassification == .localDev
+    }
+
+    var isSessionSnapshotShadowWriteOverrideAllowed: Bool {
+        guard isOverrideActive, isConfigured else { return false }
+        switch targetClassification {
+        case .localDev, .approvedStaging:
+            return true
+        case .missing, .invalid, .remote:
+            return false
+        }
     }
 
     var sanitizedURLDisplay: String {
@@ -3587,8 +3603,8 @@ final class AppState: ObservableObject {
         guard supabaseConfiguration.isConfigured else {
             return (false, "Supabase config invalid")
         }
-        guard supabaseConfiguration.isSafeLocalDevOverride else {
-            return (false, "Supabase target is not a safe local/dev override")
+        guard supabaseConfiguration.isSessionSnapshotShadowWriteOverrideAllowed else {
+            return (false, "Supabase target is not approved for snapshot shadow-write override")
         }
         guard localDiagnostics.sessionSnapshotUpload.remoteAvailability != "unavailable" else {
             return (false, "snapshot schema unavailable")
@@ -3597,7 +3613,7 @@ final class AppState: ObservableObject {
         guard targetResolution.target != nil else {
             return (false, targetResolution.reason)
         }
-        return (true, "ready for manual local/dev upload")
+        return (true, "ready for manual snapshot shadow-write upload")
     }
 
     var manualSessionSnapshotUploadTarget: ManualSessionSnapshotUploadTarget? {
@@ -4468,7 +4484,7 @@ final class AppState: ObservableObject {
         self.backendFeatureFlags = BackendFeatureFlags.load(
             userDefaults: userDefaults,
             environment: environment,
-            allowSessionSnapshotEnvironmentOverride: supabaseConfiguration.isSafeLocalDevOverride
+            allowSessionSnapshotEnvironmentOverride: supabaseConfiguration.isSessionSnapshotShadowWriteOverrideAllowed
         )
 
         if let rawID = userDefaults.string(forKey: selectedPropertyDefaultsKey) {

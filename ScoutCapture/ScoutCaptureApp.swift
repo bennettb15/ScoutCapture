@@ -8707,6 +8707,10 @@ private struct DebugSessionSnapshotUploadDiagnosticsView: View {
                 diagnosticRow("Config Source", appState.supabaseConfiguration.source.rawValue)
                 diagnosticRow("Anon Key", appState.supabaseConfiguration.redactedAnonKeyDisplay)
                 diagnosticRow("Snapshot Flag Env", environmentFlagDetected ? "detected" : "not detected")
+                diagnosticRow(
+                    "Snapshot Override Allowed",
+                    appState.supabaseConfiguration.isSessionSnapshotShadowWriteOverrideAllowed ? "true" : "false"
+                )
             }
 
             Section("Session Snapshot Upload") {

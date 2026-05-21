@@ -81,12 +81,12 @@
       <EnvironmentVariables>
          <EnvironmentVariable
             key = "SCOUTCAPTURE_SUPABASE_URL"
-            value = "http://127.0.0.1:54321"
+            value = "https://hpekjqqiyurrewfjvjmn.supabase.co"
             isEnabled = "YES">
          </EnvironmentVariable>
          <EnvironmentVariable
             key = "SCOUTCAPTURE_SUPABASE_ANON_KEY"
-            value = "sb_publishable_ACJWlzQHlZjBrEguHvfOxg_3BJgxAaH"
+            value = "sb_publishable_CNEoXNkp6J3gWiJB35KR7Q_SQ3fkbt_"
             isEnabled = "YES">
          </EnvironmentVariable>
          <EnvironmentVariable
