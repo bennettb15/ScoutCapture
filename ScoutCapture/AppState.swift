@@ -420,6 +420,26 @@ final class AppState: ObservableObject {
         let message: String?
     }
 
+    struct SessionSnapshotAuthPreflightRemoteParentStatus: Equatable {
+        var propertyExists: Bool = false
+        var sessionExists: Bool = false
+        var orgIDsMatch: Bool = false
+        var errorMessage: String?
+    }
+
+    struct SessionSnapshotAuthPreflightResult: Equatable {
+        var checkedAt: Date
+        var appAuthUserID: String?
+        var clientAuthUserID: String?
+        var usersMatch: Bool
+        var payloadOrgID: UUID?
+        var payloadPropertyID: UUID?
+        var payloadSessionID: UUID?
+        var remoteParentStatus: SessionSnapshotAuthPreflightRemoteParentStatus
+        var isReady: Bool
+        var failureMessage: String?
+    }
+
     struct ManualSessionSnapshotUploadTarget: Equatable {
         enum Source: String, Equatable {
             case activeSession = "active_session"
@@ -673,6 +693,18 @@ final class AppState: ObservableObject {
         var lastUploadErrorMessage: String?
         var lastKind: String?
         var lastTrigger: String?
+        var lastAuthPreflightAt: Date?
+        var lastAuthPreflightAppUserID: String?
+        var lastAuthPreflightClientUserID: String?
+        var lastAuthPreflightUsersMatch: Bool?
+        var lastAuthPreflightPayloadOrgID: UUID?
+        var lastAuthPreflightPayloadPropertyID: UUID?
+        var lastAuthPreflightPayloadSessionID: UUID?
+        var lastAuthPreflightRemotePropertyExists: Bool?
+        var lastAuthPreflightRemoteSessionExists: Bool?
+        var lastAuthPreflightRemoteOrgIDsMatch: Bool?
+        var lastAuthPreflightReady: Bool?
+        var lastAuthPreflightFailureMessage: String?
         var lastReadbackAt: Date?
         var lastReadbackStatus: String = "not_checked"
         var lastReadbackSnapshotID: UUID?
@@ -3634,6 +3666,11 @@ final class AppState: ObservableObject {
         guard localDiagnostics.sessionSnapshotUpload.remoteAvailability != "unavailable" else {
             return (false, "snapshot schema unavailable")
         }
+        if let preflightReady = localDiagnostics.sessionSnapshotUpload.lastAuthPreflightReady,
+           !preflightReady {
+            let reason = localDiagnostics.sessionSnapshotUpload.lastAuthPreflightFailureMessage ?? "auth preflight not ready"
+            return (false, "auth preflight not ready: \(reason)")
+        }
         let targetResolution = manualSessionSnapshotUploadTargetResolution
         guard targetResolution.target != nil else {
             return (false, targetResolution.reason)
@@ -4125,6 +4162,8 @@ final class AppState: ObservableObject {
     private let sessionSnapshotRowInsertOverride: SessionSnapshotRowInsertOverride?
     private let sessionSnapshotRowsFetchOverride: SessionSnapshotRowsFetchOverride?
     private let sessionSnapshotStorageDownloadOverride: SessionSnapshotStorageDownloadOverride?
+    private let sessionSnapshotClientAuthPreflightOverride: (() async -> (userID: String, email: String, error: String))?
+    private let sessionSnapshotRemoteParentPreflightOverride: ((UUID, UUID, UUID) async throws -> SessionSnapshotAuthPreflightRemoteParentStatus)?
     private let captureProfileBackfillFetchOverride: CaptureProfileBackfillFetchOverride?
     private let captureProfileRemotePropertyIDsFetchOverride: CaptureProfileRemotePropertyIDsFetchOverride?
     private let captureProfileBackfillEnsureOverride: CaptureProfileBackfillEnsureOverride?
@@ -4474,6 +4513,8 @@ final class AppState: ObservableObject {
         sessionSnapshotRowInsertOverride: SessionSnapshotRowInsertOverride? = nil,
         sessionSnapshotRowsFetchOverride: SessionSnapshotRowsFetchOverride? = nil,
         sessionSnapshotStorageDownloadOverride: SessionSnapshotStorageDownloadOverride? = nil,
+        sessionSnapshotClientAuthPreflightOverride: (() async -> (userID: String, email: String, error: String))? = nil,
+        sessionSnapshotRemoteParentPreflightOverride: ((UUID, UUID, UUID) async throws -> SessionSnapshotAuthPreflightRemoteParentStatus)? = nil,
         captureProfileBackfillFetchOverride: CaptureProfileBackfillFetchOverride? = nil,
         captureProfileRemotePropertyIDsFetchOverride: CaptureProfileRemotePropertyIDsFetchOverride? = nil,
         captureProfileBackfillEnsureOverride: CaptureProfileBackfillEnsureOverride? = nil,
@@ -4500,6 +4541,8 @@ final class AppState: ObservableObject {
         self.sessionSnapshotRowInsertOverride = sessionSnapshotRowInsertOverride
         self.sessionSnapshotRowsFetchOverride = sessionSnapshotRowsFetchOverride
         self.sessionSnapshotStorageDownloadOverride = sessionSnapshotStorageDownloadOverride
+        self.sessionSnapshotClientAuthPreflightOverride = sessionSnapshotClientAuthPreflightOverride
+        self.sessionSnapshotRemoteParentPreflightOverride = sessionSnapshotRemoteParentPreflightOverride
         self.captureProfileBackfillFetchOverride = captureProfileBackfillFetchOverride
         self.captureProfileRemotePropertyIDsFetchOverride = captureProfileRemotePropertyIDsFetchOverride
         self.captureProfileBackfillEnsureOverride = captureProfileBackfillEnsureOverride
@@ -10820,6 +10863,169 @@ final class AppState: ObservableObject {
         ].joined(separator: "/")
     }
 
+    @MainActor
+    @discardableResult
+    func refreshManualSessionSnapshotAuthPreflight(checkedAt: Date = Date()) async -> SessionSnapshotAuthPreflightResult {
+        let appUserID = authenticatedSupabaseUser?.id.uuidString.lowercased()
+        let clientAuth = await sessionSnapshotClientAuthPreflight()
+        let clientUserID = Self.trimmedNonEmpty(clientAuth.userID == "nil" ? nil : clientAuth.userID)?.lowercased()
+        let usersMatch = appUserID != nil && clientUserID != nil && appUserID == clientUserID
+        var payloadOrgID: UUID?
+        var payloadPropertyID: UUID?
+        var payloadSessionID: UUID?
+        var remoteParentStatus = SessionSnapshotAuthPreflightRemoteParentStatus()
+        var failureReasons: [String] = []
+
+        if appUserID == nil {
+            failureReasons.append("app_auth_user_missing")
+        }
+        if clientUserID == nil {
+            failureReasons.append("client_auth_user_missing")
+        }
+        if clientAuth.error != "none" {
+            failureReasons.append("client_auth_error=\(clientAuth.error)")
+        }
+        if appUserID != nil, clientUserID != nil, !usersMatch {
+            failureReasons.append("app_client_auth_user_mismatch")
+        }
+
+        if let target = manualSessionSnapshotUploadTarget {
+            payloadPropertyID = target.propertyID
+            payloadSessionID = target.sessionID
+            do {
+                let session = try localSessionForSnapshotUpload(propertyID: target.propertyID, sessionID: target.sessionID)
+                let metadata = try localStore.loadSessionMetadata(propertyID: target.propertyID, sessionID: session.id)
+                payloadOrgID = metadata.orgID
+                if let orgID = metadata.orgID {
+                    do {
+                        remoteParentStatus = try await sessionSnapshotRemoteParentPreflightStatus(
+                            orgID: orgID,
+                            propertyID: target.propertyID,
+                            sessionID: session.id
+                        )
+                    } catch {
+                        remoteParentStatus.errorMessage = Self.diagnosticsPreviewText(error.localizedDescription, maxLength: 160)
+                    }
+                } else {
+                    failureReasons.append("payload_org_id_missing")
+                }
+            } catch {
+                failureReasons.append(Self.diagnosticsPreviewText(error.localizedDescription, maxLength: 160) ?? "local_target_unreadable")
+            }
+        } else {
+            failureReasons.append(manualSessionSnapshotUploadTargetResolution.reason)
+        }
+
+        if remoteParentStatus.errorMessage != nil {
+            failureReasons.append("remote_parent_check_failed")
+        } else if payloadOrgID != nil {
+            if !remoteParentStatus.propertyExists {
+                failureReasons.append("remote_property_missing_or_hidden")
+            }
+            if !remoteParentStatus.sessionExists {
+                failureReasons.append("remote_session_missing_or_hidden")
+            }
+            if !remoteParentStatus.orgIDsMatch {
+                failureReasons.append("remote_parent_org_mismatch")
+            }
+        }
+
+        let isReady = usersMatch &&
+            payloadOrgID != nil &&
+            remoteParentStatus.propertyExists &&
+            remoteParentStatus.sessionExists &&
+            remoteParentStatus.orgIDsMatch &&
+            remoteParentStatus.errorMessage == nil
+        let failureMessage = isReady ? nil : failureReasons.joined(separator: " | ")
+        let result = SessionSnapshotAuthPreflightResult(
+            checkedAt: checkedAt,
+            appAuthUserID: appUserID,
+            clientAuthUserID: clientUserID,
+            usersMatch: usersMatch,
+            payloadOrgID: payloadOrgID,
+            payloadPropertyID: payloadPropertyID,
+            payloadSessionID: payloadSessionID,
+            remoteParentStatus: remoteParentStatus,
+            isReady: isReady,
+            failureMessage: Self.diagnosticsPreviewText(failureMessage, maxLength: 160)
+        )
+        recordSessionSnapshotAuthPreflight(result)
+        return result
+    }
+
+    private func sessionSnapshotClientAuthPreflight() async -> (
+        userID: String,
+        email: String,
+        error: String
+    ) {
+        if let sessionSnapshotClientAuthPreflightOverride {
+            return await sessionSnapshotClientAuthPreflightOverride()
+        }
+        return await supabaseClientAuthDiagnostic(supabaseClient)
+    }
+
+    private struct SessionSnapshotRemotePropertyPreflightRow: Codable {
+        let id: UUID
+        let orgID: UUID
+
+        enum CodingKeys: String, CodingKey {
+            case id
+            case orgID = "org_id"
+        }
+    }
+
+    private struct SessionSnapshotRemoteSessionPreflightRow: Codable {
+        let id: UUID
+        let orgID: UUID
+        let propertyID: UUID
+
+        enum CodingKeys: String, CodingKey {
+            case id
+            case orgID = "org_id"
+            case propertyID = "property_id"
+        }
+    }
+
+    private func sessionSnapshotRemoteParentPreflightStatus(
+        orgID: UUID,
+        propertyID: UUID,
+        sessionID: UUID
+    ) async throws -> SessionSnapshotAuthPreflightRemoteParentStatus {
+        if let sessionSnapshotRemoteParentPreflightOverride {
+            return try await sessionSnapshotRemoteParentPreflightOverride(orgID, propertyID, sessionID)
+        }
+        guard backendFeatureFlags.supabaseEnabled,
+              let client = supabaseClient else {
+            throw SessionSnapshotUploadError.missingSupabaseClient
+        }
+
+        let properties: [SessionSnapshotRemotePropertyPreflightRow] = try await client
+            .from("properties")
+            .select("id, org_id")
+            .eq("id", value: propertyID.uuidString.lowercased())
+            .is("deleted_at", value: nil)
+            .limit(1)
+            .execute()
+            .value
+        let sessions: [SessionSnapshotRemoteSessionPreflightRow] = try await client
+            .from("sessions")
+            .select("id, org_id, property_id")
+            .eq("id", value: sessionID.uuidString.lowercased())
+            .is("deleted_at", value: nil)
+            .limit(1)
+            .execute()
+            .value
+
+        let property = properties.first
+        let session = sessions.first
+        return SessionSnapshotAuthPreflightRemoteParentStatus(
+            propertyExists: property != nil,
+            sessionExists: session != nil,
+            orgIDsMatch: property?.orgID == orgID && session?.orgID == orgID && session?.propertyID == propertyID,
+            errorMessage: nil
+        )
+    }
+
     @discardableResult
     func uploadCurrentSessionSnapshotShadowWrite(
         kind: SessionSnapshotKind = .manual,
@@ -11394,6 +11600,23 @@ final class AppState: ObservableObject {
             diagnostics.sessionSnapshotUpload.lastReadbackSnapshotCreatedAt = result.snapshotCreatedAt
             diagnostics.sessionSnapshotUpload.lastReadbackFailureMessage = result.failureReason
         }
+    }
+
+    private func recordSessionSnapshotAuthPreflight(_ result: SessionSnapshotAuthPreflightResult) {
+        var diagnostics = localDiagnostics
+        diagnostics.sessionSnapshotUpload.lastAuthPreflightAt = result.checkedAt
+        diagnostics.sessionSnapshotUpload.lastAuthPreflightAppUserID = result.appAuthUserID
+        diagnostics.sessionSnapshotUpload.lastAuthPreflightClientUserID = result.clientAuthUserID
+        diagnostics.sessionSnapshotUpload.lastAuthPreflightUsersMatch = result.usersMatch
+        diagnostics.sessionSnapshotUpload.lastAuthPreflightPayloadOrgID = result.payloadOrgID
+        diagnostics.sessionSnapshotUpload.lastAuthPreflightPayloadPropertyID = result.payloadPropertyID
+        diagnostics.sessionSnapshotUpload.lastAuthPreflightPayloadSessionID = result.payloadSessionID
+        diagnostics.sessionSnapshotUpload.lastAuthPreflightRemotePropertyExists = result.remoteParentStatus.propertyExists
+        diagnostics.sessionSnapshotUpload.lastAuthPreflightRemoteSessionExists = result.remoteParentStatus.sessionExists
+        diagnostics.sessionSnapshotUpload.lastAuthPreflightRemoteOrgIDsMatch = result.remoteParentStatus.orgIDsMatch
+        diagnostics.sessionSnapshotUpload.lastAuthPreflightReady = result.isReady
+        diagnostics.sessionSnapshotUpload.lastAuthPreflightFailureMessage = result.failureMessage
+        localDiagnostics = diagnostics
     }
 
     private func isSessionSnapshotRemoteUnavailable(_ error: Error) -> Bool {
@@ -12747,6 +12970,20 @@ final class AppState: ObservableObject {
         lines.append("- generated_payload_path_present: \(trimmedNonEmpty(diagnostics.lastUploadPath) != nil)")
         lines.append("- storage_upload_completed: \(diagnostics.lastStorageUploadCompleted)")
         lines.append("- row_insert_completed: \(diagnostics.lastRowInsertCompleted)")
+        lines.append("")
+        lines.append("Auth Preflight")
+        lines.append("- checked_at: \(diagnostics.lastAuthPreflightAt?.formatted(date: .abbreviated, time: .standard) ?? "none")")
+        lines.append("- app_auth_user_id: \(diagnosticsPreviewText(diagnostics.lastAuthPreflightAppUserID, maxLength: 80) ?? "none")")
+        lines.append("- client_auth_user_id: \(diagnosticsPreviewText(diagnostics.lastAuthPreflightClientUserID, maxLength: 80) ?? "none")")
+        lines.append("- app_client_users_match: \(diagnostics.lastAuthPreflightUsersMatch.map(String.init) ?? "not_checked")")
+        lines.append("- payload_org_id: \(diagnostics.lastAuthPreflightPayloadOrgID?.uuidString ?? "none")")
+        lines.append("- payload_property_id: \(diagnostics.lastAuthPreflightPayloadPropertyID?.uuidString ?? "none")")
+        lines.append("- payload_session_id: \(diagnostics.lastAuthPreflightPayloadSessionID?.uuidString ?? "none")")
+        lines.append("- remote_property_exists: \(diagnostics.lastAuthPreflightRemotePropertyExists.map(String.init) ?? "not_checked")")
+        lines.append("- remote_session_exists: \(diagnostics.lastAuthPreflightRemoteSessionExists.map(String.init) ?? "not_checked")")
+        lines.append("- remote_parent_org_ids_match: \(diagnostics.lastAuthPreflightRemoteOrgIDsMatch.map(String.init) ?? "not_checked")")
+        lines.append("- preflight_ready: \(diagnostics.lastAuthPreflightReady.map(String.init) ?? "not_checked")")
+        lines.append("- preflight_failure: \(diagnosticsPreviewText(diagnostics.lastAuthPreflightFailureMessage, maxLength: 160) ?? "none")")
         lines.append("")
         lines.append("Remote Readback")
         lines.append("- status: \(diagnosticsPreviewText(diagnostics.lastReadbackStatus, maxLength: 60) ?? "not_checked")")

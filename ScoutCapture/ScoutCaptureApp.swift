@@ -8667,6 +8667,7 @@ private struct DebugSessionSnapshotUploadDiagnosticsView: View {
     let diagnostics: AppState.SessionSnapshotUploadDiagnostics
     @State private var isUploadingSessionSnapshot: Bool = false
     @State private var isCheckingSnapshotReadback: Bool = false
+    @State private var isRefreshingAuthPreflight: Bool = false
     @State private var testSessionCreationMessage: String?
 
     private var reportText: String {
@@ -8776,6 +8777,35 @@ private struct DebugSessionSnapshotUploadDiagnosticsView: View {
                     .foregroundStyle(.secondary)
             }
 
+            Section("Auth Preflight") {
+                diagnosticRow("Checked", formattedRunDate(diagnostics.lastAuthPreflightAt))
+                diagnosticRow("App Auth User", diagnostics.lastAuthPreflightAppUserID ?? "none")
+                diagnosticRow("Client Session User", diagnostics.lastAuthPreflightClientUserID ?? "none")
+                diagnosticRow("Users Match", optionalBoolText(diagnostics.lastAuthPreflightUsersMatch))
+                diagnosticRow("Payload Org ID", diagnostics.lastAuthPreflightPayloadOrgID?.uuidString ?? "none")
+                diagnosticRow("Payload Property ID", diagnostics.lastAuthPreflightPayloadPropertyID?.uuidString ?? "none")
+                diagnosticRow("Payload Session ID", diagnostics.lastAuthPreflightPayloadSessionID?.uuidString ?? "none")
+                diagnosticRow("Remote Property", optionalBoolText(diagnostics.lastAuthPreflightRemotePropertyExists))
+                diagnosticRow("Remote Session", optionalBoolText(diagnostics.lastAuthPreflightRemoteSessionExists))
+                diagnosticRow("Remote Org Match", optionalBoolText(diagnostics.lastAuthPreflightRemoteOrgIDsMatch))
+                diagnosticRow("Preflight Ready", optionalBoolText(diagnostics.lastAuthPreflightReady))
+                if let failure = AppState.diagnosticsPreviewText(diagnostics.lastAuthPreflightFailureMessage, maxLength: 160) {
+                    diagnosticRow("Preflight Failure", failure)
+                }
+                Button(isRefreshingAuthPreflight ? "Checking..." : "Refresh Auth Preflight") {
+                    guard !isRefreshingAuthPreflight else { return }
+                    isRefreshingAuthPreflight = true
+                    Task {
+                        _ = await appState.refreshManualSessionSnapshotAuthPreflight()
+                        await MainActor.run {
+                            isRefreshingAuthPreflight = false
+                        }
+                    }
+                }
+                .disabled(isRefreshingAuthPreflight || uploadTarget == nil)
+                .font(.system(size: 14, weight: .semibold))
+            }
+
             Section("Manual Diagnostic Trigger") {
                 Button(isUploadingSessionSnapshot ? "Uploading..." : "Upload Selected Session Snapshot") {
                     guard uploadAvailability.isAvailable else { return }
@@ -8844,6 +8874,10 @@ private struct DebugSessionSnapshotUploadDiagnosticsView: View {
     @ViewBuilder
     private func diagnosticRow(_ label: String, _ value: Int) -> some View {
         diagnosticRow(label, String(value))
+    }
+
+    private func optionalBoolText(_ value: Bool?) -> String {
+        value.map { $0 ? "true" : "false" } ?? "not checked"
     }
 
     @ViewBuilder

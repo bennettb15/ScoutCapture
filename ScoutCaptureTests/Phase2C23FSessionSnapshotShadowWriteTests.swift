@@ -21,7 +21,9 @@ final class Phase2C23FSessionSnapshotShadowWriteTests: XCTestCase {
         storageUploadOverride: AppState.SessionSnapshotStorageUploadOverride? = nil,
         rowInsertOverride: AppState.SessionSnapshotRowInsertOverride? = nil,
         rowsFetchOverride: AppState.SessionSnapshotRowsFetchOverride? = nil,
-        storageDownloadOverride: AppState.SessionSnapshotStorageDownloadOverride? = nil
+        storageDownloadOverride: AppState.SessionSnapshotStorageDownloadOverride? = nil,
+        clientAuthPreflightOverride: (() async -> (userID: String, email: String, error: String))? = nil,
+        remoteParentPreflightOverride: ((UUID, UUID, UUID) async throws -> AppState.SessionSnapshotAuthPreflightRemoteParentStatus)? = nil
     ) throws -> (store: LocalStore, appState: AppState, root: URL, property: Property, session: Session) {
         let root = try makeTempStorageRoot()
         let store = LocalStore(testStorageRootURL: root)
@@ -43,12 +45,19 @@ final class Phase2C23FSessionSnapshotShadowWriteTests: XCTestCase {
         let appState = AppState(
             localStore: store,
             userDefaults: makeDefaults(shadowWriteEnabled: shadowWriteEnabled),
+            environment: [
+                "SCOUTCAPTURE_SUPABASE_URL": "http://127.0.0.1:54321",
+                "SCOUTCAPTURE_SUPABASE_ANON_KEY": "local-anon-key"
+            ],
             sessionSnapshotStorageUploadOverride: storageUploadOverride ?? { _ in },
             sessionSnapshotRowInsertOverride: rowInsertOverride ?? { _ in },
             sessionSnapshotRowsFetchOverride: rowsFetchOverride,
             sessionSnapshotStorageDownloadOverride: storageDownloadOverride,
+            sessionSnapshotClientAuthPreflightOverride: clientAuthPreflightOverride,
+            sessionSnapshotRemoteParentPreflightOverride: remoteParentPreflightOverride,
             disableCloudBackupForTests: true
         )
+        appState.selectedPropertyID = property.id
         return (store, appState, root, property, session)
     }
 
@@ -205,6 +214,84 @@ final class Phase2C23FSessionSnapshotShadowWriteTests: XCTestCase {
         XCTAssertTrue(fixture.appState.localDiagnostics.sessionSnapshotUpload.lastRowInsertCompleted)
         XCTAssertEqual(fixture.appState.localDiagnostics.sessionSnapshotUpload.lastUploadOutcome, "succeeded")
         XCTAssertNil(fixture.appState.localDiagnostics.sessionSnapshotUpload.lastUploadErrorMessage)
+    }
+
+    func testManualAuthPreflightRecordsReadyStateWhenUsersAndParentsMatch() async throws {
+        let userID = UUID()
+        let fixture = try makeFixture(
+            clientAuthPreflightOverride: {
+                (userID: userID.uuidString, email: "debug@example.com", error: "none")
+            },
+            remoteParentPreflightOverride: { _, _, _ in
+                return AppState.SessionSnapshotAuthPreflightRemoteParentStatus(
+                    propertyExists: true,
+                    sessionExists: true,
+                    orgIDsMatch: true,
+                    errorMessage: nil
+                )
+            }
+        )
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        fixture.appState._debugSetOfflineReplayEnvironmentForTests(
+            activeOrganizationID: fixture.property.orgId,
+            authenticatedUserID: userID
+        )
+
+        let result = await fixture.appState.refreshManualSessionSnapshotAuthPreflight(
+            checkedAt: Date(timeIntervalSinceReferenceDate: 1_000)
+        )
+
+        XCTAssertTrue(result.isReady)
+        XCTAssertEqual(result.appAuthUserID, userID.uuidString.lowercased())
+        XCTAssertEqual(result.clientAuthUserID, userID.uuidString.lowercased())
+        XCTAssertTrue(result.usersMatch)
+        XCTAssertEqual(result.payloadOrgID, fixture.property.orgId)
+        XCTAssertEqual(result.payloadPropertyID, fixture.property.id)
+        XCTAssertEqual(result.payloadSessionID, fixture.session.id)
+        XCTAssertEqual(
+            fixture.appState.localDiagnostics.sessionSnapshotUpload.lastAuthPreflightReady,
+            true,
+            "diagnostics=\(fixture.appState.localDiagnostics.sessionSnapshotUpload)"
+        )
+        XCTAssertTrue(fixture.appState.manualSessionSnapshotUploadAvailability.isAvailable)
+    }
+
+    func testManualAuthPreflightMismatchDisablesManualUploadAvailabilityWithoutUploading() async throws {
+        let appUserID = UUID()
+        let clientUserID = UUID()
+        var storageCalled = false
+        let fixture = try makeFixture(
+            storageUploadOverride: { _ in storageCalled = true },
+            clientAuthPreflightOverride: {
+                (userID: clientUserID.uuidString, email: "client@example.com", error: "none")
+            },
+            remoteParentPreflightOverride: { _, _, _ in
+                AppState.SessionSnapshotAuthPreflightRemoteParentStatus(
+                    propertyExists: true,
+                    sessionExists: true,
+                    orgIDsMatch: true,
+                    errorMessage: nil
+                )
+            }
+        )
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        fixture.appState._debugSetOfflineReplayEnvironmentForTests(
+            activeOrganizationID: fixture.property.orgId,
+            authenticatedUserID: appUserID
+        )
+
+        let result = await fixture.appState.refreshManualSessionSnapshotAuthPreflight()
+
+        XCTAssertFalse(result.isReady)
+        XCTAssertFalse(result.usersMatch)
+        XCTAssertEqual(fixture.appState.localDiagnostics.sessionSnapshotUpload.lastAuthPreflightReady, false)
+        XCTAssertTrue(fixture.appState.localDiagnostics.sessionSnapshotUpload.lastAuthPreflightFailureMessage?.contains("app_client_auth_user_mismatch") == true)
+        XCTAssertFalse(
+            fixture.appState.manualSessionSnapshotUploadAvailability.isAvailable,
+            "diagnostics=\(fixture.appState.localDiagnostics.sessionSnapshotUpload) availability=\(fixture.appState.manualSessionSnapshotUploadAvailability)"
+        )
+        XCTAssertTrue(fixture.appState.manualSessionSnapshotUploadAvailability.reason.contains("auth preflight not ready"))
+        XCTAssertFalse(storageCalled)
     }
 
     func testStorageSuccessTableInsertFailureRecordsOrphanRisk() async throws {
