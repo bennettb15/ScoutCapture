@@ -423,6 +423,9 @@ final class AppState: ObservableObject {
     struct SessionSnapshotAuthPreflightRemoteParentStatus: Equatable {
         var propertyExists: Bool = false
         var sessionExists: Bool = false
+        var propertyOrgID: UUID?
+        var sessionOrgID: UUID?
+        var sessionPropertyIDMatches: Bool = false
         var orgIDsMatch: Bool = false
         var errorMessage: String?
     }
@@ -438,6 +441,15 @@ final class AppState: ObservableObject {
         var remoteParentStatus: SessionSnapshotAuthPreflightRemoteParentStatus
         var isReady: Bool
         var failureMessage: String?
+    }
+
+    struct SessionSnapshotLocalOrgRepairResult: Equatable {
+        var repaired: Bool
+        var propertyID: UUID?
+        var sessionID: UUID?
+        var previousLocalOrgID: UUID?
+        var canonicalOrgID: UUID?
+        var message: String
     }
 
     struct ManualSessionSnapshotUploadTarget: Equatable {
@@ -702,9 +714,19 @@ final class AppState: ObservableObject {
         var lastAuthPreflightPayloadSessionID: UUID?
         var lastAuthPreflightRemotePropertyExists: Bool?
         var lastAuthPreflightRemoteSessionExists: Bool?
+        var lastAuthPreflightRemotePropertyOrgID: UUID?
+        var lastAuthPreflightRemoteSessionOrgID: UUID?
+        var lastAuthPreflightRemoteSessionPropertyMatches: Bool?
         var lastAuthPreflightRemoteOrgIDsMatch: Bool?
         var lastAuthPreflightReady: Bool?
         var lastAuthPreflightFailureMessage: String?
+        var lastLocalOrgRepairAt: Date?
+        var lastLocalOrgRepairOutcome: String = "not_attempted"
+        var lastLocalOrgRepairPropertyID: UUID?
+        var lastLocalOrgRepairSessionID: UUID?
+        var lastLocalOrgRepairPreviousOrgID: UUID?
+        var lastLocalOrgRepairCanonicalOrgID: UUID?
+        var lastLocalOrgRepairMessage: String?
         var lastReadbackAt: Date?
         var lastReadbackStatus: String = "not_checked"
         var lastReadbackSnapshotID: UUID?
@@ -3670,6 +3692,13 @@ final class AppState: ObservableObject {
            !preflightReady {
             let reason = localDiagnostics.sessionSnapshotUpload.lastAuthPreflightFailureMessage ?? "auth preflight not ready"
             return (false, "auth preflight not ready: \(reason)")
+        }
+        if let target = manualSessionSnapshotUploadTarget,
+           let reason = sessionSnapshotPreflightOrgMismatchBlockReason(
+            propertyID: target.propertyID,
+            sessionID: target.sessionID
+           ) {
+            return (false, reason)
         }
         let targetResolution = manualSessionSnapshotUploadTargetResolution
         guard targetResolution.target != nil else {
@@ -11018,12 +11047,159 @@ final class AppState: ObservableObject {
 
         let property = properties.first
         let session = sessions.first
+        let sessionPropertyIDMatches = session?.propertyID == propertyID
         return SessionSnapshotAuthPreflightRemoteParentStatus(
             propertyExists: property != nil,
             sessionExists: session != nil,
-            orgIDsMatch: property?.orgID == orgID && session?.orgID == orgID && session?.propertyID == propertyID,
+            propertyOrgID: property?.orgID,
+            sessionOrgID: session?.orgID,
+            sessionPropertyIDMatches: sessionPropertyIDMatches,
+            orgIDsMatch: property?.orgID == orgID && session?.orgID == orgID && sessionPropertyIDMatches,
             errorMessage: nil
         )
+    }
+
+    private func sessionSnapshotPreflightOrgMismatchBlockReason(
+        propertyID: UUID,
+        sessionID: UUID
+    ) -> String? {
+        let diagnostics = localDiagnostics.sessionSnapshotUpload
+        guard diagnostics.lastAuthPreflightPayloadPropertyID == propertyID,
+              diagnostics.lastAuthPreflightPayloadSessionID == sessionID,
+              diagnostics.lastAuthPreflightRemotePropertyExists == true,
+              diagnostics.lastAuthPreflightRemoteSessionExists == true,
+              diagnostics.lastAuthPreflightRemoteOrgIDsMatch == false else {
+            return nil
+        }
+        let localOrg = diagnostics.lastAuthPreflightPayloadOrgID?.uuidString ?? "none"
+        let remotePropertyOrg = diagnostics.lastAuthPreflightRemotePropertyOrgID?.uuidString ?? "none"
+        let remoteSessionOrg = diagnostics.lastAuthPreflightRemoteSessionOrgID?.uuidString ?? "none"
+        return "auth preflight remote parent org mismatch: local_org=\(localOrg) remote_property_org=\(remotePropertyOrg) remote_session_org=\(remoteSessionOrg)"
+    }
+
+    @MainActor
+    @discardableResult
+    func repairSelectedManualSessionSnapshotLocalOrgDrift() async -> SessionSnapshotLocalOrgRepairResult {
+        guard let target = manualSessionSnapshotUploadTarget else {
+            let result = SessionSnapshotLocalOrgRepairResult(
+                repaired: false,
+                propertyID: selectedPropertyID,
+                sessionID: nil,
+                previousLocalOrgID: nil,
+                canonicalOrgID: nil,
+                message: "no selected manual snapshot upload target"
+            )
+            recordSessionSnapshotLocalOrgRepair(result)
+            return result
+        }
+
+        let localSession: Session
+        let localMetadata: SessionMetadata
+        do {
+            localSession = try localSessionForSnapshotUpload(propertyID: target.propertyID, sessionID: target.sessionID)
+            localMetadata = try localStore.loadSessionMetadata(propertyID: target.propertyID, sessionID: localSession.id)
+        } catch {
+            let result = SessionSnapshotLocalOrgRepairResult(
+                repaired: false,
+                propertyID: target.propertyID,
+                sessionID: target.sessionID,
+                previousLocalOrgID: nil,
+                canonicalOrgID: nil,
+                message: Self.diagnosticsPreviewText(error.localizedDescription, maxLength: 160) ?? "local target unreadable"
+            )
+            recordSessionSnapshotLocalOrgRepair(result)
+            return result
+        }
+
+        let previousOrgID = localMetadata.orgID
+        let expectedOrgID = previousOrgID ?? activeOrganizationID ?? UUID()
+        let remoteStatus: SessionSnapshotAuthPreflightRemoteParentStatus
+        do {
+            remoteStatus = try await sessionSnapshotRemoteParentPreflightStatus(
+                orgID: expectedOrgID,
+                propertyID: target.propertyID,
+                sessionID: localSession.id
+            )
+        } catch {
+            let result = SessionSnapshotLocalOrgRepairResult(
+                repaired: false,
+                propertyID: target.propertyID,
+                sessionID: localSession.id,
+                previousLocalOrgID: previousOrgID,
+                canonicalOrgID: nil,
+                message: Self.diagnosticsPreviewText(error.localizedDescription, maxLength: 160) ?? "remote parent check failed"
+            )
+            recordSessionSnapshotLocalOrgRepair(result)
+            return result
+        }
+
+        guard remoteStatus.propertyExists,
+              remoteStatus.sessionExists,
+              remoteStatus.sessionPropertyIDMatches,
+              let propertyOrgID = remoteStatus.propertyOrgID,
+              let sessionOrgID = remoteStatus.sessionOrgID,
+              propertyOrgID == sessionOrgID else {
+            let result = SessionSnapshotLocalOrgRepairResult(
+                repaired: false,
+                propertyID: target.propertyID,
+                sessionID: localSession.id,
+                previousLocalOrgID: previousOrgID,
+                canonicalOrgID: remoteStatus.propertyOrgID ?? remoteStatus.sessionOrgID,
+                message: "remote parent canonical org could not be confirmed"
+            )
+            recordSessionSnapshotLocalOrgRepair(result)
+            return result
+        }
+
+        do {
+            let organizationName = organizationSelectionOptions.first(where: { $0.id == propertyOrgID })?.name
+                ?? allOrganizations.first(where: { $0.id == propertyOrgID })?.name
+                ?? activeOrganization?.name
+                ?? "Remote Organization"
+            let repairedProperty = try localStore.repairPropertyOrgIDForSessionSnapshotValidation(
+                propertyID: target.propertyID,
+                canonicalOrgID: propertyOrgID,
+                organizationName: organizationName
+            )
+            var repairedMetadata = localMetadata
+            repairedMetadata.orgID = propertyOrgID
+            try localStore.saveSessionMetadataAtomically(
+                propertyID: target.propertyID,
+                sessionID: localSession.id,
+                metadata: repairedMetadata
+            )
+
+            allOrganizations = (try? localStore.fetchOrganizations()) ?? allOrganizations
+            if let index = allProperties.firstIndex(where: { $0.id == repairedProperty.id }) {
+                allProperties[index] = repairedProperty
+            } else {
+                allProperties.append(repairedProperty)
+            }
+            applyTenantScopedState()
+
+            let result = SessionSnapshotLocalOrgRepairResult(
+                repaired: true,
+                propertyID: target.propertyID,
+                sessionID: localSession.id,
+                previousLocalOrgID: previousOrgID,
+                canonicalOrgID: propertyOrgID,
+                message: previousOrgID == propertyOrgID ? "selected target already matched canonical org" : "selected target local org repaired"
+            )
+            recordSessionSnapshotLocalOrgRepair(result)
+            _ = await refreshManualSessionSnapshotAuthPreflight()
+            return result
+        } catch {
+            let result = SessionSnapshotLocalOrgRepairResult(
+                repaired: false,
+                propertyID: target.propertyID,
+                sessionID: localSession.id,
+                previousLocalOrgID: previousOrgID,
+                canonicalOrgID: propertyOrgID,
+                message: Self.diagnosticsPreviewText(error.localizedDescription, maxLength: 160) ?? "local repair failed"
+            )
+            recordSessionSnapshotLocalOrgRepair(result)
+            return result
+        }
     }
 
     @discardableResult
@@ -11050,6 +11226,35 @@ final class AppState: ObservableObject {
                 snapshotID: nil,
                 sessionID: nil,
                 propertyID: selectedPropertyID,
+                storagePath: nil,
+                message: message
+            )
+        }
+        let preflight = await refreshManualSessionSnapshotAuthPreflight()
+        if preflight.remoteParentStatus.propertyExists,
+           preflight.remoteParentStatus.sessionExists,
+           !preflight.remoteParentStatus.orgIDsMatch,
+           preflight.remoteParentStatus.errorMessage == nil {
+            let message = sessionSnapshotPreflightOrgMismatchBlockReason(
+                propertyID: target.propertyID,
+                sessionID: target.sessionID
+            ) ?? "auth preflight remote parent org mismatch"
+            let error = SessionSnapshotUploadError.notPreviewable(message)
+            recordSessionSnapshotUploadFailure(
+                outcome: .failed,
+                snapshotID: nil,
+                propertyID: target.propertyID,
+                sessionID: target.sessionID,
+                path: nil,
+                kind: kind,
+                trigger: trigger,
+                error: error
+            )
+            return SessionSnapshotUploadResult(
+                outcome: .failed,
+                snapshotID: nil,
+                sessionID: target.sessionID,
+                propertyID: target.propertyID,
                 storagePath: nil,
                 message: message
             )
@@ -11108,6 +11313,27 @@ final class AppState: ObservableObject {
                     message: error.localizedDescription
                 )
             }
+        }
+        if let message = sessionSnapshotPreflightOrgMismatchBlockReason(propertyID: propertyID, sessionID: sessionID) {
+            let error = SessionSnapshotUploadError.notPreviewable(message)
+            recordSessionSnapshotUploadFailure(
+                outcome: .failed,
+                snapshotID: nil,
+                propertyID: propertyID,
+                sessionID: sessionID,
+                path: nil,
+                kind: kind,
+                trigger: trigger,
+                error: error
+            )
+            return SessionSnapshotUploadResult(
+                outcome: .failed,
+                snapshotID: nil,
+                sessionID: sessionID,
+                propertyID: propertyID,
+                storagePath: nil,
+                message: message
+            )
         }
 
         let snapshotID = UUID()
@@ -11613,9 +11839,24 @@ final class AppState: ObservableObject {
         diagnostics.sessionSnapshotUpload.lastAuthPreflightPayloadSessionID = result.payloadSessionID
         diagnostics.sessionSnapshotUpload.lastAuthPreflightRemotePropertyExists = result.remoteParentStatus.propertyExists
         diagnostics.sessionSnapshotUpload.lastAuthPreflightRemoteSessionExists = result.remoteParentStatus.sessionExists
+        diagnostics.sessionSnapshotUpload.lastAuthPreflightRemotePropertyOrgID = result.remoteParentStatus.propertyOrgID
+        diagnostics.sessionSnapshotUpload.lastAuthPreflightRemoteSessionOrgID = result.remoteParentStatus.sessionOrgID
+        diagnostics.sessionSnapshotUpload.lastAuthPreflightRemoteSessionPropertyMatches = result.remoteParentStatus.sessionPropertyIDMatches
         diagnostics.sessionSnapshotUpload.lastAuthPreflightRemoteOrgIDsMatch = result.remoteParentStatus.orgIDsMatch
         diagnostics.sessionSnapshotUpload.lastAuthPreflightReady = result.isReady
         diagnostics.sessionSnapshotUpload.lastAuthPreflightFailureMessage = result.failureMessage
+        localDiagnostics = diagnostics
+    }
+
+    private func recordSessionSnapshotLocalOrgRepair(_ result: SessionSnapshotLocalOrgRepairResult) {
+        var diagnostics = localDiagnostics
+        diagnostics.sessionSnapshotUpload.lastLocalOrgRepairAt = Date()
+        diagnostics.sessionSnapshotUpload.lastLocalOrgRepairOutcome = result.repaired ? "repaired" : "blocked"
+        diagnostics.sessionSnapshotUpload.lastLocalOrgRepairPropertyID = result.propertyID
+        diagnostics.sessionSnapshotUpload.lastLocalOrgRepairSessionID = result.sessionID
+        diagnostics.sessionSnapshotUpload.lastLocalOrgRepairPreviousOrgID = result.previousLocalOrgID
+        diagnostics.sessionSnapshotUpload.lastLocalOrgRepairCanonicalOrgID = result.canonicalOrgID
+        diagnostics.sessionSnapshotUpload.lastLocalOrgRepairMessage = result.message
         localDiagnostics = diagnostics
     }
 
@@ -12981,9 +13222,19 @@ final class AppState: ObservableObject {
         lines.append("- payload_session_id: \(diagnostics.lastAuthPreflightPayloadSessionID?.uuidString ?? "none")")
         lines.append("- remote_property_exists: \(diagnostics.lastAuthPreflightRemotePropertyExists.map(String.init) ?? "not_checked")")
         lines.append("- remote_session_exists: \(diagnostics.lastAuthPreflightRemoteSessionExists.map(String.init) ?? "not_checked")")
+        lines.append("- remote_property_org_id: \(diagnostics.lastAuthPreflightRemotePropertyOrgID?.uuidString ?? "none")")
+        lines.append("- remote_session_org_id: \(diagnostics.lastAuthPreflightRemoteSessionOrgID?.uuidString ?? "none")")
+        lines.append("- remote_session_property_matches: \(diagnostics.lastAuthPreflightRemoteSessionPropertyMatches.map(String.init) ?? "not_checked")")
         lines.append("- remote_parent_org_ids_match: \(diagnostics.lastAuthPreflightRemoteOrgIDsMatch.map(String.init) ?? "not_checked")")
         lines.append("- preflight_ready: \(diagnostics.lastAuthPreflightReady.map(String.init) ?? "not_checked")")
         lines.append("- preflight_failure: \(diagnosticsPreviewText(diagnostics.lastAuthPreflightFailureMessage, maxLength: 160) ?? "none")")
+        lines.append("- local_org_repair_at: \(diagnostics.lastLocalOrgRepairAt?.formatted(date: .abbreviated, time: .standard) ?? "none")")
+        lines.append("- local_org_repair_outcome: \(diagnostics.lastLocalOrgRepairOutcome)")
+        lines.append("- local_org_repair_property_id: \(diagnostics.lastLocalOrgRepairPropertyID?.uuidString ?? "none")")
+        lines.append("- local_org_repair_session_id: \(diagnostics.lastLocalOrgRepairSessionID?.uuidString ?? "none")")
+        lines.append("- local_org_repair_previous_org_id: \(diagnostics.lastLocalOrgRepairPreviousOrgID?.uuidString ?? "none")")
+        lines.append("- local_org_repair_canonical_org_id: \(diagnostics.lastLocalOrgRepairCanonicalOrgID?.uuidString ?? "none")")
+        lines.append("- local_org_repair_message: \(diagnosticsPreviewText(diagnostics.lastLocalOrgRepairMessage, maxLength: 160) ?? "none")")
         lines.append("")
         lines.append("Remote Readback")
         lines.append("- status: \(diagnosticsPreviewText(diagnostics.lastReadbackStatus, maxLength: 60) ?? "not_checked")")

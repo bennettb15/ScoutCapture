@@ -1556,6 +1556,40 @@ final class LocalStore {
     }
 
     @discardableResult
+    func repairPropertyOrgIDForSessionSnapshotValidation(
+        propertyID: UUID,
+        canonicalOrgID: UUID,
+        organizationName: String
+    ) throws -> Property {
+        try performFileIOSync {
+            var state = try migratedPropertyAndOrganizationState()
+            let normalizedName = organizationName.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !state.organizations.contains(where: { $0.id == canonicalOrgID }) {
+                state.organizations.append(
+                    Organization(
+                        id: canonicalOrgID,
+                        name: normalizedName.isEmpty ? "Remote Organization" : normalizedName
+                    )
+                )
+                state.organizations = normalizedOrganizations(state.organizations)
+            }
+            guard let index = state.properties.firstIndex(where: { $0.id == propertyID }) else {
+                throw StoreError.propertyNotFound(propertyID)
+            }
+            state.properties[index].orgId = canonicalOrgID
+            try writeOrganizations(state.organizations)
+            try writeProperties(state.properties)
+            try writeHubIndexForAtomicReplacement(
+                properties: state.properties.sorted { $0.createdAt < $1.createdAt },
+                organizations: state.organizations
+            )
+            try overwritePropertySyncEvents(with: state.properties)
+            NotificationCenter.default.post(name: .scoutPersistentDataDidChange, object: nil)
+            return state.properties[index]
+        }
+    }
+
+    @discardableResult
     func createOrganization(_ organization: Organization) throws -> Organization {
         try performFileIOSync {
             var state = try migratedPropertyAndOrganizationState()

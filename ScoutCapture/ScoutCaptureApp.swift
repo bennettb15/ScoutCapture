@@ -8668,6 +8668,7 @@ private struct DebugSessionSnapshotUploadDiagnosticsView: View {
     @State private var isUploadingSessionSnapshot: Bool = false
     @State private var isCheckingSnapshotReadback: Bool = false
     @State private var isRefreshingAuthPreflight: Bool = false
+    @State private var isRepairingLocalOrgDrift: Bool = false
     @State private var testSessionCreationMessage: String?
 
     private var reportText: String {
@@ -8787,10 +8788,19 @@ private struct DebugSessionSnapshotUploadDiagnosticsView: View {
                 diagnosticRow("Payload Session ID", diagnostics.lastAuthPreflightPayloadSessionID?.uuidString ?? "none")
                 diagnosticRow("Remote Property", optionalBoolText(diagnostics.lastAuthPreflightRemotePropertyExists))
                 diagnosticRow("Remote Session", optionalBoolText(diagnostics.lastAuthPreflightRemoteSessionExists))
+                diagnosticRow("Remote Property Org", diagnostics.lastAuthPreflightRemotePropertyOrgID?.uuidString ?? "none")
+                diagnosticRow("Remote Session Org", diagnostics.lastAuthPreflightRemoteSessionOrgID?.uuidString ?? "none")
+                diagnosticRow("Remote Session Property", optionalBoolText(diagnostics.lastAuthPreflightRemoteSessionPropertyMatches))
                 diagnosticRow("Remote Org Match", optionalBoolText(diagnostics.lastAuthPreflightRemoteOrgIDsMatch))
                 diagnosticRow("Preflight Ready", optionalBoolText(diagnostics.lastAuthPreflightReady))
                 if let failure = AppState.diagnosticsPreviewText(diagnostics.lastAuthPreflightFailureMessage, maxLength: 160) {
                     diagnosticRow("Preflight Failure", failure)
+                }
+                diagnosticRow("Repair Outcome", diagnostics.lastLocalOrgRepairOutcome)
+                diagnosticRow("Repair Previous Org", diagnostics.lastLocalOrgRepairPreviousOrgID?.uuidString ?? "none")
+                diagnosticRow("Repair Canonical Org", diagnostics.lastLocalOrgRepairCanonicalOrgID?.uuidString ?? "none")
+                if let repairMessage = AppState.diagnosticsPreviewText(diagnostics.lastLocalOrgRepairMessage, maxLength: 160) {
+                    diagnosticRow("Repair Message", repairMessage)
                 }
                 Button(isRefreshingAuthPreflight ? "Checking..." : "Refresh Auth Preflight") {
                     guard !isRefreshingAuthPreflight else { return }
@@ -8803,6 +8813,18 @@ private struct DebugSessionSnapshotUploadDiagnosticsView: View {
                     }
                 }
                 .disabled(isRefreshingAuthPreflight || uploadTarget == nil)
+                .font(.system(size: 14, weight: .semibold))
+                Button(isRepairingLocalOrgDrift ? "Repairing..." : "Repair Selected Local Org Drift") {
+                    guard !isRepairingLocalOrgDrift else { return }
+                    isRepairingLocalOrgDrift = true
+                    Task {
+                        _ = await appState.repairSelectedManualSessionSnapshotLocalOrgDrift()
+                        await MainActor.run {
+                            isRepairingLocalOrgDrift = false
+                        }
+                    }
+                }
+                .disabled(isRepairingLocalOrgDrift || uploadTarget == nil)
                 .font(.system(size: 14, weight: .semibold))
             }
 
