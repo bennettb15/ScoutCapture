@@ -667,6 +667,10 @@ final class AppState: ObservableObject {
         var lastPropertyID: UUID?
         var lastSessionID: UUID?
         var lastUploadPath: String?
+        var lastStorageUploadCompleted: Bool = false
+        var lastRowInsertCompleted: Bool = false
+        var lastUploadOutcome: String = "not_attempted"
+        var lastUploadErrorMessage: String?
         var lastKind: String?
         var lastTrigger: String?
         var lastReadbackAt: Date?
@@ -10946,9 +10950,33 @@ final class AppState: ObservableObject {
                 storagePath: storageObject.path
             )
 
+            recordSessionSnapshotGeneratedPayloadPath(
+                snapshotID: snapshotID,
+                propertyID: propertyID,
+                sessionID: sessionID,
+                path: storageObject.path,
+                kind: kind,
+                trigger: trigger
+            )
             try await uploadSessionSnapshotStorageObject(storageObject)
+            recordSessionSnapshotStorageUploadCompleted(
+                snapshotID: snapshotID,
+                propertyID: propertyID,
+                sessionID: sessionID,
+                path: storageObject.path,
+                kind: kind,
+                trigger: trigger
+            )
             do {
                 try await insertSessionSnapshotRow(uploadRow)
+                recordSessionSnapshotRowInsertCompleted(
+                    snapshotID: snapshotID,
+                    propertyID: propertyID,
+                    sessionID: sessionID,
+                    path: storageObject.path,
+                    kind: kind,
+                    trigger: trigger
+                )
             } catch {
                 let outcome: SessionSnapshotUploadOutcome = isSessionSnapshotRemoteUnavailable(error) ? .unavailable : .orphanRisk
                 recordSessionSnapshotUploadFailure(
@@ -11405,6 +11433,67 @@ final class AppState: ObservableObject {
             diagnostics.sessionSnapshotUpload.lastPropertyID = propertyID
             diagnostics.sessionSnapshotUpload.lastSessionID = sessionID
             diagnostics.sessionSnapshotUpload.lastUploadPath = path
+            diagnostics.sessionSnapshotUpload.lastStorageUploadCompleted = false
+            diagnostics.sessionSnapshotUpload.lastRowInsertCompleted = false
+            diagnostics.sessionSnapshotUpload.lastUploadOutcome = "attempting"
+            diagnostics.sessionSnapshotUpload.lastUploadErrorMessage = nil
+            diagnostics.sessionSnapshotUpload.lastKind = kind.rawValue
+            diagnostics.sessionSnapshotUpload.lastTrigger = trigger
+        }
+    }
+
+    private func recordSessionSnapshotGeneratedPayloadPath(
+        snapshotID: UUID,
+        propertyID: UUID,
+        sessionID: UUID,
+        path: String,
+        kind: SessionSnapshotKind,
+        trigger: String
+    ) {
+        mutateLocalDiagnostics { diagnostics in
+            diagnostics.sessionSnapshotUpload.lastSnapshotID = snapshotID
+            diagnostics.sessionSnapshotUpload.lastPropertyID = propertyID
+            diagnostics.sessionSnapshotUpload.lastSessionID = sessionID
+            diagnostics.sessionSnapshotUpload.lastUploadPath = path
+            diagnostics.sessionSnapshotUpload.lastKind = kind.rawValue
+            diagnostics.sessionSnapshotUpload.lastTrigger = trigger
+        }
+    }
+
+    private func recordSessionSnapshotStorageUploadCompleted(
+        snapshotID: UUID,
+        propertyID: UUID,
+        sessionID: UUID,
+        path: String,
+        kind: SessionSnapshotKind,
+        trigger: String
+    ) {
+        mutateLocalDiagnostics { diagnostics in
+            diagnostics.sessionSnapshotUpload.lastSnapshotID = snapshotID
+            diagnostics.sessionSnapshotUpload.lastPropertyID = propertyID
+            diagnostics.sessionSnapshotUpload.lastSessionID = sessionID
+            diagnostics.sessionSnapshotUpload.lastUploadPath = path
+            diagnostics.sessionSnapshotUpload.lastStorageUploadCompleted = true
+            diagnostics.sessionSnapshotUpload.lastKind = kind.rawValue
+            diagnostics.sessionSnapshotUpload.lastTrigger = trigger
+        }
+    }
+
+    private func recordSessionSnapshotRowInsertCompleted(
+        snapshotID: UUID,
+        propertyID: UUID,
+        sessionID: UUID,
+        path: String,
+        kind: SessionSnapshotKind,
+        trigger: String
+    ) {
+        mutateLocalDiagnostics { diagnostics in
+            diagnostics.sessionSnapshotUpload.lastSnapshotID = snapshotID
+            diagnostics.sessionSnapshotUpload.lastPropertyID = propertyID
+            diagnostics.sessionSnapshotUpload.lastSessionID = sessionID
+            diagnostics.sessionSnapshotUpload.lastUploadPath = path
+            diagnostics.sessionSnapshotUpload.lastStorageUploadCompleted = true
+            diagnostics.sessionSnapshotUpload.lastRowInsertCompleted = true
             diagnostics.sessionSnapshotUpload.lastKind = kind.rawValue
             diagnostics.sessionSnapshotUpload.lastTrigger = trigger
         }
@@ -11427,6 +11516,10 @@ final class AppState: ObservableObject {
             diagnostics.sessionSnapshotUpload.lastPropertyID = propertyID
             diagnostics.sessionSnapshotUpload.lastSessionID = sessionID
             diagnostics.sessionSnapshotUpload.lastUploadPath = path
+            diagnostics.sessionSnapshotUpload.lastStorageUploadCompleted = true
+            diagnostics.sessionSnapshotUpload.lastRowInsertCompleted = true
+            diagnostics.sessionSnapshotUpload.lastUploadOutcome = SessionSnapshotUploadOutcome.succeeded.rawValue
+            diagnostics.sessionSnapshotUpload.lastUploadErrorMessage = nil
             diagnostics.sessionSnapshotUpload.lastKind = kind.rawValue
             diagnostics.sessionSnapshotUpload.lastTrigger = trigger
             diagnostics.sessionSnapshotUpload.lastFailureMessage = nil
@@ -11453,11 +11546,16 @@ final class AppState: ObservableObject {
                 diagnostics.sessionSnapshotUpload.orphanRiskCount += 1
             }
             diagnostics.sessionSnapshotUpload.lastFailureAt = Date()
-            diagnostics.sessionSnapshotUpload.lastFailureMessage = Self.diagnosticsPreviewText(error.localizedDescription, maxLength: 160)
+            let sanitizedError = Self.diagnosticsPreviewText(error.localizedDescription, maxLength: 160)
+            diagnostics.sessionSnapshotUpload.lastFailureMessage = sanitizedError
+            diagnostics.sessionSnapshotUpload.lastUploadErrorMessage = sanitizedError
             diagnostics.sessionSnapshotUpload.lastSnapshotID = snapshotID
             diagnostics.sessionSnapshotUpload.lastPropertyID = propertyID
             diagnostics.sessionSnapshotUpload.lastSessionID = sessionID
             diagnostics.sessionSnapshotUpload.lastUploadPath = path
+            diagnostics.sessionSnapshotUpload.lastStorageUploadCompleted = orphanRisk
+            diagnostics.sessionSnapshotUpload.lastRowInsertCompleted = false
+            diagnostics.sessionSnapshotUpload.lastUploadOutcome = outcome.rawValue
             diagnostics.sessionSnapshotUpload.lastKind = kind.rawValue
             diagnostics.sessionSnapshotUpload.lastTrigger = trigger
         }
@@ -12637,6 +12735,8 @@ final class AppState: ObservableObject {
         lines.append("- last_success_at: \(diagnostics.lastSuccessAt?.formatted(date: .abbreviated, time: .standard) ?? "none")")
         lines.append("- last_failure_at: \(diagnostics.lastFailureAt?.formatted(date: .abbreviated, time: .standard) ?? "none")")
         lines.append("- last_failure: \(diagnosticsPreviewText(diagnostics.lastFailureMessage, maxLength: 160) ?? "none")")
+        lines.append("- final_upload_outcome: \(diagnosticsPreviewText(diagnostics.lastUploadOutcome, maxLength: 60) ?? "not_attempted")")
+        lines.append("- last_upload_error: \(diagnosticsPreviewText(diagnostics.lastUploadErrorMessage, maxLength: 160) ?? "none")")
         lines.append("")
         lines.append("Last Sanitized Attempt")
         lines.append("- snapshot_id: \(diagnostics.lastSnapshotID?.uuidString ?? "none")")
@@ -12644,7 +12744,9 @@ final class AppState: ObservableObject {
         lines.append("- session_id: \(diagnostics.lastSessionID?.uuidString ?? "none")")
         lines.append("- snapshot_kind: \(diagnosticsPreviewText(diagnostics.lastKind, maxLength: 40) ?? "none")")
         lines.append("- trigger: \(diagnosticsPreviewText(diagnostics.lastTrigger, maxLength: 60) ?? "none")")
-        lines.append("- payload_storage_path_present: \(trimmedNonEmpty(diagnostics.lastUploadPath) != nil)")
+        lines.append("- generated_payload_path_present: \(trimmedNonEmpty(diagnostics.lastUploadPath) != nil)")
+        lines.append("- storage_upload_completed: \(diagnostics.lastStorageUploadCompleted)")
+        lines.append("- row_insert_completed: \(diagnostics.lastRowInsertCompleted)")
         lines.append("")
         lines.append("Remote Readback")
         lines.append("- status: \(diagnosticsPreviewText(diagnostics.lastReadbackStatus, maxLength: 60) ?? "not_checked")")

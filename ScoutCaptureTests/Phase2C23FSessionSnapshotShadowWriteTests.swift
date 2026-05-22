@@ -200,6 +200,11 @@ final class Phase2C23FSessionSnapshotShadowWriteTests: XCTestCase {
         XCTAssertEqual(result.outcome, .succeeded)
         XCTAssertEqual(fixture.appState.localDiagnostics.sessionSnapshotUpload.successCount, 1)
         XCTAssertEqual(fixture.appState.localDiagnostics.sessionSnapshotUpload.orphanRiskCount, 0)
+        XCTAssertTrue(fixture.appState.localDiagnostics.sessionSnapshotUpload.lastUploadPath?.isEmpty == false)
+        XCTAssertTrue(fixture.appState.localDiagnostics.sessionSnapshotUpload.lastStorageUploadCompleted)
+        XCTAssertTrue(fixture.appState.localDiagnostics.sessionSnapshotUpload.lastRowInsertCompleted)
+        XCTAssertEqual(fixture.appState.localDiagnostics.sessionSnapshotUpload.lastUploadOutcome, "succeeded")
+        XCTAssertNil(fixture.appState.localDiagnostics.sessionSnapshotUpload.lastUploadErrorMessage)
     }
 
     func testStorageSuccessTableInsertFailureRecordsOrphanRisk() async throws {
@@ -218,6 +223,11 @@ final class Phase2C23FSessionSnapshotShadowWriteTests: XCTestCase {
         XCTAssertEqual(result.outcome, .orphanRisk)
         XCTAssertEqual(fixture.appState.localDiagnostics.sessionSnapshotUpload.orphanRiskCount, 1)
         XCTAssertEqual(fixture.appState.localDiagnostics.sessionSnapshotUpload.failureCount, 1)
+        XCTAssertTrue(fixture.appState.localDiagnostics.sessionSnapshotUpload.lastUploadPath?.isEmpty == false)
+        XCTAssertTrue(fixture.appState.localDiagnostics.sessionSnapshotUpload.lastStorageUploadCompleted)
+        XCTAssertFalse(fixture.appState.localDiagnostics.sessionSnapshotUpload.lastRowInsertCompleted)
+        XCTAssertEqual(fixture.appState.localDiagnostics.sessionSnapshotUpload.lastUploadOutcome, "orphanRisk")
+        XCTAssertEqual(fixture.appState.localDiagnostics.sessionSnapshotUpload.lastUploadErrorMessage, "insert failed")
     }
 
     func testMissingRemoteBucketOrTableReportsUnavailableWithoutCrash() async throws {
@@ -233,6 +243,14 @@ final class Phase2C23FSessionSnapshotShadowWriteTests: XCTestCase {
 
         XCTAssertEqual(result.outcome, .unavailable)
         XCTAssertEqual(fixture.appState.localDiagnostics.sessionSnapshotUpload.remoteAvailability, "unavailable")
+        XCTAssertTrue(fixture.appState.localDiagnostics.sessionSnapshotUpload.lastUploadPath?.isEmpty == false)
+        XCTAssertFalse(fixture.appState.localDiagnostics.sessionSnapshotUpload.lastStorageUploadCompleted)
+        XCTAssertFalse(fixture.appState.localDiagnostics.sessionSnapshotUpload.lastRowInsertCompleted)
+        XCTAssertEqual(fixture.appState.localDiagnostics.sessionSnapshotUpload.lastUploadOutcome, "unavailable")
+        XCTAssertEqual(
+            fixture.appState.localDiagnostics.sessionSnapshotUpload.lastUploadErrorMessage,
+            "Session snapshot remote table or bucket is unavailable: missing bucket scoutcapture-session-snapshots"
+        )
     }
 
     func testUploadReportIsSanitized() async throws {
@@ -254,6 +272,11 @@ final class Phase2C23FSessionSnapshotShadowWriteTests: XCTestCase {
         XCTAssertFalse(report.contains("https://example.supabase.co"))
         XCTAssertFalse(report.contains("data:image/png"))
         XCTAssertFalse(report.contains("rawSessionJSON"))
+        XCTAssertTrue(report.contains("generated_payload_path_present"))
+        XCTAssertTrue(report.contains("storage_upload_completed"))
+        XCTAssertTrue(report.contains("row_insert_completed"))
+        XCTAssertTrue(report.contains("final_upload_outcome"))
+        XCTAssertTrue(report.contains("last_upload_error"))
         XCTAssertTrue(report.contains("does not switch canonical reads"))
     }
 
@@ -274,6 +297,8 @@ final class Phase2C23FSessionSnapshotShadowWriteTests: XCTestCase {
 
         XCTAssertEqual(result.outcome, .orphanRisk)
         XCTAssertEqual(fixture.appState.localDiagnostics.sessionSnapshotUpload.failureCount, 1)
+        XCTAssertEqual(fixture.appState.localDiagnostics.sessionSnapshotUpload.lastUploadOutcome, "orphanRisk")
+        XCTAssertEqual(fixture.appState.localDiagnostics.sessionSnapshotUpload.lastUploadErrorMessage, "table insert failed")
     }
 
     func testReadbackRowObjectConsistencyAndChecksumVerification() async throws {

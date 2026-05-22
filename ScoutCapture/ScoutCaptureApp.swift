@@ -8731,11 +8731,12 @@ private struct DebugSessionSnapshotUploadDiagnosticsView: View {
                 diagnosticRow("Successes", diagnostics.successCount)
                 diagnosticRow("Failures", diagnostics.failureCount)
                 diagnosticRow("Orphan Risk", diagnostics.orphanRiskCount)
+                diagnosticRow("Final Upload Outcome", diagnostics.lastUploadOutcome)
                 diagnosticRow("Last Attempt", formattedRunDate(diagnostics.lastAttemptAt))
                 diagnosticRow("Last Success", formattedRunDate(diagnostics.lastSuccessAt))
                 diagnosticRow("Last Failure", formattedRunDate(diagnostics.lastFailureAt))
-                if let failure = AppState.diagnosticsPreviewText(diagnostics.lastFailureMessage, maxLength: 160) {
-                    diagnosticRow("Last Failure Message", failure)
+                if let uploadError = AppState.diagnosticsPreviewText(diagnostics.lastUploadErrorMessage, maxLength: 160) {
+                    diagnosticRow("Last Upload Error", uploadError)
                 }
                 NavigationLink {
                     DebugSessionSnapshotUploadTextView(snapshotText: reportText)
@@ -8802,7 +8803,9 @@ private struct DebugSessionSnapshotUploadDiagnosticsView: View {
                 diagnosticRow("Session ID", diagnostics.lastSessionID?.uuidString ?? "none")
                 diagnosticRow("Snapshot Kind", diagnostics.lastKind ?? "none")
                 diagnosticRow("Trigger", diagnostics.lastTrigger ?? "none")
-                diagnosticRow("Payload Path Present", AppState.diagnosticsPreviewText(diagnostics.lastUploadPath) == nil ? "false" : "true")
+                diagnosticRow("Generated Payload Path", AppState.diagnosticsPreviewText(diagnostics.lastUploadPath) == nil ? "false" : "true")
+                diagnosticRow("Storage Upload Completed", diagnostics.lastStorageUploadCompleted ? "true" : "false")
+                diagnosticRow("Row Insert Completed", diagnostics.lastRowInsertCompleted ? "true" : "false")
             }
 
             Section("Remote Readback") {
