@@ -8670,6 +8670,7 @@ private struct DebugSessionSnapshotUploadDiagnosticsView: View {
     @State private var isRefreshingAuthPreflight: Bool = false
     @State private var isRepairingLocalOrgDrift: Bool = false
     @State private var isRunningLocalOrgDriftAudit: Bool = false
+    @State private var isRepairingConfirmedLocalOrgDrift: Bool = false
     @State private var testSessionCreationMessage: String?
 
     private var reportText: String {
@@ -8839,12 +8840,28 @@ private struct DebugSessionSnapshotUploadDiagnosticsView: View {
                 diagnosticRow("Property Mismatches", diagnostics.lastLocalOrgDriftAuditPropertyMismatchCount)
                 diagnosticRow("Session Mismatches", diagnostics.lastLocalOrgDriftAuditSessionMismatchCount)
                 diagnosticRow("Unable To Confirm", diagnostics.lastLocalOrgDriftAuditUnableToConfirmCount)
+                diagnosticRow("Repair Checked", formattedRunDate(diagnostics.lastLocalOrgDriftRepairAt))
+                diagnosticRow("Repair Attempts", diagnostics.lastLocalOrgDriftRepairAttemptedCount)
+                diagnosticRow("Repaired Properties", diagnostics.lastLocalOrgDriftRepairPropertyCount)
+                diagnosticRow("Repaired Sessions", diagnostics.lastLocalOrgDriftRepairSessionCount)
+                diagnosticRow("Repair Skipped", diagnostics.lastLocalOrgDriftRepairSkippedCount)
+                diagnosticRow("Repair Failures", diagnostics.lastLocalOrgDriftRepairFailureCount)
                 if diagnostics.lastLocalOrgDriftAuditSamples.isEmpty {
                     diagnosticRow("Samples", "none")
                 } else {
                     ForEach(Array(diagnostics.lastLocalOrgDriftAuditSamples.enumerated()), id: \.offset) { index, sample in
                         diagnosticRow(
                             "Sample \(index + 1)",
+                            AppState.diagnosticsPreviewText(sample, maxLength: 180) ?? "sample_unavailable"
+                        )
+                    }
+                }
+                if diagnostics.lastLocalOrgDriftRepairSamples.isEmpty {
+                    diagnosticRow("Repair Samples", "none")
+                } else {
+                    ForEach(Array(diagnostics.lastLocalOrgDriftRepairSamples.enumerated()), id: \.offset) { index, sample in
+                        diagnosticRow(
+                            "Repair \(index + 1)",
                             AppState.diagnosticsPreviewText(sample, maxLength: 180) ?? "sample_unavailable"
                         )
                     }
@@ -8860,6 +8877,18 @@ private struct DebugSessionSnapshotUploadDiagnosticsView: View {
                     }
                 }
                 .disabled(isRunningLocalOrgDriftAudit)
+                .font(.system(size: 14, weight: .semibold))
+                Button(isRepairingConfirmedLocalOrgDrift ? "Repairing..." : "Repair Confirmed Local Org Drift") {
+                    guard !isRepairingConfirmedLocalOrgDrift else { return }
+                    isRepairingConfirmedLocalOrgDrift = true
+                    Task {
+                        _ = await appState.repairConfirmedLocalOrgDrift()
+                        await MainActor.run {
+                            isRepairingConfirmedLocalOrgDrift = false
+                        }
+                    }
+                }
+                .disabled(isRepairingConfirmedLocalOrgDrift)
                 .font(.system(size: 14, weight: .semibold))
             }
 

@@ -495,11 +495,22 @@ final class AppState: ObservableObject {
         var propertyMismatchCount: Int
         var sessionMismatchCount: Int
         var unableToConfirmCount: Int
+        var confirmedMismatches: [LocalOrgDriftAuditSample] = []
         var samples: [LocalOrgDriftAuditSample]
 
         var totalMismatchCount: Int {
             propertyMismatchCount + sessionMismatchCount
         }
+    }
+
+    struct LocalOrgDriftRepairResult: Equatable {
+        var repairedAt: Date
+        var attemptedCount: Int
+        var repairedPropertyCount: Int
+        var repairedSessionCount: Int
+        var skippedCount: Int
+        var failureCount: Int
+        var samples: [LocalOrgDriftAuditSample]
     }
 
     struct ManualSessionSnapshotUploadTarget: Equatable {
@@ -784,6 +795,13 @@ final class AppState: ObservableObject {
         var lastLocalOrgDriftAuditSessionMismatchCount: Int = 0
         var lastLocalOrgDriftAuditUnableToConfirmCount: Int = 0
         var lastLocalOrgDriftAuditSamples: [String] = []
+        var lastLocalOrgDriftRepairAt: Date?
+        var lastLocalOrgDriftRepairAttemptedCount: Int = 0
+        var lastLocalOrgDriftRepairPropertyCount: Int = 0
+        var lastLocalOrgDriftRepairSessionCount: Int = 0
+        var lastLocalOrgDriftRepairSkippedCount: Int = 0
+        var lastLocalOrgDriftRepairFailureCount: Int = 0
+        var lastLocalOrgDriftRepairSamples: [String] = []
         var lastReadbackAt: Date?
         var lastReadbackStatus: String = "not_checked"
         var lastReadbackSnapshotID: UUID?
@@ -11082,10 +11100,12 @@ final class AppState: ObservableObject {
     private struct SessionSnapshotRemotePropertyPreflightRow: Codable {
         let id: UUID
         let orgID: UUID
+        let isArchived: Bool
 
         enum CodingKeys: String, CodingKey {
             case id
             case orgID = "org_id"
+            case isArchived = "is_archived"
         }
     }
 
@@ -11116,9 +11136,10 @@ final class AppState: ObservableObject {
 
         let properties: [SessionSnapshotRemotePropertyPreflightRow] = try await client
             .from("properties")
-            .select("id, org_id")
+            .select("id, org_id, is_archived")
             .eq("id", value: propertyID.uuidString.lowercased())
             .is("deleted_at", value: nil)
+            .eq("is_archived", value: false)
             .limit(1)
             .execute()
             .value
@@ -11174,6 +11195,7 @@ final class AppState: ObservableObject {
         var propertyMismatchCount = 0
         var sessionMismatchCount = 0
         var unableToConfirmCount = 0
+        var confirmedMismatches: [LocalOrgDriftAuditSample] = []
         var samples: [LocalOrgDriftAuditSample] = []
         var confirmedCanonicalOrgByProperty: [UUID: UUID] = [:]
         var checkedPropertyIDs = Set<UUID>()
@@ -11236,31 +11258,31 @@ final class AppState: ObservableObject {
                     totalPropertiesChecked += 1
                     if property.orgId != canonicalOrgID {
                         propertyMismatchCount += 1
-                        appendSample(
-                            LocalOrgDriftAuditSample(
-                                subject: "property",
-                                propertyID: property.id,
-                                sessionID: nil,
-                                localOrgID: property.orgId,
-                                canonicalOrgID: canonicalOrgID,
-                                detail: "local_property_org_differs_from_confirmed_remote_parent_org"
-                            )
+                        let mismatch = LocalOrgDriftAuditSample(
+                            subject: "property",
+                            propertyID: property.id,
+                            sessionID: nil,
+                            localOrgID: property.orgId,
+                            canonicalOrgID: canonicalOrgID,
+                            detail: "local_property_org_differs_from_confirmed_remote_parent_org"
                         )
+                        confirmedMismatches.append(mismatch)
+                        appendSample(mismatch)
                     }
                 }
 
                 if metadata.orgID != canonicalOrgID {
                     sessionMismatchCount += 1
-                    appendSample(
-                        LocalOrgDriftAuditSample(
-                            subject: "session_metadata",
-                            propertyID: property.id,
-                            sessionID: session.id,
-                            localOrgID: metadata.orgID,
-                            canonicalOrgID: canonicalOrgID,
-                            detail: "local_session_metadata_org_differs_from_confirmed_remote_parent_org"
-                        )
+                    let mismatch = LocalOrgDriftAuditSample(
+                        subject: "session_metadata",
+                        propertyID: property.id,
+                        sessionID: session.id,
+                        localOrgID: metadata.orgID,
+                        canonicalOrgID: canonicalOrgID,
+                        detail: "local_session_metadata_org_differs_from_confirmed_remote_parent_org"
                     )
+                    confirmedMismatches.append(mismatch)
+                    appendSample(mismatch)
                 }
             }
         }
@@ -11272,9 +11294,94 @@ final class AppState: ObservableObject {
             propertyMismatchCount: propertyMismatchCount,
             sessionMismatchCount: sessionMismatchCount,
             unableToConfirmCount: unableToConfirmCount,
+            confirmedMismatches: confirmedMismatches,
             samples: samples
         )
         recordLocalOrgDriftAudit(result)
+        return result
+    }
+
+    @MainActor
+    @discardableResult
+    func repairConfirmedLocalOrgDrift(repairedAt: Date = Date(), sampleLimit: Int = 5) async -> LocalOrgDriftRepairResult {
+        let audit = await runLocalOrgDriftAudit(checkedAt: repairedAt, sampleLimit: sampleLimit)
+        var repairedPropertyCount = 0
+        var repairedSessionCount = 0
+        var skippedCount = audit.unableToConfirmCount
+        var failureCount = 0
+        var samples: [LocalOrgDriftAuditSample] = []
+        var repairedProperties = Set<UUID>()
+
+        func appendRepairSample(_ sample: LocalOrgDriftAuditSample) {
+            guard samples.count < sampleLimit else { return }
+            samples.append(sample)
+        }
+
+        for mismatch in audit.confirmedMismatches {
+            switch mismatch.subject {
+            case "property":
+                guard !repairedProperties.contains(mismatch.propertyID) else {
+                    skippedCount += 1
+                    continue
+                }
+                do {
+                    let organizationName = organizationSelectionOptions.first(where: { $0.id == mismatch.canonicalOrgID })?.name
+                        ?? allOrganizations.first(where: { $0.id == mismatch.canonicalOrgID })?.name
+                        ?? activeOrganization?.name
+                        ?? "Remote Organization"
+                    _ = try localStore.repairPropertyOrgIDForSessionSnapshotValidation(
+                        propertyID: mismatch.propertyID,
+                        canonicalOrgID: mismatch.canonicalOrgID,
+                        organizationName: organizationName
+                    )
+                    repairedProperties.insert(mismatch.propertyID)
+                    repairedPropertyCount += 1
+                    appendRepairSample(mismatch)
+                } catch {
+                    failureCount += 1
+                }
+
+            case "session_metadata":
+                guard let sessionID = mismatch.sessionID else {
+                    skippedCount += 1
+                    continue
+                }
+                do {
+                    var metadata = try localStore.loadSessionMetadata(
+                        propertyID: mismatch.propertyID,
+                        sessionID: sessionID
+                    )
+                    metadata.orgID = mismatch.canonicalOrgID
+                    try localStore.saveSessionMetadataAtomically(
+                        propertyID: mismatch.propertyID,
+                        sessionID: sessionID,
+                        metadata: metadata
+                    )
+                    repairedSessionCount += 1
+                    appendRepairSample(mismatch)
+                } catch {
+                    failureCount += 1
+                }
+
+            default:
+                skippedCount += 1
+            }
+        }
+
+        allOrganizations = (try? localStore.fetchOrganizations()) ?? allOrganizations
+        allProperties = (try? localStore.fetchProperties()) ?? allProperties
+        applyTenantScopedState()
+
+        let result = LocalOrgDriftRepairResult(
+            repairedAt: repairedAt,
+            attemptedCount: audit.confirmedMismatches.count,
+            repairedPropertyCount: repairedPropertyCount,
+            repairedSessionCount: repairedSessionCount,
+            skippedCount: skippedCount,
+            failureCount: failureCount,
+            samples: samples
+        )
+        recordLocalOrgDriftRepair(result)
         return result
     }
 
@@ -12065,6 +12172,18 @@ final class AppState: ObservableObject {
         diagnostics.sessionSnapshotUpload.lastLocalOrgDriftAuditSessionMismatchCount = result.sessionMismatchCount
         diagnostics.sessionSnapshotUpload.lastLocalOrgDriftAuditUnableToConfirmCount = result.unableToConfirmCount
         diagnostics.sessionSnapshotUpload.lastLocalOrgDriftAuditSamples = result.samples.map(\.diagnosticsLine)
+        localDiagnostics = diagnostics
+    }
+
+    private func recordLocalOrgDriftRepair(_ result: LocalOrgDriftRepairResult) {
+        var diagnostics = localDiagnostics
+        diagnostics.sessionSnapshotUpload.lastLocalOrgDriftRepairAt = result.repairedAt
+        diagnostics.sessionSnapshotUpload.lastLocalOrgDriftRepairAttemptedCount = result.attemptedCount
+        diagnostics.sessionSnapshotUpload.lastLocalOrgDriftRepairPropertyCount = result.repairedPropertyCount
+        diagnostics.sessionSnapshotUpload.lastLocalOrgDriftRepairSessionCount = result.repairedSessionCount
+        diagnostics.sessionSnapshotUpload.lastLocalOrgDriftRepairSkippedCount = result.skippedCount
+        diagnostics.sessionSnapshotUpload.lastLocalOrgDriftRepairFailureCount = result.failureCount
+        diagnostics.sessionSnapshotUpload.lastLocalOrgDriftRepairSamples = result.samples.map(\.diagnosticsLine)
         localDiagnostics = diagnostics
     }
 
@@ -13456,6 +13575,22 @@ final class AppState: ObservableObject {
         } else {
             lines.append("Samples")
             for sample in diagnostics.lastLocalOrgDriftAuditSamples {
+                lines.append("- \(diagnosticsPreviewText(sample, maxLength: 240) ?? "sample_unavailable")")
+            }
+        }
+        lines.append("")
+        lines.append("Local Org Drift Repair")
+        lines.append("- repair_at: \(diagnostics.lastLocalOrgDriftRepairAt?.formatted(date: .abbreviated, time: .standard) ?? "none")")
+        lines.append("- attempted_count: \(diagnostics.lastLocalOrgDriftRepairAttemptedCount)")
+        lines.append("- repaired_property_count: \(diagnostics.lastLocalOrgDriftRepairPropertyCount)")
+        lines.append("- repaired_session_count: \(diagnostics.lastLocalOrgDriftRepairSessionCount)")
+        lines.append("- skipped_count: \(diagnostics.lastLocalOrgDriftRepairSkippedCount)")
+        lines.append("- failure_count: \(diagnostics.lastLocalOrgDriftRepairFailureCount)")
+        if diagnostics.lastLocalOrgDriftRepairSamples.isEmpty {
+            lines.append("- repair_samples: none")
+        } else {
+            lines.append("Repair Samples")
+            for sample in diagnostics.lastLocalOrgDriftRepairSamples {
                 lines.append("- \(diagnosticsPreviewText(sample, maxLength: 240) ?? "sample_unavailable")")
             }
         }

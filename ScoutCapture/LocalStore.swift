@@ -1583,7 +1583,12 @@ final class LocalStore {
                 properties: state.properties.sorted { $0.createdAt < $1.createdAt },
                 organizations: state.organizations
             )
-            try overwritePropertySyncEvents(with: state.properties)
+            try appendPropertySyncEvent(
+                propertyID: state.properties[index].id,
+                operation: .upsert,
+                property: state.properties[index],
+                occurredAt: Date()
+            )
             NotificationCenter.default.post(name: .scoutPersistentDataDidChange, object: nil)
             return state.properties[index]
         }
