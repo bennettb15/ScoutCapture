@@ -124,6 +124,19 @@ final class Phase2C23FSessionSnapshotShadowWriteTests: XCTestCase {
         try store.saveSessionMetadataAtomically(propertyID: property.id, sessionID: session.id, metadata: metadata)
     }
 
+    private func writeRawSessionMetadata(
+        _ metadata: SessionMetadata,
+        store: LocalStore,
+        propertyID: UUID,
+        sessionID: UUID
+    ) throws {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        encoder.dateEncodingStrategy = .iso8601
+        let data = try encoder.encode(metadata)
+        try data.write(to: store.sessionJSONURL(propertyID: propertyID, sessionID: sessionID), options: .atomic)
+    }
+
     func testFeatureFlagDefaultsOff() {
         let defaults = UserDefaults(suiteName: "ScoutCapture-2C23F-default-\(UUID().uuidString)") ?? .standard
         let flags = BackendFeatureFlags.load(userDefaults: defaults)
@@ -169,6 +182,93 @@ final class Phase2C23FSessionSnapshotShadowWriteTests: XCTestCase {
             path,
             "orgs/\(orgID.uuidString.lowercased())/properties/\(propertyID.uuidString.lowercased())/sessions/\(sessionID.uuidString.lowercased())/snapshots/completed/\(snapshotID.uuidString.lowercased()).json"
         )
+    }
+
+    func testStaleLocalPropertyOrgOverridesSessionMetadataOrgDuringLoad() throws {
+        let root = try makeTempStorageRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = LocalStore(testStorageRootURL: root)
+        let propertyOrgID = UUID()
+        let metadataOrgID = UUID()
+        _ = try store.createOrganization(Organization(id: propertyOrgID, name: "Property Org"))
+        let property = try store.createProperty(
+            Property(id: UUID(), orgId: propertyOrgID, name: "Stale Boundary Property")
+        )
+        let session = try store.upsertSession(
+            Session(
+                id: UUID(),
+                propertyID: property.id,
+                startedAt: Date(timeIntervalSinceReferenceDate: 100),
+                status: .completed
+            )
+        )
+        var metadata = try store.loadSessionMetadata(propertyID: property.id, sessionID: session.id)
+        metadata.orgID = metadataOrgID
+        try writeRawSessionMetadata(metadata, store: store, propertyID: property.id, sessionID: session.id)
+
+        let loaded = try store.loadSessionMetadata(propertyID: property.id, sessionID: session.id)
+
+        XCTAssertEqual(property.orgId, propertyOrgID)
+        XCTAssertEqual(loaded.orgID, propertyOrgID)
+        XCTAssertNotEqual(loaded.orgID, metadataOrgID)
+    }
+
+    func testConfirmedRemoteParentResultProvidesCanonicalOrg() {
+        let canonicalOrgID = UUID()
+        let unconfirmedStatuses = [
+            AppState.SessionSnapshotAuthPreflightRemoteParentStatus(
+                propertyExists: false,
+                sessionExists: true,
+                propertyOrgID: canonicalOrgID,
+                sessionOrgID: canonicalOrgID,
+                sessionPropertyIDMatches: true,
+                orgIDsMatch: false,
+                errorMessage: nil
+            ),
+            AppState.SessionSnapshotAuthPreflightRemoteParentStatus(
+                propertyExists: true,
+                sessionExists: false,
+                propertyOrgID: canonicalOrgID,
+                sessionOrgID: canonicalOrgID,
+                sessionPropertyIDMatches: true,
+                orgIDsMatch: false,
+                errorMessage: nil
+            ),
+            AppState.SessionSnapshotAuthPreflightRemoteParentStatus(
+                propertyExists: true,
+                sessionExists: true,
+                propertyOrgID: canonicalOrgID,
+                sessionOrgID: UUID(),
+                sessionPropertyIDMatches: true,
+                orgIDsMatch: false,
+                errorMessage: nil
+            ),
+            AppState.SessionSnapshotAuthPreflightRemoteParentStatus(
+                propertyExists: true,
+                sessionExists: true,
+                propertyOrgID: canonicalOrgID,
+                sessionOrgID: canonicalOrgID,
+                sessionPropertyIDMatches: false,
+                orgIDsMatch: false,
+                errorMessage: nil
+            )
+        ]
+        let confirmed = AppState.SessionSnapshotAuthPreflightRemoteParentStatus(
+            propertyExists: true,
+            sessionExists: true,
+            propertyOrgID: canonicalOrgID,
+            sessionOrgID: canonicalOrgID,
+            sessionPropertyIDMatches: true,
+            orgIDsMatch: false,
+            errorMessage: nil
+        )
+
+        XCTAssertEqual(confirmed.confirmedCanonicalOrgID, canonicalOrgID)
+        XCTAssertTrue(confirmed.hasConfirmedRemoteParent)
+        for status in unconfirmedStatuses {
+            XCTAssertNil(status.confirmedCanonicalOrgID)
+            XCTAssertFalse(status.hasConfirmedRemoteParent)
+        }
     }
 
     func testPayloadChecksumMetadataMatchesPreview() async throws {
@@ -404,6 +504,79 @@ final class Phase2C23FSessionSnapshotShadowWriteTests: XCTestCase {
         XCTAssertEqual(property.orgId, originalOrgID)
         XCTAssertEqual(metadata.orgID, originalOrgID)
         XCTAssertEqual(fixture.appState.localDiagnostics.sessionSnapshotUpload.lastLocalOrgRepairOutcome, "blocked")
+    }
+
+    func testSelectedLocalOrgRepairRefusesUnconfirmedRemoteParentRows() async throws {
+        let canonicalOrgID = UUID()
+        let mismatchedOrgID = UUID()
+        let cases: [(String, AppState.SessionSnapshotAuthPreflightRemoteParentStatus)] = [
+            (
+                "property_missing_or_hidden",
+                AppState.SessionSnapshotAuthPreflightRemoteParentStatus(
+                    propertyExists: false,
+                    sessionExists: true,
+                    propertyOrgID: canonicalOrgID,
+                    sessionOrgID: canonicalOrgID,
+                    sessionPropertyIDMatches: true,
+                    orgIDsMatch: false,
+                    errorMessage: nil
+                )
+            ),
+            (
+                "session_missing_or_hidden",
+                AppState.SessionSnapshotAuthPreflightRemoteParentStatus(
+                    propertyExists: true,
+                    sessionExists: false,
+                    propertyOrgID: canonicalOrgID,
+                    sessionOrgID: canonicalOrgID,
+                    sessionPropertyIDMatches: true,
+                    orgIDsMatch: false,
+                    errorMessage: nil
+                )
+            ),
+            (
+                "remote_orgs_disagree",
+                AppState.SessionSnapshotAuthPreflightRemoteParentStatus(
+                    propertyExists: true,
+                    sessionExists: true,
+                    propertyOrgID: canonicalOrgID,
+                    sessionOrgID: mismatchedOrgID,
+                    sessionPropertyIDMatches: true,
+                    orgIDsMatch: false,
+                    errorMessage: nil
+                )
+            ),
+            (
+                "session_belongs_to_another_property",
+                AppState.SessionSnapshotAuthPreflightRemoteParentStatus(
+                    propertyExists: true,
+                    sessionExists: true,
+                    propertyOrgID: canonicalOrgID,
+                    sessionOrgID: canonicalOrgID,
+                    sessionPropertyIDMatches: false,
+                    orgIDsMatch: false,
+                    errorMessage: nil
+                )
+            )
+        ]
+
+        for (name, status) in cases {
+            let fixture = try makeFixture(
+                remoteParentPreflightOverride: { _, _, _ in status }
+            )
+            defer { try? FileManager.default.removeItem(at: fixture.root) }
+            let originalOrgID = try XCTUnwrap(fixture.property.orgId, name)
+
+            let result = await fixture.appState.repairSelectedManualSessionSnapshotLocalOrgDrift()
+
+            XCTAssertFalse(result.repaired, name)
+            XCTAssertTrue(result.message.contains("could not be confirmed"), name)
+            let property = try XCTUnwrap(try fixture.store.fetchProperties().first { $0.id == fixture.property.id }, name)
+            let metadata = try fixture.store.loadSessionMetadata(propertyID: fixture.property.id, sessionID: fixture.session.id)
+            XCTAssertEqual(property.orgId, originalOrgID, name)
+            XCTAssertEqual(metadata.orgID, originalOrgID, name)
+            XCTAssertEqual(fixture.appState.localDiagnostics.sessionSnapshotUpload.lastLocalOrgRepairOutcome, "blocked", name)
+        }
     }
 
     func testStorageSuccessTableInsertFailureRecordsOrphanRisk() async throws {

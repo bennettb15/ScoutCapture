@@ -428,6 +428,22 @@ final class AppState: ObservableObject {
         var sessionPropertyIDMatches: Bool = false
         var orgIDsMatch: Bool = false
         var errorMessage: String?
+
+        var confirmedCanonicalOrgID: UUID? {
+            guard propertyExists,
+                  sessionExists,
+                  sessionPropertyIDMatches,
+                  let propertyOrgID,
+                  let sessionOrgID,
+                  propertyOrgID == sessionOrgID else {
+                return nil
+            }
+            return propertyOrgID
+        }
+
+        var hasConfirmedRemoteParent: Bool {
+            confirmedCanonicalOrgID != nil
+        }
     }
 
     struct SessionSnapshotAuthPreflightResult: Equatable {
@@ -11133,12 +11149,7 @@ final class AppState: ObservableObject {
             return result
         }
 
-        guard remoteStatus.propertyExists,
-              remoteStatus.sessionExists,
-              remoteStatus.sessionPropertyIDMatches,
-              let propertyOrgID = remoteStatus.propertyOrgID,
-              let sessionOrgID = remoteStatus.sessionOrgID,
-              propertyOrgID == sessionOrgID else {
+        guard let canonicalOrgID = remoteStatus.confirmedCanonicalOrgID else {
             let result = SessionSnapshotLocalOrgRepairResult(
                 repaired: false,
                 propertyID: target.propertyID,
@@ -11152,17 +11163,17 @@ final class AppState: ObservableObject {
         }
 
         do {
-            let organizationName = organizationSelectionOptions.first(where: { $0.id == propertyOrgID })?.name
-                ?? allOrganizations.first(where: { $0.id == propertyOrgID })?.name
+            let organizationName = organizationSelectionOptions.first(where: { $0.id == canonicalOrgID })?.name
+                ?? allOrganizations.first(where: { $0.id == canonicalOrgID })?.name
                 ?? activeOrganization?.name
                 ?? "Remote Organization"
             let repairedProperty = try localStore.repairPropertyOrgIDForSessionSnapshotValidation(
                 propertyID: target.propertyID,
-                canonicalOrgID: propertyOrgID,
+                canonicalOrgID: canonicalOrgID,
                 organizationName: organizationName
             )
             var repairedMetadata = localMetadata
-            repairedMetadata.orgID = propertyOrgID
+            repairedMetadata.orgID = canonicalOrgID
             try localStore.saveSessionMetadataAtomically(
                 propertyID: target.propertyID,
                 sessionID: localSession.id,
@@ -11182,8 +11193,8 @@ final class AppState: ObservableObject {
                 propertyID: target.propertyID,
                 sessionID: localSession.id,
                 previousLocalOrgID: previousOrgID,
-                canonicalOrgID: propertyOrgID,
-                message: previousOrgID == propertyOrgID ? "selected target already matched canonical org" : "selected target local org repaired"
+                canonicalOrgID: canonicalOrgID,
+                message: previousOrgID == canonicalOrgID ? "selected target already matched canonical org" : "selected target local org repaired"
             )
             recordSessionSnapshotLocalOrgRepair(result)
             _ = await refreshManualSessionSnapshotAuthPreflight()
@@ -11194,7 +11205,7 @@ final class AppState: ObservableObject {
                 propertyID: target.propertyID,
                 sessionID: localSession.id,
                 previousLocalOrgID: previousOrgID,
-                canonicalOrgID: propertyOrgID,
+                canonicalOrgID: canonicalOrgID,
                 message: Self.diagnosticsPreviewText(error.localizedDescription, maxLength: 160) ?? "local repair failed"
             )
             recordSessionSnapshotLocalOrgRepair(result)
