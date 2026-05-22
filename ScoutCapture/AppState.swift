@@ -7416,6 +7416,23 @@ final class AppState: ObservableObject {
                 currentUpdatedAt: existingProperty.updatedAt,
                 incomingUpdatedAt: record.updatedAt
                ) {
+                if let existingIndex,
+                   existingProperty.orgId != record.orgID,
+                   record.deletedAt == nil,
+                   !record.isArchived {
+                    var corrected = existingProperty
+                    corrected.orgId = record.orgID
+                    allProperties[existingIndex] = corrected
+                    applied += 1
+                    didMutateProperties = true
+                    print(
+                        "[SyncApply] action=property_org_corrected " +
+                        "propertyID=\(record.id.uuidString) " +
+                        "staleOrgID=\(existingProperty.orgId?.uuidString ?? "nil") " +
+                        "canonicalOrgID=\(record.orgID.uuidString)"
+                    )
+                    continue
+                }
                 skipped += 1
                 if existingProperty.updatedAt > record.updatedAt {
                     print(
@@ -7522,6 +7539,9 @@ final class AppState: ObservableObject {
             )
         }
 
+        let caches = makeHubCaches(for: allProperties)
+        applyHubCachePayload(properties: allProperties, organizations: allOrganizations, caches: caches)
+
         return (applied, skipped)
     }
 
@@ -7536,6 +7556,15 @@ final class AppState: ObservableObject {
         var skipped = 0
 
         for record in records where record.orgID == orgID {
+            if record.deletedAt != nil {
+                skipped += 1
+                print(
+                    "[SyncApply] action=session_skipped " +
+                    "sessionID=\(record.id.uuidString) " +
+                    "reason=deleted_remote_row"
+                )
+                continue
+            }
             guard allProperties.contains(where: { $0.id == record.propertyID }) else {
                 skipped += 1
                 print(

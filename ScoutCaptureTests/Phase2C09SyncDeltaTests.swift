@@ -261,6 +261,174 @@ final class Phase2C09SyncDeltaTests: XCTestCase {
         XCTAssertEqual(persisted?.name, "Local Property")
     }
 
+    func testDeltaApplyCorrectsStaleLocalOrgForCanonicalActiveRemoteProperty() async throws {
+        let fixture = try makeFixture()
+        defer { tearDownFixture(fixture) }
+        let staleOrgID = UUID()
+        let canonicalOrgID = UUID()
+        let propertyID = UUID()
+        let localUpdatedAt = Date(timeIntervalSinceReferenceDate: 300)
+        try makeOrganization(fixture, id: staleOrgID)
+        try makeOrganization(fixture, id: canonicalOrgID)
+
+        _ = try fixture.localStore.createProperty(
+            Property(
+                id: propertyID,
+                orgId: staleOrgID,
+                folderId: "00001",
+                clientName: "Local Client",
+                name: "Local Property",
+                address: "123 Local Street",
+                street: "123 Local Street",
+                city: "Boston",
+                state: "MA",
+                zip: "02110",
+                createdAt: Date(timeIntervalSinceReferenceDate: 100),
+                updatedAt: localUpdatedAt
+            )
+        )
+        await refresh(fixture.appState)
+        await configureOrganizationContext(fixture.appState, orgID: canonicalOrgID)
+
+        let result = await MainActor.run {
+            fixture.appState._debugApplySyncDeltaPropertiesForTests(
+                records: [
+                    makePropertyDelta(
+                        id: propertyID,
+                        orgID: canonicalOrgID,
+                        name: "Remote Older Name",
+                        createdAt: Date(timeIntervalSinceReferenceDate: 100),
+                        updatedAt: Date(timeIntervalSinceReferenceDate: 200)
+                    )
+                ],
+                orgID: canonicalOrgID
+            )
+        }
+
+        let persisted = try fixture.localStore.fetchProperties().first(where: { $0.id == propertyID })
+        XCTAssertEqual(result.applied, 1)
+        XCTAssertEqual(result.skipped, 0)
+        XCTAssertEqual(persisted?.orgId, canonicalOrgID)
+        XCTAssertEqual(persisted?.name, "Local Property")
+        XCTAssertEqual(persisted?.updatedAt, localUpdatedAt)
+    }
+
+    func testDeltaApplyDoesNotCorrectLocalOrgWhenRemoteRowMissing() async throws {
+        let fixture = try makeFixture()
+        defer { tearDownFixture(fixture) }
+        let staleOrgID = UUID()
+        let canonicalOrgID = UUID()
+        let propertyID = UUID()
+        try makeOrganization(fixture, id: staleOrgID)
+        try makeOrganization(fixture, id: canonicalOrgID)
+
+        _ = try fixture.localStore.createProperty(
+            Property(id: propertyID, orgId: staleOrgID, name: "Local Property")
+        )
+        await refresh(fixture.appState)
+        await configureOrganizationContext(fixture.appState, orgID: canonicalOrgID)
+
+        let result = await MainActor.run {
+            fixture.appState._debugApplySyncDeltaPropertiesForTests(records: [], orgID: canonicalOrgID)
+        }
+
+        let persisted = try fixture.localStore.fetchProperties().first(where: { $0.id == propertyID })
+        XCTAssertEqual(result.applied, 0)
+        XCTAssertEqual(result.skipped, 0)
+        XCTAssertEqual(persisted?.orgId, staleOrgID)
+    }
+
+    func testDeltaApplyDoesNotCorrectLocalOrgWhenRemoteIDDiffers() async throws {
+        let fixture = try makeFixture()
+        defer { tearDownFixture(fixture) }
+        let staleOrgID = UUID()
+        let canonicalOrgID = UUID()
+        let propertyID = UUID()
+        try makeOrganization(fixture, id: staleOrgID)
+        try makeOrganization(fixture, id: canonicalOrgID)
+
+        _ = try fixture.localStore.createProperty(
+            Property(
+                id: propertyID,
+                orgId: staleOrgID,
+                name: "Local Property",
+                updatedAt: Date(timeIntervalSinceReferenceDate: 300)
+            )
+        )
+        await refresh(fixture.appState)
+        await configureOrganizationContext(fixture.appState, orgID: canonicalOrgID)
+
+        let result = await MainActor.run {
+            fixture.appState._debugApplySyncDeltaPropertiesForTests(
+                records: [
+                    makePropertyDelta(
+                        id: UUID(),
+                        orgID: canonicalOrgID,
+                        name: "Different Remote Property",
+                        createdAt: Date(timeIntervalSinceReferenceDate: 100),
+                        updatedAt: Date(timeIntervalSinceReferenceDate: 200)
+                    )
+                ],
+                orgID: canonicalOrgID
+            )
+        }
+
+        let persisted = try fixture.localStore.fetchProperties().first(where: { $0.id == propertyID })
+        XCTAssertEqual(result.applied, 1)
+        XCTAssertEqual(result.skipped, 0)
+        XCTAssertEqual(persisted?.orgId, staleOrgID)
+    }
+
+    func testDeltaApplyDoesNotCorrectLocalOrgForDeletedOrArchivedRemoteRows() async throws {
+        let cases: [(String, Date?, Bool)] = [
+            ("deleted", Date(timeIntervalSinceReferenceDate: 200), false),
+            ("archived", nil, true)
+        ]
+
+        for (name, deletedAt, isArchived) in cases {
+            let fixture = try makeFixture()
+            defer { tearDownFixture(fixture) }
+            let staleOrgID = UUID()
+            let canonicalOrgID = UUID()
+            let propertyID = UUID()
+            try makeOrganization(fixture, id: staleOrgID)
+            try makeOrganization(fixture, id: canonicalOrgID)
+
+            _ = try fixture.localStore.createProperty(
+                Property(
+                    id: propertyID,
+                    orgId: staleOrgID,
+                    name: "Local Property",
+                    updatedAt: Date(timeIntervalSinceReferenceDate: 300)
+                )
+            )
+            await refresh(fixture.appState)
+            await configureOrganizationContext(fixture.appState, orgID: canonicalOrgID)
+
+            let result = await MainActor.run {
+                fixture.appState._debugApplySyncDeltaPropertiesForTests(
+                    records: [
+                        makePropertyDelta(
+                            id: propertyID,
+                            orgID: canonicalOrgID,
+                            name: "Remote \(name)",
+                            createdAt: Date(timeIntervalSinceReferenceDate: 100),
+                            updatedAt: Date(timeIntervalSinceReferenceDate: 200),
+                            deletedAt: deletedAt,
+                            isArchived: isArchived
+                        )
+                    ],
+                    orgID: canonicalOrgID
+                )
+            }
+
+            let persisted = try fixture.localStore.fetchProperties().first(where: { $0.id == propertyID })
+            XCTAssertEqual(result.applied, 0, name)
+            XCTAssertEqual(result.skipped, 1, name)
+            XCTAssertEqual(persisted?.orgId, staleOrgID, name)
+        }
+    }
+
     func testDeltaApplyUpsertsRemoteNewerProperty() async throws {
         let fixture = try makeFixture()
         defer { tearDownFixture(fixture) }
