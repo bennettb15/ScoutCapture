@@ -24,16 +24,20 @@ struct SupabaseRuntimeConfiguration {
         case invalid
         case localDev = "local_dev"
         case approvedStaging = "approved_staging"
+        case approvedProductionValidation = "approved_production_validation"
         case remote
     }
 
     static let approvedSessionSnapshotStagingProjectRef = "hpekjqqiyurrewfjvjmn"
+    static let productionSnapshotValidationProjectRef = "chlvazmtucoszicehtnm"
+    static let productionSnapshotValidationEnvKey = "SCOUTCAPTURE_PRODUCTION_SNAPSHOT_VALIDATION_ALLOWED"
 
     let url: URL?
     let anonKey: String?
     let source: Source
     let overrideURLRawValue: String?
     let overrideAnonKeyPresent: Bool
+    let productionSnapshotValidationAllowed: Bool
 
     var isConfigured: Bool {
         url != nil && !(anonKey?.isEmpty ?? true)
@@ -54,6 +58,10 @@ struct SupabaseRuntimeConfiguration {
         if host == "\(Self.approvedSessionSnapshotStagingProjectRef).supabase.co" {
             return .approvedStaging
         }
+        if host == "\(Self.productionSnapshotValidationProjectRef).supabase.co",
+           productionSnapshotValidationAllowed {
+            return .approvedProductionValidation
+        }
         return .remote
     }
 
@@ -62,13 +70,19 @@ struct SupabaseRuntimeConfiguration {
     }
 
     var isSessionSnapshotShadowWriteOverrideAllowed: Bool {
-        guard isOverrideActive, isConfigured else { return false }
+        guard isConfigured else { return false }
         switch targetClassification {
         case .localDev, .approvedStaging:
+            return isOverrideActive
+        case .approvedProductionValidation:
             return true
         case .missing, .invalid, .remote:
             return false
         }
+    }
+
+    var isProductionSnapshotValidationManualOnly: Bool {
+        targetClassification == .approvedProductionValidation
     }
 
     var sanitizedURLDisplay: String {
@@ -98,13 +112,15 @@ struct SupabaseRuntimeConfiguration {
         anonKey: String?,
         source: Source = .infoPlist,
         overrideURLRawValue: String? = nil,
-        overrideAnonKeyPresent: Bool = false
+        overrideAnonKeyPresent: Bool = false,
+        productionSnapshotValidationAllowed: Bool = false
     ) {
         self.url = url
         self.anonKey = anonKey
         self.source = source
         self.overrideURLRawValue = overrideURLRawValue
         self.overrideAnonKeyPresent = overrideAnonKeyPresent
+        self.productionSnapshotValidationAllowed = productionSnapshotValidationAllowed
     }
 
     private static func sanitizedURLText(_ value: String) -> String {
@@ -3606,6 +3622,11 @@ final class AppState: ObservableObject {
         guard supabaseConfiguration.isSessionSnapshotShadowWriteOverrideAllowed else {
             return (false, "Supabase target is not approved for snapshot shadow-write override")
         }
+        if supabaseConfiguration.isProductionSnapshotValidationManualOnly {
+            guard supabaseConfiguration.productionSnapshotValidationAllowed else {
+                return (false, "production snapshot validation gate disabled")
+            }
+        }
         guard localDiagnostics.sessionSnapshotUpload.remoteAvailability != "unavailable" else {
             return (false, "snapshot schema unavailable")
         }
@@ -4527,6 +4548,10 @@ final class AppState: ObservableObject {
         environment: [String: String] = ProcessInfo.processInfo.environment,
         debugOverrideAllowed: Bool = AppStateTestEnvironment.isRunningUnderXCTest
     ) -> SupabaseRuntimeConfiguration {
+        let productionSnapshotValidationAllowed = Self.boolEnvironmentValue(
+            for: SupabaseRuntimeConfiguration.productionSnapshotValidationEnvKey,
+            environment: environment
+        )
         #if DEBUG
         let overrideAllowed = true
         #else
@@ -4546,7 +4571,8 @@ final class AppState: ObservableObject {
                     anonKey: isValid ? overrideAnonKey : nil,
                     source: isValid ? .environmentOverride : .invalidEnvironmentOverride,
                     overrideURLRawValue: rawOverrideURL,
-                    overrideAnonKeyPresent: rawOverrideAnonKey?.isEmpty == false
+                    overrideAnonKeyPresent: rawOverrideAnonKey?.isEmpty == false,
+                    productionSnapshotValidationAllowed: productionSnapshotValidationAllowed
                 )
             }
         }
@@ -4559,8 +4585,24 @@ final class AppState: ObservableObject {
         return SupabaseRuntimeConfiguration(
             url: rawURL.flatMap(Self.validSupabaseURL(from:)),
             anonKey: rawAnonKey,
-            source: .infoPlist
+            source: .infoPlist,
+            productionSnapshotValidationAllowed: productionSnapshotValidationAllowed
         )
+    }
+
+    private nonisolated static func boolEnvironmentValue(
+        for key: String,
+        environment: [String: String]
+    ) -> Bool {
+        guard let rawValue = environment[key]?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() else {
+            return false
+        }
+        switch rawValue {
+        case "1", "true", "yes", "on":
+            return true
+        default:
+            return false
+        }
     }
 
     private nonisolated static func validSupabaseURL(from rawValue: String) -> URL? {
@@ -10833,6 +10875,29 @@ final class AppState: ObservableObject {
                 storagePath: nil,
                 message: SessionSnapshotUploadError.disabled.localizedDescription
             )
+        }
+        if supabaseConfiguration.isProductionSnapshotValidationManualOnly {
+            guard kind == .manual && trigger == "manual_diagnostic" else {
+                let error = SessionSnapshotUploadError.notPreviewable("Production snapshot validation is manual-only.")
+                recordSessionSnapshotUploadFailure(
+                    outcome: .failed,
+                    snapshotID: nil,
+                    propertyID: propertyID,
+                    sessionID: sessionID,
+                    path: nil,
+                    kind: kind,
+                    trigger: trigger,
+                    error: error
+                )
+                return SessionSnapshotUploadResult(
+                    outcome: .failed,
+                    snapshotID: nil,
+                    sessionID: sessionID,
+                    propertyID: propertyID,
+                    storagePath: nil,
+                    message: error.localizedDescription
+                )
+            }
         }
 
         let snapshotID = UUID()

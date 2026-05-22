@@ -47,6 +47,21 @@ final class Phase2C23IALocalSupabaseOverrideTests: XCTestCase {
         ]
     }
 
+    private func productionSnapshotEnvironment(
+        flagValue: String = "true",
+        validationAllowed: String? = nil
+    ) -> [String: String] {
+        var environment = [
+            "SCOUTCAPTURE_SUPABASE_URL": "https://chlvazmtucoszicehtnm.supabase.co",
+            "SCOUTCAPTURE_SUPABASE_ANON_KEY": "production-anon-key",
+            "session_snapshot_shadow_write_enabled": flagValue
+        ]
+        if let validationAllowed {
+            environment["SCOUTCAPTURE_PRODUCTION_SNAPSHOT_VALIDATION_ALLOWED"] = validationAllowed
+        }
+        return environment
+    }
+
     private func makeStoreWithPropertyAndSessions(
         sessionStarts: [TimeInterval]
     ) throws -> (store: LocalStore, property: Property, sessions: [Session]) {
@@ -159,6 +174,17 @@ final class Phase2C23IALocalSupabaseOverrideTests: XCTestCase {
             anonKey: "remote-anon-key",
             source: .infoPlist
         )
+        let productionWithoutGate = SupabaseRuntimeConfiguration(
+            url: URL(string: "https://chlvazmtucoszicehtnm.supabase.co"),
+            anonKey: "production-anon-key",
+            source: .environmentOverride
+        )
+        let productionWithGate = SupabaseRuntimeConfiguration(
+            url: URL(string: "https://chlvazmtucoszicehtnm.supabase.co"),
+            anonKey: "production-anon-key",
+            source: .environmentOverride,
+            productionSnapshotValidationAllowed: true
+        )
 
         XCTAssertEqual(local.targetClassification, .localDev)
         XCTAssertTrue(local.isSafeLocalDevOverride)
@@ -169,6 +195,11 @@ final class Phase2C23IALocalSupabaseOverrideTests: XCTestCase {
         XCTAssertEqual(remote.targetClassification, .remote)
         XCTAssertFalse(remote.isSafeLocalDevOverride)
         XCTAssertFalse(remote.isSessionSnapshotShadowWriteOverrideAllowed)
+        XCTAssertEqual(productionWithoutGate.targetClassification, .remote)
+        XCTAssertFalse(productionWithoutGate.isSessionSnapshotShadowWriteOverrideAllowed)
+        XCTAssertEqual(productionWithGate.targetClassification, .approvedProductionValidation)
+        XCTAssertTrue(productionWithGate.isSessionSnapshotShadowWriteOverrideAllowed)
+        XCTAssertTrue(productionWithGate.isProductionSnapshotValidationManualOnly)
     }
 
     func testManualUploadRemainsDisabledUnlessFlagAndValidSafeTarget() {
@@ -301,17 +332,91 @@ final class Phase2C23IALocalSupabaseOverrideTests: XCTestCase {
         let appState = AppState(
             localStore: store,
             userDefaults: makeEmptyDefaults(),
+            environment: productionSnapshotEnvironment(),
+            disableCloudBackupForTests: true
+        )
+
+        XCTAssertEqual(appState.supabaseConfiguration.targetClassification, .remote)
+        XCTAssertFalse(appState.supabaseConfiguration.productionSnapshotValidationAllowed)
+        XCTAssertFalse(appState.supabaseConfiguration.isSessionSnapshotShadowWriteOverrideAllowed)
+        XCTAssertFalse(appState.backendFeatureFlags.sessionSnapshotShadowWriteEnabled)
+    }
+
+    func testAppStateAllowsProductionSnapshotValidationOnlyWithSecondExplicitGate() {
+        let store = LocalStore(testStorageRootURL: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString))
+        let appState = AppState(
+            localStore: store,
+            userDefaults: makeEmptyDefaults(),
+            environment: productionSnapshotEnvironment(validationAllowed: "true"),
+            disableCloudBackupForTests: true
+        )
+
+        XCTAssertEqual(appState.supabaseConfiguration.targetClassification, .approvedProductionValidation)
+        XCTAssertTrue(appState.supabaseConfiguration.productionSnapshotValidationAllowed)
+        XCTAssertTrue(appState.supabaseConfiguration.isProductionSnapshotValidationManualOnly)
+        XCTAssertTrue(appState.supabaseConfiguration.isSessionSnapshotShadowWriteOverrideAllowed)
+        XCTAssertTrue(appState.backendFeatureFlags.sessionSnapshotShadowWriteEnabled)
+        XCTAssertTrue(appState.manualSessionSnapshotUploadAvailability.reason.contains("no property context"))
+    }
+
+    func testRandomRemoteRemainsBlockedEvenWithProductionValidationGate() {
+        let store = LocalStore(testStorageRootURL: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString))
+        let appState = AppState(
+            localStore: store,
+            userDefaults: makeEmptyDefaults(),
             environment: [
-                "SCOUTCAPTURE_SUPABASE_URL": "https://chlvazmtucoszicehtnm.supabase.co",
-                "SCOUTCAPTURE_SUPABASE_ANON_KEY": "production-anon-key",
-                "session_snapshot_shadow_write_enabled": "true"
+                "SCOUTCAPTURE_SUPABASE_URL": "https://remote.example.supabase.co",
+                "SCOUTCAPTURE_SUPABASE_ANON_KEY": "remote-anon-key",
+                "session_snapshot_shadow_write_enabled": "true",
+                "SCOUTCAPTURE_PRODUCTION_SNAPSHOT_VALIDATION_ALLOWED": "true"
             ],
             disableCloudBackupForTests: true
         )
 
         XCTAssertEqual(appState.supabaseConfiguration.targetClassification, .remote)
+        XCTAssertTrue(appState.supabaseConfiguration.productionSnapshotValidationAllowed)
         XCTAssertFalse(appState.supabaseConfiguration.isSessionSnapshotShadowWriteOverrideAllowed)
         XCTAssertFalse(appState.backendFeatureFlags.sessionSnapshotShadowWriteEnabled)
+    }
+
+    func testProductionValidationRejectsNonManualSnapshotUploadBeforeUploadAttempt() async throws {
+        let appState = AppState(
+            localStore: LocalStore(testStorageRootURL: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)),
+            userDefaults: makeEmptyDefaults(),
+            environment: productionSnapshotEnvironment(validationAllowed: "true"),
+            sessionSnapshotStorageUploadOverride: { _ in
+                XCTFail("Production validation test must not attempt storage upload")
+            },
+            sessionSnapshotRowInsertOverride: { _ in
+                XCTFail("Production validation test must not attempt row insert")
+            },
+            disableCloudBackupForTests: true
+        )
+
+        let result = await appState.uploadSessionSnapshotShadowWrite(
+            propertyID: UUID(),
+            sessionID: UUID(),
+            kind: .completed,
+            trigger: "automatic_lifecycle"
+        )
+
+        XCTAssertEqual(result.outcome, .failed)
+        XCTAssertTrue(result.message?.contains("manual-only") == true)
+        XCTAssertEqual(appState.localDiagnostics.sessionSnapshotUpload.attemptedCount, 0)
+    }
+
+    func testSnapshotUploadHasOnlyManualUICallSite() throws {
+        let testFile = URL(fileURLWithPath: #filePath)
+        let projectRoot = testFile
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let appSource = projectRoot
+            .appendingPathComponent("ScoutCapture")
+            .appendingPathComponent("ScoutCaptureApp.swift")
+        let source = try String(contentsOf: appSource)
+
+        XCTAssertEqual(source.components(separatedBy: "uploadCurrentSessionSnapshotShadowWrite(").count - 1, 1)
+        XCTAssertFalse(source.contains("uploadSessionSnapshotShadowWrite("))
     }
 
     func testManualSnapshotUploadTargetUsesActiveSessionFirst() throws {
