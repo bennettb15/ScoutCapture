@@ -468,6 +468,40 @@ final class AppState: ObservableObject {
         var message: String
     }
 
+    struct LocalOrgDriftAuditSample: Equatable {
+        var subject: String
+        var propertyID: UUID
+        var sessionID: UUID?
+        var localOrgID: UUID?
+        var canonicalOrgID: UUID
+        var detail: String
+
+        var diagnosticsLine: String {
+            [
+                "subject=\(subject)",
+                "property_id=\(propertyID.uuidString)",
+                "session_id=\(sessionID?.uuidString ?? "none")",
+                "local_org_id=\(localOrgID?.uuidString ?? "none")",
+                "canonical_org_id=\(canonicalOrgID.uuidString)",
+                "detail=\(detail)"
+            ].joined(separator: " ")
+        }
+    }
+
+    struct LocalOrgDriftAuditResult: Equatable {
+        var checkedAt: Date
+        var totalPropertiesChecked: Int
+        var totalSessionsChecked: Int
+        var propertyMismatchCount: Int
+        var sessionMismatchCount: Int
+        var unableToConfirmCount: Int
+        var samples: [LocalOrgDriftAuditSample]
+
+        var totalMismatchCount: Int {
+            propertyMismatchCount + sessionMismatchCount
+        }
+    }
+
     struct ManualSessionSnapshotUploadTarget: Equatable {
         enum Source: String, Equatable {
             case activeSession = "active_session"
@@ -743,6 +777,13 @@ final class AppState: ObservableObject {
         var lastLocalOrgRepairPreviousOrgID: UUID?
         var lastLocalOrgRepairCanonicalOrgID: UUID?
         var lastLocalOrgRepairMessage: String?
+        var lastLocalOrgDriftAuditAt: Date?
+        var lastLocalOrgDriftAuditPropertiesChecked: Int = 0
+        var lastLocalOrgDriftAuditSessionsChecked: Int = 0
+        var lastLocalOrgDriftAuditPropertyMismatchCount: Int = 0
+        var lastLocalOrgDriftAuditSessionMismatchCount: Int = 0
+        var lastLocalOrgDriftAuditUnableToConfirmCount: Int = 0
+        var lastLocalOrgDriftAuditSamples: [String] = []
         var lastReadbackAt: Date?
         var lastReadbackStatus: String = "not_checked"
         var lastReadbackSnapshotID: UUID?
@@ -11124,6 +11165,121 @@ final class AppState: ObservableObject {
 
     @MainActor
     @discardableResult
+    func runLocalOrgDriftAudit(checkedAt: Date = Date(), sampleLimit: Int = 5) async -> LocalOrgDriftAuditResult {
+        let activeLocalProperties = ((try? localStore.fetchProperties()) ?? [])
+            .filter { $0.deletedAt == nil }
+
+        var totalPropertiesChecked = 0
+        var totalSessionsChecked = 0
+        var propertyMismatchCount = 0
+        var sessionMismatchCount = 0
+        var unableToConfirmCount = 0
+        var samples: [LocalOrgDriftAuditSample] = []
+        var confirmedCanonicalOrgByProperty: [UUID: UUID] = [:]
+        var checkedPropertyIDs = Set<UUID>()
+
+        func appendSample(_ sample: LocalOrgDriftAuditSample) {
+            guard samples.count < sampleLimit else { return }
+            samples.append(sample)
+        }
+
+        for property in activeLocalProperties {
+            let localSessions = ((try? localStore.fetchSessionsForCacheBuild(propertyID: property.id)) ?? [])
+                .filter { $0.deletedAt == nil }
+
+            guard !localSessions.isEmpty else {
+                unableToConfirmCount += 1
+                continue
+            }
+
+            for session in localSessions {
+                let metadata: SessionMetadata
+                do {
+                    metadata = try localStore.loadSessionMetadata(propertyID: property.id, sessionID: session.id)
+                } catch {
+                    unableToConfirmCount += 1
+                    continue
+                }
+
+                guard let probeOrgID = metadata.orgID ?? property.orgId ?? activeOrganizationID else {
+                    unableToConfirmCount += 1
+                    continue
+                }
+
+                let remoteStatus: SessionSnapshotAuthPreflightRemoteParentStatus
+                do {
+                    remoteStatus = try await sessionSnapshotRemoteParentPreflightStatus(
+                        orgID: probeOrgID,
+                        propertyID: property.id,
+                        sessionID: session.id
+                    )
+                } catch {
+                    unableToConfirmCount += 1
+                    continue
+                }
+
+                guard let canonicalOrgID = remoteStatus.confirmedCanonicalOrgID else {
+                    unableToConfirmCount += 1
+                    continue
+                }
+
+                if let previousCanonicalOrgID = confirmedCanonicalOrgByProperty[property.id],
+                   previousCanonicalOrgID != canonicalOrgID {
+                    unableToConfirmCount += 1
+                    continue
+                }
+                confirmedCanonicalOrgByProperty[property.id] = canonicalOrgID
+                totalSessionsChecked += 1
+
+                if !checkedPropertyIDs.contains(property.id) {
+                    checkedPropertyIDs.insert(property.id)
+                    totalPropertiesChecked += 1
+                    if property.orgId != canonicalOrgID {
+                        propertyMismatchCount += 1
+                        appendSample(
+                            LocalOrgDriftAuditSample(
+                                subject: "property",
+                                propertyID: property.id,
+                                sessionID: nil,
+                                localOrgID: property.orgId,
+                                canonicalOrgID: canonicalOrgID,
+                                detail: "local_property_org_differs_from_confirmed_remote_parent_org"
+                            )
+                        )
+                    }
+                }
+
+                if metadata.orgID != canonicalOrgID {
+                    sessionMismatchCount += 1
+                    appendSample(
+                        LocalOrgDriftAuditSample(
+                            subject: "session_metadata",
+                            propertyID: property.id,
+                            sessionID: session.id,
+                            localOrgID: metadata.orgID,
+                            canonicalOrgID: canonicalOrgID,
+                            detail: "local_session_metadata_org_differs_from_confirmed_remote_parent_org"
+                        )
+                    )
+                }
+            }
+        }
+
+        let result = LocalOrgDriftAuditResult(
+            checkedAt: checkedAt,
+            totalPropertiesChecked: totalPropertiesChecked,
+            totalSessionsChecked: totalSessionsChecked,
+            propertyMismatchCount: propertyMismatchCount,
+            sessionMismatchCount: sessionMismatchCount,
+            unableToConfirmCount: unableToConfirmCount,
+            samples: samples
+        )
+        recordLocalOrgDriftAudit(result)
+        return result
+    }
+
+    @MainActor
+    @discardableResult
     func repairSelectedManualSessionSnapshotLocalOrgDrift() async -> SessionSnapshotLocalOrgRepairResult {
         guard let target = manualSessionSnapshotUploadTarget else {
             let result = SessionSnapshotLocalOrgRepairResult(
@@ -11897,6 +12053,18 @@ final class AppState: ObservableObject {
         diagnostics.sessionSnapshotUpload.lastLocalOrgRepairPreviousOrgID = result.previousLocalOrgID
         diagnostics.sessionSnapshotUpload.lastLocalOrgRepairCanonicalOrgID = result.canonicalOrgID
         diagnostics.sessionSnapshotUpload.lastLocalOrgRepairMessage = result.message
+        localDiagnostics = diagnostics
+    }
+
+    private func recordLocalOrgDriftAudit(_ result: LocalOrgDriftAuditResult) {
+        var diagnostics = localDiagnostics
+        diagnostics.sessionSnapshotUpload.lastLocalOrgDriftAuditAt = result.checkedAt
+        diagnostics.sessionSnapshotUpload.lastLocalOrgDriftAuditPropertiesChecked = result.totalPropertiesChecked
+        diagnostics.sessionSnapshotUpload.lastLocalOrgDriftAuditSessionsChecked = result.totalSessionsChecked
+        diagnostics.sessionSnapshotUpload.lastLocalOrgDriftAuditPropertyMismatchCount = result.propertyMismatchCount
+        diagnostics.sessionSnapshotUpload.lastLocalOrgDriftAuditSessionMismatchCount = result.sessionMismatchCount
+        diagnostics.sessionSnapshotUpload.lastLocalOrgDriftAuditUnableToConfirmCount = result.unableToConfirmCount
+        diagnostics.sessionSnapshotUpload.lastLocalOrgDriftAuditSamples = result.samples.map(\.diagnosticsLine)
         localDiagnostics = diagnostics
     }
 
@@ -13275,6 +13443,22 @@ final class AppState: ObservableObject {
         lines.append("- local_org_repair_previous_org_id: \(diagnostics.lastLocalOrgRepairPreviousOrgID?.uuidString ?? "none")")
         lines.append("- local_org_repair_canonical_org_id: \(diagnostics.lastLocalOrgRepairCanonicalOrgID?.uuidString ?? "none")")
         lines.append("- local_org_repair_message: \(diagnosticsPreviewText(diagnostics.lastLocalOrgRepairMessage, maxLength: 160) ?? "none")")
+        lines.append("")
+        lines.append("Local Org Drift Audit")
+        lines.append("- audit_at: \(diagnostics.lastLocalOrgDriftAuditAt?.formatted(date: .abbreviated, time: .standard) ?? "none")")
+        lines.append("- properties_checked: \(diagnostics.lastLocalOrgDriftAuditPropertiesChecked)")
+        lines.append("- sessions_checked: \(diagnostics.lastLocalOrgDriftAuditSessionsChecked)")
+        lines.append("- property_mismatch_count: \(diagnostics.lastLocalOrgDriftAuditPropertyMismatchCount)")
+        lines.append("- session_metadata_mismatch_count: \(diagnostics.lastLocalOrgDriftAuditSessionMismatchCount)")
+        lines.append("- unable_to_confirm_count: \(diagnostics.lastLocalOrgDriftAuditUnableToConfirmCount)")
+        if diagnostics.lastLocalOrgDriftAuditSamples.isEmpty {
+            lines.append("- samples: none")
+        } else {
+            lines.append("Samples")
+            for sample in diagnostics.lastLocalOrgDriftAuditSamples {
+                lines.append("- \(diagnosticsPreviewText(sample, maxLength: 240) ?? "sample_unavailable")")
+            }
+        }
         lines.append("")
         lines.append("Remote Readback")
         lines.append("- status: \(diagnosticsPreviewText(diagnostics.lastReadbackStatus, maxLength: 60) ?? "not_checked")")

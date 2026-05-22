@@ -579,6 +579,164 @@ final class Phase2C23FSessionSnapshotShadowWriteTests: XCTestCase {
         }
     }
 
+    func testLocalOrgDriftAuditDetectsPropertyAndSessionMetadataMismatches() async throws {
+        let canonicalOrgID = UUID()
+        let fixture = try makeFixture(
+            remoteParentPreflightOverride: { _, _, _ in
+                AppState.SessionSnapshotAuthPreflightRemoteParentStatus(
+                    propertyExists: true,
+                    sessionExists: true,
+                    propertyOrgID: canonicalOrgID,
+                    sessionOrgID: canonicalOrgID,
+                    sessionPropertyIDMatches: true,
+                    orgIDsMatch: false,
+                    errorMessage: nil
+                )
+            }
+        )
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+
+        let result = await fixture.appState.runLocalOrgDriftAudit()
+
+        XCTAssertEqual(result.totalPropertiesChecked, 1)
+        XCTAssertEqual(result.totalSessionsChecked, 1)
+        XCTAssertEqual(result.propertyMismatchCount, 1)
+        XCTAssertEqual(result.sessionMismatchCount, 1)
+        XCTAssertEqual(result.unableToConfirmCount, 0)
+        XCTAssertEqual(result.samples.count, 2)
+        XCTAssertEqual(fixture.appState.localDiagnostics.sessionSnapshotUpload.lastLocalOrgDriftAuditPropertyMismatchCount, 1)
+        XCTAssertEqual(fixture.appState.localDiagnostics.sessionSnapshotUpload.lastLocalOrgDriftAuditSessionMismatchCount, 1)
+    }
+
+    func testLocalOrgDriftAuditRequiresCanonicalRemoteAgreement() async throws {
+        let canonicalOrgID = UUID()
+        let mismatchedOrgID = UUID()
+        let cases: [(String, AppState.SessionSnapshotAuthPreflightRemoteParentStatus)] = [
+            (
+                "remote_orgs_disagree",
+                AppState.SessionSnapshotAuthPreflightRemoteParentStatus(
+                    propertyExists: true,
+                    sessionExists: true,
+                    propertyOrgID: canonicalOrgID,
+                    sessionOrgID: mismatchedOrgID,
+                    sessionPropertyIDMatches: true,
+                    orgIDsMatch: false,
+                    errorMessage: nil
+                )
+            ),
+            (
+                "session_belongs_to_another_property",
+                AppState.SessionSnapshotAuthPreflightRemoteParentStatus(
+                    propertyExists: true,
+                    sessionExists: true,
+                    propertyOrgID: canonicalOrgID,
+                    sessionOrgID: canonicalOrgID,
+                    sessionPropertyIDMatches: false,
+                    orgIDsMatch: false,
+                    errorMessage: nil
+                )
+            )
+        ]
+
+        for (name, status) in cases {
+            let fixture = try makeFixture(
+                remoteParentPreflightOverride: { _, _, _ in status }
+            )
+            defer { try? FileManager.default.removeItem(at: fixture.root) }
+
+            let result = await fixture.appState.runLocalOrgDriftAudit()
+
+            XCTAssertEqual(result.totalPropertiesChecked, 0, name)
+            XCTAssertEqual(result.totalSessionsChecked, 0, name)
+            XCTAssertEqual(result.propertyMismatchCount, 0, name)
+            XCTAssertEqual(result.sessionMismatchCount, 0, name)
+            XCTAssertEqual(result.unableToConfirmCount, 1, name)
+            XCTAssertTrue(result.samples.isEmpty, name)
+        }
+    }
+
+    func testLocalOrgDriftAuditTreatsMissingOrHiddenRemoteRowsAsUnableToConfirm() async throws {
+        let localOrgID = UUID()
+        let cases: [(String, AppState.SessionSnapshotAuthPreflightRemoteParentStatus)] = [
+            (
+                "property_missing_or_hidden",
+                AppState.SessionSnapshotAuthPreflightRemoteParentStatus(
+                    propertyExists: false,
+                    sessionExists: true,
+                    propertyOrgID: nil,
+                    sessionOrgID: localOrgID,
+                    sessionPropertyIDMatches: true,
+                    orgIDsMatch: false,
+                    errorMessage: nil
+                )
+            ),
+            (
+                "session_missing_or_hidden",
+                AppState.SessionSnapshotAuthPreflightRemoteParentStatus(
+                    propertyExists: true,
+                    sessionExists: false,
+                    propertyOrgID: localOrgID,
+                    sessionOrgID: nil,
+                    sessionPropertyIDMatches: false,
+                    orgIDsMatch: false,
+                    errorMessage: nil
+                )
+            )
+        ]
+
+        for (name, status) in cases {
+            let fixture = try makeFixture(
+                remoteParentPreflightOverride: { _, _, _ in status }
+            )
+            defer { try? FileManager.default.removeItem(at: fixture.root) }
+
+            let result = await fixture.appState.runLocalOrgDriftAudit()
+
+            XCTAssertEqual(result.totalPropertiesChecked, 0, name)
+            XCTAssertEqual(result.totalSessionsChecked, 0, name)
+            XCTAssertEqual(result.totalMismatchCount, 0, name)
+            XCTAssertEqual(result.unableToConfirmCount, 1, name)
+            XCTAssertTrue(result.samples.isEmpty, name)
+        }
+    }
+
+    func testLocalOrgDriftAuditDoesNotReportFalsePositiveWhenLocalMatchesCanonical() async throws {
+        let localOrgID = UUID()
+        let fixture = try makeFixture(
+            remoteParentPreflightOverride: { _, _, _ in
+                AppState.SessionSnapshotAuthPreflightRemoteParentStatus(
+                    propertyExists: true,
+                    sessionExists: true,
+                    propertyOrgID: localOrgID,
+                    sessionOrgID: localOrgID,
+                    sessionPropertyIDMatches: true,
+                    orgIDsMatch: true,
+                    errorMessage: nil
+                )
+            }
+        )
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        _ = try fixture.store.createOrganization(Organization(id: localOrgID, name: "Canonical Org"))
+        var property = fixture.property
+        property.orgId = localOrgID
+        _ = try fixture.store.updateProperty(property)
+        var metadata = try fixture.store.loadSessionMetadata(propertyID: fixture.property.id, sessionID: fixture.session.id)
+        metadata.orgID = localOrgID
+        try fixture.store.saveSessionMetadataAtomically(
+            propertyID: fixture.property.id,
+            sessionID: fixture.session.id,
+            metadata: metadata
+        )
+
+        let result = await fixture.appState.runLocalOrgDriftAudit()
+
+        XCTAssertEqual(result.totalPropertiesChecked, 1)
+        XCTAssertEqual(result.totalSessionsChecked, 1)
+        XCTAssertEqual(result.totalMismatchCount, 0)
+        XCTAssertEqual(result.unableToConfirmCount, 0)
+        XCTAssertTrue(result.samples.isEmpty)
+    }
+
     func testStorageSuccessTableInsertFailureRecordsOrphanRisk() async throws {
         let fixture = try makeFixture(rowInsertOverride: { _ in
             throw NSError(domain: "ScoutCaptureTests", code: 1, userInfo: [

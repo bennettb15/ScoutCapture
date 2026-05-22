@@ -8669,6 +8669,7 @@ private struct DebugSessionSnapshotUploadDiagnosticsView: View {
     @State private var isCheckingSnapshotReadback: Bool = false
     @State private var isRefreshingAuthPreflight: Bool = false
     @State private var isRepairingLocalOrgDrift: Bool = false
+    @State private var isRunningLocalOrgDriftAudit: Bool = false
     @State private var testSessionCreationMessage: String?
 
     private var reportText: String {
@@ -8825,6 +8826,40 @@ private struct DebugSessionSnapshotUploadDiagnosticsView: View {
                     }
                 }
                 .disabled(isRepairingLocalOrgDrift || uploadTarget == nil)
+                .font(.system(size: 14, weight: .semibold))
+            }
+
+            Section("Local Org Drift Audit") {
+                Text("Read-only manual audit. Confirms canonical org only when active remote property/session rows exist, agree, and the remote session belongs to the local property.")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(.secondary)
+                diagnosticRow("Checked", formattedRunDate(diagnostics.lastLocalOrgDriftAuditAt))
+                diagnosticRow("Properties Checked", diagnostics.lastLocalOrgDriftAuditPropertiesChecked)
+                diagnosticRow("Sessions Checked", diagnostics.lastLocalOrgDriftAuditSessionsChecked)
+                diagnosticRow("Property Mismatches", diagnostics.lastLocalOrgDriftAuditPropertyMismatchCount)
+                diagnosticRow("Session Mismatches", diagnostics.lastLocalOrgDriftAuditSessionMismatchCount)
+                diagnosticRow("Unable To Confirm", diagnostics.lastLocalOrgDriftAuditUnableToConfirmCount)
+                if diagnostics.lastLocalOrgDriftAuditSamples.isEmpty {
+                    diagnosticRow("Samples", "none")
+                } else {
+                    ForEach(Array(diagnostics.lastLocalOrgDriftAuditSamples.enumerated()), id: \.offset) { index, sample in
+                        diagnosticRow(
+                            "Sample \(index + 1)",
+                            AppState.diagnosticsPreviewText(sample, maxLength: 180) ?? "sample_unavailable"
+                        )
+                    }
+                }
+                Button(isRunningLocalOrgDriftAudit ? "Auditing..." : "Run Local Org Drift Audit") {
+                    guard !isRunningLocalOrgDriftAudit else { return }
+                    isRunningLocalOrgDriftAudit = true
+                    Task {
+                        _ = await appState.runLocalOrgDriftAudit()
+                        await MainActor.run {
+                            isRunningLocalOrgDriftAudit = false
+                        }
+                    }
+                }
+                .disabled(isRunningLocalOrgDriftAudit)
                 .font(.system(size: 14, weight: .semibold))
             }
 
