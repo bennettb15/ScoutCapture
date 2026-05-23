@@ -8670,6 +8670,7 @@ private struct DebugSessionSnapshotUploadDiagnosticsView: View {
     @State private var isCheckingSnapshotRestoreDiagnostics: Bool = false
     @State private var isCheckingRecoveryCohort: Bool = false
     @State private var isHydratingSnapshotMetadata: Bool = false
+    @State private var isShowingHydrationConfirmation: Bool = false
     @State private var isRefreshingAuthPreflight: Bool = false
     @State private var isRepairingLocalOrgDrift: Bool = false
     @State private var isRunningLocalOrgDriftAudit: Bool = false
@@ -8694,6 +8695,13 @@ private struct DebugSessionSnapshotUploadDiagnosticsView: View {
 
     private var hydrationPolicy: AppState.SessionSnapshotHydrationPolicyDiagnostics {
         appState.sessionSnapshotHydrationPolicyDiagnostics
+    }
+
+    private var hydrationConfirmation: AppState.SessionSnapshotHydrationConfirmation {
+        AppState.makeSessionSnapshotHydrationConfirmation(
+            diagnostics: diagnostics,
+            policy: hydrationPolicy
+        )
     }
 
     private var testSessionCreationAvailability: (isAvailable: Bool, reason: String) {
@@ -8988,7 +8996,7 @@ private struct DebugSessionSnapshotUploadDiagnosticsView: View {
             }
 
             Section("Snapshot Restore Diagnostics") {
-                Text("Read-only restore candidacy check. It verifies snapshot metadata and compares local counts without hydrating sessions, restoring shots, downloading media, or writing local metadata.")
+                Text("Diagnostics are read-only. Metadata hydration is a separate manual action that writes local session, shot, issue, and guided metadata only; it does not restore media, download originals, switch canonical reads, or bypass local_newer_conflict / production policy blocks.")
                     .font(.system(size: 13, weight: .medium))
                     .foregroundStyle(.secondary)
                 diagnosticRow("Result", diagnostics.lastRestoreDiagnosticsResult)
@@ -9030,6 +9038,9 @@ private struct DebugSessionSnapshotUploadDiagnosticsView: View {
                 diagnosticRow("Hydration Mode", hydrationPolicy.hydrationMode)
                 diagnosticRow("Hydration Scope", hydrationPolicy.hydrationScope)
                 diagnosticRow("Production Hydration Blocked Reason", hydrationPolicy.productionHydrationBlockedReason ?? "none")
+                diagnosticRow("Hydration Confirmation Required", hydrationConfirmation.confirmationRequired ? "true" : "false")
+                diagnosticRow("Hydration Action Available", hydrationConfirmation.canHydrate ? "true" : "false")
+                diagnosticRow("Hydration Action Blocked Reason", hydrationConfirmation.blockedReason ?? "none")
                 Button(isCheckingSnapshotRestoreDiagnostics ? "Checking..." : "Check Restore Diagnostics") {
                     isCheckingSnapshotRestoreDiagnostics = true
                     Task {
@@ -9041,14 +9052,8 @@ private struct DebugSessionSnapshotUploadDiagnosticsView: View {
                 }
                 .disabled(isCheckingSnapshotRestoreDiagnostics)
                 .font(.system(size: 14, weight: .semibold))
-                Button(isHydratingSnapshotMetadata ? "Hydrating..." : "Hydrate Metadata From Snapshot") {
-                    isHydratingSnapshotMetadata = true
-                    Task {
-                        _ = await appState.hydrateMetadataFromLatestSessionSnapshot()
-                        await MainActor.run {
-                            isHydratingSnapshotMetadata = false
-                        }
-                    }
+                Button(isHydratingSnapshotMetadata ? "Hydrating..." : "Review Metadata Hydration...") {
+                    isShowingHydrationConfirmation = true
                 }
                 .disabled(isHydratingSnapshotMetadata)
                 .font(.system(size: 14, weight: .semibold))
@@ -9080,6 +9085,22 @@ private struct DebugSessionSnapshotUploadDiagnosticsView: View {
         }
         .navigationTitle("Snapshot Upload")
         .navigationBarTitleDisplayMode(.inline)
+        .alert("Hydrate Metadata From Snapshot?", isPresented: $isShowingHydrationConfirmation) {
+            Button("Cancel", role: .cancel) {}
+            if hydrationConfirmation.canHydrate {
+                Button("Hydrate Local Metadata Only", role: .destructive) {
+                    isHydratingSnapshotMetadata = true
+                    Task {
+                        _ = await appState.hydrateMetadataFromLatestSessionSnapshot()
+                        await MainActor.run {
+                            isHydratingSnapshotMetadata = false
+                        }
+                    }
+                }
+            }
+        } message: {
+            Text(hydrationConfirmation.messageText)
+        }
     }
 
     @ViewBuilder

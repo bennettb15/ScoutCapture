@@ -839,6 +839,21 @@ final class AppState: ObservableObject {
         var productionHydrationBlockedReason: String?
     }
 
+    struct SessionSnapshotHydrationConfirmation: Equatable {
+        var confirmationRequired: Bool
+        var canHydrate: Bool
+        var blockedReason: String?
+        var propertyIDText: String
+        var sessionIDText: String
+        var snapshotIDText: String
+        var restoreResult: String
+        var shotCountText: String
+        var issueCountText: String
+        var guidedCountText: String
+        var messageText: String
+    }
+
+
     enum SnapshotRecoveryCohortCategory: String, Codable, Equatable, CaseIterable {
         case completedSealedSession = "completed_sealed_session"
         case draftSession = "draft_session"
@@ -12779,6 +12794,74 @@ final class AppState: ObservableObject {
                 productionHydrationBlockedReason: "supabase_config_invalid"
             )
         }
+    }
+
+    static func makeSessionSnapshotHydrationConfirmation(
+        diagnostics: SessionSnapshotUploadDiagnostics,
+        policy: SessionSnapshotHydrationPolicyDiagnostics
+    ) -> SessionSnapshotHydrationConfirmation {
+        let restoreResult = diagnostics.lastRestoreDiagnosticsResult
+        let blockedReason: String? = {
+            if !policy.hydrationAvailable {
+                return policy.productionHydrationBlockedReason ?? "hydration_policy_blocked"
+            }
+            guard restoreResult == SessionSnapshotRestoreDiagnosticOutcome.restorableMetadataCandidate.rawValue else {
+                return restoreResult == "not_checked" ? "restore_diagnostics_not_checked" : restoreResult
+            }
+            guard diagnostics.lastRestoreDiagnosticsChecksumVerified else {
+                return SessionSnapshotRestoreDiagnosticOutcome.checksumFailed.rawValue
+            }
+            guard diagnostics.lastRestoreDiagnosticsRowObjectVerified else {
+                return "row_object_not_verified"
+            }
+            guard diagnostics.lastRestoreDiagnosticsParentRemoteVerified else {
+                return SessionSnapshotRestoreDiagnosticOutcome.parentMismatch.rawValue
+            }
+            guard diagnostics.lastRestoreDiagnosticsSnapshotSchemaVersion == 1 else {
+                return SessionSnapshotRestoreDiagnosticOutcome.unsupportedSchema.rawValue
+            }
+            guard diagnostics.lastRestoreDiagnosticsFreshness != "local_newer" else {
+                return SessionSnapshotRestoreDiagnosticOutcome.localNewerConflict.rawValue
+            }
+            guard diagnostics.lastRestoreDiagnosticsPropertyID != nil,
+                  diagnostics.lastRestoreDiagnosticsSessionID != nil,
+                  diagnostics.lastRestoreDiagnosticsSnapshotID != nil else {
+                return "missing_snapshot_target"
+            }
+            return nil
+        }()
+        let canHydrate = blockedReason == nil
+        let propertyIDText = diagnostics.lastRestoreDiagnosticsPropertyID?.uuidString ?? "none"
+        let sessionIDText = diagnostics.lastRestoreDiagnosticsSessionID?.uuidString ?? "none"
+        let snapshotIDText = diagnostics.lastRestoreDiagnosticsSnapshotID?.uuidString ?? "none"
+        let shotCountText = diagnostics.lastRestoreDiagnosticsSnapshotShotCount.map(String.init) ?? "none"
+        let issueCountText = diagnostics.lastRestoreDiagnosticsSnapshotIssueCount.map(String.init) ?? "none"
+        let guidedCountText = diagnostics.lastRestoreDiagnosticsSnapshotGuidedCount.map(String.init) ?? "none"
+        let blockedText = blockedReason.map { "\n\nBlocked reason: \($0)" } ?? ""
+        let message = [
+            "Property: \(propertyIDText)",
+            "Session: \(sessionIDText)",
+            "Snapshot: \(snapshotIDText)",
+            "Result: \(restoreResult)",
+            "Counts: shots \(shotCountText), issues \(issueCountText), guided \(guidedCountText)",
+            "Hydration writes local metadata only.",
+            "Media files and original images are not restored or downloaded.",
+            "Canonical reads, export, seal, sync, media, and iCloud behavior are unchanged."
+        ].joined(separator: "\n") + blockedText
+
+        return SessionSnapshotHydrationConfirmation(
+            confirmationRequired: true,
+            canHydrate: canHydrate,
+            blockedReason: blockedReason,
+            propertyIDText: propertyIDText,
+            sessionIDText: sessionIDText,
+            snapshotIDText: snapshotIDText,
+            restoreResult: restoreResult,
+            shotCountText: shotCountText,
+            issueCountText: issueCountText,
+            guidedCountText: guidedCountText,
+            messageText: message
+        )
     }
 
     @discardableResult
