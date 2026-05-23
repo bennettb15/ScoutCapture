@@ -31,6 +31,7 @@ struct SupabaseRuntimeConfiguration {
     static let approvedSessionSnapshotStagingProjectRef = "hpekjqqiyurrewfjvjmn"
     static let productionSnapshotValidationProjectRef = "chlvazmtucoszicehtnm"
     static let productionSnapshotValidationEnvKey = "SCOUTCAPTURE_PRODUCTION_SNAPSHOT_VALIDATION_ALLOWED"
+    static let productionSnapshotHydrationEnvKey = "SCOUTCAPTURE_PRODUCTION_SNAPSHOT_HYDRATION_ALLOWED"
 
     let url: URL?
     let anonKey: String?
@@ -38,6 +39,7 @@ struct SupabaseRuntimeConfiguration {
     let overrideURLRawValue: String?
     let overrideAnonKeyPresent: Bool
     let productionSnapshotValidationAllowed: Bool
+    let productionSnapshotHydrationAllowed: Bool
 
     var isConfigured: Bool {
         url != nil && !(anonKey?.isEmpty ?? true)
@@ -85,6 +87,20 @@ struct SupabaseRuntimeConfiguration {
         targetClassification == .approvedProductionValidation
     }
 
+    var isExactProductionSnapshotHydrationTarget: Bool {
+        guard let url else { return false }
+        guard url.scheme?.lowercased() == "https",
+              url.host?.lowercased() == "\(Self.productionSnapshotValidationProjectRef).supabase.co",
+              url.port == nil,
+              url.user == nil,
+              url.password == nil,
+              url.query == nil,
+              url.fragment == nil else {
+            return false
+        }
+        return url.path.isEmpty || url.path == "/"
+    }
+
     var sanitizedURLDisplay: String {
         guard let url else {
             return overrideURLRawValue.map { "invalid:\(Self.sanitizedURLText($0))" } ?? "none"
@@ -113,7 +129,8 @@ struct SupabaseRuntimeConfiguration {
         source: Source = .infoPlist,
         overrideURLRawValue: String? = nil,
         overrideAnonKeyPresent: Bool = false,
-        productionSnapshotValidationAllowed: Bool = false
+        productionSnapshotValidationAllowed: Bool = false,
+        productionSnapshotHydrationAllowed: Bool = false
     ) {
         self.url = url
         self.anonKey = anonKey
@@ -121,6 +138,7 @@ struct SupabaseRuntimeConfiguration {
         self.overrideURLRawValue = overrideURLRawValue
         self.overrideAnonKeyPresent = overrideAnonKeyPresent
         self.productionSnapshotValidationAllowed = productionSnapshotValidationAllowed
+        self.productionSnapshotHydrationAllowed = productionSnapshotHydrationAllowed
     }
 
     private static func sanitizedURLText(_ value: String) -> String {
@@ -813,6 +831,14 @@ final class AppState: ObservableObject {
         var hydratedGuidedCount: Int
     }
 
+    struct SessionSnapshotHydrationPolicyDiagnostics: Equatable {
+        var hydrationAvailable: Bool
+        var productionHydrationAllowed: Bool
+        var hydrationMode: String
+        var hydrationScope: String
+        var productionHydrationBlockedReason: String?
+    }
+
     enum SnapshotRecoveryCohortCategory: String, Codable, Equatable, CaseIterable {
         case completedSealedSession = "completed_sealed_session"
         case draftSession = "draft_session"
@@ -1073,6 +1099,10 @@ final class AppState: ObservableObject {
         var lastHydrationShotCount: Int = 0
         var lastHydrationIssueCount: Int = 0
         var lastHydrationGuidedCount: Int = 0
+        var productionHydrationAllowed: Bool = false
+        var hydrationMode: String = "blocked_by_default"
+        var hydrationScope: String = "none"
+        var productionHydrationBlockedReason: String = "production_hydration_gate_disabled"
         var lastRecoveryCohortAt: Date?
         var lastRecoveryCohortCategory: String = SnapshotRecoveryCohortCategory.unknown.rawValue
         var lastRecoveryReadiness: String = SnapshotRecoveryReadiness.notChecked.rawValue
@@ -4973,6 +5003,10 @@ final class AppState: ObservableObject {
             for: SupabaseRuntimeConfiguration.productionSnapshotValidationEnvKey,
             environment: environment
         )
+        let productionSnapshotHydrationAllowed = Self.boolEnvironmentValue(
+            for: SupabaseRuntimeConfiguration.productionSnapshotHydrationEnvKey,
+            environment: environment
+        )
         #if DEBUG
         let overrideAllowed = true
         #else
@@ -4993,7 +5027,8 @@ final class AppState: ObservableObject {
                     source: isValid ? .environmentOverride : .invalidEnvironmentOverride,
                     overrideURLRawValue: rawOverrideURL,
                     overrideAnonKeyPresent: rawOverrideAnonKey?.isEmpty == false,
-                    productionSnapshotValidationAllowed: productionSnapshotValidationAllowed
+                    productionSnapshotValidationAllowed: productionSnapshotValidationAllowed,
+                    productionSnapshotHydrationAllowed: productionSnapshotHydrationAllowed
                 )
             }
         }
@@ -5007,7 +5042,8 @@ final class AppState: ObservableObject {
             url: rawURL.flatMap(Self.validSupabaseURL(from:)),
             anonKey: rawAnonKey,
             source: .infoPlist,
-            productionSnapshotValidationAllowed: productionSnapshotValidationAllowed
+            productionSnapshotValidationAllowed: productionSnapshotValidationAllowed,
+            productionSnapshotHydrationAllowed: productionSnapshotHydrationAllowed
         )
     }
 
@@ -12540,12 +12576,13 @@ final class AppState: ObservableObject {
 
     @discardableResult
     func hydrateMetadataFromLatestSessionSnapshot(checkedAt: Date = Date()) async -> SessionSnapshotHydrationResult {
-        let hydrationTargetAvailability = sessionSnapshotHydrationTargetAvailability
-        guard hydrationTargetAvailability.isAvailable else {
+        let hydrationPolicy = sessionSnapshotHydrationPolicyDiagnostics
+        recordSessionSnapshotHydrationPolicyDiagnostics(hydrationPolicy)
+        guard hydrationPolicy.hydrationAvailable else {
             let result = SessionSnapshotHydrationResult(
                 hydratedAt: checkedAt,
                 allowed: false,
-                blockedReason: hydrationTargetAvailability.reason,
+                blockedReason: hydrationPolicy.productionHydrationBlockedReason ?? "hydration_unavailable",
                 sourceSnapshotID: nil,
                 propertyID: manualSessionSnapshotUploadTarget?.propertyID ?? localDiagnostics.sessionSnapshotUpload.lastPropertyID,
                 sessionID: manualSessionSnapshotUploadTarget?.sessionID ?? localDiagnostics.sessionSnapshotUpload.lastSessionID,
@@ -12661,21 +12698,86 @@ final class AppState: ObservableObject {
         }
     }
 
-    private var sessionSnapshotHydrationTargetAvailability: (isAvailable: Bool, reason: String?) {
+    var sessionSnapshotHydrationPolicyDiagnostics: SessionSnapshotHydrationPolicyDiagnostics {
         guard supabaseConfiguration.isConfigured else {
-            return (false, "supabase_config_invalid")
+            return SessionSnapshotHydrationPolicyDiagnostics(
+                hydrationAvailable: false,
+                productionHydrationAllowed: false,
+                hydrationMode: "blocked_by_default",
+                hydrationScope: "none",
+                productionHydrationBlockedReason: "supabase_config_invalid"
+            )
         }
+
+        if supabaseConfiguration.isExactProductionSnapshotHydrationTarget {
+            guard supabaseConfiguration.productionSnapshotHydrationAllowed else {
+                return SessionSnapshotHydrationPolicyDiagnostics(
+                    hydrationAvailable: false,
+                    productionHydrationAllowed: false,
+                    hydrationMode: "blocked_by_default",
+                    hydrationScope: "none",
+                    productionHydrationBlockedReason: "production_hydration_gate_disabled"
+                )
+            }
+            guard manualSessionSnapshotUploadTarget != nil else {
+                return SessionSnapshotHydrationPolicyDiagnostics(
+                    hydrationAvailable: false,
+                    productionHydrationAllowed: true,
+                    hydrationMode: "diagnostics_only",
+                    hydrationScope: "none",
+                    productionHydrationBlockedReason: "single_session_target_required"
+                )
+            }
+            return SessionSnapshotHydrationPolicyDiagnostics(
+                hydrationAvailable: true,
+                productionHydrationAllowed: true,
+                hydrationMode: "operator_approved_single_session",
+                hydrationScope: "single_selected_session",
+                productionHydrationBlockedReason: nil
+            )
+        }
+
         switch supabaseConfiguration.targetClassification {
         case .localDev, .approvedStaging:
-            return (true, nil)
+            return SessionSnapshotHydrationPolicyDiagnostics(
+                hydrationAvailable: true,
+                productionHydrationAllowed: false,
+                hydrationMode: "diagnostics_only",
+                hydrationScope: "local_or_staging_manual",
+                productionHydrationBlockedReason: nil
+            )
         case .approvedProductionValidation:
-            return (false, "production_hydration_disabled")
+            return SessionSnapshotHydrationPolicyDiagnostics(
+                hydrationAvailable: false,
+                productionHydrationAllowed: false,
+                hydrationMode: "production_wide_disabled",
+                hydrationScope: "none",
+                productionHydrationBlockedReason: "production_hydration_target_not_exact"
+            )
         case .remote:
-            return (false, "unapproved_remote_hydration_disabled")
+            return SessionSnapshotHydrationPolicyDiagnostics(
+                hydrationAvailable: false,
+                productionHydrationAllowed: false,
+                hydrationMode: "production_wide_disabled",
+                hydrationScope: "none",
+                productionHydrationBlockedReason: "unapproved_remote_hydration_disabled"
+            )
         case .missing:
-            return (false, "supabase_config_missing")
+            return SessionSnapshotHydrationPolicyDiagnostics(
+                hydrationAvailable: false,
+                productionHydrationAllowed: false,
+                hydrationMode: "blocked_by_default",
+                hydrationScope: "none",
+                productionHydrationBlockedReason: "supabase_config_missing"
+            )
         case .invalid:
-            return (false, "supabase_config_invalid")
+            return SessionSnapshotHydrationPolicyDiagnostics(
+                hydrationAvailable: false,
+                productionHydrationAllowed: false,
+                hydrationMode: "blocked_by_default",
+                hydrationScope: "none",
+                productionHydrationBlockedReason: "supabase_config_invalid"
+            )
         }
     }
 
@@ -13213,6 +13315,15 @@ final class AppState: ObservableObject {
             diagnostics.sessionSnapshotUpload.lastHydrationShotCount = result.hydratedShotCount
             diagnostics.sessionSnapshotUpload.lastHydrationIssueCount = result.hydratedIssueCount
             diagnostics.sessionSnapshotUpload.lastHydrationGuidedCount = result.hydratedGuidedCount
+        }
+    }
+
+    private func recordSessionSnapshotHydrationPolicyDiagnostics(_ policy: SessionSnapshotHydrationPolicyDiagnostics) {
+        mutateLocalDiagnostics { diagnostics in
+            diagnostics.sessionSnapshotUpload.productionHydrationAllowed = policy.productionHydrationAllowed
+            diagnostics.sessionSnapshotUpload.hydrationMode = policy.hydrationMode
+            diagnostics.sessionSnapshotUpload.hydrationScope = policy.hydrationScope
+            diagnostics.sessionSnapshotUpload.productionHydrationBlockedReason = policy.productionHydrationBlockedReason ?? "none"
         }
     }
 
@@ -14823,6 +14934,12 @@ final class AppState: ObservableObject {
         lines.append("- hydrated_shot_count: \(diagnostics.lastHydrationShotCount)")
         lines.append("- hydrated_issue_count: \(diagnostics.lastHydrationIssueCount)")
         lines.append("- hydrated_guided_count: \(diagnostics.lastHydrationGuidedCount)")
+        lines.append("")
+        lines.append("Production Hydration Policy")
+        lines.append("- production_hydration_allowed: \(diagnostics.productionHydrationAllowed)")
+        lines.append("- hydration_mode: \(diagnosticsPreviewText(diagnostics.hydrationMode, maxLength: 80) ?? "blocked_by_default")")
+        lines.append("- hydration_scope: \(diagnosticsPreviewText(diagnostics.hydrationScope, maxLength: 80) ?? "none")")
+        lines.append("- production_hydration_blocked_reason: \(diagnosticsPreviewText(diagnostics.productionHydrationBlockedReason, maxLength: 120) ?? "none")")
         lines.append("")
         lines.append("Snapshot Recovery Cohort")
         lines.append("- cohort_checked_at: \(diagnostics.lastRecoveryCohortAt?.formatted(date: .abbreviated, time: .standard) ?? "none")")

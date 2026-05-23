@@ -284,7 +284,7 @@ final class Phase2C25EControlledRestoreCandidateTests: XCTestCase {
         let hydration = await appState.hydrateMetadataFromLatestSessionSnapshot()
 
         XCTAssertFalse(hydration.allowed)
-        XCTAssertEqual(hydration.blockedReason, "production_hydration_disabled")
+        XCTAssertEqual(hydration.blockedReason, "production_hydration_gate_disabled")
         XCTAssertNil(appState.localDiagnostics.sessionSnapshotUpload.lastRestoreDiagnosticsAt)
     }
 }

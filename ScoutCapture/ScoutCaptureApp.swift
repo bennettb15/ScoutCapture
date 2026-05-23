@@ -8692,6 +8692,10 @@ private struct DebugSessionSnapshotUploadDiagnosticsView: View {
         appState.manualSessionSnapshotUploadTargetResolution
     }
 
+    private var hydrationPolicy: AppState.SessionSnapshotHydrationPolicyDiagnostics {
+        appState.sessionSnapshotHydrationPolicyDiagnostics
+    }
+
     private var testSessionCreationAvailability: (isAvailable: Bool, reason: String) {
         appState.manualSessionSnapshotTestSessionCreationAvailability
     }
@@ -8733,6 +8737,10 @@ private struct DebugSessionSnapshotUploadDiagnosticsView: View {
                 diagnosticRow(
                     "Snapshot Override Allowed",
                     appState.supabaseConfiguration.isSessionSnapshotShadowWriteOverrideAllowed ? "true" : "false"
+                )
+                diagnosticRow(
+                    "Production Hydration Gate",
+                    appState.supabaseConfiguration.productionSnapshotHydrationAllowed ? "true" : "false"
                 )
             }
 
@@ -9018,6 +9026,10 @@ private struct DebugSessionSnapshotUploadDiagnosticsView: View {
                 diagnosticRow("Hydrated Shots", diagnostics.lastHydrationShotCount)
                 diagnosticRow("Hydrated Issues", diagnostics.lastHydrationIssueCount)
                 diagnosticRow("Hydrated Guided", diagnostics.lastHydrationGuidedCount)
+                diagnosticRow("Production Hydration Allowed", hydrationPolicy.productionHydrationAllowed ? "true" : "false")
+                diagnosticRow("Hydration Mode", hydrationPolicy.hydrationMode)
+                diagnosticRow("Hydration Scope", hydrationPolicy.hydrationScope)
+                diagnosticRow("Production Hydration Blocked Reason", hydrationPolicy.productionHydrationBlockedReason ?? "none")
                 Button(isCheckingSnapshotRestoreDiagnostics ? "Checking..." : "Check Restore Diagnostics") {
                     isCheckingSnapshotRestoreDiagnostics = true
                     Task {
