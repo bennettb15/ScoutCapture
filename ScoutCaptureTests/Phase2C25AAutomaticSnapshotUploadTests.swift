@@ -153,6 +153,49 @@ final class Phase2C25AAutomaticSnapshotUploadTests: XCTestCase {
         XCTAssertFalse(flags.sessionSnapshotAutoUploadHasAllowlist)
     }
 
+    func testEnvironmentEnableWithoutAllowlistSkipsAndRecordsEffectiveAutoFlag() async throws {
+        var attemptedStorageUpload = false
+        let fixture = try makeFixture(
+            environmentExtras: ["SCOUTCAPTURE_SESSION_SNAPSHOT_AUTO_UPLOAD_ENABLED": "true"],
+            storageUploadOverride: { _ in attemptedStorageUpload = true }
+        )
+
+        let result = await fixture.appState.attemptAutomaticSessionSnapshotUploadForCompletedSealedCheckpoint(
+            session: fixture.session,
+            triggerSource: "sealCurrentSessionForExportLater"
+        )
+
+        XCTAssertNil(result)
+        XCTAssertFalse(attemptedStorageUpload)
+        XCTAssertTrue(fixture.appState.backendFeatureFlags.sessionSnapshotAutoUploadEnabled)
+        XCTAssertFalse(fixture.appState.backendFeatureFlags.sessionSnapshotAutoUploadHasAllowlist)
+        XCTAssertTrue(fixture.appState.localDiagnostics.sessionSnapshotUpload.autoUploadFlagEnabled)
+        XCTAssertEqual(fixture.appState.localDiagnostics.sessionSnapshotUpload.autoUploadSkippedReason, "allowlist_empty")
+    }
+
+    func testKillSwitchEnvironmentSkipsAndRecordsEffectiveKillSwitch() async throws {
+        var attemptedStorageUpload = false
+        let fixture = try makeFixture(
+            environmentExtras: [
+                "SCOUTCAPTURE_SESSION_SNAPSHOT_AUTO_UPLOAD_ENABLED": "true",
+                "SCOUTCAPTURE_SESSION_SNAPSHOT_AUTO_UPLOAD_KILL_SWITCH": "true"
+            ],
+            storageUploadOverride: { _ in attemptedStorageUpload = true }
+        )
+
+        let result = await fixture.appState.attemptAutomaticSessionSnapshotUploadForCompletedSealedCheckpoint(
+            session: fixture.session,
+            triggerSource: "sealCurrentSessionForExportLater"
+        )
+
+        XCTAssertNil(result)
+        XCTAssertFalse(attemptedStorageUpload)
+        XCTAssertTrue(fixture.appState.backendFeatureFlags.sessionSnapshotAutoUploadEnabled)
+        XCTAssertTrue(fixture.appState.backendFeatureFlags.sessionSnapshotAutoUploadKillSwitch)
+        XCTAssertTrue(fixture.appState.localDiagnostics.sessionSnapshotUpload.autoUploadKillSwitchActive)
+        XCTAssertEqual(fixture.appState.localDiagnostics.sessionSnapshotUpload.autoUploadSkippedReason, "kill_switch_active")
+    }
+
     func testKillSwitchDisablesEvenWhenFlagAndAllowlistMatch() async throws {
         var attemptedStorageUpload = false
         let fixture = try makeFixture(

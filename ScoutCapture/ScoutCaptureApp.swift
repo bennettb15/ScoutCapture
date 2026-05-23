@@ -8697,6 +8697,14 @@ private struct DebugSessionSnapshotUploadDiagnosticsView: View {
         appState.backendFeatureFlags.sessionSnapshotShadowWriteEnabled
     }
 
+    private var effectiveAutoUploadFlagEnabled: Bool {
+        appState.backendFeatureFlags.sessionSnapshotAutoUploadEnabled
+    }
+
+    private var effectiveAutoUploadKillSwitchActive: Bool {
+        appState.backendFeatureFlags.sessionSnapshotAutoUploadKillSwitch
+    }
+
     private var environmentFlagDetected: Bool {
         ProcessInfo.processInfo.environment["session_snapshot_shadow_write_enabled"] != nil ||
             ProcessInfo.processInfo.environment["SCOUTCAPTURE_SESSION_SNAPSHOT_SHADOW_WRITE_ENABLED"] != nil
@@ -8751,8 +8759,8 @@ private struct DebugSessionSnapshotUploadDiagnosticsView: View {
             }
 
             Section("Automatic Upload Guard") {
-                diagnosticRow("Auto Flag Enabled", diagnostics.autoUploadFlagEnabled ? "true" : "false")
-                diagnosticRow("Kill Switch Active", diagnostics.autoUploadKillSwitchActive ? "true" : "false")
+                diagnosticRow("Auto Flag Enabled", effectiveAutoUploadFlagEnabled ? "true" : "false")
+                diagnosticRow("Kill Switch Active", effectiveAutoUploadKillSwitchActive ? "true" : "false")
                 diagnosticRow("Allowlist Match", diagnostics.autoUploadAllowlistMatch ? "true" : "false")
                 diagnosticRow("Skipped Reason", diagnostics.autoUploadSkippedReason ?? "none")
                 diagnosticRow("Trigger Source", diagnostics.autoUploadTriggerSource ?? "none")
