@@ -11036,6 +11036,9 @@ final class AppState: ObservableObject {
                             propertyID: target.propertyID,
                             sessionID: session.id
                         )
+                        if remoteParentStatus.confirmedCanonicalOrgID == orgID {
+                            remoteParentStatus.orgIDsMatch = true
+                        }
                     } catch {
                         remoteParentStatus.errorMessage = Self.diagnosticsPreviewText(error.localizedDescription, maxLength: 160)
                     }

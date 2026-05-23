@@ -481,21 +481,37 @@ final class Phase2C23FSessionSnapshotShadowWriteTests: XCTestCase {
     }
 
     func testSelectedLocalOrgRepairSurvivesPropertySyncEventProjection() async throws {
+        let userID = UUID()
         let canonicalOrgID = UUID()
         let fixture = try makeFixture(
-            remoteParentPreflightOverride: { _, _, _ in
+            clientAuthPreflightOverride: {
+                (userID: userID.uuidString, email: "debug@example.com", error: "none")
+            },
+            remoteParentPreflightOverride: { orgID, _, _ in
                 AppState.SessionSnapshotAuthPreflightRemoteParentStatus(
                     propertyExists: true,
                     sessionExists: true,
                     propertyOrgID: canonicalOrgID,
                     sessionOrgID: canonicalOrgID,
                     sessionPropertyIDMatches: true,
-                    orgIDsMatch: false,
+                    orgIDsMatch: orgID == canonicalOrgID,
                     errorMessage: nil
                 )
             }
         )
         defer { try? FileManager.default.removeItem(at: fixture.root) }
+        fixture.appState._debugSetOfflineReplayEnvironmentForTests(
+            activeOrganizationID: canonicalOrgID,
+            authenticatedUserID: userID
+        )
+
+        let initialPreflight = await fixture.appState.refreshManualSessionSnapshotAuthPreflight()
+        XCTAssertFalse(initialPreflight.isReady)
+        XCTAssertEqual(initialPreflight.remoteParentStatus.propertyOrgID, canonicalOrgID)
+        XCTAssertEqual(initialPreflight.remoteParentStatus.sessionOrgID, canonicalOrgID)
+        XCTAssertTrue(initialPreflight.remoteParentStatus.sessionPropertyIDMatches)
+        XCTAssertFalse(initialPreflight.remoteParentStatus.orgIDsMatch)
+        XCTAssertTrue(initialPreflight.failureMessage?.contains("remote_parent_org_mismatch") == true)
 
         _ = await fixture.appState.repairSelectedManualSessionSnapshotLocalOrgDrift()
 
@@ -503,6 +519,13 @@ final class Phase2C23FSessionSnapshotShadowWriteTests: XCTestCase {
         let projectedMetadata = try fixture.store.loadSessionMetadata(propertyID: fixture.property.id, sessionID: fixture.session.id)
         XCTAssertEqual(projectedProperty.orgId, canonicalOrgID)
         XCTAssertEqual(projectedMetadata.orgID, canonicalOrgID)
+        let refreshedPreflight = await fixture.appState.refreshManualSessionSnapshotAuthPreflight()
+        XCTAssertEqual(refreshedPreflight.payloadOrgID, canonicalOrgID)
+        XCTAssertTrue(refreshedPreflight.usersMatch, refreshedPreflight.failureMessage ?? "users did not match")
+        XCTAssertTrue(refreshedPreflight.remoteParentStatus.orgIDsMatch, refreshedPreflight.failureMessage ?? "remote orgs did not match")
+        XCTAssertTrue(refreshedPreflight.isReady)
+        XCTAssertEqual(fixture.appState.localDiagnostics.sessionSnapshotUpload.lastAuthPreflightReady, true)
+        XCTAssertNil(fixture.appState.localDiagnostics.sessionSnapshotUpload.lastAuthPreflightFailureMessage)
 
         let audit = await fixture.appState.runLocalOrgDriftAudit()
         XCTAssertEqual(audit.propertyMismatchCount, 0)

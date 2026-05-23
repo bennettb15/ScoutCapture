@@ -81,12 +81,12 @@
       <EnvironmentVariables>
          <EnvironmentVariable
             key = "SCOUTCAPTURE_SUPABASE_URL"
-            value = "https://hpekjqqiyurrewfjvjmn.supabase.co"
+            value = "https://chlvazmtucoszicehtnm.supabase.co"
             isEnabled = "YES">
          </EnvironmentVariable>
          <EnvironmentVariable
             key = "SCOUTCAPTURE_SUPABASE_ANON_KEY"
-            value = "sb_publishable_CNEoXNkp6J3gWiJB35KR7Q_SQ3fkbt_"
+            value = "sb_publishable_WixxIYHzr8VB-rmZ8q8DiQ_adVqsd2x"
             isEnabled = "YES">
          </EnvironmentVariable>
          <EnvironmentVariable
@@ -96,6 +96,11 @@
          </EnvironmentVariable>
          <EnvironmentVariable
             key = "SCOUTCAPTURE_SESSION_SNAPSHOT_SHADOW_WRITE_ENABLED"
+            value = "true"
+            isEnabled = "YES">
+         </EnvironmentVariable>
+         <EnvironmentVariable
+            key = "SCOUTCAPTURE_PRODUCTION_SNAPSHOT_VALIDATION_ALLOWED"
             value = "true"
             isEnabled = "YES">
          </EnvironmentVariable>

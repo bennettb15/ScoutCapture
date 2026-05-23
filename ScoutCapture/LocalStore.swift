@@ -1583,12 +1583,7 @@ final class LocalStore {
                 properties: state.properties.sorted { $0.createdAt < $1.createdAt },
                 organizations: state.organizations
             )
-            try appendPropertySyncEvent(
-                propertyID: state.properties[index].id,
-                operation: .upsert,
-                property: state.properties[index],
-                occurredAt: Date()
-            )
+            try appendPropertyOrgRepairSyncEvent(property: state.properties[index])
             NotificationCenter.default.post(name: .scoutPersistentDataDidChange, object: nil)
             return state.properties[index]
         }
@@ -3443,6 +3438,23 @@ final class LocalStore {
         try data.write(
             to: propertySyncEventsDirectoryURL.appendingPathComponent(filename, isDirectory: false),
             options: .atomic
+        )
+    }
+
+    private func appendPropertyOrgRepairSyncEvent(property: Property) throws {
+        let latestEventDate = try readPropertySyncEvents()
+            .filter { $0.propertyID == property.id }
+            .map(\.occurredAt)
+            .max()
+        var occurredAt = Date()
+        if let latestEventDate, occurredAt <= latestEventDate {
+            occurredAt = latestEventDate.addingTimeInterval(0.001)
+        }
+        try appendPropertySyncEvent(
+            propertyID: property.id,
+            operation: .upsert,
+            property: property,
+            occurredAt: occurredAt
         )
     }
 
