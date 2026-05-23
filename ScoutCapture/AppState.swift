@@ -801,6 +801,18 @@ final class AppState: ObservableObject {
         var freshness: String
     }
 
+    struct SessionSnapshotHydrationResult: Equatable {
+        var hydratedAt: Date
+        var allowed: Bool
+        var blockedReason: String?
+        var sourceSnapshotID: UUID?
+        var propertyID: UUID?
+        var sessionID: UUID?
+        var hydratedShotCount: Int
+        var hydratedIssueCount: Int
+        var hydratedGuidedCount: Int
+    }
+
     enum SessionSnapshotUploadError: LocalizedError, Equatable {
         case disabled
         case missingSupabaseClient
@@ -1009,6 +1021,15 @@ final class AppState: ObservableObject {
         var lastRestoreDiagnosticsSnapshotMissingLocalOriginalsCount: Int?
         var lastRestoreDiagnosticsSnapshotSupabaseStorageMetadataCount: Int?
         var lastRestoreDiagnosticsFreshness: String = "not_checked"
+        var lastHydrationAt: Date?
+        var lastHydrationAllowed: Bool = false
+        var lastHydrationBlockedReason: String?
+        var lastHydrationSourceSnapshotID: UUID?
+        var lastHydrationPropertyID: UUID?
+        var lastHydrationSessionID: UUID?
+        var lastHydrationShotCount: Int = 0
+        var lastHydrationIssueCount: Int = 0
+        var lastHydrationGuidedCount: Int = 0
     }
 
     struct LocalDiagnosticsState: Equatable {
@@ -12466,6 +12487,112 @@ final class AppState: ObservableObject {
         }
     }
 
+    @discardableResult
+    func hydrateMetadataFromLatestSessionSnapshot(checkedAt: Date = Date()) async -> SessionSnapshotHydrationResult {
+        let diagnostics = await validateLatestSessionSnapshotRestoreDiagnostics(checkedAt: checkedAt)
+        guard diagnostics.result == .restorableMetadataCandidate,
+              diagnostics.checksumVerified,
+              diagnostics.rowObjectVerified,
+              diagnostics.parentRemoteVerified,
+              diagnostics.snapshotSchemaVersion == 1,
+              diagnostics.freshness != "local_newer" else {
+            let result = SessionSnapshotHydrationResult(
+                hydratedAt: checkedAt,
+                allowed: false,
+                blockedReason: diagnostics.result.rawValue,
+                sourceSnapshotID: diagnostics.snapshotID,
+                propertyID: diagnostics.propertyID,
+                sessionID: diagnostics.sessionID,
+                hydratedShotCount: 0,
+                hydratedIssueCount: 0,
+                hydratedGuidedCount: 0
+            )
+            recordSessionSnapshotHydration(result)
+            return result
+        }
+
+        guard let snapshotID = diagnostics.snapshotID,
+              let propertyID = diagnostics.propertyID,
+              let sessionID = diagnostics.sessionID else {
+            let result = SessionSnapshotHydrationResult(
+                hydratedAt: checkedAt,
+                allowed: false,
+                blockedReason: "missing_snapshot_target",
+                sourceSnapshotID: diagnostics.snapshotID,
+                propertyID: diagnostics.propertyID,
+                sessionID: diagnostics.sessionID,
+                hydratedShotCount: 0,
+                hydratedIssueCount: 0,
+                hydratedGuidedCount: 0
+            )
+            recordSessionSnapshotHydration(result)
+            return result
+        }
+
+        do {
+            let rows = try await fetchSessionSnapshotRows(snapshotID: snapshotID, propertyID: propertyID, sessionID: sessionID)
+            guard let row = rows.first(where: { $0.id == snapshotID }) ?? rows.sorted(by: Self.sessionSnapshotUploadRowSort).first else {
+                throw SessionSnapshotUploadError.notPreviewable("snapshot_row_not_found")
+            }
+            let payloadData = try await downloadSessionSnapshotPayload(
+                bucket: row.payloadStorageBucket,
+                path: row.payloadStoragePath
+            )
+            guard let payload = Self.decodeSessionSnapshotPayload(payloadData),
+                  payload.snapshotSchemaVersion == 1,
+                  payload.propertyID == propertyID,
+                  payload.sessionID == sessionID else {
+                throw SessionSnapshotUploadError.notPreviewable("snapshot_payload_unusable")
+            }
+            let metadata = try Self.decodeHydratableSessionMetadata(from: payload.rawSessionJSON)
+            guard metadata.propertyID == propertyID, metadata.sessionID == sessionID else {
+                throw SessionSnapshotUploadError.notPreviewable("snapshot_metadata_target_mismatch")
+            }
+
+            let session = Session(
+                id: sessionID,
+                propertyID: propertyID,
+                startedAt: metadata.startedAt,
+                status: metadata.status,
+                endedAt: metadata.endedAt,
+                exportedAt: metadata.exportedAt,
+                isSealed: metadata.isSealed,
+                firstDeliveredAt: metadata.firstDeliveredAt,
+                reExportExpiresAt: metadata.reExportExpiresAt
+            )
+            _ = try localStore.upsertSession(session)
+            try localStore.saveSessionMetadataAtomically(propertyID: propertyID, sessionID: sessionID, metadata: metadata)
+
+            let result = SessionSnapshotHydrationResult(
+                hydratedAt: checkedAt,
+                allowed: true,
+                blockedReason: nil,
+                sourceSnapshotID: snapshotID,
+                propertyID: propertyID,
+                sessionID: sessionID,
+                hydratedShotCount: metadata.shots.count,
+                hydratedIssueCount: metadata.issues.count,
+                hydratedGuidedCount: metadata.guidedShots.count
+            )
+            recordSessionSnapshotHydration(result)
+            return result
+        } catch {
+            let result = SessionSnapshotHydrationResult(
+                hydratedAt: checkedAt,
+                allowed: false,
+                blockedReason: Self.diagnosticsPreviewText(error.localizedDescription, maxLength: 160) ?? "hydration_failed",
+                sourceSnapshotID: snapshotID,
+                propertyID: propertyID,
+                sessionID: sessionID,
+                hydratedShotCount: 0,
+                hydratedIssueCount: 0,
+                hydratedGuidedCount: 0
+            )
+            recordSessionSnapshotHydration(result)
+            return result
+        }
+    }
+
     private func fetchSessionSnapshotRows(
         snapshotID: UUID?,
         propertyID: UUID?,
@@ -12556,6 +12683,15 @@ final class AppState: ObservableObject {
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
         return try? decoder.decode(SessionSnapshotPayloadForChecksum.self, from: data)
+    }
+
+    private static func decodeHydratableSessionMetadata(from rawSessionJSON: String) throws -> SessionMetadata {
+        guard let data = rawSessionJSON.data(using: .utf8) else {
+            throw SessionSnapshotUploadError.notPreviewable("snapshot_raw_session_json_unreadable")
+        }
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        return try decoder.decode(SessionMetadata.self, from: data)
     }
 
     private func localSessionSnapshotRestoreComparison(
@@ -12846,6 +12982,20 @@ final class AppState: ObservableObject {
             diagnostics.sessionSnapshotUpload.lastRestoreDiagnosticsSnapshotMissingLocalOriginalsCount = result.snapshotMissingLocalOriginalsCount
             diagnostics.sessionSnapshotUpload.lastRestoreDiagnosticsSnapshotSupabaseStorageMetadataCount = result.snapshotSupabaseStorageMetadataCount
             diagnostics.sessionSnapshotUpload.lastRestoreDiagnosticsFreshness = result.freshness
+        }
+    }
+
+    private func recordSessionSnapshotHydration(_ result: SessionSnapshotHydrationResult) {
+        mutateLocalDiagnostics { diagnostics in
+            diagnostics.sessionSnapshotUpload.lastHydrationAt = result.hydratedAt
+            diagnostics.sessionSnapshotUpload.lastHydrationAllowed = result.allowed
+            diagnostics.sessionSnapshotUpload.lastHydrationBlockedReason = result.blockedReason
+            diagnostics.sessionSnapshotUpload.lastHydrationSourceSnapshotID = result.sourceSnapshotID
+            diagnostics.sessionSnapshotUpload.lastHydrationPropertyID = result.propertyID
+            diagnostics.sessionSnapshotUpload.lastHydrationSessionID = result.sessionID
+            diagnostics.sessionSnapshotUpload.lastHydrationShotCount = result.hydratedShotCount
+            diagnostics.sessionSnapshotUpload.lastHydrationIssueCount = result.hydratedIssueCount
+            diagnostics.sessionSnapshotUpload.lastHydrationGuidedCount = result.hydratedGuidedCount
         }
     }
 
@@ -14432,6 +14582,17 @@ final class AppState: ObservableObject {
         lines.append("- snapshot_media_manifest_count: \(diagnostics.lastRestoreDiagnosticsSnapshotMediaManifestCount.map(String.init) ?? "none")")
         lines.append("- snapshot_missing_local_originals_count: \(diagnostics.lastRestoreDiagnosticsSnapshotMissingLocalOriginalsCount.map(String.init) ?? "none")")
         lines.append("- snapshot_supabase_storage_metadata_count: \(diagnostics.lastRestoreDiagnosticsSnapshotSupabaseStorageMetadataCount.map(String.init) ?? "none")")
+        lines.append("")
+        lines.append("Snapshot Metadata Hydration")
+        lines.append("- hydration_at: \(diagnostics.lastHydrationAt?.formatted(date: .abbreviated, time: .standard) ?? "none")")
+        lines.append("- hydration_allowed: \(diagnostics.lastHydrationAllowed)")
+        lines.append("- hydration_blocked_reason: \(diagnosticsPreviewText(diagnostics.lastHydrationBlockedReason, maxLength: 160) ?? "none")")
+        lines.append("- hydration_source_snapshot_id: \(diagnostics.lastHydrationSourceSnapshotID?.uuidString ?? "none")")
+        lines.append("- hydration_property_id: \(diagnostics.lastHydrationPropertyID?.uuidString ?? "none")")
+        lines.append("- hydration_session_id: \(diagnostics.lastHydrationSessionID?.uuidString ?? "none")")
+        lines.append("- hydrated_shot_count: \(diagnostics.lastHydrationShotCount)")
+        lines.append("- hydrated_issue_count: \(diagnostics.lastHydrationIssueCount)")
+        lines.append("- hydrated_guided_count: \(diagnostics.lastHydrationGuidedCount)")
         lines.append("")
         lines.append("Redaction Notes")
         lines.append("- Report rows intentionally omit raw session.json text, local paths, storage object paths, signed URLs, auth tokens, and media bytes.")

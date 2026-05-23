@@ -8668,6 +8668,7 @@ private struct DebugSessionSnapshotUploadDiagnosticsView: View {
     @State private var isUploadingSessionSnapshot: Bool = false
     @State private var isCheckingSnapshotReadback: Bool = false
     @State private var isCheckingSnapshotRestoreDiagnostics: Bool = false
+    @State private var isHydratingSnapshotMetadata: Bool = false
     @State private var isRefreshingAuthPreflight: Bool = false
     @State private var isRepairingLocalOrgDrift: Bool = false
     @State private var isRunningLocalOrgDriftAudit: Bool = false
@@ -9008,6 +9009,14 @@ private struct DebugSessionSnapshotUploadDiagnosticsView: View {
                 if let failure = AppState.diagnosticsPreviewText(diagnostics.lastRestoreDiagnosticsFailureReason, maxLength: 160) {
                     diagnosticRow("Failure Reason", failure)
                 }
+                diagnosticRow("Hydration Allowed", diagnostics.lastHydrationAllowed ? "true" : "false")
+                diagnosticRow("Hydration Blocked", diagnostics.lastHydrationBlockedReason ?? "none")
+                diagnosticRow("Hydration Source", diagnostics.lastHydrationSourceSnapshotID?.uuidString ?? "none")
+                diagnosticRow("Hydrated At", formattedRunDate(diagnostics.lastHydrationAt))
+                diagnosticRow("Hydrated Session", diagnostics.lastHydrationSessionID?.uuidString ?? "none")
+                diagnosticRow("Hydrated Shots", diagnostics.lastHydrationShotCount)
+                diagnosticRow("Hydrated Issues", diagnostics.lastHydrationIssueCount)
+                diagnosticRow("Hydrated Guided", diagnostics.lastHydrationGuidedCount)
                 Button(isCheckingSnapshotRestoreDiagnostics ? "Checking..." : "Check Restore Diagnostics") {
                     isCheckingSnapshotRestoreDiagnostics = true
                     Task {
@@ -9018,6 +9027,17 @@ private struct DebugSessionSnapshotUploadDiagnosticsView: View {
                     }
                 }
                 .disabled(isCheckingSnapshotRestoreDiagnostics)
+                .font(.system(size: 14, weight: .semibold))
+                Button(isHydratingSnapshotMetadata ? "Hydrating..." : "Hydrate Metadata From Snapshot") {
+                    isHydratingSnapshotMetadata = true
+                    Task {
+                        _ = await appState.hydrateMetadataFromLatestSessionSnapshot()
+                        await MainActor.run {
+                            isHydratingSnapshotMetadata = false
+                        }
+                    }
+                }
+                .disabled(isHydratingSnapshotMetadata)
                 .font(.system(size: 14, weight: .semibold))
             }
         }
