@@ -200,6 +200,10 @@ struct BackendFeatureFlags {
     let syncDeltaEnabled: Bool
     let sessionCoordinationEnabled: Bool
     let sessionSnapshotShadowWriteEnabled: Bool
+    let sessionSnapshotAutoUploadEnabled: Bool
+    let sessionSnapshotAutoUploadKillSwitch: Bool
+    let sessionSnapshotAutoUploadOrgAllowlist: Set<UUID>
+    let sessionSnapshotAutoUploadPropertyAllowlist: Set<UUID>
 
     init(
         supabaseEnabled: Bool,
@@ -209,7 +213,11 @@ struct BackendFeatureFlags {
         mediaSupabaseUploadEnabled: Bool,
         syncDeltaEnabled: Bool,
         sessionCoordinationEnabled: Bool,
-        sessionSnapshotShadowWriteEnabled: Bool = false
+        sessionSnapshotShadowWriteEnabled: Bool = false,
+        sessionSnapshotAutoUploadEnabled: Bool = false,
+        sessionSnapshotAutoUploadKillSwitch: Bool = false,
+        sessionSnapshotAutoUploadOrgAllowlist: Set<UUID> = [],
+        sessionSnapshotAutoUploadPropertyAllowlist: Set<UUID> = []
     ) {
         self.supabaseEnabled = supabaseEnabled
         self.shadowWriteEnabled = shadowWriteEnabled
@@ -219,6 +227,10 @@ struct BackendFeatureFlags {
         self.syncDeltaEnabled = syncDeltaEnabled
         self.sessionCoordinationEnabled = sessionCoordinationEnabled
         self.sessionSnapshotShadowWriteEnabled = sessionSnapshotShadowWriteEnabled
+        self.sessionSnapshotAutoUploadEnabled = sessionSnapshotAutoUploadEnabled
+        self.sessionSnapshotAutoUploadKillSwitch = sessionSnapshotAutoUploadKillSwitch
+        self.sessionSnapshotAutoUploadOrgAllowlist = sessionSnapshotAutoUploadOrgAllowlist
+        self.sessionSnapshotAutoUploadPropertyAllowlist = sessionSnapshotAutoUploadPropertyAllowlist
     }
 
     // The cutover phase is derived from the existing backend flags. Property-list
@@ -259,8 +271,35 @@ struct BackendFeatureFlags {
                 userDefaults: userDefaults,
                 environment: environment,
                 allowEnvironmentOverride: allowSessionSnapshotEnvironmentOverride
+            ),
+            sessionSnapshotAutoUploadEnabled: Self.sessionSnapshotAutoUploadValue(
+                bundle: bundle,
+                userDefaults: userDefaults,
+                environment: environment
+            ),
+            sessionSnapshotAutoUploadKillSwitch: Self.boolEnvironmentValue(
+                for: "SCOUTCAPTURE_SESSION_SNAPSHOT_AUTO_UPLOAD_KILL_SWITCH",
+                environment: environment
+            ),
+            sessionSnapshotAutoUploadOrgAllowlist: Self.uuidAllowlistValue(
+                for: "session_snapshot_auto_upload_org_allowlist",
+                environmentKey: "SCOUTCAPTURE_SESSION_SNAPSHOT_AUTO_UPLOAD_ORG_ALLOWLIST",
+                bundle: bundle,
+                userDefaults: userDefaults,
+                environment: environment
+            ),
+            sessionSnapshotAutoUploadPropertyAllowlist: Self.uuidAllowlistValue(
+                for: "session_snapshot_auto_upload_property_allowlist",
+                environmentKey: "SCOUTCAPTURE_SESSION_SNAPSHOT_AUTO_UPLOAD_PROPERTY_ALLOWLIST",
+                bundle: bundle,
+                userDefaults: userDefaults,
+                environment: environment
             )
         )
+    }
+
+    var sessionSnapshotAutoUploadHasAllowlist: Bool {
+        !sessionSnapshotAutoUploadOrgAllowlist.isEmpty || !sessionSnapshotAutoUploadPropertyAllowlist.isEmpty
     }
 
     private static func sessionSnapshotShadowWriteValue(
@@ -294,6 +333,81 @@ struct BackendFeatureFlags {
         default:
             return configuredValue
         }
+    }
+
+    private static func sessionSnapshotAutoUploadValue(
+        bundle: Bundle,
+        userDefaults: UserDefaults,
+        environment: [String: String]
+    ) -> Bool {
+        let configuredValue = Self.boolValue(
+            for: "session_snapshot_auto_upload_enabled",
+            bundle: bundle,
+            userDefaults: userDefaults
+        )
+
+        guard let rawOverride = environment["SCOUTCAPTURE_SESSION_SNAPSHOT_AUTO_UPLOAD_ENABLED"] else {
+            return configuredValue
+        }
+
+        switch rawOverride.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "1", "true", "yes", "on":
+            return true
+        case "0", "false", "no", "off":
+            return false
+        default:
+            return configuredValue
+        }
+    }
+
+    private static func boolEnvironmentValue(
+        for key: String,
+        environment: [String: String]
+    ) -> Bool {
+        guard let rawValue = environment[key]?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() else {
+            return false
+        }
+        switch rawValue {
+        case "1", "true", "yes", "on":
+            return true
+        default:
+            return false
+        }
+    }
+
+    private static func uuidAllowlistValue(
+        for key: String,
+        environmentKey: String,
+        bundle: Bundle,
+        userDefaults: UserDefaults,
+        environment: [String: String]
+    ) -> Set<UUID> {
+        if let rawValue = environment[environmentKey] {
+            return Self.uuidSet(from: rawValue)
+        }
+        if let rawValue = userDefaults.string(forKey: key) {
+            return Self.uuidSet(from: rawValue)
+        }
+        if let rawValues = userDefaults.array(forKey: key) as? [String] {
+            return Set(rawValues.compactMap { UUID(uuidString: $0.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)) })
+        }
+        if let rawValue = bundle.object(forInfoDictionaryKey: key) as? String {
+            return Self.uuidSet(from: rawValue)
+        }
+        if let rawValues = bundle.object(forInfoDictionaryKey: key) as? [String] {
+            return Set(rawValues.compactMap { UUID(uuidString: $0.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)) })
+        }
+        return []
+    }
+
+    private static func uuidSet(from rawValue: String) -> Set<UUID> {
+        let parts = rawValue
+            .split { character in
+                character == "," || character == ";" || character == "\n" || character == "\t" || character == " "
+            }
+        return Set(parts.compactMap { part in
+            UUID(uuidString: String(part).trimmingCharacters(in: CharacterSet.whitespacesAndNewlines))
+        })
     }
 
     private static func boolValue(
@@ -747,6 +861,20 @@ final class AppState: ObservableObject {
 
     struct SessionSnapshotUploadDiagnostics: Equatable {
         var flagEnabled: Bool = false
+        var autoUploadFlagEnabled: Bool = false
+        var autoUploadKillSwitchActive: Bool = false
+        var autoUploadAllowlistMatch: Bool = false
+        var autoUploadSkippedReason: String?
+        var autoUploadTriggerSource: String?
+        var lastAutoAttemptAt: Date?
+        var lastAutoSuccessAt: Date?
+        var lastAutoFailureAt: Date?
+        var lastAutoFailureMessage: String?
+        var lastAutoPropertyID: UUID?
+        var lastAutoSessionID: UUID?
+        var lastAutoSnapshotID: UUID?
+        var lastAutoUploadPath: String?
+        var lastAutoUploadOutcome: String = "not_attempted"
         var remoteAvailability: String = "not_checked"
         var attemptedCount: Int = 0
         var successCount: Int = 0
@@ -4314,6 +4442,7 @@ final class AppState: ObservableObject {
     private let startupFallbackGraceWindow: TimeInterval = 25.0
     private let supabaseOperationalMediaBucket = "scoutcapture-originals"
     private let sessionSnapshotStorageBucket = "scoutcapture-session-snapshots"
+    private var sessionSnapshotAutoUploadCheckpointKeys: Set<String> = []
     private let maximumSupabaseMediaUploadAttempts = 5
     private let failedSupabaseMediaRetryCooldown: TimeInterval = 30
     private var inFlightSupabaseMediaOperations: Set<String> = []
@@ -11777,6 +11906,174 @@ final class AppState: ObservableObject {
         }
     }
 
+    @discardableResult
+    func attemptAutomaticSessionSnapshotUploadForCompletedSealedCheckpoint(
+        session: Session,
+        triggerSource: String,
+        attemptedAt: Date = Date()
+    ) async -> SessionSnapshotUploadResult? {
+        let propertyID = session.propertyID
+        let sessionID = session.id
+        let checkpointKey = Self.sessionSnapshotAutoUploadCheckpointKey(session: session, triggerSource: triggerSource)
+
+        guard backendFeatureFlags.sessionSnapshotAutoUploadEnabled else {
+            recordSessionSnapshotAutoUploadSkipped(
+                propertyID: propertyID,
+                sessionID: sessionID,
+                triggerSource: triggerSource,
+                reason: "auto_upload_disabled"
+            )
+            return nil
+        }
+        guard !backendFeatureFlags.sessionSnapshotAutoUploadKillSwitch else {
+            recordSessionSnapshotAutoUploadSkipped(
+                propertyID: propertyID,
+                sessionID: sessionID,
+                triggerSource: triggerSource,
+                reason: "kill_switch_active"
+            )
+            return nil
+        }
+        guard backendFeatureFlags.sessionSnapshotAutoUploadHasAllowlist else {
+            recordSessionSnapshotAutoUploadSkipped(
+                propertyID: propertyID,
+                sessionID: sessionID,
+                triggerSource: triggerSource,
+                reason: "allowlist_empty"
+            )
+            return nil
+        }
+        guard session.status == .completed, session.isSealed, session.deletedAt == nil else {
+            recordSessionSnapshotAutoUploadSkipped(
+                propertyID: propertyID,
+                sessionID: sessionID,
+                triggerSource: triggerSource,
+                reason: "session_not_completed_sealed"
+            )
+            return nil
+        }
+        guard backendFeatureFlags.sessionSnapshotShadowWriteEnabled else {
+            recordSessionSnapshotAutoUploadSkipped(
+                propertyID: propertyID,
+                sessionID: sessionID,
+                triggerSource: triggerSource,
+                reason: "snapshot_shadow_write_disabled"
+            )
+            return nil
+        }
+        guard supabaseConfiguration.isConfigured else {
+            recordSessionSnapshotAutoUploadSkipped(
+                propertyID: propertyID,
+                sessionID: sessionID,
+                triggerSource: triggerSource,
+                reason: "supabase_config_invalid"
+            )
+            return nil
+        }
+        guard supabaseConfiguration.isSessionSnapshotShadowWriteOverrideAllowed else {
+            recordSessionSnapshotAutoUploadSkipped(
+                propertyID: propertyID,
+                sessionID: sessionID,
+                triggerSource: triggerSource,
+                reason: "snapshot_target_not_approved"
+            )
+            return nil
+        }
+        guard !supabaseConfiguration.isProductionSnapshotValidationManualOnly else {
+            recordSessionSnapshotAutoUploadSkipped(
+                propertyID: propertyID,
+                sessionID: sessionID,
+                triggerSource: triggerSource,
+                reason: "production_validation_manual_only"
+            )
+            return nil
+        }
+
+        let orgID = sessionSnapshotAutoUploadOrgID(for: session)
+        guard sessionSnapshotAutoUploadAllowlistMatches(propertyID: propertyID, orgID: orgID) else {
+            recordSessionSnapshotAutoUploadSkipped(
+                propertyID: propertyID,
+                sessionID: sessionID,
+                triggerSource: triggerSource,
+                reason: "allowlist_no_match"
+            )
+            return nil
+        }
+        guard reserveSessionSnapshotAutoUploadCheckpointKey(checkpointKey) else {
+            recordSessionSnapshotAutoUploadSkipped(
+                propertyID: propertyID,
+                sessionID: sessionID,
+                triggerSource: triggerSource,
+                reason: "duplicate_checkpoint"
+            )
+            return nil
+        }
+
+        recordSessionSnapshotAutoUploadAttempt(
+            propertyID: propertyID,
+            sessionID: sessionID,
+            triggerSource: triggerSource,
+            attemptedAt: attemptedAt
+        )
+        let result = await uploadSessionSnapshotShadowWrite(
+            propertyID: propertyID,
+            sessionID: sessionID,
+            kind: .completed,
+            trigger: "auto_completed_sealed_archive:\(triggerSource)",
+            generatedAt: attemptedAt
+        )
+        recordSessionSnapshotAutoUploadResult(result, triggerSource: triggerSource)
+        return result
+    }
+
+    private func sessionSnapshotAutoUploadOrgID(for session: Session) -> UUID? {
+        if let metadata = try? localStore.loadSessionMetadata(propertyID: session.propertyID, sessionID: session.id) {
+            return metadata.orgID
+        }
+        if let property = (try? localStore.fetchProperties())?.first(where: { $0.id == session.propertyID }),
+           let orgID = property.orgId {
+            return orgID
+        }
+        return nil
+    }
+
+    private func sessionSnapshotAutoUploadAllowlistMatches(propertyID: UUID, orgID: UUID?) -> Bool {
+        if backendFeatureFlags.sessionSnapshotAutoUploadPropertyAllowlist.contains(propertyID) {
+            return true
+        }
+        if let orgID, backendFeatureFlags.sessionSnapshotAutoUploadOrgAllowlist.contains(orgID) {
+            return true
+        }
+        return false
+    }
+
+    private func reserveSessionSnapshotAutoUploadCheckpointKey(_ key: String) -> Bool {
+        if sessionSnapshotAutoUploadCheckpointKeys.contains(key) {
+            return false
+        }
+        sessionSnapshotAutoUploadCheckpointKeys.insert(key)
+        return true
+    }
+
+    private static func sessionSnapshotAutoUploadCheckpointKey(session: Session, triggerSource: String) -> String {
+        let formatter = ISO8601DateFormatter()
+        let endedAt = session.endedAt.map { formatter.string(from: $0) } ?? "no-ended-at"
+        let exportedAt = session.exportedAt.map { formatter.string(from: $0) } ?? "no-exported-at"
+        let firstDeliveredAt = session.firstDeliveredAt.map { formatter.string(from: $0) } ?? "no-first-delivered-at"
+        let sealedState = session.isSealed ? "sealed" : "unsealed"
+        let parts: [String] = [
+            session.propertyID.uuidString.lowercased(),
+            session.id.uuidString.lowercased(),
+            triggerSource,
+            session.status.rawValue,
+            sealedState,
+            endedAt,
+            exportedAt,
+            firstDeliveredAt
+        ]
+        return parts.joined(separator: "|")
+    }
+
     private func localSessionForSnapshotUpload(propertyID: UUID, sessionID: UUID) throws -> Session {
         if let currentSession, currentSession.propertyID == propertyID, currentSession.id == sessionID {
             return currentSession
@@ -12352,6 +12649,69 @@ final class AppState: ObservableObject {
             diagnostics.sessionSnapshotUpload.lastUploadOutcome = outcome.rawValue
             diagnostics.sessionSnapshotUpload.lastKind = kind.rawValue
             diagnostics.sessionSnapshotUpload.lastTrigger = trigger
+        }
+    }
+
+    private func recordSessionSnapshotAutoUploadSkipped(
+        propertyID: UUID,
+        sessionID: UUID,
+        triggerSource: String,
+        reason: String
+    ) {
+        mutateLocalDiagnostics { diagnostics in
+            diagnostics.sessionSnapshotUpload.autoUploadFlagEnabled = self.backendFeatureFlags.sessionSnapshotAutoUploadEnabled
+            diagnostics.sessionSnapshotUpload.autoUploadKillSwitchActive = self.backendFeatureFlags.sessionSnapshotAutoUploadKillSwitch
+            diagnostics.sessionSnapshotUpload.autoUploadAllowlistMatch = false
+            diagnostics.sessionSnapshotUpload.autoUploadSkippedReason = reason
+            diagnostics.sessionSnapshotUpload.autoUploadTriggerSource = triggerSource
+            diagnostics.sessionSnapshotUpload.lastAutoPropertyID = propertyID
+            diagnostics.sessionSnapshotUpload.lastAutoSessionID = sessionID
+            diagnostics.sessionSnapshotUpload.lastAutoUploadOutcome = "skipped"
+        }
+    }
+
+    private func recordSessionSnapshotAutoUploadAttempt(
+        propertyID: UUID,
+        sessionID: UUID,
+        triggerSource: String,
+        attemptedAt: Date
+    ) {
+        mutateLocalDiagnostics { diagnostics in
+            diagnostics.sessionSnapshotUpload.autoUploadFlagEnabled = self.backendFeatureFlags.sessionSnapshotAutoUploadEnabled
+            diagnostics.sessionSnapshotUpload.autoUploadKillSwitchActive = self.backendFeatureFlags.sessionSnapshotAutoUploadKillSwitch
+            diagnostics.sessionSnapshotUpload.autoUploadAllowlistMatch = true
+            diagnostics.sessionSnapshotUpload.autoUploadSkippedReason = nil
+            diagnostics.sessionSnapshotUpload.autoUploadTriggerSource = triggerSource
+            diagnostics.sessionSnapshotUpload.lastAutoAttemptAt = attemptedAt
+            diagnostics.sessionSnapshotUpload.lastAutoPropertyID = propertyID
+            diagnostics.sessionSnapshotUpload.lastAutoSessionID = sessionID
+            diagnostics.sessionSnapshotUpload.lastAutoUploadOutcome = "attempting"
+            diagnostics.sessionSnapshotUpload.lastAutoFailureMessage = nil
+        }
+    }
+
+    private func recordSessionSnapshotAutoUploadResult(
+        _ result: SessionSnapshotUploadResult,
+        triggerSource: String
+    ) {
+        mutateLocalDiagnostics { diagnostics in
+            diagnostics.sessionSnapshotUpload.autoUploadFlagEnabled = self.backendFeatureFlags.sessionSnapshotAutoUploadEnabled
+            diagnostics.sessionSnapshotUpload.autoUploadKillSwitchActive = self.backendFeatureFlags.sessionSnapshotAutoUploadKillSwitch
+            diagnostics.sessionSnapshotUpload.autoUploadAllowlistMatch = true
+            diagnostics.sessionSnapshotUpload.autoUploadTriggerSource = triggerSource
+            diagnostics.sessionSnapshotUpload.lastAutoPropertyID = result.propertyID
+            diagnostics.sessionSnapshotUpload.lastAutoSessionID = result.sessionID
+            diagnostics.sessionSnapshotUpload.lastAutoSnapshotID = result.snapshotID
+            diagnostics.sessionSnapshotUpload.lastAutoUploadPath = result.storagePath
+            diagnostics.sessionSnapshotUpload.lastAutoUploadOutcome = result.outcome.rawValue
+            switch result.outcome {
+            case .succeeded:
+                diagnostics.sessionSnapshotUpload.lastAutoSuccessAt = Date()
+                diagnostics.sessionSnapshotUpload.lastAutoFailureMessage = nil
+            case .disabled, .unavailable, .failed, .orphanRisk:
+                diagnostics.sessionSnapshotUpload.lastAutoFailureAt = Date()
+                diagnostics.sessionSnapshotUpload.lastAutoFailureMessage = result.message
+            }
         }
     }
 
@@ -13531,6 +13891,22 @@ final class AppState: ObservableObject {
         lines.append("- last_failure: \(diagnosticsPreviewText(diagnostics.lastFailureMessage, maxLength: 160) ?? "none")")
         lines.append("- final_upload_outcome: \(diagnosticsPreviewText(diagnostics.lastUploadOutcome, maxLength: 60) ?? "not_attempted")")
         lines.append("- last_upload_error: \(diagnosticsPreviewText(diagnostics.lastUploadErrorMessage, maxLength: 160) ?? "none")")
+        lines.append("")
+        lines.append("Automatic Upload Guard")
+        lines.append("- auto_upload_flag_enabled: \(diagnostics.autoUploadFlagEnabled)")
+        lines.append("- auto_upload_kill_switch_active: \(diagnostics.autoUploadKillSwitchActive)")
+        lines.append("- auto_upload_allowlist_match: \(diagnostics.autoUploadAllowlistMatch)")
+        lines.append("- auto_upload_skipped_reason: \(diagnosticsPreviewText(diagnostics.autoUploadSkippedReason, maxLength: 120) ?? "none")")
+        lines.append("- auto_upload_trigger_source: \(diagnosticsPreviewText(diagnostics.autoUploadTriggerSource, maxLength: 80) ?? "none")")
+        lines.append("- last_auto_attempt_at: \(diagnostics.lastAutoAttemptAt?.formatted(date: .abbreviated, time: .standard) ?? "none")")
+        lines.append("- last_auto_success_at: \(diagnostics.lastAutoSuccessAt?.formatted(date: .abbreviated, time: .standard) ?? "none")")
+        lines.append("- last_auto_failure_at: \(diagnostics.lastAutoFailureAt?.formatted(date: .abbreviated, time: .standard) ?? "none")")
+        lines.append("- last_auto_failure: \(diagnosticsPreviewText(diagnostics.lastAutoFailureMessage, maxLength: 160) ?? "none")")
+        lines.append("- last_auto_outcome: \(diagnosticsPreviewText(diagnostics.lastAutoUploadOutcome, maxLength: 60) ?? "not_attempted")")
+        lines.append("- last_auto_snapshot_id: \(diagnostics.lastAutoSnapshotID?.uuidString ?? "none")")
+        lines.append("- last_auto_property_id: \(diagnostics.lastAutoPropertyID?.uuidString ?? "none")")
+        lines.append("- last_auto_session_id: \(diagnostics.lastAutoSessionID?.uuidString ?? "none")")
+        lines.append("- last_auto_upload_path_present: \(trimmedNonEmpty(diagnostics.lastAutoUploadPath) != nil)")
         lines.append("")
         lines.append("Last Sanitized Attempt")
         lines.append("- snapshot_id: \(diagnostics.lastSnapshotID?.uuidString ?? "none")")
@@ -26566,6 +26942,12 @@ final class AppState: ObservableObject {
             guard let self else { return }
             do {
                 _ = try self.localStore.createSessionArchiveSnapshot(session: session, trigger: trigger)
+                Task {
+                    await self.attemptAutomaticSessionSnapshotUploadForCompletedSealedCheckpoint(
+                        session: session,
+                        triggerSource: trigger
+                    )
+                }
             } catch {
                 print(
                     "[SessionArchive] result=failed " +

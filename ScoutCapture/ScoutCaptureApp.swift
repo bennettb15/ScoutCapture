@@ -8750,6 +8750,21 @@ private struct DebugSessionSnapshotUploadDiagnosticsView: View {
                 }
             }
 
+            Section("Automatic Upload Guard") {
+                diagnosticRow("Auto Flag Enabled", diagnostics.autoUploadFlagEnabled ? "true" : "false")
+                diagnosticRow("Kill Switch Active", diagnostics.autoUploadKillSwitchActive ? "true" : "false")
+                diagnosticRow("Allowlist Match", diagnostics.autoUploadAllowlistMatch ? "true" : "false")
+                diagnosticRow("Skipped Reason", diagnostics.autoUploadSkippedReason ?? "none")
+                diagnosticRow("Trigger Source", diagnostics.autoUploadTriggerSource ?? "none")
+                diagnosticRow("Last Auto Attempt", formattedRunDate(diagnostics.lastAutoAttemptAt))
+                diagnosticRow("Last Auto Success", formattedRunDate(diagnostics.lastAutoSuccessAt))
+                diagnosticRow("Last Auto Failure", formattedRunDate(diagnostics.lastAutoFailureAt))
+                diagnosticRow("Last Auto Outcome", diagnostics.lastAutoUploadOutcome)
+                if let autoError = AppState.diagnosticsPreviewText(diagnostics.lastAutoFailureMessage, maxLength: 160) {
+                    diagnosticRow("Last Auto Failure", autoError)
+                }
+            }
+
             Section("Selected Upload Target") {
                 if let uploadTarget {
                     diagnosticRow("Source", uploadTarget.source.rawValue)
