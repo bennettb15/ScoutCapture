@@ -759,6 +759,48 @@ final class AppState: ObservableObject {
         }
     }
 
+    enum SessionSnapshotRestoreDiagnosticOutcome: String, Codable, Equatable, CaseIterable {
+        case restorableMetadataCandidate = "restorable_metadata_candidate"
+        case noSnapshotFound = "no_snapshot_found"
+        case checksumFailed = "checksum_failed"
+        case objectMissing = "object_missing"
+        case parentMismatch = "parent_mismatch"
+        case staleSnapshot = "stale_snapshot"
+        case localNewerConflict = "local_newer_conflict"
+        case unsupportedSchema = "unsupported_schema"
+        case unableToVerify = "unable_to_verify"
+    }
+
+    struct SessionSnapshotRestoreDiagnosticsResult: Equatable {
+        var checkedAt: Date
+        var propertyID: UUID?
+        var sessionID: UUID?
+        var snapshotID: UUID?
+        var result: SessionSnapshotRestoreDiagnosticOutcome
+        var failureReason: String?
+        var rowFound: Bool
+        var objectReadable: Bool
+        var checksumVerified: Bool
+        var byteSizeMatches: Bool
+        var rowObjectVerified: Bool
+        var parentRemoteVerified: Bool
+        var snapshotSchemaVersion: Int?
+        var snapshotCreatedAt: Date?
+        var snapshotGeneratedAt: Date?
+        var localSessionExists: Bool
+        var localSessionStatus: String?
+        var localShotCount: Int?
+        var localIssueCount: Int?
+        var localGuidedCount: Int?
+        var snapshotShotCount: Int?
+        var snapshotIssueCount: Int?
+        var snapshotGuidedCount: Int?
+        var snapshotMediaManifestCount: Int?
+        var snapshotMissingLocalOriginalsCount: Int?
+        var snapshotSupabaseStorageMetadataCount: Int?
+        var freshness: String
+    }
+
     enum SessionSnapshotUploadError: LocalizedError, Equatable {
         case disabled
         case missingSupabaseClient
@@ -940,6 +982,33 @@ final class AppState: ObservableObject {
         var lastReadbackPayloadByteSize: Int?
         var lastReadbackSnapshotCreatedAt: Date?
         var lastReadbackFailureMessage: String?
+        var lastRestoreDiagnosticsAt: Date?
+        var lastRestoreDiagnosticsResult: String = "not_checked"
+        var lastRestoreDiagnosticsFailureReason: String?
+        var lastRestoreDiagnosticsPropertyID: UUID?
+        var lastRestoreDiagnosticsSessionID: UUID?
+        var lastRestoreDiagnosticsSnapshotID: UUID?
+        var lastRestoreDiagnosticsRowFound: Bool = false
+        var lastRestoreDiagnosticsObjectReadable: Bool = false
+        var lastRestoreDiagnosticsChecksumVerified: Bool = false
+        var lastRestoreDiagnosticsByteSizeMatches: Bool = false
+        var lastRestoreDiagnosticsRowObjectVerified: Bool = false
+        var lastRestoreDiagnosticsParentRemoteVerified: Bool = false
+        var lastRestoreDiagnosticsSnapshotSchemaVersion: Int?
+        var lastRestoreDiagnosticsSnapshotCreatedAt: Date?
+        var lastRestoreDiagnosticsSnapshotGeneratedAt: Date?
+        var lastRestoreDiagnosticsLocalSessionExists: Bool = false
+        var lastRestoreDiagnosticsLocalSessionStatus: String?
+        var lastRestoreDiagnosticsLocalShotCount: Int?
+        var lastRestoreDiagnosticsLocalIssueCount: Int?
+        var lastRestoreDiagnosticsLocalGuidedCount: Int?
+        var lastRestoreDiagnosticsSnapshotShotCount: Int?
+        var lastRestoreDiagnosticsSnapshotIssueCount: Int?
+        var lastRestoreDiagnosticsSnapshotGuidedCount: Int?
+        var lastRestoreDiagnosticsSnapshotMediaManifestCount: Int?
+        var lastRestoreDiagnosticsSnapshotMissingLocalOriginalsCount: Int?
+        var lastRestoreDiagnosticsSnapshotSupabaseStorageMetadataCount: Int?
+        var lastRestoreDiagnosticsFreshness: String = "not_checked"
     }
 
     struct LocalDiagnosticsState: Equatable {
@@ -12254,6 +12323,149 @@ final class AppState: ObservableObject {
         }
     }
 
+    @discardableResult
+    func validateLatestSessionSnapshotRestoreDiagnostics(checkedAt: Date = Date()) async -> SessionSnapshotRestoreDiagnosticsResult {
+        let propertyID = manualSessionSnapshotUploadTarget?.propertyID ?? localDiagnostics.sessionSnapshotUpload.lastPropertyID
+        let sessionID = manualSessionSnapshotUploadTarget?.sessionID ?? localDiagnostics.sessionSnapshotUpload.lastSessionID
+
+        do {
+            let rows = try await fetchSessionSnapshotRows(snapshotID: nil, propertyID: propertyID, sessionID: sessionID)
+            guard let row = rows.sorted(by: Self.sessionSnapshotUploadRowSort).first else {
+                let result = SessionSnapshotRestoreDiagnosticsResult(
+                    checkedAt: checkedAt,
+                    propertyID: propertyID,
+                    sessionID: sessionID,
+                    snapshotID: nil,
+                    result: .noSnapshotFound,
+                    failureReason: "snapshot row not found",
+                    rowFound: false,
+                    objectReadable: false,
+                    checksumVerified: false,
+                    byteSizeMatches: false,
+                    rowObjectVerified: false,
+                    parentRemoteVerified: false,
+                    snapshotSchemaVersion: nil,
+                    snapshotCreatedAt: nil,
+                    snapshotGeneratedAt: nil,
+                    localSessionExists: false,
+                    localSessionStatus: nil,
+                    localShotCount: nil,
+                    localIssueCount: nil,
+                    localGuidedCount: nil,
+                    snapshotShotCount: nil,
+                    snapshotIssueCount: nil,
+                    snapshotGuidedCount: nil,
+                    snapshotMediaManifestCount: nil,
+                    snapshotMissingLocalOriginalsCount: nil,
+                    snapshotSupabaseStorageMetadataCount: nil,
+                    freshness: "unknown"
+                )
+                recordSessionSnapshotRestoreDiagnostics(result)
+                return result
+            }
+
+            let payloadData: Data
+            do {
+                payloadData = try await downloadSessionSnapshotPayload(
+                    bucket: row.payloadStorageBucket,
+                    path: row.payloadStoragePath
+                )
+            } catch {
+                let result = makeSessionSnapshotRestoreDiagnosticsResult(
+                    row: row,
+                    payloadData: nil,
+                    checkedAt: checkedAt,
+                    parentStatus: nil,
+                    localComparison: nil,
+                    outcome: .objectMissing,
+                    failureReason: "snapshot payload object missing or unreadable"
+                )
+                recordSessionSnapshotRestoreDiagnostics(result)
+                return result
+            }
+
+            let decodedPayload = Self.decodeSessionSnapshotPayload(payloadData)
+            let localComparison = localSessionSnapshotRestoreComparison(propertyID: row.propertyID, sessionID: row.sessionID)
+            let parentStatus: SessionSnapshotAuthPreflightRemoteParentStatus?
+            do {
+                parentStatus = try await sessionSnapshotRemoteParentPreflightStatus(
+                    orgID: row.orgID,
+                    propertyID: row.propertyID,
+                    sessionID: row.sessionID
+                )
+            } catch {
+                let result = makeSessionSnapshotRestoreDiagnosticsResult(
+                    row: row,
+                    payloadData: payloadData,
+                    checkedAt: checkedAt,
+                    parentStatus: nil,
+                    localComparison: localComparison,
+                    outcome: .unableToVerify,
+                    failureReason: "remote parent check failed"
+                )
+                recordSessionSnapshotRestoreDiagnostics(result)
+                return result
+            }
+
+            let readback = Self.makeSessionSnapshotReadbackResult(
+                row: row,
+                payloadData: payloadData,
+                checkedAt: checkedAt,
+                failureReason: nil
+            )
+            let outcomeAndReason = Self.sessionSnapshotRestoreOutcome(
+                row: row,
+                decodedPayload: decodedPayload,
+                readback: readback,
+                parentStatus: parentStatus,
+                localComparison: localComparison
+            )
+            let result = makeSessionSnapshotRestoreDiagnosticsResult(
+                row: row,
+                payloadData: payloadData,
+                checkedAt: checkedAt,
+                parentStatus: parentStatus,
+                localComparison: localComparison,
+                outcome: outcomeAndReason.outcome,
+                failureReason: outcomeAndReason.reason
+            )
+            recordSessionSnapshotRestoreDiagnostics(result)
+            return result
+        } catch {
+            let result = SessionSnapshotRestoreDiagnosticsResult(
+                checkedAt: checkedAt,
+                propertyID: propertyID,
+                sessionID: sessionID,
+                snapshotID: nil,
+                result: .unableToVerify,
+                failureReason: "unable to verify snapshot restore diagnostics",
+                rowFound: false,
+                objectReadable: false,
+                checksumVerified: false,
+                byteSizeMatches: false,
+                rowObjectVerified: false,
+                parentRemoteVerified: false,
+                snapshotSchemaVersion: nil,
+                snapshotCreatedAt: nil,
+                snapshotGeneratedAt: nil,
+                localSessionExists: false,
+                localSessionStatus: nil,
+                localShotCount: nil,
+                localIssueCount: nil,
+                localGuidedCount: nil,
+                snapshotShotCount: nil,
+                snapshotIssueCount: nil,
+                snapshotGuidedCount: nil,
+                snapshotMediaManifestCount: nil,
+                snapshotMissingLocalOriginalsCount: nil,
+                snapshotSupabaseStorageMetadataCount: nil,
+                freshness: "unknown"
+            )
+            recordSessionSnapshotRestoreDiagnostics(result)
+            return result
+        }
+    }
+
     private func fetchSessionSnapshotRows(
         snapshotID: UUID?,
         propertyID: UUID?,
@@ -12328,6 +12540,180 @@ final class AppState: ObservableObject {
             throw SessionSnapshotUploadError.missingSupabaseClient
         }
         return try await client.storage.from(bucket).download(path: path)
+    }
+
+    private struct SessionSnapshotRestoreLocalComparison {
+        let sessionExists: Bool
+        let status: String?
+        let shotCount: Int?
+        let issueCount: Int?
+        let guidedCount: Int?
+        let knownStateAt: Date?
+    }
+
+    private static func decodeSessionSnapshotPayload(_ data: Data?) -> SessionSnapshotPayloadForChecksum? {
+        guard let data else { return nil }
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        return try? decoder.decode(SessionSnapshotPayloadForChecksum.self, from: data)
+    }
+
+    private func localSessionSnapshotRestoreComparison(
+        propertyID: UUID,
+        sessionID: UUID
+    ) -> SessionSnapshotRestoreLocalComparison {
+        let session = (try? localStore.fetchSessionsForCacheBuild(propertyID: propertyID))
+            .flatMap { sessions in sessions.first { $0.id == sessionID } }
+        guard let session else {
+            return SessionSnapshotRestoreLocalComparison(
+                sessionExists: false,
+                status: nil,
+                shotCount: nil,
+                issueCount: nil,
+                guidedCount: nil,
+                knownStateAt: nil
+            )
+        }
+
+        let metadata = try? localStore.loadSessionMetadata(propertyID: propertyID, sessionID: sessionID)
+        let knownDates = [
+            session.startedAt,
+            session.endedAt,
+            session.exportedAt,
+            session.firstDeliveredAt,
+            session.reExportExpiresAt,
+            metadata?.startedAt,
+            metadata?.endedAt,
+            metadata?.exportedAt,
+            metadata?.firstDeliveredAt,
+            metadata?.reExportExpiresAt
+        ].compactMap { $0 }
+        return SessionSnapshotRestoreLocalComparison(
+            sessionExists: true,
+            status: metadata?.status.rawValue ?? session.status.rawValue,
+            shotCount: metadata?.shots.count,
+            issueCount: metadata?.issues.count,
+            guidedCount: metadata?.guidedShots.count,
+            knownStateAt: knownDates.max()
+        )
+    }
+
+    private static func sessionSnapshotRestoreOutcome(
+        row: SessionSnapshotUploadRow,
+        decodedPayload: SessionSnapshotPayloadForChecksum?,
+        readback: SessionSnapshotReadbackResult,
+        parentStatus: SessionSnapshotAuthPreflightRemoteParentStatus?,
+        localComparison: SessionSnapshotRestoreLocalComparison
+    ) -> (outcome: SessionSnapshotRestoreDiagnosticOutcome, reason: String?) {
+        guard let decodedPayload else {
+            return (.unableToVerify, "snapshot payload could not be decoded")
+        }
+        guard row.snapshotSchemaVersion == 1, decodedPayload.snapshotSchemaVersion == 1 else {
+            return (.unsupportedSchema, "snapshot schema version unsupported")
+        }
+        guard readback.checksumVerified else {
+            return (.checksumFailed, "snapshot payload checksum mismatch")
+        }
+        guard readback.byteSizeMatches else {
+            return (.unableToVerify, "snapshot payload byte size mismatch")
+        }
+        guard readback.rowObjectConsistent else {
+            return (.parentMismatch, "snapshot row/object consistency failed")
+        }
+        guard readback.countsValid else {
+            return (.unableToVerify, "snapshot row/object counts mismatch")
+        }
+        guard let parentStatus,
+              parentStatus.propertyExists,
+              parentStatus.sessionExists,
+              parentStatus.sessionPropertyIDMatches,
+              parentStatus.orgIDsMatch,
+              parentStatus.errorMessage == nil else {
+            return (.parentMismatch, "remote parent property/session mismatch")
+        }
+
+        if localComparison.sessionExists,
+           let localKnownStateAt = localComparison.knownStateAt,
+           localKnownStateAt > decodedPayload.generatedAt {
+            return (.localNewerConflict, "local session state is newer than snapshot")
+        }
+
+        if localComparison.sessionExists,
+           let localShotCount = localComparison.shotCount,
+           let localIssueCount = localComparison.issueCount,
+           let localGuidedCount = localComparison.guidedCount,
+           (localShotCount > decodedPayload.shotCount ||
+            localIssueCount > decodedPayload.issueCount ||
+            localGuidedCount > decodedPayload.guidedCount) {
+            return (.staleSnapshot, "snapshot counts are behind local metadata")
+        }
+
+        return (.restorableMetadataCandidate, nil)
+    }
+
+    private func makeSessionSnapshotRestoreDiagnosticsResult(
+        row: SessionSnapshotUploadRow,
+        payloadData: Data?,
+        checkedAt: Date,
+        parentStatus: SessionSnapshotAuthPreflightRemoteParentStatus?,
+        localComparison: SessionSnapshotRestoreLocalComparison?,
+        outcome: SessionSnapshotRestoreDiagnosticOutcome,
+        failureReason: String?
+    ) -> SessionSnapshotRestoreDiagnosticsResult {
+        let decodedPayload = Self.decodeSessionSnapshotPayload(payloadData)
+        let readback = Self.makeSessionSnapshotReadbackResult(
+            row: row,
+            payloadData: payloadData,
+            checkedAt: checkedAt,
+            failureReason: failureReason
+        )
+        let parentVerified = parentStatus?.propertyExists == true &&
+            parentStatus?.sessionExists == true &&
+            parentStatus?.sessionPropertyIDMatches == true &&
+            parentStatus?.orgIDsMatch == true &&
+            parentStatus?.errorMessage == nil
+        let freshness = Self.sessionSnapshotRestoreFreshness(
+            snapshotGeneratedAt: decodedPayload?.generatedAt,
+            localKnownStateAt: localComparison?.knownStateAt
+        )
+        return SessionSnapshotRestoreDiagnosticsResult(
+            checkedAt: checkedAt,
+            propertyID: row.propertyID,
+            sessionID: row.sessionID,
+            snapshotID: row.id,
+            result: outcome,
+            failureReason: Self.diagnosticsPreviewText(failureReason, maxLength: 160),
+            rowFound: true,
+            objectReadable: payloadData != nil,
+            checksumVerified: readback.checksumVerified,
+            byteSizeMatches: readback.byteSizeMatches,
+            rowObjectVerified: readback.rowObjectConsistent,
+            parentRemoteVerified: parentVerified,
+            snapshotSchemaVersion: decodedPayload?.snapshotSchemaVersion == row.snapshotSchemaVersion ? decodedPayload?.snapshotSchemaVersion : row.snapshotSchemaVersion,
+            snapshotCreatedAt: row.createdAt,
+            snapshotGeneratedAt: decodedPayload?.generatedAt,
+            localSessionExists: localComparison?.sessionExists ?? false,
+            localSessionStatus: localComparison?.status,
+            localShotCount: localComparison?.shotCount,
+            localIssueCount: localComparison?.issueCount,
+            localGuidedCount: localComparison?.guidedCount,
+            snapshotShotCount: decodedPayload?.shotCount ?? row.shotCount,
+            snapshotIssueCount: decodedPayload?.issueCount ?? row.issueCount,
+            snapshotGuidedCount: decodedPayload?.guidedCount ?? row.guidedCount,
+            snapshotMediaManifestCount: decodedPayload?.mediaManifestCount ?? row.mediaManifestCount,
+            snapshotMissingLocalOriginalsCount: decodedPayload?.missingLocalOriginalsCount ?? row.missingLocalOriginalsCount,
+            snapshotSupabaseStorageMetadataCount: decodedPayload?.supabaseStorageMetadataCount ?? row.supabaseStorageMetadataCount,
+            freshness: freshness
+        )
+    }
+
+    private static func sessionSnapshotRestoreFreshness(
+        snapshotGeneratedAt: Date?,
+        localKnownStateAt: Date?
+    ) -> String {
+        guard let snapshotGeneratedAt, let localKnownStateAt else { return "unknown" }
+        if snapshotGeneratedAt == localKnownStateAt { return "equal" }
+        return snapshotGeneratedAt > localKnownStateAt ? "snapshot_newer" : "local_newer"
     }
 
     static func makeSessionSnapshotReadbackResult(
@@ -12428,6 +12814,38 @@ final class AppState: ObservableObject {
             diagnostics.sessionSnapshotUpload.lastReadbackPayloadByteSize = result.payloadByteSize
             diagnostics.sessionSnapshotUpload.lastReadbackSnapshotCreatedAt = result.snapshotCreatedAt
             diagnostics.sessionSnapshotUpload.lastReadbackFailureMessage = result.failureReason
+        }
+    }
+
+    private func recordSessionSnapshotRestoreDiagnostics(_ result: SessionSnapshotRestoreDiagnosticsResult) {
+        mutateLocalDiagnostics { diagnostics in
+            diagnostics.sessionSnapshotUpload.lastRestoreDiagnosticsAt = result.checkedAt
+            diagnostics.sessionSnapshotUpload.lastRestoreDiagnosticsResult = result.result.rawValue
+            diagnostics.sessionSnapshotUpload.lastRestoreDiagnosticsFailureReason = result.failureReason
+            diagnostics.sessionSnapshotUpload.lastRestoreDiagnosticsPropertyID = result.propertyID
+            diagnostics.sessionSnapshotUpload.lastRestoreDiagnosticsSessionID = result.sessionID
+            diagnostics.sessionSnapshotUpload.lastRestoreDiagnosticsSnapshotID = result.snapshotID
+            diagnostics.sessionSnapshotUpload.lastRestoreDiagnosticsRowFound = result.rowFound
+            diagnostics.sessionSnapshotUpload.lastRestoreDiagnosticsObjectReadable = result.objectReadable
+            diagnostics.sessionSnapshotUpload.lastRestoreDiagnosticsChecksumVerified = result.checksumVerified
+            diagnostics.sessionSnapshotUpload.lastRestoreDiagnosticsByteSizeMatches = result.byteSizeMatches
+            diagnostics.sessionSnapshotUpload.lastRestoreDiagnosticsRowObjectVerified = result.rowObjectVerified
+            diagnostics.sessionSnapshotUpload.lastRestoreDiagnosticsParentRemoteVerified = result.parentRemoteVerified
+            diagnostics.sessionSnapshotUpload.lastRestoreDiagnosticsSnapshotSchemaVersion = result.snapshotSchemaVersion
+            diagnostics.sessionSnapshotUpload.lastRestoreDiagnosticsSnapshotCreatedAt = result.snapshotCreatedAt
+            diagnostics.sessionSnapshotUpload.lastRestoreDiagnosticsSnapshotGeneratedAt = result.snapshotGeneratedAt
+            diagnostics.sessionSnapshotUpload.lastRestoreDiagnosticsLocalSessionExists = result.localSessionExists
+            diagnostics.sessionSnapshotUpload.lastRestoreDiagnosticsLocalSessionStatus = result.localSessionStatus
+            diagnostics.sessionSnapshotUpload.lastRestoreDiagnosticsLocalShotCount = result.localShotCount
+            diagnostics.sessionSnapshotUpload.lastRestoreDiagnosticsLocalIssueCount = result.localIssueCount
+            diagnostics.sessionSnapshotUpload.lastRestoreDiagnosticsLocalGuidedCount = result.localGuidedCount
+            diagnostics.sessionSnapshotUpload.lastRestoreDiagnosticsSnapshotShotCount = result.snapshotShotCount
+            diagnostics.sessionSnapshotUpload.lastRestoreDiagnosticsSnapshotIssueCount = result.snapshotIssueCount
+            diagnostics.sessionSnapshotUpload.lastRestoreDiagnosticsSnapshotGuidedCount = result.snapshotGuidedCount
+            diagnostics.sessionSnapshotUpload.lastRestoreDiagnosticsSnapshotMediaManifestCount = result.snapshotMediaManifestCount
+            diagnostics.sessionSnapshotUpload.lastRestoreDiagnosticsSnapshotMissingLocalOriginalsCount = result.snapshotMissingLocalOriginalsCount
+            diagnostics.sessionSnapshotUpload.lastRestoreDiagnosticsSnapshotSupabaseStorageMetadataCount = result.snapshotSupabaseStorageMetadataCount
+            diagnostics.sessionSnapshotUpload.lastRestoreDiagnosticsFreshness = result.freshness
         }
     }
 
@@ -13985,6 +14403,35 @@ final class AppState: ObservableObject {
         lines.append("- payload_byte_size: \(diagnostics.lastReadbackPayloadByteSize.map(String.init) ?? "none")")
         lines.append("- snapshot_created_at: \(diagnostics.lastReadbackSnapshotCreatedAt?.formatted(date: .abbreviated, time: .standard) ?? "none")")
         lines.append("- readback_failure: \(diagnosticsPreviewText(diagnostics.lastReadbackFailureMessage, maxLength: 160) ?? "none")")
+        lines.append("")
+        lines.append("Snapshot Restore Diagnostics")
+        lines.append("- checked_at: \(diagnostics.lastRestoreDiagnosticsAt?.formatted(date: .abbreviated, time: .standard) ?? "none")")
+        lines.append("- property_id: \(diagnostics.lastRestoreDiagnosticsPropertyID?.uuidString ?? "none")")
+        lines.append("- session_id: \(diagnostics.lastRestoreDiagnosticsSessionID?.uuidString ?? "none")")
+        lines.append("- snapshot_id: \(diagnostics.lastRestoreDiagnosticsSnapshotID?.uuidString ?? "none")")
+        lines.append("- result: \(diagnosticsPreviewText(diagnostics.lastRestoreDiagnosticsResult, maxLength: 80) ?? "not_checked")")
+        lines.append("- failure_reason: \(diagnosticsPreviewText(diagnostics.lastRestoreDiagnosticsFailureReason, maxLength: 160) ?? "none")")
+        lines.append("- row_found: \(diagnostics.lastRestoreDiagnosticsRowFound)")
+        lines.append("- object_readable: \(diagnostics.lastRestoreDiagnosticsObjectReadable)")
+        lines.append("- checksum_verified: \(diagnostics.lastRestoreDiagnosticsChecksumVerified)")
+        lines.append("- byte_size_matches: \(diagnostics.lastRestoreDiagnosticsByteSizeMatches)")
+        lines.append("- row_object_verified: \(diagnostics.lastRestoreDiagnosticsRowObjectVerified)")
+        lines.append("- parent_remote_verified: \(diagnostics.lastRestoreDiagnosticsParentRemoteVerified)")
+        lines.append("- snapshot_schema_version: \(diagnostics.lastRestoreDiagnosticsSnapshotSchemaVersion.map(String.init) ?? "none")")
+        lines.append("- snapshot_created_at: \(diagnostics.lastRestoreDiagnosticsSnapshotCreatedAt?.formatted(date: .abbreviated, time: .standard) ?? "none")")
+        lines.append("- snapshot_generated_at: \(diagnostics.lastRestoreDiagnosticsSnapshotGeneratedAt?.formatted(date: .abbreviated, time: .standard) ?? "none")")
+        lines.append("- freshness: \(diagnosticsPreviewText(diagnostics.lastRestoreDiagnosticsFreshness, maxLength: 80) ?? "not_checked")")
+        lines.append("- local_session_exists: \(diagnostics.lastRestoreDiagnosticsLocalSessionExists)")
+        lines.append("- local_session_status: \(diagnosticsPreviewText(diagnostics.lastRestoreDiagnosticsLocalSessionStatus, maxLength: 60) ?? "none")")
+        lines.append("- local_shot_count: \(diagnostics.lastRestoreDiagnosticsLocalShotCount.map(String.init) ?? "none")")
+        lines.append("- local_issue_count: \(diagnostics.lastRestoreDiagnosticsLocalIssueCount.map(String.init) ?? "none")")
+        lines.append("- local_guided_count: \(diagnostics.lastRestoreDiagnosticsLocalGuidedCount.map(String.init) ?? "none")")
+        lines.append("- snapshot_shot_count: \(diagnostics.lastRestoreDiagnosticsSnapshotShotCount.map(String.init) ?? "none")")
+        lines.append("- snapshot_issue_count: \(diagnostics.lastRestoreDiagnosticsSnapshotIssueCount.map(String.init) ?? "none")")
+        lines.append("- snapshot_guided_count: \(diagnostics.lastRestoreDiagnosticsSnapshotGuidedCount.map(String.init) ?? "none")")
+        lines.append("- snapshot_media_manifest_count: \(diagnostics.lastRestoreDiagnosticsSnapshotMediaManifestCount.map(String.init) ?? "none")")
+        lines.append("- snapshot_missing_local_originals_count: \(diagnostics.lastRestoreDiagnosticsSnapshotMissingLocalOriginalsCount.map(String.init) ?? "none")")
+        lines.append("- snapshot_supabase_storage_metadata_count: \(diagnostics.lastRestoreDiagnosticsSnapshotSupabaseStorageMetadataCount.map(String.init) ?? "none")")
         lines.append("")
         lines.append("Redaction Notes")
         lines.append("- Report rows intentionally omit raw session.json text, local paths, storage object paths, signed URLs, auth tokens, and media bytes.")

@@ -8667,6 +8667,7 @@ private struct DebugSessionSnapshotUploadDiagnosticsView: View {
     let diagnostics: AppState.SessionSnapshotUploadDiagnostics
     @State private var isUploadingSessionSnapshot: Bool = false
     @State private var isCheckingSnapshotReadback: Bool = false
+    @State private var isCheckingSnapshotRestoreDiagnostics: Bool = false
     @State private var isRefreshingAuthPreflight: Bool = false
     @State private var isRepairingLocalOrgDrift: Bool = false
     @State private var isRunningLocalOrgDriftAudit: Bool = false
@@ -8973,6 +8974,50 @@ private struct DebugSessionSnapshotUploadDiagnosticsView: View {
                     }
                 }
                 .disabled(isCheckingSnapshotReadback)
+                .font(.system(size: 14, weight: .semibold))
+            }
+
+            Section("Snapshot Restore Diagnostics") {
+                Text("Read-only restore candidacy check. It verifies snapshot metadata and compares local counts without hydrating sessions, restoring shots, downloading media, or writing local metadata.")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(.secondary)
+                diagnosticRow("Result", diagnostics.lastRestoreDiagnosticsResult)
+                diagnosticRow("Last Checked", formattedRunDate(diagnostics.lastRestoreDiagnosticsAt))
+                diagnosticRow("Property ID", diagnostics.lastRestoreDiagnosticsPropertyID?.uuidString ?? "none")
+                diagnosticRow("Session ID", diagnostics.lastRestoreDiagnosticsSessionID?.uuidString ?? "none")
+                diagnosticRow("Snapshot ID", diagnostics.lastRestoreDiagnosticsSnapshotID?.uuidString ?? "none")
+                diagnosticRow("Row Found", diagnostics.lastRestoreDiagnosticsRowFound ? "true" : "false")
+                diagnosticRow("Object Readable", diagnostics.lastRestoreDiagnosticsObjectReadable ? "true" : "false")
+                diagnosticRow("Checksum Verified", diagnostics.lastRestoreDiagnosticsChecksumVerified ? "true" : "false")
+                diagnosticRow("Byte Size Matches", diagnostics.lastRestoreDiagnosticsByteSizeMatches ? "true" : "false")
+                diagnosticRow("Row/Object Verified", diagnostics.lastRestoreDiagnosticsRowObjectVerified ? "true" : "false")
+                diagnosticRow("Parent Remote Verified", diagnostics.lastRestoreDiagnosticsParentRemoteVerified ? "true" : "false")
+                diagnosticRow("Snapshot Schema", diagnostics.lastRestoreDiagnosticsSnapshotSchemaVersion.map(String.init) ?? "none")
+                diagnosticRow("Snapshot Created", formattedRunDate(diagnostics.lastRestoreDiagnosticsSnapshotCreatedAt))
+                diagnosticRow("Snapshot Generated", formattedRunDate(diagnostics.lastRestoreDiagnosticsSnapshotGeneratedAt))
+                diagnosticRow("Freshness", diagnostics.lastRestoreDiagnosticsFreshness)
+                diagnosticRow("Local Session Exists", diagnostics.lastRestoreDiagnosticsLocalSessionExists ? "true" : "false")
+                diagnosticRow("Local Session Status", diagnostics.lastRestoreDiagnosticsLocalSessionStatus ?? "none")
+                diagnosticRow("Local Shots", diagnostics.lastRestoreDiagnosticsLocalShotCount.map(String.init) ?? "none")
+                diagnosticRow("Local Issues", diagnostics.lastRestoreDiagnosticsLocalIssueCount.map(String.init) ?? "none")
+                diagnosticRow("Local Guided", diagnostics.lastRestoreDiagnosticsLocalGuidedCount.map(String.init) ?? "none")
+                diagnosticRow("Snapshot Shots", diagnostics.lastRestoreDiagnosticsSnapshotShotCount.map(String.init) ?? "none")
+                diagnosticRow("Snapshot Issues", diagnostics.lastRestoreDiagnosticsSnapshotIssueCount.map(String.init) ?? "none")
+                diagnosticRow("Snapshot Guided", diagnostics.lastRestoreDiagnosticsSnapshotGuidedCount.map(String.init) ?? "none")
+                diagnosticRow("Media Manifest Count", diagnostics.lastRestoreDiagnosticsSnapshotMediaManifestCount.map(String.init) ?? "none")
+                if let failure = AppState.diagnosticsPreviewText(diagnostics.lastRestoreDiagnosticsFailureReason, maxLength: 160) {
+                    diagnosticRow("Failure Reason", failure)
+                }
+                Button(isCheckingSnapshotRestoreDiagnostics ? "Checking..." : "Check Restore Diagnostics") {
+                    isCheckingSnapshotRestoreDiagnostics = true
+                    Task {
+                        _ = await appState.validateLatestSessionSnapshotRestoreDiagnostics()
+                        await MainActor.run {
+                            isCheckingSnapshotRestoreDiagnostics = false
+                        }
+                    }
+                }
+                .disabled(isCheckingSnapshotRestoreDiagnostics)
                 .font(.system(size: 14, weight: .semibold))
             }
         }
