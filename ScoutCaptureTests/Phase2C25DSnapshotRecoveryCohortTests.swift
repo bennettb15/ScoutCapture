@@ -46,7 +46,8 @@ final class Phase2C25DSnapshotRecoveryCohortTests: XCTestCase {
             snapshotMediaManifestCount: snapshotMediaManifestCount,
             snapshotMissingLocalOriginalsCount: nil,
             snapshotSupabaseStorageMetadataCount: nil,
-            freshness: "equal"
+            freshness: "equal",
+            mediaRecoveryDiagnostics: .notChecked
         )
     }
 

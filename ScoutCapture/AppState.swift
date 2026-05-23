@@ -817,6 +817,73 @@ final class AppState: ObservableObject {
         var snapshotMissingLocalOriginalsCount: Int?
         var snapshotSupabaseStorageMetadataCount: Int?
         var freshness: String
+        var mediaRecoveryDiagnostics: SessionSnapshotMediaRecoveryDiagnostics
+    }
+
+    enum SessionSnapshotMediaRecoveryState: String, Codable, Equatable, CaseIterable {
+        case recoverableFromSupabaseStorage = "recoverable_from_supabase_storage"
+        case recoverableFromLocalCache = "recoverable_from_local_cache"
+        case missingRemoteStorageMetadata = "missing_remote_storage_metadata"
+        case missingLocalFile = "missing_local_file"
+        case missingBoth = "missing_both"
+        case checksumUnknown = "checksum_unknown"
+        case checksumMismatch = "checksum_mismatch"
+        case unsupportedMediaManifest = "unsupported_media_manifest"
+        case notChecked = "not_checked"
+    }
+
+    struct SessionSnapshotMediaRecoveryItemDiagnostic: Equatable, Identifiable {
+        let id: UUID
+        let state: SessionSnapshotMediaRecoveryState
+        let localReferencePresent: Bool
+        let localFilePresent: Bool
+        let remoteStorageMetadataPresent: Bool
+        let checksumPresent: Bool
+        let checksumVerified: Bool
+    }
+
+    struct SessionSnapshotMediaRecoveryDiagnostics: Equatable {
+        var checkedAt: Date?
+        var readiness: String
+        var manifestSupported: Bool
+        var manifestCount: Int
+        var originalsCount: Int
+        var localFilesPresentCount: Int
+        var remoteStorageMetadataPresentCount: Int
+        var recoverableRemoteCount: Int
+        var recoverableLocalCount: Int
+        var missingCount: Int
+        var missingRemoteStorageMetadataCount: Int
+        var missingLocalFileCount: Int
+        var checksumVerifiedCount: Int
+        var checksumUnknownCount: Int
+        var checksumMismatchCount: Int
+        var unsupportedCount: Int
+        var notCheckedCount: Int
+        var stateCounts: [SessionSnapshotMediaRecoveryState: Int]
+        var items: [SessionSnapshotMediaRecoveryItemDiagnostic]
+
+        static let notChecked = SessionSnapshotMediaRecoveryDiagnostics(
+            checkedAt: nil,
+            readiness: SessionSnapshotMediaRecoveryState.notChecked.rawValue,
+            manifestSupported: false,
+            manifestCount: 0,
+            originalsCount: 0,
+            localFilesPresentCount: 0,
+            remoteStorageMetadataPresentCount: 0,
+            recoverableRemoteCount: 0,
+            recoverableLocalCount: 0,
+            missingCount: 0,
+            missingRemoteStorageMetadataCount: 0,
+            missingLocalFileCount: 0,
+            checksumVerifiedCount: 0,
+            checksumUnknownCount: 0,
+            checksumMismatchCount: 0,
+            unsupportedCount: 0,
+            notCheckedCount: 0,
+            stateCounts: [:],
+            items: []
+        )
     }
 
     struct SessionSnapshotHydrationResult: Equatable {
@@ -1105,6 +1172,23 @@ final class AppState: ObservableObject {
         var lastRestoreDiagnosticsSnapshotMissingLocalOriginalsCount: Int?
         var lastRestoreDiagnosticsSnapshotSupabaseStorageMetadataCount: Int?
         var lastRestoreDiagnosticsFreshness: String = "not_checked"
+        var lastRestoreDiagnosticsMediaRecoveryReadiness: String = SessionSnapshotMediaRecoveryState.notChecked.rawValue
+        var lastRestoreDiagnosticsMediaManifestSupported: Bool = false
+        var lastRestoreDiagnosticsMediaManifestCount: Int = 0
+        var lastRestoreDiagnosticsMediaOriginalsCount: Int = 0
+        var lastRestoreDiagnosticsMediaLocalFilesPresentCount: Int = 0
+        var lastRestoreDiagnosticsMediaRemoteStorageMetadataPresentCount: Int = 0
+        var lastRestoreDiagnosticsMediaRecoverableRemoteCount: Int = 0
+        var lastRestoreDiagnosticsMediaRecoverableLocalCount: Int = 0
+        var lastRestoreDiagnosticsMediaMissingCount: Int = 0
+        var lastRestoreDiagnosticsMediaMissingRemoteStorageMetadataCount: Int = 0
+        var lastRestoreDiagnosticsMediaMissingLocalFileCount: Int = 0
+        var lastRestoreDiagnosticsMediaChecksumVerifiedCount: Int = 0
+        var lastRestoreDiagnosticsMediaChecksumUnknownCount: Int = 0
+        var lastRestoreDiagnosticsMediaChecksumMismatchCount: Int = 0
+        var lastRestoreDiagnosticsMediaUnsupportedCount: Int = 0
+        var lastRestoreDiagnosticsMediaNotCheckedCount: Int = 0
+        var lastRestoreDiagnosticsMediaStateCounts: [String] = []
         var lastHydrationAt: Date?
         var lastHydrationAllowed: Bool = false
         var lastHydrationBlockedReason: String?
@@ -12481,7 +12565,8 @@ final class AppState: ObservableObject {
                     snapshotMediaManifestCount: nil,
                     snapshotMissingLocalOriginalsCount: nil,
                     snapshotSupabaseStorageMetadataCount: nil,
-                    freshness: "unknown"
+                    freshness: "unknown",
+                    mediaRecoveryDiagnostics: .notChecked
                 )
                 recordSessionSnapshotRestoreDiagnostics(result)
                 return result
@@ -12582,7 +12667,8 @@ final class AppState: ObservableObject {
                 snapshotMediaManifestCount: nil,
                 snapshotMissingLocalOriginalsCount: nil,
                 snapshotSupabaseStorageMetadataCount: nil,
-                freshness: "unknown"
+                freshness: "unknown",
+                mediaRecoveryDiagnostics: .notChecked
             )
             recordSessionSnapshotRestoreDiagnostics(result)
             return result
@@ -13095,6 +13181,13 @@ final class AppState: ObservableObject {
             snapshotGeneratedAt: decodedPayload?.generatedAt,
             localKnownStateAt: localComparison?.knownStateAt
         )
+        let mediaRecoveryDiagnostics = makeSessionSnapshotMediaRecoveryDiagnostics(
+            decodedPayload: decodedPayload,
+            rowSnapshotSchemaVersion: row.snapshotSchemaVersion,
+            propertyID: row.propertyID,
+            sessionID: row.sessionID,
+            checkedAt: checkedAt
+        )
         return SessionSnapshotRestoreDiagnosticsResult(
             checkedAt: checkedAt,
             propertyID: row.propertyID,
@@ -13122,8 +13215,184 @@ final class AppState: ObservableObject {
             snapshotMediaManifestCount: decodedPayload?.mediaManifestCount ?? row.mediaManifestCount,
             snapshotMissingLocalOriginalsCount: decodedPayload?.missingLocalOriginalsCount ?? row.missingLocalOriginalsCount,
             snapshotSupabaseStorageMetadataCount: decodedPayload?.supabaseStorageMetadataCount ?? row.supabaseStorageMetadataCount,
-            freshness: freshness
+            freshness: freshness,
+            mediaRecoveryDiagnostics: mediaRecoveryDiagnostics
         )
+    }
+
+    private func makeSessionSnapshotMediaRecoveryDiagnostics(
+        decodedPayload: SessionSnapshotPayloadForChecksum?,
+        rowSnapshotSchemaVersion: Int,
+        propertyID: UUID,
+        sessionID: UUID,
+        checkedAt: Date
+    ) -> SessionSnapshotMediaRecoveryDiagnostics {
+        guard let decodedPayload else {
+            return .notChecked
+        }
+        guard rowSnapshotSchemaVersion == 1,
+              decodedPayload.snapshotSchemaVersion == 1,
+              decodedPayload.mediaManifestCount == decodedPayload.mediaManifest.count,
+              let metadata = try? Self.decodeHydratableSessionMetadata(from: decodedPayload.rawSessionJSON),
+              metadata.propertyID == propertyID,
+              metadata.sessionID == sessionID,
+              metadata.shots.count == decodedPayload.mediaManifest.count else {
+            return Self.makeUnsupportedSessionSnapshotMediaRecoveryDiagnostics(
+                checkedAt: checkedAt,
+                manifestCount: max(decodedPayload.mediaManifestCount, decodedPayload.mediaManifest.count)
+            )
+        }
+
+        let shotsByID = Dictionary(uniqueKeysWithValues: metadata.shots.map { ($0.shotID, $0) })
+        guard decodedPayload.mediaManifest.allSatisfy({ shotsByID[$0.id] != nil }) else {
+            return Self.makeUnsupportedSessionSnapshotMediaRecoveryDiagnostics(
+                checkedAt: checkedAt,
+                manifestCount: decodedPayload.mediaManifest.count
+            )
+        }
+
+        let items = decodedPayload.mediaManifest.map { manifestItem -> SessionSnapshotMediaRecoveryItemDiagnostic in
+            let shot = shotsByID[manifestItem.id]
+            let localReferencePresent = Self.trimmedNonEmpty(shot?.originalRelativePath) != nil &&
+                manifestItem.originalRelativePathPresent
+            let localURL = shot.flatMap { shot in
+                localStore.resolveSessionRelativeFileURL(
+                    propertyID: propertyID,
+                    sessionID: sessionID,
+                    relativePath: shot.originalRelativePath
+                )
+            }
+            let localFilePresent = localURL.map { FileManager.default.fileExists(atPath: $0.path) } ?? false
+            let remoteStorageMetadataPresent = Self.trimmedNonEmpty(shot?.storageBucket) != nil &&
+                Self.trimmedNonEmpty(shot?.storagePath) != nil &&
+                manifestItem.storageBucketPresent &&
+                manifestItem.storagePathPresent
+            let checksumPresent = Self.trimmedNonEmpty(shot?.checksumSHA256) != nil && manifestItem.checksumPresent
+            let expectedByteSize = shot?.byteSize ?? shot?.originalByteSize ?? manifestItem.storageByteSize ?? manifestItem.originalByteSize
+            let actualByteSize = localURL.flatMap { Self.fileSizeBytesIfPresent(at: $0) }
+            let checksumVerified = false
+            let state: SessionSnapshotMediaRecoveryState
+            if checksumPresent,
+               let expectedByteSize,
+               let actualByteSize,
+               actualByteSize != expectedByteSize {
+                state = .checksumMismatch
+            } else if remoteStorageMetadataPresent {
+                state = .recoverableFromSupabaseStorage
+            } else if localFilePresent {
+                state = .recoverableFromLocalCache
+            } else if !localReferencePresent && !remoteStorageMetadataPresent {
+                state = .missingBoth
+            } else if !remoteStorageMetadataPresent && !localFilePresent {
+                state = .missingBoth
+            } else if !remoteStorageMetadataPresent {
+                state = .missingRemoteStorageMetadata
+            } else if !localFilePresent {
+                state = .missingLocalFile
+            } else if !checksumPresent {
+                state = .checksumUnknown
+            } else {
+                state = .notChecked
+            }
+            return SessionSnapshotMediaRecoveryItemDiagnostic(
+                id: manifestItem.id,
+                state: state,
+                localReferencePresent: localReferencePresent,
+                localFilePresent: localFilePresent,
+                remoteStorageMetadataPresent: remoteStorageMetadataPresent,
+                checksumPresent: checksumPresent,
+                checksumVerified: checksumVerified
+            )
+        }
+
+        return Self.makeSessionSnapshotMediaRecoveryDiagnostics(checkedAt: checkedAt, items: items)
+    }
+
+    private nonisolated static func makeUnsupportedSessionSnapshotMediaRecoveryDiagnostics(
+        checkedAt: Date,
+        manifestCount: Int
+    ) -> SessionSnapshotMediaRecoveryDiagnostics {
+        let stateCounts: [SessionSnapshotMediaRecoveryState: Int] = manifestCount > 0
+            ? [.unsupportedMediaManifest: manifestCount]
+            : [.unsupportedMediaManifest: 1]
+        return SessionSnapshotMediaRecoveryDiagnostics(
+            checkedAt: checkedAt,
+            readiness: SessionSnapshotMediaRecoveryState.unsupportedMediaManifest.rawValue,
+            manifestSupported: false,
+            manifestCount: manifestCount,
+            originalsCount: 0,
+            localFilesPresentCount: 0,
+            remoteStorageMetadataPresentCount: 0,
+            recoverableRemoteCount: 0,
+            recoverableLocalCount: 0,
+            missingCount: manifestCount,
+            missingRemoteStorageMetadataCount: 0,
+            missingLocalFileCount: 0,
+            checksumVerifiedCount: 0,
+            checksumUnknownCount: 0,
+            checksumMismatchCount: 0,
+            unsupportedCount: stateCounts[.unsupportedMediaManifest] ?? 0,
+            notCheckedCount: 0,
+            stateCounts: stateCounts,
+            items: []
+        )
+    }
+
+    private nonisolated static func makeSessionSnapshotMediaRecoveryDiagnostics(
+        checkedAt: Date,
+        items: [SessionSnapshotMediaRecoveryItemDiagnostic]
+    ) -> SessionSnapshotMediaRecoveryDiagnostics {
+        var stateCounts: [SessionSnapshotMediaRecoveryState: Int] = [:]
+        for item in items {
+            stateCounts[item.state, default: 0] += 1
+        }
+        let remoteCount = items.filter(\.remoteStorageMetadataPresent).count
+        let localCount = items.filter(\.localFilePresent).count
+        let checksumMismatchCount = stateCounts[.checksumMismatch] ?? 0
+        let unsupportedCount = stateCounts[.unsupportedMediaManifest] ?? 0
+        let notCheckedCount = stateCounts[.notChecked] ?? 0
+        let missingCount = items.filter { !$0.remoteStorageMetadataPresent && !$0.localFilePresent }.count
+        let readiness: String
+        if unsupportedCount > 0 {
+            readiness = SessionSnapshotMediaRecoveryState.unsupportedMediaManifest.rawValue
+        } else if checksumMismatchCount > 0 {
+            readiness = SessionSnapshotMediaRecoveryState.checksumMismatch.rawValue
+        } else if missingCount > 0 {
+            readiness = "partial"
+        } else if items.isEmpty {
+            readiness = "no_media_manifest"
+        } else {
+            readiness = "ready"
+        }
+        return SessionSnapshotMediaRecoveryDiagnostics(
+            checkedAt: checkedAt,
+            readiness: readiness,
+            manifestSupported: true,
+            manifestCount: items.count,
+            originalsCount: items.filter(\.localReferencePresent).count,
+            localFilesPresentCount: localCount,
+            remoteStorageMetadataPresentCount: remoteCount,
+            recoverableRemoteCount: remoteCount,
+            recoverableLocalCount: localCount,
+            missingCount: missingCount,
+            missingRemoteStorageMetadataCount: items.filter { !$0.remoteStorageMetadataPresent }.count,
+            missingLocalFileCount: items.filter { $0.localReferencePresent && !$0.localFilePresent }.count,
+            checksumVerifiedCount: items.filter(\.checksumVerified).count,
+            checksumUnknownCount: items.filter { !$0.checksumPresent }.count,
+            checksumMismatchCount: checksumMismatchCount,
+            unsupportedCount: unsupportedCount,
+            notCheckedCount: notCheckedCount,
+            stateCounts: stateCounts,
+            items: items
+        )
+    }
+
+    private nonisolated static func fileSizeBytesIfPresent(at url: URL) -> Int? {
+        guard let attributes = try? FileManager.default.attributesOfItem(atPath: url.path),
+              let size = attributes[.size] as? NSNumber else {
+            return nil
+        }
+        return size.intValue
     }
 
     private static func sessionSnapshotRestoreFreshness(
@@ -13384,6 +13653,25 @@ final class AppState: ObservableObject {
             diagnostics.sessionSnapshotUpload.lastRestoreDiagnosticsSnapshotMissingLocalOriginalsCount = result.snapshotMissingLocalOriginalsCount
             diagnostics.sessionSnapshotUpload.lastRestoreDiagnosticsSnapshotSupabaseStorageMetadataCount = result.snapshotSupabaseStorageMetadataCount
             diagnostics.sessionSnapshotUpload.lastRestoreDiagnosticsFreshness = result.freshness
+            diagnostics.sessionSnapshotUpload.lastRestoreDiagnosticsMediaRecoveryReadiness = result.mediaRecoveryDiagnostics.readiness
+            diagnostics.sessionSnapshotUpload.lastRestoreDiagnosticsMediaManifestSupported = result.mediaRecoveryDiagnostics.manifestSupported
+            diagnostics.sessionSnapshotUpload.lastRestoreDiagnosticsMediaManifestCount = result.mediaRecoveryDiagnostics.manifestCount
+            diagnostics.sessionSnapshotUpload.lastRestoreDiagnosticsMediaOriginalsCount = result.mediaRecoveryDiagnostics.originalsCount
+            diagnostics.sessionSnapshotUpload.lastRestoreDiagnosticsMediaLocalFilesPresentCount = result.mediaRecoveryDiagnostics.localFilesPresentCount
+            diagnostics.sessionSnapshotUpload.lastRestoreDiagnosticsMediaRemoteStorageMetadataPresentCount = result.mediaRecoveryDiagnostics.remoteStorageMetadataPresentCount
+            diagnostics.sessionSnapshotUpload.lastRestoreDiagnosticsMediaRecoverableRemoteCount = result.mediaRecoveryDiagnostics.recoverableRemoteCount
+            diagnostics.sessionSnapshotUpload.lastRestoreDiagnosticsMediaRecoverableLocalCount = result.mediaRecoveryDiagnostics.recoverableLocalCount
+            diagnostics.sessionSnapshotUpload.lastRestoreDiagnosticsMediaMissingCount = result.mediaRecoveryDiagnostics.missingCount
+            diagnostics.sessionSnapshotUpload.lastRestoreDiagnosticsMediaMissingRemoteStorageMetadataCount = result.mediaRecoveryDiagnostics.missingRemoteStorageMetadataCount
+            diagnostics.sessionSnapshotUpload.lastRestoreDiagnosticsMediaMissingLocalFileCount = result.mediaRecoveryDiagnostics.missingLocalFileCount
+            diagnostics.sessionSnapshotUpload.lastRestoreDiagnosticsMediaChecksumVerifiedCount = result.mediaRecoveryDiagnostics.checksumVerifiedCount
+            diagnostics.sessionSnapshotUpload.lastRestoreDiagnosticsMediaChecksumUnknownCount = result.mediaRecoveryDiagnostics.checksumUnknownCount
+            diagnostics.sessionSnapshotUpload.lastRestoreDiagnosticsMediaChecksumMismatchCount = result.mediaRecoveryDiagnostics.checksumMismatchCount
+            diagnostics.sessionSnapshotUpload.lastRestoreDiagnosticsMediaUnsupportedCount = result.mediaRecoveryDiagnostics.unsupportedCount
+            diagnostics.sessionSnapshotUpload.lastRestoreDiagnosticsMediaNotCheckedCount = result.mediaRecoveryDiagnostics.notCheckedCount
+            diagnostics.sessionSnapshotUpload.lastRestoreDiagnosticsMediaStateCounts = result.mediaRecoveryDiagnostics.stateCounts
+                .sorted { $0.key.rawValue < $1.key.rawValue }
+                .map { "\($0.key.rawValue)=\($0.value)" }
         }
     }
 
@@ -15006,6 +15294,23 @@ final class AppState: ObservableObject {
         lines.append("- snapshot_media_manifest_count: \(diagnostics.lastRestoreDiagnosticsSnapshotMediaManifestCount.map(String.init) ?? "none")")
         lines.append("- snapshot_missing_local_originals_count: \(diagnostics.lastRestoreDiagnosticsSnapshotMissingLocalOriginalsCount.map(String.init) ?? "none")")
         lines.append("- snapshot_supabase_storage_metadata_count: \(diagnostics.lastRestoreDiagnosticsSnapshotSupabaseStorageMetadataCount.map(String.init) ?? "none")")
+        lines.append("- media_recovery_readiness: \(diagnosticsPreviewText(diagnostics.lastRestoreDiagnosticsMediaRecoveryReadiness, maxLength: 80) ?? "not_checked")")
+        lines.append("- media_manifest_supported: \(diagnostics.lastRestoreDiagnosticsMediaManifestSupported)")
+        lines.append("- media_manifest_count: \(diagnostics.lastRestoreDiagnosticsMediaManifestCount)")
+        lines.append("- media_originals_count: \(diagnostics.lastRestoreDiagnosticsMediaOriginalsCount)")
+        lines.append("- media_local_files_present_count: \(diagnostics.lastRestoreDiagnosticsMediaLocalFilesPresentCount)")
+        lines.append("- media_remote_storage_metadata_present_count: \(diagnostics.lastRestoreDiagnosticsMediaRemoteStorageMetadataPresentCount)")
+        lines.append("- media_recoverable_remote_count: \(diagnostics.lastRestoreDiagnosticsMediaRecoverableRemoteCount)")
+        lines.append("- media_recoverable_local_count: \(diagnostics.lastRestoreDiagnosticsMediaRecoverableLocalCount)")
+        lines.append("- media_missing_count: \(diagnostics.lastRestoreDiagnosticsMediaMissingCount)")
+        lines.append("- media_missing_remote_storage_metadata_count: \(diagnostics.lastRestoreDiagnosticsMediaMissingRemoteStorageMetadataCount)")
+        lines.append("- media_missing_local_file_count: \(diagnostics.lastRestoreDiagnosticsMediaMissingLocalFileCount)")
+        lines.append("- media_checksum_verified_count: \(diagnostics.lastRestoreDiagnosticsMediaChecksumVerifiedCount)")
+        lines.append("- media_checksum_unknown_count: \(diagnostics.lastRestoreDiagnosticsMediaChecksumUnknownCount)")
+        lines.append("- media_checksum_mismatch_count: \(diagnostics.lastRestoreDiagnosticsMediaChecksumMismatchCount)")
+        lines.append("- media_unsupported_manifest_count: \(diagnostics.lastRestoreDiagnosticsMediaUnsupportedCount)")
+        lines.append("- media_not_checked_count: \(diagnostics.lastRestoreDiagnosticsMediaNotCheckedCount)")
+        lines.append("- media_state_counts: \(diagnostics.lastRestoreDiagnosticsMediaStateCounts.isEmpty ? "none" : diagnostics.lastRestoreDiagnosticsMediaStateCounts.joined(separator: ", "))")
         lines.append("")
         lines.append("Snapshot Metadata Hydration")
         lines.append("- hydration_at: \(diagnostics.lastHydrationAt?.formatted(date: .abbreviated, time: .standard) ?? "none")")

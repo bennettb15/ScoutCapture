@@ -29,7 +29,8 @@ final class Phase2C25BSnapshotRestoreDiagnosticsTests: XCTestCase {
         objectTransform: ((AppState.SessionSnapshotStorageObject) -> AppState.SessionSnapshotStorageObject)? = nil,
         rowsOverride: AppState.SessionSnapshotRowsFetchOverride? = nil,
         downloadOverride: AppState.SessionSnapshotStorageDownloadOverride? = nil,
-        parentOverride: ((UUID, UUID, UUID) async throws -> AppState.SessionSnapshotAuthPreflightRemoteParentStatus)? = nil
+        parentOverride: ((UUID, UUID, UUID) async throws -> AppState.SessionSnapshotAuthPreflightRemoteParentStatus)? = nil,
+        mediaSetup: ((LocalStore, Property, Session) throws -> [ShotMetadata])? = nil
     ) throws -> (
         store: LocalStore,
         appState: AppState,
@@ -57,7 +58,8 @@ final class Phase2C25BSnapshotRestoreDiagnosticsTests: XCTestCase {
                 reExportExpiresAt: nil
             )
         )
-        try saveMetadata(store: store, property: property, session: session, orgID: orgID)
+        let shots = try mediaSetup?(store, property, session) ?? []
+        try saveMetadata(store: store, property: property, session: session, orgID: orgID, shots: shots)
 
         let artifactAppState = AppState(
             localStore: store,
@@ -97,7 +99,13 @@ final class Phase2C25BSnapshotRestoreDiagnosticsTests: XCTestCase {
         return (store, appState, property, session, orgID, row, object)
     }
 
-    private func saveMetadata(store: LocalStore, property: Property, session: Session, orgID: UUID) throws {
+    private func saveMetadata(
+        store: LocalStore,
+        property: Property,
+        session: Session,
+        orgID: UUID,
+        shots: [ShotMetadata] = []
+    ) throws {
         let metadata = SessionMetadata(
             schemaVersion: 12,
             propertyID: property.id,
@@ -116,11 +124,62 @@ final class Phase2C25BSnapshotRestoreDiagnosticsTests: XCTestCase {
             appVersion: "test-app",
             deviceModel: "test-device",
             osVersion: "test-os",
-            shots: [],
+            shots: shots,
             issues: [],
             guidedShots: []
         )
         try store.saveSessionMetadataAtomically(propertyID: property.id, sessionID: session.id, metadata: metadata)
+    }
+
+    private func makeShot(
+        propertyID: UUID,
+        sessionID: UUID,
+        filename: String,
+        localReference: Bool = true,
+        remoteMetadata: Bool = true,
+        byteSize: Int = 4
+    ) -> ShotMetadata {
+        ShotMetadata(
+            shotID: UUID(),
+            propertyID: propertyID,
+            sessionID: sessionID,
+            createdAt: Date(timeIntervalSinceReferenceDate: 120),
+            updatedAt: Date(timeIntervalSinceReferenceDate: 130),
+            building: "A",
+            elevation: "North",
+            detailType: filename,
+            angleIndex: 1,
+            shotKey: "a-north-\(filename)-1",
+            isGuided: false,
+            isFlagged: false,
+            issueID: nil,
+            issueStatus: nil,
+            noteText: nil,
+            noteCategory: nil,
+            originalFilename: filename,
+            originalRelativePath: localReference ? "Originals/\(filename)" : "",
+            originalByteSize: byteSize,
+            storageBucket: remoteMetadata ? "scoutcapture-originals" : nil,
+            storagePath: remoteMetadata ? "sessions/\(sessionID.uuidString.lowercased())/\(filename)" : nil,
+            checksumSHA256: String(repeating: "a", count: 64),
+            byteSize: byteSize,
+            stampedFilename: nil,
+            stampedRelativePath: nil,
+            captureMode: nil,
+            lens: nil,
+            exifOrientation: nil,
+            latitude: nil,
+            longitude: nil,
+            accuracyMeters: nil,
+            imageWidth: nil,
+            imageHeight: nil
+        )
+    }
+
+    private func writeOriginal(_ store: LocalStore, propertyID: UUID, sessionID: UUID, filename: String, bytes: [UInt8] = [1, 2, 3, 4]) throws {
+        let folder = store.originalsFolderURL(propertyID: propertyID, sessionID: sessionID)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        try Data(bytes).write(to: folder.appendingPathComponent(filename, isDirectory: false))
     }
 
     func testVerifiedSnapshotBecomesRestorableMetadataCandidate() async throws {
@@ -307,5 +366,159 @@ final class Phase2C25BSnapshotRestoreDiagnosticsTests: XCTestCase {
 
         let after = try Data(contentsOf: sessionJSONURL)
         XCTAssertEqual(before, after)
+    }
+
+    func testMediaRecoveryDiagnosticsAllRecoverableFromRemoteMetadata() async throws {
+        let fixture = try makeFixture(mediaSetup: { _, property, session in
+            [
+                self.makeShot(propertyID: property.id, sessionID: session.id, filename: "remote-1.jpg", localReference: true, remoteMetadata: true),
+                self.makeShot(propertyID: property.id, sessionID: session.id, filename: "remote-2.jpg", localReference: true, remoteMetadata: true)
+            ]
+        })
+
+        let result = await fixture.appState.validateLatestSessionSnapshotRestoreDiagnostics()
+
+        XCTAssertEqual(result.mediaRecoveryDiagnostics.manifestCount, 2)
+        XCTAssertEqual(result.mediaRecoveryDiagnostics.recoverableRemoteCount, 2)
+        XCTAssertEqual(result.mediaRecoveryDiagnostics.recoverableLocalCount, 0)
+        XCTAssertEqual(result.mediaRecoveryDiagnostics.missingCount, 0)
+        XCTAssertEqual(result.mediaRecoveryDiagnostics.readiness, "ready")
+    }
+
+    func testMediaRecoveryDiagnosticsAllRecoverableFromLocalCache() async throws {
+        let fixture = try makeFixture(mediaSetup: { store, property, session in
+            try self.writeOriginal(store, propertyID: property.id, sessionID: session.id, filename: "local-1.jpg")
+            try self.writeOriginal(store, propertyID: property.id, sessionID: session.id, filename: "local-2.jpg")
+            return [
+                self.makeShot(propertyID: property.id, sessionID: session.id, filename: "local-1.jpg", remoteMetadata: false),
+                self.makeShot(propertyID: property.id, sessionID: session.id, filename: "local-2.jpg", remoteMetadata: false)
+            ]
+        })
+
+        let result = await fixture.appState.validateLatestSessionSnapshotRestoreDiagnostics()
+
+        XCTAssertEqual(result.mediaRecoveryDiagnostics.recoverableRemoteCount, 0)
+        XCTAssertEqual(result.mediaRecoveryDiagnostics.recoverableLocalCount, 2)
+        XCTAssertEqual(result.mediaRecoveryDiagnostics.localFilesPresentCount, 2)
+        XCTAssertEqual(result.mediaRecoveryDiagnostics.missingCount, 0)
+        XCTAssertEqual(result.mediaRecoveryDiagnostics.readiness, "ready")
+    }
+
+    func testMediaRecoveryDiagnosticsMixedLocalAndRemoteRecovery() async throws {
+        let fixture = try makeFixture(mediaSetup: { store, property, session in
+            try self.writeOriginal(store, propertyID: property.id, sessionID: session.id, filename: "local.jpg")
+            return [
+                self.makeShot(propertyID: property.id, sessionID: session.id, filename: "remote.jpg", remoteMetadata: true),
+                self.makeShot(propertyID: property.id, sessionID: session.id, filename: "local.jpg", remoteMetadata: false)
+            ]
+        })
+
+        let result = await fixture.appState.validateLatestSessionSnapshotRestoreDiagnostics()
+
+        XCTAssertEqual(result.mediaRecoveryDiagnostics.recoverableRemoteCount, 1)
+        XCTAssertEqual(result.mediaRecoveryDiagnostics.recoverableLocalCount, 1)
+        XCTAssertEqual(result.mediaRecoveryDiagnostics.missingCount, 0)
+        XCTAssertEqual(result.mediaRecoveryDiagnostics.stateCounts[.recoverableFromSupabaseStorage], 1)
+        XCTAssertEqual(result.mediaRecoveryDiagnostics.stateCounts[.recoverableFromLocalCache], 1)
+    }
+
+    func testMediaRecoveryDiagnosticsMissingRemoteMetadata() async throws {
+        let fixture = try makeFixture(mediaSetup: { _, property, session in
+            [
+                self.makeShot(propertyID: property.id, sessionID: session.id, filename: "missing-remote.jpg", remoteMetadata: false)
+            ]
+        })
+
+        let result = await fixture.appState.validateLatestSessionSnapshotRestoreDiagnostics()
+
+        XCTAssertEqual(result.mediaRecoveryDiagnostics.remoteStorageMetadataPresentCount, 0)
+        XCTAssertEqual(result.mediaRecoveryDiagnostics.missingRemoteStorageMetadataCount, 1)
+        XCTAssertEqual(result.mediaRecoveryDiagnostics.missingCount, 1)
+    }
+
+    func testMediaRecoveryDiagnosticsMissingLocalFile() async throws {
+        let fixture = try makeFixture(mediaSetup: { _, property, session in
+            [
+                self.makeShot(propertyID: property.id, sessionID: session.id, filename: "missing-local.jpg", remoteMetadata: true)
+            ]
+        })
+
+        let result = await fixture.appState.validateLatestSessionSnapshotRestoreDiagnostics()
+
+        XCTAssertEqual(result.mediaRecoveryDiagnostics.localFilesPresentCount, 0)
+        XCTAssertEqual(result.mediaRecoveryDiagnostics.missingLocalFileCount, 1)
+        XCTAssertEqual(result.mediaRecoveryDiagnostics.recoverableRemoteCount, 1)
+    }
+
+    func testMediaRecoveryDiagnosticsMissingBoth() async throws {
+        let fixture = try makeFixture(mediaSetup: { _, property, session in
+            [
+                self.makeShot(propertyID: property.id, sessionID: session.id, filename: "missing-both.jpg", remoteMetadata: false)
+            ]
+        })
+
+        let result = await fixture.appState.validateLatestSessionSnapshotRestoreDiagnostics()
+
+        XCTAssertEqual(result.mediaRecoveryDiagnostics.missingCount, 1)
+        XCTAssertEqual(result.mediaRecoveryDiagnostics.stateCounts[.missingBoth], 1)
+        XCTAssertEqual(result.mediaRecoveryDiagnostics.readiness, "partial")
+    }
+
+    func testUnsupportedManifestBlocksMediaRecoveryReadiness() async throws {
+        let fixture = try makeFixture(
+            rowTransform: { row in
+                AppState.SessionSnapshotUploadRow(
+                    id: row.id,
+                    orgID: row.orgID,
+                    propertyID: row.propertyID,
+                    sessionID: row.sessionID,
+                    snapshotKind: row.snapshotKind,
+                    snapshotSchemaVersion: 99,
+                    sessionMetadataSchemaVersion: row.sessionMetadataSchemaVersion,
+                    trigger: row.trigger,
+                    sessionStatus: row.sessionStatus,
+                    isSealed: row.isSealed,
+                    exportedAt: row.exportedAt,
+                    firstDeliveredAt: row.firstDeliveredAt,
+                    reExportExpiresAt: row.reExportExpiresAt,
+                    payloadStorageBucket: row.payloadStorageBucket,
+                    payloadStoragePath: row.payloadStoragePath,
+                    payloadByteSize: row.payloadByteSize,
+                    rawSessionJSONSHA256: row.rawSessionJSONSHA256,
+                    snapshotPayloadSHA256: row.snapshotPayloadSHA256,
+                    manifest: row.manifest,
+                    shotCount: row.shotCount,
+                    issueCount: row.issueCount,
+                    guidedCount: row.guidedCount,
+                    mediaManifestCount: row.mediaManifestCount,
+                    missingLocalOriginalsCount: row.missingLocalOriginalsCount,
+                    supabaseStorageMetadataCount: row.supabaseStorageMetadataCount,
+                    createdBy: row.createdBy,
+                    updatedBy: row.updatedBy,
+                    createdAt: row.createdAt
+                )
+            },
+            mediaSetup: { _, property, session in
+                [self.makeShot(propertyID: property.id, sessionID: session.id, filename: "unsupported.jpg")]
+            }
+        )
+
+        let result = await fixture.appState.validateLatestSessionSnapshotRestoreDiagnostics()
+
+        XCTAssertEqual(result.mediaRecoveryDiagnostics.readiness, "unsupported_media_manifest")
+        XCTAssertFalse(result.mediaRecoveryDiagnostics.manifestSupported)
+    }
+
+    func testMediaRecoveryDiagnosticsDoNotDownloadOrWriteMedia() async throws {
+        let fixture = try makeFixture(mediaSetup: { _, property, session in
+            [self.makeShot(propertyID: property.id, sessionID: session.id, filename: "read-only.jpg")]
+        })
+        let sessionFolder = fixture.store.sessionFolderURL(propertyID: fixture.property.id, sessionID: fixture.session.id)
+        let before = (try? FileManager.default.subpathsOfDirectory(atPath: sessionFolder.path)) ?? []
+
+        _ = await fixture.appState.validateLatestSessionSnapshotRestoreDiagnostics()
+
+        let after = (try? FileManager.default.subpathsOfDirectory(atPath: sessionFolder.path)) ?? []
+        XCTAssertEqual(before.sorted(), after.sorted())
     }
 }
