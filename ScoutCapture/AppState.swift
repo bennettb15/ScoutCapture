@@ -12540,6 +12540,23 @@ final class AppState: ObservableObject {
 
     @discardableResult
     func hydrateMetadataFromLatestSessionSnapshot(checkedAt: Date = Date()) async -> SessionSnapshotHydrationResult {
+        let hydrationTargetAvailability = sessionSnapshotHydrationTargetAvailability
+        guard hydrationTargetAvailability.isAvailable else {
+            let result = SessionSnapshotHydrationResult(
+                hydratedAt: checkedAt,
+                allowed: false,
+                blockedReason: hydrationTargetAvailability.reason,
+                sourceSnapshotID: nil,
+                propertyID: manualSessionSnapshotUploadTarget?.propertyID ?? localDiagnostics.sessionSnapshotUpload.lastPropertyID,
+                sessionID: manualSessionSnapshotUploadTarget?.sessionID ?? localDiagnostics.sessionSnapshotUpload.lastSessionID,
+                hydratedShotCount: 0,
+                hydratedIssueCount: 0,
+                hydratedGuidedCount: 0
+            )
+            recordSessionSnapshotHydration(result)
+            return result
+        }
+
         let diagnostics = await validateLatestSessionSnapshotRestoreDiagnostics(checkedAt: checkedAt)
         guard diagnostics.result == .restorableMetadataCandidate,
               diagnostics.checksumVerified,
@@ -12641,6 +12658,24 @@ final class AppState: ObservableObject {
             )
             recordSessionSnapshotHydration(result)
             return result
+        }
+    }
+
+    private var sessionSnapshotHydrationTargetAvailability: (isAvailable: Bool, reason: String?) {
+        guard supabaseConfiguration.isConfigured else {
+            return (false, "supabase_config_invalid")
+        }
+        switch supabaseConfiguration.targetClassification {
+        case .localDev, .approvedStaging:
+            return (true, nil)
+        case .approvedProductionValidation:
+            return (false, "production_hydration_disabled")
+        case .remote:
+            return (false, "unapproved_remote_hydration_disabled")
+        case .missing:
+            return (false, "supabase_config_missing")
+        case .invalid:
+            return (false, "supabase_config_invalid")
         }
     }
 
