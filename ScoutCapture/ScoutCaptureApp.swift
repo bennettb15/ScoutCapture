@@ -8668,6 +8668,7 @@ private struct DebugSessionSnapshotUploadDiagnosticsView: View {
     @State private var isUploadingSessionSnapshot: Bool = false
     @State private var isCheckingSnapshotReadback: Bool = false
     @State private var isCheckingSnapshotRestoreDiagnostics: Bool = false
+    @State private var isCheckingRecoveryCohort: Bool = false
     @State private var isHydratingSnapshotMetadata: Bool = false
     @State private var isRefreshingAuthPreflight: Bool = false
     @State private var isRepairingLocalOrgDrift: Bool = false
@@ -9038,6 +9039,30 @@ private struct DebugSessionSnapshotUploadDiagnosticsView: View {
                     }
                 }
                 .disabled(isHydratingSnapshotMetadata)
+                .font(.system(size: 14, weight: .semibold))
+            }
+
+            Section("Snapshot Recovery Cohort") {
+                Text("Read-only recovery cohort and readiness summary. It does not hydrate metadata, download media, switch canonical reads, or change local or remote state.")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(.secondary)
+                diagnosticRow("Cohort", diagnostics.lastRecoveryCohortCategory)
+                diagnosticRow("Readiness", diagnostics.lastRecoveryReadiness)
+                diagnosticRow("Risk", diagnostics.lastRecoveryRiskLevel)
+                diagnosticRow("Snapshot Age Seconds", diagnostics.lastRecoverySnapshotFreshnessAgeSeconds.map { String(Int($0)) } ?? "none")
+                diagnosticRow("Hydration Eligibility", diagnostics.lastRecoveryHydrationEligibilityReason)
+                diagnosticRow("Latest Snapshot Covered", diagnostics.lastRecoveryLatestSnapshotCovered ? "true" : "false")
+                diagnosticRow("Restore Result", diagnostics.lastRecoveryRestoreDiagnosticsResult)
+                Button(isCheckingRecoveryCohort ? "Checking..." : "Check Recovery Cohort") {
+                    isCheckingRecoveryCohort = true
+                    Task {
+                        _ = await appState.validateSnapshotRecoveryCohort()
+                        await MainActor.run {
+                            isCheckingRecoveryCohort = false
+                        }
+                    }
+                }
+                .disabled(isCheckingRecoveryCohort)
                 .font(.system(size: 14, weight: .semibold))
             }
         }

@@ -813,6 +813,49 @@ final class AppState: ObservableObject {
         var hydratedGuidedCount: Int
     }
 
+    enum SnapshotRecoveryCohortCategory: String, Codable, Equatable, CaseIterable {
+        case completedSealedSession = "completed_sealed_session"
+        case draftSession = "draft_session"
+        case highVolumeMetadata = "many_shots_issues_guided_items"
+        case noMediaManifest = "no_media_manifest"
+        case localNewerConflict = "local_newer_conflict"
+        case missingLocalMetadata = "missing_local_metadata"
+        case orgDriftHistory = "org_drift_history"
+        case staleSnapshot = "stale_snapshot"
+        case noSnapshotFound = "no_snapshot_found"
+        case blockedVerification = "blocked_verification"
+        case unknown = "unknown"
+    }
+
+    enum SnapshotRecoveryReadiness: String, Codable, Equatable, CaseIterable {
+        case readyForManualHydration = "ready_for_manual_hydration"
+        case needsReview = "needs_review"
+        case blocked = "blocked"
+        case notChecked = "not_checked"
+    }
+
+    enum SnapshotRestoreRiskLevel: String, Codable, Equatable, CaseIterable {
+        case low
+        case medium
+        case high
+        case blocking
+        case unknown
+    }
+
+    struct SnapshotRecoveryCohortResult: Equatable {
+        var checkedAt: Date
+        var propertyID: UUID?
+        var sessionID: UUID?
+        var snapshotID: UUID?
+        var category: SnapshotRecoveryCohortCategory
+        var readiness: SnapshotRecoveryReadiness
+        var riskLevel: SnapshotRestoreRiskLevel
+        var snapshotFreshnessAgeSeconds: TimeInterval?
+        var hydrationEligibilityReason: String
+        var latestSnapshotCovered: Bool
+        var restoreDiagnosticsResult: String
+    }
+
     enum SessionSnapshotUploadError: LocalizedError, Equatable {
         case disabled
         case missingSupabaseClient
@@ -1030,6 +1073,14 @@ final class AppState: ObservableObject {
         var lastHydrationShotCount: Int = 0
         var lastHydrationIssueCount: Int = 0
         var lastHydrationGuidedCount: Int = 0
+        var lastRecoveryCohortAt: Date?
+        var lastRecoveryCohortCategory: String = SnapshotRecoveryCohortCategory.unknown.rawValue
+        var lastRecoveryReadiness: String = SnapshotRecoveryReadiness.notChecked.rawValue
+        var lastRecoveryRiskLevel: String = SnapshotRestoreRiskLevel.unknown.rawValue
+        var lastRecoverySnapshotFreshnessAgeSeconds: TimeInterval?
+        var lastRecoveryHydrationEligibilityReason: String = "not_checked"
+        var lastRecoveryLatestSnapshotCovered: Bool = false
+        var lastRecoveryRestoreDiagnosticsResult: String = "not_checked"
     }
 
     struct LocalDiagnosticsState: Equatable {
@@ -12593,6 +12644,18 @@ final class AppState: ObservableObject {
         }
     }
 
+    @discardableResult
+    func validateSnapshotRecoveryCohort(checkedAt: Date = Date()) async -> SnapshotRecoveryCohortResult {
+        let diagnostics = await validateLatestSessionSnapshotRestoreDiagnostics(checkedAt: checkedAt)
+        let result = Self.makeSnapshotRecoveryCohortResult(
+            from: diagnostics,
+            checkedAt: checkedAt,
+            hasOrgDriftHistory: sessionSnapshotHasOrgDriftHistory(for: diagnostics)
+        )
+        recordSnapshotRecoveryCohort(result)
+        return result
+    }
+
     private func fetchSessionSnapshotRows(
         snapshotID: UUID?,
         propertyID: UUID?,
@@ -12852,6 +12915,125 @@ final class AppState: ObservableObject {
         return snapshotGeneratedAt > localKnownStateAt ? "snapshot_newer" : "local_newer"
     }
 
+    static func makeSnapshotRecoveryCohortResult(
+        from diagnostics: SessionSnapshotRestoreDiagnosticsResult,
+        checkedAt: Date = Date(),
+        hasOrgDriftHistory: Bool = false
+    ) -> SnapshotRecoveryCohortResult {
+        let snapshotDate = diagnostics.snapshotGeneratedAt ?? diagnostics.snapshotCreatedAt
+        let ageSeconds = snapshotDate.map { max(0, checkedAt.timeIntervalSince($0)) }
+        let isStaleByAge = ageSeconds.map { $0 > 7 * 24 * 60 * 60 } ?? false
+        let highVolumeCount = max(
+            diagnostics.snapshotShotCount ?? diagnostics.localShotCount ?? 0,
+            diagnostics.snapshotIssueCount ?? diagnostics.localIssueCount ?? 0,
+            diagnostics.snapshotGuidedCount ?? diagnostics.localGuidedCount ?? 0
+        )
+        let highVolume = highVolumeCount >= 100
+        let noMediaManifest = diagnostics.snapshotMediaManifestCount == 0
+
+        let category: SnapshotRecoveryCohortCategory
+        switch diagnostics.result {
+        case .noSnapshotFound:
+            category = .noSnapshotFound
+        case .checksumFailed, .objectMissing, .parentMismatch, .unsupportedSchema, .unableToVerify:
+            category = .blockedVerification
+        case .localNewerConflict:
+            category = .localNewerConflict
+        case .staleSnapshot:
+            category = .staleSnapshot
+        case .restorableMetadataCandidate:
+            if !diagnostics.localSessionExists {
+                category = .missingLocalMetadata
+            } else if isStaleByAge {
+                category = .staleSnapshot
+            } else if hasOrgDriftHistory {
+                category = .orgDriftHistory
+            } else if highVolume {
+                category = .highVolumeMetadata
+            } else if noMediaManifest {
+                category = .noMediaManifest
+            } else if diagnostics.localSessionStatus == Session.Status.draft.rawValue {
+                category = .draftSession
+            } else if diagnostics.localSessionStatus == Session.Status.completed.rawValue {
+                category = .completedSealedSession
+            } else {
+                category = .unknown
+            }
+        }
+
+        let readiness: SnapshotRecoveryReadiness
+        let risk: SnapshotRestoreRiskLevel
+        let reason: String
+        switch diagnostics.result {
+        case .restorableMetadataCandidate:
+            if isStaleByAge {
+                readiness = .needsReview
+                risk = .medium
+                reason = "snapshot_age_review_required"
+            } else {
+                readiness = .readyForManualHydration
+                risk = category == .missingLocalMetadata ? .low : .medium
+                reason = "verified_snapshot_manual_hydration_candidate"
+            }
+        case .localNewerConflict:
+            readiness = .blocked
+            risk = .blocking
+            reason = "local_newer_conflict"
+        case .staleSnapshot:
+            readiness = .needsReview
+            risk = .high
+            reason = "stale_snapshot"
+        case .noSnapshotFound:
+            readiness = .blocked
+            risk = .blocking
+            reason = "no_snapshot_found"
+        case .checksumFailed:
+            readiness = .blocked
+            risk = .blocking
+            reason = "checksum_failed"
+        case .objectMissing:
+            readiness = .blocked
+            risk = .blocking
+            reason = "object_missing"
+        case .parentMismatch:
+            readiness = .blocked
+            risk = .blocking
+            reason = "parent_mismatch"
+        case .unsupportedSchema:
+            readiness = .blocked
+            risk = .blocking
+            reason = "unsupported_schema"
+        case .unableToVerify:
+            readiness = .blocked
+            risk = .unknown
+            reason = "unable_to_verify"
+        }
+
+        return SnapshotRecoveryCohortResult(
+            checkedAt: checkedAt,
+            propertyID: diagnostics.propertyID,
+            sessionID: diagnostics.sessionID,
+            snapshotID: diagnostics.snapshotID,
+            category: category,
+            readiness: readiness,
+            riskLevel: risk,
+            snapshotFreshnessAgeSeconds: ageSeconds,
+            hydrationEligibilityReason: reason,
+            latestSnapshotCovered: diagnostics.rowFound && diagnostics.objectReadable,
+            restoreDiagnosticsResult: diagnostics.result.rawValue
+        )
+    }
+
+    private func sessionSnapshotHasOrgDriftHistory(for diagnostics: SessionSnapshotRestoreDiagnosticsResult) -> Bool {
+        let uploadDiagnostics = localDiagnostics.sessionSnapshotUpload
+        if let sessionID = diagnostics.sessionID,
+           uploadDiagnostics.lastLocalOrgRepairSessionID == sessionID {
+            return true
+        }
+        return uploadDiagnostics.lastLocalOrgDriftRepairAt != nil &&
+            uploadDiagnostics.lastLocalOrgDriftRepairSessionCount > 0
+    }
+
     static func makeSessionSnapshotReadbackResult(
         row: SessionSnapshotUploadRow?,
         payloadData: Data?,
@@ -12996,6 +13178,19 @@ final class AppState: ObservableObject {
             diagnostics.sessionSnapshotUpload.lastHydrationShotCount = result.hydratedShotCount
             diagnostics.sessionSnapshotUpload.lastHydrationIssueCount = result.hydratedIssueCount
             diagnostics.sessionSnapshotUpload.lastHydrationGuidedCount = result.hydratedGuidedCount
+        }
+    }
+
+    private func recordSnapshotRecoveryCohort(_ result: SnapshotRecoveryCohortResult) {
+        mutateLocalDiagnostics { diagnostics in
+            diagnostics.sessionSnapshotUpload.lastRecoveryCohortAt = result.checkedAt
+            diagnostics.sessionSnapshotUpload.lastRecoveryCohortCategory = result.category.rawValue
+            diagnostics.sessionSnapshotUpload.lastRecoveryReadiness = result.readiness.rawValue
+            diagnostics.sessionSnapshotUpload.lastRecoveryRiskLevel = result.riskLevel.rawValue
+            diagnostics.sessionSnapshotUpload.lastRecoverySnapshotFreshnessAgeSeconds = result.snapshotFreshnessAgeSeconds
+            diagnostics.sessionSnapshotUpload.lastRecoveryHydrationEligibilityReason = result.hydrationEligibilityReason
+            diagnostics.sessionSnapshotUpload.lastRecoveryLatestSnapshotCovered = result.latestSnapshotCovered
+            diagnostics.sessionSnapshotUpload.lastRecoveryRestoreDiagnosticsResult = result.restoreDiagnosticsResult
         }
     }
 
@@ -14593,6 +14788,16 @@ final class AppState: ObservableObject {
         lines.append("- hydrated_shot_count: \(diagnostics.lastHydrationShotCount)")
         lines.append("- hydrated_issue_count: \(diagnostics.lastHydrationIssueCount)")
         lines.append("- hydrated_guided_count: \(diagnostics.lastHydrationGuidedCount)")
+        lines.append("")
+        lines.append("Snapshot Recovery Cohort")
+        lines.append("- cohort_checked_at: \(diagnostics.lastRecoveryCohortAt?.formatted(date: .abbreviated, time: .standard) ?? "none")")
+        lines.append("- cohort_category: \(diagnosticsPreviewText(diagnostics.lastRecoveryCohortCategory, maxLength: 80) ?? "unknown")")
+        lines.append("- recovery_readiness: \(diagnosticsPreviewText(diagnostics.lastRecoveryReadiness, maxLength: 80) ?? "not_checked")")
+        lines.append("- restore_risk_level: \(diagnosticsPreviewText(diagnostics.lastRecoveryRiskLevel, maxLength: 40) ?? "unknown")")
+        lines.append("- snapshot_freshness_age_seconds: \(diagnostics.lastRecoverySnapshotFreshnessAgeSeconds.map { String(Int($0)) } ?? "none")")
+        lines.append("- hydration_eligibility_reason: \(diagnosticsPreviewText(diagnostics.lastRecoveryHydrationEligibilityReason, maxLength: 120) ?? "not_checked")")
+        lines.append("- latest_snapshot_covered: \(diagnostics.lastRecoveryLatestSnapshotCovered)")
+        lines.append("- cohort_restore_diagnostics_result: \(diagnosticsPreviewText(diagnostics.lastRecoveryRestoreDiagnosticsResult, maxLength: 80) ?? "not_checked")")
         lines.append("")
         lines.append("Redaction Notes")
         lines.append("- Report rows intentionally omit raw session.json text, local paths, storage object paths, signed URLs, auth tokens, and media bytes.")
