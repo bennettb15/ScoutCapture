@@ -383,6 +383,7 @@ final class Phase2C25BSnapshotRestoreDiagnosticsTests: XCTestCase {
         XCTAssertEqual(result.mediaRecoveryDiagnostics.recoverableLocalCount, 0)
         XCTAssertEqual(result.mediaRecoveryDiagnostics.missingCount, 0)
         XCTAssertEqual(result.mediaRecoveryDiagnostics.readiness, "ready")
+        XCTAssertEqual(result.mediaRecoveryDiagnostics.planningState, .remoteOnly)
     }
 
     func testMediaRecoveryDiagnosticsAllRecoverableFromLocalCache() async throws {
@@ -402,6 +403,7 @@ final class Phase2C25BSnapshotRestoreDiagnosticsTests: XCTestCase {
         XCTAssertEqual(result.mediaRecoveryDiagnostics.localFilesPresentCount, 2)
         XCTAssertEqual(result.mediaRecoveryDiagnostics.missingCount, 0)
         XCTAssertEqual(result.mediaRecoveryDiagnostics.readiness, "ready")
+        XCTAssertEqual(result.mediaRecoveryDiagnostics.planningState, .localOnly)
     }
 
     func testMediaRecoveryDiagnosticsMixedLocalAndRemoteRecovery() async throws {
@@ -420,6 +422,7 @@ final class Phase2C25BSnapshotRestoreDiagnosticsTests: XCTestCase {
         XCTAssertEqual(result.mediaRecoveryDiagnostics.missingCount, 0)
         XCTAssertEqual(result.mediaRecoveryDiagnostics.stateCounts[.recoverableFromSupabaseStorage], 1)
         XCTAssertEqual(result.mediaRecoveryDiagnostics.stateCounts[.recoverableFromLocalCache], 1)
+        XCTAssertEqual(result.mediaRecoveryDiagnostics.planningState, .fullyRecoverable)
     }
 
     func testMediaRecoveryDiagnosticsMissingRemoteMetadata() async throws {
@@ -462,6 +465,7 @@ final class Phase2C25BSnapshotRestoreDiagnosticsTests: XCTestCase {
         XCTAssertEqual(result.mediaRecoveryDiagnostics.missingCount, 1)
         XCTAssertEqual(result.mediaRecoveryDiagnostics.stateCounts[.missingBoth], 1)
         XCTAssertEqual(result.mediaRecoveryDiagnostics.readiness, "partial")
+        XCTAssertEqual(result.mediaRecoveryDiagnostics.planningState, .metadataOnly)
     }
 
     func testUnsupportedManifestBlocksMediaRecoveryReadiness() async throws {
@@ -506,6 +510,7 @@ final class Phase2C25BSnapshotRestoreDiagnosticsTests: XCTestCase {
         let result = await fixture.appState.validateLatestSessionSnapshotRestoreDiagnostics()
 
         XCTAssertEqual(result.mediaRecoveryDiagnostics.readiness, "unsupported_media_manifest")
+        XCTAssertEqual(result.mediaRecoveryDiagnostics.planningState, .unrecoverable)
         XCTAssertFalse(result.mediaRecoveryDiagnostics.manifestSupported)
     }
 
@@ -520,5 +525,108 @@ final class Phase2C25BSnapshotRestoreDiagnosticsTests: XCTestCase {
 
         let after = (try? FileManager.default.subpathsOfDirectory(atPath: sessionFolder.path)) ?? []
         XCTAssertEqual(before.sorted(), after.sorted())
+    }
+
+    func testMediaRecoveryPlanningStateMapping() {
+        XCTAssertEqual(
+            AppState.sessionSnapshotMediaRecoveryPlanningState(
+                manifestCount: 4,
+                localFilesPresentCount: 2,
+                remoteStorageMetadataPresentCount: 4,
+                missingCount: 0,
+                unsupportedCount: 0,
+                checksumMismatchCount: 0
+            ),
+            .fullyRecoverable
+        )
+        XCTAssertEqual(
+            AppState.sessionSnapshotMediaRecoveryPlanningState(
+                manifestCount: 4,
+                localFilesPresentCount: 0,
+                remoteStorageMetadataPresentCount: 2,
+                missingCount: 2,
+                unsupportedCount: 0,
+                checksumMismatchCount: 0
+            ),
+            .partiallyRecoverable
+        )
+        XCTAssertEqual(
+            AppState.sessionSnapshotMediaRecoveryPlanningState(
+                manifestCount: 2,
+                localFilesPresentCount: 0,
+                remoteStorageMetadataPresentCount: 0,
+                missingCount: 2,
+                unsupportedCount: 0,
+                checksumMismatchCount: 0
+            ),
+            .metadataOnly
+        )
+        XCTAssertEqual(
+            AppState.sessionSnapshotMediaRecoveryPlanningState(
+                manifestCount: 0,
+                localFilesPresentCount: 0,
+                remoteStorageMetadataPresentCount: 0,
+                missingCount: 0,
+                unsupportedCount: 0,
+                checksumMismatchCount: 0
+            ),
+            .unrecoverable
+        )
+    }
+
+    func testMediaRetrievalGuardrailsBlockUnsafeRequests() {
+        let violations = AppState.sessionSnapshotMediaRetrievalGuardrailViolations(
+            requestedBatchSize: 100,
+            isManual: false,
+            isAllowlisted: false,
+            isProductionWide: true,
+            storageQuotaChecked: false,
+            networkApproved: false,
+            batteryApproved: false,
+            checksumValidationPlanned: false,
+            duplicatePreventionPlanned: false
+        )
+
+        XCTAssertTrue(violations.contains("manual_only_required"))
+        XCTAssertTrue(violations.contains("allowlisted_test_only_required"))
+        XCTAssertTrue(violations.contains("production_wide_retrieval_blocked"))
+        XCTAssertTrue(violations.contains("max_batch_size_exceeded"))
+        XCTAssertTrue(violations.contains("storage_quota_check_required"))
+        XCTAssertTrue(violations.contains("network_requirement_not_met"))
+        XCTAssertTrue(violations.contains("battery_requirement_not_met"))
+        XCTAssertTrue(violations.contains("checksum_validation_required"))
+        XCTAssertTrue(violations.contains("duplicate_prevention_required"))
+        XCTAssertTrue(violations.contains("media_retrieval_not_implemented"))
+    }
+
+    func testMediaRetrievalGuardrailsRemainBlockedEvenWhenPolicyInputsPass() {
+        let violations = AppState.sessionSnapshotMediaRetrievalGuardrailViolations(
+            requestedBatchSize: AppState.SessionSnapshotMediaRetrievalPolicyDiagnostics.guardrailsOnly.maxBatchSize,
+            isManual: true,
+            isAllowlisted: true,
+            isProductionWide: false,
+            storageQuotaChecked: true,
+            networkApproved: true,
+            batteryApproved: true,
+            checksumValidationPlanned: true,
+            duplicatePreventionPlanned: true
+        )
+
+        XCTAssertEqual(violations, ["media_retrieval_not_implemented"])
+    }
+
+    func testMediaRecoveryGuardrailsAppearInCopyableReport() async throws {
+        let fixture = try makeFixture(mediaSetup: { _, property, session in
+            [self.makeShot(propertyID: property.id, sessionID: session.id, filename: "report.jpg", remoteMetadata: true)]
+        })
+
+        _ = await fixture.appState.validateLatestSessionSnapshotRestoreDiagnostics()
+        let report = AppState.sessionSnapshotUploadReportText(fixture.appState.localDiagnostics.sessionSnapshotUpload)
+
+        XCTAssertTrue(report.contains("media_recovery_source_priority: local_cache > icloud_local_backup > supabase_storage > export_archives"))
+        XCTAssertTrue(report.contains("media_retrieval_mode: manual_only"))
+        XCTAssertTrue(report.contains("media_retrieval_can_start: false"))
+        XCTAssertTrue(report.contains("media_retrieval_blocked_reasons: media_retrieval_not_implemented"))
+        XCTAssertFalse(report.contains(fixture.row.payloadStoragePath))
     }
 }

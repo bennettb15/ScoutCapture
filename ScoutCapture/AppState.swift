@@ -832,6 +832,71 @@ final class AppState: ObservableObject {
         case notChecked = "not_checked"
     }
 
+    enum SessionSnapshotMediaRecoveryPlanningState: String, Codable, Equatable, CaseIterable {
+        case fullyRecoverable = "fully_recoverable"
+        case partiallyRecoverable = "partially_recoverable"
+        case metadataOnly = "metadata_only"
+        case remoteOnly = "remote_only"
+        case localOnly = "local_only"
+        case unrecoverable = "unrecoverable"
+    }
+
+    enum SessionSnapshotMediaRecoverySource: String, Codable, Equatable, CaseIterable {
+        case localCache = "local_cache"
+        case iCloudLocalBackup = "icloud_local_backup"
+        case supabaseStorage = "supabase_storage"
+        case exportArchives = "export_archives"
+
+        nonisolated static var defaultPriority: [SessionSnapshotMediaRecoverySource] {
+            [
+                .localCache,
+                .iCloudLocalBackup,
+                .supabaseStorage,
+                .exportArchives
+            ]
+        }
+    }
+
+    struct SessionSnapshotMediaRetrievalPolicyDiagnostics: Equatable {
+        let mode: String
+        let allowlistMode: String
+        let productionWideRetrievalAllowed: Bool
+        let maxBatchSize: Int
+        let storageQuotaAwarenessRequired: Bool
+        let networkRequirement: String
+        let batteryRequirement: String
+        let checksumValidationRequired: Bool
+        let duplicatePreventionRequired: Bool
+        let partialFailureHandling: String
+        let trustModel: String
+        let rolloutPhase: String
+        let canStartRetrieval: Bool
+        let blockedReasons: [String]
+
+        nonisolated static var guardrailsOnly: SessionSnapshotMediaRetrievalPolicyDiagnostics {
+            SessionSnapshotMediaRetrievalPolicyDiagnostics(
+                mode: "manual_only",
+                allowlistMode: "allowlisted_test_only_first",
+                productionWideRetrievalAllowed: false,
+                maxBatchSize: 25,
+                storageQuotaAwarenessRequired: true,
+                networkRequirement: "unmetered_or_operator_approved",
+                batteryRequirement: "charging_or_sufficient_battery",
+                checksumValidationRequired: true,
+                duplicatePreventionRequired: true,
+                partialFailureHandling: "per_item_report_continue_safe_items",
+                trustModel: "checksum_required_before_accept_storage_metadata_is_locator_only",
+                rolloutPhase: "26B_guardrails_only_next_26C_test_only_media_retrieval",
+                canStartRetrieval: false,
+                blockedReasons: [
+                    "media_retrieval_not_implemented",
+                    "manual_operator_confirmation_required",
+                    "production_wide_retrieval_blocked"
+                ]
+            )
+        }
+    }
+
     struct SessionSnapshotMediaRecoveryItemDiagnostic: Equatable, Identifiable {
         let id: UUID
         let state: SessionSnapshotMediaRecoveryState
@@ -845,6 +910,9 @@ final class AppState: ObservableObject {
     struct SessionSnapshotMediaRecoveryDiagnostics: Equatable {
         var checkedAt: Date?
         var readiness: String
+        var planningState: SessionSnapshotMediaRecoveryPlanningState
+        var sourcePriority: [SessionSnapshotMediaRecoverySource]
+        var retrievalPolicy: SessionSnapshotMediaRetrievalPolicyDiagnostics
         var manifestSupported: Bool
         var manifestCount: Int
         var originalsCount: Int
@@ -866,6 +934,9 @@ final class AppState: ObservableObject {
         static let notChecked = SessionSnapshotMediaRecoveryDiagnostics(
             checkedAt: nil,
             readiness: SessionSnapshotMediaRecoveryState.notChecked.rawValue,
+            planningState: .unrecoverable,
+            sourcePriority: SessionSnapshotMediaRecoverySource.defaultPriority,
+            retrievalPolicy: .guardrailsOnly,
             manifestSupported: false,
             manifestCount: 0,
             originalsCount: 0,
@@ -1173,6 +1244,22 @@ final class AppState: ObservableObject {
         var lastRestoreDiagnosticsSnapshotSupabaseStorageMetadataCount: Int?
         var lastRestoreDiagnosticsFreshness: String = "not_checked"
         var lastRestoreDiagnosticsMediaRecoveryReadiness: String = SessionSnapshotMediaRecoveryState.notChecked.rawValue
+        var lastRestoreDiagnosticsMediaRecoveryPlanningState: String = SessionSnapshotMediaRecoveryPlanningState.unrecoverable.rawValue
+        var lastRestoreDiagnosticsMediaRecoverySourcePriority: [String] = SessionSnapshotMediaRecoverySource.defaultPriority.map(\.rawValue)
+        var lastRestoreDiagnosticsMediaRetrievalMode: String = SessionSnapshotMediaRetrievalPolicyDiagnostics.guardrailsOnly.mode
+        var lastRestoreDiagnosticsMediaRetrievalAllowlistMode: String = SessionSnapshotMediaRetrievalPolicyDiagnostics.guardrailsOnly.allowlistMode
+        var lastRestoreDiagnosticsMediaProductionWideRetrievalAllowed: Bool = false
+        var lastRestoreDiagnosticsMediaRetrievalMaxBatchSize: Int = SessionSnapshotMediaRetrievalPolicyDiagnostics.guardrailsOnly.maxBatchSize
+        var lastRestoreDiagnosticsMediaRetrievalStorageQuotaRequired: Bool = true
+        var lastRestoreDiagnosticsMediaRetrievalNetworkRequirement: String = SessionSnapshotMediaRetrievalPolicyDiagnostics.guardrailsOnly.networkRequirement
+        var lastRestoreDiagnosticsMediaRetrievalBatteryRequirement: String = SessionSnapshotMediaRetrievalPolicyDiagnostics.guardrailsOnly.batteryRequirement
+        var lastRestoreDiagnosticsMediaRetrievalChecksumRequired: Bool = true
+        var lastRestoreDiagnosticsMediaRetrievalDuplicatePreventionRequired: Bool = true
+        var lastRestoreDiagnosticsMediaRetrievalPartialFailureHandling: String = SessionSnapshotMediaRetrievalPolicyDiagnostics.guardrailsOnly.partialFailureHandling
+        var lastRestoreDiagnosticsMediaRetrievalTrustModel: String = SessionSnapshotMediaRetrievalPolicyDiagnostics.guardrailsOnly.trustModel
+        var lastRestoreDiagnosticsMediaRetrievalRolloutPhase: String = SessionSnapshotMediaRetrievalPolicyDiagnostics.guardrailsOnly.rolloutPhase
+        var lastRestoreDiagnosticsMediaRetrievalCanStart: Bool = false
+        var lastRestoreDiagnosticsMediaRetrievalBlockedReasons: [String] = SessionSnapshotMediaRetrievalPolicyDiagnostics.guardrailsOnly.blockedReasons
         var lastRestoreDiagnosticsMediaManifestSupported: Bool = false
         var lastRestoreDiagnosticsMediaManifestCount: Int = 0
         var lastRestoreDiagnosticsMediaOriginalsCount: Int = 0
@@ -13318,6 +13405,9 @@ final class AppState: ObservableObject {
         return SessionSnapshotMediaRecoveryDiagnostics(
             checkedAt: checkedAt,
             readiness: SessionSnapshotMediaRecoveryState.unsupportedMediaManifest.rawValue,
+            planningState: .unrecoverable,
+            sourcePriority: SessionSnapshotMediaRecoverySource.defaultPriority,
+            retrievalPolicy: .guardrailsOnly,
             manifestSupported: false,
             manifestCount: manifestCount,
             originalsCount: 0,
@@ -13352,6 +13442,14 @@ final class AppState: ObservableObject {
         let unsupportedCount = stateCounts[.unsupportedMediaManifest] ?? 0
         let notCheckedCount = stateCounts[.notChecked] ?? 0
         let missingCount = items.filter { !$0.remoteStorageMetadataPresent && !$0.localFilePresent }.count
+        let planningState = sessionSnapshotMediaRecoveryPlanningState(
+            manifestCount: items.count,
+            localFilesPresentCount: localCount,
+            remoteStorageMetadataPresentCount: remoteCount,
+            missingCount: missingCount,
+            unsupportedCount: unsupportedCount,
+            checksumMismatchCount: checksumMismatchCount
+        )
         let readiness: String
         if unsupportedCount > 0 {
             readiness = SessionSnapshotMediaRecoveryState.unsupportedMediaManifest.rawValue
@@ -13367,6 +13465,9 @@ final class AppState: ObservableObject {
         return SessionSnapshotMediaRecoveryDiagnostics(
             checkedAt: checkedAt,
             readiness: readiness,
+            planningState: planningState,
+            sourcePriority: SessionSnapshotMediaRecoverySource.defaultPriority,
+            retrievalPolicy: .guardrailsOnly,
             manifestSupported: true,
             manifestCount: items.count,
             originalsCount: items.filter(\.localReferencePresent).count,
@@ -13385,6 +13486,79 @@ final class AppState: ObservableObject {
             stateCounts: stateCounts,
             items: items
         )
+    }
+
+    nonisolated static func sessionSnapshotMediaRecoveryPlanningState(
+        manifestCount: Int,
+        localFilesPresentCount: Int,
+        remoteStorageMetadataPresentCount: Int,
+        missingCount: Int,
+        unsupportedCount: Int,
+        checksumMismatchCount: Int
+    ) -> SessionSnapshotMediaRecoveryPlanningState {
+        guard manifestCount > 0,
+              unsupportedCount == 0,
+              checksumMismatchCount == 0 else {
+            return .unrecoverable
+        }
+        let recoverableCount = max(localFilesPresentCount, remoteStorageMetadataPresentCount)
+        if recoverableCount == 0 {
+            return .metadataOnly
+        }
+        if missingCount > 0 {
+            return .partiallyRecoverable
+        }
+        if localFilesPresentCount > 0, remoteStorageMetadataPresentCount == 0 {
+            return .localOnly
+        }
+        if remoteStorageMetadataPresentCount > 0, localFilesPresentCount == 0 {
+            return .remoteOnly
+        }
+        return .fullyRecoverable
+    }
+
+    nonisolated static func sessionSnapshotMediaRetrievalGuardrailViolations(
+        requestedBatchSize: Int,
+        isManual: Bool,
+        isAllowlisted: Bool,
+        isProductionWide: Bool,
+        storageQuotaChecked: Bool,
+        networkApproved: Bool,
+        batteryApproved: Bool,
+        checksumValidationPlanned: Bool,
+        duplicatePreventionPlanned: Bool
+    ) -> [String] {
+        var violations: [String] = []
+        let policy = SessionSnapshotMediaRetrievalPolicyDiagnostics.guardrailsOnly
+        if !isManual {
+            violations.append("manual_only_required")
+        }
+        if !isAllowlisted {
+            violations.append("allowlisted_test_only_required")
+        }
+        if isProductionWide {
+            violations.append("production_wide_retrieval_blocked")
+        }
+        if requestedBatchSize > policy.maxBatchSize {
+            violations.append("max_batch_size_exceeded")
+        }
+        if !storageQuotaChecked {
+            violations.append("storage_quota_check_required")
+        }
+        if !networkApproved {
+            violations.append("network_requirement_not_met")
+        }
+        if !batteryApproved {
+            violations.append("battery_requirement_not_met")
+        }
+        if !checksumValidationPlanned {
+            violations.append("checksum_validation_required")
+        }
+        if !duplicatePreventionPlanned {
+            violations.append("duplicate_prevention_required")
+        }
+        violations.append("media_retrieval_not_implemented")
+        return violations
     }
 
     private nonisolated static func fileSizeBytesIfPresent(at url: URL) -> Int? {
@@ -13654,6 +13828,22 @@ final class AppState: ObservableObject {
             diagnostics.sessionSnapshotUpload.lastRestoreDiagnosticsSnapshotSupabaseStorageMetadataCount = result.snapshotSupabaseStorageMetadataCount
             diagnostics.sessionSnapshotUpload.lastRestoreDiagnosticsFreshness = result.freshness
             diagnostics.sessionSnapshotUpload.lastRestoreDiagnosticsMediaRecoveryReadiness = result.mediaRecoveryDiagnostics.readiness
+            diagnostics.sessionSnapshotUpload.lastRestoreDiagnosticsMediaRecoveryPlanningState = result.mediaRecoveryDiagnostics.planningState.rawValue
+            diagnostics.sessionSnapshotUpload.lastRestoreDiagnosticsMediaRecoverySourcePriority = result.mediaRecoveryDiagnostics.sourcePriority.map(\.rawValue)
+            diagnostics.sessionSnapshotUpload.lastRestoreDiagnosticsMediaRetrievalMode = result.mediaRecoveryDiagnostics.retrievalPolicy.mode
+            diagnostics.sessionSnapshotUpload.lastRestoreDiagnosticsMediaRetrievalAllowlistMode = result.mediaRecoveryDiagnostics.retrievalPolicy.allowlistMode
+            diagnostics.sessionSnapshotUpload.lastRestoreDiagnosticsMediaProductionWideRetrievalAllowed = result.mediaRecoveryDiagnostics.retrievalPolicy.productionWideRetrievalAllowed
+            diagnostics.sessionSnapshotUpload.lastRestoreDiagnosticsMediaRetrievalMaxBatchSize = result.mediaRecoveryDiagnostics.retrievalPolicy.maxBatchSize
+            diagnostics.sessionSnapshotUpload.lastRestoreDiagnosticsMediaRetrievalStorageQuotaRequired = result.mediaRecoveryDiagnostics.retrievalPolicy.storageQuotaAwarenessRequired
+            diagnostics.sessionSnapshotUpload.lastRestoreDiagnosticsMediaRetrievalNetworkRequirement = result.mediaRecoveryDiagnostics.retrievalPolicy.networkRequirement
+            diagnostics.sessionSnapshotUpload.lastRestoreDiagnosticsMediaRetrievalBatteryRequirement = result.mediaRecoveryDiagnostics.retrievalPolicy.batteryRequirement
+            diagnostics.sessionSnapshotUpload.lastRestoreDiagnosticsMediaRetrievalChecksumRequired = result.mediaRecoveryDiagnostics.retrievalPolicy.checksumValidationRequired
+            diagnostics.sessionSnapshotUpload.lastRestoreDiagnosticsMediaRetrievalDuplicatePreventionRequired = result.mediaRecoveryDiagnostics.retrievalPolicy.duplicatePreventionRequired
+            diagnostics.sessionSnapshotUpload.lastRestoreDiagnosticsMediaRetrievalPartialFailureHandling = result.mediaRecoveryDiagnostics.retrievalPolicy.partialFailureHandling
+            diagnostics.sessionSnapshotUpload.lastRestoreDiagnosticsMediaRetrievalTrustModel = result.mediaRecoveryDiagnostics.retrievalPolicy.trustModel
+            diagnostics.sessionSnapshotUpload.lastRestoreDiagnosticsMediaRetrievalRolloutPhase = result.mediaRecoveryDiagnostics.retrievalPolicy.rolloutPhase
+            diagnostics.sessionSnapshotUpload.lastRestoreDiagnosticsMediaRetrievalCanStart = result.mediaRecoveryDiagnostics.retrievalPolicy.canStartRetrieval
+            diagnostics.sessionSnapshotUpload.lastRestoreDiagnosticsMediaRetrievalBlockedReasons = result.mediaRecoveryDiagnostics.retrievalPolicy.blockedReasons
             diagnostics.sessionSnapshotUpload.lastRestoreDiagnosticsMediaManifestSupported = result.mediaRecoveryDiagnostics.manifestSupported
             diagnostics.sessionSnapshotUpload.lastRestoreDiagnosticsMediaManifestCount = result.mediaRecoveryDiagnostics.manifestCount
             diagnostics.sessionSnapshotUpload.lastRestoreDiagnosticsMediaOriginalsCount = result.mediaRecoveryDiagnostics.originalsCount
@@ -15295,6 +15485,22 @@ final class AppState: ObservableObject {
         lines.append("- snapshot_missing_local_originals_count: \(diagnostics.lastRestoreDiagnosticsSnapshotMissingLocalOriginalsCount.map(String.init) ?? "none")")
         lines.append("- snapshot_supabase_storage_metadata_count: \(diagnostics.lastRestoreDiagnosticsSnapshotSupabaseStorageMetadataCount.map(String.init) ?? "none")")
         lines.append("- media_recovery_readiness: \(diagnosticsPreviewText(diagnostics.lastRestoreDiagnosticsMediaRecoveryReadiness, maxLength: 80) ?? "not_checked")")
+        lines.append("- media_recovery_planning_state: \(diagnosticsPreviewText(diagnostics.lastRestoreDiagnosticsMediaRecoveryPlanningState, maxLength: 80) ?? "unrecoverable")")
+        lines.append("- media_recovery_source_priority: \(diagnostics.lastRestoreDiagnosticsMediaRecoverySourcePriority.joined(separator: " > "))")
+        lines.append("- media_retrieval_mode: \(diagnosticsPreviewText(diagnostics.lastRestoreDiagnosticsMediaRetrievalMode, maxLength: 80) ?? "manual_only")")
+        lines.append("- media_retrieval_allowlist_mode: \(diagnosticsPreviewText(diagnostics.lastRestoreDiagnosticsMediaRetrievalAllowlistMode, maxLength: 80) ?? "allowlisted_test_only_first")")
+        lines.append("- media_production_wide_retrieval_allowed: \(diagnostics.lastRestoreDiagnosticsMediaProductionWideRetrievalAllowed)")
+        lines.append("- media_retrieval_max_batch_size: \(diagnostics.lastRestoreDiagnosticsMediaRetrievalMaxBatchSize)")
+        lines.append("- media_retrieval_storage_quota_required: \(diagnostics.lastRestoreDiagnosticsMediaRetrievalStorageQuotaRequired)")
+        lines.append("- media_retrieval_network_requirement: \(diagnosticsPreviewText(diagnostics.lastRestoreDiagnosticsMediaRetrievalNetworkRequirement, maxLength: 80) ?? "unmetered_or_operator_approved")")
+        lines.append("- media_retrieval_battery_requirement: \(diagnosticsPreviewText(diagnostics.lastRestoreDiagnosticsMediaRetrievalBatteryRequirement, maxLength: 80) ?? "charging_or_sufficient_battery")")
+        lines.append("- media_retrieval_checksum_validation_required: \(diagnostics.lastRestoreDiagnosticsMediaRetrievalChecksumRequired)")
+        lines.append("- media_retrieval_duplicate_prevention_required: \(diagnostics.lastRestoreDiagnosticsMediaRetrievalDuplicatePreventionRequired)")
+        lines.append("- media_retrieval_partial_failure_handling: \(diagnosticsPreviewText(diagnostics.lastRestoreDiagnosticsMediaRetrievalPartialFailureHandling, maxLength: 100) ?? "per_item_report_continue_safe_items")")
+        lines.append("- media_retrieval_trust_model: \(diagnosticsPreviewText(diagnostics.lastRestoreDiagnosticsMediaRetrievalTrustModel, maxLength: 120) ?? "checksum_required_before_accept_storage_metadata_is_locator_only")")
+        lines.append("- media_retrieval_rollout_phase: \(diagnosticsPreviewText(diagnostics.lastRestoreDiagnosticsMediaRetrievalRolloutPhase, maxLength: 120) ?? "26B_guardrails_only")")
+        lines.append("- media_retrieval_can_start: \(diagnostics.lastRestoreDiagnosticsMediaRetrievalCanStart)")
+        lines.append("- media_retrieval_blocked_reasons: \(diagnostics.lastRestoreDiagnosticsMediaRetrievalBlockedReasons.isEmpty ? "none" : diagnostics.lastRestoreDiagnosticsMediaRetrievalBlockedReasons.joined(separator: ", "))")
         lines.append("- media_manifest_supported: \(diagnostics.lastRestoreDiagnosticsMediaManifestSupported)")
         lines.append("- media_manifest_count: \(diagnostics.lastRestoreDiagnosticsMediaManifestCount)")
         lines.append("- media_originals_count: \(diagnostics.lastRestoreDiagnosticsMediaOriginalsCount)")
