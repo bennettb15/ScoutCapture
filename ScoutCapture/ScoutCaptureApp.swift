@@ -8672,6 +8672,7 @@ private struct DebugSessionSnapshotUploadDiagnosticsView: View {
     @State private var isShowingHydrationConfirmation: Bool = false
     @State private var isRetrievingSnapshotMedia: Bool = false
     @State private var isShowingMediaRetrievalConfirmation: Bool = false
+    @State private var isCheckingCanonicalReadDiagnostics: Bool = false
     @State private var isRefreshingAuthPreflight: Bool = false
     @State private var isRepairingLocalOrgDrift: Bool = false
     @State private var isRunningLocalOrgDriftAudit: Bool = false
@@ -9109,6 +9110,47 @@ private struct DebugSessionSnapshotUploadDiagnosticsView: View {
                     }
                 }
                 .disabled(isCheckingRecoveryCohort)
+                .font(.system(size: 14, weight: .semibold))
+            }
+
+            Section("Canonical Read Diagnostics Test-Only") {
+                Text("Read-only local-vs-remote normalized row comparison. It does not switch canonical reads, hydrate data, restore files, download media, or change local or remote state.")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(.secondary)
+                diagnosticRow("Result", diagnostics.lastCanonicalReadDiagnosticsResult)
+                diagnosticRow("Checked", formattedRunDate(diagnostics.lastCanonicalReadDiagnosticsAt))
+                diagnosticRow("Property ID", diagnostics.lastCanonicalReadDiagnosticsPropertyID?.uuidString ?? "none")
+                diagnosticRow("Session ID", diagnostics.lastCanonicalReadDiagnosticsSessionID?.uuidString ?? "none")
+                diagnosticRow("Local Property", diagnostics.lastCanonicalReadDiagnosticsLocalPropertyFound ? "true" : "false")
+                diagnosticRow("Local Session", diagnostics.lastCanonicalReadDiagnosticsLocalSessionFound ? "true" : "false")
+                diagnosticRow("Remote Property", diagnostics.lastCanonicalReadDiagnosticsRemotePropertyFound ? "true" : "false")
+                diagnosticRow("Remote Session", diagnostics.lastCanonicalReadDiagnosticsRemoteSessionFound ? "true" : "false")
+                diagnosticRow("Count Parity", optionalBoolText(diagnostics.lastCanonicalReadDiagnosticsCountParity))
+                diagnosticRow("Status Parity", optionalBoolText(diagnostics.lastCanonicalReadDiagnosticsStatusParity))
+                diagnosticRow("Parent Org", optionalBoolText(diagnostics.lastCanonicalReadDiagnosticsParentOrgConsistent))
+                diagnosticRow("Parent Property", optionalBoolText(diagnostics.lastCanonicalReadDiagnosticsParentPropertyConsistent))
+                diagnosticRow("Local Shots", diagnostics.lastCanonicalReadDiagnosticsLocalShotCount.map(String.init) ?? "none")
+                diagnosticRow("Remote Shots", diagnostics.lastCanonicalReadDiagnosticsRemoteShotCount.map(String.init) ?? "none")
+                diagnosticRow("Local Issues/Obs", diagnostics.lastCanonicalReadDiagnosticsLocalIssueObservationCount.map(String.init) ?? "none")
+                diagnosticRow("Remote Issues/Obs", diagnostics.lastCanonicalReadDiagnosticsRemoteIssueObservationCount.map(String.init) ?? "none")
+                diagnosticRow("Local Guided", diagnostics.lastCanonicalReadDiagnosticsLocalGuidedCount.map(String.init) ?? "none")
+                diagnosticRow("Remote Freshness Seconds", diagnostics.lastCanonicalReadDiagnosticsRemoteFreshnessAgeSeconds.map { String(Int($0)) } ?? "unknown")
+                diagnosticRow("Remote Revision", diagnostics.lastCanonicalReadDiagnosticsRemoteRevision.map(String.init) ?? "none")
+                diagnosticRow("Recommendation", diagnostics.lastCanonicalReadDiagnosticsRecommendation)
+                if let blockedReason = AppState.diagnosticsPreviewText(diagnostics.lastCanonicalReadDiagnosticsBlockedReason, maxLength: 160) {
+                    diagnosticRow("Blocked Reason", blockedReason)
+                }
+                Button(isCheckingCanonicalReadDiagnostics ? "Checking..." : "Check Canonical Read Diagnostics") {
+                    guard !isCheckingCanonicalReadDiagnostics else { return }
+                    isCheckingCanonicalReadDiagnostics = true
+                    Task {
+                        _ = await appState.runCanonicalReadDiagnosticsForSelectedSession()
+                        await MainActor.run {
+                            isCheckingCanonicalReadDiagnostics = false
+                        }
+                    }
+                }
+                .disabled(isCheckingCanonicalReadDiagnostics)
                 .font(.system(size: 14, weight: .semibold))
             }
         }
