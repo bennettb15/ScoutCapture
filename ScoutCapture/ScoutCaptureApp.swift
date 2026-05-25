@@ -9154,6 +9154,13 @@ private struct DebugSessionSnapshotUploadDiagnosticsView: View {
                 diagnosticRow("Missing Child Count", "\(diagnostics.lastMissingChildCount)")
                 diagnosticRow("Replay Eligibility", diagnostics.lastReplayEligibility)
                 diagnosticRow("Repair Phase", diagnostics.lastParityRepairRolloutPhase)
+                diagnosticRow("Backfill Eligible", diagnostics.lastNormalizedBackfillEligible ? "true" : "false")
+                diagnosticRow("Backfill Blocked", diagnostics.lastNormalizedBackfillBlockedReason)
+                diagnosticRow("Backfill Planned", "sessions \(diagnostics.lastNormalizedBackfillPlannedSessionUpserts), shots \(diagnostics.lastNormalizedBackfillPlannedShotUpserts), observations \(diagnostics.lastNormalizedBackfillPlannedObservationUpserts)")
+                diagnosticRow("Backfill Executed", "\(diagnostics.lastNormalizedBackfillExecutedEntityCount)")
+                diagnosticRow("Backfill Skipped", "\(diagnostics.lastNormalizedBackfillSkippedEntityCount)")
+                diagnosticRow("Remote Newer Conflicts", "\(diagnostics.lastNormalizedBackfillRemoteNewerConflictCount)")
+                diagnosticRow("Production Backfill", diagnostics.lastNormalizedBackfillProductionBlocked ? "blocked" : "not blocked")
                 if !diagnostics.lastCanonicalReadRolloutBlockers.isEmpty {
                     diagnosticRow("Rollout Blockers", diagnostics.lastCanonicalReadRolloutBlockers.joined(separator: ", "))
                 }

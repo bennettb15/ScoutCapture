@@ -1398,6 +1398,15 @@ final class AppState: ObservableObject {
         var lastMissingChildCount: Int = 0
         var lastReplayEligibility: String = "not_checked"
         var lastParityRepairRolloutPhase: String = "diagnostics_only"
+        var lastNormalizedBackfillEligible: Bool = false
+        var lastNormalizedBackfillBlockedReason: String = "not_checked"
+        var lastNormalizedBackfillPlannedSessionUpserts: Int = 0
+        var lastNormalizedBackfillPlannedShotUpserts: Int = 0
+        var lastNormalizedBackfillPlannedObservationUpserts: Int = 0
+        var lastNormalizedBackfillExecutedEntityCount: Int = 0
+        var lastNormalizedBackfillSkippedEntityCount: Int = 0
+        var lastNormalizedBackfillRemoteNewerConflictCount: Int = 0
+        var lastNormalizedBackfillProductionBlocked: Bool = true
     }
 
     struct LocalDiagnosticsState: Equatable {
@@ -2203,6 +2212,51 @@ final class AppState: ObservableObject {
         case childRowRegeneration = "child_row_regeneration"
         case shadowWriteReplay = "shadow_write_replay"
         case noOpBlock = "no_op_block"
+    }
+
+    enum NormalizedBackfillEntityKind: String, Codable, Equatable, CaseIterable {
+        case session = "session"
+        case shot = "shot"
+        case observation = "observation"
+    }
+
+    struct NormalizedBackfillReplayPlan: Equatable {
+        let checkedAt: Date
+        let propertyID: UUID?
+        let sessionID: UUID?
+        let eligible: Bool
+        let blockedReason: String?
+        let evidenceSourcePriority: [String]
+        let parentLineageRepairNeeded: Bool
+        let sessionRowUpsertNeeded: Bool
+        let shotRowUpsertsNeeded: Int
+        let observationIssueRowUpsertsNeeded: Int
+        let skippedReason: String?
+        let remoteNewerConflictCount: Int
+        let canonicalReadsRemainBlocked: Bool
+        let noBehaviorChangedText: String
+    }
+
+    struct NormalizedBackfillEntityResult: Equatable {
+        let kind: NormalizedBackfillEntityKind
+        let attemptedCount: Int
+        let upsertedCount: Int
+        let skippedCount: Int
+        let failedCount: Int
+        let message: String
+    }
+
+    struct NormalizedBackfillReplayExecutionResult: Equatable {
+        let allowed: Bool
+        let blockedReason: String?
+        let productionBlocked: Bool
+        let attemptedEntityCount: Int
+        let executedEntityCount: Int
+        let skippedEntityCount: Int
+        let failedEntityCount: Int
+        let remoteNewerConflictCount: Int
+        let results: [NormalizedBackfillEntityResult]
+        let noBehaviorChangedText: String
     }
 
     struct CanonicalReadLocalSnapshot: Equatable {
@@ -16475,6 +16529,15 @@ final class AppState: ObservableObject {
         lines.append("- missing_child_count: \(diagnostics.lastMissingChildCount)")
         lines.append("- replay_eligibility: \(diagnosticsPreviewText(diagnostics.lastReplayEligibility, maxLength: 140) ?? "not_checked")")
         lines.append("- parity_repair_rollout_phase: \(diagnosticsPreviewText(diagnostics.lastParityRepairRolloutPhase, maxLength: 120) ?? "diagnostics_only")")
+        lines.append("- normalized_backfill_eligible: \(diagnostics.lastNormalizedBackfillEligible)")
+        lines.append("- normalized_backfill_blocked_reason: \(diagnosticsPreviewText(diagnostics.lastNormalizedBackfillBlockedReason, maxLength: 160) ?? "not_checked")")
+        lines.append("- normalized_backfill_planned_session_upserts: \(diagnostics.lastNormalizedBackfillPlannedSessionUpserts)")
+        lines.append("- normalized_backfill_planned_shot_upserts: \(diagnostics.lastNormalizedBackfillPlannedShotUpserts)")
+        lines.append("- normalized_backfill_planned_observation_upserts: \(diagnostics.lastNormalizedBackfillPlannedObservationUpserts)")
+        lines.append("- normalized_backfill_executed_entity_count: \(diagnostics.lastNormalizedBackfillExecutedEntityCount)")
+        lines.append("- normalized_backfill_skipped_entity_count: \(diagnostics.lastNormalizedBackfillSkippedEntityCount)")
+        lines.append("- normalized_backfill_remote_newer_conflicts: \(diagnostics.lastNormalizedBackfillRemoteNewerConflictCount)")
+        lines.append("- normalized_backfill_production_blocked: \(diagnostics.lastNormalizedBackfillProductionBlocked)")
         lines.append("")
         lines.append("Redaction Notes")
         lines.append("- Report rows intentionally omit raw session.json text, local paths, storage object paths, signed URLs, auth tokens, and media bytes.")
@@ -17587,6 +17650,18 @@ final class AppState: ObservableObject {
         diagnostics.sessionSnapshotUpload.lastMissingChildCount = parityGapReport.missingChildCount
         diagnostics.sessionSnapshotUpload.lastReplayEligibility = parityGapReport.replayEligibility
         diagnostics.sessionSnapshotUpload.lastParityRepairRolloutPhase = parityGapReport.repairRolloutPhase
+        let backfillPlan = Self.makeNormalizedBackfillReplayPlan(
+            checkedAt: result.checkedAt,
+            canonicalDiagnostics: result,
+            parityReport: parityGapReport
+        )
+        diagnostics.sessionSnapshotUpload.lastNormalizedBackfillEligible = backfillPlan.eligible
+        diagnostics.sessionSnapshotUpload.lastNormalizedBackfillBlockedReason = backfillPlan.blockedReason ?? "none"
+        diagnostics.sessionSnapshotUpload.lastNormalizedBackfillPlannedSessionUpserts = backfillPlan.sessionRowUpsertNeeded ? 1 : 0
+        diagnostics.sessionSnapshotUpload.lastNormalizedBackfillPlannedShotUpserts = backfillPlan.shotRowUpsertsNeeded
+        diagnostics.sessionSnapshotUpload.lastNormalizedBackfillPlannedObservationUpserts = backfillPlan.observationIssueRowUpsertsNeeded
+        diagnostics.sessionSnapshotUpload.lastNormalizedBackfillRemoteNewerConflictCount = backfillPlan.remoteNewerConflictCount
+        diagnostics.sessionSnapshotUpload.lastNormalizedBackfillProductionBlocked = true
         localDiagnostics = diagnostics
     }
 
@@ -18210,6 +18285,148 @@ final class AppState: ObservableObject {
             lines.append("- \(diagnosticsPreviewText(prerequisite, maxLength: 140) ?? "unknown")")
         }
         return lines.joined(separator: "\n")
+    }
+
+    nonisolated static func makeNormalizedBackfillReplayPlan(
+        checkedAt: Date = Date(),
+        canonicalDiagnostics: CanonicalReadDiagnosticsResult,
+        parityReport: NormalizedParityGapReport? = nil,
+        useLocalAsExplicitSource: Bool = false
+    ) -> NormalizedBackfillReplayPlan {
+        let report = parityReport ?? makeNormalizedParityGapReport(
+            checkedAt: checkedAt,
+            canonicalDiagnostics: canonicalDiagnostics
+        )
+        let localShotCount = canonicalDiagnostics.localShotCount ?? 0
+        let remoteShotCount = canonicalDiagnostics.remoteShotCount ?? 0
+        let localObservationCount = canonicalDiagnostics.localIssueObservationCount ?? 0
+        let remoteObservationCount = canonicalDiagnostics.remoteIssueObservationCount ?? 0
+        let shotUpsertsNeeded = max(localShotCount - remoteShotCount, 0)
+        let observationUpsertsNeeded = max(localObservationCount - remoteObservationCount, 0)
+        let sessionRowUpsertNeeded = canonicalDiagnostics.localSessionFound && !canonicalDiagnostics.remoteSessionFound
+        let parentLineageRepairNeeded = canonicalDiagnostics.parentOrgConsistent == false ||
+            canonicalDiagnostics.parentPropertyConsistent == false
+        let remoteNewerConflictCount = canonicalDiagnostics.result == .remoteNewerCandidate ? 1 : 0
+        let plannedCount = (sessionRowUpsertNeeded ? 1 : 0) + shotUpsertsNeeded + observationUpsertsNeeded
+
+        var blockedReasons: [String] = []
+        if canonicalDiagnostics.propertyID == nil || canonicalDiagnostics.sessionID == nil {
+            blockedReasons.append("selected_single_session_required")
+        }
+        if !canonicalDiagnostics.localPropertyFound || !canonicalDiagnostics.localSessionFound {
+            blockedReasons.append("local_property_session_identity_not_confirmed")
+        }
+        if canonicalDiagnostics.result == .remoteNewerCandidate {
+            blockedReasons.append("remote_newer_conflict_blocks_backfill")
+        }
+        if canonicalDiagnostics.result == .localNewerConflict && !useLocalAsExplicitSource {
+            blockedReasons.append("local_newer_ambiguity_requires_explicit_local_source")
+        }
+        if canonicalDiagnostics.parentOrgConsistent == nil || canonicalDiagnostics.parentPropertyConsistent == nil {
+            blockedReasons.append("parent_lineage_unable_to_verify")
+        }
+        if parentLineageRepairNeeded && !report.repairStrategies.contains(.lineageReconciliation) {
+            blockedReasons.append("parent_lineage_repair_not_planned")
+        }
+        if plannedCount == 0 && !parentLineageRepairNeeded {
+            blockedReasons.append("no_missing_normalized_rows_planned")
+        }
+
+        let blockedReason = blockedReasons.isEmpty ? nil : blockedReasons.joined(separator: ", ")
+        return NormalizedBackfillReplayPlan(
+            checkedAt: checkedAt,
+            propertyID: canonicalDiagnostics.propertyID,
+            sessionID: canonicalDiagnostics.sessionID,
+            eligible: blockedReason == nil,
+            blockedReason: blockedReason,
+            evidenceSourcePriority: [
+                "verified_snapshot_payload",
+                "local_session_metadata",
+                "local_shot_issue_guided_metadata"
+            ],
+            parentLineageRepairNeeded: parentLineageRepairNeeded,
+            sessionRowUpsertNeeded: sessionRowUpsertNeeded,
+            shotRowUpsertsNeeded: shotUpsertsNeeded,
+            observationIssueRowUpsertsNeeded: observationUpsertsNeeded,
+            skippedReason: blockedReason,
+            remoteNewerConflictCount: remoteNewerConflictCount,
+            canonicalReadsRemainBlocked: true,
+            noBehaviorChangedText: "No behavior changed: this test-only normalized backfill/replay plan is read-only by default and does not switch canonical reads, hydrate data, restore local state, run bulk backfill, change export, change seal, change sync, change media, change iCloud behavior, loosen RLS, delete data, or mutate production data."
+        )
+    }
+
+    nonisolated static func executeNormalizedBackfillReplayTestOnly(
+        plan: NormalizedBackfillReplayPlan,
+        targetClassification: SupabaseRuntimeConfiguration.TargetClassification,
+        operation: (NormalizedBackfillEntityKind, Int) async throws -> NormalizedBackfillEntityResult
+    ) async -> NormalizedBackfillReplayExecutionResult {
+        guard targetClassification == .localDev || targetClassification == .approvedStaging else {
+            let productionBlocked = targetClassification == .approvedProductionValidation || targetClassification == .remote
+            return NormalizedBackfillReplayExecutionResult(
+                allowed: false,
+                blockedReason: productionBlocked ? "production_backfill_blocked" : "target_environment_not_allowed",
+                productionBlocked: productionBlocked,
+                attemptedEntityCount: 0,
+                executedEntityCount: 0,
+                skippedEntityCount: 0,
+                failedEntityCount: 0,
+                remoteNewerConflictCount: plan.remoteNewerConflictCount,
+                results: [],
+                noBehaviorChangedText: "Production normalized backfill remains blocked. No canonical reads were switched and no production repair/backfill was executed."
+            )
+        }
+        guard plan.eligible else {
+            return NormalizedBackfillReplayExecutionResult(
+                allowed: false,
+                blockedReason: plan.blockedReason ?? "plan_not_eligible",
+                productionBlocked: false,
+                attemptedEntityCount: 0,
+                executedEntityCount: 0,
+                skippedEntityCount: 0,
+                failedEntityCount: 0,
+                remoteNewerConflictCount: plan.remoteNewerConflictCount,
+                results: [],
+                noBehaviorChangedText: "No normalized backfill executed because the test-only plan was not eligible."
+            )
+        }
+
+        let plannedOperations: [(NormalizedBackfillEntityKind, Int)] = [
+            (.session, plan.sessionRowUpsertNeeded ? 1 : 0),
+            (.shot, plan.shotRowUpsertsNeeded),
+            (.observation, plan.observationIssueRowUpsertsNeeded)
+        ].filter { $0.1 > 0 }
+
+        var results: [NormalizedBackfillEntityResult] = []
+        for (kind, count) in plannedOperations {
+            do {
+                results.append(try await operation(kind, count))
+            } catch {
+                results.append(NormalizedBackfillEntityResult(
+                    kind: kind,
+                    attemptedCount: count,
+                    upsertedCount: 0,
+                    skippedCount: 0,
+                    failedCount: count,
+                    message: sanitizedDiagnosticsErrorMessage(error.localizedDescription)
+                ))
+            }
+        }
+        let attempted = results.reduce(0) { $0 + $1.attemptedCount }
+        let executed = results.reduce(0) { $0 + $1.upsertedCount }
+        let skipped = results.reduce(0) { $0 + $1.skippedCount }
+        let failed = results.reduce(0) { $0 + $1.failedCount }
+        return NormalizedBackfillReplayExecutionResult(
+            allowed: true,
+            blockedReason: nil,
+            productionBlocked: false,
+            attemptedEntityCount: attempted,
+            executedEntityCount: executed,
+            skippedEntityCount: skipped,
+            failedEntityCount: failed,
+            remoteNewerConflictCount: plan.remoteNewerConflictCount,
+            results: results,
+            noBehaviorChangedText: "Test-only normalized backfill/replay executed only through the supplied local/staging operation hook. No canonical reads were switched, no bulk backfill was run, no local state was hydrated/restored, and production backfill remains blocked."
+        )
     }
 
     private nonisolated static func canonicalReadState(
