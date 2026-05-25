@@ -8664,18 +8664,27 @@ private struct DebugSessionSnapshotPreviewTextView: View {
 
 private struct DebugSessionSnapshotUploadDiagnosticsView: View {
     @ObservedObject var appState: AppState
-    let diagnostics: AppState.SessionSnapshotUploadDiagnostics
     @State private var isUploadingSessionSnapshot: Bool = false
     @State private var isCheckingSnapshotReadback: Bool = false
     @State private var isCheckingSnapshotRestoreDiagnostics: Bool = false
     @State private var isCheckingRecoveryCohort: Bool = false
     @State private var isHydratingSnapshotMetadata: Bool = false
     @State private var isShowingHydrationConfirmation: Bool = false
+    @State private var isRetrievingSnapshotMedia: Bool = false
+    @State private var isShowingMediaRetrievalConfirmation: Bool = false
     @State private var isRefreshingAuthPreflight: Bool = false
     @State private var isRepairingLocalOrgDrift: Bool = false
     @State private var isRunningLocalOrgDriftAudit: Bool = false
     @State private var isRepairingConfirmedLocalOrgDrift: Bool = false
     @State private var testSessionCreationMessage: String?
+
+    init(appState: AppState, diagnostics: AppState.SessionSnapshotUploadDiagnostics) {
+        self.appState = appState
+    }
+
+    private var diagnostics: AppState.SessionSnapshotUploadDiagnostics {
+        appState.localDiagnostics.sessionSnapshotUpload
+    }
 
     private var reportText: String {
         AppState.sessionSnapshotUploadReportText(diagnostics)
@@ -8701,6 +8710,13 @@ private struct DebugSessionSnapshotUploadDiagnosticsView: View {
         AppState.makeSessionSnapshotHydrationConfirmation(
             diagnostics: diagnostics,
             policy: hydrationPolicy
+        )
+    }
+
+    private var mediaRetrievalConfirmation: AppState.SessionSnapshotMediaRetrievalConfirmation {
+        AppState.makeSessionSnapshotMediaRetrievalConfirmation(
+            diagnostics: diagnostics,
+            targetClassification: appState.supabaseConfiguration.targetClassification
         )
     }
 
@@ -9026,6 +9042,14 @@ private struct DebugSessionSnapshotUploadDiagnosticsView: View {
                 if let failure = AppState.diagnosticsPreviewText(diagnostics.lastRestoreDiagnosticsFailureReason, maxLength: 160) {
                     diagnosticRow("Failure Reason", failure)
                 }
+                diagnosticRow("Media Retrieval Allowed", mediaRetrievalConfirmation.canRetrieve ? "true" : "false")
+                diagnosticRow("Media Retrieval Blocked", mediaRetrievalConfirmation.blockedReason ?? "none")
+                diagnosticRow("Media Retrieval Attempted", diagnostics.lastMediaRetrievalAttemptedCount)
+                diagnosticRow("Media Retrieval Downloaded", diagnostics.lastMediaRetrievalDownloadedCount)
+                diagnosticRow("Media Retrieval Checksums", diagnostics.lastMediaRetrievalChecksumVerifiedCount)
+                diagnosticRow("Media Retrieval Existing", diagnostics.lastMediaRetrievalSkippedExistingCount)
+                diagnosticRow("Media Retrieval Failed", diagnostics.lastMediaRetrievalFailedCount)
+                diagnosticRow("Recovered Local Paths", diagnostics.lastMediaRetrievalRecoveredLocalPathCount)
                 diagnosticRow("Hydration Allowed", diagnostics.lastHydrationAllowed ? "true" : "false")
                 diagnosticRow("Hydration Blocked", diagnostics.lastHydrationBlockedReason ?? "none")
                 diagnosticRow("Hydration Source", diagnostics.lastHydrationSourceSnapshotID?.uuidString ?? "none")
@@ -9056,6 +9080,11 @@ private struct DebugSessionSnapshotUploadDiagnosticsView: View {
                     isShowingHydrationConfirmation = true
                 }
                 .disabled(isHydratingSnapshotMetadata)
+                .font(.system(size: 14, weight: .semibold))
+                Button(isRetrievingSnapshotMedia ? "Retrieving..." : "Retrieve Snapshot Media Test-Only") {
+                    isShowingMediaRetrievalConfirmation = true
+                }
+                .disabled(isRetrievingSnapshotMedia)
                 .font(.system(size: 14, weight: .semibold))
             }
 
@@ -9100,6 +9129,22 @@ private struct DebugSessionSnapshotUploadDiagnosticsView: View {
             }
         } message: {
             Text(hydrationConfirmation.messageText)
+        }
+        .alert("Retrieve Snapshot Media Test-Only?", isPresented: $isShowingMediaRetrievalConfirmation) {
+            Button("Cancel", role: .cancel) {}
+            if mediaRetrievalConfirmation.canRetrieve {
+                Button("Retrieve Test Media", role: .destructive) {
+                    isRetrievingSnapshotMedia = true
+                    Task {
+                        _ = await appState.retrieveSnapshotMediaTestOnly()
+                        await MainActor.run {
+                            isRetrievingSnapshotMedia = false
+                        }
+                    }
+                }
+            }
+        } message: {
+            Text(mediaRetrievalConfirmation.messageText)
         }
     }
 

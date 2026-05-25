@@ -526,6 +526,7 @@ final class AppState: ObservableObject {
     typealias SessionSnapshotRowInsertOverride = (SessionSnapshotUploadRow) async throws -> Void
     typealias SessionSnapshotRowsFetchOverride = (UUID?, UUID?, UUID?) async throws -> [SessionSnapshotUploadRow]
     typealias SessionSnapshotStorageDownloadOverride = (String, String) async throws -> Data
+    typealias SessionSnapshotMediaDownloadOverride = (String, String) async throws -> Data
 
     enum SessionSnapshotKind: String, Codable, CaseIterable, Equatable {
         case draft
@@ -886,10 +887,9 @@ final class AppState: ObservableObject {
                 duplicatePreventionRequired: true,
                 partialFailureHandling: "per_item_report_continue_safe_items",
                 trustModel: "checksum_required_before_accept_storage_metadata_is_locator_only",
-                rolloutPhase: "26B_guardrails_only_next_26C_test_only_media_retrieval",
+                rolloutPhase: "26C_test_only_media_retrieval",
                 canStartRetrieval: false,
                 blockedReasons: [
-                    "media_retrieval_not_implemented",
                     "manual_operator_confirmation_required",
                     "production_wide_retrieval_blocked"
                 ]
@@ -989,6 +989,52 @@ final class AppState: ObservableObject {
         var issueCountText: String
         var guidedCountText: String
         var messageText: String
+    }
+
+    struct SessionSnapshotMediaRetrievalConfirmation: Equatable {
+        var confirmationRequired: Bool
+        var canRetrieve: Bool
+        var blockedReason: String?
+        var propertyIDText: String
+        var sessionIDText: String
+        var snapshotIDText: String
+        var mediaCount: Int
+        var maxBatchSize: Int
+        var messageText: String
+    }
+
+    enum SessionSnapshotMediaRetrievalItemStatus: String, Codable, Equatable {
+        case downloaded
+        case skippedExisting = "skipped_existing"
+        case skippedMissingStorageMetadata = "skipped_missing_storage_metadata"
+        case skippedChecksumMissing = "skipped_checksum_missing"
+        case rejectedChecksumMismatch = "rejected_checksum_mismatch"
+        case failed
+    }
+
+    struct SessionSnapshotMediaRetrievalItemResult: Equatable, Identifiable {
+        let id: UUID
+        let status: SessionSnapshotMediaRetrievalItemStatus
+        let checksumVerified: Bool
+        let recoveredLocalPathPresent: Bool
+        let failureReason: String?
+    }
+
+    struct SessionSnapshotMediaRetrievalResult: Equatable {
+        let retrievedAt: Date
+        let allowed: Bool
+        let blockedReason: String?
+        let propertyID: UUID?
+        let sessionID: UUID?
+        let snapshotID: UUID?
+        let attemptedCount: Int
+        let downloadedCount: Int
+        let checksumVerifiedCount: Int
+        let skippedExistingCount: Int
+        let failedCount: Int
+        let recoveredLocalPathCount: Int
+        let recoveredMediaDirectoryPathPresent: Bool
+        let items: [SessionSnapshotMediaRetrievalItemResult]
     }
 
 
@@ -1276,6 +1322,19 @@ final class AppState: ObservableObject {
         var lastRestoreDiagnosticsMediaUnsupportedCount: Int = 0
         var lastRestoreDiagnosticsMediaNotCheckedCount: Int = 0
         var lastRestoreDiagnosticsMediaStateCounts: [String] = []
+        var lastMediaRetrievalAt: Date?
+        var lastMediaRetrievalAllowed: Bool = false
+        var lastMediaRetrievalBlockedReason: String?
+        var lastMediaRetrievalPropertyID: UUID?
+        var lastMediaRetrievalSessionID: UUID?
+        var lastMediaRetrievalSnapshotID: UUID?
+        var lastMediaRetrievalAttemptedCount: Int = 0
+        var lastMediaRetrievalDownloadedCount: Int = 0
+        var lastMediaRetrievalChecksumVerifiedCount: Int = 0
+        var lastMediaRetrievalSkippedExistingCount: Int = 0
+        var lastMediaRetrievalFailedCount: Int = 0
+        var lastMediaRetrievalRecoveredLocalPathCount: Int = 0
+        var lastMediaRetrievalRecoveredDirectoryPathPresent: Bool = false
         var lastHydrationAt: Date?
         var lastHydrationAllowed: Bool = false
         var lastHydrationBlockedReason: String?
@@ -4751,6 +4810,7 @@ final class AppState: ObservableObject {
     private let sessionSnapshotRowInsertOverride: SessionSnapshotRowInsertOverride?
     private let sessionSnapshotRowsFetchOverride: SessionSnapshotRowsFetchOverride?
     private let sessionSnapshotStorageDownloadOverride: SessionSnapshotStorageDownloadOverride?
+    private let sessionSnapshotMediaDownloadOverride: SessionSnapshotMediaDownloadOverride?
     private let sessionSnapshotClientAuthPreflightOverride: (() async -> (userID: String, email: String, error: String))?
     private let sessionSnapshotRemoteParentPreflightOverride: ((UUID, UUID, UUID) async throws -> SessionSnapshotAuthPreflightRemoteParentStatus)?
     private let captureProfileBackfillFetchOverride: CaptureProfileBackfillFetchOverride?
@@ -5103,6 +5163,7 @@ final class AppState: ObservableObject {
         sessionSnapshotRowInsertOverride: SessionSnapshotRowInsertOverride? = nil,
         sessionSnapshotRowsFetchOverride: SessionSnapshotRowsFetchOverride? = nil,
         sessionSnapshotStorageDownloadOverride: SessionSnapshotStorageDownloadOverride? = nil,
+        sessionSnapshotMediaDownloadOverride: SessionSnapshotMediaDownloadOverride? = nil,
         sessionSnapshotClientAuthPreflightOverride: (() async -> (userID: String, email: String, error: String))? = nil,
         sessionSnapshotRemoteParentPreflightOverride: ((UUID, UUID, UUID) async throws -> SessionSnapshotAuthPreflightRemoteParentStatus)? = nil,
         captureProfileBackfillFetchOverride: CaptureProfileBackfillFetchOverride? = nil,
@@ -5131,6 +5192,7 @@ final class AppState: ObservableObject {
         self.sessionSnapshotRowInsertOverride = sessionSnapshotRowInsertOverride
         self.sessionSnapshotRowsFetchOverride = sessionSnapshotRowsFetchOverride
         self.sessionSnapshotStorageDownloadOverride = sessionSnapshotStorageDownloadOverride
+        self.sessionSnapshotMediaDownloadOverride = sessionSnapshotMediaDownloadOverride
         self.sessionSnapshotClientAuthPreflightOverride = sessionSnapshotClientAuthPreflightOverride
         self.sessionSnapshotRemoteParentPreflightOverride = sessionSnapshotRemoteParentPreflightOverride
         self.captureProfileBackfillFetchOverride = captureProfileBackfillFetchOverride
@@ -13037,6 +13099,358 @@ final class AppState: ObservableObject {
         )
     }
 
+    static func makeSessionSnapshotMediaRetrievalConfirmation(
+        diagnostics: SessionSnapshotUploadDiagnostics,
+        targetClassification: SupabaseRuntimeConfiguration.TargetClassification
+    ) -> SessionSnapshotMediaRetrievalConfirmation {
+        let maxBatchSize = SessionSnapshotMediaRetrievalPolicyDiagnostics.guardrailsOnly.maxBatchSize
+        let blockedReason: String? = {
+            switch targetClassification {
+            case .localDev, .approvedStaging:
+                break
+            case .approvedProductionValidation:
+                return "production_media_retrieval_blocked"
+            case .remote:
+                return "unapproved_remote_media_retrieval_blocked"
+            case .missing:
+                return "supabase_config_missing"
+            case .invalid:
+                return "supabase_config_invalid"
+            }
+            guard diagnostics.lastRestoreDiagnosticsResult == SessionSnapshotRestoreDiagnosticOutcome.restorableMetadataCandidate.rawValue else {
+                return diagnostics.lastRestoreDiagnosticsResult == "not_checked"
+                    ? "restore_diagnostics_not_checked"
+                    : diagnostics.lastRestoreDiagnosticsResult
+            }
+            guard diagnostics.lastRestoreDiagnosticsChecksumVerified else {
+                return SessionSnapshotRestoreDiagnosticOutcome.checksumFailed.rawValue
+            }
+            guard diagnostics.lastRestoreDiagnosticsRowObjectVerified else {
+                return "row_object_not_verified"
+            }
+            guard diagnostics.lastRestoreDiagnosticsParentRemoteVerified else {
+                return SessionSnapshotRestoreDiagnosticOutcome.parentMismatch.rawValue
+            }
+            guard diagnostics.lastRestoreDiagnosticsSnapshotSchemaVersion == 1 else {
+                return SessionSnapshotRestoreDiagnosticOutcome.unsupportedSchema.rawValue
+            }
+            guard diagnostics.lastRestoreDiagnosticsMediaManifestSupported else {
+                return "unsupported_media_manifest"
+            }
+            guard diagnostics.lastRestoreDiagnosticsMediaChecksumUnknownCount == 0 else {
+                return "checksum_unknown"
+            }
+            guard diagnostics.lastRestoreDiagnosticsMediaChecksumMismatchCount == 0 else {
+                return "checksum_mismatch"
+            }
+            guard diagnostics.lastRestoreDiagnosticsMediaMissingRemoteStorageMetadataCount == 0 else {
+                return "missing_remote_storage_metadata"
+            }
+            guard diagnostics.lastRestoreDiagnosticsMediaRecoverableRemoteCount > 0 else {
+                return "no_remote_recoverable_media"
+            }
+            guard diagnostics.lastRestoreDiagnosticsMediaRecoverableRemoteCount <= maxBatchSize else {
+                return "max_batch_size_exceeded"
+            }
+            guard diagnostics.lastRestoreDiagnosticsPropertyID != nil,
+                  diagnostics.lastRestoreDiagnosticsSessionID != nil,
+                  diagnostics.lastRestoreDiagnosticsSnapshotID != nil else {
+                return "missing_snapshot_target"
+            }
+            return nil
+        }()
+        let propertyIDText = diagnostics.lastRestoreDiagnosticsPropertyID?.uuidString ?? "none"
+        let sessionIDText = diagnostics.lastRestoreDiagnosticsSessionID?.uuidString ?? "none"
+        let snapshotIDText = diagnostics.lastRestoreDiagnosticsSnapshotID?.uuidString ?? "none"
+        let mediaCount = diagnostics.lastRestoreDiagnosticsMediaRecoverableRemoteCount
+        let blockedText = blockedReason.map { "\n\nBlocked reason: \($0)" } ?? ""
+        let message = [
+            "Property: \(propertyIDText)",
+            "Session: \(sessionIDText)",
+            "Snapshot: \(snapshotIDText)",
+            "Media items: \(mediaCount)",
+            "Max batch size: \(maxBatchSize)",
+            "Test-only manual retrieval. Production media retrieval remains blocked.",
+            "Recovered bytes are written only to the guarded recovered-media location and never over existing originals.",
+            "Canonical reads, export, seal, sync, media backfill, and iCloud behavior are unchanged."
+        ].joined(separator: "\n") + blockedText
+
+        return SessionSnapshotMediaRetrievalConfirmation(
+            confirmationRequired: true,
+            canRetrieve: blockedReason == nil,
+            blockedReason: blockedReason,
+            propertyIDText: propertyIDText,
+            sessionIDText: sessionIDText,
+            snapshotIDText: snapshotIDText,
+            mediaCount: mediaCount,
+            maxBatchSize: maxBatchSize,
+            messageText: message
+        )
+    }
+
+    @discardableResult
+    func retrieveSnapshotMediaTestOnly(
+        checkedAt: Date = Date(),
+        manualAction: Bool = true,
+        storageQuotaChecked: Bool = true,
+        networkApproved: Bool = true,
+        batteryApproved: Bool = true
+    ) async -> SessionSnapshotMediaRetrievalResult {
+        let diagnostics = await validateLatestSessionSnapshotRestoreDiagnostics(checkedAt: checkedAt)
+        let policyViolations = Self.sessionSnapshotMediaRetrievalGuardrailViolations(
+            requestedBatchSize: diagnostics.mediaRecoveryDiagnostics.recoverableRemoteCount,
+            isManual: manualAction,
+            isAllowlisted: supabaseConfiguration.targetClassification == .localDev ||
+                supabaseConfiguration.targetClassification == .approvedStaging,
+            isProductionWide: supabaseConfiguration.targetClassification == .approvedProductionValidation,
+            storageQuotaChecked: storageQuotaChecked,
+            networkApproved: networkApproved,
+            batteryApproved: batteryApproved,
+            checksumValidationPlanned: true,
+            duplicatePreventionPlanned: true
+        )
+        if let violation = policyViolations.first {
+            let result = makeBlockedSessionSnapshotMediaRetrievalResult(
+                checkedAt: checkedAt,
+                diagnostics: diagnostics,
+                reason: violation
+            )
+            recordSessionSnapshotMediaRetrieval(result)
+            return result
+        }
+
+        let confirmation = Self.makeSessionSnapshotMediaRetrievalConfirmation(
+            diagnostics: localDiagnostics.sessionSnapshotUpload,
+            targetClassification: supabaseConfiguration.targetClassification
+        )
+        guard confirmation.canRetrieve else {
+            let result = makeBlockedSessionSnapshotMediaRetrievalResult(
+                checkedAt: checkedAt,
+                diagnostics: diagnostics,
+                reason: confirmation.blockedReason ?? "media_retrieval_blocked"
+            )
+            recordSessionSnapshotMediaRetrieval(result)
+            return result
+        }
+
+        guard let snapshotID = diagnostics.snapshotID,
+              let propertyID = diagnostics.propertyID,
+              let sessionID = diagnostics.sessionID else {
+            let result = makeBlockedSessionSnapshotMediaRetrievalResult(
+                checkedAt: checkedAt,
+                diagnostics: diagnostics,
+                reason: "missing_snapshot_target"
+            )
+            recordSessionSnapshotMediaRetrieval(result)
+            return result
+        }
+
+        do {
+            let rows = try await fetchSessionSnapshotRows(snapshotID: snapshotID, propertyID: propertyID, sessionID: sessionID)
+            guard let row = rows.first(where: { $0.id == snapshotID }) ?? rows.sorted(by: Self.sessionSnapshotUploadRowSort).first else {
+                throw SessionSnapshotUploadError.notPreviewable("snapshot_row_not_found")
+            }
+            let payloadData = try await downloadSessionSnapshotPayload(bucket: row.payloadStorageBucket, path: row.payloadStoragePath)
+            guard let payload = Self.decodeSessionSnapshotPayload(payloadData),
+                  payload.snapshotSchemaVersion == 1,
+                  payload.propertyID == propertyID,
+                  payload.sessionID == sessionID,
+                  payload.mediaManifestCount == payload.mediaManifest.count else {
+                throw SessionSnapshotUploadError.notPreviewable("snapshot_payload_unusable")
+            }
+            let metadata = try Self.decodeHydratableSessionMetadata(from: payload.rawSessionJSON)
+            guard metadata.propertyID == propertyID,
+                  metadata.sessionID == sessionID,
+                  metadata.shots.count == payload.mediaManifest.count else {
+                throw SessionSnapshotUploadError.notPreviewable("snapshot_metadata_target_mismatch")
+            }
+
+            let manifestIDs = Set(payload.mediaManifest.map(\.id))
+            let remoteShots = metadata.shots
+                .filter { manifestIDs.contains($0.shotID) }
+                .filter { Self.trimmedNonEmpty($0.storageBucket) != nil && Self.trimmedNonEmpty($0.storagePath) != nil }
+            var itemResults: [SessionSnapshotMediaRetrievalItemResult] = []
+            itemResults.reserveCapacity(remoteShots.count)
+            let recoveredDirectory = sessionSnapshotRecoveredMediaDirectoryURLForDiagnostics(
+                propertyID: propertyID,
+                sessionID: sessionID,
+                snapshotID: snapshotID
+            )
+
+            for shot in remoteShots {
+                guard let bucket = Self.trimmedNonEmpty(shot.storageBucket),
+                      let path = Self.trimmedNonEmpty(shot.storagePath) else {
+                    itemResults.append(SessionSnapshotMediaRetrievalItemResult(
+                        id: shot.shotID,
+                        status: .skippedMissingStorageMetadata,
+                        checksumVerified: false,
+                        recoveredLocalPathPresent: false,
+                        failureReason: "missing_remote_storage_metadata"
+                    ))
+                    continue
+                }
+                guard let expectedChecksum = Self.trimmedNonEmpty(shot.checksumSHA256)?.lowercased() else {
+                    itemResults.append(SessionSnapshotMediaRetrievalItemResult(
+                        id: shot.shotID,
+                        status: .skippedChecksumMissing,
+                        checksumVerified: false,
+                        recoveredLocalPathPresent: false,
+                        failureReason: "checksum_unknown"
+                    ))
+                    continue
+                }
+                let targetURL = sessionSnapshotRecoveredMediaURL(
+                    propertyID: propertyID,
+                    sessionID: sessionID,
+                    snapshotID: snapshotID,
+                    shot: shot
+                )
+                if FileManager.default.fileExists(atPath: targetURL.path) {
+                    itemResults.append(SessionSnapshotMediaRetrievalItemResult(
+                        id: shot.shotID,
+                        status: .skippedExisting,
+                        checksumVerified: false,
+                        recoveredLocalPathPresent: true,
+                        failureReason: nil
+                    ))
+                    continue
+                }
+
+                do {
+                    let data = try await downloadSessionSnapshotMediaObject(bucket: bucket, path: path)
+                    guard sha256Hex(for: data) == expectedChecksum else {
+                        itemResults.append(SessionSnapshotMediaRetrievalItemResult(
+                            id: shot.shotID,
+                            status: .rejectedChecksumMismatch,
+                            checksumVerified: false,
+                            recoveredLocalPathPresent: false,
+                            failureReason: "checksum_mismatch"
+                        ))
+                        continue
+                    }
+                    try FileManager.default.createDirectory(at: recoveredDirectory, withIntermediateDirectories: true)
+                    try data.write(to: targetURL, options: [.atomic])
+                    itemResults.append(SessionSnapshotMediaRetrievalItemResult(
+                        id: shot.shotID,
+                        status: .downloaded,
+                        checksumVerified: true,
+                        recoveredLocalPathPresent: true,
+                        failureReason: nil
+                    ))
+                } catch {
+                    itemResults.append(SessionSnapshotMediaRetrievalItemResult(
+                        id: shot.shotID,
+                        status: .failed,
+                        checksumVerified: false,
+                        recoveredLocalPathPresent: false,
+                        failureReason: Self.diagnosticsPreviewText(error.localizedDescription, maxLength: 160)
+                    ))
+                }
+            }
+
+            let result = makeSessionSnapshotMediaRetrievalResult(
+                checkedAt: checkedAt,
+                allowed: true,
+                blockedReason: nil,
+                propertyID: propertyID,
+                sessionID: sessionID,
+                snapshotID: snapshotID,
+                recoveredDirectory: recoveredDirectory,
+                itemResults: itemResults
+            )
+            recordSessionSnapshotMediaRetrieval(result)
+            return result
+        } catch {
+            let result = makeBlockedSessionSnapshotMediaRetrievalResult(
+                checkedAt: checkedAt,
+                diagnostics: diagnostics,
+                reason: Self.diagnosticsPreviewText(error.localizedDescription, maxLength: 160) ?? "media_retrieval_failed"
+            )
+            recordSessionSnapshotMediaRetrieval(result)
+            return result
+        }
+    }
+
+    func sessionSnapshotRecoveredMediaDirectoryURLForDiagnostics(
+        propertyID: UUID,
+        sessionID: UUID,
+        snapshotID: UUID
+    ) -> URL {
+        localStore
+            .sessionFolderURL(propertyID: propertyID, sessionID: sessionID)
+            .appendingPathComponent("RecoveredMedia", isDirectory: true)
+            .appendingPathComponent("SnapshotMedia", isDirectory: true)
+            .appendingPathComponent(snapshotID.uuidString.lowercased(), isDirectory: true)
+    }
+
+    private func sessionSnapshotRecoveredMediaURL(
+        propertyID: UUID,
+        sessionID: UUID,
+        snapshotID: UUID,
+        shot: ShotMetadata
+    ) -> URL {
+        let filename = sanitizedStorageFilename(shot.originalFilename, fallbackShotID: shot.shotID)
+        return sessionSnapshotRecoveredMediaDirectoryURLForDiagnostics(
+            propertyID: propertyID,
+            sessionID: sessionID,
+            snapshotID: snapshotID
+        )
+        .appendingPathComponent(filename, isDirectory: false)
+    }
+
+    private func makeBlockedSessionSnapshotMediaRetrievalResult(
+        checkedAt: Date,
+        diagnostics: SessionSnapshotRestoreDiagnosticsResult,
+        reason: String
+    ) -> SessionSnapshotMediaRetrievalResult {
+        SessionSnapshotMediaRetrievalResult(
+            retrievedAt: checkedAt,
+            allowed: false,
+            blockedReason: reason,
+            propertyID: diagnostics.propertyID,
+            sessionID: diagnostics.sessionID,
+            snapshotID: diagnostics.snapshotID,
+            attemptedCount: 0,
+            downloadedCount: 0,
+            checksumVerifiedCount: 0,
+            skippedExistingCount: 0,
+            failedCount: 0,
+            recoveredLocalPathCount: 0,
+            recoveredMediaDirectoryPathPresent: false,
+            items: []
+        )
+    }
+
+    private func makeSessionSnapshotMediaRetrievalResult(
+        checkedAt: Date,
+        allowed: Bool,
+        blockedReason: String?,
+        propertyID: UUID,
+        sessionID: UUID,
+        snapshotID: UUID,
+        recoveredDirectory: URL,
+        itemResults: [SessionSnapshotMediaRetrievalItemResult]
+    ) -> SessionSnapshotMediaRetrievalResult {
+        SessionSnapshotMediaRetrievalResult(
+            retrievedAt: checkedAt,
+            allowed: allowed,
+            blockedReason: blockedReason,
+            propertyID: propertyID,
+            sessionID: sessionID,
+            snapshotID: snapshotID,
+            attemptedCount: itemResults.count,
+            downloadedCount: itemResults.filter { $0.status == .downloaded }.count,
+            checksumVerifiedCount: itemResults.filter(\.checksumVerified).count,
+            skippedExistingCount: itemResults.filter { $0.status == .skippedExisting }.count,
+            failedCount: itemResults.filter { item in
+                item.status == .failed || item.status == .rejectedChecksumMismatch
+            }.count,
+            recoveredLocalPathCount: itemResults.filter(\.recoveredLocalPathPresent).count,
+            recoveredMediaDirectoryPathPresent: FileManager.default.fileExists(atPath: recoveredDirectory.path),
+            items: itemResults
+        )
+    }
+
     @discardableResult
     func validateSnapshotRecoveryCohort(checkedAt: Date = Date()) async -> SnapshotRecoveryCohortResult {
         let diagnostics = await validateLatestSessionSnapshotRestoreDiagnostics(checkedAt: checkedAt)
@@ -13117,6 +13531,17 @@ final class AppState: ObservableObject {
     private func downloadSessionSnapshotPayload(bucket: String, path: String) async throws -> Data {
         if let sessionSnapshotStorageDownloadOverride {
             return try await sessionSnapshotStorageDownloadOverride(bucket, path)
+        }
+        guard backendFeatureFlags.supabaseEnabled,
+              let client = supabaseClient else {
+            throw SessionSnapshotUploadError.missingSupabaseClient
+        }
+        return try await client.storage.from(bucket).download(path: path)
+    }
+
+    private func downloadSessionSnapshotMediaObject(bucket: String, path: String) async throws -> Data {
+        if let sessionSnapshotMediaDownloadOverride {
+            return try await sessionSnapshotMediaDownloadOverride(bucket, path)
         }
         guard backendFeatureFlags.supabaseEnabled,
               let client = supabaseClient else {
@@ -13533,11 +13958,11 @@ final class AppState: ObservableObject {
         if !isManual {
             violations.append("manual_only_required")
         }
-        if !isAllowlisted {
-            violations.append("allowlisted_test_only_required")
-        }
         if isProductionWide {
             violations.append("production_wide_retrieval_blocked")
+        }
+        if !isAllowlisted {
+            violations.append("allowlisted_test_only_required")
         }
         if requestedBatchSize > policy.maxBatchSize {
             violations.append("max_batch_size_exceeded")
@@ -13557,7 +13982,6 @@ final class AppState: ObservableObject {
         if !duplicatePreventionPlanned {
             violations.append("duplicate_prevention_required")
         }
-        violations.append("media_retrieval_not_implemented")
         return violations
     }
 
@@ -13876,6 +14300,24 @@ final class AppState: ObservableObject {
             diagnostics.sessionSnapshotUpload.lastHydrationShotCount = result.hydratedShotCount
             diagnostics.sessionSnapshotUpload.lastHydrationIssueCount = result.hydratedIssueCount
             diagnostics.sessionSnapshotUpload.lastHydrationGuidedCount = result.hydratedGuidedCount
+        }
+    }
+
+    private func recordSessionSnapshotMediaRetrieval(_ result: SessionSnapshotMediaRetrievalResult) {
+        mutateLocalDiagnostics { diagnostics in
+            diagnostics.sessionSnapshotUpload.lastMediaRetrievalAt = result.retrievedAt
+            diagnostics.sessionSnapshotUpload.lastMediaRetrievalAllowed = result.allowed
+            diagnostics.sessionSnapshotUpload.lastMediaRetrievalBlockedReason = result.blockedReason
+            diagnostics.sessionSnapshotUpload.lastMediaRetrievalPropertyID = result.propertyID
+            diagnostics.sessionSnapshotUpload.lastMediaRetrievalSessionID = result.sessionID
+            diagnostics.sessionSnapshotUpload.lastMediaRetrievalSnapshotID = result.snapshotID
+            diagnostics.sessionSnapshotUpload.lastMediaRetrievalAttemptedCount = result.attemptedCount
+            diagnostics.sessionSnapshotUpload.lastMediaRetrievalDownloadedCount = result.downloadedCount
+            diagnostics.sessionSnapshotUpload.lastMediaRetrievalChecksumVerifiedCount = result.checksumVerifiedCount
+            diagnostics.sessionSnapshotUpload.lastMediaRetrievalSkippedExistingCount = result.skippedExistingCount
+            diagnostics.sessionSnapshotUpload.lastMediaRetrievalFailedCount = result.failedCount
+            diagnostics.sessionSnapshotUpload.lastMediaRetrievalRecoveredLocalPathCount = result.recoveredLocalPathCount
+            diagnostics.sessionSnapshotUpload.lastMediaRetrievalRecoveredDirectoryPathPresent = result.recoveredMediaDirectoryPathPresent
         }
     }
 
@@ -15517,6 +15959,21 @@ final class AppState: ObservableObject {
         lines.append("- media_unsupported_manifest_count: \(diagnostics.lastRestoreDiagnosticsMediaUnsupportedCount)")
         lines.append("- media_not_checked_count: \(diagnostics.lastRestoreDiagnosticsMediaNotCheckedCount)")
         lines.append("- media_state_counts: \(diagnostics.lastRestoreDiagnosticsMediaStateCounts.isEmpty ? "none" : diagnostics.lastRestoreDiagnosticsMediaStateCounts.joined(separator: ", "))")
+        lines.append("")
+        lines.append("Snapshot Media Retrieval Test-Only")
+        lines.append("- media_retrieval_at: \(diagnostics.lastMediaRetrievalAt?.formatted(date: .abbreviated, time: .standard) ?? "none")")
+        lines.append("- media_retrieval_allowed: \(diagnostics.lastMediaRetrievalAllowed)")
+        lines.append("- media_retrieval_blocked_reason: \(diagnosticsPreviewText(diagnostics.lastMediaRetrievalBlockedReason, maxLength: 160) ?? "none")")
+        lines.append("- media_retrieval_property_id: \(diagnostics.lastMediaRetrievalPropertyID?.uuidString ?? "none")")
+        lines.append("- media_retrieval_session_id: \(diagnostics.lastMediaRetrievalSessionID?.uuidString ?? "none")")
+        lines.append("- media_retrieval_snapshot_id: \(diagnostics.lastMediaRetrievalSnapshotID?.uuidString ?? "none")")
+        lines.append("- media_retrieval_attempted_count: \(diagnostics.lastMediaRetrievalAttemptedCount)")
+        lines.append("- media_retrieval_downloaded_count: \(diagnostics.lastMediaRetrievalDownloadedCount)")
+        lines.append("- media_retrieval_checksum_verified_count: \(diagnostics.lastMediaRetrievalChecksumVerifiedCount)")
+        lines.append("- media_retrieval_skipped_existing_count: \(diagnostics.lastMediaRetrievalSkippedExistingCount)")
+        lines.append("- media_retrieval_failed_count: \(diagnostics.lastMediaRetrievalFailedCount)")
+        lines.append("- media_retrieval_recovered_local_path_count: \(diagnostics.lastMediaRetrievalRecoveredLocalPathCount)")
+        lines.append("- media_retrieval_recovered_directory_path_present: \(diagnostics.lastMediaRetrievalRecoveredDirectoryPathPresent)")
         lines.append("")
         lines.append("Snapshot Metadata Hydration")
         lines.append("- hydration_at: \(diagnostics.lastHydrationAt?.formatted(date: .abbreviated, time: .standard) ?? "none")")

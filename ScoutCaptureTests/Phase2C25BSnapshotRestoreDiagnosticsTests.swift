@@ -1,4 +1,5 @@
 import XCTest
+import CryptoKit
 @testable import ScoutCapture
 
 @MainActor
@@ -12,6 +13,7 @@ final class Phase2C25BSnapshotRestoreDiagnosticsTests: XCTestCase {
 
     private func makeDefaults() -> UserDefaults {
         let defaults = UserDefaults(suiteName: "ScoutCapture-2C25B-\(UUID().uuidString)") ?? .standard
+        defaults.set(false, forKey: "supabase_enabled")
         defaults.set(true, forKey: "session_snapshot_shadow_write_enabled")
         return defaults
     }
@@ -23,12 +25,40 @@ final class Phase2C25BSnapshotRestoreDiagnosticsTests: XCTestCase {
         ]
     }
 
+    private func approvedStagingEnvironment() -> [String: String] {
+        [
+            "SCOUTCAPTURE_SUPABASE_URL": "https://hpekjqqiyurrewfjvjmn.supabase.co",
+            "SCOUTCAPTURE_SUPABASE_ANON_KEY": "staging-anon-key"
+        ]
+    }
+
+    private func productionEnvironment() -> [String: String] {
+        [
+            "SCOUTCAPTURE_SUPABASE_URL": "https://chlvazmtucoszicehtnm.supabase.co",
+            "SCOUTCAPTURE_SUPABASE_ANON_KEY": "production-anon-key",
+            "SCOUTCAPTURE_PRODUCTION_SNAPSHOT_VALIDATION_ALLOWED": "true"
+        ]
+    }
+
+    private func randomRemoteEnvironment() -> [String: String] {
+        [
+            "SCOUTCAPTURE_SUPABASE_URL": "https://example.supabase.co",
+            "SCOUTCAPTURE_SUPABASE_ANON_KEY": "remote-anon-key"
+        ]
+    }
+
+    private func sha256Hex(_ data: Data) -> String {
+        SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+    }
+
     private func makeFixture(
         generatedAt: Date = Date(timeIntervalSinceReferenceDate: 1_000),
         rowTransform: ((AppState.SessionSnapshotUploadRow) -> AppState.SessionSnapshotUploadRow)? = nil,
         objectTransform: ((AppState.SessionSnapshotStorageObject) -> AppState.SessionSnapshotStorageObject)? = nil,
+        environment: [String: String]? = nil,
         rowsOverride: AppState.SessionSnapshotRowsFetchOverride? = nil,
         downloadOverride: AppState.SessionSnapshotStorageDownloadOverride? = nil,
+        mediaDownloadOverride: AppState.SessionSnapshotMediaDownloadOverride? = nil,
         parentOverride: ((UUID, UUID, UUID) async throws -> AppState.SessionSnapshotAuthPreflightRemoteParentStatus)? = nil,
         mediaSetup: ((LocalStore, Property, Session) throws -> [ShotMetadata])? = nil
     ) throws -> (
@@ -64,7 +94,7 @@ final class Phase2C25BSnapshotRestoreDiagnosticsTests: XCTestCase {
         let artifactAppState = AppState(
             localStore: store,
             userDefaults: makeDefaults(),
-            environment: localEnvironment(),
+            environment: environment ?? localEnvironment(),
             sessionSnapshotStorageUploadOverride: { _ in },
             sessionSnapshotRowInsertOverride: { _ in },
             disableCloudBackupForTests: true
@@ -79,9 +109,10 @@ final class Phase2C25BSnapshotRestoreDiagnosticsTests: XCTestCase {
         let appState = AppState(
             localStore: store,
             userDefaults: makeDefaults(),
-            environment: localEnvironment(),
+            environment: environment ?? localEnvironment(),
             sessionSnapshotRowsFetchOverride: rowsOverride ?? { _, _, _ in [row] },
             sessionSnapshotStorageDownloadOverride: downloadOverride ?? { _, _ in object.payloadData },
+            sessionSnapshotMediaDownloadOverride: mediaDownloadOverride,
             sessionSnapshotRemoteParentPreflightOverride: parentOverride ?? { _, _, _ in
                 AppState.SessionSnapshotAuthPreflightRemoteParentStatus(
                     propertyExists: true,
@@ -137,6 +168,7 @@ final class Phase2C25BSnapshotRestoreDiagnosticsTests: XCTestCase {
         filename: String,
         localReference: Bool = true,
         remoteMetadata: Bool = true,
+        checksumSHA256: String? = String(repeating: "a", count: 64),
         byteSize: Int = 4
     ) -> ShotMetadata {
         ShotMetadata(
@@ -161,7 +193,7 @@ final class Phase2C25BSnapshotRestoreDiagnosticsTests: XCTestCase {
             originalByteSize: byteSize,
             storageBucket: remoteMetadata ? "scoutcapture-originals" : nil,
             storagePath: remoteMetadata ? "sessions/\(sessionID.uuidString.lowercased())/\(filename)" : nil,
-            checksumSHA256: String(repeating: "a", count: 64),
+            checksumSHA256: checksumSHA256,
             byteSize: byteSize,
             stampedFilename: nil,
             stampedRelativePath: nil,
@@ -596,10 +628,9 @@ final class Phase2C25BSnapshotRestoreDiagnosticsTests: XCTestCase {
         XCTAssertTrue(violations.contains("battery_requirement_not_met"))
         XCTAssertTrue(violations.contains("checksum_validation_required"))
         XCTAssertTrue(violations.contains("duplicate_prevention_required"))
-        XCTAssertTrue(violations.contains("media_retrieval_not_implemented"))
     }
 
-    func testMediaRetrievalGuardrailsRemainBlockedEvenWhenPolicyInputsPass() {
+    func testMediaRetrievalGuardrailsAllowWhenPolicyInputsPass() {
         let violations = AppState.sessionSnapshotMediaRetrievalGuardrailViolations(
             requestedBatchSize: AppState.SessionSnapshotMediaRetrievalPolicyDiagnostics.guardrailsOnly.maxBatchSize,
             isManual: true,
@@ -612,7 +643,7 @@ final class Phase2C25BSnapshotRestoreDiagnosticsTests: XCTestCase {
             duplicatePreventionPlanned: true
         )
 
-        XCTAssertEqual(violations, ["media_retrieval_not_implemented"])
+        XCTAssertEqual(violations, [])
     }
 
     func testMediaRecoveryGuardrailsAppearInCopyableReport() async throws {
@@ -626,7 +657,277 @@ final class Phase2C25BSnapshotRestoreDiagnosticsTests: XCTestCase {
         XCTAssertTrue(report.contains("media_recovery_source_priority: local_cache > icloud_local_backup > supabase_storage > export_archives"))
         XCTAssertTrue(report.contains("media_retrieval_mode: manual_only"))
         XCTAssertTrue(report.contains("media_retrieval_can_start: false"))
-        XCTAssertTrue(report.contains("media_retrieval_blocked_reasons: media_retrieval_not_implemented"))
+        XCTAssertTrue(report.contains("media_retrieval_blocked_reasons: manual_operator_confirmation_required, production_wide_retrieval_blocked"))
         XCTAssertFalse(report.contains(fixture.row.payloadStoragePath))
+    }
+
+    func testSnapshotMediaRetrievalSucceedsForLocalAndApprovedStaging() async throws {
+        let bytes = Data([9, 8, 7, 6])
+        let checksum = sha256Hex(bytes)
+
+        for environment in [localEnvironment(), approvedStagingEnvironment()] {
+            var mediaDownloads = 0
+            let fixture = try makeFixture(
+                environment: environment,
+                mediaDownloadOverride: { _, _ in
+                    mediaDownloads += 1
+                    return bytes
+                },
+                mediaSetup: { _, property, session in
+                    [
+                        self.makeShot(
+                            propertyID: property.id,
+                            sessionID: session.id,
+                            filename: "remote-original.jpg",
+                            localReference: false,
+                            remoteMetadata: true,
+                            checksumSHA256: checksum,
+                            byteSize: bytes.count
+                        )
+                    ]
+                }
+            )
+
+            let result = await fixture.appState.retrieveSnapshotMediaTestOnly()
+
+            XCTAssertTrue(result.allowed)
+            XCTAssertNil(result.blockedReason)
+            XCTAssertEqual(result.attemptedCount, 1)
+            XCTAssertEqual(result.downloadedCount, 1)
+            XCTAssertEqual(result.checksumVerifiedCount, 1)
+            XCTAssertEqual(result.recoveredLocalPathCount, 1)
+            XCTAssertEqual(mediaDownloads, 1)
+            let recovered = fixture.appState
+                .sessionSnapshotRecoveredMediaDirectoryURLForDiagnostics(
+                    propertyID: fixture.property.id,
+                    sessionID: fixture.session.id,
+                    snapshotID: fixture.row.id
+                )
+                .appendingPathComponent("remote-original.jpg")
+            XCTAssertTrue(recovered.path.contains("/RecoveredMedia/SnapshotMedia/"))
+            XCTAssertEqual(try Data(contentsOf: recovered), bytes)
+            XCTAssertEqual(fixture.appState.localDiagnostics.sessionSnapshotUpload.lastMediaRetrievalDownloadedCount, 1)
+        }
+    }
+
+    func testSnapshotMediaRetrievalBlocksProductionAndRandomRemote() async throws {
+        let bytes = Data([1, 2, 3, 4])
+        let checksum = sha256Hex(bytes)
+        let production = try makeFixture(
+            environment: productionEnvironment(),
+            mediaDownloadOverride: { _, _ in bytes },
+            mediaSetup: { _, property, session in
+                [self.makeShot(propertyID: property.id, sessionID: session.id, filename: "prod.jpg", localReference: false, checksumSHA256: checksum)]
+            }
+        )
+        let remote = try makeFixture(
+            environment: randomRemoteEnvironment(),
+            mediaDownloadOverride: { _, _ in bytes },
+            mediaSetup: { _, property, session in
+                [self.makeShot(propertyID: property.id, sessionID: session.id, filename: "remote.jpg", localReference: false, checksumSHA256: checksum)]
+            }
+        )
+
+        let productionResult = await production.appState.retrieveSnapshotMediaTestOnly()
+        let remoteResult = await remote.appState.retrieveSnapshotMediaTestOnly()
+
+        XCTAssertFalse(productionResult.allowed)
+        XCTAssertEqual(productionResult.blockedReason, "production_wide_retrieval_blocked")
+        XCTAssertFalse(remoteResult.allowed)
+        XCTAssertEqual(remoteResult.blockedReason, "allowlisted_test_only_required")
+        XCTAssertEqual(productionResult.downloadedCount, 0)
+        XCTAssertEqual(remoteResult.downloadedCount, 0)
+    }
+
+    func testSnapshotMediaRetrievalRejectsChecksumMismatch() async throws {
+        let expected = Data([1, 1, 1, 1])
+        let downloaded = Data([2, 2, 2, 2])
+        let fixture = try makeFixture(
+            mediaDownloadOverride: { _, _ in downloaded },
+            mediaSetup: { _, property, session in
+                [
+                    self.makeShot(
+                        propertyID: property.id,
+                        sessionID: session.id,
+                        filename: "mismatch.jpg",
+                        localReference: false,
+                        checksumSHA256: self.sha256Hex(expected),
+                        byteSize: expected.count
+                    )
+                ]
+            }
+        )
+
+        let result = await fixture.appState.retrieveSnapshotMediaTestOnly()
+
+        XCTAssertTrue(result.allowed)
+        XCTAssertEqual(result.downloadedCount, 0)
+        XCTAssertEqual(result.failedCount, 1)
+        XCTAssertEqual(result.items.first?.status, .rejectedChecksumMismatch)
+        let recovered = fixture.appState
+            .sessionSnapshotRecoveredMediaDirectoryURLForDiagnostics(
+                propertyID: fixture.property.id,
+                sessionID: fixture.session.id,
+                snapshotID: fixture.row.id
+            )
+            .appendingPathComponent("mismatch.jpg")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: recovered.path))
+    }
+
+    func testSnapshotMediaRetrievalBlocksMissingStorageMetadataAndChecksum() async throws {
+        let bytes = Data([4, 3, 2, 1])
+        let missingStorage = try makeFixture(
+            mediaDownloadOverride: { _, _ in bytes },
+            mediaSetup: { _, property, session in
+                [
+                    self.makeShot(
+                        propertyID: property.id,
+                        sessionID: session.id,
+                        filename: "missing-storage.jpg",
+                        localReference: false,
+                        remoteMetadata: false,
+                        checksumSHA256: self.sha256Hex(bytes)
+                    )
+                ]
+            }
+        )
+        let missingChecksum = try makeFixture(
+            mediaDownloadOverride: { _, _ in bytes },
+            mediaSetup: { _, property, session in
+                [
+                    self.makeShot(
+                        propertyID: property.id,
+                        sessionID: session.id,
+                        filename: "missing-checksum.jpg",
+                        localReference: false,
+                        remoteMetadata: true,
+                        checksumSHA256: nil
+                    )
+                ]
+            }
+        )
+
+        let storageResult = await missingStorage.appState.retrieveSnapshotMediaTestOnly()
+        let checksumResult = await missingChecksum.appState.retrieveSnapshotMediaTestOnly()
+
+        XCTAssertFalse(storageResult.allowed)
+        XCTAssertEqual(storageResult.blockedReason, "missing_remote_storage_metadata")
+        XCTAssertFalse(checksumResult.allowed)
+        XCTAssertEqual(checksumResult.blockedReason, "checksum_unknown")
+        XCTAssertEqual(storageResult.downloadedCount, 0)
+        XCTAssertEqual(checksumResult.downloadedCount, 0)
+    }
+
+    func testSnapshotMediaRetrievalDoesNotOverwriteDuplicateRecoveredFile() async throws {
+        let originalRecovered = Data([7, 7, 7, 7])
+        let remoteBytes = Data([8, 8, 8, 8])
+        var mediaDownloads = 0
+        let fixture = try makeFixture(
+            mediaDownloadOverride: { _, _ in
+                mediaDownloads += 1
+                return remoteBytes
+            },
+            mediaSetup: { _, property, session in
+                [
+                    self.makeShot(
+                        propertyID: property.id,
+                        sessionID: session.id,
+                        filename: "duplicate.jpg",
+                        localReference: false,
+                        checksumSHA256: self.sha256Hex(remoteBytes),
+                        byteSize: remoteBytes.count
+                    )
+                ]
+            }
+        )
+        let recovered = fixture.appState
+            .sessionSnapshotRecoveredMediaDirectoryURLForDiagnostics(
+                propertyID: fixture.property.id,
+                sessionID: fixture.session.id,
+                snapshotID: fixture.row.id
+            )
+            .appendingPathComponent("duplicate.jpg")
+        try FileManager.default.createDirectory(at: recovered.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try originalRecovered.write(to: recovered)
+
+        let result = await fixture.appState.retrieveSnapshotMediaTestOnly()
+
+        XCTAssertTrue(result.allowed)
+        XCTAssertEqual(result.skippedExistingCount, 1)
+        XCTAssertEqual(result.downloadedCount, 0)
+        XCTAssertEqual(mediaDownloads, 0)
+        XCTAssertEqual(try Data(contentsOf: recovered), originalRecovered)
+    }
+
+    func testSnapshotMediaRetrievalBatchLimitEnforcedBeforeDownload() async throws {
+        let bytes = Data([5])
+        var mediaDownloads = 0
+        let fixture = try makeFixture(
+            mediaDownloadOverride: { _, _ in
+                mediaDownloads += 1
+                return bytes
+            },
+            mediaSetup: { _, property, session in
+                (0..<26).map { index in
+                    self.makeShot(
+                        propertyID: property.id,
+                        sessionID: session.id,
+                        filename: "batch-\(index).jpg",
+                        localReference: false,
+                        checksumSHA256: self.sha256Hex(bytes),
+                        byteSize: bytes.count
+                    )
+                }
+            }
+        )
+
+        let result = await fixture.appState.retrieveSnapshotMediaTestOnly()
+
+        XCTAssertFalse(result.allowed)
+        XCTAssertEqual(result.blockedReason, "max_batch_size_exceeded")
+        XCTAssertEqual(result.attemptedCount, 0)
+        XCTAssertEqual(mediaDownloads, 0)
+    }
+
+    func testSnapshotMediaRetrievalDoesNotChangeMetadataHydrationOrCanonicalBehavior() async throws {
+        let bytes = Data([3, 3, 3, 3])
+        let fixture = try makeFixture(
+            mediaDownloadOverride: { _, _ in bytes },
+            mediaSetup: { _, property, session in
+                [
+                    self.makeShot(
+                        propertyID: property.id,
+                        sessionID: session.id,
+                        filename: "guarded.jpg",
+                        localReference: false,
+                        checksumSHA256: self.sha256Hex(bytes),
+                        byteSize: bytes.count
+                    )
+                ]
+            }
+        )
+        let metadataBefore = try fixture.store.loadSessionMetadata(propertyID: fixture.property.id, sessionID: fixture.session.id)
+
+        _ = await fixture.appState.retrieveSnapshotMediaTestOnly()
+
+        let metadataAfter = try fixture.store.loadSessionMetadata(propertyID: fixture.property.id, sessionID: fixture.session.id)
+        let recovered = fixture.appState
+            .sessionSnapshotRecoveredMediaDirectoryURLForDiagnostics(
+                propertyID: fixture.property.id,
+                sessionID: fixture.session.id,
+                snapshotID: fixture.row.id
+            )
+            .appendingPathComponent("guarded.jpg")
+        let original = fixture.store
+            .originalsFolderURL(propertyID: fixture.property.id, sessionID: fixture.session.id)
+            .appendingPathComponent("guarded.jpg")
+        XCTAssertEqual(metadataAfter.shots.map(\.shotID), metadataBefore.shots.map(\.shotID))
+        XCTAssertTrue(recovered.path.contains("/RecoveredMedia/SnapshotMedia/"))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: recovered.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: original.path))
+        XCTAssertNil(fixture.appState.localDiagnostics.sessionSnapshotUpload.lastHydrationAt)
+        XCTAssertFalse(fixture.appState.localDiagnostics.sessionSnapshotUpload.lastHydrationAllowed)
+        XCTAssertFalse(fixture.appState.localDiagnostics.sessionSnapshotUpload.productionHydrationAllowed)
+        XCTAssertEqual(fixture.appState.localDiagnostics.sessionSnapshotUpload.hydrationMode, "blocked_by_default")
     }
 }
