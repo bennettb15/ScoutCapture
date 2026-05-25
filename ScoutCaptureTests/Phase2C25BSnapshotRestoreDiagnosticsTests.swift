@@ -11,9 +11,11 @@ final class Phase2C25BSnapshotRestoreDiagnosticsTests: XCTestCase {
         return root
     }
 
-    private func makeDefaults() -> UserDefaults {
+    private let hostedStagingURL = "https://hpekjqqiyurrewfjvjmn.supabase.co"
+
+    private func makeDefaults(supabaseEnabled: Bool = false) -> UserDefaults {
         let defaults = UserDefaults(suiteName: "ScoutCapture-2C25B-\(UUID().uuidString)") ?? .standard
-        defaults.set(false, forKey: "supabase_enabled")
+        defaults.set(supabaseEnabled, forKey: "supabase_enabled")
         defaults.set(true, forKey: "session_snapshot_shadow_write_enabled")
         return defaults
     }
@@ -27,8 +29,15 @@ final class Phase2C25BSnapshotRestoreDiagnosticsTests: XCTestCase {
 
     private func approvedStagingEnvironment() -> [String: String] {
         [
-            "SCOUTCAPTURE_SUPABASE_URL": "https://hpekjqqiyurrewfjvjmn.supabase.co",
+            "SCOUTCAPTURE_SUPABASE_URL": hostedStagingURL,
             "SCOUTCAPTURE_SUPABASE_ANON_KEY": "staging-anon-key"
+        ]
+    }
+
+    private func approvedStagingEnvironment(anonKey: String) -> [String: String] {
+        [
+            "SCOUTCAPTURE_SUPABASE_URL": hostedStagingURL,
+            "SCOUTCAPTURE_SUPABASE_ANON_KEY": anonKey
         ]
     }
 
@@ -212,6 +221,67 @@ final class Phase2C25BSnapshotRestoreDiagnosticsTests: XCTestCase {
         let folder = store.originalsFolderURL(propertyID: propertyID, sessionID: sessionID)
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         try Data(bytes).write(to: folder.appendingPathComponent(filename, isDirectory: false))
+    }
+
+    private func stagingValidationHeaderValue(_ key: String) throws -> String {
+        guard let value = ProcessInfo.processInfo.environment[key]?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !value.isEmpty else {
+            throw XCTSkip("Set \(key) to run hosted staging media recovery validation.")
+        }
+        return value
+    }
+
+    @discardableResult
+    private func performStagingRESTRequest(
+        path: String,
+        method: String,
+        serviceKey: String,
+        body: Data,
+        contentType: String
+    ) async throws -> Data {
+        guard let url = URL(string: "\(hostedStagingURL)\(path)") else {
+            XCTFail("Invalid staging URL path: \(path)")
+            return Data()
+        }
+        var request = URLRequest(url: url)
+        request.httpMethod = method
+        request.httpBody = body.isEmpty ? nil : body
+        request.setValue(serviceKey, forHTTPHeaderField: "apikey")
+        request.setValue("Bearer \(serviceKey)", forHTTPHeaderField: "Authorization")
+        request.setValue(contentType, forHTTPHeaderField: "Content-Type")
+        if method != "GET" {
+            request.setValue("return=minimal", forHTTPHeaderField: "Prefer")
+        }
+        if path.hasPrefix("/storage/v1/object/") {
+            request.setValue("false", forHTTPHeaderField: "x-upsert")
+        }
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard let http = response as? HTTPURLResponse else {
+            XCTFail("Missing HTTP response for staging request \(path)")
+            return Data()
+        }
+        guard (200..<300).contains(http.statusCode) else {
+            let bodyText = String(data: data, encoding: .utf8) ?? "<non-utf8>"
+            XCTFail("Staging request failed: \(method) \(path) status=\(http.statusCode) body=\(bodyText)")
+            return Data()
+        }
+        return data
+    }
+
+    private func insertStagingRow(
+        table: String,
+        payload: [String: Any],
+        serviceKey: String
+    ) async throws {
+        let data = try JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys])
+        try await performStagingRESTRequest(
+            path: "/rest/v1/\(table)",
+            method: "POST",
+            serviceKey: serviceKey,
+            body: data,
+            contentType: "application/json"
+        )
     }
 
     func testVerifiedSnapshotBecomesRestorableMetadataCandidate() async throws {
@@ -929,5 +999,303 @@ final class Phase2C25BSnapshotRestoreDiagnosticsTests: XCTestCase {
         XCTAssertFalse(fixture.appState.localDiagnostics.sessionSnapshotUpload.lastHydrationAllowed)
         XCTAssertFalse(fixture.appState.localDiagnostics.sessionSnapshotUpload.productionHydrationAllowed)
         XCTAssertEqual(fixture.appState.localDiagnostics.sessionSnapshotUpload.hydrationMode, "blocked_by_default")
+    }
+
+    func testPhase2C26DHostedStagingMediaRecoveryValidation() async throws {
+        guard ProcessInfo.processInfo.environment["SCOUTCAPTURE_RUN_26D_STAGING_MEDIA_RECOVERY_VALIDATION"] == "1" else {
+            throw XCTSkip("Set SCOUTCAPTURE_RUN_26D_STAGING_MEDIA_RECOVERY_VALIDATION=1 to run hosted staging validation.")
+        }
+        let serviceKey = try stagingValidationHeaderValue("SCOUTCAPTURE_26D_STAGING_SERVICE_ROLE_KEY")
+        let mediaBytes = Data([0xff, 0xd8, 0xff, 0xe0, 0x32, 0x43, 0x32, 0x36, 0x44, 0xff, 0xd9])
+        let mediaChecksum = sha256Hex(mediaBytes)
+        let root = try makeTempStorageRoot()
+        let store = LocalStore(testStorageRootURL: root)
+        let orgID = UUID()
+        _ = try store.createOrganization(Organization(id: orgID, name: "Phase 2C-26D Staging Org"))
+        let property = try store.createProperty(Property(
+            id: UUID(),
+            orgId: orgID,
+            name: "Phase 2C-26D Staging Media Recovery Validation"
+        ))
+        let session = try store.upsertSession(Session(
+            id: UUID(),
+            propertyID: property.id,
+            startedAt: Date(timeIntervalSinceReferenceDate: 10_000),
+            status: .completed,
+            endedAt: Date(timeIntervalSinceReferenceDate: 10_600),
+            exportedAt: nil,
+            isSealed: true,
+            firstDeliveredAt: nil,
+            reExportExpiresAt: nil
+        ))
+        let filename = "phase-2c-26d-real-media.jpg"
+        let storagePath = "sessions/\(session.id.uuidString.lowercased())/\(filename)"
+        let shot = makeShot(
+            propertyID: property.id,
+            sessionID: session.id,
+            filename: filename,
+            localReference: false,
+            remoteMetadata: true,
+            checksumSHA256: mediaChecksum,
+            byteSize: mediaBytes.count
+        )
+        try saveMetadata(store: store, property: property, session: session, orgID: orgID, shots: [shot])
+
+        let iso8601 = ISO8601DateFormatter()
+        try await insertStagingRow(
+            table: "orgs",
+            payload: [
+                "id": orgID.uuidString.lowercased(),
+                "name": "Phase 2C-26D Staging Org"
+            ],
+            serviceKey: serviceKey
+        )
+        try await insertStagingRow(
+            table: "properties",
+            payload: [
+                "id": property.id.uuidString.lowercased(),
+                "org_id": orgID.uuidString.lowercased(),
+                "name": property.name
+            ],
+            serviceKey: serviceKey
+        )
+        try await insertStagingRow(
+            table: "sessions",
+            payload: [
+                "id": session.id.uuidString.lowercased(),
+                "org_id": orgID.uuidString.lowercased(),
+                "property_id": property.id.uuidString.lowercased(),
+                "status": session.status.rawValue,
+                "started_at": iso8601.string(from: session.startedAt),
+                "completed_at": session.endedAt.map { iso8601.string(from: $0) } ?? NSNull()
+            ],
+            serviceKey: serviceKey
+        )
+        try await performStagingRESTRequest(
+            path: "/storage/v1/object/scoutcapture-originals/\(storagePath)",
+            method: "POST",
+            serviceKey: serviceKey,
+            body: mediaBytes,
+            contentType: "image/jpeg"
+        )
+
+        let artifactAppState = AppState(
+            localStore: store,
+            userDefaults: makeDefaults(),
+            environment: localEnvironment(),
+            disableCloudBackupForTests: true
+        )
+
+        let snapshotID = UUID()
+        let loadedMetadata = try store.loadSessionMetadata(propertyID: property.id, sessionID: session.id)
+        XCTAssertEqual(loadedMetadata.shots.count, 1)
+        let snapshotArtifacts = try artifactAppState._debugMakeSessionSnapshotUploadArtifactsForTests(
+            propertyID: property.id,
+            sessionID: session.id,
+            snapshotID: snapshotID,
+            kind: .manual,
+            trigger: "phase_2c_26d_hosted_staging_validation",
+            generatedAt: Date()
+        )
+        XCTAssertEqual(snapshotArtifacts.row.mediaManifestCount, 1)
+        XCTAssertEqual(snapshotArtifacts.row.manifest.media.count, 1)
+        let validatedSnapshotRow = AppState.SessionSnapshotUploadRow(
+            id: snapshotID,
+            orgID: orgID,
+            propertyID: property.id,
+            sessionID: session.id,
+            snapshotKind: snapshotArtifacts.row.snapshotKind,
+            snapshotSchemaVersion: snapshotArtifacts.row.snapshotSchemaVersion,
+            sessionMetadataSchemaVersion: snapshotArtifacts.row.sessionMetadataSchemaVersion,
+            trigger: snapshotArtifacts.row.trigger,
+            sessionStatus: snapshotArtifacts.row.sessionStatus,
+            isSealed: snapshotArtifacts.row.isSealed,
+            exportedAt: snapshotArtifacts.row.exportedAt,
+            firstDeliveredAt: snapshotArtifacts.row.firstDeliveredAt,
+            reExportExpiresAt: snapshotArtifacts.row.reExportExpiresAt,
+            payloadStorageBucket: snapshotArtifacts.row.payloadStorageBucket,
+            payloadStoragePath: snapshotArtifacts.row.payloadStoragePath,
+            payloadByteSize: snapshotArtifacts.row.payloadByteSize,
+            rawSessionJSONSHA256: snapshotArtifacts.row.rawSessionJSONSHA256,
+            snapshotPayloadSHA256: snapshotArtifacts.row.snapshotPayloadSHA256,
+            manifest: snapshotArtifacts.row.manifest,
+            shotCount: snapshotArtifacts.row.shotCount,
+            issueCount: snapshotArtifacts.row.issueCount,
+            guidedCount: snapshotArtifacts.row.guidedCount,
+            mediaManifestCount: snapshotArtifacts.row.mediaManifestCount,
+            missingLocalOriginalsCount: snapshotArtifacts.row.missingLocalOriginalsCount,
+            supabaseStorageMetadataCount: snapshotArtifacts.row.supabaseStorageMetadataCount,
+            createdBy: snapshotArtifacts.row.createdBy,
+            updatedBy: snapshotArtifacts.row.updatedBy,
+            createdAt: snapshotArtifacts.row.createdAt
+        )
+        try await performStagingRESTRequest(
+            path: "/storage/v1/object/\(snapshotArtifacts.object.bucket)/\(snapshotArtifacts.object.path)",
+            method: "POST",
+            serviceKey: serviceKey,
+            body: snapshotArtifacts.object.payloadData,
+            contentType: snapshotArtifacts.object.contentType
+        )
+        let rowEncoder = JSONEncoder()
+        rowEncoder.dateEncodingStrategy = .iso8601
+        let rowData = try rowEncoder.encode(snapshotArtifacts.row)
+        try await performStagingRESTRequest(
+            path: "/rest/v1/session_snapshots",
+            method: "POST",
+            serviceKey: serviceKey,
+            body: rowData,
+            contentType: "application/json"
+        )
+        print("[Phase2C26D] seeded_snapshot snapshot_id=\(snapshotID.uuidString) storage_path=\(snapshotArtifacts.object.path)")
+
+        let rowFetchOverride: AppState.SessionSnapshotRowsFetchOverride = { requestedSnapshotID, requestedPropertyID, requestedSessionID in
+            let requestedContext = [
+                requestedSnapshotID.map { "requested_snapshot=\($0.uuidString.lowercased())" },
+                requestedPropertyID.map { "requested_property=\($0.uuidString.lowercased())" },
+                requestedSessionID.map { "requested_session=\($0.uuidString.lowercased())" }
+            ].compactMap { $0 }.joined(separator: ",")
+            let filters = [
+                "select=*",
+                "id=eq.\(snapshotID.uuidString.lowercased())"
+            ]
+            let data = try await self.performStagingRESTRequest(
+                path: "/rest/v1/session_snapshots?\(filters.joined(separator: "&"))",
+                method: "GET",
+                serviceKey: serviceKey,
+                body: Data(),
+                contentType: "application/json"
+            )
+            let rawRows = (try JSONSerialization.jsonObject(with: data) as? [[String: Any]]) ?? []
+            let remoteRow = rawRows.first
+            XCTAssertEqual(remoteRow?["id"] as? String, snapshotID.uuidString.lowercased())
+            XCTAssertEqual(remoteRow?["org_id"] as? String, orgID.uuidString.lowercased())
+            XCTAssertEqual(remoteRow?["property_id"] as? String, property.id.uuidString.lowercased())
+            XCTAssertEqual(remoteRow?["session_id"] as? String, session.id.uuidString.lowercased())
+            XCTAssertEqual(remoteRow?["payload_storage_path"] as? String, snapshotArtifacts.object.path)
+            print("[Phase2C26D] row_fetch filters=\(filters.joined(separator: ",")) rows=\(rawRows.count) \(requestedContext)")
+            return rawRows.isEmpty ? [] : [validatedSnapshotRow]
+        }
+        let parentPreflightOverride: (UUID, UUID, UUID) async throws -> AppState.SessionSnapshotAuthPreflightRemoteParentStatus = { requestedOrgID, requestedPropertyID, requestedSessionID in
+            let propertyData = try await self.performStagingRESTRequest(
+                path: "/rest/v1/properties?select=id,org_id&id=eq.\(property.id.uuidString.lowercased())",
+                method: "GET",
+                serviceKey: serviceKey,
+                body: Data(),
+                contentType: "application/json"
+            )
+            let sessionData = try await self.performStagingRESTRequest(
+                path: "/rest/v1/sessions?select=id,org_id,property_id&id=eq.\(session.id.uuidString.lowercased())",
+                method: "GET",
+                serviceKey: serviceKey,
+                body: Data(),
+                contentType: "application/json"
+            )
+            let propertyRows = (try JSONSerialization.jsonObject(with: propertyData) as? [[String: Any]]) ?? []
+            let sessionRows = (try JSONSerialization.jsonObject(with: sessionData) as? [[String: Any]]) ?? []
+            let propertyOrgID = (propertyRows.first?["org_id"] as? String).flatMap(UUID.init(uuidString:))
+            let sessionOrgID = (sessionRows.first?["org_id"] as? String).flatMap(UUID.init(uuidString:))
+            let sessionPropertyID = (sessionRows.first?["property_id"] as? String).flatMap(UUID.init(uuidString:))
+            let propertyMatches = sessionPropertyID == property.id
+            print("[Phase2C26D] parent_preflight property_rows=\(propertyRows.count) session_rows=\(sessionRows.count) property_org=\(propertyOrgID?.uuidString ?? "nil") session_org=\(sessionOrgID?.uuidString ?? "nil") session_property=\(sessionPropertyID?.uuidString ?? "nil") requested_org=\(requestedOrgID.uuidString) requested_property=\(requestedPropertyID.uuidString) requested_session=\(requestedSessionID.uuidString)")
+            return AppState.SessionSnapshotAuthPreflightRemoteParentStatus(
+                propertyExists: propertyRows.first != nil,
+                sessionExists: sessionRows.first != nil,
+                propertyOrgID: propertyOrgID,
+                sessionOrgID: sessionOrgID,
+                sessionPropertyIDMatches: propertyMatches,
+                orgIDsMatch: propertyOrgID == orgID && sessionOrgID == orgID && propertyMatches,
+                errorMessage: nil
+            )
+        }
+        let seededSnapshotBucket = snapshotArtifacts.object.bucket
+        let seededSnapshotPath = snapshotArtifacts.object.path
+        let seededMediaBucket = "scoutcapture-originals"
+        let seededMediaPath = storagePath
+        let snapshotDownloadOverride: AppState.SessionSnapshotStorageDownloadOverride = { _, _ in
+            try await self.performStagingRESTRequest(
+                path: "/storage/v1/object/\(seededSnapshotBucket)/\(seededSnapshotPath)",
+                method: "GET",
+                serviceKey: serviceKey,
+                body: Data(),
+                contentType: "application/json"
+            )
+        }
+        let mediaDownloadOverride: AppState.SessionSnapshotMediaDownloadOverride = { _, _ in
+            try await self.performStagingRESTRequest(
+                path: "/storage/v1/object/\(seededMediaBucket)/\(seededMediaPath)",
+                method: "GET",
+                serviceKey: serviceKey,
+                body: Data(),
+                contentType: "application/json"
+            )
+        }
+        let appState = AppState(
+            localStore: store,
+            userDefaults: makeDefaults(supabaseEnabled: true),
+            environment: approvedStagingEnvironment(anonKey: serviceKey),
+            sessionSnapshotRowsFetchOverride: rowFetchOverride,
+            sessionSnapshotStorageDownloadOverride: snapshotDownloadOverride,
+            sessionSnapshotMediaDownloadOverride: mediaDownloadOverride,
+            sessionSnapshotRemoteParentPreflightOverride: parentPreflightOverride,
+            disableCloudBackupForTests: true
+        )
+        appState.selectedPropertyID = property.id
+        appState.currentSession = session
+
+        let diagnostics = await appState.validateLatestSessionSnapshotRestoreDiagnostics()
+        print("[Phase2C26D] diagnostics result=\(diagnostics.result.rawValue) failure=\(diagnostics.failureReason ?? "none") row_found=\(diagnostics.rowFound) object_readable=\(diagnostics.objectReadable) media_manifest=\(diagnostics.mediaRecoveryDiagnostics.manifestCount) recoverable_remote=\(diagnostics.mediaRecoveryDiagnostics.recoverableRemoteCount)")
+        guard diagnostics.result == .restorableMetadataCandidate else {
+            XCTFail("Expected hosted staging restore diagnostics to be restorable, got \(diagnostics.result.rawValue): \(diagnostics.failureReason ?? "no failure reason")")
+            return
+        }
+        XCTAssertTrue(diagnostics.rowObjectVerified)
+        XCTAssertTrue(diagnostics.checksumVerified)
+        XCTAssertTrue(diagnostics.parentRemoteVerified)
+        XCTAssertEqual(diagnostics.mediaRecoveryDiagnostics.recoverableRemoteCount, 1)
+        XCTAssertEqual(diagnostics.mediaRecoveryDiagnostics.readiness, "ready")
+
+        let firstRetrieval = await appState.retrieveSnapshotMediaTestOnly()
+        let recovered = appState
+            .sessionSnapshotRecoveredMediaDirectoryURLForDiagnostics(
+                propertyID: property.id,
+                sessionID: session.id,
+                snapshotID: snapshotID
+            )
+            .appendingPathComponent(filename)
+        let original = store
+            .originalsFolderURL(propertyID: property.id, sessionID: session.id)
+            .appendingPathComponent(filename)
+
+        XCTAssertTrue(firstRetrieval.allowed)
+        XCTAssertNil(firstRetrieval.blockedReason)
+        XCTAssertEqual(firstRetrieval.attemptedCount, 1)
+        XCTAssertEqual(firstRetrieval.downloadedCount, 1)
+        XCTAssertEqual(firstRetrieval.checksumVerifiedCount, firstRetrieval.downloadedCount)
+        XCTAssertEqual(firstRetrieval.failedCount, 0)
+        XCTAssertEqual(firstRetrieval.recoveredLocalPathCount, firstRetrieval.downloadedCount)
+        XCTAssertTrue(recovered.path.contains("/RecoveredMedia/SnapshotMedia/\(snapshotID.uuidString.lowercased())/"))
+        XCTAssertEqual(try Data(contentsOf: recovered), mediaBytes)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: original.path))
+
+        let recoveredBeforeDuplicateRun = try Data(contentsOf: recovered)
+        let duplicateRetrieval = await appState.retrieveSnapshotMediaTestOnly()
+
+        XCTAssertTrue(duplicateRetrieval.allowed)
+        XCTAssertEqual(duplicateRetrieval.attemptedCount, 1)
+        XCTAssertEqual(duplicateRetrieval.downloadedCount, 0)
+        XCTAssertEqual(duplicateRetrieval.skippedExistingCount, 1)
+        XCTAssertEqual(duplicateRetrieval.failedCount, 0)
+        XCTAssertEqual(try Data(contentsOf: recovered), recoveredBeforeDuplicateRun)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: original.path))
+
+        print("[Phase2C26D] staging_url=\(hostedStagingURL)")
+        print("[Phase2C26D] property_id=\(property.id.uuidString)")
+        print("[Phase2C26D] session_id=\(session.id.uuidString)")
+        print("[Phase2C26D] snapshot_id=\(snapshotID.uuidString)")
+        print("[Phase2C26D] storage_object=scoutcapture-originals/\(storagePath)")
+        print("[Phase2C26D] snapshot_object=\(snapshotArtifacts.object.path)")
+        print("[Phase2C26D] retrieval allowed=\(firstRetrieval.allowed) attempted=\(firstRetrieval.attemptedCount) downloaded=\(firstRetrieval.downloadedCount) checksum_verified=\(firstRetrieval.checksumVerifiedCount) failed=\(firstRetrieval.failedCount) recovered_paths=\(firstRetrieval.recoveredLocalPathCount)")
+        print("[Phase2C26D] duplicate allowed=\(duplicateRetrieval.allowed) attempted=\(duplicateRetrieval.attemptedCount) downloaded=\(duplicateRetrieval.downloadedCount) skipped_existing=\(duplicateRetrieval.skippedExistingCount) failed=\(duplicateRetrieval.failedCount)")
+        print("[Phase2C26D] recovered_path=\(recovered.path)")
     }
 }
