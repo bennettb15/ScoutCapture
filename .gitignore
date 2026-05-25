@@ -2,3 +2,5 @@
 
 Migration Backups/
 .claude/
+.local/ScoutCaptureTestSecrets.json
+ScoutCaptureTests/LocalTestSecrets.json

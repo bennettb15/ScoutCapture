@@ -224,11 +224,119 @@ final class Phase2C25BSnapshotRestoreDiagnosticsTests: XCTestCase {
     }
 
     private func stagingValidationHeaderValue(_ key: String) throws -> String {
-        guard let value = ProcessInfo.processInfo.environment[key]?.trimmingCharacters(in: .whitespacesAndNewlines),
+        guard let value = stagingValidationSecretValue(key)?.trimmingCharacters(in: .whitespacesAndNewlines),
               !value.isEmpty else {
-            throw XCTSkip("Set \(key) to run hosted staging media recovery validation.")
+            throw XCTSkip("Set \(key) or .local/ScoutCaptureTestSecrets.json to run hosted staging validation.")
         }
         return value
+    }
+
+    private func stagingValidationFlagEnabled(_ key: String) -> Bool {
+        guard let value = stagingValidationSecretValue(key)?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() else {
+            return false
+        }
+        return value == "1" || value == "true" || value == "yes"
+    }
+
+    private func stagingValidationSecretValue(_ key: String) -> String? {
+        if let environmentValue = ProcessInfo.processInfo.environment[key],
+           !environmentValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return environmentValue
+        }
+        if let defaultsValue = UserDefaults.standard.string(forKey: key),
+           !defaultsValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return defaultsValue
+        }
+        let arguments = ProcessInfo.processInfo.arguments
+        for index in arguments.indices {
+            let argument = arguments[index]
+            if argument == "-\(key)" || argument == key,
+               arguments.indices.contains(index + 1) {
+                return arguments[index + 1]
+            }
+            if argument.hasPrefix("\(key)=") {
+                return String(argument.dropFirst(key.count + 1))
+            }
+            if argument.hasPrefix("-\(key)=") {
+                return String(argument.dropFirst(key.count + 2))
+            }
+        }
+        if let fileValue = localTestSecretValue(for: key),
+           !fileValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return fileValue
+        }
+        return nil
+    }
+
+    private func localTestSecretValue(for key: String) -> String? {
+        let jsonKey: String
+        switch key {
+        case "SCOUTCAPTURE_RUN_26K_STAGING_NORMALIZED_REPLAY_VALIDATION":
+            jsonKey = "run_26k_staging_normalized_replay_validation"
+        case "SCOUTCAPTURE_26K_STAGING_SERVICE_ROLE_KEY":
+            jsonKey = "staging_service_role_key"
+        default:
+            return nil
+        }
+
+        for fileURL in localTestSecretFileCandidates() {
+            guard FileManager.default.fileExists(atPath: fileURL.path),
+                  let data = try? Data(contentsOf: fileURL),
+                  let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let value = object[jsonKey] else {
+                continue
+            }
+            if let string = value as? String {
+                return string
+            }
+            if let bool = value as? Bool {
+                return bool ? "true" : "false"
+            }
+            if let number = value as? NSNumber {
+                return number.boolValue ? "true" : "false"
+            }
+        }
+        return nil
+    }
+
+    private func localTestSecretFileCandidates() -> [URL] {
+        let sourceFile = URL(fileURLWithPath: #filePath)
+        let testsFolder = sourceFile.deletingLastPathComponent()
+        let repoRoot = testsFolder.deletingLastPathComponent()
+        var candidates = [
+            repoRoot.appendingPathComponent(".local/ScoutCaptureTestSecrets.json", isDirectory: false),
+            testsFolder.appendingPathComponent("LocalTestSecrets.json", isDirectory: false)
+        ]
+        if let override = stagingValidationSecretValueFromProcess("SCOUTCAPTURE_TEST_SECRETS_FILE") {
+            candidates.insert(URL(fileURLWithPath: override), at: 0)
+        }
+        return candidates
+    }
+
+    private func stagingValidationSecretValueFromProcess(_ key: String) -> String? {
+        if let environmentValue = ProcessInfo.processInfo.environment[key],
+           !environmentValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return environmentValue
+        }
+        if let defaultsValue = UserDefaults.standard.string(forKey: key),
+           !defaultsValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return defaultsValue
+        }
+        let arguments = ProcessInfo.processInfo.arguments
+        for index in arguments.indices {
+            let argument = arguments[index]
+            if argument == "-\(key)" || argument == key,
+               arguments.indices.contains(index + 1) {
+                return arguments[index + 1]
+            }
+            if argument.hasPrefix("\(key)=") {
+                return String(argument.dropFirst(key.count + 1))
+            }
+            if argument.hasPrefix("-\(key)=") {
+                return String(argument.dropFirst(key.count + 2))
+            }
+        }
+        return nil
     }
 
     @discardableResult
@@ -282,6 +390,21 @@ final class Phase2C25BSnapshotRestoreDiagnosticsTests: XCTestCase {
             body: data,
             contentType: "application/json"
         )
+    }
+
+    private func fetchStagingRows(
+        table: String,
+        query: String,
+        serviceKey: String
+    ) async throws -> [[String: Any]] {
+        let data = try await performStagingRESTRequest(
+            path: "/rest/v1/\(table)?\(query)",
+            method: "GET",
+            serviceKey: serviceKey,
+            body: Data(),
+            contentType: "application/json"
+        )
+        return (try JSONSerialization.jsonObject(with: data) as? [[String: Any]]) ?? []
     }
 
     func testVerifiedSnapshotBecomesRestorableMetadataCandidate() async throws {
@@ -1297,5 +1420,236 @@ final class Phase2C25BSnapshotRestoreDiagnosticsTests: XCTestCase {
         print("[Phase2C26D] retrieval allowed=\(firstRetrieval.allowed) attempted=\(firstRetrieval.attemptedCount) downloaded=\(firstRetrieval.downloadedCount) checksum_verified=\(firstRetrieval.checksumVerifiedCount) failed=\(firstRetrieval.failedCount) recovered_paths=\(firstRetrieval.recoveredLocalPathCount)")
         print("[Phase2C26D] duplicate allowed=\(duplicateRetrieval.allowed) attempted=\(duplicateRetrieval.attemptedCount) downloaded=\(duplicateRetrieval.downloadedCount) skipped_existing=\(duplicateRetrieval.skippedExistingCount) failed=\(duplicateRetrieval.failedCount)")
         print("[Phase2C26D] recovered_path=\(recovered.path)")
+    }
+
+    func testPhase2C26KHostedStagingNormalizedReplayValidation() async throws {
+        guard stagingValidationFlagEnabled("SCOUTCAPTURE_RUN_26K_STAGING_NORMALIZED_REPLAY_VALIDATION") else {
+            throw XCTSkip("Set SCOUTCAPTURE_RUN_26K_STAGING_NORMALIZED_REPLAY_VALIDATION=1 to run hosted staging normalized replay validation.")
+        }
+        let serviceKey = try stagingValidationHeaderValue("SCOUTCAPTURE_26K_STAGING_SERVICE_ROLE_KEY")
+        let root = try makeTempStorageRoot()
+        let store = LocalStore(testStorageRootURL: root)
+        let orgID = UUID()
+        _ = try store.createOrganization(Organization(id: orgID, name: "Phase 2C-26K Staging Org"))
+        let property = try store.createProperty(Property(
+            id: UUID(),
+            orgId: orgID,
+            name: "Phase 2C-26K Staging Normalized Replay Validation"
+        ))
+        let session = try store.upsertSession(Session(
+            id: UUID(),
+            propertyID: property.id,
+            startedAt: Date(timeIntervalSinceReferenceDate: 20_000),
+            status: .completed,
+            endedAt: Date(timeIntervalSinceReferenceDate: 20_600),
+            exportedAt: nil,
+            isSealed: true,
+            firstDeliveredAt: nil,
+            reExportExpiresAt: nil
+        ))
+        let shots = [
+            makeShot(propertyID: property.id, sessionID: session.id, filename: "phase-2c-26k-1.jpg", localReference: false, remoteMetadata: false),
+            makeShot(propertyID: property.id, sessionID: session.id, filename: "phase-2c-26k-2.jpg", localReference: false, remoteMetadata: false)
+        ]
+        try saveMetadata(store: store, property: property, session: session, orgID: orgID, shots: shots)
+
+        let iso8601 = ISO8601DateFormatter()
+        try await insertStagingRow(
+            table: "orgs",
+            payload: [
+                "id": orgID.uuidString.lowercased(),
+                "name": "Phase 2C-26K Staging Org"
+            ],
+            serviceKey: serviceKey
+        )
+        try await insertStagingRow(
+            table: "properties",
+            payload: [
+                "id": property.id.uuidString.lowercased(),
+                "org_id": orgID.uuidString.lowercased(),
+                "name": property.name
+            ],
+            serviceKey: serviceKey
+        )
+        try await insertStagingRow(
+            table: "sessions",
+            payload: [
+                "id": session.id.uuidString.lowercased(),
+                "org_id": orgID.uuidString.lowercased(),
+                "property_id": property.id.uuidString.lowercased(),
+                "status": session.status.rawValue,
+                "started_at": iso8601.string(from: session.startedAt),
+                "completed_at": session.endedAt.map { iso8601.string(from: $0) } ?? NSNull()
+            ],
+            serviceKey: serviceKey
+        )
+
+        func remoteCounts() async throws -> (sessionRows: Int, shotRows: Int, observationRows: Int) {
+            let sessionRows = try await fetchStagingRows(
+                table: "sessions",
+                query: "select=id,org_id,property_id&id=eq.\(session.id.uuidString.lowercased())&deleted_at=is.null",
+                serviceKey: serviceKey
+            )
+            let shotRows = try await fetchStagingRows(
+                table: "shots",
+                query: "select=id,session_id&session_id=eq.\(session.id.uuidString.lowercased())&deleted_at=is.null",
+                serviceKey: serviceKey
+            )
+            let observationRows = try await fetchStagingRows(
+                table: "observations",
+                query: "select=id,session_id&session_id=eq.\(session.id.uuidString.lowercased())&deleted_at=is.null",
+                serviceKey: serviceKey
+            )
+            return (sessionRows.count, shotRows.count, observationRows.count)
+        }
+
+        func diagnostics(
+            remoteShotCount: Int,
+            remoteObservationCount: Int,
+            result: AppState.CanonicalReadDiagnosticResult,
+            recommendation: String
+        ) -> AppState.CanonicalReadDiagnosticsResult {
+            AppState.CanonicalReadDiagnosticsResult(
+                checkedAt: Date(),
+                propertyID: property.id,
+                sessionID: session.id,
+                activeOrganizationID: orgID,
+                result: result,
+                remotePropertyFound: true,
+                remoteSessionFound: true,
+                localPropertyFound: true,
+                localSessionFound: true,
+                countParity: remoteShotCount == shots.count && remoteObservationCount == 1,
+                statusParity: true,
+                parentOrgConsistent: true,
+                parentPropertyConsistent: true,
+                localShotCount: shots.count,
+                remoteShotCount: remoteShotCount,
+                localIssueObservationCount: 1,
+                remoteIssueObservationCount: remoteObservationCount,
+                localGuidedCount: 0,
+                remoteGuidedCount: nil,
+                localUpdatedAt: session.endedAt,
+                remoteUpdatedAt: session.endedAt,
+                remoteRevision: nil,
+                remoteFreshnessAgeSeconds: nil,
+                canonicalRecommendation: recommendation,
+                blockedReason: nil,
+                noBehaviorChangedText: "read only"
+            )
+        }
+
+        let beforeCounts = try await remoteCounts()
+        XCTAssertEqual(beforeCounts.sessionRows, 1)
+        XCTAssertEqual(beforeCounts.shotRows, 0)
+        XCTAssertEqual(beforeCounts.observationRows, 0)
+        let beforeDiagnostics = diagnostics(
+            remoteShotCount: beforeCounts.shotRows,
+            remoteObservationCount: beforeCounts.observationRows,
+            result: .divergentConflict,
+            recommendation: "local_first_block_canonical_read"
+        )
+        let beforeReport = AppState.makeNormalizedParityGapReport(canonicalDiagnostics: beforeDiagnostics)
+        let plan = AppState.makeNormalizedBackfillReplayPlan(canonicalDiagnostics: beforeDiagnostics)
+
+        let replay = await AppState.executeNormalizedBackfillReplayTestOnly(
+            plan: plan,
+            targetClassification: .approvedStaging
+        ) { kind, count in
+            switch kind {
+            case .session:
+                return AppState.NormalizedBackfillEntityResult(kind: kind, attemptedCount: count, upsertedCount: 0, skippedCount: count, failedCount: 0, message: "session_present")
+            case .shot:
+                for shot in shots {
+                    try await self.insertStagingRow(
+                        table: "shots",
+                        payload: [
+                            "id": shot.shotID.uuidString.lowercased(),
+                            "org_id": orgID.uuidString.lowercased(),
+                            "property_id": property.id.uuidString.lowercased(),
+                            "session_id": session.id.uuidString.lowercased(),
+                            "shot_type": "detail",
+                            "position": shot.angleIndex,
+                            "captured_at": iso8601.string(from: shot.createdAt),
+                            "upload_state": "pending",
+                            "upload_attempts": 0
+                        ],
+                        serviceKey: serviceKey
+                    )
+                }
+                return AppState.NormalizedBackfillEntityResult(kind: kind, attemptedCount: count, upsertedCount: shots.count, skippedCount: max(0, count - shots.count), failedCount: 0, message: "shot_rows_inserted")
+            case .observation:
+                try await self.insertStagingRow(
+                    table: "observations",
+                    payload: [
+                        "id": UUID().uuidString.lowercased(),
+                        "org_id": orgID.uuidString.lowercased(),
+                        "session_id": session.id.uuidString.lowercased(),
+                        "shot_id": shots.first?.shotID.uuidString.lowercased() ?? NSNull(),
+                        "category": "phase_2c_26k",
+                        "status": "open",
+                        "title": "Phase 2C-26K validation observation",
+                        "detail": "Hosted staging normalized replay validation"
+                    ],
+                    serviceKey: serviceKey
+                )
+                return AppState.NormalizedBackfillEntityResult(kind: kind, attemptedCount: count, upsertedCount: 1, skippedCount: max(0, count - 1), failedCount: 0, message: "observation_row_inserted")
+            }
+        }
+
+        let afterCounts = try await remoteCounts()
+        let afterDiagnostics = diagnostics(
+            remoteShotCount: afterCounts.shotRows,
+            remoteObservationCount: afterCounts.observationRows,
+            result: .remoteMatchesLocal,
+            recommendation: "remote_candidate_after_replay_validation"
+        )
+        let afterReport = AppState.makeNormalizedParityGapReport(canonicalDiagnostics: afterDiagnostics)
+        let validation = AppState.validateNormalizedBackfillReplay(
+            before: beforeDiagnostics,
+            after: afterDiagnostics,
+            execution: replay
+        )
+
+        XCTAssertTrue(replay.allowed)
+        XCTAssertEqual(replay.executedEntityCount, 3)
+        XCTAssertEqual(replay.failedEntityCount, 0)
+        XCTAssertEqual(afterCounts.sessionRows, 1)
+        XCTAssertEqual(afterCounts.shotRows, shots.count)
+        XCTAssertEqual(afterCounts.observationRows, 1)
+        XCTAssertGreaterThan(afterReport.parityCompletenessScore, beforeReport.parityCompletenessScore)
+        XCTAssertEqual(afterReport.missingChildCount, 0)
+        XCTAssertTrue(validation.parityCompletenessImproved)
+        XCTAssertTrue(validation.missingChildCountDecreased)
+        XCTAssertTrue(validation.recommendationImproved)
+        XCTAssertTrue(validation.remainingCanonicalBlockers.isEmpty)
+
+        let secondPlan = AppState.makeNormalizedBackfillReplayPlan(canonicalDiagnostics: afterDiagnostics)
+        let secondReplay = await AppState.executeNormalizedBackfillReplayTestOnly(
+            plan: secondPlan,
+            targetClassification: .approvedStaging
+        ) { kind, count in
+            AppState.NormalizedBackfillEntityResult(
+                kind: kind,
+                attemptedCount: count,
+                upsertedCount: 0,
+                skippedCount: count,
+                failedCount: 0,
+                message: "duplicate_skipped"
+            )
+        }
+        let duplicateCounts = try await remoteCounts()
+        XCTAssertFalse(secondReplay.allowed)
+        XCTAssertEqual(secondReplay.executedEntityCount, 0)
+        XCTAssertEqual(duplicateCounts.shotRows, afterCounts.shotRows)
+        XCTAssertEqual(duplicateCounts.observationRows, afterCounts.observationRows)
+
+        print("[Phase2C26K] staging_url=\(hostedStagingURL)")
+        print("[Phase2C26K] property_id=\(property.id.uuidString)")
+        print("[Phase2C26K] session_id=\(session.id.uuidString)")
+        print("[Phase2C26K] before result=\(beforeDiagnostics.result.rawValue) recommendation=\(beforeDiagnostics.canonicalRecommendation) completeness=\(beforeReport.parityCompletenessScore) missing_children=\(beforeReport.missingChildCount) parent_org=\(beforeDiagnostics.parentOrgConsistent.map(String.init) ?? "nil") remote_shots=\(beforeCounts.shotRows) remote_observations=\(beforeCounts.observationRows)")
+        print("[Phase2C26K] replay allowed=\(replay.allowed) executed=\(replay.executedEntityCount) skipped=\(replay.skippedEntityCount) failed=\(replay.failedEntityCount)")
+        print("[Phase2C26K] after result=\(afterDiagnostics.result.rawValue) recommendation=\(afterDiagnostics.canonicalRecommendation) completeness=\(afterReport.parityCompletenessScore) missing_children=\(afterReport.missingChildCount) parent_org=\(afterDiagnostics.parentOrgConsistent.map(String.init) ?? "nil") remote_shots=\(afterCounts.shotRows) remote_observations=\(afterCounts.observationRows)")
+        print("[Phase2C26K] duplicate allowed=\(secondReplay.allowed) executed=\(secondReplay.executedEntityCount) skipped=\(secondReplay.skippedEntityCount) remote_shots=\(duplicateCounts.shotRows) remote_observations=\(duplicateCounts.observationRows)")
     }
 }
