@@ -2259,6 +2259,25 @@ final class AppState: ObservableObject {
         let noBehaviorChangedText: String
     }
 
+    struct NormalizedBackfillReplayValidationResult: Equatable {
+        let beforeRecommendation: String
+        let afterRecommendation: String
+        let beforeParityCompletenessScore: Double
+        let afterParityCompletenessScore: Double
+        let beforeMissingChildCount: Int
+        let afterMissingChildCount: Int
+        let parityCompletenessImproved: Bool
+        let missingChildCountDecreased: Bool
+        let recommendationImproved: Bool
+        let parentOrgConsistencyRepaired: Bool
+        let replayExecutedEntityCount: Int
+        let replaySkippedEntityCount: Int
+        let replayFailedEntityCount: Int
+        let remoteNewerConflictCount: Int
+        let remainingCanonicalBlockers: [String]
+        let noBehaviorChangedText: String
+    }
+
     struct CanonicalReadLocalSnapshot: Equatable {
         let propertyID: UUID?
         let orgID: UUID?
@@ -18427,6 +18446,74 @@ final class AppState: ObservableObject {
             results: results,
             noBehaviorChangedText: "Test-only normalized backfill/replay executed only through the supplied local/staging operation hook. No canonical reads were switched, no bulk backfill was run, no local state was hydrated/restored, and production backfill remains blocked."
         )
+    }
+
+    nonisolated static func validateNormalizedBackfillReplay(
+        before: CanonicalReadDiagnosticsResult,
+        after: CanonicalReadDiagnosticsResult,
+        execution: NormalizedBackfillReplayExecutionResult
+    ) -> NormalizedBackfillReplayValidationResult {
+        let beforeReport = makeNormalizedParityGapReport(
+            checkedAt: before.checkedAt,
+            canonicalDiagnostics: before
+        )
+        let afterReport = makeNormalizedParityGapReport(
+            checkedAt: after.checkedAt,
+            canonicalDiagnostics: after
+        )
+        let beforeRank = canonicalDiagnosticRecommendationRank(before.result)
+        let afterRank = canonicalDiagnosticRecommendationRank(after.result)
+        var remainingBlockers = afterReport.rolloutBlockers
+        if after.parentOrgConsistent != true {
+            remainingBlockers.append("parent_org_consistency_not_verified_after_replay")
+        }
+        if after.countParity != true {
+            remainingBlockers.append("count_parity_not_verified_after_replay")
+        }
+        if execution.failedEntityCount > 0 {
+            remainingBlockers.append("replay_entity_failures_present")
+        }
+        if execution.remoteNewerConflictCount > 0 {
+            remainingBlockers.append("remote_newer_conflict_present")
+        }
+        remainingBlockers = remainingBlockers.reduce(into: []) { partial, blocker in
+            if !partial.contains(blocker) {
+                partial.append(blocker)
+            }
+        }
+
+        return NormalizedBackfillReplayValidationResult(
+            beforeRecommendation: before.canonicalRecommendation,
+            afterRecommendation: after.canonicalRecommendation,
+            beforeParityCompletenessScore: beforeReport.parityCompletenessScore,
+            afterParityCompletenessScore: afterReport.parityCompletenessScore,
+            beforeMissingChildCount: beforeReport.missingChildCount,
+            afterMissingChildCount: afterReport.missingChildCount,
+            parityCompletenessImproved: afterReport.parityCompletenessScore > beforeReport.parityCompletenessScore,
+            missingChildCountDecreased: afterReport.missingChildCount < beforeReport.missingChildCount,
+            recommendationImproved: afterRank > beforeRank ||
+                after.canonicalRecommendation != before.canonicalRecommendation,
+            parentOrgConsistencyRepaired: before.parentOrgConsistent == false && after.parentOrgConsistent == true,
+            replayExecutedEntityCount: execution.executedEntityCount,
+            replaySkippedEntityCount: execution.skippedEntityCount,
+            replayFailedEntityCount: execution.failedEntityCount,
+            remoteNewerConflictCount: execution.remoteNewerConflictCount,
+            remainingCanonicalBlockers: remainingBlockers,
+            noBehaviorChangedText: "No behavior changed: this parity replay validation only compares before/after diagnostics and test-only replay results. It does not switch canonical reads, enable production remote reads, hydrate or restore local state, change export, change seal, change sync, change media, change iCloud behavior, loosen RLS, delete data, or mutate production data."
+        )
+    }
+
+    private nonisolated static func canonicalDiagnosticRecommendationRank(_ result: CanonicalReadDiagnosticResult) -> Int {
+        switch result {
+        case .localOnly, .remoteMissing, .unableToVerify:
+            return 0
+        case .parentMismatch, .divergentConflict, .localNewerConflict:
+            return 1
+        case .remoteNewerCandidate:
+            return 2
+        case .remoteMatchesLocal:
+            return 3
+        }
     }
 
     private nonisolated static func canonicalReadState(
