@@ -9140,6 +9140,16 @@ private struct DebugSessionSnapshotUploadDiagnosticsView: View {
                 if let blockedReason = AppState.diagnosticsPreviewText(diagnostics.lastCanonicalReadDiagnosticsBlockedReason, maxLength: 160) {
                     diagnosticRow("Blocked Reason", blockedReason)
                 }
+                diagnosticRow("Parity Gaps", diagnostics.lastNormalizedParityGapTaxonomy.isEmpty ? "none" : diagnostics.lastNormalizedParityGapTaxonomy.joined(separator: ", "))
+                diagnosticRow("Completeness", diagnostics.lastNormalizedParityCompleteness)
+                diagnosticRow("Shadow Coverage", diagnostics.lastRemoteShadowWriteCoverage)
+                diagnosticRow("Missing Remote", diagnostics.lastMissingRemoteEntityClassification)
+                diagnosticRow("Lineage Source", diagnostics.lastLineageDivergenceSource)
+                diagnosticRow("Repair Tooling", diagnostics.lastParityRepairToolingRecommended ? "recommended" : "not required")
+                diagnosticRow("Canonical Blocked", diagnostics.lastCanonicalReadsRemainBlocked ? "true" : "false")
+                if !diagnostics.lastCanonicalReadRolloutBlockers.isEmpty {
+                    diagnosticRow("Rollout Blockers", diagnostics.lastCanonicalReadRolloutBlockers.joined(separator: ", "))
+                }
                 Button(isCheckingCanonicalReadDiagnostics ? "Checking..." : "Check Canonical Read Diagnostics") {
                     guard !isCheckingCanonicalReadDiagnostics else { return }
                     isCheckingCanonicalReadDiagnostics = true

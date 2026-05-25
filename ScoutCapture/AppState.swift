@@ -1379,6 +1379,16 @@ final class AppState: ObservableObject {
         var lastCanonicalReadDiagnosticsRemoteRevision: Int64?
         var lastCanonicalReadDiagnosticsRecommendation: String = "local_first"
         var lastCanonicalReadDiagnosticsBlockedReason: String?
+        var lastNormalizedParityGapTaxonomy: [String] = []
+        var lastNormalizedParityCompleteness: String = "not_checked"
+        var lastRemoteShadowWriteCoverage: String = "not_checked"
+        var lastMissingRemoteEntityClassification: String = "not_checked"
+        var lastLineageDivergenceSource: String = "not_checked"
+        var lastParityRepairToolingRecommended: Bool = false
+        var lastCanonicalReadsRemainBlocked: Bool = true
+        var lastCanonicalReadRolloutBlockers: [String] = []
+        var lastCanonicalReadPrerequisitesBeforeAllowlist: [String] = []
+        var lastCanonicalReadProbableCauses: [String] = []
     }
 
     struct LocalDiagnosticsState: Equatable {
@@ -2167,6 +2177,15 @@ final class AppState: ObservableObject {
         case unableToVerify = "unable_to_verify"
     }
 
+    enum NormalizedParityGap: String, Codable, Equatable, CaseIterable {
+        case missingRemoteChildren = "missing_remote_children"
+        case parentOrgDivergence = "parent_org_divergence"
+        case partialShadowWrite = "partial_shadow_write"
+        case staleLocalProjection = "stale_local_projection"
+        case legacyLocalOnlySession = "legacy_local_only_session"
+        case unknownParityGap = "unknown_parity_gap"
+    }
+
     struct CanonicalReadLocalSnapshot: Equatable {
         let propertyID: UUID?
         let orgID: UUID?
@@ -2251,6 +2270,23 @@ final class AppState: ObservableObject {
         let remoteFreshnessAgeSeconds: TimeInterval?
         let canonicalRecommendation: String
         let blockedReason: String?
+        let noBehaviorChangedText: String
+    }
+
+    struct NormalizedParityGapReport: Equatable {
+        let checkedAt: Date
+        let propertyID: UUID?
+        let sessionID: UUID?
+        let taxonomy: [NormalizedParityGap]
+        let normalizedParityCompleteness: String
+        let remoteShadowWriteCoverage: String
+        let missingRemoteEntityClassification: String
+        let lineageDivergenceSource: String
+        let probableCauses: [String]
+        let rolloutBlockers: [String]
+        let parityRepairToolingRecommended: Bool
+        let canonicalReadsRemainBlocked: Bool
+        let prerequisitesBeforeAllowlist: [String]
         let noBehaviorChangedText: String
     }
 
@@ -16392,6 +16428,16 @@ final class AppState: ObservableObject {
         lines.append("- canonical_read_remote_revision: \(diagnostics.lastCanonicalReadDiagnosticsRemoteRevision.map(String.init) ?? "none")")
         lines.append("- canonical_read_recommendation: \(diagnosticsPreviewText(diagnostics.lastCanonicalReadDiagnosticsRecommendation, maxLength: 120) ?? "local_first")")
         lines.append("- canonical_read_blocked_reason: \(diagnosticsPreviewText(diagnostics.lastCanonicalReadDiagnosticsBlockedReason, maxLength: 160) ?? "none")")
+        lines.append("- normalized_parity_gap_taxonomy: \(diagnostics.lastNormalizedParityGapTaxonomy.isEmpty ? "none" : diagnostics.lastNormalizedParityGapTaxonomy.joined(separator: ", "))")
+        lines.append("- normalized_parity_completeness: \(diagnosticsPreviewText(diagnostics.lastNormalizedParityCompleteness, maxLength: 120) ?? "not_checked")")
+        lines.append("- remote_shadow_write_coverage: \(diagnosticsPreviewText(diagnostics.lastRemoteShadowWriteCoverage, maxLength: 140) ?? "not_checked")")
+        lines.append("- missing_remote_entity_classification: \(diagnosticsPreviewText(diagnostics.lastMissingRemoteEntityClassification, maxLength: 120) ?? "not_checked")")
+        lines.append("- lineage_divergence_source: \(diagnosticsPreviewText(diagnostics.lastLineageDivergenceSource, maxLength: 140) ?? "not_checked")")
+        lines.append("- parity_repair_tooling_recommended: \(diagnostics.lastParityRepairToolingRecommended)")
+        lines.append("- canonical_reads_remain_blocked: \(diagnostics.lastCanonicalReadsRemainBlocked)")
+        lines.append("- canonical_rollout_blockers: \(diagnostics.lastCanonicalReadRolloutBlockers.isEmpty ? "none" : diagnostics.lastCanonicalReadRolloutBlockers.joined(separator: ", "))")
+        lines.append("- canonical_prerequisites_before_allowlist: \(diagnostics.lastCanonicalReadPrerequisitesBeforeAllowlist.isEmpty ? "none" : diagnostics.lastCanonicalReadPrerequisitesBeforeAllowlist.joined(separator: ", "))")
+        lines.append("- canonical_probable_causes: \(diagnostics.lastCanonicalReadProbableCauses.isEmpty ? "none" : diagnostics.lastCanonicalReadProbableCauses.joined(separator: ", "))")
         lines.append("")
         lines.append("Redaction Notes")
         lines.append("- Report rows intentionally omit raw session.json text, local paths, storage object paths, signed URLs, auth tokens, and media bytes.")
@@ -17480,6 +17526,21 @@ final class AppState: ObservableObject {
         diagnostics.sessionSnapshotUpload.lastCanonicalReadDiagnosticsRemoteRevision = result.remoteRevision
         diagnostics.sessionSnapshotUpload.lastCanonicalReadDiagnosticsRecommendation = result.canonicalRecommendation
         diagnostics.sessionSnapshotUpload.lastCanonicalReadDiagnosticsBlockedReason = result.blockedReason
+        let parityGapReport = Self.makeNormalizedParityGapReport(
+            checkedAt: result.checkedAt,
+            canonicalDiagnostics: result,
+            uploadDiagnostics: diagnostics.sessionSnapshotUpload
+        )
+        diagnostics.sessionSnapshotUpload.lastNormalizedParityGapTaxonomy = parityGapReport.taxonomy.map(\.rawValue)
+        diagnostics.sessionSnapshotUpload.lastNormalizedParityCompleteness = parityGapReport.normalizedParityCompleteness
+        diagnostics.sessionSnapshotUpload.lastRemoteShadowWriteCoverage = parityGapReport.remoteShadowWriteCoverage
+        diagnostics.sessionSnapshotUpload.lastMissingRemoteEntityClassification = parityGapReport.missingRemoteEntityClassification
+        diagnostics.sessionSnapshotUpload.lastLineageDivergenceSource = parityGapReport.lineageDivergenceSource
+        diagnostics.sessionSnapshotUpload.lastParityRepairToolingRecommended = parityGapReport.parityRepairToolingRecommended
+        diagnostics.sessionSnapshotUpload.lastCanonicalReadsRemainBlocked = parityGapReport.canonicalReadsRemainBlocked
+        diagnostics.sessionSnapshotUpload.lastCanonicalReadRolloutBlockers = parityGapReport.rolloutBlockers
+        diagnostics.sessionSnapshotUpload.lastCanonicalReadPrerequisitesBeforeAllowlist = parityGapReport.prerequisitesBeforeAllowlist
+        diagnostics.sessionSnapshotUpload.lastCanonicalReadProbableCauses = parityGapReport.probableCauses
         localDiagnostics = diagnostics
     }
 
@@ -17794,6 +17855,184 @@ final class AppState: ObservableObject {
         lines.append("")
         lines.append("Redaction Notes")
         lines.append("- Report rows intentionally omit raw row payloads, local paths, storage object paths, signed URLs, auth tokens, and media bytes.")
+        return lines.joined(separator: "\n")
+    }
+
+    nonisolated static func makeNormalizedParityGapReport(
+        checkedAt: Date = Date(),
+        canonicalDiagnostics: CanonicalReadDiagnosticsResult,
+        uploadDiagnostics: SessionSnapshotUploadDiagnostics? = nil
+    ) -> NormalizedParityGapReport {
+        var taxonomy: [NormalizedParityGap] = []
+        let localHasChildren = (canonicalDiagnostics.localShotCount ?? 0) > 0 ||
+            (canonicalDiagnostics.localIssueObservationCount ?? 0) > 0 ||
+            (canonicalDiagnostics.localGuidedCount ?? 0) > 0
+        let remoteChildrenMissing = localHasChildren &&
+            (canonicalDiagnostics.remoteShotCount ?? 0) == 0 &&
+            (canonicalDiagnostics.remoteIssueObservationCount ?? 0) == 0
+        if remoteChildrenMissing {
+            taxonomy.append(.missingRemoteChildren)
+        }
+        if canonicalDiagnostics.parentOrgConsistent == false {
+            taxonomy.append(.parentOrgDivergence)
+        }
+        if canonicalDiagnostics.result == .remoteMissing,
+           canonicalDiagnostics.localSessionFound {
+            taxonomy.append(.legacyLocalOnlySession)
+        }
+        if canonicalDiagnostics.result == .localNewerConflict {
+            taxonomy.append(.staleLocalProjection)
+        }
+        let hasShadowWriteFailure = (uploadDiagnostics?.failureCount ?? 0) > 0 ||
+            trimmedNonEmpty(uploadDiagnostics?.lastUploadErrorMessage) != nil ||
+            trimmedNonEmpty(uploadDiagnostics?.lastFailureMessage) != nil
+        let remoteChildrenPartial = localHasChildren &&
+            ((canonicalDiagnostics.remoteShotCount ?? 0) < (canonicalDiagnostics.localShotCount ?? 0) ||
+             (canonicalDiagnostics.remoteIssueObservationCount ?? 0) < (canonicalDiagnostics.localIssueObservationCount ?? 0))
+        if hasShadowWriteFailure || remoteChildrenPartial {
+            taxonomy.append(.partialShadowWrite)
+        }
+        if taxonomy.isEmpty, canonicalDiagnostics.result != .remoteMatchesLocal {
+            taxonomy.append(.unknownParityGap)
+        }
+        taxonomy = taxonomy.reduce(into: []) { partial, gap in
+            if !partial.contains(gap) {
+                partial.append(gap)
+            }
+        }
+
+        let normalizedParityCompleteness: String
+        if canonicalDiagnostics.result == .remoteMatchesLocal {
+            normalizedParityCompleteness = "complete_for_checked_scope"
+        } else if remoteChildrenMissing {
+            normalizedParityCompleteness = "parents_present_children_missing"
+        } else if canonicalDiagnostics.parentOrgConsistent == false {
+            normalizedParityCompleteness = "blocked_by_parent_org_divergence"
+        } else if canonicalDiagnostics.remotePropertyFound || canonicalDiagnostics.remoteSessionFound {
+            normalizedParityCompleteness = "partial_remote_normalized_projection"
+        } else {
+            normalizedParityCompleteness = "remote_normalized_projection_missing"
+        }
+
+        let remoteShadowWriteCoverage: String
+        if canonicalDiagnostics.remotePropertyFound && canonicalDiagnostics.remoteSessionFound && !remoteChildrenMissing {
+            remoteShadowWriteCoverage = "property_session_children_present_for_checked_scope"
+        } else if canonicalDiagnostics.remotePropertyFound && canonicalDiagnostics.remoteSessionFound {
+            remoteShadowWriteCoverage = "property_session_present_child_shadow_writes_missing_or_unverified"
+        } else if canonicalDiagnostics.remotePropertyFound || canonicalDiagnostics.remoteSessionFound {
+            remoteShadowWriteCoverage = "partial_parent_shadow_write_coverage"
+        } else {
+            remoteShadowWriteCoverage = "no_remote_parent_shadow_write_coverage_for_checked_scope"
+        }
+
+        let missingRemoteEntityClassification: String
+        if remoteChildrenMissing {
+            missingRemoteEntityClassification = "remote_shots_and_observations_missing"
+        } else if (canonicalDiagnostics.localShotCount ?? 0) > (canonicalDiagnostics.remoteShotCount ?? 0) {
+            missingRemoteEntityClassification = "remote_shots_incomplete"
+        } else if (canonicalDiagnostics.localIssueObservationCount ?? 0) > (canonicalDiagnostics.remoteIssueObservationCount ?? 0) {
+            missingRemoteEntityClassification = "remote_observations_incomplete"
+        } else if !canonicalDiagnostics.remotePropertyFound || !canonicalDiagnostics.remoteSessionFound {
+            missingRemoteEntityClassification = "remote_parent_missing"
+        } else {
+            missingRemoteEntityClassification = "none_detected"
+        }
+
+        let lineageDivergenceSource: String
+        if canonicalDiagnostics.parentOrgConsistent == false {
+            lineageDivergenceSource = "property_or_session_org_id_differs_from_local_or_active_org"
+        } else if canonicalDiagnostics.parentPropertyConsistent == false {
+            lineageDivergenceSource = "remote_session_property_id_differs_from_local_property"
+        } else {
+            lineageDivergenceSource = "none_detected"
+        }
+
+        var probableCauses: [String] = []
+        if taxonomy.contains(.parentOrgDivergence) {
+            probableCauses.append("org_drift_history_or_stale_remote_parent_lineage")
+        }
+        if taxonomy.contains(.missingRemoteChildren) {
+            probableCauses.append("shots_or_observations_were_local_only_or_not_backfilled_to_normalized_rows")
+        }
+        if taxonomy.contains(.partialShadowWrite) {
+            probableCauses.append("incomplete_shadow_write_coverage_or_failed_remote_write")
+        }
+        if taxonomy.contains(.legacyLocalOnlySession) {
+            probableCauses.append("session_predates_shadow_write_coverage_or_was_created_offline")
+        }
+        if taxonomy.contains(.staleLocalProjection) {
+            probableCauses.append("local_metadata_projection_is_newer_than_remote_normalized_rows")
+        }
+        if taxonomy.contains(.unknownParityGap) {
+            probableCauses.append("insufficient_diagnostics_to_identify_gap")
+        }
+
+        var rolloutBlockers: [String] = []
+        if canonicalDiagnostics.parentOrgConsistent == false {
+            rolloutBlockers.append("parent_org_consistency_not_verified")
+        }
+        if canonicalDiagnostics.countParity == false || remoteChildrenMissing {
+            rolloutBlockers.append("remote_child_row_count_parity_not_verified")
+        }
+        if canonicalDiagnostics.result != .remoteMatchesLocal && canonicalDiagnostics.result != .remoteNewerCandidate {
+            rolloutBlockers.append("canonical_read_diagnostic_result_blocks_remote_candidate")
+        }
+
+        let prerequisites = [
+            "remote_property_and_session_org_lineage_must_match_active_local_scope",
+            "remote_shot_rows_must_match_local_session_shots",
+            "remote_observation_or_issue_rows_must_match_local_session_issues_when_represented",
+            "shadow_write_failures_and_RLS_debt_must_be_zero_or_acknowledged_as_historical",
+            "parity_repair_or_backfill_plan_must_be_defined_before_allowlisted_canonical_reads"
+        ]
+
+        return NormalizedParityGapReport(
+            checkedAt: checkedAt,
+            propertyID: canonicalDiagnostics.propertyID,
+            sessionID: canonicalDiagnostics.sessionID,
+            taxonomy: taxonomy,
+            normalizedParityCompleteness: normalizedParityCompleteness,
+            remoteShadowWriteCoverage: remoteShadowWriteCoverage,
+            missingRemoteEntityClassification: missingRemoteEntityClassification,
+            lineageDivergenceSource: lineageDivergenceSource,
+            probableCauses: probableCauses,
+            rolloutBlockers: rolloutBlockers,
+            parityRepairToolingRecommended: !taxonomy.isEmpty && taxonomy != [.staleLocalProjection],
+            canonicalReadsRemainBlocked: !rolloutBlockers.isEmpty,
+            prerequisitesBeforeAllowlist: prerequisites,
+            noBehaviorChangedText: "No behavior changed: this parity gap report is read-only diagnostics and does not switch canonical reads, hydrate data, restore files, download media, change export, change seal, change sync, change iCloud behavior, loosen RLS, repair parity, backfill rows, or mutate local/remote data."
+        )
+    }
+
+    nonisolated static func normalizedParityGapReportText(_ report: NormalizedParityGapReport) -> String {
+        var lines: [String] = []
+        lines.append("ScoutCapture Local Health - Remote Normalized Parity Gap")
+        lines.append("Checked: \(report.checkedAt.formatted(date: .abbreviated, time: .standard))")
+        lines.append("Property ID: \(report.propertyID?.uuidString ?? "none")")
+        lines.append("Session ID: \(report.sessionID?.uuidString ?? "none")")
+        lines.append("Taxonomy: \(report.taxonomy.isEmpty ? "none" : report.taxonomy.map(\.rawValue).joined(separator: ", "))")
+        lines.append("Normalized Parity Completeness: \(report.normalizedParityCompleteness)")
+        lines.append("Remote Shadow-Write Coverage: \(report.remoteShadowWriteCoverage)")
+        lines.append("Missing Remote Entity Classification: \(report.missingRemoteEntityClassification)")
+        lines.append("Lineage Divergence Source: \(report.lineageDivergenceSource)")
+        lines.append("Parity Repair Tooling Recommended: \(report.parityRepairToolingRecommended)")
+        lines.append("Canonical Reads Remain Blocked: \(report.canonicalReadsRemainBlocked)")
+        lines.append(report.noBehaviorChangedText)
+        lines.append("")
+        lines.append("Probable Causes")
+        for cause in report.probableCauses {
+            lines.append("- \(diagnosticsPreviewText(cause, maxLength: 120) ?? "unknown")")
+        }
+        lines.append("")
+        lines.append("Rollout Blockers")
+        for blocker in report.rolloutBlockers {
+            lines.append("- \(diagnosticsPreviewText(blocker, maxLength: 120) ?? "none")")
+        }
+        lines.append("")
+        lines.append("Prerequisites Before Allowlist")
+        for prerequisite in report.prerequisitesBeforeAllowlist {
+            lines.append("- \(diagnosticsPreviewText(prerequisite, maxLength: 140) ?? "unknown")")
+        }
         return lines.joined(separator: "\n")
     }
 
