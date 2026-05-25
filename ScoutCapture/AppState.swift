@@ -1389,6 +1389,15 @@ final class AppState: ObservableObject {
         var lastCanonicalReadRolloutBlockers: [String] = []
         var lastCanonicalReadPrerequisitesBeforeAllowlist: [String] = []
         var lastCanonicalReadProbableCauses: [String] = []
+        var lastParityRepairStrategies: [String] = []
+        var lastParityRepairSafetyRules: [String] = []
+        var lastParityDiagnosticsBeforeRepair: [String] = []
+        var lastParityCompletenessScore: Double = 0
+        var lastShadowWriteCoverageScore: Double = 0
+        var lastLineageConfidence: String = "not_checked"
+        var lastMissingChildCount: Int = 0
+        var lastReplayEligibility: String = "not_checked"
+        var lastParityRepairRolloutPhase: String = "diagnostics_only"
     }
 
     struct LocalDiagnosticsState: Equatable {
@@ -2183,7 +2192,17 @@ final class AppState: ObservableObject {
         case partialShadowWrite = "partial_shadow_write"
         case staleLocalProjection = "stale_local_projection"
         case legacyLocalOnlySession = "legacy_local_only_session"
+        case remoteMissing = "remote_missing"
         case unknownParityGap = "unknown_parity_gap"
+    }
+
+    enum NormalizedParityRepairStrategy: String, Codable, Equatable, CaseIterable {
+        case localOnlyRepair = "local_only_repair"
+        case remoteBackfill = "remote_backfill"
+        case lineageReconciliation = "lineage_reconciliation"
+        case childRowRegeneration = "child_row_regeneration"
+        case shadowWriteReplay = "shadow_write_replay"
+        case noOpBlock = "no_op_block"
     }
 
     struct CanonicalReadLocalSnapshot: Equatable {
@@ -2284,6 +2303,15 @@ final class AppState: ObservableObject {
         let lineageDivergenceSource: String
         let probableCauses: [String]
         let rolloutBlockers: [String]
+        let repairStrategies: [NormalizedParityRepairStrategy]
+        let repairSafetyRules: [String]
+        let diagnosticsBeforeRepair: [String]
+        let parityCompletenessScore: Double
+        let shadowWriteCoverageScore: Double
+        let lineageConfidence: String
+        let missingChildCount: Int
+        let replayEligibility: String
+        let repairRolloutPhase: String
         let parityRepairToolingRecommended: Bool
         let canonicalReadsRemainBlocked: Bool
         let prerequisitesBeforeAllowlist: [String]
@@ -16438,6 +16466,15 @@ final class AppState: ObservableObject {
         lines.append("- canonical_rollout_blockers: \(diagnostics.lastCanonicalReadRolloutBlockers.isEmpty ? "none" : diagnostics.lastCanonicalReadRolloutBlockers.joined(separator: ", "))")
         lines.append("- canonical_prerequisites_before_allowlist: \(diagnostics.lastCanonicalReadPrerequisitesBeforeAllowlist.isEmpty ? "none" : diagnostics.lastCanonicalReadPrerequisitesBeforeAllowlist.joined(separator: ", "))")
         lines.append("- canonical_probable_causes: \(diagnostics.lastCanonicalReadProbableCauses.isEmpty ? "none" : diagnostics.lastCanonicalReadProbableCauses.joined(separator: ", "))")
+        lines.append("- parity_repair_strategies: \(diagnostics.lastParityRepairStrategies.isEmpty ? "none" : diagnostics.lastParityRepairStrategies.joined(separator: ", "))")
+        lines.append("- parity_repair_safety_rules: \(diagnostics.lastParityRepairSafetyRules.isEmpty ? "none" : diagnostics.lastParityRepairSafetyRules.joined(separator: ", "))")
+        lines.append("- parity_diagnostics_before_repair: \(diagnostics.lastParityDiagnosticsBeforeRepair.isEmpty ? "none" : diagnostics.lastParityDiagnosticsBeforeRepair.joined(separator: ", "))")
+        lines.append("- parity_completeness_score: \(String(format: "%.2f", diagnostics.lastParityCompletenessScore))")
+        lines.append("- shadow_write_coverage_score: \(String(format: "%.2f", diagnostics.lastShadowWriteCoverageScore))")
+        lines.append("- lineage_confidence: \(diagnosticsPreviewText(diagnostics.lastLineageConfidence, maxLength: 120) ?? "not_checked")")
+        lines.append("- missing_child_count: \(diagnostics.lastMissingChildCount)")
+        lines.append("- replay_eligibility: \(diagnosticsPreviewText(diagnostics.lastReplayEligibility, maxLength: 140) ?? "not_checked")")
+        lines.append("- parity_repair_rollout_phase: \(diagnosticsPreviewText(diagnostics.lastParityRepairRolloutPhase, maxLength: 120) ?? "diagnostics_only")")
         lines.append("")
         lines.append("Redaction Notes")
         lines.append("- Report rows intentionally omit raw session.json text, local paths, storage object paths, signed URLs, auth tokens, and media bytes.")
@@ -17541,6 +17578,15 @@ final class AppState: ObservableObject {
         diagnostics.sessionSnapshotUpload.lastCanonicalReadRolloutBlockers = parityGapReport.rolloutBlockers
         diagnostics.sessionSnapshotUpload.lastCanonicalReadPrerequisitesBeforeAllowlist = parityGapReport.prerequisitesBeforeAllowlist
         diagnostics.sessionSnapshotUpload.lastCanonicalReadProbableCauses = parityGapReport.probableCauses
+        diagnostics.sessionSnapshotUpload.lastParityRepairStrategies = parityGapReport.repairStrategies.map(\.rawValue)
+        diagnostics.sessionSnapshotUpload.lastParityRepairSafetyRules = parityGapReport.repairSafetyRules
+        diagnostics.sessionSnapshotUpload.lastParityDiagnosticsBeforeRepair = parityGapReport.diagnosticsBeforeRepair
+        diagnostics.sessionSnapshotUpload.lastParityCompletenessScore = parityGapReport.parityCompletenessScore
+        diagnostics.sessionSnapshotUpload.lastShadowWriteCoverageScore = parityGapReport.shadowWriteCoverageScore
+        diagnostics.sessionSnapshotUpload.lastLineageConfidence = parityGapReport.lineageConfidence
+        diagnostics.sessionSnapshotUpload.lastMissingChildCount = parityGapReport.missingChildCount
+        diagnostics.sessionSnapshotUpload.lastReplayEligibility = parityGapReport.replayEligibility
+        diagnostics.sessionSnapshotUpload.lastParityRepairRolloutPhase = parityGapReport.repairRolloutPhase
         localDiagnostics = diagnostics
     }
 
@@ -17880,6 +17926,11 @@ final class AppState: ObservableObject {
            canonicalDiagnostics.localSessionFound {
             taxonomy.append(.legacyLocalOnlySession)
         }
+        if canonicalDiagnostics.result == .remoteMissing ||
+            !canonicalDiagnostics.remotePropertyFound ||
+            !canonicalDiagnostics.remoteSessionFound {
+            taxonomy.append(.remoteMissing)
+        }
         if canonicalDiagnostics.result == .localNewerConflict {
             taxonomy.append(.staleLocalProjection)
         }
@@ -17960,6 +18011,9 @@ final class AppState: ObservableObject {
         if taxonomy.contains(.legacyLocalOnlySession) {
             probableCauses.append("session_predates_shadow_write_coverage_or_was_created_offline")
         }
+        if taxonomy.contains(.remoteMissing) {
+            probableCauses.append("remote_parent_rows_were_never_written_or_are_not_visible_under_current_RLS")
+        }
         if taxonomy.contains(.staleLocalProjection) {
             probableCauses.append("local_metadata_projection_is_newer_than_remote_normalized_rows")
         }
@@ -17985,6 +18039,102 @@ final class AppState: ObservableObject {
             "shadow_write_failures_and_RLS_debt_must_be_zero_or_acknowledged_as_historical",
             "parity_repair_or_backfill_plan_must_be_defined_before_allowlisted_canonical_reads"
         ]
+        let localShotCount = canonicalDiagnostics.localShotCount ?? 0
+        let remoteShotCount = canonicalDiagnostics.remoteShotCount ?? 0
+        let localObservationCount = canonicalDiagnostics.localIssueObservationCount ?? 0
+        let remoteObservationCount = canonicalDiagnostics.remoteIssueObservationCount ?? 0
+        let localChildCount = localShotCount + localObservationCount
+        let remoteChildCount = min(remoteShotCount, localShotCount) + min(remoteObservationCount, localObservationCount)
+        let missingChildCount = max(localShotCount - remoteShotCount, 0) + max(localObservationCount - remoteObservationCount, 0)
+        let parentCount = 2
+        let presentParentCount = (canonicalDiagnostics.remotePropertyFound ? 1 : 0) + (canonicalDiagnostics.remoteSessionFound ? 1 : 0)
+        let parityCompletenessScore: Double
+        if localChildCount == 0 {
+            parityCompletenessScore = Double(presentParentCount) / Double(parentCount)
+        } else {
+            parityCompletenessScore = Double(presentParentCount + remoteChildCount) / Double(parentCount + localChildCount)
+        }
+        let shadowWriteCoverageScore = localChildCount == 0 ? parityCompletenessScore : Double(remoteChildCount) / Double(localChildCount)
+        let lineageConfidence: String
+        if canonicalDiagnostics.parentOrgConsistent == true && canonicalDiagnostics.parentPropertyConsistent == true {
+            lineageConfidence = "high"
+        } else if canonicalDiagnostics.parentOrgConsistent == false || canonicalDiagnostics.parentPropertyConsistent == false {
+            lineageConfidence = "blocked"
+        } else {
+            lineageConfidence = "unknown"
+        }
+        let replayEligibility: String
+        if canonicalDiagnostics.parentOrgConsistent == false || canonicalDiagnostics.parentPropertyConsistent == false {
+            replayEligibility = "blocked_until_parent_lineage_reconciled"
+        } else if taxonomy.contains(.legacyLocalOnlySession) || taxonomy.contains(.remoteMissing) {
+            replayEligibility = "requires_manual_parent_backfill_plan"
+        } else if taxonomy.contains(.missingRemoteChildren) || taxonomy.contains(.partialShadowWrite) {
+            replayEligibility = "candidate_for_test_only_shadow_write_replay_after_snapshot_verification"
+        } else if taxonomy.contains(.staleLocalProjection) {
+            replayEligibility = "compare_newer_local_projection_before_any_replay"
+        } else {
+            replayEligibility = "not_needed"
+        }
+        var repairStrategies: [NormalizedParityRepairStrategy] = []
+        if taxonomy.isEmpty {
+            repairStrategies.append(.noOpBlock)
+        }
+        if taxonomy.contains(.parentOrgDivergence) {
+            repairStrategies.append(.lineageReconciliation)
+            repairStrategies.append(.noOpBlock)
+        }
+        if taxonomy.contains(.remoteMissing) || taxonomy.contains(.legacyLocalOnlySession) {
+            repairStrategies.append(.remoteBackfill)
+        }
+        if taxonomy.contains(.missingRemoteChildren) {
+            repairStrategies.append(.childRowRegeneration)
+            repairStrategies.append(.remoteBackfill)
+        }
+        if taxonomy.contains(.partialShadowWrite) {
+            repairStrategies.append(.shadowWriteReplay)
+        }
+        if taxonomy.contains(.staleLocalProjection) {
+            repairStrategies.append(.localOnlyRepair)
+            repairStrategies.append(.noOpBlock)
+        }
+        if taxonomy.contains(.unknownParityGap) {
+            repairStrategies.append(.noOpBlock)
+        }
+        repairStrategies = repairStrategies.reduce(into: []) { partial, strategy in
+            if !partial.contains(strategy) {
+                partial.append(strategy)
+            }
+        }
+        let repairSafetyRules = [
+            "no_blind_overwrite",
+            "preserve_newer_remote_rows",
+            "preserve_newer_local_state",
+            "require_parent_consistency_first",
+            "operator_manual_gating_required",
+            "snapshot_or_checksum_evidence_required_before_remote_backfill",
+            "production_repair_requires_explicit_allowlist_and_separate_approval"
+        ]
+        let diagnosticsBeforeRepair = [
+            "parity_completeness_score",
+            "shadow_write_coverage_score",
+            "lineage_confidence",
+            "missing_child_counts",
+            "replay_eligibility",
+            "queued_mutation_or_RLS_debt",
+            "snapshot_checksum_and_parent_verification"
+        ]
+        let repairRolloutPhase: String
+        if taxonomy.isEmpty {
+            repairRolloutPhase = "canonical_read_candidate_readiness"
+        } else if lineageConfidence == "blocked" {
+            repairRolloutPhase = "diagnostics_only"
+        } else if repairStrategies.contains(.shadowWriteReplay) || repairStrategies.contains(.childRowRegeneration) {
+            repairRolloutPhase = "test_only_replay_backfill"
+        } else if repairStrategies.contains(.remoteBackfill) {
+            repairRolloutPhase = "allowlisted_manual_repair_tooling"
+        } else {
+            repairRolloutPhase = "diagnostics_only"
+        }
 
         return NormalizedParityGapReport(
             checkedAt: checkedAt,
@@ -17997,6 +18147,15 @@ final class AppState: ObservableObject {
             lineageDivergenceSource: lineageDivergenceSource,
             probableCauses: probableCauses,
             rolloutBlockers: rolloutBlockers,
+            repairStrategies: repairStrategies,
+            repairSafetyRules: repairSafetyRules,
+            diagnosticsBeforeRepair: diagnosticsBeforeRepair,
+            parityCompletenessScore: max(0, min(parityCompletenessScore, 1)),
+            shadowWriteCoverageScore: max(0, min(shadowWriteCoverageScore, 1)),
+            lineageConfidence: lineageConfidence,
+            missingChildCount: missingChildCount,
+            replayEligibility: replayEligibility,
+            repairRolloutPhase: repairRolloutPhase,
             parityRepairToolingRecommended: !taxonomy.isEmpty && taxonomy != [.staleLocalProjection],
             canonicalReadsRemainBlocked: !rolloutBlockers.isEmpty,
             prerequisitesBeforeAllowlist: prerequisites,
@@ -18015,6 +18174,13 @@ final class AppState: ObservableObject {
         lines.append("Remote Shadow-Write Coverage: \(report.remoteShadowWriteCoverage)")
         lines.append("Missing Remote Entity Classification: \(report.missingRemoteEntityClassification)")
         lines.append("Lineage Divergence Source: \(report.lineageDivergenceSource)")
+        lines.append("Repair Strategies: \(report.repairStrategies.isEmpty ? "none" : report.repairStrategies.map(\.rawValue).joined(separator: ", "))")
+        lines.append("Parity Completeness Score: \(String(format: "%.2f", report.parityCompletenessScore))")
+        lines.append("Shadow-Write Coverage Score: \(String(format: "%.2f", report.shadowWriteCoverageScore))")
+        lines.append("Lineage Confidence: \(report.lineageConfidence)")
+        lines.append("Missing Child Count: \(report.missingChildCount)")
+        lines.append("Replay Eligibility: \(report.replayEligibility)")
+        lines.append("Repair Rollout Phase: \(report.repairRolloutPhase)")
         lines.append("Parity Repair Tooling Recommended: \(report.parityRepairToolingRecommended)")
         lines.append("Canonical Reads Remain Blocked: \(report.canonicalReadsRemainBlocked)")
         lines.append(report.noBehaviorChangedText)
@@ -18027,6 +18193,16 @@ final class AppState: ObservableObject {
         lines.append("Rollout Blockers")
         for blocker in report.rolloutBlockers {
             lines.append("- \(diagnosticsPreviewText(blocker, maxLength: 120) ?? "none")")
+        }
+        lines.append("")
+        lines.append("Repair Safety Rules")
+        for rule in report.repairSafetyRules {
+            lines.append("- \(diagnosticsPreviewText(rule, maxLength: 140) ?? "unknown")")
+        }
+        lines.append("")
+        lines.append("Diagnostics Before Repair")
+        for diagnostic in report.diagnosticsBeforeRepair {
+            lines.append("- \(diagnosticsPreviewText(diagnostic, maxLength: 140) ?? "unknown")")
         }
         lines.append("")
         lines.append("Prerequisites Before Allowlist")

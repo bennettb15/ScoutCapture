@@ -9147,6 +9147,13 @@ private struct DebugSessionSnapshotUploadDiagnosticsView: View {
                 diagnosticRow("Lineage Source", diagnostics.lastLineageDivergenceSource)
                 diagnosticRow("Repair Tooling", diagnostics.lastParityRepairToolingRecommended ? "recommended" : "not required")
                 diagnosticRow("Canonical Blocked", diagnostics.lastCanonicalReadsRemainBlocked ? "true" : "false")
+                diagnosticRow("Repair Strategies", diagnostics.lastParityRepairStrategies.isEmpty ? "none" : diagnostics.lastParityRepairStrategies.joined(separator: ", "))
+                diagnosticRow("Completeness Score", String(format: "%.2f", diagnostics.lastParityCompletenessScore))
+                diagnosticRow("Shadow Score", String(format: "%.2f", diagnostics.lastShadowWriteCoverageScore))
+                diagnosticRow("Lineage Confidence", diagnostics.lastLineageConfidence)
+                diagnosticRow("Missing Child Count", "\(diagnostics.lastMissingChildCount)")
+                diagnosticRow("Replay Eligibility", diagnostics.lastReplayEligibility)
+                diagnosticRow("Repair Phase", diagnostics.lastParityRepairRolloutPhase)
                 if !diagnostics.lastCanonicalReadRolloutBlockers.isEmpty {
                     diagnosticRow("Rollout Blockers", diagnostics.lastCanonicalReadRolloutBlockers.joined(separator: ", "))
                 }
