@@ -9161,6 +9161,19 @@ private struct DebugSessionSnapshotUploadDiagnosticsView: View {
                 diagnosticRow("Backfill Skipped", "\(diagnostics.lastNormalizedBackfillSkippedEntityCount)")
                 diagnosticRow("Remote Newer Conflicts", "\(diagnostics.lastNormalizedBackfillRemoteNewerConflictCount)")
                 diagnosticRow("Production Backfill", diagnostics.lastNormalizedBackfillProductionBlocked ? "blocked" : "not blocked")
+                diagnosticRow("Candidate Flag", diagnostics.lastCanonicalReadCandidateFlagEnabled ? "enabled" : "off")
+                diagnosticRow("Candidate Allowed", diagnostics.lastCanonicalReadCandidateAllowed ? "true" : "false")
+                diagnosticRow("Candidate Blocked", diagnostics.lastCanonicalReadCandidateBlockedReason)
+                diagnosticRow("Effective Source", diagnostics.lastCanonicalReadCandidateEffectiveSourceRecommendation)
+                diagnosticRow("Local Fallback", diagnostics.lastCanonicalReadCandidateLocalFallbackAvailable ? "available" : "missing")
+                diagnosticRow("Candidate Parity", String(format: "%.2f", diagnostics.lastCanonicalReadCandidateParityConfidence))
+                diagnosticRow("Candidate Replay", String(format: "%.2f", diagnostics.lastCanonicalReadCandidateReplayConfidence))
+                diagnosticRow("Candidate Media", String(format: "%.2f", diagnostics.lastCanonicalReadCandidateMediaRecoveryConfidence))
+                diagnosticRow("Candidate Remote State", diagnostics.lastCanonicalReadCandidateRemoteStateReadable ? "readable" : "blocked")
+                diagnosticRow("Candidate Scope", diagnostics.lastCanonicalReadCandidateProductionWideEnabled ? "production-wide" : "allowlisted/test-only")
+                if !diagnostics.lastCanonicalReadCandidateWarnings.isEmpty {
+                    diagnosticRow("Candidate Warnings", diagnostics.lastCanonicalReadCandidateWarnings.joined(separator: ", "))
+                }
                 if !diagnostics.lastCanonicalReadRolloutBlockers.isEmpty {
                     diagnosticRow("Rollout Blockers", diagnostics.lastCanonicalReadRolloutBlockers.joined(separator: ", "))
                 }

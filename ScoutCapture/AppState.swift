@@ -32,6 +32,10 @@ struct SupabaseRuntimeConfiguration {
     static let productionSnapshotValidationProjectRef = "chlvazmtucoszicehtnm"
     static let productionSnapshotValidationEnvKey = "SCOUTCAPTURE_PRODUCTION_SNAPSHOT_VALIDATION_ALLOWED"
     static let productionSnapshotHydrationEnvKey = "SCOUTCAPTURE_PRODUCTION_SNAPSHOT_HYDRATION_ALLOWED"
+    nonisolated static let canonicalReadCandidateEnabledEnvKey = "SCOUTCAPTURE_CANONICAL_READ_CANDIDATE_ENABLED"
+    nonisolated static let canonicalReadCandidateOrgAllowlistEnvKey = "SCOUTCAPTURE_CANONICAL_READ_CANDIDATE_ORG_ALLOWLIST"
+    nonisolated static let canonicalReadCandidatePropertyAllowlistEnvKey = "SCOUTCAPTURE_CANONICAL_READ_CANDIDATE_PROPERTY_ALLOWLIST"
+    nonisolated static let canonicalReadCandidateSessionAllowlistEnvKey = "SCOUTCAPTURE_CANONICAL_READ_CANDIDATE_SESSION_ALLOWLIST"
 
     let url: URL?
     let anonKey: String?
@@ -1407,6 +1411,20 @@ final class AppState: ObservableObject {
         var lastNormalizedBackfillSkippedEntityCount: Int = 0
         var lastNormalizedBackfillRemoteNewerConflictCount: Int = 0
         var lastNormalizedBackfillProductionBlocked: Bool = true
+        var lastCanonicalReadCandidateAllowed: Bool = false
+        var lastCanonicalReadCandidateBlockedReason: String = "not_checked"
+        var lastCanonicalReadCandidateEffectiveSourceRecommendation: String = "local_first"
+        var lastCanonicalReadCandidateLocalFallbackAvailable: Bool = true
+        var lastCanonicalReadCandidateParityConfidence: Double = 0
+        var lastCanonicalReadCandidateReplayConfidence: Double = 0
+        var lastCanonicalReadCandidateMediaRecoveryConfidence: Double = 0
+        var lastCanonicalReadCandidateRemoteStateReadable: Bool = false
+        var lastCanonicalReadCandidateFlagEnabled: Bool = false
+        var lastCanonicalReadCandidateOrgAllowlisted: Bool = false
+        var lastCanonicalReadCandidatePropertyAllowlisted: Bool = false
+        var lastCanonicalReadCandidateSessionAllowlisted: Bool = false
+        var lastCanonicalReadCandidateProductionWideEnabled: Bool = false
+        var lastCanonicalReadCandidateWarnings: [String] = []
     }
 
     struct LocalDiagnosticsState: Equatable {
@@ -2163,6 +2181,47 @@ final class AppState: ObservableObject {
         case allowlistedOrgPropertyCanonicalReadCandidates = "allowlisted_org_property_canonical_read_candidates"
         case recoveryAssistedCanonicalReads = "recovery_assisted_canonical_reads"
         case broaderRollout = "broader_rollout"
+    }
+
+    struct CanonicalReadCandidateConfiguration: Equatable {
+        let enabled: Bool
+        let orgAllowlist: Set<UUID>
+        let propertyAllowlist: Set<UUID>
+        let sessionAllowlist: Set<UUID>
+        let parityCompletenessThreshold: Double
+        let mediaRecoveryConfidenceThreshold: Double
+
+        static let disabled = CanonicalReadCandidateConfiguration(
+            enabled: false,
+            orgAllowlist: [],
+            propertyAllowlist: [],
+            sessionAllowlist: [],
+            parityCompletenessThreshold: 0.95,
+            mediaRecoveryConfidenceThreshold: 0.95
+        )
+    }
+
+    struct CanonicalReadCandidateDiagnostics: Equatable {
+        let checkedAt: Date
+        let propertyID: UUID?
+        let sessionID: UUID?
+        let activeOrganizationID: UUID?
+        let targetClassification: SupabaseRuntimeConfiguration.TargetClassification
+        let candidateFlagEnabled: Bool
+        let orgAllowlisted: Bool
+        let propertyAllowlisted: Bool
+        let sessionAllowlisted: Bool
+        let allowed: Bool
+        let blockedReason: String?
+        let effectiveSourceRecommendation: String
+        let localFallbackAvailable: Bool
+        let parityConfidence: Double
+        let replayConfidence: Double
+        let mediaRecoveryConfidence: Double
+        let remoteCandidateStateReadable: Bool
+        let productionWideCanonicalReadsEnabled: Bool
+        let warnings: [String]
+        let noBehaviorChangedText: String
     }
 
     struct CanonicalTransitionPolicyDiagnostics: Equatable {
@@ -5194,6 +5253,7 @@ final class AppState: ObservableObject {
     private let sessionSnapshotStorageDownloadOverride: SessionSnapshotStorageDownloadOverride?
     private let sessionSnapshotMediaDownloadOverride: SessionSnapshotMediaDownloadOverride?
     private let canonicalReadRemoteSnapshotFetchOverride: CanonicalReadRemoteSnapshotFetchOverride?
+    private let canonicalReadCandidateConfiguration: CanonicalReadCandidateConfiguration
     private let sessionSnapshotClientAuthPreflightOverride: (() async -> (userID: String, email: String, error: String))?
     private let sessionSnapshotRemoteParentPreflightOverride: ((UUID, UUID, UUID) async throws -> SessionSnapshotAuthPreflightRemoteParentStatus)?
     private let captureProfileBackfillFetchOverride: CaptureProfileBackfillFetchOverride?
@@ -5586,6 +5646,10 @@ final class AppState: ObservableObject {
         self.captureProfileBackfillWriteOverride = captureProfileBackfillWriteOverride
         let supabaseConfiguration = AppState.loadSupabaseConfiguration(environment: environment)
         self.supabaseConfiguration = supabaseConfiguration
+        self.canonicalReadCandidateConfiguration = AppState.loadCanonicalReadCandidateConfiguration(
+            userDefaults: userDefaults,
+            environment: environment
+        )
         self.backendFeatureFlags = BackendFeatureFlags.load(
             userDefaults: userDefaults,
             environment: environment,
@@ -5693,6 +5757,50 @@ final class AppState: ObservableObject {
         default:
             return false
         }
+    }
+
+    nonisolated static func loadCanonicalReadCandidateConfiguration(
+        userDefaults: UserDefaults,
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) -> CanonicalReadCandidateConfiguration {
+        let flagEnabled = userDefaults.bool(forKey: "canonical_read_candidate_enabled") ||
+            boolEnvironmentValue(
+                for: SupabaseRuntimeConfiguration.canonicalReadCandidateEnabledEnvKey,
+                environment: environment
+            )
+        return CanonicalReadCandidateConfiguration(
+            enabled: flagEnabled,
+            orgAllowlist: uuidAllowlist(
+                defaultsValue: userDefaults.string(forKey: "canonical_read_candidate_org_allowlist"),
+                environmentValue: environment[SupabaseRuntimeConfiguration.canonicalReadCandidateOrgAllowlistEnvKey]
+            ),
+            propertyAllowlist: uuidAllowlist(
+                defaultsValue: userDefaults.string(forKey: "canonical_read_candidate_property_allowlist"),
+                environmentValue: environment[SupabaseRuntimeConfiguration.canonicalReadCandidatePropertyAllowlistEnvKey]
+            ),
+            sessionAllowlist: uuidAllowlist(
+                defaultsValue: userDefaults.string(forKey: "canonical_read_candidate_session_allowlist"),
+                environmentValue: environment[SupabaseRuntimeConfiguration.canonicalReadCandidateSessionAllowlistEnvKey]
+            ),
+            parityCompletenessThreshold: 0.95,
+            mediaRecoveryConfidenceThreshold: 0.95
+        )
+    }
+
+    private nonisolated static func uuidAllowlist(
+        defaultsValue: String?,
+        environmentValue: String?
+    ) -> Set<UUID> {
+        let rawValues = [defaultsValue, environmentValue]
+            .compactMap { $0 }
+            .flatMap { value in
+                value
+                    .split { character in
+                        character == "," || character == ";" || character == "\n" || character == " "
+                    }
+                    .map(String.init)
+            }
+        return Set(rawValues.compactMap { UUID(uuidString: $0.trimmingCharacters(in: .whitespacesAndNewlines)) })
     }
 
     private nonisolated static func validSupabaseURL(from rawValue: String) -> URL? {
@@ -16558,6 +16666,22 @@ final class AppState: ObservableObject {
         lines.append("- normalized_backfill_remote_newer_conflicts: \(diagnostics.lastNormalizedBackfillRemoteNewerConflictCount)")
         lines.append("- normalized_backfill_production_blocked: \(diagnostics.lastNormalizedBackfillProductionBlocked)")
         lines.append("")
+        lines.append("Allowlisted Canonical Read Candidate")
+        lines.append("- canonical_candidate_flag_enabled: \(diagnostics.lastCanonicalReadCandidateFlagEnabled)")
+        lines.append("- canonical_candidate_org_allowlisted: \(diagnostics.lastCanonicalReadCandidateOrgAllowlisted)")
+        lines.append("- canonical_candidate_property_allowlisted: \(diagnostics.lastCanonicalReadCandidatePropertyAllowlisted)")
+        lines.append("- canonical_candidate_session_allowlisted: \(diagnostics.lastCanonicalReadCandidateSessionAllowlisted)")
+        lines.append("- canonical_candidate_allowed: \(diagnostics.lastCanonicalReadCandidateAllowed)")
+        lines.append("- canonical_candidate_blocked_reason: \(diagnosticsPreviewText(diagnostics.lastCanonicalReadCandidateBlockedReason, maxLength: 180) ?? "not_checked")")
+        lines.append("- canonical_candidate_effective_source_recommendation: \(diagnosticsPreviewText(diagnostics.lastCanonicalReadCandidateEffectiveSourceRecommendation, maxLength: 140) ?? "local_first")")
+        lines.append("- canonical_candidate_local_fallback_available: \(diagnostics.lastCanonicalReadCandidateLocalFallbackAvailable)")
+        lines.append("- canonical_candidate_parity_confidence: \(String(format: "%.2f", diagnostics.lastCanonicalReadCandidateParityConfidence))")
+        lines.append("- canonical_candidate_replay_confidence: \(String(format: "%.2f", diagnostics.lastCanonicalReadCandidateReplayConfidence))")
+        lines.append("- canonical_candidate_media_recovery_confidence: \(String(format: "%.2f", diagnostics.lastCanonicalReadCandidateMediaRecoveryConfidence))")
+        lines.append("- canonical_candidate_remote_state_readable: \(diagnostics.lastCanonicalReadCandidateRemoteStateReadable)")
+        lines.append("- canonical_candidate_production_wide_enabled: \(diagnostics.lastCanonicalReadCandidateProductionWideEnabled)")
+        lines.append("- canonical_candidate_warnings: \(diagnostics.lastCanonicalReadCandidateWarnings.isEmpty ? "none" : diagnostics.lastCanonicalReadCandidateWarnings.joined(separator: ", "))")
+        lines.append("")
         lines.append("Redaction Notes")
         lines.append("- Report rows intentionally omit raw session.json text, local paths, storage object paths, signed URLs, auth tokens, and media bytes.")
         lines.append("- If storage upload succeeds and table insert fails, the app does not delete the object; orphan risk is reported for later controlled cleanup.")
@@ -17681,6 +17805,30 @@ final class AppState: ObservableObject {
         diagnostics.sessionSnapshotUpload.lastNormalizedBackfillPlannedObservationUpserts = backfillPlan.observationIssueRowUpsertsNeeded
         diagnostics.sessionSnapshotUpload.lastNormalizedBackfillRemoteNewerConflictCount = backfillPlan.remoteNewerConflictCount
         diagnostics.sessionSnapshotUpload.lastNormalizedBackfillProductionBlocked = true
+        let candidateDiagnostics = Self.makeCanonicalReadCandidateDiagnostics(
+            checkedAt: result.checkedAt,
+            configuration: canonicalReadCandidateConfiguration,
+            targetClassification: supabaseConfiguration.targetClassification,
+            canonicalDiagnostics: result,
+            parityReport: parityGapReport,
+            mediaRecoveryConfidence: Self.canonicalCandidateMediaRecoveryConfidence(
+                uploadDiagnostics: diagnostics.sessionSnapshotUpload
+            )
+        )
+        diagnostics.sessionSnapshotUpload.lastCanonicalReadCandidateAllowed = candidateDiagnostics.allowed
+        diagnostics.sessionSnapshotUpload.lastCanonicalReadCandidateBlockedReason = candidateDiagnostics.blockedReason ?? "none"
+        diagnostics.sessionSnapshotUpload.lastCanonicalReadCandidateEffectiveSourceRecommendation = candidateDiagnostics.effectiveSourceRecommendation
+        diagnostics.sessionSnapshotUpload.lastCanonicalReadCandidateLocalFallbackAvailable = candidateDiagnostics.localFallbackAvailable
+        diagnostics.sessionSnapshotUpload.lastCanonicalReadCandidateParityConfidence = candidateDiagnostics.parityConfidence
+        diagnostics.sessionSnapshotUpload.lastCanonicalReadCandidateReplayConfidence = candidateDiagnostics.replayConfidence
+        diagnostics.sessionSnapshotUpload.lastCanonicalReadCandidateMediaRecoveryConfidence = candidateDiagnostics.mediaRecoveryConfidence
+        diagnostics.sessionSnapshotUpload.lastCanonicalReadCandidateRemoteStateReadable = candidateDiagnostics.remoteCandidateStateReadable
+        diagnostics.sessionSnapshotUpload.lastCanonicalReadCandidateFlagEnabled = candidateDiagnostics.candidateFlagEnabled
+        diagnostics.sessionSnapshotUpload.lastCanonicalReadCandidateOrgAllowlisted = candidateDiagnostics.orgAllowlisted
+        diagnostics.sessionSnapshotUpload.lastCanonicalReadCandidatePropertyAllowlisted = candidateDiagnostics.propertyAllowlisted
+        diagnostics.sessionSnapshotUpload.lastCanonicalReadCandidateSessionAllowlisted = candidateDiagnostics.sessionAllowlisted
+        diagnostics.sessionSnapshotUpload.lastCanonicalReadCandidateProductionWideEnabled = candidateDiagnostics.productionWideCanonicalReadsEnabled
+        diagnostics.sessionSnapshotUpload.lastCanonicalReadCandidateWarnings = candidateDiagnostics.warnings
         localDiagnostics = diagnostics
     }
 
@@ -18501,6 +18649,157 @@ final class AppState: ObservableObject {
             remainingCanonicalBlockers: remainingBlockers,
             noBehaviorChangedText: "No behavior changed: this parity replay validation only compares before/after diagnostics and test-only replay results. It does not switch canonical reads, enable production remote reads, hydrate or restore local state, change export, change seal, change sync, change media, change iCloud behavior, loosen RLS, delete data, or mutate production data."
         )
+    }
+
+    nonisolated static func makeCanonicalReadCandidateDiagnostics(
+        checkedAt: Date = Date(),
+        configuration: CanonicalReadCandidateConfiguration,
+        targetClassification: SupabaseRuntimeConfiguration.TargetClassification,
+        canonicalDiagnostics: CanonicalReadDiagnosticsResult,
+        parityReport: NormalizedParityGapReport,
+        replayValidation: NormalizedBackfillReplayValidationResult? = nil,
+        mediaRecoveryConfidence: Double = 1
+    ) -> CanonicalReadCandidateDiagnostics {
+        let orgAllowlisted = canonicalDiagnostics.activeOrganizationID.map { configuration.orgAllowlist.contains($0) } ?? false
+        let propertyAllowlisted = canonicalDiagnostics.propertyID.map { configuration.propertyAllowlist.contains($0) } ?? false
+        let sessionAllowlisted = canonicalDiagnostics.sessionID.map { configuration.sessionAllowlist.contains($0) } ?? false
+        let localFallbackAvailable = canonicalDiagnostics.localPropertyFound || canonicalDiagnostics.localSessionFound
+        let replayConfidence: Double
+        if let replayValidation {
+            replayConfidence = replayValidation.remainingCanonicalBlockers.isEmpty &&
+                replayValidation.replayFailedEntityCount == 0 &&
+                replayValidation.remoteNewerConflictCount == 0 ? 1 : 0
+        } else if canonicalDiagnostics.canonicalRecommendation == "remote_candidate_after_replay_validation" {
+            replayConfidence = 1
+        } else {
+            replayConfidence = canonicalDiagnostics.result == .remoteMatchesLocal ? 1 : 0
+        }
+        let parityConfidence = parityReport.parityCompletenessScore
+        let remoteCandidateEvidencePasses = canonicalDiagnostics.result == .remoteMatchesLocal ||
+            canonicalDiagnostics.canonicalRecommendation == "remote_candidate_after_replay_validation"
+        var blockers: [String] = []
+
+        if !configuration.enabled {
+            blockers.append("canonical_read_candidate_flag_disabled")
+        }
+        switch targetClassification {
+        case .localDev, .approvedStaging:
+            break
+        case .approvedProductionValidation:
+            blockers.append("production_canonical_read_candidate_requires_separate_explicit_approval")
+        case .remote:
+            blockers.append("random_remote_canonical_read_candidate_blocked")
+        case .missing, .invalid:
+            blockers.append("supabase_target_not_verified")
+        }
+        if !orgAllowlisted {
+            blockers.append("org_not_allowlisted")
+        }
+        if !propertyAllowlisted {
+            blockers.append("property_not_allowlisted")
+        }
+        if !sessionAllowlisted {
+            blockers.append("session_not_allowlisted")
+        }
+        if !remoteCandidateEvidencePasses {
+            blockers.append("canonical_read_diagnostic_result_not_candidate")
+        }
+        if parityConfidence < configuration.parityCompletenessThreshold {
+            blockers.append("parity_completeness_below_threshold")
+        }
+        if canonicalDiagnostics.parentOrgConsistent != true || canonicalDiagnostics.parentPropertyConsistent != true {
+            blockers.append("parent_org_or_property_divergence")
+        }
+        if parityReport.missingChildCount > 0 || parityReport.taxonomy.contains(.missingRemoteChildren) {
+            blockers.append("missing_remote_children")
+        }
+        if canonicalDiagnostics.result == .remoteNewerCandidate {
+            blockers.append("remote_newer_conflict")
+        }
+        if mediaRecoveryConfidence < configuration.mediaRecoveryConfidenceThreshold {
+            blockers.append("media_recovery_confidence_below_threshold")
+        }
+        if !localFallbackAvailable {
+            blockers.append("local_fallback_unavailable")
+        }
+
+        let allowed = blockers.isEmpty
+        let effectiveSourceRecommendation = allowed
+            ? "remote_normalized_candidate_with_local_fallback"
+            : "local_first_block_canonical_read"
+        return CanonicalReadCandidateDiagnostics(
+            checkedAt: checkedAt,
+            propertyID: canonicalDiagnostics.propertyID,
+            sessionID: canonicalDiagnostics.sessionID,
+            activeOrganizationID: canonicalDiagnostics.activeOrganizationID,
+            targetClassification: targetClassification,
+            candidateFlagEnabled: configuration.enabled,
+            orgAllowlisted: orgAllowlisted,
+            propertyAllowlisted: propertyAllowlisted,
+            sessionAllowlisted: sessionAllowlisted,
+            allowed: allowed,
+            blockedReason: blockers.isEmpty ? nil : blockers.joined(separator: ", "),
+            effectiveSourceRecommendation: effectiveSourceRecommendation,
+            localFallbackAvailable: localFallbackAvailable,
+            parityConfidence: max(0, min(parityConfidence, 1)),
+            replayConfidence: max(0, min(replayConfidence, 1)),
+            mediaRecoveryConfidence: max(0, min(mediaRecoveryConfidence, 1)),
+            remoteCandidateStateReadable: allowed,
+            productionWideCanonicalReadsEnabled: false,
+            warnings: [
+                "test_only_allowlisted_canonical_read_candidate",
+                "local_fallback_retained",
+                "not_production_wide",
+                "does_not_discard_local_state"
+            ],
+            noBehaviorChangedText: "No behavior changed: allowlisted canonical-read candidate diagnostics do not switch global reads, discard local state, hydrate local data, change export, change seal, change sync, change media, change iCloud behavior, loosen RLS, delete data, or mutate production data."
+        )
+    }
+
+    nonisolated static func canonicalReadCandidateDiagnosticsText(_ diagnostics: CanonicalReadCandidateDiagnostics) -> String {
+        var lines: [String] = []
+        lines.append("ScoutCapture Local Health - Allowlisted Canonical Read Candidate")
+        lines.append("Checked: \(diagnostics.checkedAt.formatted(date: .abbreviated, time: .standard))")
+        lines.append("Property ID: \(diagnostics.propertyID?.uuidString ?? "none")")
+        lines.append("Session ID: \(diagnostics.sessionID?.uuidString ?? "none")")
+        lines.append("Target: \(diagnostics.targetClassification.rawValue)")
+        lines.append("Candidate Flag Enabled: \(diagnostics.candidateFlagEnabled)")
+        lines.append("Org Allowlisted: \(diagnostics.orgAllowlisted)")
+        lines.append("Property Allowlisted: \(diagnostics.propertyAllowlisted)")
+        lines.append("Session Allowlisted: \(diagnostics.sessionAllowlisted)")
+        lines.append("Canonical Candidate Allowed: \(diagnostics.allowed)")
+        lines.append("Candidate Blocked Reason: \(diagnosticsPreviewText(diagnostics.blockedReason, maxLength: 180) ?? "none")")
+        lines.append("Effective Source Recommendation: \(diagnostics.effectiveSourceRecommendation)")
+        lines.append("Local Fallback Available: \(diagnostics.localFallbackAvailable)")
+        lines.append("Parity Confidence: \(String(format: "%.2f", diagnostics.parityConfidence))")
+        lines.append("Replay Confidence: \(String(format: "%.2f", diagnostics.replayConfidence))")
+        lines.append("Media Recovery Confidence: \(String(format: "%.2f", diagnostics.mediaRecoveryConfidence))")
+        lines.append("Remote Candidate State Readable: \(diagnostics.remoteCandidateStateReadable)")
+        lines.append("Production-Wide Canonical Reads Enabled: \(diagnostics.productionWideCanonicalReadsEnabled)")
+        lines.append(diagnostics.noBehaviorChangedText)
+        lines.append("")
+        lines.append("Warnings")
+        for warning in diagnostics.warnings {
+            lines.append("- \(warning)")
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    private nonisolated static func canonicalCandidateMediaRecoveryConfidence(
+        uploadDiagnostics: SessionSnapshotUploadDiagnostics
+    ) -> Double {
+        let manifestCount = uploadDiagnostics.lastRestoreDiagnosticsMediaManifestCount
+        guard manifestCount > 0 else { return 1 }
+        if uploadDiagnostics.lastRestoreDiagnosticsMediaChecksumMismatchCount > 0 ||
+            uploadDiagnostics.lastRestoreDiagnosticsMediaMissingCount > 0 ||
+            uploadDiagnostics.lastRestoreDiagnosticsMediaUnsupportedCount > 0 {
+            return 0
+        }
+        let recoverable = max(
+            uploadDiagnostics.lastRestoreDiagnosticsMediaRecoverableRemoteCount,
+            uploadDiagnostics.lastRestoreDiagnosticsMediaRecoverableLocalCount
+        )
+        return min(Double(recoverable) / Double(manifestCount), 1)
     }
 
     private nonisolated static func canonicalDiagnosticRecommendationRank(_ result: CanonicalReadDiagnosticResult) -> Int {
