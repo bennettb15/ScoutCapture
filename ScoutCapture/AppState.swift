@@ -2069,6 +2069,70 @@ final class AppState: ObservableObject {
         case unknown
     }
 
+    enum CanonicalReadState: String, Codable, Equatable, CaseIterable {
+        case localOnly = "local_only"
+        case localPreferredRemoteVerified = "local_preferred_remote_verified"
+        case remoteCandidate = "remote_candidate"
+        case remoteCanonical = "remote_canonical"
+        case recoveryMode = "recovery_mode"
+        case conflictMode = "conflict_mode"
+    }
+
+    enum CanonicalConflictState: String, Codable, Equatable, CaseIterable {
+        case none
+        case localNewerThanRemote = "local_newer_than_remote"
+        case remoteNewerThanLocal = "remote_newer_than_local"
+        case divergentEdits = "divergent_edits"
+        case staleSnapshot = "stale_snapshot"
+        case partialMediaRecovery = "partial_media_recovery"
+        case missingMedia = "missing_media"
+        case notChecked = "not_checked"
+    }
+
+    enum CanonicalTrustSource: String, Codable, Equatable, CaseIterable {
+        case activeLocalCaptureSessionState = "active_local_capture_session_state"
+        case remoteNormalizedRows = "remote_normalized_rows"
+        case remoteSnapshots = "remote_snapshots"
+        case localCacheICloud = "local_cache_icloud"
+        case exportArchives = "export_archives"
+
+        nonisolated static var defaultHierarchy: [CanonicalTrustSource] {
+            [
+                .activeLocalCaptureSessionState,
+                .remoteNormalizedRows,
+                .remoteSnapshots,
+                .localCacheICloud,
+                .exportArchives
+            ]
+        }
+    }
+
+    enum CanonicalRolloutPhase: String, Codable, Equatable, CaseIterable {
+        case testOnlyCanonicalReadDiagnostics = "test_only_canonical_read_diagnostics"
+        case allowlistedOrgPropertyCanonicalReadCandidates = "allowlisted_org_property_canonical_read_candidates"
+        case recoveryAssistedCanonicalReads = "recovery_assisted_canonical_reads"
+        case broaderRollout = "broader_rollout"
+    }
+
+    struct CanonicalTransitionPolicyDiagnostics: Equatable {
+        let checkedAt: Date
+        let readState: CanonicalReadState
+        let canonicalSourceRecommendation: String
+        let canonicalSourceReason: String
+        let conflictState: CanonicalConflictState
+        let recoveryFallbackState: String
+        let remoteFreshnessAgeSeconds: TimeInterval?
+        let hydrationConfidence: String
+        let mediaRecoveryConfidence: String
+        let trustHierarchy: [CanonicalTrustSource]
+        let rolloutPhase: CanonicalRolloutPhase
+        let prerequisites: [String: String]
+        let iCloudNearTermRole: String
+        let iCloudMediumTermRole: String
+        let iCloudLongTermRole: String
+        let noBehaviorChangedText: String
+    }
+
     struct CanonicalReadinessRow: Equatable, Identifiable {
         let id: String
         let label: String
@@ -16894,6 +16958,257 @@ final class AppState: ObservableObject {
                 "\(diagnosticsPreviewText(key, maxLength: 80) ?? "unknown")=\(diagnosticsPreviewText(value, maxLength: 120) ?? "none")"
             }
             .joined(separator: ",")
+    }
+
+    nonisolated static func makeCanonicalTransitionPolicyDiagnostics(
+        checkedAt: Date = Date(),
+        restoreDiagnostics: SessionSnapshotRestoreDiagnosticsResult?,
+        recoveryCohort: SnapshotRecoveryCohortResult?,
+        hydrationPolicy: SessionSnapshotHydrationPolicyDiagnostics?,
+        uploadDiagnostics: SessionSnapshotUploadDiagnostics? = nil
+    ) -> CanonicalTransitionPolicyDiagnostics {
+        let mediaDiagnostics = restoreDiagnostics?.mediaRecoveryDiagnostics
+        let mediaRecoveryConfidence = canonicalMediaRecoveryConfidence(mediaDiagnostics)
+        let hydrationConfidence = canonicalHydrationConfidence(
+            restoreDiagnostics: restoreDiagnostics,
+            recoveryCohort: recoveryCohort,
+            hydrationPolicy: hydrationPolicy
+        )
+        let conflictState = canonicalConflictState(
+            restoreDiagnostics: restoreDiagnostics,
+            mediaRecoveryConfidence: mediaRecoveryConfidence
+        )
+        let remoteFreshnessAgeSeconds = canonicalRemoteFreshnessAgeSeconds(
+            checkedAt: checkedAt,
+            restoreDiagnostics: restoreDiagnostics
+        )
+        let readState = canonicalReadState(
+            restoreDiagnostics: restoreDiagnostics,
+            recoveryCohort: recoveryCohort,
+            conflictState: conflictState,
+            hydrationConfidence: hydrationConfidence,
+            mediaRecoveryConfidence: mediaRecoveryConfidence
+        )
+        let recommendationAndReason = canonicalSourceRecommendation(
+            readState: readState,
+            conflictState: conflictState,
+            hydrationConfidence: hydrationConfidence,
+            mediaRecoveryConfidence: mediaRecoveryConfidence
+        )
+        let prerequisites: [String: String] = [
+            "snapshot_freshness": restoreDiagnostics?.freshness ?? "not_checked",
+            "checksum_verification": restoreDiagnostics?.checksumVerified == true ? "verified" : "not_verified",
+            "media_recoverability": mediaRecoveryConfidence,
+            "hydration_success_rate": "not_measured_policy_only",
+            "upload_success_metrics": canonicalUploadSuccessMetric(uploadDiagnostics),
+            "recovery_cohort_confidence": recoveryCohort?.readiness.rawValue ?? "not_checked",
+            "parent_consistency": restoreDiagnostics?.parentRemoteVerified == true ? "verified" : "not_verified"
+        ]
+
+        return CanonicalTransitionPolicyDiagnostics(
+            checkedAt: checkedAt,
+            readState: readState,
+            canonicalSourceRecommendation: recommendationAndReason.recommendation,
+            canonicalSourceReason: recommendationAndReason.reason,
+            conflictState: conflictState,
+            recoveryFallbackState: canonicalRecoveryFallbackState(
+                readState: readState,
+                conflictState: conflictState,
+                mediaRecoveryConfidence: mediaRecoveryConfidence
+            ),
+            remoteFreshnessAgeSeconds: remoteFreshnessAgeSeconds,
+            hydrationConfidence: hydrationConfidence,
+            mediaRecoveryConfidence: mediaRecoveryConfidence,
+            trustHierarchy: CanonicalTrustSource.defaultHierarchy,
+            rolloutPhase: .testOnlyCanonicalReadDiagnostics,
+            prerequisites: prerequisites,
+            iCloudNearTermRole: "unchanged_local_offline_backup_rail",
+            iCloudMediumTermRole: "secondary_recovery_offline_continuity",
+            iCloudLongTermRole: "optional_redundancy_after_supabase_recovery_is_proven",
+            noBehaviorChangedText: "No behavior changed: this policy report is read-only diagnostics and does not switch canonical reads, hydrate data, download media, change export, change seal, change sync, change iCloud behavior, loosen RLS, or mutate local/remote data."
+        )
+    }
+
+    nonisolated static func canonicalTransitionPolicyDiagnosticsText(_ diagnostics: CanonicalTransitionPolicyDiagnostics) -> String {
+        var lines: [String] = []
+        lines.append("ScoutCapture Local Health - Canonical Transition Policy")
+        lines.append("Checked: \(diagnostics.checkedAt.formatted(date: .abbreviated, time: .standard))")
+        lines.append("Read State: \(diagnostics.readState.rawValue)")
+        lines.append("Canonical Source Recommendation: \(diagnosticsPreviewText(diagnostics.canonicalSourceRecommendation, maxLength: 120) ?? "unknown")")
+        lines.append("Canonical Source Reason: \(diagnosticsPreviewText(diagnostics.canonicalSourceReason, maxLength: 180) ?? "unknown")")
+        lines.append("Conflict State: \(diagnostics.conflictState.rawValue)")
+        lines.append("Recovery Fallback State: \(diagnosticsPreviewText(diagnostics.recoveryFallbackState, maxLength: 120) ?? "unknown")")
+        lines.append("Remote Freshness Age Seconds: \(diagnostics.remoteFreshnessAgeSeconds.map { String(Int($0)) } ?? "unknown")")
+        lines.append("Hydration Confidence: \(diagnosticsPreviewText(diagnostics.hydrationConfidence, maxLength: 120) ?? "unknown")")
+        lines.append("Media Recovery Confidence: \(diagnosticsPreviewText(diagnostics.mediaRecoveryConfidence, maxLength: 120) ?? "unknown")")
+        lines.append("Rollout Phase: \(diagnostics.rolloutPhase.rawValue)")
+        lines.append("Trust Hierarchy: \(diagnostics.trustHierarchy.map(\.rawValue).joined(separator: " > "))")
+        lines.append("iCloud Near Term Role: \(diagnostics.iCloudNearTermRole)")
+        lines.append("iCloud Medium Term Role: \(diagnostics.iCloudMediumTermRole)")
+        lines.append("iCloud Long Term Role: \(diagnostics.iCloudLongTermRole)")
+        lines.append(diagnostics.noBehaviorChangedText)
+        lines.append("")
+        lines.append("Prerequisites")
+        for key in diagnostics.prerequisites.keys.sorted() {
+            lines.append("- \(key): \(diagnosticsPreviewText(diagnostics.prerequisites[key], maxLength: 120) ?? "unknown")")
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    private nonisolated static func canonicalReadState(
+        restoreDiagnostics: SessionSnapshotRestoreDiagnosticsResult?,
+        recoveryCohort: SnapshotRecoveryCohortResult?,
+        conflictState: CanonicalConflictState,
+        hydrationConfidence: String,
+        mediaRecoveryConfidence: String
+    ) -> CanonicalReadState {
+        guard let restoreDiagnostics else { return .localOnly }
+        if conflictState != .none { return .conflictMode }
+        guard restoreDiagnostics.result == .restorableMetadataCandidate else {
+            return restoreDiagnostics.result == .noSnapshotFound || restoreDiagnostics.result == .objectMissing
+                ? .localOnly
+                : .recoveryMode
+        }
+        if mediaRecoveryConfidence == "partial_missing_media" || mediaRecoveryConfidence == "blocked_checksum_mismatch" {
+            return .recoveryMode
+        }
+        if recoveryCohort?.readiness == .readyForManualHydration,
+           hydrationConfidence == "manual_metadata_hydration_ready",
+           restoreDiagnostics.checksumVerified,
+           restoreDiagnostics.rowObjectVerified,
+           restoreDiagnostics.parentRemoteVerified {
+            return .remoteCandidate
+        }
+        return .localPreferredRemoteVerified
+    }
+
+    private nonisolated static func canonicalConflictState(
+        restoreDiagnostics: SessionSnapshotRestoreDiagnosticsResult?,
+        mediaRecoveryConfidence: String
+    ) -> CanonicalConflictState {
+        guard let restoreDiagnostics else { return .notChecked }
+        switch restoreDiagnostics.result {
+        case .localNewerConflict:
+            return .localNewerThanRemote
+        case .staleSnapshot:
+            return .staleSnapshot
+        case .checksumFailed, .parentMismatch:
+            return .divergentEdits
+        default:
+            break
+        }
+        if mediaRecoveryConfidence == "partial_missing_media" { return .partialMediaRecovery }
+        if mediaRecoveryConfidence == "missing_media" { return .missingMedia }
+        return .none
+    }
+
+    private nonisolated static func canonicalHydrationConfidence(
+        restoreDiagnostics: SessionSnapshotRestoreDiagnosticsResult?,
+        recoveryCohort: SnapshotRecoveryCohortResult?,
+        hydrationPolicy: SessionSnapshotHydrationPolicyDiagnostics?
+    ) -> String {
+        guard let restoreDiagnostics else { return "not_checked" }
+        guard restoreDiagnostics.result == .restorableMetadataCandidate else {
+            return "blocked_restore_diagnostics_\(restoreDiagnostics.result.rawValue)"
+        }
+        guard recoveryCohort?.readiness == .readyForManualHydration else {
+            return "needs_recovery_cohort_review"
+        }
+        guard hydrationPolicy?.hydrationAvailable == true else {
+            return "hydration_policy_not_available"
+        }
+        if hydrationPolicy?.productionHydrationAllowed == false {
+            return "manual_metadata_hydration_ready"
+        }
+        return "manual_metadata_hydration_ready_production_override_present"
+    }
+
+    private nonisolated static func canonicalMediaRecoveryConfidence(
+        _ diagnostics: SessionSnapshotMediaRecoveryDiagnostics?
+    ) -> String {
+        guard let diagnostics else { return "not_checked" }
+        if diagnostics.manifestCount == 0 { return "no_media_manifest" }
+        if diagnostics.checksumMismatchCount > 0 { return "blocked_checksum_mismatch" }
+        if diagnostics.unsupportedCount > 0 || !diagnostics.manifestSupported { return "unsupported_media_manifest" }
+        if diagnostics.missingCount >= diagnostics.manifestCount { return "missing_media" }
+        if diagnostics.missingCount > 0 { return "partial_missing_media" }
+        if diagnostics.recoverableRemoteCount + diagnostics.recoverableLocalCount >= diagnostics.manifestCount {
+            return "recoverable"
+        }
+        if diagnostics.checksumUnknownCount > 0 { return "checksum_unknown" }
+        return "not_recoverable"
+    }
+
+    private nonisolated static func canonicalRemoteFreshnessAgeSeconds(
+        checkedAt: Date,
+        restoreDiagnostics: SessionSnapshotRestoreDiagnosticsResult?
+    ) -> TimeInterval? {
+        guard let generatedAt = restoreDiagnostics?.snapshotGeneratedAt else { return nil }
+        return max(0, checkedAt.timeIntervalSince(generatedAt))
+    }
+
+    private nonisolated static func canonicalUploadSuccessMetric(
+        _ diagnostics: SessionSnapshotUploadDiagnostics?
+    ) -> String {
+        guard let diagnostics else { return "not_available" }
+        return "attempted=\(diagnostics.attemptedCount) success=\(diagnostics.successCount) failure=\(diagnostics.failureCount)"
+    }
+
+    private nonisolated static func canonicalSourceRecommendation(
+        readState: CanonicalReadState,
+        conflictState: CanonicalConflictState,
+        hydrationConfidence: String,
+        mediaRecoveryConfidence: String
+    ) -> (recommendation: String, reason: String) {
+        switch readState {
+        case .remoteCandidate:
+            return (
+                "local_preferred_remote_candidate",
+                "Remote snapshot and parent verification are strong enough for allowlisted canonical-read candidate diagnostics, but reads remain local-first."
+            )
+        case .localPreferredRemoteVerified:
+            return (
+                "local_preferred_remote_verified",
+                "Remote data is useful for comparison and recovery planning, while local/iCloud remains the operational source."
+            )
+        case .recoveryMode:
+            return (
+                "local_with_recovery_assist",
+                "Recovery prerequisites are incomplete: hydration=\(hydrationConfidence) media=\(mediaRecoveryConfidence)."
+            )
+        case .conflictMode:
+            return (
+                "local_until_operator_review",
+                "Conflict state \(conflictState.rawValue) blocks canonical transition."
+            )
+        case .remoteCanonical:
+            return (
+                "remote_canonical_future_only",
+                "Reserved for a later rollout phase; Phase 2C-26E never enables remote canonical reads."
+            )
+        case .localOnly:
+            return (
+                "local_only",
+                "Remote snapshot readiness is not verified enough to recommend a canonical-read candidate."
+            )
+        }
+    }
+
+    private nonisolated static func canonicalRecoveryFallbackState(
+        readState: CanonicalReadState,
+        conflictState: CanonicalConflictState,
+        mediaRecoveryConfidence: String
+    ) -> String {
+        if conflictState != .none && conflictState != .notChecked {
+            return "operator_review_required_before_recovery"
+        }
+        if mediaRecoveryConfidence == "recoverable" {
+            return "snapshot_metadata_plus_guarded_media_recovery_available"
+        }
+        if readState == .localOnly {
+            return "local_icloud_backup_primary"
+        }
+        return "snapshot_metadata_recovery_only"
     }
 
     nonisolated static func makeCanonicalReadinessReport(
