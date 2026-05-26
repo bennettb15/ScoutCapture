@@ -913,4 +913,201 @@ final class Phase2C26OCanonicalCandidateConsumptionTests: XCTestCase {
         XCTAssertTrue(text.contains("- production-wide disabled confirmation: true"))
         XCTAssertTrue(text.contains("does not enable production canonical reads"))
     }
+
+    func testProductionCohortOperatorApprovalDefaultNotRequested() {
+        let controlPlane = AppState.makeProductionCohortControlPlaneDiagnostics(
+            AppState.SessionSnapshotUploadDiagnostics()
+        )
+
+        let approval = AppState.makeProductionCohortOperatorApprovalDiagnostics(controlPlane)
+
+        XCTAssertEqual(approval.state, .notRequested)
+        XCTAssertFalse(approval.approvalEligible)
+        XCTAssertTrue(approval.approvalBlockedReason?.contains("org_id_required") == true)
+        XCTAssertTrue(approval.approvalBlockedReason?.contains("property_id_required") == true)
+    }
+
+    func testProductionCohortOperatorApprovalMissingAllowlistBlocksApproval() {
+        let upload = rolloutReadinessDiagnostics(
+            configuration: AppState.CanonicalReadCandidateConfiguration(
+                enabled: true,
+                orgAllowlist: [],
+                propertyAllowlist: [],
+                sessionAllowlist: [],
+                parityCompletenessThreshold: 0.95,
+                mediaRecoveryConfidenceThreshold: 0.95
+            )
+        )
+        let controlPlane = AppState.makeProductionCohortControlPlaneDiagnostics(
+            upload,
+            orgID: orgID
+        )
+
+        let approval = AppState.makeProductionCohortOperatorApprovalDiagnostics(controlPlane)
+
+        XCTAssertFalse(approval.approvalEligible)
+        XCTAssertTrue(approval.approvalBlockedReason?.contains("allowlist_incomplete") == true)
+    }
+
+    func testProductionCohortOperatorApprovalMissingRollbackBlocksApproval() {
+        let upload = rolloutReadinessDiagnostics(rollbackAvailable: false)
+        let controlPlane = AppState.makeProductionCohortControlPlaneDiagnostics(
+            upload,
+            orgID: orgID
+        )
+
+        let approval = AppState.makeProductionCohortOperatorApprovalDiagnostics(controlPlane)
+
+        XCTAssertFalse(approval.approvalEligible)
+        XCTAssertTrue(approval.approvalBlockedReason?.contains("rollback_not_validated") == true)
+    }
+
+    func testProductionCohortOperatorApprovalUnresolvedBlockersBlockApproval() {
+        let upload = rolloutReadinessDiagnostics(
+            diagnostics: diagnostics(
+                result: .divergentConflict,
+                recommendation: "local_first_block_canonical_read",
+                localShotCount: 5,
+                remoteShotCount: 1,
+                localIssueObservationCount: 2,
+                remoteIssueObservationCount: 0,
+                countParity: false
+            )
+        )
+        let controlPlane = AppState.makeProductionCohortControlPlaneDiagnostics(
+            upload,
+            orgID: orgID
+        )
+
+        let approval = AppState.makeProductionCohortOperatorApprovalDiagnostics(controlPlane)
+
+        XCTAssertFalse(approval.approvalEligible)
+        XCTAssertTrue(approval.approvalBlockedReason?.contains("unresolved_missing_remote_children") == true)
+    }
+
+    func testProductionCohortOperatorApprovalPositiveEvidenceCanEnterPendingReview() {
+        let upload = rolloutReadinessDiagnostics()
+        let controlPlane = AppState.makeProductionCohortControlPlaneDiagnostics(
+            upload,
+            orgID: orgID
+        )
+
+        let result = AppState.requestProductionCohortOperatorReview(
+            controlPlane,
+            requestedAt: Date(timeIntervalSinceReferenceDate: 7_000)
+        )
+
+        XCTAssertEqual(result.action, .requestOperatorReview)
+        XCTAssertEqual(result.diagnostics.state, .pendingReview)
+        XCTAssertTrue(result.diagnostics.approvalEligible)
+        XCTAssertNil(result.diagnostics.approvalBlockedReason)
+        XCTAssertTrue(result.noBehaviorChangedText.contains("diagnostic approval state only"))
+    }
+
+    func testProductionCohortOperatorApprovalRecordsSelectedScopeOnly() {
+        let upload = rolloutReadinessDiagnostics()
+        let controlPlane = AppState.makeProductionCohortControlPlaneDiagnostics(
+            upload,
+            orgID: orgID,
+            policy: cohortPolicy(
+                requestedStage: .singleSessionActivation,
+                approvalState: .approved
+            )
+        )
+        let approvedAt = Date(timeIntervalSinceReferenceDate: 7_100)
+        let expiresAt = Date(timeIntervalSinceReferenceDate: 7_200)
+
+        let result = AppState.approveProductionCohortReadiness(
+            controlPlane,
+            approvedAt: approvedAt,
+            expiresAt: expiresAt
+        )
+
+        XCTAssertEqual(result.action, .approveProductionCohortReadiness)
+        XCTAssertEqual(result.diagnostics.state, .approved)
+        XCTAssertEqual(result.diagnostics.approvedScope.orgID, orgID)
+        XCTAssertEqual(result.diagnostics.approvedScope.propertyID, propertyID)
+        XCTAssertEqual(result.diagnostics.approvedScope.sessionID, sessionID)
+        XCTAssertEqual(result.diagnostics.approvalTimestamp, approvedAt)
+        XCTAssertEqual(result.diagnostics.expirationTimestamp, expiresAt)
+        XCTAssertFalse(result.diagnostics.staleApproval)
+    }
+
+    func testProductionCohortOperatorApprovalRejectedBlocksReadiness() {
+        let upload = rolloutReadinessDiagnostics()
+        let controlPlane = AppState.makeProductionCohortControlPlaneDiagnostics(
+            upload,
+            orgID: orgID
+        )
+
+        let result = AppState.rejectProductionCohortReadiness(
+            controlPlane,
+            rejectedAt: Date(timeIntervalSinceReferenceDate: 7_300)
+        )
+
+        XCTAssertEqual(result.action, .rejectProductionCohortReadiness)
+        XCTAssertEqual(result.diagnostics.state, .rejected)
+        XCTAssertFalse(result.diagnostics.approvalEligible)
+        XCTAssertTrue(result.diagnostics.approvalBlockedReason?.contains("operator_rejected") == true)
+    }
+
+    func testProductionCohortOperatorApprovalExpiredOrStaleBlocksReadiness() {
+        let upload = rolloutReadinessDiagnostics()
+        let controlPlane = AppState.makeProductionCohortControlPlaneDiagnostics(
+            upload,
+            orgID: orgID
+        )
+        let approvedAt = Date(timeIntervalSinceReferenceDate: 7_400)
+        let expiredAt = Date(timeIntervalSinceReferenceDate: 7_500)
+        let checkedAt = Date(timeIntervalSinceReferenceDate: 7_600)
+
+        let approval = AppState.makeProductionCohortOperatorApprovalDiagnostics(
+            controlPlane,
+            requestedState: .approved,
+            approvalTimestamp: approvedAt,
+            expirationTimestamp: expiredAt,
+            checkedAt: checkedAt
+        )
+
+        XCTAssertEqual(approval.state, .expired)
+        XCTAssertTrue(approval.staleApproval)
+        XCTAssertFalse(approval.approvalEligible)
+        XCTAssertTrue(approval.approvalBlockedReason?.contains("operator_approval_expired") == true)
+    }
+
+    func testProductionCohortOperatorApprovalReportIncludesLocalHealthFields() {
+        let upload = rolloutReadinessDiagnostics()
+        let controlPlane = AppState.makeProductionCohortControlPlaneDiagnostics(
+            upload,
+            orgID: orgID
+        )
+        let approval = AppState.requestProductionCohortOperatorReview(controlPlane).diagnostics
+
+        let report = AppState.productionCohortOperatorApprovalReportText(approval)
+        let rolloutReport = AppState.canonicalReadRolloutReportText(upload)
+
+        XCTAssertTrue(report.contains("Production Cohort Operator Approval"))
+        XCTAssertTrue(report.contains("- operator_approval_state: pending_review"))
+        XCTAssertTrue(report.contains("- approval_eligibility: true"))
+        XCTAssertTrue(report.contains("- approved_org_id: \(orgID.uuidString)"))
+        XCTAssertTrue(report.contains("- approval_freshness: fresh_or_not_started"))
+        XCTAssertTrue(report.contains("- manual_actions: Request Operator Review, Approve Production Cohort Readiness, Reject Production Cohort Readiness"))
+        XCTAssertTrue(rolloutReport.contains("Operator Approval Rows"))
+        XCTAssertTrue(rolloutReport.contains("- operator approval state: not_requested"))
+    }
+
+    func testProductionCohortOperatorApprovalDoesNotChangeProductionCanonicalReadBehavior() {
+        let upload = rolloutReadinessDiagnostics()
+        let controlPlane = AppState.makeProductionCohortControlPlaneDiagnostics(
+            upload,
+            orgID: orgID
+        )
+
+        let result = AppState.approveProductionCohortReadiness(controlPlane)
+
+        XCTAssertTrue(result.diagnostics.noBehaviorChangedText.contains("does not enable production canonical reads"))
+        XCTAssertTrue(result.diagnostics.noBehaviorChangedText.contains("activate production candidates"))
+        XCTAssertTrue(result.diagnostics.noBehaviorChangedText.contains("switch global canonical reads"))
+        XCTAssertTrue(result.diagnostics.noBehaviorChangedText.contains("remove local/iCloud fallback"))
+    }
 }

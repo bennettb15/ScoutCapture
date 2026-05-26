@@ -2479,6 +2479,45 @@ final class AppState: ObservableObject {
         let noBehaviorChangedText: String
     }
 
+    enum ProductionCohortOperatorAction: String, CaseIterable, Equatable {
+        case requestOperatorReview = "Request Operator Review"
+        case approveProductionCohortReadiness = "Approve Production Cohort Readiness"
+        case rejectProductionCohortReadiness = "Reject Production Cohort Readiness"
+    }
+
+    struct ProductionCohortApprovalScope: Equatable {
+        let orgID: UUID?
+        let propertyID: UUID?
+        let sessionID: UUID?
+
+        nonisolated var description: String {
+            [
+                "org=\(orgID?.uuidString ?? "none")",
+                "property=\(propertyID?.uuidString ?? "none")",
+                "session=\(sessionID?.uuidString ?? "none")"
+            ].joined(separator: " ")
+        }
+    }
+
+    struct ProductionCohortOperatorApprovalDiagnostics: Equatable {
+        let state: ProductionCohortOperatorApprovalState
+        let approvalEligible: Bool
+        let approvalBlockedReason: String?
+        let approvedScope: ProductionCohortApprovalScope
+        let approvalTimestamp: Date?
+        let expirationTimestamp: Date?
+        let staleApproval: Bool
+        let nextRecommendedAction: String
+        let allowedManualActions: [ProductionCohortOperatorAction]
+        let noBehaviorChangedText: String
+    }
+
+    struct ProductionCohortOperatorActionResult: Equatable {
+        let action: ProductionCohortOperatorAction
+        let diagnostics: ProductionCohortOperatorApprovalDiagnostics
+        let noBehaviorChangedText: String
+    }
+
     struct CanonicalTransitionPolicyDiagnostics: Equatable {
         let checkedAt: Date
         let readState: CanonicalReadState
@@ -16989,6 +17028,7 @@ final class AppState: ObservableObject {
         let readiness = makeCanonicalRolloutReadinessDiagnostics(diagnostics)
         let productionReadiness = makeProductionAllowlistReadinessDiagnostics(diagnostics)
         let cohortControlPlane = makeProductionCohortControlPlaneDiagnostics(diagnostics)
+        let cohortApproval = makeProductionCohortOperatorApprovalDiagnostics(cohortControlPlane)
         var lines: [String] = []
         lines.append("ScoutCapture Local Health - Canonical Read Rollout Report")
         lines.append("Operator validation report. This report is diagnostic-only: it does not switch canonical reads, enable production canonical reads, change candidate gating, build or activate overlays, mutate local/remote data, change export, seal, sync, media, or iCloud behavior, loosen RLS, or delete data.")
@@ -17032,6 +17072,14 @@ final class AppState: ObservableObject {
         lines.append("- cohort blockers: \(cohortControlPlane.blockers.isEmpty ? "none" : cohortControlPlane.blockers.joined(separator: ", "))")
         lines.append("- recommended next action: \(cohortControlPlane.recommendedNextAction)")
         lines.append("- production-wide disabled confirmation: \(cohortControlPlane.eligibility.productionWideDisabled)")
+        lines.append("")
+        lines.append("Operator Approval Rows")
+        lines.append("- operator approval state: \(cohortApproval.state.rawValue)")
+        lines.append("- approval eligibility: \(cohortApproval.approvalEligible)")
+        lines.append("- approval blockers: \(diagnosticsPreviewText(cohortApproval.approvalBlockedReason, maxLength: 220) ?? "none")")
+        lines.append("- approved org/property/session: \(cohortApproval.approvedScope.description)")
+        lines.append("- approval freshness: \(cohortApproval.staleApproval ? "stale" : "fresh_or_not_started")")
+        lines.append("- next recommended action: \(cohortApproval.nextRecommendedAction)")
         lines.append("")
         lines.append(productionCohortControlPlaneReportText(cohortControlPlane))
         lines.append("")
@@ -20194,6 +20242,7 @@ final class AppState: ObservableObject {
     nonisolated static func productionCohortControlPlaneReportText(
         _ diagnostics: ProductionCohortControlPlaneDiagnostics
     ) -> String {
+        let approval = makeProductionCohortOperatorApprovalDiagnostics(diagnostics)
         var lines: [String] = []
         lines.append("Production Cohort Control Plane")
         lines.append("- org_id: \(diagnostics.cohort.orgID?.uuidString ?? "none")")
@@ -20214,8 +20263,186 @@ final class AppState: ObservableObject {
         lines.append("- activation_rollback_verified: \(diagnostics.eligibility.activationRollbackVerified)")
         lines.append("- production_wide_disabled: \(diagnostics.eligibility.productionWideDisabled)")
         lines.append("- unresolved_blockers: \(diagnostics.eligibility.unresolvedBlockers.isEmpty ? "none" : diagnostics.eligibility.unresolvedBlockers.joined(separator: ", "))")
+        lines.append("")
+        lines.append(productionCohortOperatorApprovalReportText(approval))
         lines.append(diagnostics.noBehaviorChangedText)
         return lines.joined(separator: "\n")
+    }
+
+    nonisolated static func makeProductionCohortOperatorApprovalDiagnostics(
+        _ controlPlane: ProductionCohortControlPlaneDiagnostics,
+        requestedState: ProductionCohortOperatorApprovalState? = nil,
+        approvalTimestamp: Date? = nil,
+        expirationTimestamp: Date? = nil,
+        checkedAt: Date = Date()
+    ) -> ProductionCohortOperatorApprovalDiagnostics {
+        let staleApproval = expirationTimestamp.map { $0 <= checkedAt } ?? false
+        let state = staleApproval && (requestedState ?? controlPlane.cohort.operatorApprovalState) == .approved
+            ? ProductionCohortOperatorApprovalState.expired
+            : (requestedState ?? controlPlane.cohort.operatorApprovalState)
+
+        var blockers: [String] = []
+        if controlPlane.cohort.orgID == nil {
+            blockers.append("org_id_required")
+        }
+        if controlPlane.cohort.propertyID == nil {
+            blockers.append("property_id_required")
+        }
+        if !controlPlane.eligibility.allowlistComplete {
+            blockers.append("allowlist_incomplete")
+        }
+        if !controlPlane.eligibility.parityVerified {
+            blockers.append("parity_not_verified")
+        }
+        if !controlPlane.eligibility.replayBackfillVerified {
+            blockers.append("replay_backfill_not_verified")
+        }
+        if !controlPlane.eligibility.overlayVerified {
+            blockers.append("overlay_not_verified")
+        }
+        if !controlPlane.eligibility.activationRollbackVerified {
+            blockers.append("rollback_not_validated")
+        }
+        if !controlPlane.eligibility.productionWideDisabled {
+            blockers.append("production_wide_canonical_reads_not_disabled")
+        }
+        blockers.append(contentsOf: controlPlane.eligibility.unresolvedBlockers.map { "unresolved_\($0)" })
+        if state == .rejected {
+            blockers.append("operator_rejected")
+        }
+        if state == .expired || staleApproval {
+            blockers.append("operator_approval_expired")
+        }
+
+        let dedupedBlockers = Array(Set(blockers)).sorted()
+        let approvalEligible = dedupedBlockers.isEmpty
+        let nextRecommendedAction: String
+        switch state {
+        case .notRequested:
+            nextRecommendedAction = approvalEligible ? "request_operator_review" : "resolve_approval_blockers"
+        case .pendingReview:
+            nextRecommendedAction = approvalEligible ? "operator_review_pending" : "resolve_approval_blockers_before_approval"
+        case .approved:
+            nextRecommendedAction = approvalEligible ? "hold_approved_readiness_diagnostics_only" : "revoke_or_refresh_approval_after_blockers"
+        case .rejected:
+            nextRecommendedAction = "operator_rejected_resolve_before_new_review"
+        case .expired:
+            nextRecommendedAction = "refresh_operator_approval_after_revalidation"
+        }
+
+        let actions: [ProductionCohortOperatorAction]
+        if state == .rejected || state == .expired {
+            actions = [.requestOperatorReview]
+        } else if approvalEligible {
+            actions = [
+                .requestOperatorReview,
+                .approveProductionCohortReadiness,
+                .rejectProductionCohortReadiness
+            ]
+        } else {
+            actions = [.requestOperatorReview]
+        }
+
+        return ProductionCohortOperatorApprovalDiagnostics(
+            state: state,
+            approvalEligible: approvalEligible,
+            approvalBlockedReason: dedupedBlockers.isEmpty ? nil : dedupedBlockers.joined(separator: ", "),
+            approvedScope: ProductionCohortApprovalScope(
+                orgID: controlPlane.cohort.orgID,
+                propertyID: controlPlane.cohort.propertyID,
+                sessionID: controlPlane.cohort.sessionID
+            ),
+            approvalTimestamp: approvalTimestamp,
+            expirationTimestamp: expirationTimestamp,
+            staleApproval: staleApproval,
+            nextRecommendedAction: nextRecommendedAction,
+            allowedManualActions: actions,
+            noBehaviorChangedText: "No behavior changed: operator approval workflow updates diagnostic approval state only. It does not enable production canonical reads, activate production candidates, switch global canonical reads, mutate production data, remove local/iCloud fallback, change export, seal, sync, media, or iCloud behavior, loosen RLS, or delete data."
+        )
+    }
+
+    nonisolated static func productionCohortOperatorApprovalReportText(
+        _ diagnostics: ProductionCohortOperatorApprovalDiagnostics
+    ) -> String {
+        var lines: [String] = []
+        lines.append("Production Cohort Operator Approval")
+        lines.append("- operator_approval_state: \(diagnostics.state.rawValue)")
+        lines.append("- approval_eligibility: \(diagnostics.approvalEligible)")
+        lines.append("- approval_blockers: \(diagnosticsPreviewText(diagnostics.approvalBlockedReason, maxLength: 220) ?? "none")")
+        lines.append("- approved_org_id: \(diagnostics.approvedScope.orgID?.uuidString ?? "none")")
+        lines.append("- approved_property_id: \(diagnostics.approvedScope.propertyID?.uuidString ?? "none")")
+        lines.append("- approved_session_id: \(diagnostics.approvedScope.sessionID?.uuidString ?? "none")")
+        lines.append("- approved_scope: \(diagnostics.approvedScope.description)")
+        lines.append("- approval_timestamp: \(diagnostics.approvalTimestamp?.formatted(date: .abbreviated, time: .standard) ?? "none")")
+        lines.append("- expiration_timestamp: \(diagnostics.expirationTimestamp?.formatted(date: .abbreviated, time: .standard) ?? "none")")
+        lines.append("- approval_freshness: \(diagnostics.staleApproval ? "stale" : "fresh_or_not_started")")
+        lines.append("- next_recommended_action: \(diagnostics.nextRecommendedAction)")
+        lines.append("- manual_actions: \(diagnostics.allowedManualActions.map(\.rawValue).joined(separator: ", "))")
+        lines.append(diagnostics.noBehaviorChangedText)
+        return lines.joined(separator: "\n")
+    }
+
+    nonisolated static func requestProductionCohortOperatorReview(
+        _ controlPlane: ProductionCohortControlPlaneDiagnostics,
+        requestedAt: Date = Date(),
+        expirationTimestamp: Date? = nil
+    ) -> ProductionCohortOperatorActionResult {
+        let diagnostics = makeProductionCohortOperatorApprovalDiagnostics(
+            controlPlane,
+            requestedState: .pendingReview,
+            approvalTimestamp: nil,
+            expirationTimestamp: expirationTimestamp,
+            checkedAt: requestedAt
+        )
+        return ProductionCohortOperatorActionResult(
+            action: .requestOperatorReview,
+            diagnostics: diagnostics,
+            noBehaviorChangedText: diagnostics.noBehaviorChangedText
+        )
+    }
+
+    nonisolated static func approveProductionCohortReadiness(
+        _ controlPlane: ProductionCohortControlPlaneDiagnostics,
+        approvedAt: Date = Date(),
+        expiresAt: Date? = nil
+    ) -> ProductionCohortOperatorActionResult {
+        let candidate = makeProductionCohortOperatorApprovalDiagnostics(
+            controlPlane,
+            requestedState: .approved,
+            approvalTimestamp: approvedAt,
+            expirationTimestamp: expiresAt,
+            checkedAt: approvedAt
+        )
+        let diagnostics = candidate.approvalEligible ? candidate : makeProductionCohortOperatorApprovalDiagnostics(
+            controlPlane,
+            requestedState: .pendingReview,
+            approvalTimestamp: nil,
+            expirationTimestamp: expiresAt,
+            checkedAt: approvedAt
+        )
+        return ProductionCohortOperatorActionResult(
+            action: .approveProductionCohortReadiness,
+            diagnostics: diagnostics,
+            noBehaviorChangedText: diagnostics.noBehaviorChangedText
+        )
+    }
+
+    nonisolated static func rejectProductionCohortReadiness(
+        _ controlPlane: ProductionCohortControlPlaneDiagnostics,
+        rejectedAt: Date = Date()
+    ) -> ProductionCohortOperatorActionResult {
+        let diagnostics = makeProductionCohortOperatorApprovalDiagnostics(
+            controlPlane,
+            requestedState: .rejected,
+            approvalTimestamp: rejectedAt,
+            expirationTimestamp: nil,
+            checkedAt: rejectedAt
+        )
+        return ProductionCohortOperatorActionResult(
+            action: .rejectProductionCohortReadiness,
+            diagnostics: diagnostics,
+            noBehaviorChangedText: diagnostics.noBehaviorChangedText
+        )
     }
 
     private nonisolated static func canonicalCandidateMediaRecoveryConfidence(
