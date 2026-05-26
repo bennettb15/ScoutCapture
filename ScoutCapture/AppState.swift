@@ -32,6 +32,10 @@ struct SupabaseRuntimeConfiguration {
     static let productionSnapshotValidationProjectRef = "chlvazmtucoszicehtnm"
     static let productionSnapshotValidationEnvKey = "SCOUTCAPTURE_PRODUCTION_SNAPSHOT_VALIDATION_ALLOWED"
     static let productionSnapshotHydrationEnvKey = "SCOUTCAPTURE_PRODUCTION_SNAPSHOT_HYDRATION_ALLOWED"
+    nonisolated static let productionSingleSessionCanonicalActivationEnabledEnvKey = "SCOUTCAPTURE_PRODUCTION_SINGLE_SESSION_CANONICAL_ACTIVATION_ENABLED"
+    nonisolated static let productionSingleSessionCanonicalActivationOrgAllowlistEnvKey = "SCOUTCAPTURE_PRODUCTION_SINGLE_SESSION_CANONICAL_ACTIVATION_ORG_ALLOWLIST"
+    nonisolated static let productionSingleSessionCanonicalActivationPropertyAllowlistEnvKey = "SCOUTCAPTURE_PRODUCTION_SINGLE_SESSION_CANONICAL_ACTIVATION_PROPERTY_ALLOWLIST"
+    nonisolated static let productionSingleSessionCanonicalActivationSessionAllowlistEnvKey = "SCOUTCAPTURE_PRODUCTION_SINGLE_SESSION_CANONICAL_ACTIVATION_SESSION_ALLOWLIST"
     nonisolated static let canonicalReadCandidateEnabledEnvKey = "SCOUTCAPTURE_CANONICAL_READ_CANDIDATE_ENABLED"
     nonisolated static let canonicalReadCandidateOrgAllowlistEnvKey = "SCOUTCAPTURE_CANONICAL_READ_CANDIDATE_ORG_ALLOWLIST"
     nonisolated static let canonicalReadCandidatePropertyAllowlistEnvKey = "SCOUTCAPTURE_CANONICAL_READ_CANDIDATE_PROPERTY_ALLOWLIST"
@@ -2545,6 +2549,38 @@ final class AppState: ObservableObject {
         let productionWideDisabledConfirmation: Bool
         let localHealthAction: String
         let noChangesPerformedText: String
+    }
+
+    struct ProductionSingleSessionActivationGatePolicy: Equatable {
+        let productionSingleSessionCanonicalActivationEnabled: Bool
+        let orgAllowlist: Set<UUID>
+        let propertyAllowlist: Set<UUID>
+        let sessionAllowlist: Set<UUID>
+        let parityConfidenceThreshold: Double
+        let replayConfidenceThreshold: Double
+
+        nonisolated static let disabled = ProductionSingleSessionActivationGatePolicy(
+            productionSingleSessionCanonicalActivationEnabled: false,
+            orgAllowlist: [],
+            propertyAllowlist: [],
+            sessionAllowlist: [],
+            parityConfidenceThreshold: 0.95,
+            replayConfidenceThreshold: 0.95
+        )
+    }
+
+    struct ProductionSingleSessionActivationGateDiagnostics: Equatable {
+        let productionSingleSessionActivationGateEnabled: Bool
+        let gateAllowed: Bool
+        let gateBlockedReason: String?
+        let exactScopeMatch: Bool
+        let operatorApprovalMatch: Bool
+        let preflightPassed: Bool
+        let rollbackPreflightPassed: Bool
+        let productionWideDisabledConfirmed: Bool
+        let selectedScope: ProductionCohortApprovalScope
+        let approvedScope: ProductionCohortApprovalScope
+        let noBehaviorChangedText: String
     }
 
     struct CanonicalTransitionPolicyDiagnostics: Equatable {
@@ -6107,6 +6143,31 @@ final class AppState: ObservableObject {
             ),
             parityCompletenessThreshold: 0.95,
             mediaRecoveryConfidenceThreshold: 0.95
+        )
+    }
+
+    nonisolated static func loadProductionSingleSessionActivationGatePolicy(
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) -> ProductionSingleSessionActivationGatePolicy {
+        ProductionSingleSessionActivationGatePolicy(
+            productionSingleSessionCanonicalActivationEnabled: boolEnvironmentValue(
+                for: SupabaseRuntimeConfiguration.productionSingleSessionCanonicalActivationEnabledEnvKey,
+                environment: environment
+            ),
+            orgAllowlist: uuidAllowlist(
+                defaultsValue: nil,
+                environmentValue: environment[SupabaseRuntimeConfiguration.productionSingleSessionCanonicalActivationOrgAllowlistEnvKey]
+            ),
+            propertyAllowlist: uuidAllowlist(
+                defaultsValue: nil,
+                environmentValue: environment[SupabaseRuntimeConfiguration.productionSingleSessionCanonicalActivationPropertyAllowlistEnvKey]
+            ),
+            sessionAllowlist: uuidAllowlist(
+                defaultsValue: nil,
+                environmentValue: environment[SupabaseRuntimeConfiguration.productionSingleSessionCanonicalActivationSessionAllowlistEnvKey]
+            ),
+            parityConfidenceThreshold: 0.95,
+            replayConfidenceThreshold: 0.95
         )
     }
 
@@ -17058,6 +17119,12 @@ final class AppState: ObservableObject {
         let productionReadiness = makeProductionAllowlistReadinessDiagnostics(diagnostics)
         let cohortControlPlane = makeProductionCohortControlPlaneDiagnostics(diagnostics)
         let cohortApproval = makeProductionCohortOperatorApprovalDiagnostics(cohortControlPlane)
+        let singleSessionGate = makeProductionSingleSessionActivationGateDiagnostics(
+            policy: .disabled,
+            approval: nil,
+            targetClassification: .approvedProductionValidation,
+            diagnostics: diagnostics
+        )
         var lines: [String] = []
         lines.append("ScoutCapture Local Health - Canonical Read Rollout Report")
         lines.append("Operator validation report. This report is diagnostic-only: it does not switch canonical reads, enable production canonical reads, change candidate gating, build or activate overlays, mutate local/remote data, change export, seal, sync, media, or iCloud behavior, loosen RLS, or delete data.")
@@ -17109,6 +17176,17 @@ final class AppState: ObservableObject {
         lines.append("- approved org/property/session: \(cohortApproval.approvedScope.description)")
         lines.append("- approval freshness: \(cohortApproval.staleApproval ? "stale" : "fresh_or_not_started")")
         lines.append("- next recommended action: \(cohortApproval.nextRecommendedAction)")
+        lines.append("")
+        lines.append("Production Single-Session Activation Gate Rows")
+        lines.append("- production single-session activation gate enabled: \(singleSessionGate.productionSingleSessionActivationGateEnabled)")
+        lines.append("- gate blocked reason: \(diagnosticsPreviewText(singleSessionGate.gateBlockedReason, maxLength: 220) ?? "none")")
+        lines.append("- exact scope match: \(singleSessionGate.exactScopeMatch)")
+        lines.append("- operator approval match: \(singleSessionGate.operatorApprovalMatch)")
+        lines.append("- preflight passed: \(singleSessionGate.preflightPassed)")
+        lines.append("- rollback preflight passed: \(singleSessionGate.rollbackPreflightPassed)")
+        lines.append("- production-wide disabled confirmed: \(singleSessionGate.productionWideDisabledConfirmed)")
+        lines.append("")
+        lines.append(productionSingleSessionActivationGateReportText(singleSessionGate))
         lines.append("")
         let dryRun = generateProductionRolloutDryRun(diagnostics)
         lines.append("Production Rollout Dry Run Rows")
@@ -19304,6 +19382,160 @@ final class AppState: ObservableObject {
         )
     }
 
+    nonisolated static func makeProductionSingleSessionActivationGateDiagnostics(
+        checkedAt: Date = Date(),
+        policy: ProductionSingleSessionActivationGatePolicy = .disabled,
+        approval: ProductionCohortOperatorApprovalDiagnostics? = nil,
+        targetClassification: SupabaseRuntimeConfiguration.TargetClassification,
+        diagnostics: SessionSnapshotUploadDiagnostics
+    ) -> ProductionSingleSessionActivationGateDiagnostics {
+        let orgID = approval?.approvedScope.orgID
+        let propertyID = diagnostics.lastCanonicalCandidateOverlayPropertyID ?? diagnostics.lastCanonicalReadDiagnosticsPropertyID
+        let sessionID = diagnostics.lastCanonicalCandidateOverlaySessionID ?? diagnostics.lastCanonicalReadDiagnosticsSessionID
+        let selectedScope = ProductionCohortApprovalScope(
+            orgID: orgID,
+            propertyID: propertyID,
+            sessionID: sessionID
+        )
+        let approvedScope = approval?.approvedScope ?? ProductionCohortApprovalScope(
+            orgID: nil,
+            propertyID: nil,
+            sessionID: nil
+        )
+
+        let exactScopeMatch = orgID.map { policy.orgAllowlist == Set([$0]) } ?? false &&
+            propertyID.map { policy.propertyAllowlist == Set([$0]) } ?? false &&
+            sessionID.map { policy.sessionAllowlist == Set([$0]) } ?? false
+        let approvalFresh = approval.map { !$0.staleApproval && $0.state == .approved } ?? false
+        let operatorApprovalMatch = approvalFresh &&
+            approval?.approvedScope.orgID == orgID &&
+            approval?.approvedScope.propertyID == propertyID &&
+            approval?.approvedScope.sessionID == sessionID
+        let productionWideDisabledConfirmed = !diagnostics.lastCanonicalReadCandidateProductionWideEnabled
+        let candidateEvidencePasses = diagnostics.lastCanonicalReadDiagnosticsResult == CanonicalReadDiagnosticResult.remoteMatchesLocal.rawValue ||
+            diagnostics.lastCanonicalReadDiagnosticsRecommendation == "remote_candidate_after_replay_validation"
+        let noParentMismatch = diagnostics.lastCanonicalReadDiagnosticsParentOrgConsistent == true &&
+            diagnostics.lastCanonicalReadDiagnosticsParentPropertyConsistent == true
+        let noMissingChildren = diagnostics.lastMissingChildCount == 0 &&
+            !diagnostics.lastNormalizedParityGapTaxonomy.contains("missing_remote_children")
+        let noRemoteNewerConflict = diagnostics.lastCanonicalReadDiagnosticsResult != CanonicalReadDiagnosticResult.remoteNewerCandidate.rawValue &&
+            diagnostics.lastNormalizedBackfillRemoteNewerConflictCount == 0
+        let candidateDiagnosticsPass = diagnostics.lastCanonicalReadCandidateFlagEnabled &&
+            diagnostics.lastCanonicalReadCandidateOrgAllowlisted &&
+            diagnostics.lastCanonicalReadCandidatePropertyAllowlisted &&
+            diagnostics.lastCanonicalReadCandidateSessionAllowlisted &&
+            diagnostics.lastCanonicalReadCandidateParityConfidence >= policy.parityConfidenceThreshold &&
+            diagnostics.lastCanonicalReadCandidateReplayConfidence >= policy.replayConfidenceThreshold &&
+            diagnostics.lastCanonicalReadCandidateLocalFallbackAvailable &&
+            candidateEvidencePasses &&
+            noParentMismatch &&
+            noMissingChildren &&
+            noRemoteNewerConflict
+        let overlayVerified = diagnostics.lastCanonicalCandidateOverlayBuilt &&
+            diagnostics.lastCanonicalCandidateOverlayAllowed
+        let comparisonVerified = diagnostics.lastCanonicalCandidateOverlayComparisonResult == CanonicalCandidateOverlayComparisonResult.candidateMatchesLocal.rawValue
+        let activationReadinessPass = diagnostics.lastCanonicalCandidateActivationAllowed ||
+            (
+                overlayVerified &&
+                comparisonVerified &&
+                diagnostics.lastCanonicalCandidateOverlayRollbackAvailable &&
+                diagnostics.lastCanonicalReadCandidateLocalFallbackAvailable &&
+                noParentMismatch &&
+                noMissingChildren &&
+                noRemoteNewerConflict
+            )
+        let rollbackPreflightPassed = diagnostics.lastCanonicalCandidateOverlayRollbackAvailable &&
+            diagnostics.lastCanonicalCandidateActivationRollbackAvailable &&
+            diagnostics.lastCanonicalReadCandidateLocalFallbackAvailable
+        let preflightPassed = productionWideDisabledConfirmed &&
+            candidateDiagnosticsPass &&
+            overlayVerified &&
+            comparisonVerified &&
+            activationReadinessPass &&
+            rollbackPreflightPassed
+
+        var blockers: [String] = []
+        if targetClassification != .approvedProductionValidation {
+            blockers.append("target_not_production_validation")
+        }
+        if !policy.productionSingleSessionCanonicalActivationEnabled {
+            blockers.append("production_single_session_canonical_activation_disabled")
+        }
+        if !exactScopeMatch {
+            blockers.append("exact_scope_match_required")
+        }
+        if !operatorApprovalMatch {
+            blockers.append("operator_approval_exact_scope_required")
+        }
+        if approval?.state == .expired || approval?.staleApproval == true {
+            blockers.append("operator_approval_expired")
+        }
+        if approval == nil {
+            blockers.append("operator_approval_missing")
+        }
+        if !productionWideDisabledConfirmed {
+            blockers.append("production_wide_canonical_reads_not_disabled")
+        }
+        if !candidateDiagnosticsPass {
+            blockers.append("candidate_diagnostics_not_passed")
+        }
+        if !overlayVerified {
+            blockers.append("overlay_not_verified")
+        }
+        if !comparisonVerified {
+            blockers.append("comparison_not_candidate_matches_local")
+        }
+        if !activationReadinessPass {
+            blockers.append("activation_readiness_not_passed")
+        }
+        if !rollbackPreflightPassed {
+            blockers.append("rollback_preflight_not_passed")
+        }
+        if !noParentMismatch {
+            blockers.append("parent_org_or_property_divergence")
+        }
+        if !noMissingChildren {
+            blockers.append("missing_remote_children")
+        }
+        if !noRemoteNewerConflict {
+            blockers.append("remote_newer_conflict")
+        }
+
+        let dedupedBlockers = Array(Set(blockers)).sorted()
+        return ProductionSingleSessionActivationGateDiagnostics(
+            productionSingleSessionActivationGateEnabled: policy.productionSingleSessionCanonicalActivationEnabled,
+            gateAllowed: dedupedBlockers.isEmpty,
+            gateBlockedReason: dedupedBlockers.isEmpty ? nil : dedupedBlockers.joined(separator: ", "),
+            exactScopeMatch: exactScopeMatch,
+            operatorApprovalMatch: operatorApprovalMatch,
+            preflightPassed: preflightPassed,
+            rollbackPreflightPassed: rollbackPreflightPassed,
+            productionWideDisabledConfirmed: productionWideDisabledConfirmed,
+            selectedScope: selectedScope,
+            approvedScope: approvedScope,
+            noBehaviorChangedText: "No behavior changed: production single-session activation gate is default-off readiness gating only. It does not activate production sessions, enable production-wide canonical reads, enable cohort activation, mutate production data, remove local/iCloud fallback, change export, seal, sync, media, or iCloud behavior, loosen RLS, or delete data."
+        )
+    }
+
+    nonisolated static func productionSingleSessionActivationGateReportText(
+        _ diagnostics: ProductionSingleSessionActivationGateDiagnostics
+    ) -> String {
+        var lines: [String] = []
+        lines.append("Production Single-Session Activation Gate")
+        lines.append("- production_single_session_activation_gate_enabled: \(diagnostics.productionSingleSessionActivationGateEnabled)")
+        lines.append("- gate_allowed: \(diagnostics.gateAllowed)")
+        lines.append("- gate_blocked_reason: \(diagnosticsPreviewText(diagnostics.gateBlockedReason, maxLength: 220) ?? "none")")
+        lines.append("- exact_scope_match: \(diagnostics.exactScopeMatch)")
+        lines.append("- operator_approval_match: \(diagnostics.operatorApprovalMatch)")
+        lines.append("- preflight_passed: \(diagnostics.preflightPassed)")
+        lines.append("- rollback_preflight_passed: \(diagnostics.rollbackPreflightPassed)")
+        lines.append("- production_wide_disabled_confirmed: \(diagnostics.productionWideDisabledConfirmed)")
+        lines.append("- selected_scope: \(diagnostics.selectedScope.description)")
+        lines.append("- approved_scope: \(diagnostics.approvedScope.description)")
+        lines.append(diagnostics.noBehaviorChangedText)
+        return lines.joined(separator: "\n")
+    }
+
     nonisolated static func makeCanonicalReadCandidateDiagnostics(
         checkedAt: Date = Date(),
         configuration: CanonicalReadCandidateConfiguration,
@@ -19311,7 +19543,8 @@ final class AppState: ObservableObject {
         canonicalDiagnostics: CanonicalReadDiagnosticsResult,
         parityReport: NormalizedParityGapReport,
         replayValidation: NormalizedBackfillReplayValidationResult? = nil,
-        mediaRecoveryConfidence: Double = 1
+        mediaRecoveryConfidence: Double = 1,
+        productionActivationGate: ProductionSingleSessionActivationGateDiagnostics? = nil
     ) -> CanonicalReadCandidateDiagnostics {
         let orgAllowlisted = canonicalDiagnostics.activeOrganizationID.map { configuration.orgAllowlist.contains($0) } ?? false
         let propertyAllowlisted = canonicalDiagnostics.propertyID.map { configuration.propertyAllowlist.contains($0) } ?? false
@@ -19339,7 +19572,9 @@ final class AppState: ObservableObject {
         case .localDev, .approvedStaging:
             break
         case .approvedProductionValidation:
-            blockers.append("production_canonical_read_candidate_requires_separate_explicit_approval")
+            if productionActivationGate?.gateAllowed != true {
+                blockers.append("production_canonical_read_candidate_requires_separate_explicit_approval")
+            }
         case .remote:
             blockers.append("random_remote_canonical_read_candidate_blocked")
         case .missing, .invalid:
@@ -19443,14 +19678,17 @@ final class AppState: ObservableObject {
         targetClassification: SupabaseRuntimeConfiguration.TargetClassification,
         canonicalDiagnostics: CanonicalReadDiagnosticsResult,
         parityReport: NormalizedParityGapReport,
-        candidateDiagnostics: CanonicalReadCandidateDiagnostics
+        candidateDiagnostics: CanonicalReadCandidateDiagnostics,
+        productionActivationGate: ProductionSingleSessionActivationGateDiagnostics? = nil
     ) -> CanonicalCandidateOverlayBuildResult {
         var blockers: [String] = []
         switch targetClassification {
         case .localDev, .approvedStaging:
             break
         case .approvedProductionValidation:
-            blockers.append("production_canonical_candidate_overlay_blocked")
+            if productionActivationGate?.gateAllowed != true {
+                blockers.append("production_canonical_candidate_overlay_blocked")
+            }
         case .remote:
             blockers.append("random_remote_canonical_candidate_overlay_blocked")
         case .missing, .invalid:
@@ -19660,14 +19898,17 @@ final class AppState: ObservableObject {
     nonisolated static func makeCanonicalCandidateActivationResult(
         checkedAt: Date = Date(),
         targetClassification: SupabaseRuntimeConfiguration.TargetClassification,
-        diagnostics: SessionSnapshotUploadDiagnostics
+        diagnostics: SessionSnapshotUploadDiagnostics,
+        productionActivationGate: ProductionSingleSessionActivationGateDiagnostics? = nil
     ) -> CanonicalCandidateActivationResult {
         var blockers: [String] = []
         switch targetClassification {
         case .localDev, .approvedStaging:
             break
         case .approvedProductionValidation:
-            blockers.append("production_canonical_candidate_activation_blocked")
+            if productionActivationGate?.gateAllowed != true {
+                blockers.append("production_canonical_candidate_activation_blocked")
+            }
         case .remote:
             blockers.append("random_remote_canonical_candidate_activation_blocked")
         case .missing, .invalid:
