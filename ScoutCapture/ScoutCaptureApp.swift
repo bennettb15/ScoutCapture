@@ -8692,6 +8692,10 @@ private struct DebugSessionSnapshotUploadDiagnosticsView: View {
         AppState.sessionSnapshotUploadReportText(diagnostics)
     }
 
+    private var canonicalReadRolloutReportText: String {
+        AppState.canonicalReadRolloutReportText(diagnostics)
+    }
+
     private var uploadAvailability: (isAvailable: Bool, reason: String) {
         appState.manualSessionSnapshotUploadAvailability
     }
@@ -8791,6 +8795,16 @@ private struct DebugSessionSnapshotUploadDiagnosticsView: View {
                     DebugSessionSnapshotUploadTextView(snapshotText: reportText)
                 } label: {
                     Text("View Copyable Upload Report")
+                        .font(.system(size: 14, weight: .semibold))
+                }
+                NavigationLink {
+                    DebugSessionSnapshotUploadTextView(
+                        snapshotText: canonicalReadRolloutReportText,
+                        title: "Canonical Read Report",
+                        footerText: "Copies the sanitized canonical-read rollout report as plain text. It keeps full canonical details out of the primary diagnostic rows and does not include raw session.json, local paths, signed URLs, auth material, storage object paths, or media payloads."
+                    )
+                } label: {
+                    Text("View Canonical Read Rollout Report")
                         .font(.system(size: 14, weight: .semibold))
                 }
             }
@@ -9197,7 +9211,8 @@ private struct DebugSessionSnapshotCanonicalReadDiagnosticsSection: View {
     @State private var isRollingBackCanonicalCandidate = false
 
     var body: some View {
-        Section("Canonical Read Diagnostics Test-Only") {
+        Group {
+        Section("Canonical Read - Read Diagnostics") {
             Text("Read-only local-vs-remote normalized row comparison. It does not switch canonical reads, hydrate data, restore files, download media, or change local or remote state.")
                 .font(.system(size: 13, weight: .medium))
                 .foregroundStyle(.secondary)
@@ -9224,14 +9239,17 @@ private struct DebugSessionSnapshotCanonicalReadDiagnosticsSection: View {
             if let blockedReason = AppState.diagnosticsPreviewText(diagnostics.lastCanonicalReadDiagnosticsBlockedReason, maxLength: 160) {
                 diagnosticRow("Blocked Reason", blockedReason)
             }
-            diagnosticRow("Parity Gaps", diagnostics.lastNormalizedParityGapTaxonomy.isEmpty ? "none" : diagnostics.lastNormalizedParityGapTaxonomy.joined(separator: ", "))
+        }
+
+        Section("Canonical Read - Parity / Repair") {
+            diagnosticRow("Parity Gaps", compactListSummary(diagnostics.lastNormalizedParityGapTaxonomy))
             diagnosticRow("Completeness", diagnostics.lastNormalizedParityCompleteness)
             diagnosticRow("Shadow Coverage", diagnostics.lastRemoteShadowWriteCoverage)
             diagnosticRow("Missing Remote", diagnostics.lastMissingRemoteEntityClassification)
             diagnosticRow("Lineage Source", diagnostics.lastLineageDivergenceSource)
             diagnosticRow("Repair Tooling", diagnostics.lastParityRepairToolingRecommended ? "recommended" : "not required")
             diagnosticRow("Canonical Blocked", diagnostics.lastCanonicalReadsRemainBlocked ? "true" : "false")
-            diagnosticRow("Repair Strategies", diagnostics.lastParityRepairStrategies.isEmpty ? "none" : diagnostics.lastParityRepairStrategies.joined(separator: ", "))
+            diagnosticRow("Repair Strategies", compactListSummary(diagnostics.lastParityRepairStrategies))
             diagnosticRow("Completeness Score", String(format: "%.2f", diagnostics.lastParityCompletenessScore))
             diagnosticRow("Shadow Score", String(format: "%.2f", diagnostics.lastShadowWriteCoverageScore))
             diagnosticRow("Lineage Confidence", diagnostics.lastLineageConfidence)
@@ -9245,9 +9263,12 @@ private struct DebugSessionSnapshotCanonicalReadDiagnosticsSection: View {
             diagnosticRow("Backfill Skipped", "\(diagnostics.lastNormalizedBackfillSkippedEntityCount)")
             diagnosticRow("Remote Newer Conflicts", "\(diagnostics.lastNormalizedBackfillRemoteNewerConflictCount)")
             diagnosticRow("Production Backfill", diagnostics.lastNormalizedBackfillProductionBlocked ? "blocked" : "not blocked")
+        }
+
+        Section("Canonical Read - Candidate") {
             diagnosticRow("Candidate Flag", diagnostics.lastCanonicalReadCandidateFlagEnabled ? "enabled" : "off")
             diagnosticRow("Candidate Allowed", diagnostics.lastCanonicalReadCandidateAllowed ? "true" : "false")
-            diagnosticRow("Candidate Blocked", diagnostics.lastCanonicalReadCandidateBlockedReason)
+            diagnosticRow("Candidate Blocked", compactValue(diagnostics.lastCanonicalReadCandidateBlockedReason))
             diagnosticRow("Effective Source", diagnostics.lastCanonicalReadCandidateEffectiveSourceRecommendation)
             diagnosticRow("Local Fallback", diagnostics.lastCanonicalReadCandidateLocalFallbackAvailable ? "available" : "missing")
             diagnosticRow("Candidate Parity", String(format: "%.2f", diagnostics.lastCanonicalReadCandidateParityConfidence))
@@ -9256,11 +9277,14 @@ private struct DebugSessionSnapshotCanonicalReadDiagnosticsSection: View {
             diagnosticRow("Candidate Remote State", diagnostics.lastCanonicalReadCandidateRemoteStateReadable ? "readable" : "blocked")
             diagnosticRow("Candidate Scope", diagnostics.lastCanonicalReadCandidateProductionWideEnabled ? "production-wide" : "allowlisted/test-only")
             if !diagnostics.lastCanonicalReadCandidateWarnings.isEmpty {
-                diagnosticRow("Candidate Warnings", diagnostics.lastCanonicalReadCandidateWarnings.joined(separator: ", "))
+                diagnosticRow("Candidate Warnings", compactListSummary(diagnostics.lastCanonicalReadCandidateWarnings))
             }
+        }
+
+        Section("Canonical Read - Overlay") {
             diagnosticRow("Overlay Built", diagnostics.lastCanonicalCandidateOverlayBuilt ? "true" : "false")
             diagnosticRow("Overlay Allowed", diagnostics.lastCanonicalCandidateOverlayAllowed ? "true" : "false")
-            diagnosticRow("Overlay Blocked", diagnostics.lastCanonicalCandidateOverlayBlockedReason)
+            diagnosticRow("Overlay Blocked", compactValue(diagnostics.lastCanonicalCandidateOverlayBlockedReason))
             diagnosticRow("Overlay Source", diagnostics.lastCanonicalCandidateOverlaySource)
             diagnosticRow("Overlay Property", diagnostics.lastCanonicalCandidateOverlayPropertyID?.uuidString ?? "none")
             diagnosticRow("Overlay Session", diagnostics.lastCanonicalCandidateOverlaySessionID?.uuidString ?? "none")
@@ -9270,14 +9294,20 @@ private struct DebugSessionSnapshotCanonicalReadDiagnosticsSection: View {
             diagnosticRow("Active Source", diagnostics.lastCanonicalCandidateOverlayActiveSource)
             diagnosticRow("Rollback/Fallback", diagnostics.lastCanonicalCandidateOverlayRollbackAvailable ? "available" : "missing")
             diagnosticRow("Overlay Production", diagnostics.lastCanonicalCandidateOverlayProductionBlocked ? "blocked" : "not blocked")
+        }
+
+        Section("Canonical Read - Comparison") {
             diagnosticRow("Comparison Result", diagnostics.lastCanonicalCandidateOverlayComparisonResult)
             diagnosticRow("Local Counts", "shots \(diagnostics.lastCanonicalCandidateOverlayComparisonLocalShotCount.map(String.init) ?? "none"), issues \(diagnostics.lastCanonicalCandidateOverlayComparisonLocalIssueObservationCount.map(String.init) ?? "none")")
             diagnosticRow("Candidate Counts", "shots \(diagnostics.lastCanonicalCandidateOverlayComparisonRemoteShotCount.map(String.init) ?? "none"), issues \(diagnostics.lastCanonicalCandidateOverlayComparisonRemoteIssueObservationCount.map(String.init) ?? "none")")
             diagnosticRow("Freshness", "local \(diagnostics.lastCanonicalCandidateOverlayComparisonLocalFreshness), remote \(diagnostics.lastCanonicalCandidateOverlayComparisonRemoteFreshness)")
-            diagnosticRow("Why Trusted", diagnostics.lastCanonicalCandidateOverlayComparisonTrustedReason)
-            diagnosticRow("Why Blocked", diagnostics.lastCanonicalCandidateOverlayComparisonBlockedReason)
+            diagnosticRow("Why Trusted", compactValue(diagnostics.lastCanonicalCandidateOverlayComparisonTrustedReason))
+            diagnosticRow("Why Blocked", compactValue(diagnostics.lastCanonicalCandidateOverlayComparisonBlockedReason))
+        }
+
+        Section("Canonical Read - Activation / Rollback") {
             diagnosticRow("Activation Allowed", diagnostics.lastCanonicalCandidateActivationAllowed ? "true" : "false")
-            diagnosticRow("Activation Blocked", diagnostics.lastCanonicalCandidateActivationBlockedReason)
+            diagnosticRow("Activation Blocked", compactValue(diagnostics.lastCanonicalCandidateActivationBlockedReason))
             diagnosticRow("Activation Active Source", diagnostics.lastCanonicalCandidateActivationActiveSource)
             diagnosticRow("Activation Rollback Source", diagnostics.lastCanonicalCandidateActivationRollbackSource)
             diagnosticRow("Activation Scope", diagnostics.lastCanonicalCandidateActivationScope)
@@ -9288,8 +9318,11 @@ private struct DebugSessionSnapshotCanonicalReadDiagnosticsSection: View {
             diagnosticRow("Last Rollback", formattedDate(diagnostics.lastCanonicalCandidateActivationLastRolledBackAt))
             diagnosticRow("Production Activation", diagnostics.lastCanonicalCandidateActivationProductionBlocked ? "blocked" : "not blocked")
             if !diagnostics.lastCanonicalReadRolloutBlockers.isEmpty {
-                diagnosticRow("Rollout Blockers", diagnostics.lastCanonicalReadRolloutBlockers.joined(separator: ", "))
+                diagnosticRow("Rollout Blockers", compactListSummary(diagnostics.lastCanonicalReadRolloutBlockers))
             }
+        }
+
+        Section("Canonical Read Actions") {
             Button(isCheckingCanonicalReadDiagnostics ? "Checking..." : "Check Canonical Read Diagnostics") {
                 guard !isCheckingCanonicalReadDiagnostics else { return }
                 isCheckingCanonicalReadDiagnostics = true
@@ -9352,15 +9385,29 @@ private struct DebugSessionSnapshotCanonicalReadDiagnosticsSection: View {
             .disabled(isRollingBackCanonicalCandidate)
             .font(.system(size: 14, weight: .semibold))
         }
+        }
     }
 
     private func optionalBoolText(_ value: Bool?) -> String {
         value.map { $0 ? "true" : "false" } ?? "not checked"
     }
+
+    private func compactListSummary(_ values: [String]) -> String {
+        guard !values.isEmpty else { return "none" }
+        let preview = values.prefix(2).joined(separator: ", ")
+        guard values.count > 2 else { return preview }
+        return "\(preview) +\(values.count - 2) more"
+    }
+
+    private func compactValue(_ value: String) -> String {
+        AppState.diagnosticsPreviewText(value, maxLength: 80) ?? "none"
+    }
 }
 
 private struct DebugSessionSnapshotUploadTextView: View {
     let snapshotText: String
+    var title: String = "Snapshot Upload Report"
+    var footerText: String = "Copies the sanitized shadow-write upload report as plain text. It does not include raw session.json, local paths, signed URLs, auth material, storage object paths, or media payloads."
     @State private var didCopySnapshot: Bool = false
 
     var body: some View {
@@ -9372,7 +9419,7 @@ private struct DebugSessionSnapshotUploadTextView: View {
                 }
                 .font(.system(size: 14, weight: .semibold))
             } footer: {
-                Text("Copies the sanitized shadow-write upload report as plain text. It does not include raw session.json, local paths, signed URLs, auth material, storage object paths, or media payloads.")
+                Text(footerText)
             }
 
             Section {
@@ -9382,7 +9429,7 @@ private struct DebugSessionSnapshotUploadTextView: View {
                     .textSelection(.enabled)
             }
         }
-        .navigationTitle("Snapshot Upload Report")
+        .navigationTitle(title)
         .navigationBarTitleDisplayMode(.inline)
     }
 }

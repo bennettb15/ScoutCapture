@@ -314,6 +314,41 @@ final class Phase2C26OCanonicalCandidateConsumptionTests: XCTestCase {
         XCTAssertTrue(text.contains("- canonical_candidate_activation_production_blocked: true"))
     }
 
+    func testCanonicalReadRolloutReportSummarizesOperatorFields() {
+        var upload = activationDiagnostics()
+        upload.lastCanonicalReadDiagnosticsRecommendation = "remote_candidate_after_replay_validation"
+        upload.lastNormalizedParityCompleteness = "complete"
+        upload.lastParityCompletenessScore = 1
+        upload.lastCanonicalCandidateActivationAllowed = true
+        upload.lastCanonicalCandidateActivationActiveSource = "canonical_candidate"
+        upload.lastCanonicalCandidateActivationBlockedReason = "none"
+        upload.lastCanonicalCandidateActivationRollbackAvailable = true
+        upload.lastCanonicalCandidateActivationProductionBlocked = true
+
+        let text = AppState.canonicalReadRolloutReportText(upload)
+
+        XCTAssertTrue(text.contains("ScoutCapture Local Health - Canonical Read Rollout Report"))
+        XCTAssertTrue(text.contains("Summary"))
+        XCTAssertTrue(text.contains("- canonical_read_result: remote_matches_local"))
+        XCTAssertTrue(text.contains("- recommendation: remote_candidate_after_replay_validation"))
+        XCTAssertTrue(text.contains("- parity_completeness_score: 1.00"))
+        XCTAssertTrue(text.contains("- missing_child_count: 0"))
+        XCTAssertTrue(text.contains("- candidate_allowed: true"))
+        XCTAssertTrue(text.contains("- overlay_built: true"))
+        XCTAssertTrue(text.contains("- overlay_comparison_result: candidate_matches_local"))
+        XCTAssertTrue(text.contains("- activation_allowed: true"))
+        XCTAssertTrue(text.contains("- active_source: canonical_candidate"))
+        XCTAssertTrue(text.contains("- rollback_available: true"))
+        XCTAssertTrue(text.contains("- fallback_available: true"))
+        XCTAssertTrue(text.contains("- production_activation_blocked: true"))
+        XCTAssertTrue(text.contains("Read Diagnostics"))
+        XCTAssertTrue(text.contains("Parity / Repair"))
+        XCTAssertTrue(text.contains("Candidate"))
+        XCTAssertTrue(text.contains("Overlay"))
+        XCTAssertTrue(text.contains("Comparison"))
+        XCTAssertTrue(text.contains("Activation / Rollback"))
+    }
+
     func testComparisonCandidateMatchesLocal() {
         let result = comparison()
         let report = AppState.canonicalCandidateOverlayComparisonReportText(result)
