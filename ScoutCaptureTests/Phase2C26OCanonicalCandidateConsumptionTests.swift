@@ -88,7 +88,7 @@ final class Phase2C26OCanonicalCandidateConsumptionTests: XCTestCase {
 
         XCTAssertTrue(result.allowed)
         XCTAssertNil(result.blockedReason)
-        XCTAssertEqual(result.overlay?.source, "remote_normalized_candidate_overlay")
+        XCTAssertEqual(result.overlay?.source, "remote_normalized_candidate_with_local_fallback")
         XCTAssertEqual(result.overlay?.propertyID, propertyID)
         XCTAssertEqual(result.overlay?.sessionID, sessionID)
         XCTAssertEqual(result.overlay?.remoteShotCount, 3)
@@ -105,7 +105,7 @@ final class Phase2C26OCanonicalCandidateConsumptionTests: XCTestCase {
         let result = overlay(target: .localDev)
 
         XCTAssertTrue(result.allowed)
-        XCTAssertEqual(result.overlay?.source, "remote_normalized_candidate_overlay")
+        XCTAssertEqual(result.overlay?.source, "remote_normalized_candidate_with_local_fallback")
         XCTAssertEqual(result.remoteCandidateRowCounts["remote_shots"], 3)
     }
 

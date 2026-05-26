@@ -18935,7 +18935,7 @@ final class AppState: ObservableObject {
         let allowed = blockers.isEmpty
         let overlay = allowed ? CanonicalCandidateOverlay(
             builtAt: checkedAt,
-            source: "remote_normalized_candidate_overlay",
+            source: "remote_normalized_candidate_with_local_fallback",
             propertyID: canonicalDiagnostics.propertyID,
             sessionID: canonicalDiagnostics.sessionID,
             organizationID: canonicalDiagnostics.activeOrganizationID,
