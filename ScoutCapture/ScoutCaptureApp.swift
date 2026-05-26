@@ -9192,6 +9192,9 @@ private struct DebugSessionSnapshotCanonicalReadDiagnosticsSection: View {
     let diagnostics: AppState.SessionSnapshotUploadDiagnostics
     @Binding var isCheckingCanonicalReadDiagnostics: Bool
     @Binding var isBuildingCanonicalCandidateOverlay: Bool
+    @State private var isShowingCanonicalCandidateActivationConfirmation = false
+    @State private var isActivatingCanonicalCandidate = false
+    @State private var isRollingBackCanonicalCandidate = false
 
     var body: some View {
         Section("Canonical Read Diagnostics Test-Only") {
@@ -9273,6 +9276,17 @@ private struct DebugSessionSnapshotCanonicalReadDiagnosticsSection: View {
             diagnosticRow("Freshness", "local \(diagnostics.lastCanonicalCandidateOverlayComparisonLocalFreshness), remote \(diagnostics.lastCanonicalCandidateOverlayComparisonRemoteFreshness)")
             diagnosticRow("Why Trusted", diagnostics.lastCanonicalCandidateOverlayComparisonTrustedReason)
             diagnosticRow("Why Blocked", diagnostics.lastCanonicalCandidateOverlayComparisonBlockedReason)
+            diagnosticRow("Activation Allowed", diagnostics.lastCanonicalCandidateActivationAllowed ? "true" : "false")
+            diagnosticRow("Activation Blocked", diagnostics.lastCanonicalCandidateActivationBlockedReason)
+            diagnosticRow("Activation Active Source", diagnostics.lastCanonicalCandidateActivationActiveSource)
+            diagnosticRow("Activation Rollback Source", diagnostics.lastCanonicalCandidateActivationRollbackSource)
+            diagnosticRow("Activation Scope", diagnostics.lastCanonicalCandidateActivationScope)
+            diagnosticRow("Activation Property", diagnostics.lastCanonicalCandidateActivationPropertyID?.uuidString ?? "none")
+            diagnosticRow("Activation Session", diagnostics.lastCanonicalCandidateActivationSessionID?.uuidString ?? "none")
+            diagnosticRow("Activation Rollback", diagnostics.lastCanonicalCandidateActivationRollbackAvailable ? "available" : "missing")
+            diagnosticRow("Last Activation", formattedDate(diagnostics.lastCanonicalCandidateActivationLastActivatedAt))
+            diagnosticRow("Last Rollback", formattedDate(diagnostics.lastCanonicalCandidateActivationLastRolledBackAt))
+            diagnosticRow("Production Activation", diagnostics.lastCanonicalCandidateActivationProductionBlocked ? "blocked" : "not blocked")
             if !diagnostics.lastCanonicalReadRolloutBlockers.isEmpty {
                 diagnosticRow("Rollout Blockers", diagnostics.lastCanonicalReadRolloutBlockers.joined(separator: ", "))
             }
@@ -9299,6 +9313,43 @@ private struct DebugSessionSnapshotCanonicalReadDiagnosticsSection: View {
                 }
             }
             .disabled(isBuildingCanonicalCandidateOverlay)
+            .font(.system(size: 14, weight: .semibold))
+            Button(isActivatingCanonicalCandidate ? "Activating..." : "Activate Canonical Candidate For Session") {
+                guard !isActivatingCanonicalCandidate else { return }
+                isShowingCanonicalCandidateActivationConfirmation = true
+            }
+            .disabled(isActivatingCanonicalCandidate)
+            .font(.system(size: 14, weight: .semibold))
+            .alert("Activate Canonical Candidate?", isPresented: $isShowingCanonicalCandidateActivationConfirmation) {
+                Button("Cancel", role: .cancel) {}
+                Button("Activate") {
+                    guard !isActivatingCanonicalCandidate else { return }
+                    isActivatingCanonicalCandidate = true
+                    Task {
+                        _ = await MainActor.run {
+                            appState.activateCanonicalCandidateForSelectedSession()
+                        }
+                        await MainActor.run {
+                            isActivatingCanonicalCandidate = false
+                        }
+                    }
+                }
+            } message: {
+                Text("Selected session only. Active read source changes to the candidate overlay for this diagnostic scope, local fallback stays retained, export/seal/sync/media/iCloud behavior is unchanged, and production remains blocked.")
+            }
+            Button(isRollingBackCanonicalCandidate ? "Rolling Back..." : "Rollback To Local Source") {
+                guard !isRollingBackCanonicalCandidate else { return }
+                isRollingBackCanonicalCandidate = true
+                Task {
+                    _ = await MainActor.run {
+                        appState.rollbackCanonicalCandidateToLocalSource()
+                    }
+                    await MainActor.run {
+                        isRollingBackCanonicalCandidate = false
+                    }
+                }
+            }
+            .disabled(isRollingBackCanonicalCandidate)
             .font(.system(size: 14, weight: .semibold))
         }
     }

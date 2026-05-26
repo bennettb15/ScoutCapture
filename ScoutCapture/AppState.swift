@@ -1450,6 +1450,17 @@ final class AppState: ObservableObject {
         var lastCanonicalCandidateOverlayComparisonParityConfidence: String = "not_checked"
         var lastCanonicalCandidateOverlayComparisonTrustedReason: String = "not_checked"
         var lastCanonicalCandidateOverlayComparisonBlockedReason: String = "not_checked"
+        var lastCanonicalCandidateActivationAllowed: Bool = false
+        var lastCanonicalCandidateActivationBlockedReason: String = "not_checked"
+        var lastCanonicalCandidateActivationActiveSource: String = "local"
+        var lastCanonicalCandidateActivationRollbackSource: String = "local"
+        var lastCanonicalCandidateActivationScope: String = "selected_session_only"
+        var lastCanonicalCandidateActivationPropertyID: UUID?
+        var lastCanonicalCandidateActivationSessionID: UUID?
+        var lastCanonicalCandidateActivationRollbackAvailable: Bool = true
+        var lastCanonicalCandidateActivationLastActivatedAt: Date?
+        var lastCanonicalCandidateActivationLastRolledBackAt: Date?
+        var lastCanonicalCandidateActivationProductionBlocked: Bool = true
     }
 
     struct LocalDiagnosticsState: Equatable {
@@ -2306,6 +2317,25 @@ final class AppState: ObservableObject {
         let rollbackAvailable: Bool
         let trustedReason: String
         let blockedReason: String?
+        let noBehaviorChangedText: String
+    }
+
+    enum CanonicalCandidateActivationSource: String, CaseIterable, Equatable {
+        case local
+        case canonicalCandidate = "canonical_candidate"
+    }
+
+    struct CanonicalCandidateActivationResult: Equatable {
+        let checkedAt: Date
+        let allowed: Bool
+        let blockedReason: String?
+        let activeSource: CanonicalCandidateActivationSource
+        let rollbackSource: CanonicalCandidateActivationSource
+        let activationScope: String
+        let propertyID: UUID?
+        let sessionID: UUID?
+        let rollbackAvailable: Bool
+        let productionBlocked: Bool
         let noBehaviorChangedText: String
     }
 
@@ -16796,6 +16826,19 @@ final class AppState: ObservableObject {
         lines.append("- canonical_candidate_overlay_comparison_trusted_reason: \(diagnosticsPreviewText(diagnostics.lastCanonicalCandidateOverlayComparisonTrustedReason, maxLength: 180) ?? "not_checked")")
         lines.append("- canonical_candidate_overlay_comparison_blocked_reason: \(diagnosticsPreviewText(diagnostics.lastCanonicalCandidateOverlayComparisonBlockedReason, maxLength: 180) ?? "not_checked")")
         lines.append("")
+        lines.append("Canonical Candidate Activation Test-Only")
+        lines.append("- canonical_candidate_activation_allowed: \(diagnostics.lastCanonicalCandidateActivationAllowed)")
+        lines.append("- canonical_candidate_activation_blocked_reason: \(diagnosticsPreviewText(diagnostics.lastCanonicalCandidateActivationBlockedReason, maxLength: 180) ?? "not_checked")")
+        lines.append("- canonical_candidate_activation_active_source: \(diagnosticsPreviewText(diagnostics.lastCanonicalCandidateActivationActiveSource, maxLength: 80) ?? "local")")
+        lines.append("- canonical_candidate_activation_rollback_source: \(diagnosticsPreviewText(diagnostics.lastCanonicalCandidateActivationRollbackSource, maxLength: 80) ?? "local")")
+        lines.append("- canonical_candidate_activation_scope: \(diagnosticsPreviewText(diagnostics.lastCanonicalCandidateActivationScope, maxLength: 80) ?? "selected_session_only")")
+        lines.append("- canonical_candidate_activation_property_id: \(diagnostics.lastCanonicalCandidateActivationPropertyID?.uuidString ?? "none")")
+        lines.append("- canonical_candidate_activation_session_id: \(diagnostics.lastCanonicalCandidateActivationSessionID?.uuidString ?? "none")")
+        lines.append("- canonical_candidate_activation_rollback_available: \(diagnostics.lastCanonicalCandidateActivationRollbackAvailable)")
+        lines.append("- canonical_candidate_activation_last_activated_at: \(diagnostics.lastCanonicalCandidateActivationLastActivatedAt?.formatted(date: .abbreviated, time: .standard) ?? "none")")
+        lines.append("- canonical_candidate_activation_last_rolled_back_at: \(diagnostics.lastCanonicalCandidateActivationLastRolledBackAt?.formatted(date: .abbreviated, time: .standard) ?? "none")")
+        lines.append("- canonical_candidate_activation_production_blocked: \(diagnostics.lastCanonicalCandidateActivationProductionBlocked)")
+        lines.append("")
         lines.append("Redaction Notes")
         lines.append("- Report rows intentionally omit raw session.json text, local paths, storage object paths, signed URLs, auth tokens, and media bytes.")
         lines.append("- If storage upload succeeds and table insert fails, the app does not delete the object; orphan risk is reported for later controlled cleanup.")
@@ -18014,6 +18057,51 @@ final class AppState: ObservableObject {
         localDiagnostics = diagnostics
     }
 
+    @MainActor
+    func activateCanonicalCandidateForSelectedSession(checkedAt: Date = Date()) -> CanonicalCandidateActivationResult {
+        let result = Self.makeCanonicalCandidateActivationResult(
+            checkedAt: checkedAt,
+            targetClassification: supabaseConfiguration.targetClassification,
+            diagnostics: localDiagnostics.sessionSnapshotUpload
+        )
+        recordCanonicalCandidateActivation(result, activatedAt: result.allowed ? checkedAt : nil)
+        return result
+    }
+
+    @MainActor
+    func rollbackCanonicalCandidateToLocalSource(checkedAt: Date = Date()) -> CanonicalCandidateActivationResult {
+        let result = Self.makeCanonicalCandidateRollbackResult(
+            checkedAt: checkedAt,
+            diagnostics: localDiagnostics.sessionSnapshotUpload
+        )
+        recordCanonicalCandidateActivation(result, rolledBackAt: checkedAt)
+        return result
+    }
+
+    private func recordCanonicalCandidateActivation(
+        _ result: CanonicalCandidateActivationResult,
+        activatedAt: Date? = nil,
+        rolledBackAt: Date? = nil
+    ) {
+        var diagnostics = localDiagnostics
+        diagnostics.sessionSnapshotUpload.lastCanonicalCandidateActivationAllowed = result.allowed
+        diagnostics.sessionSnapshotUpload.lastCanonicalCandidateActivationBlockedReason = result.blockedReason ?? "none"
+        diagnostics.sessionSnapshotUpload.lastCanonicalCandidateActivationActiveSource = result.activeSource.rawValue
+        diagnostics.sessionSnapshotUpload.lastCanonicalCandidateActivationRollbackSource = result.rollbackSource.rawValue
+        diagnostics.sessionSnapshotUpload.lastCanonicalCandidateActivationScope = result.activationScope
+        diagnostics.sessionSnapshotUpload.lastCanonicalCandidateActivationPropertyID = result.propertyID
+        diagnostics.sessionSnapshotUpload.lastCanonicalCandidateActivationSessionID = result.sessionID
+        diagnostics.sessionSnapshotUpload.lastCanonicalCandidateActivationRollbackAvailable = result.rollbackAvailable
+        diagnostics.sessionSnapshotUpload.lastCanonicalCandidateActivationProductionBlocked = result.productionBlocked
+        if let activatedAt {
+            diagnostics.sessionSnapshotUpload.lastCanonicalCandidateActivationLastActivatedAt = activatedAt
+        }
+        if let rolledBackAt {
+            diagnostics.sessionSnapshotUpload.lastCanonicalCandidateActivationLastRolledBackAt = rolledBackAt
+        }
+        localDiagnostics = diagnostics
+    }
+
     nonisolated static func makeCanonicalReadDiagnostics(
         checkedAt: Date = Date(),
         activeOrganizationID: UUID?,
@@ -19183,6 +19271,115 @@ final class AppState: ObservableObject {
         lines.append("- why_candidate_is_trusted: \(comparison.trustedReason)")
         lines.append("- why_candidate_is_blocked: \(diagnosticsPreviewText(comparison.blockedReason, maxLength: 180) ?? "none")")
         lines.append(comparison.noBehaviorChangedText)
+        return lines.joined(separator: "\n")
+    }
+
+    nonisolated static func makeCanonicalCandidateActivationResult(
+        checkedAt: Date = Date(),
+        targetClassification: SupabaseRuntimeConfiguration.TargetClassification,
+        diagnostics: SessionSnapshotUploadDiagnostics
+    ) -> CanonicalCandidateActivationResult {
+        var blockers: [String] = []
+        switch targetClassification {
+        case .localDev, .approvedStaging:
+            break
+        case .approvedProductionValidation:
+            blockers.append("production_canonical_candidate_activation_blocked")
+        case .remote:
+            blockers.append("random_remote_canonical_candidate_activation_blocked")
+        case .missing, .invalid:
+            blockers.append("supabase_target_not_verified")
+        }
+        if !diagnostics.lastCanonicalReadCandidateFlagEnabled {
+            blockers.append("canonical_read_candidate_flag_disabled")
+        }
+        if !diagnostics.lastCanonicalReadCandidateOrgAllowlisted {
+            blockers.append("org_not_allowlisted")
+        }
+        if !diagnostics.lastCanonicalReadCandidatePropertyAllowlisted {
+            blockers.append("property_not_allowlisted")
+        }
+        if !diagnostics.lastCanonicalReadCandidateSessionAllowlisted {
+            blockers.append("session_not_allowlisted")
+        }
+        if !diagnostics.lastCanonicalReadCandidateAllowed {
+            blockers.append(diagnostics.lastCanonicalReadCandidateBlockedReason == "none" ? "canonical_candidate_not_allowed" : diagnostics.lastCanonicalReadCandidateBlockedReason)
+        }
+        if !diagnostics.lastCanonicalCandidateOverlayBuilt || !diagnostics.lastCanonicalCandidateOverlayAllowed {
+            blockers.append(diagnostics.lastCanonicalCandidateOverlayBlockedReason == "none" ? "canonical_candidate_overlay_not_built" : diagnostics.lastCanonicalCandidateOverlayBlockedReason)
+        }
+        if diagnostics.lastCanonicalCandidateOverlayComparisonResult != CanonicalCandidateOverlayComparisonResult.candidateMatchesLocal.rawValue {
+            blockers.append("canonical_candidate_comparison_not_matching_local")
+        }
+        if !diagnostics.lastCanonicalReadCandidateLocalFallbackAvailable {
+            blockers.append("local_fallback_unavailable")
+        }
+        if !diagnostics.lastCanonicalCandidateOverlayRollbackAvailable {
+            blockers.append("rollback_unavailable")
+        }
+        if diagnostics.lastCanonicalReadDiagnosticsParentOrgConsistent != true ||
+            diagnostics.lastCanonicalReadDiagnosticsParentPropertyConsistent != true {
+            blockers.append("parent_org_or_property_divergence")
+        }
+        if diagnostics.lastMissingChildCount > 0 ||
+            diagnostics.lastNormalizedParityGapTaxonomy.contains("missing_remote_children") {
+            blockers.append("missing_remote_children")
+        }
+        if diagnostics.lastCanonicalReadDiagnosticsResult == CanonicalReadDiagnosticResult.remoteNewerCandidate.rawValue {
+            blockers.append("remote_newer_conflict_diagnostic_only")
+        }
+        if diagnostics.lastNormalizedBackfillRemoteNewerConflictCount > 0 {
+            blockers.append("remote_newer_conflict")
+        }
+
+        let allowed = blockers.isEmpty
+        return CanonicalCandidateActivationResult(
+            checkedAt: checkedAt,
+            allowed: allowed,
+            blockedReason: allowed ? nil : Array(Set(blockers)).sorted().joined(separator: ", "),
+            activeSource: allowed ? .canonicalCandidate : .local,
+            rollbackSource: .local,
+            activationScope: "selected_session_only",
+            propertyID: diagnostics.lastCanonicalCandidateOverlayPropertyID ?? diagnostics.lastCanonicalReadDiagnosticsPropertyID,
+            sessionID: diagnostics.lastCanonicalCandidateOverlaySessionID ?? diagnostics.lastCanonicalReadDiagnosticsSessionID,
+            rollbackAvailable: diagnostics.lastCanonicalCandidateOverlayRollbackAvailable,
+            productionBlocked: true,
+            noBehaviorChangedText: "No behavior changed: controlled canonical candidate activation is selected-session diagnostic scope only. It does not switch global reads, mutate local state, write remote state, discard local files, remove iCloud fallback, change export, change seal, change sync, change media, loosen RLS, delete data, or enable production canonical reads."
+        )
+    }
+
+    nonisolated static func makeCanonicalCandidateRollbackResult(
+        checkedAt: Date = Date(),
+        diagnostics: SessionSnapshotUploadDiagnostics
+    ) -> CanonicalCandidateActivationResult {
+        CanonicalCandidateActivationResult(
+            checkedAt: checkedAt,
+            allowed: true,
+            blockedReason: nil,
+            activeSource: .local,
+            rollbackSource: .local,
+            activationScope: "selected_session_only",
+            propertyID: diagnostics.lastCanonicalCandidateActivationPropertyID ?? diagnostics.lastCanonicalCandidateOverlayPropertyID,
+            sessionID: diagnostics.lastCanonicalCandidateActivationSessionID ?? diagnostics.lastCanonicalCandidateOverlaySessionID,
+            rollbackAvailable: true,
+            productionBlocked: true,
+            noBehaviorChangedText: "No behavior changed: rollback restores Local Health diagnostic active source to local for the selected session only. It does not mutate local state, write remote state, change export, seal, sync, media, or iCloud behavior, or enable production canonical reads."
+        )
+    }
+
+    nonisolated static func canonicalCandidateActivationReportText(_ result: CanonicalCandidateActivationResult) -> String {
+        var lines: [String] = []
+        lines.append("Canonical Candidate Activation")
+        lines.append("- activation_allowed: \(result.allowed)")
+        lines.append("- activation_blocked_reason: \(diagnosticsPreviewText(result.blockedReason, maxLength: 180) ?? "none")")
+        lines.append("- active_source: \(result.activeSource.rawValue)")
+        lines.append("- rollback_source: \(result.rollbackSource.rawValue)")
+        lines.append("- activation_scope: \(result.activationScope)")
+        lines.append("- active_candidate_property_id: \(result.propertyID?.uuidString ?? "none")")
+        lines.append("- active_candidate_session_id: \(result.sessionID?.uuidString ?? "none")")
+        lines.append("- rollback_available: \(result.rollbackAvailable)")
+        lines.append("- production_activation_blocked: \(result.productionBlocked)")
+        lines.append(result.noBehaviorChangedText)
         return lines.joined(separator: "\n")
     }
 

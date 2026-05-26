@@ -107,6 +107,80 @@ final class Phase2C26OCanonicalCandidateConsumptionTests: XCTestCase {
         )
     }
 
+    private func activationDiagnostics(
+        target: SupabaseRuntimeConfiguration.TargetClassification = .approvedStaging,
+        diagnostics canonicalDiagnostics: AppState.CanonicalReadDiagnosticsResult? = nil,
+        configuration: AppState.CanonicalReadCandidateConfiguration? = nil,
+        remoteNewerConflictCount: Int = 0
+    ) -> AppState.SessionSnapshotUploadDiagnostics {
+        let canonicalDiagnostics = canonicalDiagnostics ?? diagnostics()
+        let configuration = configuration ?? self.configuration()
+        let parityReport = AppState.makeNormalizedParityGapReport(canonicalDiagnostics: canonicalDiagnostics)
+        let candidate = AppState.makeCanonicalReadCandidateDiagnostics(
+            checkedAt: Date(timeIntervalSinceReferenceDate: 6_100),
+            configuration: configuration,
+            targetClassification: target,
+            canonicalDiagnostics: canonicalDiagnostics,
+            parityReport: parityReport
+        )
+        let overlayResult = AppState.buildCanonicalCandidateOverlayTestOnly(
+            checkedAt: Date(timeIntervalSinceReferenceDate: 6_200),
+            targetClassification: target,
+            canonicalDiagnostics: canonicalDiagnostics,
+            parityReport: parityReport,
+            candidateDiagnostics: candidate
+        )
+        let comparison = AppState.makeCanonicalCandidateOverlayComparison(
+            checkedAt: Date(timeIntervalSinceReferenceDate: 6_300),
+            canonicalDiagnostics: canonicalDiagnostics,
+            overlayResult: overlayResult,
+            parityReport: parityReport
+        )
+
+        var upload = AppState.SessionSnapshotUploadDiagnostics()
+        upload.lastCanonicalReadDiagnosticsResult = canonicalDiagnostics.result.rawValue
+        upload.lastCanonicalReadDiagnosticsPropertyID = canonicalDiagnostics.propertyID
+        upload.lastCanonicalReadDiagnosticsSessionID = canonicalDiagnostics.sessionID
+        upload.lastCanonicalReadDiagnosticsParentOrgConsistent = canonicalDiagnostics.parentOrgConsistent
+        upload.lastCanonicalReadDiagnosticsParentPropertyConsistent = canonicalDiagnostics.parentPropertyConsistent
+        upload.lastNormalizedParityGapTaxonomy = parityReport.taxonomy.map(\.rawValue)
+        upload.lastMissingChildCount = parityReport.missingChildCount
+        upload.lastNormalizedBackfillRemoteNewerConflictCount = remoteNewerConflictCount
+        upload.lastCanonicalReadCandidateFlagEnabled = configuration.enabled
+        upload.lastCanonicalReadCandidateOrgAllowlisted = configuration.orgAllowlist.contains(orgID)
+        upload.lastCanonicalReadCandidatePropertyAllowlisted = configuration.propertyAllowlist.contains(propertyID)
+        upload.lastCanonicalReadCandidateSessionAllowlisted = configuration.sessionAllowlist.contains(sessionID)
+        upload.lastCanonicalReadCandidateAllowed = candidate.allowed
+        upload.lastCanonicalReadCandidateBlockedReason = candidate.blockedReason ?? "none"
+        upload.lastCanonicalReadCandidateLocalFallbackAvailable = candidate.localFallbackAvailable
+        upload.lastCanonicalCandidateOverlayBuilt = overlayResult.overlay != nil
+        upload.lastCanonicalCandidateOverlayAllowed = overlayResult.allowed
+        upload.lastCanonicalCandidateOverlayBlockedReason = overlayResult.blockedReason ?? "none"
+        upload.lastCanonicalCandidateOverlayPropertyID = overlayResult.overlay?.propertyID
+        upload.lastCanonicalCandidateOverlaySessionID = overlayResult.overlay?.sessionID
+        upload.lastCanonicalCandidateOverlayRollbackAvailable = overlayResult.rollbackAvailable
+        upload.lastCanonicalCandidateOverlayComparisonResult = comparison.result.rawValue
+        return upload
+    }
+
+    private func activation(
+        target: SupabaseRuntimeConfiguration.TargetClassification = .approvedStaging,
+        diagnostics canonicalDiagnostics: AppState.CanonicalReadDiagnosticsResult? = nil,
+        configuration: AppState.CanonicalReadCandidateConfiguration? = nil,
+        remoteNewerConflictCount: Int = 0
+    ) -> AppState.CanonicalCandidateActivationResult {
+        AppState.makeCanonicalCandidateActivationResult(
+            checkedAt: Date(timeIntervalSinceReferenceDate: 6_400),
+            targetClassification: target,
+            diagnostics: activationDiagnostics(
+                target: target,
+                diagnostics: canonicalDiagnostics,
+                configuration: configuration,
+                remoteNewerConflictCount: remoteNewerConflictCount
+            )
+        )
+    }
+
     func testAllowlistedStagingCandidateBuildsOverlay() {
         let result = overlay()
 
@@ -228,12 +302,16 @@ final class Phase2C26OCanonicalCandidateConsumptionTests: XCTestCase {
 
         XCTAssertTrue(text.contains("Canonical Candidate Overlay Test-Only"))
         XCTAssertTrue(text.contains("Canonical Candidate Overlay Comparison"))
+        XCTAssertTrue(text.contains("Canonical Candidate Activation Test-Only"))
         XCTAssertTrue(text.contains("- canonical_candidate_overlay_built: false"))
         XCTAssertTrue(text.contains("- canonical_candidate_overlay_source: not_built"))
         XCTAssertTrue(text.contains("- canonical_candidate_overlay_fallback_source: local"))
         XCTAssertTrue(text.contains("- canonical_candidate_overlay_active_source: local"))
         XCTAssertTrue(text.contains("- canonical_candidate_overlay_production_blocked: true"))
         XCTAssertTrue(text.contains("- canonical_candidate_overlay_comparison_result: candidate_unavailable"))
+        XCTAssertTrue(text.contains("- canonical_candidate_activation_active_source: local"))
+        XCTAssertTrue(text.contains("- canonical_candidate_activation_scope: selected_session_only"))
+        XCTAssertTrue(text.contains("- canonical_candidate_activation_production_blocked: true"))
     }
 
     func testComparisonCandidateMatchesLocal() {
@@ -322,5 +400,124 @@ final class Phase2C26OCanonicalCandidateConsumptionTests: XCTestCase {
         XCTAssertTrue(result.blockedReason?.contains("canonical_read_candidate_flag_disabled") == true)
         XCTAssertEqual(result.activeSource, "local")
         XCTAssertEqual(result.fallbackSource, "local")
+    }
+
+    func testActivationSucceedsForAllowlistedMatchingCandidate() {
+        let result = activation()
+
+        XCTAssertTrue(result.allowed)
+        XCTAssertNil(result.blockedReason)
+        XCTAssertEqual(result.activeSource, .canonicalCandidate)
+        XCTAssertEqual(result.rollbackSource, .local)
+        XCTAssertEqual(result.activationScope, "selected_session_only")
+        XCTAssertEqual(result.propertyID, propertyID)
+        XCTAssertEqual(result.sessionID, sessionID)
+        XCTAssertTrue(result.rollbackAvailable)
+        XCTAssertTrue(result.productionBlocked)
+    }
+
+    func testActivationBlocksWithoutOverlay() {
+        var upload = activationDiagnostics()
+        upload.lastCanonicalCandidateOverlayBuilt = false
+        upload.lastCanonicalCandidateOverlayAllowed = false
+        upload.lastCanonicalCandidateOverlayBlockedReason = "canonical_candidate_overlay_not_built"
+
+        let result = AppState.makeCanonicalCandidateActivationResult(
+            targetClassification: .approvedStaging,
+            diagnostics: upload
+        )
+
+        XCTAssertFalse(result.allowed)
+        XCTAssertEqual(result.activeSource, .local)
+        XCTAssertTrue(result.blockedReason?.contains("canonical_candidate_overlay_not_built") == true)
+    }
+
+    func testActivationBlocksParityGap() {
+        let result = activation(
+            diagnostics: diagnostics(
+                result: .divergentConflict,
+                recommendation: "local_first_block_canonical_read",
+                localShotCount: 5,
+                remoteShotCount: 1,
+                localIssueObservationCount: 2,
+                remoteIssueObservationCount: 0,
+                countParity: false
+            )
+        )
+
+        XCTAssertFalse(result.allowed)
+        XCTAssertEqual(result.activeSource, .local)
+        XCTAssertTrue(result.blockedReason?.contains("missing_remote_children") == true)
+    }
+
+    func testActivationBlocksParentMismatch() {
+        let result = activation(
+            diagnostics: diagnostics(
+                result: .parentMismatch,
+                parentOrgConsistent: false
+            )
+        )
+
+        XCTAssertFalse(result.allowed)
+        XCTAssertEqual(result.activeSource, .local)
+        XCTAssertTrue(result.blockedReason?.contains("parent_org_or_property_divergence") == true)
+    }
+
+    func testActivationBlocksProduction() {
+        let result = activation(target: .approvedProductionValidation)
+
+        XCTAssertFalse(result.allowed)
+        XCTAssertEqual(result.activeSource, .local)
+        XCTAssertTrue(result.blockedReason?.contains("production_canonical_candidate_activation_blocked") == true)
+        XCTAssertTrue(result.productionBlocked)
+    }
+
+    func testActivationBlocksRemoteNewerConflict() {
+        let result = activation(remoteNewerConflictCount: 1)
+
+        XCTAssertFalse(result.allowed)
+        XCTAssertEqual(result.activeSource, .local)
+        XCTAssertTrue(result.blockedReason?.contains("remote_newer_conflict") == true)
+    }
+
+    func testRollbackReturnsActiveSourceToLocal() {
+        var upload = activationDiagnostics()
+        upload.lastCanonicalCandidateActivationPropertyID = propertyID
+        upload.lastCanonicalCandidateActivationSessionID = sessionID
+
+        let result = AppState.makeCanonicalCandidateRollbackResult(
+            checkedAt: Date(timeIntervalSinceReferenceDate: 6_500),
+            diagnostics: upload
+        )
+
+        XCTAssertTrue(result.allowed)
+        XCTAssertEqual(result.activeSource, .local)
+        XCTAssertEqual(result.rollbackSource, .local)
+        XCTAssertEqual(result.activationScope, "selected_session_only")
+        XCTAssertEqual(result.propertyID, propertyID)
+        XCTAssertEqual(result.sessionID, sessionID)
+        XCTAssertTrue(result.rollbackAvailable)
+    }
+
+    func testActivationDoesNotMutateLocalStateOrBehaviorRails() {
+        let directory = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("Phase2C26R-\(UUID().uuidString)", isDirectory: true)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: directory.path))
+
+        let result = activation()
+        let report = AppState.canonicalCandidateActivationReportText(result)
+
+        XCTAssertTrue(result.allowed)
+        XCTAssertTrue(report.contains("- active_source: canonical_candidate"))
+        XCTAssertTrue(report.contains("- rollback_source: local"))
+        XCTAssertTrue(result.noBehaviorChangedText.contains("global reads"))
+        XCTAssertTrue(result.noBehaviorChangedText.contains("local state"))
+        XCTAssertTrue(result.noBehaviorChangedText.contains("remote state"))
+        XCTAssertTrue(result.noBehaviorChangedText.contains("export"))
+        XCTAssertTrue(result.noBehaviorChangedText.contains("seal"))
+        XCTAssertTrue(result.noBehaviorChangedText.contains("sync"))
+        XCTAssertTrue(result.noBehaviorChangedText.contains("media"))
+        XCTAssertTrue(result.noBehaviorChangedText.contains("iCloud"))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: directory.path))
     }
 }
