@@ -9272,7 +9272,6 @@ private struct DebugSessionSnapshotUploadDiagnosticsView: View {
                 .font(.system(size: 14, weight: .medium, design: .monospaced))
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.trailing)
-                .textSelection(.enabled)
         }
         .padding(.vertical, 2)
     }

@@ -198,4 +198,15 @@ final class Phase2C26OCanonicalCandidateConsumptionTests: XCTestCase {
         XCTAssertTrue(result.noBehaviorChangedText.contains("iCloud"))
         XCTAssertFalse(FileManager.default.fileExists(atPath: directory.path))
     }
+
+    func testSessionSnapshotUploadReportRendersOverlayDefaults() {
+        let text = AppState.sessionSnapshotUploadReportText(AppState.SessionSnapshotUploadDiagnostics())
+
+        XCTAssertTrue(text.contains("Canonical Candidate Overlay Test-Only"))
+        XCTAssertTrue(text.contains("- canonical_candidate_overlay_built: false"))
+        XCTAssertTrue(text.contains("- canonical_candidate_overlay_source: not_built"))
+        XCTAssertTrue(text.contains("- canonical_candidate_overlay_fallback_source: local"))
+        XCTAssertTrue(text.contains("- canonical_candidate_overlay_active_source: local"))
+        XCTAssertTrue(text.contains("- canonical_candidate_overlay_production_blocked: true"))
+    }
 }
