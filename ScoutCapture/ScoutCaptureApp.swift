@@ -9114,107 +9114,12 @@ private struct DebugSessionSnapshotUploadDiagnosticsView: View {
                 .font(.system(size: 14, weight: .semibold))
             }
 
-            Section("Canonical Read Diagnostics Test-Only") {
-                Text("Read-only local-vs-remote normalized row comparison. It does not switch canonical reads, hydrate data, restore files, download media, or change local or remote state.")
-                    .font(.system(size: 13, weight: .medium))
-                    .foregroundStyle(.secondary)
-                diagnosticRow("Result", diagnostics.lastCanonicalReadDiagnosticsResult)
-                diagnosticRow("Checked", formattedRunDate(diagnostics.lastCanonicalReadDiagnosticsAt))
-                diagnosticRow("Property ID", diagnostics.lastCanonicalReadDiagnosticsPropertyID?.uuidString ?? "none")
-                diagnosticRow("Session ID", diagnostics.lastCanonicalReadDiagnosticsSessionID?.uuidString ?? "none")
-                diagnosticRow("Local Property", diagnostics.lastCanonicalReadDiagnosticsLocalPropertyFound ? "true" : "false")
-                diagnosticRow("Local Session", diagnostics.lastCanonicalReadDiagnosticsLocalSessionFound ? "true" : "false")
-                diagnosticRow("Remote Property", diagnostics.lastCanonicalReadDiagnosticsRemotePropertyFound ? "true" : "false")
-                diagnosticRow("Remote Session", diagnostics.lastCanonicalReadDiagnosticsRemoteSessionFound ? "true" : "false")
-                diagnosticRow("Count Parity", optionalBoolText(diagnostics.lastCanonicalReadDiagnosticsCountParity))
-                diagnosticRow("Status Parity", optionalBoolText(diagnostics.lastCanonicalReadDiagnosticsStatusParity))
-                diagnosticRow("Parent Org", optionalBoolText(diagnostics.lastCanonicalReadDiagnosticsParentOrgConsistent))
-                diagnosticRow("Parent Property", optionalBoolText(diagnostics.lastCanonicalReadDiagnosticsParentPropertyConsistent))
-                diagnosticRow("Local Shots", diagnostics.lastCanonicalReadDiagnosticsLocalShotCount.map(String.init) ?? "none")
-                diagnosticRow("Remote Shots", diagnostics.lastCanonicalReadDiagnosticsRemoteShotCount.map(String.init) ?? "none")
-                diagnosticRow("Local Issues/Obs", diagnostics.lastCanonicalReadDiagnosticsLocalIssueObservationCount.map(String.init) ?? "none")
-                diagnosticRow("Remote Issues/Obs", diagnostics.lastCanonicalReadDiagnosticsRemoteIssueObservationCount.map(String.init) ?? "none")
-                diagnosticRow("Local Guided", diagnostics.lastCanonicalReadDiagnosticsLocalGuidedCount.map(String.init) ?? "none")
-                diagnosticRow("Remote Freshness Seconds", diagnostics.lastCanonicalReadDiagnosticsRemoteFreshnessAgeSeconds.map { String(Int($0)) } ?? "unknown")
-                diagnosticRow("Remote Revision", diagnostics.lastCanonicalReadDiagnosticsRemoteRevision.map(String.init) ?? "none")
-                diagnosticRow("Recommendation", diagnostics.lastCanonicalReadDiagnosticsRecommendation)
-                if let blockedReason = AppState.diagnosticsPreviewText(diagnostics.lastCanonicalReadDiagnosticsBlockedReason, maxLength: 160) {
-                    diagnosticRow("Blocked Reason", blockedReason)
-                }
-                diagnosticRow("Parity Gaps", diagnostics.lastNormalizedParityGapTaxonomy.isEmpty ? "none" : diagnostics.lastNormalizedParityGapTaxonomy.joined(separator: ", "))
-                diagnosticRow("Completeness", diagnostics.lastNormalizedParityCompleteness)
-                diagnosticRow("Shadow Coverage", diagnostics.lastRemoteShadowWriteCoverage)
-                diagnosticRow("Missing Remote", diagnostics.lastMissingRemoteEntityClassification)
-                diagnosticRow("Lineage Source", diagnostics.lastLineageDivergenceSource)
-                diagnosticRow("Repair Tooling", diagnostics.lastParityRepairToolingRecommended ? "recommended" : "not required")
-                diagnosticRow("Canonical Blocked", diagnostics.lastCanonicalReadsRemainBlocked ? "true" : "false")
-                diagnosticRow("Repair Strategies", diagnostics.lastParityRepairStrategies.isEmpty ? "none" : diagnostics.lastParityRepairStrategies.joined(separator: ", "))
-                diagnosticRow("Completeness Score", String(format: "%.2f", diagnostics.lastParityCompletenessScore))
-                diagnosticRow("Shadow Score", String(format: "%.2f", diagnostics.lastShadowWriteCoverageScore))
-                diagnosticRow("Lineage Confidence", diagnostics.lastLineageConfidence)
-                diagnosticRow("Missing Child Count", "\(diagnostics.lastMissingChildCount)")
-                diagnosticRow("Replay Eligibility", diagnostics.lastReplayEligibility)
-                diagnosticRow("Repair Phase", diagnostics.lastParityRepairRolloutPhase)
-                diagnosticRow("Backfill Eligible", diagnostics.lastNormalizedBackfillEligible ? "true" : "false")
-                diagnosticRow("Backfill Blocked", diagnostics.lastNormalizedBackfillBlockedReason)
-                diagnosticRow("Backfill Planned", "sessions \(diagnostics.lastNormalizedBackfillPlannedSessionUpserts), shots \(diagnostics.lastNormalizedBackfillPlannedShotUpserts), observations \(diagnostics.lastNormalizedBackfillPlannedObservationUpserts)")
-                diagnosticRow("Backfill Executed", "\(diagnostics.lastNormalizedBackfillExecutedEntityCount)")
-                diagnosticRow("Backfill Skipped", "\(diagnostics.lastNormalizedBackfillSkippedEntityCount)")
-                diagnosticRow("Remote Newer Conflicts", "\(diagnostics.lastNormalizedBackfillRemoteNewerConflictCount)")
-                diagnosticRow("Production Backfill", diagnostics.lastNormalizedBackfillProductionBlocked ? "blocked" : "not blocked")
-                diagnosticRow("Candidate Flag", diagnostics.lastCanonicalReadCandidateFlagEnabled ? "enabled" : "off")
-                diagnosticRow("Candidate Allowed", diagnostics.lastCanonicalReadCandidateAllowed ? "true" : "false")
-                diagnosticRow("Candidate Blocked", diagnostics.lastCanonicalReadCandidateBlockedReason)
-                diagnosticRow("Effective Source", diagnostics.lastCanonicalReadCandidateEffectiveSourceRecommendation)
-                diagnosticRow("Local Fallback", diagnostics.lastCanonicalReadCandidateLocalFallbackAvailable ? "available" : "missing")
-                diagnosticRow("Candidate Parity", String(format: "%.2f", diagnostics.lastCanonicalReadCandidateParityConfidence))
-                diagnosticRow("Candidate Replay", String(format: "%.2f", diagnostics.lastCanonicalReadCandidateReplayConfidence))
-                diagnosticRow("Candidate Media", String(format: "%.2f", diagnostics.lastCanonicalReadCandidateMediaRecoveryConfidence))
-                diagnosticRow("Candidate Remote State", diagnostics.lastCanonicalReadCandidateRemoteStateReadable ? "readable" : "blocked")
-                diagnosticRow("Candidate Scope", diagnostics.lastCanonicalReadCandidateProductionWideEnabled ? "production-wide" : "allowlisted/test-only")
-                if !diagnostics.lastCanonicalReadCandidateWarnings.isEmpty {
-                    diagnosticRow("Candidate Warnings", diagnostics.lastCanonicalReadCandidateWarnings.joined(separator: ", "))
-                }
-                diagnosticRow("Overlay Built", diagnostics.lastCanonicalCandidateOverlayBuilt ? "true" : "false")
-                diagnosticRow("Overlay Allowed", diagnostics.lastCanonicalCandidateOverlayAllowed ? "true" : "false")
-                diagnosticRow("Overlay Blocked", diagnostics.lastCanonicalCandidateOverlayBlockedReason)
-                diagnosticRow("Overlay Source", diagnostics.lastCanonicalCandidateOverlaySource)
-                diagnosticRow("Overlay Property", diagnostics.lastCanonicalCandidateOverlayPropertyID?.uuidString ?? "none")
-                diagnosticRow("Overlay Session", diagnostics.lastCanonicalCandidateOverlaySessionID?.uuidString ?? "none")
-                diagnosticRow("Overlay Shots", "\(diagnostics.lastCanonicalCandidateOverlayShotCount)")
-                diagnosticRow("Overlay Issues", "\(diagnostics.lastCanonicalCandidateOverlayIssueObservationCount)")
-                diagnosticRow("Overlay Fallback", diagnostics.lastCanonicalCandidateOverlayFallbackSource)
-                diagnosticRow("Active Source", diagnostics.lastCanonicalCandidateOverlayActiveSource)
-                diagnosticRow("Rollback/Fallback", diagnostics.lastCanonicalCandidateOverlayRollbackAvailable ? "available" : "missing")
-                diagnosticRow("Overlay Production", diagnostics.lastCanonicalCandidateOverlayProductionBlocked ? "blocked" : "not blocked")
-                if !diagnostics.lastCanonicalReadRolloutBlockers.isEmpty {
-                    diagnosticRow("Rollout Blockers", diagnostics.lastCanonicalReadRolloutBlockers.joined(separator: ", "))
-                }
-                Button(isCheckingCanonicalReadDiagnostics ? "Checking..." : "Check Canonical Read Diagnostics") {
-                    guard !isCheckingCanonicalReadDiagnostics else { return }
-                    isCheckingCanonicalReadDiagnostics = true
-                    Task {
-                        _ = await appState.runCanonicalReadDiagnosticsForSelectedSession()
-                        await MainActor.run {
-                            isCheckingCanonicalReadDiagnostics = false
-                        }
-                    }
-                }
-                .disabled(isCheckingCanonicalReadDiagnostics)
-                .font(.system(size: 14, weight: .semibold))
-                Button(isBuildingCanonicalCandidateOverlay ? "Building..." : "Build Canonical Candidate Overlay") {
-                    guard !isBuildingCanonicalCandidateOverlay else { return }
-                    isBuildingCanonicalCandidateOverlay = true
-                    Task {
-                        _ = await appState.buildCanonicalCandidateOverlayForSelectedSession()
-                        await MainActor.run {
-                            isBuildingCanonicalCandidateOverlay = false
-                        }
-                    }
-                }
-                .disabled(isBuildingCanonicalCandidateOverlay)
-                .font(.system(size: 14, weight: .semibold))
-            }
+            DebugSessionSnapshotCanonicalReadDiagnosticsSection(
+                appState: appState,
+                diagnostics: diagnostics,
+                isCheckingCanonicalReadDiagnostics: $isCheckingCanonicalReadDiagnostics,
+                isBuildingCanonicalCandidateOverlay: $isBuildingCanonicalCandidateOverlay
+            )
         }
         .navigationTitle("Snapshot Upload")
         .navigationBarTitleDisplayMode(.inline)
@@ -9272,12 +9177,128 @@ private struct DebugSessionSnapshotUploadDiagnosticsView: View {
                 .font(.system(size: 14, weight: .medium, design: .monospaced))
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.trailing)
+                .textSelection(.enabled)
         }
         .padding(.vertical, 2)
     }
 
     private func formattedRunDate(_ date: Date?) -> String {
         date?.formatted(date: .abbreviated, time: .standard) ?? "never"
+    }
+}
+
+private struct DebugSessionSnapshotCanonicalReadDiagnosticsSection: View {
+    @ObservedObject var appState: AppState
+    let diagnostics: AppState.SessionSnapshotUploadDiagnostics
+    @Binding var isCheckingCanonicalReadDiagnostics: Bool
+    @Binding var isBuildingCanonicalCandidateOverlay: Bool
+
+    var body: some View {
+        Section("Canonical Read Diagnostics Test-Only") {
+            Text("Read-only local-vs-remote normalized row comparison. It does not switch canonical reads, hydrate data, restore files, download media, or change local or remote state.")
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(.secondary)
+            diagnosticRow("Result", diagnostics.lastCanonicalReadDiagnosticsResult)
+            diagnosticRow("Checked", formattedDate(diagnostics.lastCanonicalReadDiagnosticsAt))
+            diagnosticRow("Property ID", diagnostics.lastCanonicalReadDiagnosticsPropertyID?.uuidString ?? "none")
+            diagnosticRow("Session ID", diagnostics.lastCanonicalReadDiagnosticsSessionID?.uuidString ?? "none")
+            diagnosticRow("Local Property", diagnostics.lastCanonicalReadDiagnosticsLocalPropertyFound ? "true" : "false")
+            diagnosticRow("Local Session", diagnostics.lastCanonicalReadDiagnosticsLocalSessionFound ? "true" : "false")
+            diagnosticRow("Remote Property", diagnostics.lastCanonicalReadDiagnosticsRemotePropertyFound ? "true" : "false")
+            diagnosticRow("Remote Session", diagnostics.lastCanonicalReadDiagnosticsRemoteSessionFound ? "true" : "false")
+            diagnosticRow("Count Parity", optionalBoolText(diagnostics.lastCanonicalReadDiagnosticsCountParity))
+            diagnosticRow("Status Parity", optionalBoolText(diagnostics.lastCanonicalReadDiagnosticsStatusParity))
+            diagnosticRow("Parent Org", optionalBoolText(diagnostics.lastCanonicalReadDiagnosticsParentOrgConsistent))
+            diagnosticRow("Parent Property", optionalBoolText(diagnostics.lastCanonicalReadDiagnosticsParentPropertyConsistent))
+            diagnosticRow("Local Shots", diagnostics.lastCanonicalReadDiagnosticsLocalShotCount.map(String.init) ?? "none")
+            diagnosticRow("Remote Shots", diagnostics.lastCanonicalReadDiagnosticsRemoteShotCount.map(String.init) ?? "none")
+            diagnosticRow("Local Issues/Obs", diagnostics.lastCanonicalReadDiagnosticsLocalIssueObservationCount.map(String.init) ?? "none")
+            diagnosticRow("Remote Issues/Obs", diagnostics.lastCanonicalReadDiagnosticsRemoteIssueObservationCount.map(String.init) ?? "none")
+            diagnosticRow("Local Guided", diagnostics.lastCanonicalReadDiagnosticsLocalGuidedCount.map(String.init) ?? "none")
+            diagnosticRow("Remote Freshness Seconds", diagnostics.lastCanonicalReadDiagnosticsRemoteFreshnessAgeSeconds.map { String(Int($0)) } ?? "unknown")
+            diagnosticRow("Remote Revision", diagnostics.lastCanonicalReadDiagnosticsRemoteRevision.map(String.init) ?? "none")
+            diagnosticRow("Recommendation", diagnostics.lastCanonicalReadDiagnosticsRecommendation)
+            if let blockedReason = AppState.diagnosticsPreviewText(diagnostics.lastCanonicalReadDiagnosticsBlockedReason, maxLength: 160) {
+                diagnosticRow("Blocked Reason", blockedReason)
+            }
+            diagnosticRow("Parity Gaps", diagnostics.lastNormalizedParityGapTaxonomy.isEmpty ? "none" : diagnostics.lastNormalizedParityGapTaxonomy.joined(separator: ", "))
+            diagnosticRow("Completeness", diagnostics.lastNormalizedParityCompleteness)
+            diagnosticRow("Shadow Coverage", diagnostics.lastRemoteShadowWriteCoverage)
+            diagnosticRow("Missing Remote", diagnostics.lastMissingRemoteEntityClassification)
+            diagnosticRow("Lineage Source", diagnostics.lastLineageDivergenceSource)
+            diagnosticRow("Repair Tooling", diagnostics.lastParityRepairToolingRecommended ? "recommended" : "not required")
+            diagnosticRow("Canonical Blocked", diagnostics.lastCanonicalReadsRemainBlocked ? "true" : "false")
+            diagnosticRow("Repair Strategies", diagnostics.lastParityRepairStrategies.isEmpty ? "none" : diagnostics.lastParityRepairStrategies.joined(separator: ", "))
+            diagnosticRow("Completeness Score", String(format: "%.2f", diagnostics.lastParityCompletenessScore))
+            diagnosticRow("Shadow Score", String(format: "%.2f", diagnostics.lastShadowWriteCoverageScore))
+            diagnosticRow("Lineage Confidence", diagnostics.lastLineageConfidence)
+            diagnosticRow("Missing Child Count", "\(diagnostics.lastMissingChildCount)")
+            diagnosticRow("Replay Eligibility", diagnostics.lastReplayEligibility)
+            diagnosticRow("Repair Phase", diagnostics.lastParityRepairRolloutPhase)
+            diagnosticRow("Backfill Eligible", diagnostics.lastNormalizedBackfillEligible ? "true" : "false")
+            diagnosticRow("Backfill Blocked", diagnostics.lastNormalizedBackfillBlockedReason)
+            diagnosticRow("Backfill Planned", "sessions \(diagnostics.lastNormalizedBackfillPlannedSessionUpserts), shots \(diagnostics.lastNormalizedBackfillPlannedShotUpserts), observations \(diagnostics.lastNormalizedBackfillPlannedObservationUpserts)")
+            diagnosticRow("Backfill Executed", "\(diagnostics.lastNormalizedBackfillExecutedEntityCount)")
+            diagnosticRow("Backfill Skipped", "\(diagnostics.lastNormalizedBackfillSkippedEntityCount)")
+            diagnosticRow("Remote Newer Conflicts", "\(diagnostics.lastNormalizedBackfillRemoteNewerConflictCount)")
+            diagnosticRow("Production Backfill", diagnostics.lastNormalizedBackfillProductionBlocked ? "blocked" : "not blocked")
+            diagnosticRow("Candidate Flag", diagnostics.lastCanonicalReadCandidateFlagEnabled ? "enabled" : "off")
+            diagnosticRow("Candidate Allowed", diagnostics.lastCanonicalReadCandidateAllowed ? "true" : "false")
+            diagnosticRow("Candidate Blocked", diagnostics.lastCanonicalReadCandidateBlockedReason)
+            diagnosticRow("Effective Source", diagnostics.lastCanonicalReadCandidateEffectiveSourceRecommendation)
+            diagnosticRow("Local Fallback", diagnostics.lastCanonicalReadCandidateLocalFallbackAvailable ? "available" : "missing")
+            diagnosticRow("Candidate Parity", String(format: "%.2f", diagnostics.lastCanonicalReadCandidateParityConfidence))
+            diagnosticRow("Candidate Replay", String(format: "%.2f", diagnostics.lastCanonicalReadCandidateReplayConfidence))
+            diagnosticRow("Candidate Media", String(format: "%.2f", diagnostics.lastCanonicalReadCandidateMediaRecoveryConfidence))
+            diagnosticRow("Candidate Remote State", diagnostics.lastCanonicalReadCandidateRemoteStateReadable ? "readable" : "blocked")
+            diagnosticRow("Candidate Scope", diagnostics.lastCanonicalReadCandidateProductionWideEnabled ? "production-wide" : "allowlisted/test-only")
+            if !diagnostics.lastCanonicalReadCandidateWarnings.isEmpty {
+                diagnosticRow("Candidate Warnings", diagnostics.lastCanonicalReadCandidateWarnings.joined(separator: ", "))
+            }
+            diagnosticRow("Overlay Built", diagnostics.lastCanonicalCandidateOverlayBuilt ? "true" : "false")
+            diagnosticRow("Overlay Allowed", diagnostics.lastCanonicalCandidateOverlayAllowed ? "true" : "false")
+            diagnosticRow("Overlay Blocked", diagnostics.lastCanonicalCandidateOverlayBlockedReason)
+            diagnosticRow("Overlay Source", diagnostics.lastCanonicalCandidateOverlaySource)
+            diagnosticRow("Overlay Property", diagnostics.lastCanonicalCandidateOverlayPropertyID?.uuidString ?? "none")
+            diagnosticRow("Overlay Session", diagnostics.lastCanonicalCandidateOverlaySessionID?.uuidString ?? "none")
+            diagnosticRow("Overlay Shots", "\(diagnostics.lastCanonicalCandidateOverlayShotCount)")
+            diagnosticRow("Overlay Issues", "\(diagnostics.lastCanonicalCandidateOverlayIssueObservationCount)")
+            diagnosticRow("Overlay Fallback", diagnostics.lastCanonicalCandidateOverlayFallbackSource)
+            diagnosticRow("Active Source", diagnostics.lastCanonicalCandidateOverlayActiveSource)
+            diagnosticRow("Rollback/Fallback", diagnostics.lastCanonicalCandidateOverlayRollbackAvailable ? "available" : "missing")
+            diagnosticRow("Overlay Production", diagnostics.lastCanonicalCandidateOverlayProductionBlocked ? "blocked" : "not blocked")
+            if !diagnostics.lastCanonicalReadRolloutBlockers.isEmpty {
+                diagnosticRow("Rollout Blockers", diagnostics.lastCanonicalReadRolloutBlockers.joined(separator: ", "))
+            }
+            Button(isCheckingCanonicalReadDiagnostics ? "Checking..." : "Check Canonical Read Diagnostics") {
+                guard !isCheckingCanonicalReadDiagnostics else { return }
+                isCheckingCanonicalReadDiagnostics = true
+                Task {
+                    _ = await appState.runCanonicalReadDiagnosticsForSelectedSession()
+                    await MainActor.run {
+                        isCheckingCanonicalReadDiagnostics = false
+                    }
+                }
+            }
+            .disabled(isCheckingCanonicalReadDiagnostics)
+            .font(.system(size: 14, weight: .semibold))
+            Button(isBuildingCanonicalCandidateOverlay ? "Building..." : "Build Canonical Candidate Overlay") {
+                guard !isBuildingCanonicalCandidateOverlay else { return }
+                isBuildingCanonicalCandidateOverlay = true
+                Task {
+                    _ = await appState.buildCanonicalCandidateOverlayForSelectedSession()
+                    await MainActor.run {
+                        isBuildingCanonicalCandidateOverlay = false
+                    }
+                }
+            }
+            .disabled(isBuildingCanonicalCandidateOverlay)
+            .font(.system(size: 14, weight: .semibold))
+        }
+    }
+
+    private func optionalBoolText(_ value: Bool?) -> String {
+        value.map { $0 ? "true" : "false" } ?? "not checked"
     }
 }
 
