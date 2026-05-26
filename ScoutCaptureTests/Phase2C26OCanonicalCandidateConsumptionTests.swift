@@ -1110,4 +1110,130 @@ final class Phase2C26OCanonicalCandidateConsumptionTests: XCTestCase {
         XCTAssertTrue(result.diagnostics.noBehaviorChangedText.contains("switch global canonical reads"))
         XCTAssertTrue(result.diagnostics.noBehaviorChangedText.contains("remove local/iCloud fallback"))
     }
+
+    func testProductionRolloutDryRunDefaultBlocked() {
+        let package = AppState.generateProductionRolloutDryRun(
+            AppState.SessionSnapshotUploadDiagnostics()
+        )
+
+        XCTAssertEqual(package.state, .dryRunBlocked)
+        XCTAssertTrue(package.blockers.contains("org_id_required"))
+        XCTAssertTrue(package.blockers.contains("property_id_required"))
+        XCTAssertEqual(package.localHealthAction, "Generate Production Rollout Dry Run")
+        XCTAssertTrue(package.noChangesPerformedText.contains("No changes performed"))
+    }
+
+    func testProductionRolloutDryRunMissingAllowlistBlocked() {
+        let upload = rolloutReadinessDiagnostics(
+            configuration: AppState.CanonicalReadCandidateConfiguration(
+                enabled: true,
+                orgAllowlist: [],
+                propertyAllowlist: [],
+                sessionAllowlist: [],
+                parityCompletenessThreshold: 0.95,
+                mediaRecoveryConfidenceThreshold: 0.95
+            )
+        )
+
+        let package = AppState.generateProductionRolloutDryRun(upload, orgID: orgID)
+
+        XCTAssertEqual(package.state, .dryRunBlocked)
+        XCTAssertTrue(package.blockers.contains("allowlist_incomplete"))
+        XCTAssertTrue(package.blockers.contains("candidate_not_ready"))
+    }
+
+    func testProductionRolloutDryRunPositiveEvidenceReadyForOperatorReview() {
+        let upload = rolloutReadinessDiagnostics()
+
+        let package = AppState.generateProductionRolloutDryRun(upload, orgID: orgID)
+
+        XCTAssertEqual(package.state, .dryRunReadyForOperatorReview)
+        XCTAssertTrue(package.blockers.isEmpty)
+        XCTAssertTrue(package.parityReplayReady)
+        XCTAssertTrue(package.candidateReady)
+        XCTAssertTrue(package.overlayReady)
+        XCTAssertTrue(package.activationReady)
+        XCTAssertTrue(package.rollbackFallbackReady)
+        XCTAssertTrue(package.requiredOperatorActions.contains("Request Operator Review"))
+    }
+
+    func testProductionRolloutDryRunOperatorApprovedReadyForSingleSessionAllowlist() {
+        let upload = rolloutReadinessDiagnostics()
+
+        let package = AppState.generateProductionRolloutDryRun(
+            upload,
+            orgID: orgID,
+            policy: cohortPolicy(
+                requestedStage: .singleSessionActivation,
+                approvalState: .approved
+            ),
+            approvalTimestamp: Date(timeIntervalSinceReferenceDate: 7_700),
+            expirationTimestamp: Date(timeIntervalSinceReferenceDate: 8_700),
+            checkedAt: Date(timeIntervalSinceReferenceDate: 7_800)
+        )
+
+        XCTAssertEqual(package.state, .dryRunReadyForSingleSessionAllowlist)
+        XCTAssertTrue(package.blockers.isEmpty)
+        XCTAssertEqual(package.operatorApprovalReadiness.state, .approved)
+        XCTAssertEqual(package.cohortControlPlane.cohort.activationEligibility, .singleSessionReadinessOnly)
+        XCTAssertTrue(package.requiredOperatorActions.contains("copy_dry_run_report_to_operator_rollout_record"))
+    }
+
+    func testProductionRolloutDryRunProductionWideEnabledBlocksDryRun() {
+        let upload = rolloutReadinessDiagnostics(productionWideEnabled: true)
+
+        let package = AppState.generateProductionRolloutDryRun(
+            upload,
+            orgID: orgID,
+            policy: cohortPolicy(
+                requestedStage: .singleSessionActivation,
+                approvalState: .approved,
+                productionWideEnabled: true
+            )
+        )
+
+        XCTAssertEqual(package.state, .dryRunBlocked)
+        XCTAssertFalse(package.productionWideDisabledConfirmation)
+        XCTAssertTrue(package.blockers.contains("production_wide_canonical_reads_not_disabled"))
+    }
+
+    func testProductionRolloutDryRunReportIncludesRollbackAndFallbackPlan() {
+        let upload = rolloutReadinessDiagnostics()
+        let package = AppState.generateProductionRolloutDryRun(upload, orgID: orgID)
+
+        let report = AppState.productionRolloutDryRunReportText(package)
+        let rolloutReport = AppState.canonicalReadRolloutReportText(upload)
+
+        XCTAssertTrue(report.contains("Production Rollout Dry Run"))
+        XCTAssertTrue(report.contains("- selected_org_id: \(orgID.uuidString)"))
+        XCTAssertTrue(report.contains("- rollback_plan: Keep active source local"))
+        XCTAssertTrue(report.contains("- fallback_plan: Continue local-first reads"))
+        XCTAssertTrue(report.contains("- production_wide_disabled_confirmation: true"))
+        XCTAssertTrue(report.contains("No changes performed"))
+        XCTAssertTrue(rolloutReport.contains("Production Rollout Dry Run Rows"))
+        XCTAssertTrue(rolloutReport.contains("- local health action: Generate Production Rollout Dry Run"))
+    }
+
+    func testProductionRolloutDryRunNoBehaviorChangesOccur() {
+        let directory = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("Phase2C27D-\(UUID().uuidString)", isDirectory: true)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: directory.path))
+        let upload = rolloutReadinessDiagnostics()
+
+        let package = AppState.generateProductionRolloutDryRun(
+            upload,
+            orgID: orgID,
+            policy: cohortPolicy(
+                requestedStage: .singleSessionActivation,
+                approvalState: .approved
+            )
+        )
+
+        XCTAssertTrue(package.noChangesPerformedText.contains("does not enable production reads"))
+        XCTAssertTrue(package.noChangesPerformedText.contains("activate candidates"))
+        XCTAssertTrue(package.noChangesPerformedText.contains("switch global canonical reads"))
+        XCTAssertTrue(package.noChangesPerformedText.contains("write local or remote state"))
+        XCTAssertTrue(package.noChangesPerformedText.contains("remove local/iCloud fallback"))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: directory.path))
+    }
 }

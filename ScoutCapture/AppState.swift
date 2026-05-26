@@ -2378,6 +2378,13 @@ final class AppState: ObservableObject {
         case expired
     }
 
+    enum ProductionRolloutDryRunState: String, CaseIterable, Equatable {
+        case dryRunNotReady = "dry_run_not_ready"
+        case dryRunReadyForOperatorReview = "dry_run_ready_for_operator_review"
+        case dryRunReadyForSingleSessionAllowlist = "dry_run_ready_for_single_session_allowlist"
+        case dryRunBlocked = "dry_run_blocked"
+    }
+
     enum ProductionCohortValidationState: String, CaseIterable, Equatable {
         case notValidated = "not_validated"
         case verified
@@ -2516,6 +2523,28 @@ final class AppState: ObservableObject {
         let action: ProductionCohortOperatorAction
         let diagnostics: ProductionCohortOperatorApprovalDiagnostics
         let noBehaviorChangedText: String
+    }
+
+    struct ProductionRolloutDryRunPackage: Equatable {
+        let state: ProductionRolloutDryRunState
+        let canonicalDiagnostics: SessionSnapshotUploadDiagnostics
+        let rolloutReadiness: CanonicalRolloutReadinessDiagnostics
+        let productionAllowlistReadiness: ProductionAllowlistReadinessDiagnostics
+        let cohortControlPlane: ProductionCohortControlPlaneDiagnostics
+        let operatorApprovalReadiness: ProductionCohortOperatorApprovalDiagnostics
+        let parityReplayReady: Bool
+        let candidateReady: Bool
+        let overlayReady: Bool
+        let activationReady: Bool
+        let rollbackFallbackReady: Bool
+        let readinessSummary: String
+        let blockers: [String]
+        let requiredOperatorActions: [String]
+        let rollbackPlan: String
+        let fallbackPlan: String
+        let productionWideDisabledConfirmation: Bool
+        let localHealthAction: String
+        let noChangesPerformedText: String
     }
 
     struct CanonicalTransitionPolicyDiagnostics: Equatable {
@@ -17081,6 +17110,18 @@ final class AppState: ObservableObject {
         lines.append("- approval freshness: \(cohortApproval.staleApproval ? "stale" : "fresh_or_not_started")")
         lines.append("- next recommended action: \(cohortApproval.nextRecommendedAction)")
         lines.append("")
+        let dryRun = generateProductionRolloutDryRun(diagnostics)
+        lines.append("Production Rollout Dry Run Rows")
+        lines.append("- local health action: \(dryRun.localHealthAction)")
+        lines.append("- dry run state: \(dryRun.state.rawValue)")
+        lines.append("- dry run blockers: \(dryRun.blockers.isEmpty ? "none" : dryRun.blockers.joined(separator: ", "))")
+        lines.append("- required operator actions: \(dryRun.requiredOperatorActions.isEmpty ? "none" : dryRun.requiredOperatorActions.joined(separator: ", "))")
+        lines.append("- rollback plan: \(dryRun.rollbackPlan)")
+        lines.append("- fallback plan: \(dryRun.fallbackPlan)")
+        lines.append("- production-wide disabled confirmation: \(dryRun.productionWideDisabledConfirmation)")
+        lines.append("")
+        lines.append(productionRolloutDryRunReportText(dryRun))
+        lines.append("")
         lines.append(productionCohortControlPlaneReportText(cohortControlPlane))
         lines.append("")
         lines.append(limitedProductionRolloutReadinessReportText(productionReadiness))
@@ -20443,6 +20484,178 @@ final class AppState: ObservableObject {
             diagnostics: diagnostics,
             noBehaviorChangedText: diagnostics.noBehaviorChangedText
         )
+    }
+
+    nonisolated static func generateProductionRolloutDryRun(
+        _ diagnostics: SessionSnapshotUploadDiagnostics,
+        orgID: UUID? = nil,
+        policy: ProductionCohortControlPlanePolicy = .diagnosticsOnly,
+        approvalTimestamp: Date? = nil,
+        expirationTimestamp: Date? = nil,
+        checkedAt: Date = Date()
+    ) -> ProductionRolloutDryRunPackage {
+        let rolloutReadiness = makeCanonicalRolloutReadinessDiagnostics(diagnostics)
+        let productionReadiness = makeProductionAllowlistReadinessDiagnostics(
+            diagnostics,
+            policy: ProductionAllowlistReadinessPolicy(
+                operatorApproved: policy.operatorApprovalState == .approved,
+                parityConfidenceThreshold: policy.parityConfidenceThreshold,
+                replayConfidenceThreshold: policy.replayConfidenceThreshold,
+                recommendedCohortSize: "single_org_property_session"
+            )
+        )
+        let controlPlane = makeProductionCohortControlPlaneDiagnostics(
+            diagnostics,
+            orgID: orgID,
+            policy: policy
+        )
+        let approval = makeProductionCohortOperatorApprovalDiagnostics(
+            controlPlane,
+            requestedState: policy.operatorApprovalState,
+            approvalTimestamp: approvalTimestamp,
+            expirationTimestamp: expirationTimestamp,
+            checkedAt: checkedAt
+        )
+
+        let parityReplayReady = controlPlane.eligibility.parityVerified &&
+            controlPlane.eligibility.replayBackfillVerified
+        let candidateReady = diagnostics.lastCanonicalReadCandidateAllowed &&
+            diagnostics.lastCanonicalReadCandidateLocalFallbackAvailable
+        let overlayReady = controlPlane.eligibility.overlayVerified
+        let activationReady = diagnostics.lastCanonicalCandidateActivationAllowed &&
+            diagnostics.lastCanonicalCandidateActivationProductionBlocked
+        let rollbackFallbackReady = controlPlane.eligibility.activationRollbackVerified &&
+            diagnostics.lastCanonicalReadCandidateLocalFallbackAvailable
+        let productionWideDisabled = controlPlane.eligibility.productionWideDisabled
+
+        var blockers: [String] = []
+        if controlPlane.cohort.orgID == nil {
+            blockers.append("org_id_required")
+        }
+        if controlPlane.cohort.propertyID == nil {
+            blockers.append("property_id_required")
+        }
+        if controlPlane.cohort.sessionID == nil {
+            blockers.append("session_id_required")
+        }
+        if !productionWideDisabled {
+            blockers.append("production_wide_canonical_reads_not_disabled")
+        }
+        if !controlPlane.eligibility.allowlistComplete {
+            blockers.append("allowlist_incomplete")
+        }
+        if !parityReplayReady {
+            blockers.append("parity_or_replay_not_verified")
+        }
+        if !candidateReady {
+            blockers.append("candidate_not_ready")
+        }
+        if !overlayReady {
+            blockers.append("overlay_not_verified")
+        }
+        if !activationReady {
+            blockers.append("activation_readiness_not_verified")
+        }
+        if !rollbackFallbackReady {
+            blockers.append("rollback_or_fallback_not_verified")
+        }
+        blockers.append(contentsOf: controlPlane.eligibility.unresolvedBlockers.map { "unresolved_\($0)" })
+        if approval.state == .rejected {
+            blockers.append("operator_rejected")
+        }
+        if approval.state == .expired || approval.staleApproval {
+            blockers.append("operator_approval_expired")
+        }
+        if let approvalBlockedReason = approval.approvalBlockedReason,
+           approval.state == .approved || approval.state == .rejected || approval.state == .expired {
+            blockers.append(contentsOf: approvalBlockedReason.split(separator: ",").map {
+                "approval_\($0.trimmingCharacters(in: .whitespaces))"
+            })
+        }
+
+        let dedupedBlockers = Array(Set(blockers)).sorted()
+        let state: ProductionRolloutDryRunState
+        if !dedupedBlockers.isEmpty {
+            state = .dryRunBlocked
+        } else if approval.state == .approved {
+            state = .dryRunReadyForSingleSessionAllowlist
+        } else {
+            state = .dryRunReadyForOperatorReview
+        }
+
+        let requiredOperatorActions: [String]
+        switch state {
+        case .dryRunReadyForOperatorReview:
+            requiredOperatorActions = [
+                ProductionCohortOperatorAction.requestOperatorReview.rawValue,
+                ProductionCohortOperatorAction.approveProductionCohortReadiness.rawValue
+            ]
+        case .dryRunReadyForSingleSessionAllowlist:
+            requiredOperatorActions = ["copy_dry_run_report_to_operator_rollout_record"]
+        case .dryRunNotReady:
+            requiredOperatorActions = ["resolve_dry_run_readiness_gaps"]
+        case .dryRunBlocked:
+            requiredOperatorActions = ["disable_production_wide_canonical_reads_before_any_review"]
+        }
+
+        let readinessSummary = [
+            "canonical=\(rolloutReadiness.state.rawValue)",
+            "production_allowlist=\(productionReadiness.state.rawValue)",
+            "cohort=\(controlPlane.cohort.rolloutStage.rawValue)",
+            "operator_approval=\(approval.state.rawValue)",
+            "parity_replay=\(parityReplayReady)",
+            "candidate=\(candidateReady)",
+            "overlay=\(overlayReady)",
+            "activation_readiness=\(activationReady)",
+            "rollback_fallback=\(rollbackFallbackReady)"
+        ].joined(separator: " ")
+
+        return ProductionRolloutDryRunPackage(
+            state: state,
+            canonicalDiagnostics: diagnostics,
+            rolloutReadiness: rolloutReadiness,
+            productionAllowlistReadiness: productionReadiness,
+            cohortControlPlane: controlPlane,
+            operatorApprovalReadiness: approval,
+            parityReplayReady: parityReplayReady,
+            candidateReady: candidateReady,
+            overlayReady: overlayReady,
+            activationReady: activationReady,
+            rollbackFallbackReady: rollbackFallbackReady,
+            readinessSummary: readinessSummary,
+            blockers: dedupedBlockers,
+            requiredOperatorActions: requiredOperatorActions,
+            rollbackPlan: "Keep active source local; if any future allowlist validation fails, restore diagnostic active source to local for the selected session and retain local/iCloud fallback.",
+            fallbackPlan: "Continue local-first reads with iCloud/local fallback retained; do not consume production canonical rows in this dry run.",
+            productionWideDisabledConfirmation: productionWideDisabled,
+            localHealthAction: "Generate Production Rollout Dry Run",
+            noChangesPerformedText: "No changes performed: production rollout dry run is diagnostics-only. It does not enable production reads, activate candidates, switch global canonical reads, build a production overlay, write local or remote state, discard local state, remove local/iCloud fallback, change export, seal, sync, media, or iCloud behavior, loosen RLS, or delete data."
+        )
+    }
+
+    nonisolated static func productionRolloutDryRunReportText(
+        _ package: ProductionRolloutDryRunPackage
+    ) -> String {
+        var lines: [String] = []
+        lines.append("Production Rollout Dry Run")
+        lines.append("- selected_org_id: \(package.cohortControlPlane.cohort.orgID?.uuidString ?? "none")")
+        lines.append("- selected_property_id: \(package.cohortControlPlane.cohort.propertyID?.uuidString ?? "none")")
+        lines.append("- selected_session_id: \(package.cohortControlPlane.cohort.sessionID?.uuidString ?? "none")")
+        lines.append("- dry_run_state: \(package.state.rawValue)")
+        lines.append("- readiness_summary: \(package.readinessSummary)")
+        lines.append("- blockers: \(package.blockers.isEmpty ? "none" : package.blockers.joined(separator: ", "))")
+        lines.append("- required_operator_actions: \(package.requiredOperatorActions.isEmpty ? "none" : package.requiredOperatorActions.joined(separator: ", "))")
+        lines.append("- rollback_plan: \(package.rollbackPlan)")
+        lines.append("- fallback_plan: \(package.fallbackPlan)")
+        lines.append("- production_wide_disabled_confirmation: \(package.productionWideDisabledConfirmation)")
+        lines.append("- parity_replay_ready: \(package.parityReplayReady)")
+        lines.append("- candidate_ready: \(package.candidateReady)")
+        lines.append("- overlay_ready: \(package.overlayReady)")
+        lines.append("- activation_ready: \(package.activationReady)")
+        lines.append("- rollback_fallback_ready: \(package.rollbackFallbackReady)")
+        lines.append("- local_health_action: \(package.localHealthAction)")
+        lines.append(package.noChangesPerformedText)
+        return lines.joined(separator: "\n")
     }
 
     private nonisolated static func canonicalCandidateMediaRecoveryConfidence(
