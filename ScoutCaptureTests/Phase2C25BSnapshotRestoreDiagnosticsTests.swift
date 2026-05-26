@@ -273,7 +273,11 @@ final class Phase2C25BSnapshotRestoreDiagnosticsTests: XCTestCase {
         switch key {
         case "SCOUTCAPTURE_RUN_26K_STAGING_NORMALIZED_REPLAY_VALIDATION":
             jsonKey = "run_26k_staging_normalized_replay_validation"
+        case "SCOUTCAPTURE_RUN_26N_STAGING_CANONICAL_CANDIDATE_VALIDATION":
+            jsonKey = "run_26n_staging_canonical_candidate_validation"
         case "SCOUTCAPTURE_26K_STAGING_SERVICE_ROLE_KEY":
+            jsonKey = "staging_service_role_key"
+        case "SCOUTCAPTURE_26N_STAGING_SERVICE_ROLE_KEY":
             jsonKey = "staging_service_role_key"
         default:
             return nil
@@ -1651,5 +1655,259 @@ final class Phase2C25BSnapshotRestoreDiagnosticsTests: XCTestCase {
         print("[Phase2C26K] replay allowed=\(replay.allowed) executed=\(replay.executedEntityCount) skipped=\(replay.skippedEntityCount) failed=\(replay.failedEntityCount)")
         print("[Phase2C26K] after result=\(afterDiagnostics.result.rawValue) recommendation=\(afterDiagnostics.canonicalRecommendation) completeness=\(afterReport.parityCompletenessScore) missing_children=\(afterReport.missingChildCount) parent_org=\(afterDiagnostics.parentOrgConsistent.map(String.init) ?? "nil") remote_shots=\(afterCounts.shotRows) remote_observations=\(afterCounts.observationRows)")
         print("[Phase2C26K] duplicate allowed=\(secondReplay.allowed) executed=\(secondReplay.executedEntityCount) skipped=\(secondReplay.skippedEntityCount) remote_shots=\(duplicateCounts.shotRows) remote_observations=\(duplicateCounts.observationRows)")
+    }
+
+    func testPhase2C26NHostedStagingCanonicalCandidatePositivePathValidation() async throws {
+        guard stagingValidationFlagEnabled("SCOUTCAPTURE_RUN_26N_STAGING_CANONICAL_CANDIDATE_VALIDATION") else {
+            throw XCTSkip("Set SCOUTCAPTURE_RUN_26N_STAGING_CANONICAL_CANDIDATE_VALIDATION=1 to run hosted staging canonical candidate validation.")
+        }
+        let serviceKey = try stagingValidationHeaderValue("SCOUTCAPTURE_26N_STAGING_SERVICE_ROLE_KEY")
+        let root = try makeTempStorageRoot()
+        let store = LocalStore(testStorageRootURL: root)
+        let orgID = UUID()
+        _ = try store.createOrganization(Organization(id: orgID, name: "Phase 2C-26N Staging Org"))
+        let property = try store.createProperty(Property(
+            id: UUID(),
+            orgId: orgID,
+            name: "Phase 2C-26N Staging Canonical Candidate Validation"
+        ))
+        let session = try store.upsertSession(Session(
+            id: UUID(),
+            propertyID: property.id,
+            startedAt: Date(timeIntervalSinceReferenceDate: 21_000),
+            status: .completed,
+            endedAt: Date(timeIntervalSinceReferenceDate: 21_600),
+            exportedAt: nil,
+            isSealed: true,
+            firstDeliveredAt: nil,
+            reExportExpiresAt: nil
+        ))
+        let shots = [
+            makeShot(propertyID: property.id, sessionID: session.id, filename: "phase-2c-26n-1.jpg", localReference: false, remoteMetadata: false),
+            makeShot(propertyID: property.id, sessionID: session.id, filename: "phase-2c-26n-2.jpg", localReference: false, remoteMetadata: false)
+        ]
+        try saveMetadata(store: store, property: property, session: session, orgID: orgID, shots: shots)
+
+        let iso8601 = ISO8601DateFormatter()
+        try await insertStagingRow(
+            table: "orgs",
+            payload: [
+                "id": orgID.uuidString.lowercased(),
+                "name": "Phase 2C-26N Staging Org"
+            ],
+            serviceKey: serviceKey
+        )
+        try await insertStagingRow(
+            table: "properties",
+            payload: [
+                "id": property.id.uuidString.lowercased(),
+                "org_id": orgID.uuidString.lowercased(),
+                "name": property.name
+            ],
+            serviceKey: serviceKey
+        )
+        try await insertStagingRow(
+            table: "sessions",
+            payload: [
+                "id": session.id.uuidString.lowercased(),
+                "org_id": orgID.uuidString.lowercased(),
+                "property_id": property.id.uuidString.lowercased(),
+                "status": session.status.rawValue,
+                "started_at": iso8601.string(from: session.startedAt),
+                "completed_at": session.endedAt.map { iso8601.string(from: $0) } ?? NSNull()
+            ],
+            serviceKey: serviceKey
+        )
+
+        func remoteCounts() async throws -> (sessionRows: Int, shotRows: Int, observationRows: Int) {
+            let sessionRows = try await fetchStagingRows(
+                table: "sessions",
+                query: "select=id,org_id,property_id&id=eq.\(session.id.uuidString.lowercased())&deleted_at=is.null",
+                serviceKey: serviceKey
+            )
+            let shotRows = try await fetchStagingRows(
+                table: "shots",
+                query: "select=id,session_id&session_id=eq.\(session.id.uuidString.lowercased())&deleted_at=is.null",
+                serviceKey: serviceKey
+            )
+            let observationRows = try await fetchStagingRows(
+                table: "observations",
+                query: "select=id,session_id&session_id=eq.\(session.id.uuidString.lowercased())&deleted_at=is.null",
+                serviceKey: serviceKey
+            )
+            return (sessionRows.count, shotRows.count, observationRows.count)
+        }
+
+        func diagnostics(
+            remoteShotCount: Int,
+            remoteObservationCount: Int,
+            result: AppState.CanonicalReadDiagnosticResult,
+            recommendation: String
+        ) -> AppState.CanonicalReadDiagnosticsResult {
+            AppState.CanonicalReadDiagnosticsResult(
+                checkedAt: Date(),
+                propertyID: property.id,
+                sessionID: session.id,
+                activeOrganizationID: orgID,
+                result: result,
+                remotePropertyFound: true,
+                remoteSessionFound: true,
+                localPropertyFound: true,
+                localSessionFound: true,
+                countParity: remoteShotCount == shots.count && remoteObservationCount == 1,
+                statusParity: true,
+                parentOrgConsistent: true,
+                parentPropertyConsistent: true,
+                localShotCount: shots.count,
+                remoteShotCount: remoteShotCount,
+                localIssueObservationCount: 1,
+                remoteIssueObservationCount: remoteObservationCount,
+                localGuidedCount: 0,
+                remoteGuidedCount: nil,
+                localUpdatedAt: session.endedAt,
+                remoteUpdatedAt: session.endedAt,
+                remoteRevision: nil,
+                remoteFreshnessAgeSeconds: nil,
+                canonicalRecommendation: recommendation,
+                blockedReason: result == .divergentConflict ? "remote_rows_diverge_from_local_counts_or_status" : nil,
+                noBehaviorChangedText: "read only"
+            )
+        }
+
+        func candidateConfiguration() -> AppState.CanonicalReadCandidateConfiguration {
+            AppState.CanonicalReadCandidateConfiguration(
+                enabled: true,
+                orgAllowlist: [orgID],
+                propertyAllowlist: [property.id],
+                sessionAllowlist: [session.id],
+                parityCompletenessThreshold: 0.95,
+                mediaRecoveryConfidenceThreshold: 0.95
+            )
+        }
+
+        let beforeCounts = try await remoteCounts()
+        XCTAssertEqual(beforeCounts.sessionRows, 1)
+        XCTAssertEqual(beforeCounts.shotRows, 0)
+        XCTAssertEqual(beforeCounts.observationRows, 0)
+        let beforeDiagnostics = diagnostics(
+            remoteShotCount: beforeCounts.shotRows,
+            remoteObservationCount: beforeCounts.observationRows,
+            result: .divergentConflict,
+            recommendation: "local_first_block_canonical_read"
+        )
+        let beforeReport = AppState.makeNormalizedParityGapReport(canonicalDiagnostics: beforeDiagnostics)
+        let beforeCandidate = AppState.makeCanonicalReadCandidateDiagnostics(
+            configuration: candidateConfiguration(),
+            targetClassification: .approvedStaging,
+            canonicalDiagnostics: beforeDiagnostics,
+            parityReport: beforeReport
+        )
+        XCTAssertFalse(beforeCandidate.allowed)
+        XCTAssertTrue(beforeCandidate.blockedReason?.contains("missing_remote_children") == true)
+        XCTAssertTrue(beforeCandidate.localFallbackAvailable)
+
+        let plan = AppState.makeNormalizedBackfillReplayPlan(canonicalDiagnostics: beforeDiagnostics)
+        let replay = await AppState.executeNormalizedBackfillReplayTestOnly(
+            plan: plan,
+            targetClassification: .approvedStaging
+        ) { kind, count in
+            switch kind {
+            case .session:
+                return AppState.NormalizedBackfillEntityResult(kind: kind, attemptedCount: count, upsertedCount: 0, skippedCount: count, failedCount: 0, message: "session_present")
+            case .shot:
+                for shot in shots {
+                    try await self.insertStagingRow(
+                        table: "shots",
+                        payload: [
+                            "id": shot.shotID.uuidString.lowercased(),
+                            "org_id": orgID.uuidString.lowercased(),
+                            "property_id": property.id.uuidString.lowercased(),
+                            "session_id": session.id.uuidString.lowercased(),
+                            "shot_type": "detail",
+                            "position": shot.angleIndex,
+                            "captured_at": iso8601.string(from: shot.createdAt),
+                            "upload_state": "pending",
+                            "upload_attempts": 0
+                        ],
+                        serviceKey: serviceKey
+                    )
+                }
+                return AppState.NormalizedBackfillEntityResult(kind: kind, attemptedCount: count, upsertedCount: shots.count, skippedCount: max(0, count - shots.count), failedCount: 0, message: "shot_rows_inserted")
+            case .observation:
+                try await self.insertStagingRow(
+                    table: "observations",
+                    payload: [
+                        "id": UUID().uuidString.lowercased(),
+                        "org_id": orgID.uuidString.lowercased(),
+                        "session_id": session.id.uuidString.lowercased(),
+                        "shot_id": shots.first?.shotID.uuidString.lowercased() ?? NSNull(),
+                        "category": "phase_2c_26n",
+                        "status": "open",
+                        "title": "Phase 2C-26N validation observation",
+                        "detail": "Hosted staging canonical candidate validation"
+                    ],
+                    serviceKey: serviceKey
+                )
+                return AppState.NormalizedBackfillEntityResult(kind: kind, attemptedCount: count, upsertedCount: 1, skippedCount: max(0, count - 1), failedCount: 0, message: "observation_row_inserted")
+            }
+        }
+
+        let afterCounts = try await remoteCounts()
+        let afterDiagnostics = diagnostics(
+            remoteShotCount: afterCounts.shotRows,
+            remoteObservationCount: afterCounts.observationRows,
+            result: .remoteMatchesLocal,
+            recommendation: "remote_candidate_after_replay_validation"
+        )
+        let afterReport = AppState.makeNormalizedParityGapReport(canonicalDiagnostics: afterDiagnostics)
+        let validation = AppState.validateNormalizedBackfillReplay(
+            before: beforeDiagnostics,
+            after: afterDiagnostics,
+            execution: replay
+        )
+        let afterCandidate = AppState.makeCanonicalReadCandidateDiagnostics(
+            configuration: candidateConfiguration(),
+            targetClassification: .approvedStaging,
+            canonicalDiagnostics: afterDiagnostics,
+            parityReport: afterReport,
+            replayValidation: validation
+        )
+
+        XCTAssertTrue(replay.allowed)
+        XCTAssertEqual(replay.failedEntityCount, 0)
+        XCTAssertEqual(afterCounts.sessionRows, 1)
+        XCTAssertEqual(afterCounts.shotRows, shots.count)
+        XCTAssertEqual(afterCounts.observationRows, 1)
+        XCTAssertEqual(afterDiagnostics.result, .remoteMatchesLocal)
+        XCTAssertEqual(afterDiagnostics.canonicalRecommendation, "remote_candidate_after_replay_validation")
+        XCTAssertGreaterThanOrEqual(afterReport.parityCompletenessScore, 0.95)
+        XCTAssertEqual(afterReport.missingChildCount, 0)
+        XCTAssertEqual(afterDiagnostics.parentOrgConsistent, true)
+        XCTAssertEqual(afterDiagnostics.parentPropertyConsistent, true)
+        XCTAssertTrue(validation.remainingCanonicalBlockers.isEmpty)
+        XCTAssertTrue(afterCandidate.allowed)
+        XCTAssertEqual(afterCandidate.effectiveSourceRecommendation, "remote_normalized_candidate_with_local_fallback")
+        XCTAssertTrue(afterCandidate.localFallbackAvailable)
+        XCTAssertFalse(afterCandidate.productionWideCanonicalReadsEnabled)
+        XCTAssertTrue(afterCandidate.noBehaviorChangedText.contains("do not switch global reads"))
+
+        let productionCandidate = AppState.makeCanonicalReadCandidateDiagnostics(
+            configuration: candidateConfiguration(),
+            targetClassification: .approvedProductionValidation,
+            canonicalDiagnostics: afterDiagnostics,
+            parityReport: afterReport,
+            replayValidation: validation
+        )
+        XCTAssertFalse(productionCandidate.allowed)
+        XCTAssertTrue(productionCandidate.blockedReason?.contains("production_canonical_read_candidate_requires_separate_explicit_approval") == true)
+        XCTAssertFalse(productionCandidate.productionWideCanonicalReadsEnabled)
+
+        print("[Phase2C26N] staging_url=\(hostedStagingURL)")
+        print("[Phase2C26N] property_id=\(property.id.uuidString)")
+        print("[Phase2C26N] session_id=\(session.id.uuidString)")
+        print("[Phase2C26N] before result=\(beforeDiagnostics.result.rawValue) candidate_allowed=\(beforeCandidate.allowed) completeness=\(beforeReport.parityCompletenessScore) missing_children=\(beforeReport.missingChildCount) remote_shots=\(beforeCounts.shotRows) remote_observations=\(beforeCounts.observationRows)")
+        print("[Phase2C26N] replay allowed=\(replay.allowed) executed=\(replay.executedEntityCount) skipped=\(replay.skippedEntityCount) failed=\(replay.failedEntityCount)")
+        print("[Phase2C26N] after result=\(afterDiagnostics.result.rawValue) recommendation=\(afterDiagnostics.canonicalRecommendation) completeness=\(afterReport.parityCompletenessScore) missing_children=\(afterReport.missingChildCount) remote_shots=\(afterCounts.shotRows) remote_observations=\(afterCounts.observationRows)")
+        print("[Phase2C26N] candidate allowed=\(afterCandidate.allowed) effective_source=\(afterCandidate.effectiveSourceRecommendation) local_fallback=\(afterCandidate.localFallbackAvailable) production_wide=\(afterCandidate.productionWideCanonicalReadsEnabled)")
     }
 }
