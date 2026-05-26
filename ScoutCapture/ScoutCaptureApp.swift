@@ -9267,6 +9267,12 @@ private struct DebugSessionSnapshotCanonicalReadDiagnosticsSection: View {
             diagnosticRow("Active Source", diagnostics.lastCanonicalCandidateOverlayActiveSource)
             diagnosticRow("Rollback/Fallback", diagnostics.lastCanonicalCandidateOverlayRollbackAvailable ? "available" : "missing")
             diagnosticRow("Overlay Production", diagnostics.lastCanonicalCandidateOverlayProductionBlocked ? "blocked" : "not blocked")
+            diagnosticRow("Comparison Result", diagnostics.lastCanonicalCandidateOverlayComparisonResult)
+            diagnosticRow("Local Counts", "shots \(diagnostics.lastCanonicalCandidateOverlayComparisonLocalShotCount.map(String.init) ?? "none"), issues \(diagnostics.lastCanonicalCandidateOverlayComparisonLocalIssueObservationCount.map(String.init) ?? "none")")
+            diagnosticRow("Candidate Counts", "shots \(diagnostics.lastCanonicalCandidateOverlayComparisonRemoteShotCount.map(String.init) ?? "none"), issues \(diagnostics.lastCanonicalCandidateOverlayComparisonRemoteIssueObservationCount.map(String.init) ?? "none")")
+            diagnosticRow("Freshness", "local \(diagnostics.lastCanonicalCandidateOverlayComparisonLocalFreshness), remote \(diagnostics.lastCanonicalCandidateOverlayComparisonRemoteFreshness)")
+            diagnosticRow("Why Trusted", diagnostics.lastCanonicalCandidateOverlayComparisonTrustedReason)
+            diagnosticRow("Why Blocked", diagnostics.lastCanonicalCandidateOverlayComparisonBlockedReason)
             if !diagnostics.lastCanonicalReadRolloutBlockers.isEmpty {
                 diagnosticRow("Rollout Blockers", diagnostics.lastCanonicalReadRolloutBlockers.joined(separator: ", "))
             }

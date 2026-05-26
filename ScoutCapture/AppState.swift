@@ -1438,6 +1438,18 @@ final class AppState: ObservableObject {
         var lastCanonicalCandidateOverlayActiveSource: String = "local"
         var lastCanonicalCandidateOverlayRollbackAvailable: Bool = true
         var lastCanonicalCandidateOverlayProductionBlocked: Bool = true
+        var lastCanonicalCandidateOverlayComparisonResult: String = "candidate_unavailable"
+        var lastCanonicalCandidateOverlayComparisonLocalStatus: String = "unknown"
+        var lastCanonicalCandidateOverlayComparisonRemoteStatus: String = "unknown"
+        var lastCanonicalCandidateOverlayComparisonLocalShotCount: Int?
+        var lastCanonicalCandidateOverlayComparisonRemoteShotCount: Int?
+        var lastCanonicalCandidateOverlayComparisonLocalIssueObservationCount: Int?
+        var lastCanonicalCandidateOverlayComparisonRemoteIssueObservationCount: Int?
+        var lastCanonicalCandidateOverlayComparisonLocalFreshness: String = "unknown"
+        var lastCanonicalCandidateOverlayComparisonRemoteFreshness: String = "unknown"
+        var lastCanonicalCandidateOverlayComparisonParityConfidence: String = "not_checked"
+        var lastCanonicalCandidateOverlayComparisonTrustedReason: String = "not_checked"
+        var lastCanonicalCandidateOverlayComparisonBlockedReason: String = "not_checked"
     }
 
     struct LocalDiagnosticsState: Equatable {
@@ -2262,6 +2274,38 @@ final class AppState: ObservableObject {
         let activeSourceRemainsLocal: Bool
         let rollbackAvailable: Bool
         let productionBlocked: Bool
+        let noBehaviorChangedText: String
+    }
+
+    enum CanonicalCandidateOverlayComparisonResult: String, CaseIterable, Equatable {
+        case candidateMatchesLocal = "candidate_matches_local"
+        case candidateRemoteNewer = "candidate_remote_newer"
+        case candidateLocalNewer = "candidate_local_newer"
+        case candidateDivergent = "candidate_divergent"
+        case candidateIncomplete = "candidate_incomplete"
+        case candidateUnavailable = "candidate_unavailable"
+    }
+
+    struct CanonicalCandidateOverlayComparison: Equatable {
+        let checkedAt: Date
+        let result: CanonicalCandidateOverlayComparisonResult
+        let propertyID: UUID?
+        let sessionID: UUID?
+        let localSessionStatus: String?
+        let remoteCandidateSessionStatus: String?
+        let localShotCount: Int?
+        let remoteCandidateShotCount: Int?
+        let localIssueObservationCount: Int?
+        let remoteCandidateIssueObservationCount: Int?
+        let localUpdatedAt: Date?
+        let remoteCandidateUpdatedAt: Date?
+        let parityConfidence: Double
+        let fallbackSource: String
+        let activeSource: String
+        let overlaySource: String
+        let rollbackAvailable: Bool
+        let trustedReason: String
+        let blockedReason: String?
         let noBehaviorChangedText: String
     }
 
@@ -16738,6 +16782,20 @@ final class AppState: ObservableObject {
         lines.append("- canonical_candidate_overlay_rollback_available: \(diagnostics.lastCanonicalCandidateOverlayRollbackAvailable)")
         lines.append("- canonical_candidate_overlay_production_blocked: \(diagnostics.lastCanonicalCandidateOverlayProductionBlocked)")
         lines.append("")
+        lines.append("Canonical Candidate Overlay Comparison")
+        lines.append("- canonical_candidate_overlay_comparison_result: \(diagnostics.lastCanonicalCandidateOverlayComparisonResult)")
+        lines.append("- canonical_candidate_overlay_comparison_local_status: \(diagnosticsPreviewText(diagnostics.lastCanonicalCandidateOverlayComparisonLocalStatus, maxLength: 80) ?? "unknown")")
+        lines.append("- canonical_candidate_overlay_comparison_remote_status: \(diagnosticsPreviewText(diagnostics.lastCanonicalCandidateOverlayComparisonRemoteStatus, maxLength: 80) ?? "unknown")")
+        lines.append("- canonical_candidate_overlay_comparison_local_shots: \(diagnostics.lastCanonicalCandidateOverlayComparisonLocalShotCount.map(String.init) ?? "none")")
+        lines.append("- canonical_candidate_overlay_comparison_remote_shots: \(diagnostics.lastCanonicalCandidateOverlayComparisonRemoteShotCount.map(String.init) ?? "none")")
+        lines.append("- canonical_candidate_overlay_comparison_local_issue_observations: \(diagnostics.lastCanonicalCandidateOverlayComparisonLocalIssueObservationCount.map(String.init) ?? "none")")
+        lines.append("- canonical_candidate_overlay_comparison_remote_issue_observations: \(diagnostics.lastCanonicalCandidateOverlayComparisonRemoteIssueObservationCount.map(String.init) ?? "none")")
+        lines.append("- canonical_candidate_overlay_comparison_local_freshness: \(diagnosticsPreviewText(diagnostics.lastCanonicalCandidateOverlayComparisonLocalFreshness, maxLength: 120) ?? "unknown")")
+        lines.append("- canonical_candidate_overlay_comparison_remote_freshness: \(diagnosticsPreviewText(diagnostics.lastCanonicalCandidateOverlayComparisonRemoteFreshness, maxLength: 120) ?? "unknown")")
+        lines.append("- canonical_candidate_overlay_comparison_parity_confidence: \(diagnostics.lastCanonicalCandidateOverlayComparisonParityConfidence)")
+        lines.append("- canonical_candidate_overlay_comparison_trusted_reason: \(diagnosticsPreviewText(diagnostics.lastCanonicalCandidateOverlayComparisonTrustedReason, maxLength: 180) ?? "not_checked")")
+        lines.append("- canonical_candidate_overlay_comparison_blocked_reason: \(diagnosticsPreviewText(diagnostics.lastCanonicalCandidateOverlayComparisonBlockedReason, maxLength: 180) ?? "not_checked")")
+        lines.append("")
         lines.append("Redaction Notes")
         lines.append("- Report rows intentionally omit raw session.json text, local paths, storage object paths, signed URLs, auth tokens, and media bytes.")
         lines.append("- If storage upload succeeds and table insert fails, the app does not delete the object; orphan risk is reported for later controlled cleanup.")
@@ -17913,11 +17971,20 @@ final class AppState: ObservableObject {
             parityReport: parityReport,
             candidateDiagnostics: candidateDiagnostics
         )
-        recordCanonicalCandidateOverlayBuild(result)
+        let comparison = Self.makeCanonicalCandidateOverlayComparison(
+            checkedAt: checkedAt,
+            canonicalDiagnostics: canonicalDiagnostics,
+            overlayResult: result,
+            parityReport: parityReport
+        )
+        recordCanonicalCandidateOverlayBuild(result, comparison: comparison)
         return result
     }
 
-    private func recordCanonicalCandidateOverlayBuild(_ result: CanonicalCandidateOverlayBuildResult) {
+    private func recordCanonicalCandidateOverlayBuild(
+        _ result: CanonicalCandidateOverlayBuildResult,
+        comparison: CanonicalCandidateOverlayComparison
+    ) {
         var diagnostics = localDiagnostics
         diagnostics.sessionSnapshotUpload.lastCanonicalCandidateOverlayBuilt = result.overlay != nil
         diagnostics.sessionSnapshotUpload.lastCanonicalCandidateOverlayAllowed = result.allowed
@@ -17932,6 +17999,18 @@ final class AppState: ObservableObject {
         diagnostics.sessionSnapshotUpload.lastCanonicalCandidateOverlayActiveSource = result.overlay?.activeSource ?? "local"
         diagnostics.sessionSnapshotUpload.lastCanonicalCandidateOverlayRollbackAvailable = result.rollbackAvailable
         diagnostics.sessionSnapshotUpload.lastCanonicalCandidateOverlayProductionBlocked = result.productionBlocked
+        diagnostics.sessionSnapshotUpload.lastCanonicalCandidateOverlayComparisonResult = comparison.result.rawValue
+        diagnostics.sessionSnapshotUpload.lastCanonicalCandidateOverlayComparisonLocalStatus = comparison.localSessionStatus ?? "unknown"
+        diagnostics.sessionSnapshotUpload.lastCanonicalCandidateOverlayComparisonRemoteStatus = comparison.remoteCandidateSessionStatus ?? "unknown"
+        diagnostics.sessionSnapshotUpload.lastCanonicalCandidateOverlayComparisonLocalShotCount = comparison.localShotCount
+        diagnostics.sessionSnapshotUpload.lastCanonicalCandidateOverlayComparisonRemoteShotCount = comparison.remoteCandidateShotCount
+        diagnostics.sessionSnapshotUpload.lastCanonicalCandidateOverlayComparisonLocalIssueObservationCount = comparison.localIssueObservationCount
+        diagnostics.sessionSnapshotUpload.lastCanonicalCandidateOverlayComparisonRemoteIssueObservationCount = comparison.remoteCandidateIssueObservationCount
+        diagnostics.sessionSnapshotUpload.lastCanonicalCandidateOverlayComparisonLocalFreshness = comparison.localUpdatedAt.map { $0.formatted(date: .abbreviated, time: .standard) } ?? "unknown"
+        diagnostics.sessionSnapshotUpload.lastCanonicalCandidateOverlayComparisonRemoteFreshness = comparison.remoteCandidateUpdatedAt.map { $0.formatted(date: .abbreviated, time: .standard) } ?? "unknown"
+        diagnostics.sessionSnapshotUpload.lastCanonicalCandidateOverlayComparisonParityConfidence = String(format: "%.2f", comparison.parityConfidence)
+        diagnostics.sessionSnapshotUpload.lastCanonicalCandidateOverlayComparisonTrustedReason = comparison.trustedReason
+        diagnostics.sessionSnapshotUpload.lastCanonicalCandidateOverlayComparisonBlockedReason = comparison.blockedReason ?? "none"
         localDiagnostics = diagnostics
     }
 
@@ -18980,6 +19059,130 @@ final class AppState: ObservableObject {
         lines.append("Rollback/Fallback Available: \(result.rollbackAvailable)")
         lines.append("Production Blocked: \(result.productionBlocked)")
         lines.append(result.noBehaviorChangedText)
+        return lines.joined(separator: "\n")
+    }
+
+    nonisolated static func makeCanonicalCandidateOverlayComparison(
+        checkedAt: Date = Date(),
+        canonicalDiagnostics: CanonicalReadDiagnosticsResult,
+        overlayResult: CanonicalCandidateOverlayBuildResult,
+        parityReport: NormalizedParityGapReport,
+        localSessionStatus: String? = nil,
+        remoteCandidateSessionStatus: String? = nil
+    ) -> CanonicalCandidateOverlayComparison {
+        let overlay = overlayResult.overlay
+        let localShotCount = canonicalDiagnostics.localShotCount
+        let remoteShotCount = overlay?.remoteShotCount ?? canonicalDiagnostics.remoteShotCount
+        let localIssueObservationCount = canonicalDiagnostics.localIssueObservationCount
+        let remoteIssueObservationCount = overlay?.remoteIssueObservationCount ?? canonicalDiagnostics.remoteIssueObservationCount
+        let fallbackSource = overlay?.fallbackSource ?? "local"
+        let activeSource = overlay?.activeSource ?? "local"
+        let overlaySource = overlay?.source ?? "not_built"
+        let rollbackAvailable = overlay?.rollbackAvailable ?? overlayResult.rollbackAvailable
+        var blockers: [String] = []
+
+        if !overlayResult.allowed || overlay == nil {
+            blockers.append(overlayResult.blockedReason ?? "canonical_candidate_overlay_unavailable")
+        }
+        if parityReport.missingChildCount > 0 {
+            blockers.append("missing_remote_children")
+        }
+        if canonicalDiagnostics.parentOrgConsistent != true || canonicalDiagnostics.parentPropertyConsistent != true {
+            blockers.append("parent_org_or_property_divergence")
+        }
+        if canonicalDiagnostics.result == .localNewerConflict {
+            blockers.append("local_newer_than_remote_candidate")
+        }
+        if canonicalDiagnostics.result == .divergentConflict {
+            blockers.append("candidate_diverges_from_local")
+        }
+        if canonicalDiagnostics.countParity == false || canonicalDiagnostics.statusParity == false {
+            blockers.append("candidate_count_or_status_parity_failed")
+        }
+
+        let result: CanonicalCandidateOverlayComparisonResult
+        if parityReport.missingChildCount > 0 {
+            result = .candidateIncomplete
+        } else if canonicalDiagnostics.result == .localNewerConflict {
+            result = .candidateLocalNewer
+        } else if canonicalDiagnostics.result == .remoteNewerCandidate {
+            result = .candidateRemoteNewer
+        } else if canonicalDiagnostics.result == .divergentConflict ||
+                    canonicalDiagnostics.countParity == false ||
+                    canonicalDiagnostics.statusParity == false {
+            result = .candidateDivergent
+        } else if overlay == nil {
+            result = .candidateUnavailable
+        } else if canonicalDiagnostics.result == .remoteMatchesLocal ||
+                    canonicalDiagnostics.canonicalRecommendation == "remote_candidate_after_replay_validation" {
+            result = .candidateMatchesLocal
+        } else {
+            result = .candidateUnavailable
+            blockers.append("canonical_read_diagnostic_result_not_candidate")
+        }
+
+        let trustedReason: String
+        switch result {
+        case .candidateMatchesLocal:
+            trustedReason = "remote_matches_local_with_parent_consistency_and_local_fallback"
+        case .candidateRemoteNewer:
+            trustedReason = "remote_candidate_newer_requires_manual_review_before_consumption"
+        case .candidateLocalNewer:
+            trustedReason = "local_newer_blocks_candidate_consumption"
+        case .candidateDivergent:
+            trustedReason = "divergent_candidate_blocks_consumption"
+        case .candidateIncomplete:
+            trustedReason = "incomplete_candidate_blocks_consumption"
+        case .candidateUnavailable:
+            trustedReason = "candidate_overlay_not_available"
+        }
+
+        return CanonicalCandidateOverlayComparison(
+            checkedAt: checkedAt,
+            result: result,
+            propertyID: canonicalDiagnostics.propertyID,
+            sessionID: canonicalDiagnostics.sessionID,
+            localSessionStatus: localSessionStatus,
+            remoteCandidateSessionStatus: remoteCandidateSessionStatus,
+            localShotCount: localShotCount,
+            remoteCandidateShotCount: remoteShotCount,
+            localIssueObservationCount: localIssueObservationCount,
+            remoteCandidateIssueObservationCount: remoteIssueObservationCount,
+            localUpdatedAt: canonicalDiagnostics.localUpdatedAt,
+            remoteCandidateUpdatedAt: canonicalDiagnostics.remoteUpdatedAt,
+            parityConfidence: max(0, min(parityReport.parityCompletenessScore, 1)),
+            fallbackSource: fallbackSource,
+            activeSource: activeSource,
+            overlaySource: overlaySource,
+            rollbackAvailable: rollbackAvailable,
+            trustedReason: trustedReason,
+            blockedReason: blockers.isEmpty ? nil : blockers.joined(separator: ", "),
+            noBehaviorChangedText: "No behavior changed: canonical candidate overlay comparison is inspect-only. Active app state remains local, local fallback remains available, production canonical reads remain disabled, and export, seal, sync, media, and iCloud behavior are unchanged."
+        )
+    }
+
+    nonisolated static func canonicalCandidateOverlayComparisonReportText(_ comparison: CanonicalCandidateOverlayComparison) -> String {
+        var lines: [String] = []
+        lines.append("Canonical Candidate Overlay Comparison")
+        lines.append("- result: \(comparison.result.rawValue)")
+        lines.append("- property_id: \(comparison.propertyID?.uuidString ?? "none")")
+        lines.append("- session_id: \(comparison.sessionID?.uuidString ?? "none")")
+        lines.append("- local_session_status: \(diagnosticsPreviewText(comparison.localSessionStatus, maxLength: 80) ?? "unknown")")
+        lines.append("- remote_candidate_session_status: \(diagnosticsPreviewText(comparison.remoteCandidateSessionStatus, maxLength: 80) ?? "unknown")")
+        lines.append("- local_shot_count: \(comparison.localShotCount.map(String.init) ?? "none")")
+        lines.append("- remote_candidate_shot_count: \(comparison.remoteCandidateShotCount.map(String.init) ?? "none")")
+        lines.append("- local_issue_observation_count: \(comparison.localIssueObservationCount.map(String.init) ?? "none")")
+        lines.append("- remote_candidate_issue_observation_count: \(comparison.remoteCandidateIssueObservationCount.map(String.init) ?? "none")")
+        lines.append("- local_updated_at: \(comparison.localUpdatedAt?.formatted(date: .abbreviated, time: .standard) ?? "unknown")")
+        lines.append("- remote_candidate_updated_at: \(comparison.remoteCandidateUpdatedAt?.formatted(date: .abbreviated, time: .standard) ?? "unknown")")
+        lines.append("- parity_confidence: \(String(format: "%.2f", comparison.parityConfidence))")
+        lines.append("- active_source: \(comparison.activeSource)")
+        lines.append("- overlay_source: \(comparison.overlaySource)")
+        lines.append("- fallback_source: \(comparison.fallbackSource)")
+        lines.append("- rollback_available: \(comparison.rollbackAvailable)")
+        lines.append("- why_candidate_is_trusted: \(comparison.trustedReason)")
+        lines.append("- why_candidate_is_blocked: \(diagnosticsPreviewText(comparison.blockedReason, maxLength: 180) ?? "none")")
+        lines.append(comparison.noBehaviorChangedText)
         return lines.joined(separator: "\n")
     }
 

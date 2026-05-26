@@ -83,6 +83,30 @@ final class Phase2C26OCanonicalCandidateConsumptionTests: XCTestCase {
         )
     }
 
+    private func comparison(
+        target: SupabaseRuntimeConfiguration.TargetClassification = .approvedStaging,
+        diagnostics canonicalDiagnostics: AppState.CanonicalReadDiagnosticsResult? = nil,
+        configuration: AppState.CanonicalReadCandidateConfiguration? = nil,
+        localStatus: String? = "completed",
+        remoteStatus: String? = "completed"
+    ) -> AppState.CanonicalCandidateOverlayComparison {
+        let canonicalDiagnostics = canonicalDiagnostics ?? diagnostics()
+        let result = overlay(
+            target: target,
+            diagnostics: canonicalDiagnostics,
+            configuration: configuration
+        )
+        let report = AppState.makeNormalizedParityGapReport(canonicalDiagnostics: canonicalDiagnostics)
+        return AppState.makeCanonicalCandidateOverlayComparison(
+            checkedAt: Date(timeIntervalSinceReferenceDate: 6_300),
+            canonicalDiagnostics: canonicalDiagnostics,
+            overlayResult: result,
+            parityReport: report,
+            localSessionStatus: localStatus,
+            remoteCandidateSessionStatus: remoteStatus
+        )
+    }
+
     func testAllowlistedStagingCandidateBuildsOverlay() {
         let result = overlay()
 
@@ -203,10 +227,100 @@ final class Phase2C26OCanonicalCandidateConsumptionTests: XCTestCase {
         let text = AppState.sessionSnapshotUploadReportText(AppState.SessionSnapshotUploadDiagnostics())
 
         XCTAssertTrue(text.contains("Canonical Candidate Overlay Test-Only"))
+        XCTAssertTrue(text.contains("Canonical Candidate Overlay Comparison"))
         XCTAssertTrue(text.contains("- canonical_candidate_overlay_built: false"))
         XCTAssertTrue(text.contains("- canonical_candidate_overlay_source: not_built"))
         XCTAssertTrue(text.contains("- canonical_candidate_overlay_fallback_source: local"))
         XCTAssertTrue(text.contains("- canonical_candidate_overlay_active_source: local"))
         XCTAssertTrue(text.contains("- canonical_candidate_overlay_production_blocked: true"))
+        XCTAssertTrue(text.contains("- canonical_candidate_overlay_comparison_result: candidate_unavailable"))
+    }
+
+    func testComparisonCandidateMatchesLocal() {
+        let result = comparison()
+        let report = AppState.canonicalCandidateOverlayComparisonReportText(result)
+
+        XCTAssertEqual(result.result, .candidateMatchesLocal)
+        XCTAssertEqual(result.localShotCount, 3)
+        XCTAssertEqual(result.remoteCandidateShotCount, 3)
+        XCTAssertEqual(result.localIssueObservationCount, 2)
+        XCTAssertEqual(result.remoteCandidateIssueObservationCount, 2)
+        XCTAssertEqual(result.activeSource, "local")
+        XCTAssertEqual(result.fallbackSource, "local")
+        XCTAssertTrue(result.rollbackAvailable)
+        XCTAssertNil(result.blockedReason)
+        XCTAssertTrue(report.contains("Canonical Candidate Overlay Comparison"))
+    }
+
+    func testComparisonRemoteCandidateNewerIsReportedNotConsumed() {
+        let result = comparison(
+            diagnostics: diagnostics(
+                result: .remoteNewerCandidate,
+                recommendation: "manual_review_remote_candidate"
+            )
+        )
+
+        XCTAssertEqual(result.result, .candidateRemoteNewer)
+        XCTAssertEqual(result.activeSource, "local")
+        XCTAssertEqual(result.fallbackSource, "local")
+        XCTAssertTrue(result.trustedReason.contains("manual_review"))
+    }
+
+    func testComparisonLocalNewerBlocksOrWarns() {
+        let result = comparison(
+            diagnostics: diagnostics(
+                result: .localNewerConflict,
+                recommendation: "local_first_block_canonical_read"
+            )
+        )
+
+        XCTAssertEqual(result.result, .candidateLocalNewer)
+        XCTAssertTrue(result.blockedReason?.contains("local_newer_than_remote_candidate") == true)
+        XCTAssertEqual(result.activeSource, "local")
+    }
+
+    func testComparisonDivergentCandidateBlocksOrWarns() {
+        let result = comparison(
+            diagnostics: diagnostics(
+                result: .divergentConflict,
+                recommendation: "local_first_block_canonical_read",
+                localShotCount: 3,
+                remoteShotCount: 3,
+                localIssueObservationCount: 2,
+                remoteIssueObservationCount: 2,
+                countParity: false
+            )
+        )
+
+        XCTAssertEqual(result.result, .candidateDivergent)
+        XCTAssertTrue(result.blockedReason?.contains("candidate_diverges_from_local") == true)
+        XCTAssertEqual(result.activeSource, "local")
+    }
+
+    func testComparisonIncompleteCandidateBlocks() {
+        let result = comparison(
+            diagnostics: diagnostics(
+                result: .divergentConflict,
+                recommendation: "local_first_block_canonical_read",
+                localShotCount: 5,
+                remoteShotCount: 1,
+                localIssueObservationCount: 2,
+                remoteIssueObservationCount: 0,
+                countParity: false
+            )
+        )
+
+        XCTAssertEqual(result.result, .candidateIncomplete)
+        XCTAssertTrue(result.blockedReason?.contains("missing_remote_children") == true)
+        XCTAssertEqual(result.activeSource, "local")
+    }
+
+    func testComparisonUnavailableCandidateBlocks() {
+        let result = comparison(configuration: configuration(enabled: false))
+
+        XCTAssertEqual(result.result, .candidateUnavailable)
+        XCTAssertTrue(result.blockedReason?.contains("canonical_read_candidate_flag_disabled") == true)
+        XCTAssertEqual(result.activeSource, "local")
+        XCTAssertEqual(result.fallbackSource, "local")
     }
 }
