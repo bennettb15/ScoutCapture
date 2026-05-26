@@ -2339,6 +2339,30 @@ final class AppState: ObservableObject {
         let noBehaviorChangedText: String
     }
 
+    enum CanonicalRolloutReadinessState: String, CaseIterable, Equatable {
+        case notReady = "not_ready"
+        case readyForStagingCandidate = "ready_for_staging_candidate"
+        case readyForSingleSessionActivation = "ready_for_single_session_activation"
+        case readyForLimitedProductionAllowlist = "ready_for_limited_production_allowlist"
+        case blocked
+    }
+
+    struct CanonicalRolloutChecklistItem: Equatable, Identifiable {
+        let id: String
+        let label: String
+        let passed: Bool
+        let detail: String
+    }
+
+    struct CanonicalRolloutReadinessDiagnostics: Equatable {
+        let state: CanonicalRolloutReadinessState
+        let blockers: [String]
+        let nextRecommendedAction: String
+        let checklist: [CanonicalRolloutChecklistItem]
+        let checklistPassed: Bool
+        let noBehaviorChangedText: String
+    }
+
     struct CanonicalTransitionPolicyDiagnostics: Equatable {
         let checkedAt: Date
         let readState: CanonicalReadState
@@ -16846,11 +16870,16 @@ final class AppState: ObservableObject {
     }
 
     nonisolated static func canonicalReadRolloutReportText(_ diagnostics: SessionSnapshotUploadDiagnostics) -> String {
+        let readiness = makeCanonicalRolloutReadinessDiagnostics(diagnostics)
         var lines: [String] = []
         lines.append("ScoutCapture Local Health - Canonical Read Rollout Report")
         lines.append("Operator validation report. This report is diagnostic-only: it does not switch canonical reads, enable production canonical reads, change candidate gating, build or activate overlays, mutate local/remote data, change export, seal, sync, media, or iCloud behavior, loosen RLS, or delete data.")
         lines.append("")
         lines.append("Summary")
+        lines.append("- readiness_state: \(readiness.state.rawValue)")
+        lines.append("- readiness_blockers: \(readiness.blockers.isEmpty ? "none" : readiness.blockers.joined(separator: ", "))")
+        lines.append("- next_recommended_action: \(readiness.nextRecommendedAction)")
+        lines.append("- rollout_checklist_passed: \(readiness.checklistPassed)")
         lines.append("- canonical_read_result: \(diagnosticsPreviewText(diagnostics.lastCanonicalReadDiagnosticsResult, maxLength: 80) ?? "local_only")")
         lines.append("- recommendation: \(diagnosticsPreviewText(diagnostics.lastCanonicalReadDiagnosticsRecommendation, maxLength: 140) ?? "local_first")")
         lines.append("- parity_completeness_score: \(String(format: "%.2f", diagnostics.lastParityCompletenessScore))")
@@ -16870,6 +16899,8 @@ final class AppState: ObservableObject {
         lines.append("- production_overlay_blocked: \(diagnostics.lastCanonicalCandidateOverlayProductionBlocked)")
         lines.append("- production_activation_blocked: \(diagnostics.lastCanonicalCandidateActivationProductionBlocked)")
         lines.append("- rollout_blockers: \(diagnostics.lastCanonicalReadRolloutBlockers.isEmpty ? "none" : diagnostics.lastCanonicalReadRolloutBlockers.joined(separator: ", "))")
+        lines.append("")
+        lines.append(canonicalRolloutReadinessReportText(readiness))
         lines.append("")
         lines.append("Read Diagnostics")
         lines.append("- checked_at: \(diagnostics.lastCanonicalReadDiagnosticsAt?.formatted(date: .abbreviated, time: .standard) ?? "none")")
@@ -19506,6 +19537,196 @@ final class AppState: ObservableObject {
         lines.append("- rollback_available: \(result.rollbackAvailable)")
         lines.append("- production_activation_blocked: \(result.productionBlocked)")
         lines.append(result.noBehaviorChangedText)
+        return lines.joined(separator: "\n")
+    }
+
+    nonisolated static func makeCanonicalRolloutReadinessDiagnostics(
+        _ diagnostics: SessionSnapshotUploadDiagnostics
+    ) -> CanonicalRolloutReadinessDiagnostics {
+        let canonicalCandidateResult = diagnostics.lastCanonicalReadDiagnosticsResult == CanonicalReadDiagnosticResult.remoteMatchesLocal.rawValue ||
+            diagnostics.lastCanonicalReadDiagnosticsRecommendation == "remote_candidate_after_replay_validation"
+        let parentConsistent = diagnostics.lastCanonicalReadDiagnosticsParentOrgConsistent == true &&
+            diagnostics.lastCanonicalReadDiagnosticsParentPropertyConsistent == true
+        let parentDivergent = diagnostics.lastCanonicalReadDiagnosticsParentOrgConsistent == false ||
+            diagnostics.lastCanonicalReadDiagnosticsParentPropertyConsistent == false
+        let noMissingChildren = diagnostics.lastMissingChildCount == 0 &&
+            !diagnostics.lastNormalizedParityGapTaxonomy.contains("missing_remote_children")
+        let noRemoteNewerConflict = diagnostics.lastCanonicalReadDiagnosticsResult != CanonicalReadDiagnosticResult.remoteNewerCandidate.rawValue &&
+            diagnostics.lastNormalizedBackfillRemoteNewerConflictCount == 0
+        let productionWideDisabled = !diagnostics.lastCanonicalReadCandidateProductionWideEnabled
+        let productionBlocked = diagnostics.lastCanonicalCandidateOverlayProductionBlocked &&
+            diagnostics.lastCanonicalCandidateActivationProductionBlocked
+        let rollbackAvailable = diagnostics.lastCanonicalCandidateOverlayRollbackAvailable &&
+            diagnostics.lastCanonicalCandidateActivationRollbackAvailable
+        let operatorReportAvailable = true
+
+        let checklist = [
+            CanonicalRolloutChecklistItem(
+                id: "local_fallback_retained",
+                label: "Local fallback retained",
+                passed: diagnostics.lastCanonicalReadCandidateLocalFallbackAvailable,
+                detail: diagnostics.lastCanonicalReadCandidateLocalFallbackAvailable ? "available" : "missing"
+            ),
+            CanonicalRolloutChecklistItem(
+                id: "rollback_tested",
+                label: "Rollback tested",
+                passed: rollbackAvailable,
+                detail: rollbackAvailable ? "rollback available" : "rollback unavailable"
+            ),
+            CanonicalRolloutChecklistItem(
+                id: "production_wide_disabled",
+                label: "Production-wide disabled",
+                passed: productionWideDisabled && productionBlocked,
+                detail: productionWideDisabled && productionBlocked ? "disabled and blocked" : "production-wide risk present"
+            ),
+            CanonicalRolloutChecklistItem(
+                id: "allowlist_required",
+                label: "Allowlist required",
+                passed: diagnostics.lastCanonicalReadCandidateFlagEnabled &&
+                    diagnostics.lastCanonicalReadCandidateOrgAllowlisted &&
+                    diagnostics.lastCanonicalReadCandidatePropertyAllowlisted &&
+                    diagnostics.lastCanonicalReadCandidateSessionAllowlisted,
+                detail: "org=\(diagnostics.lastCanonicalReadCandidateOrgAllowlisted) property=\(diagnostics.lastCanonicalReadCandidatePropertyAllowlisted) session=\(diagnostics.lastCanonicalReadCandidateSessionAllowlisted)"
+            ),
+            CanonicalRolloutChecklistItem(
+                id: "no_missing_children",
+                label: "No missing children",
+                passed: noMissingChildren,
+                detail: noMissingChildren ? "missing_child_count=0" : "missing_child_count=\(diagnostics.lastMissingChildCount)"
+            ),
+            CanonicalRolloutChecklistItem(
+                id: "no_parent_mismatch",
+                label: "No parent mismatch",
+                passed: parentConsistent,
+                detail: "org=\(diagnostics.lastCanonicalReadDiagnosticsParentOrgConsistent.map(String.init) ?? "not_checked") property=\(diagnostics.lastCanonicalReadDiagnosticsParentPropertyConsistent.map(String.init) ?? "not_checked")"
+            ),
+            CanonicalRolloutChecklistItem(
+                id: "no_remote_newer_conflict",
+                label: "No remote-newer conflict",
+                passed: noRemoteNewerConflict,
+                detail: noRemoteNewerConflict ? "none" : "remote_newer_conflict_present"
+            ),
+            CanonicalRolloutChecklistItem(
+                id: "operator_report_available",
+                label: "Operator report available",
+                passed: operatorReportAvailable,
+                detail: "canonical_read_rollout_report_available"
+            )
+        ]
+
+        var blockers: [String] = []
+        if !productionWideDisabled || !productionBlocked {
+            blockers.append("production_wide_canonical_reads_not_blocked")
+        }
+        if diagnostics.lastCanonicalReadDiagnosticsResult != CanonicalReadDiagnosticResult.localOnly.rawValue &&
+            diagnostics.lastParityCompletenessScore < 0.95 {
+            blockers.append("parity_completeness_below_threshold")
+        }
+        if parentDivergent {
+            blockers.append("parent_org_or_property_divergence")
+        }
+        if !noMissingChildren {
+            blockers.append("missing_remote_children")
+        }
+        if !noRemoteNewerConflict {
+            blockers.append("remote_newer_conflict")
+        }
+        if !canonicalCandidateResult {
+            blockers.append("canonical_diagnostics_not_candidate")
+        }
+        if !diagnostics.lastCanonicalReadCandidateAllowed {
+            blockers.append(diagnostics.lastCanonicalReadCandidateBlockedReason == "none" ? "canonical_candidate_not_allowed" : diagnostics.lastCanonicalReadCandidateBlockedReason)
+        }
+        if !diagnostics.lastCanonicalCandidateOverlayBuilt {
+            blockers.append(diagnostics.lastCanonicalCandidateOverlayBlockedReason == "none" ? "canonical_candidate_overlay_not_built" : diagnostics.lastCanonicalCandidateOverlayBlockedReason)
+        }
+        if diagnostics.lastCanonicalCandidateOverlayComparisonResult != CanonicalCandidateOverlayComparisonResult.candidateMatchesLocal.rawValue {
+            blockers.append("canonical_candidate_comparison_not_matching_local")
+        }
+        if !diagnostics.lastCanonicalCandidateActivationAllowed {
+            blockers.append(diagnostics.lastCanonicalCandidateActivationBlockedReason == "none" ? "canonical_candidate_activation_not_allowed" : diagnostics.lastCanonicalCandidateActivationBlockedReason)
+        }
+        if !rollbackAvailable {
+            blockers.append("rollback_unavailable")
+        }
+        if !diagnostics.lastCanonicalReadCandidateLocalFallbackAvailable {
+            blockers.append("local_fallback_unavailable")
+        }
+
+        let dedupedBlockers = Array(Set(blockers)).sorted()
+        let hardBlocked = dedupedBlockers.contains("production_wide_canonical_reads_not_blocked") ||
+            dedupedBlockers.contains("parent_org_or_property_divergence") ||
+            dedupedBlockers.contains("missing_remote_children") ||
+            dedupedBlockers.contains("remote_newer_conflict") ||
+            dedupedBlockers.contains("rollback_unavailable") ||
+            dedupedBlockers.contains("local_fallback_unavailable") ||
+            dedupedBlockers.contains("parity_completeness_below_threshold")
+
+        let state: CanonicalRolloutReadinessState
+        if hardBlocked {
+            state = .blocked
+        } else if diagnostics.lastCanonicalCandidateActivationAllowed &&
+                    diagnostics.lastCanonicalCandidateOverlayComparisonResult == CanonicalCandidateOverlayComparisonResult.candidateMatchesLocal.rawValue &&
+                    diagnostics.lastCanonicalCandidateOverlayBuilt &&
+                    diagnostics.lastCanonicalReadCandidateAllowed &&
+                    canonicalCandidateResult &&
+                    dedupedBlockers.isEmpty {
+            state = .readyForSingleSessionActivation
+        } else if diagnostics.lastCanonicalReadCandidateAllowed && canonicalCandidateResult {
+            state = .readyForStagingCandidate
+        } else {
+            state = .notReady
+        }
+
+        let nextRecommendedAction: String
+        switch state {
+        case .notReady:
+            if !canonicalCandidateResult {
+                nextRecommendedAction = "run_canonical_read_diagnostics"
+            } else if !diagnostics.lastCanonicalReadCandidateAllowed {
+                nextRecommendedAction = "fix_candidate_allowlist_or_blockers"
+            } else if !diagnostics.lastCanonicalCandidateOverlayBuilt {
+                nextRecommendedAction = "build_canonical_candidate_overlay"
+            } else if diagnostics.lastCanonicalCandidateOverlayComparisonResult != CanonicalCandidateOverlayComparisonResult.candidateMatchesLocal.rawValue {
+                nextRecommendedAction = "review_overlay_comparison"
+            } else {
+                nextRecommendedAction = "review_activation_gate"
+            }
+        case .readyForStagingCandidate:
+            nextRecommendedAction = "build_overlay_and_compare_candidate"
+        case .readyForSingleSessionActivation:
+            nextRecommendedAction = "manual_single_session_activation_validation"
+        case .readyForLimitedProductionAllowlist:
+            nextRecommendedAction = "prepare_limited_production_allowlist_review"
+        case .blocked:
+            nextRecommendedAction = "resolve_rollout_blockers_before_candidate_consumption"
+        }
+
+        return CanonicalRolloutReadinessDiagnostics(
+            state: state,
+            blockers: dedupedBlockers,
+            nextRecommendedAction: nextRecommendedAction,
+            checklist: checklist,
+            checklistPassed: checklist.allSatisfy(\.passed),
+            noBehaviorChangedText: "No behavior changed: canonical rollout readiness is diagnostics-only. It does not switch canonical reads, enable production canonical reads, mutate production data, discard local state, change export, seal, sync, media, or iCloud behavior, loosen RLS, or delete data."
+        )
+    }
+
+    nonisolated static func canonicalRolloutReadinessReportText(
+        _ readiness: CanonicalRolloutReadinessDiagnostics
+    ) -> String {
+        var lines: [String] = []
+        lines.append("Canonical Rollout Readiness")
+        lines.append("- readiness_state: \(readiness.state.rawValue)")
+        lines.append("- readiness_blockers: \(readiness.blockers.isEmpty ? "none" : readiness.blockers.joined(separator: ", "))")
+        lines.append("- next_recommended_action: \(readiness.nextRecommendedAction)")
+        lines.append("- rollout_checklist_passed: \(readiness.checklistPassed)")
+        lines.append("")
+        lines.append("Rollout Checklist")
+        for item in readiness.checklist {
+            lines.append("- \(item.id): \(item.passed ? "pass" : "fail") (\(item.detail))")
+        }
+        lines.append(readiness.noBehaviorChangedText)
         return lines.joined(separator: "\n")
     }
 

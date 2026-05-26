@@ -9196,8 +9196,22 @@ private struct DebugSessionSnapshotCanonicalReadDiagnosticsSection: View {
     @State private var isActivatingCanonicalCandidate = false
     @State private var isRollingBackCanonicalCandidate = false
 
+    private var rolloutReadiness: AppState.CanonicalRolloutReadinessDiagnostics {
+        AppState.makeCanonicalRolloutReadinessDiagnostics(diagnostics)
+    }
+
     var body: some View {
         Group {
+        Section("Canonical Read - Rollout Readiness") {
+            diagnosticRow("Readiness State", rolloutReadiness.state.rawValue)
+            diagnosticRow("Next Action", rolloutReadiness.nextRecommendedAction)
+            diagnosticRow("Checklist", rolloutReadiness.checklistPassed ? "pass" : "needs review")
+            diagnosticRow("Blockers", compactListSummary(rolloutReadiness.blockers))
+            ForEach(rolloutReadiness.checklist) { item in
+                diagnosticRow(item.label, item.passed ? "pass" : "fail")
+            }
+        }
+
         Section("Canonical Read - Read Diagnostics") {
             Text("Read-only local-vs-remote normalized row comparison. It does not switch canonical reads, hydrate data, restore files, download media, or change local or remote state.")
                 .font(.system(size: 13, weight: .medium))

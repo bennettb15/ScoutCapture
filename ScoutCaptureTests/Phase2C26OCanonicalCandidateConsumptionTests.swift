@@ -181,6 +181,46 @@ final class Phase2C26OCanonicalCandidateConsumptionTests: XCTestCase {
         )
     }
 
+    private func rolloutReadinessDiagnostics(
+        target: SupabaseRuntimeConfiguration.TargetClassification = .approvedStaging,
+        diagnostics canonicalDiagnostics: AppState.CanonicalReadDiagnosticsResult? = nil,
+        configuration: AppState.CanonicalReadCandidateConfiguration? = nil,
+        rollbackAvailable: Bool = true,
+        productionWideEnabled: Bool = false
+    ) -> AppState.SessionSnapshotUploadDiagnostics {
+        let canonicalDiagnostics = canonicalDiagnostics ?? diagnostics()
+        let configuration = configuration ?? self.configuration()
+        let activationResult = activation(
+            target: target,
+            diagnostics: canonicalDiagnostics,
+            configuration: configuration
+        )
+        let parityReport = AppState.makeNormalizedParityGapReport(canonicalDiagnostics: canonicalDiagnostics)
+        var upload = activationDiagnostics(
+            target: target,
+            diagnostics: canonicalDiagnostics,
+            configuration: configuration
+        )
+        upload.lastCanonicalReadDiagnosticsRecommendation = canonicalDiagnostics.canonicalRecommendation
+        upload.lastNormalizedParityCompleteness = parityReport.normalizedParityCompleteness
+        upload.lastParityCompletenessScore = parityReport.parityCompletenessScore
+        upload.lastCanonicalReadCandidateProductionWideEnabled = productionWideEnabled
+        upload.lastCanonicalCandidateOverlayProductionBlocked = true
+        upload.lastCanonicalCandidateActivationAllowed = activationResult.allowed
+        upload.lastCanonicalCandidateActivationBlockedReason = activationResult.blockedReason ?? "none"
+        upload.lastCanonicalCandidateActivationActiveSource = activationResult.activeSource.rawValue
+        upload.lastCanonicalCandidateActivationRollbackSource = activationResult.rollbackSource.rawValue
+        upload.lastCanonicalCandidateActivationScope = activationResult.activationScope
+        upload.lastCanonicalCandidateActivationRollbackAvailable = rollbackAvailable
+        upload.lastCanonicalCandidateOverlayRollbackAvailable = rollbackAvailable
+        upload.lastCanonicalCandidateActivationProductionBlocked = true
+        upload.lastCanonicalReadCandidateEffectiveSourceRecommendation = "remote_normalized_candidate_with_local_fallback"
+        upload.lastCanonicalCandidateOverlaySource = "remote_normalized_candidate_with_local_fallback"
+        upload.lastCanonicalCandidateOverlayActiveSource = "local"
+        upload.lastCanonicalCandidateOverlayFallbackSource = "local"
+        return upload
+    }
+
     func testAllowlistedStagingCandidateBuildsOverlay() {
         let result = overlay()
 
@@ -554,5 +594,85 @@ final class Phase2C26OCanonicalCandidateConsumptionTests: XCTestCase {
         XCTAssertTrue(result.noBehaviorChangedText.contains("media"))
         XCTAssertTrue(result.noBehaviorChangedText.contains("iCloud"))
         XCTAssertFalse(FileManager.default.fileExists(atPath: directory.path))
+    }
+
+    func testCanonicalRolloutReadinessDefaultStateIsNotReady() {
+        let readiness = AppState.makeCanonicalRolloutReadinessDiagnostics(
+            AppState.SessionSnapshotUploadDiagnostics()
+        )
+
+        XCTAssertEqual(readiness.state, .notReady)
+        XCTAssertTrue(readiness.blockers.contains("canonical_diagnostics_not_candidate"))
+        XCTAssertEqual(readiness.nextRecommendedAction, "run_canonical_read_diagnostics")
+        XCTAssertFalse(readiness.checklistPassed)
+    }
+
+    func testCanonicalRolloutReadinessBlockedParityIsBlocked() {
+        let upload = rolloutReadinessDiagnostics(
+            diagnostics: diagnostics(
+                result: .divergentConflict,
+                recommendation: "local_first_block_canonical_read",
+                localShotCount: 5,
+                remoteShotCount: 1,
+                localIssueObservationCount: 2,
+                remoteIssueObservationCount: 0,
+                countParity: false
+            )
+        )
+
+        let readiness = AppState.makeCanonicalRolloutReadinessDiagnostics(upload)
+
+        XCTAssertEqual(readiness.state, .blocked)
+        XCTAssertTrue(readiness.blockers.contains("missing_remote_children"))
+        XCTAssertTrue(readiness.blockers.contains("parity_completeness_below_threshold"))
+        XCTAssertEqual(readiness.nextRecommendedAction, "resolve_rollout_blockers_before_candidate_consumption")
+    }
+
+    func testCanonicalRolloutReadinessPositiveCandidateReachesSingleSessionReadiness() {
+        let upload = rolloutReadinessDiagnostics()
+
+        let readiness = AppState.makeCanonicalRolloutReadinessDiagnostics(upload)
+
+        XCTAssertEqual(readiness.state, .readyForSingleSessionActivation)
+        XCTAssertTrue(readiness.blockers.isEmpty)
+        XCTAssertEqual(readiness.nextRecommendedAction, "manual_single_session_activation_validation")
+        XCTAssertTrue(readiness.checklistPassed)
+    }
+
+    func testCanonicalRolloutReadinessMissingRollbackBlocksReadiness() {
+        let upload = rolloutReadinessDiagnostics(rollbackAvailable: false)
+
+        let readiness = AppState.makeCanonicalRolloutReadinessDiagnostics(upload)
+
+        XCTAssertEqual(readiness.state, .blocked)
+        XCTAssertTrue(readiness.blockers.contains("rollback_unavailable"))
+    }
+
+    func testCanonicalRolloutReadinessProductionWideEnabledBlocksReadiness() {
+        let upload = rolloutReadinessDiagnostics(productionWideEnabled: true)
+
+        let readiness = AppState.makeCanonicalRolloutReadinessDiagnostics(upload)
+
+        XCTAssertEqual(readiness.state, .blocked)
+        XCTAssertTrue(readiness.blockers.contains("production_wide_canonical_reads_not_blocked"))
+    }
+
+    func testCanonicalRolloutReportIncludesReadinessBlockersAndNextAction() {
+        let upload = rolloutReadinessDiagnostics(
+            diagnostics: diagnostics(
+                result: .parentMismatch,
+                recommendation: "local_first_block_canonical_read",
+                parentOrgConsistent: false
+            )
+        )
+
+        let text = AppState.canonicalReadRolloutReportText(upload)
+
+        XCTAssertTrue(text.contains("- readiness_state: blocked"))
+        XCTAssertTrue(text.contains("parent_org_or_property_divergence"))
+        XCTAssertTrue(text.contains("- next_recommended_action: resolve_rollout_blockers_before_candidate_consumption"))
+        XCTAssertTrue(text.contains("Canonical Rollout Readiness"))
+        XCTAssertTrue(text.contains("Rollout Checklist"))
+        XCTAssertTrue(text.contains("No behavior changed"))
     }
 }
