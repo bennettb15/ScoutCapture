@@ -153,6 +153,9 @@ final class Phase2C26OCanonicalCandidateConsumptionTests: XCTestCase {
         upload.lastCanonicalReadCandidateAllowed = candidate.allowed
         upload.lastCanonicalReadCandidateBlockedReason = candidate.blockedReason ?? "none"
         upload.lastCanonicalReadCandidateLocalFallbackAvailable = candidate.localFallbackAvailable
+        upload.lastCanonicalReadCandidateParityConfidence = candidate.parityConfidence
+        upload.lastCanonicalReadCandidateReplayConfidence = candidate.replayConfidence
+        upload.lastCanonicalReadCandidateMediaRecoveryConfidence = candidate.mediaRecoveryConfidence
         upload.lastCanonicalCandidateOverlayBuilt = overlayResult.overlay != nil
         upload.lastCanonicalCandidateOverlayAllowed = overlayResult.allowed
         upload.lastCanonicalCandidateOverlayBlockedReason = overlayResult.blockedReason ?? "none"
@@ -674,5 +677,86 @@ final class Phase2C26OCanonicalCandidateConsumptionTests: XCTestCase {
         XCTAssertTrue(text.contains("Canonical Rollout Readiness"))
         XCTAssertTrue(text.contains("Rollout Checklist"))
         XCTAssertTrue(text.contains("No behavior changed"))
+    }
+
+    func testProductionAllowlistReadinessDefaultProductionBlocked() {
+        let readiness = AppState.makeProductionAllowlistReadinessDiagnostics(
+            AppState.SessionSnapshotUploadDiagnostics()
+        )
+
+        XCTAssertEqual(readiness.state, .productionBlocked)
+        XCTAssertTrue(readiness.blockers.contains("canonical_diagnostics_not_candidate"))
+        XCTAssertTrue(readiness.blockers.contains("parity_confidence_below_threshold"))
+        XCTAssertTrue(readiness.operatorWorkflowDiagnostics.contains(.pendingParityValidation))
+        XCTAssertTrue(readiness.operatorWorkflowDiagnostics.contains(.blockedByUnresolvedConflicts))
+        XCTAssertTrue(readiness.operatorApprovalRequired)
+    }
+
+    func testProductionAllowlistReadinessUnresolvedBlockersBlockProduction() {
+        let upload = rolloutReadinessDiagnostics(
+            diagnostics: diagnostics(
+                result: .divergentConflict,
+                recommendation: "local_first_block_canonical_read",
+                localShotCount: 5,
+                remoteShotCount: 1,
+                localIssueObservationCount: 2,
+                remoteIssueObservationCount: 0,
+                countParity: false
+            )
+        )
+
+        let readiness = AppState.makeProductionAllowlistReadinessDiagnostics(upload)
+
+        XCTAssertEqual(readiness.state, .productionBlocked)
+        XCTAssertTrue(readiness.blockers.contains("unresolved_rollout_blockers"))
+        XCTAssertTrue(readiness.operatorWorkflowDiagnostics.contains(.blockedByUnresolvedConflicts))
+    }
+
+    func testProductionAllowlistReadinessMissingRollbackBlocksReadiness() {
+        let upload = rolloutReadinessDiagnostics(rollbackAvailable: false)
+
+        let readiness = AppState.makeProductionAllowlistReadinessDiagnostics(upload)
+
+        XCTAssertEqual(readiness.state, .productionBlocked)
+        XCTAssertTrue(readiness.blockers.contains("rollback_validation_required"))
+        XCTAssertTrue(readiness.operatorWorkflowDiagnostics.contains(.pendingRollbackValidation))
+        XCTAssertFalse(readiness.rollbackValidated)
+    }
+
+    func testProductionAllowlistReadinessPositiveCandidateReachesPendingOperatorApproval() {
+        let upload = rolloutReadinessDiagnostics()
+
+        let readiness = AppState.makeProductionAllowlistReadinessDiagnostics(upload)
+
+        XCTAssertEqual(readiness.state, .productionAllowlistPendingOperatorApproval)
+        XCTAssertTrue(readiness.blockers.isEmpty)
+        XCTAssertTrue(readiness.operatorWorkflowDiagnostics.contains(.pendingOperatorReview))
+        XCTAssertTrue(readiness.operatorApprovalRequired)
+        XCTAssertTrue(readiness.rollbackValidated)
+        XCTAssertEqual(readiness.productionCohortSizeRecommendation, "single_org_property_session")
+    }
+
+    func testProductionAllowlistReadinessProductionWideEnablementStillBlocked() {
+        let upload = rolloutReadinessDiagnostics(productionWideEnabled: true)
+
+        let readiness = AppState.makeProductionAllowlistReadinessDiagnostics(upload)
+
+        XCTAssertEqual(readiness.state, .productionBlocked)
+        XCTAssertTrue(readiness.blockers.contains("production_wide_enablement_blocked"))
+        XCTAssertTrue(readiness.blockers.contains("production_wide_canonical_reads_not_allowed"))
+    }
+
+    func testCanonicalRolloutReportIncludesLimitedProductionReadinessSectionAndRows() {
+        let upload = rolloutReadinessDiagnostics()
+
+        let text = AppState.canonicalReadRolloutReportText(upload)
+
+        XCTAssertTrue(text.contains("Limited Production Rollout Readiness"))
+        XCTAssertTrue(text.contains("- production_readiness_state: production_allowlist_pending_operator_approval"))
+        XCTAssertTrue(text.contains("- operator_workflow_diagnostics: pending_operator_review"))
+        XCTAssertTrue(text.contains("- operator approval required: true"))
+        XCTAssertTrue(text.contains("- rollback validated: true"))
+        XCTAssertTrue(text.contains("- production cohort size recommendation: single_org_property_session"))
+        XCTAssertTrue(text.contains("does not enable production canonical reads"))
     }
 }

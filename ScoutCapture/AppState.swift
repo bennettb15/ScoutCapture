@@ -2347,6 +2347,21 @@ final class AppState: ObservableObject {
         case blocked
     }
 
+    enum ProductionAllowlistReadinessState: String, CaseIterable, Equatable {
+        case productionNotReady = "production_not_ready"
+        case productionCandidateReady = "production_candidate_ready"
+        case productionAllowlistPendingOperatorApproval = "production_allowlist_pending_operator_approval"
+        case productionBlocked = "production_blocked"
+    }
+
+    enum ProductionOperatorWorkflowDiagnostic: String, CaseIterable, Equatable {
+        case approvedForCandidate = "approved_for_candidate"
+        case pendingOperatorReview = "pending_operator_review"
+        case pendingParityValidation = "pending_parity_validation"
+        case pendingRollbackValidation = "pending_rollback_validation"
+        case blockedByUnresolvedConflicts = "blocked_by_unresolved_conflicts"
+    }
+
     struct CanonicalRolloutChecklistItem: Equatable, Identifiable {
         let id: String
         let label: String
@@ -2360,6 +2375,33 @@ final class AppState: ObservableObject {
         let nextRecommendedAction: String
         let checklist: [CanonicalRolloutChecklistItem]
         let checklistPassed: Bool
+        let noBehaviorChangedText: String
+    }
+
+    struct ProductionAllowlistReadinessPolicy: Equatable {
+        let operatorApproved: Bool
+        let parityConfidenceThreshold: Double
+        let replayConfidenceThreshold: Double
+        let recommendedCohortSize: String
+
+        nonisolated static let diagnosticsOnly = ProductionAllowlistReadinessPolicy(
+            operatorApproved: false,
+            parityConfidenceThreshold: 0.95,
+            replayConfidenceThreshold: 0.95,
+            recommendedCohortSize: "single_org_property_session"
+        )
+    }
+
+    struct ProductionAllowlistReadinessDiagnostics: Equatable {
+        let state: ProductionAllowlistReadinessState
+        let blockers: [String]
+        let operatorWorkflowDiagnostics: [ProductionOperatorWorkflowDiagnostic]
+        let operatorApprovalRequired: Bool
+        let rollbackValidated: Bool
+        let productionCohortSizeRecommendation: String
+        let parityConfidenceThreshold: Double
+        let replayConfidenceThreshold: Double
+        let nextRecommendedAction: String
         let noBehaviorChangedText: String
     }
 
@@ -16871,6 +16913,7 @@ final class AppState: ObservableObject {
 
     nonisolated static func canonicalReadRolloutReportText(_ diagnostics: SessionSnapshotUploadDiagnostics) -> String {
         let readiness = makeCanonicalRolloutReadinessDiagnostics(diagnostics)
+        let productionReadiness = makeProductionAllowlistReadinessDiagnostics(diagnostics)
         var lines: [String] = []
         lines.append("ScoutCapture Local Health - Canonical Read Rollout Report")
         lines.append("Operator validation report. This report is diagnostic-only: it does not switch canonical reads, enable production canonical reads, change candidate gating, build or activate overlays, mutate local/remote data, change export, seal, sync, media, or iCloud behavior, loosen RLS, or delete data.")
@@ -16899,6 +16942,15 @@ final class AppState: ObservableObject {
         lines.append("- production_overlay_blocked: \(diagnostics.lastCanonicalCandidateOverlayProductionBlocked)")
         lines.append("- production_activation_blocked: \(diagnostics.lastCanonicalCandidateActivationProductionBlocked)")
         lines.append("- rollout_blockers: \(diagnostics.lastCanonicalReadRolloutBlockers.isEmpty ? "none" : diagnostics.lastCanonicalReadRolloutBlockers.joined(separator: ", "))")
+        lines.append("")
+        lines.append("Local Health Rows")
+        lines.append("- production readiness state: \(productionReadiness.state.rawValue)")
+        lines.append("- production rollout blockers: \(productionReadiness.blockers.isEmpty ? "none" : productionReadiness.blockers.joined(separator: ", "))")
+        lines.append("- operator approval required: \(productionReadiness.operatorApprovalRequired)")
+        lines.append("- rollback validated: \(productionReadiness.rollbackValidated)")
+        lines.append("- production cohort size recommendation: \(productionReadiness.productionCohortSizeRecommendation)")
+        lines.append("")
+        lines.append(limitedProductionRolloutReadinessReportText(productionReadiness))
         lines.append("")
         lines.append(canonicalRolloutReadinessReportText(readiness))
         lines.append("")
@@ -19726,6 +19778,151 @@ final class AppState: ObservableObject {
         for item in readiness.checklist {
             lines.append("- \(item.id): \(item.passed ? "pass" : "fail") (\(item.detail))")
         }
+        lines.append(readiness.noBehaviorChangedText)
+        return lines.joined(separator: "\n")
+    }
+
+    nonisolated static func makeProductionAllowlistReadinessDiagnostics(
+        _ diagnostics: SessionSnapshotUploadDiagnostics,
+        policy: ProductionAllowlistReadinessPolicy = .diagnosticsOnly
+    ) -> ProductionAllowlistReadinessDiagnostics {
+        let canonicalCandidateResult = diagnostics.lastCanonicalReadDiagnosticsResult == CanonicalReadDiagnosticResult.remoteMatchesLocal.rawValue ||
+            diagnostics.lastCanonicalReadDiagnosticsRecommendation == "remote_candidate_after_replay_validation"
+        let explicitAllowlistsPresent = diagnostics.lastCanonicalReadCandidateOrgAllowlisted &&
+            diagnostics.lastCanonicalReadCandidatePropertyAllowlisted &&
+            diagnostics.lastCanonicalReadCandidateSessionAllowlisted
+        let parityValidated = diagnostics.lastParityCompletenessScore >= policy.parityConfidenceThreshold &&
+            diagnostics.lastCanonicalReadCandidateParityConfidence >= policy.parityConfidenceThreshold
+        let replayValidated = diagnostics.lastCanonicalReadCandidateReplayConfidence >= policy.replayConfidenceThreshold
+        let rollbackValidated = diagnostics.lastCanonicalCandidateOverlayRollbackAvailable &&
+            diagnostics.lastCanonicalCandidateActivationRollbackAvailable
+        let productionWideDisabled = !diagnostics.lastCanonicalReadCandidateProductionWideEnabled &&
+            diagnostics.lastCanonicalCandidateOverlayProductionBlocked &&
+            diagnostics.lastCanonicalCandidateActivationProductionBlocked
+        let noUnresolvedBlockers = diagnostics.lastMissingChildCount == 0 &&
+            !diagnostics.lastNormalizedParityGapTaxonomy.contains("missing_remote_children") &&
+            diagnostics.lastNormalizedBackfillRemoteNewerConflictCount == 0 &&
+            diagnostics.lastCanonicalReadDiagnosticsResult != CanonicalReadDiagnosticResult.remoteNewerCandidate.rawValue &&
+            diagnostics.lastCanonicalReadDiagnosticsParentOrgConsistent == true &&
+            diagnostics.lastCanonicalReadDiagnosticsParentPropertyConsistent == true &&
+            diagnostics.lastCanonicalCandidateOverlayComparisonResult == CanonicalCandidateOverlayComparisonResult.candidateMatchesLocal.rawValue &&
+            diagnostics.lastCanonicalReadCandidateLocalFallbackAvailable
+
+        var blockers: [String] = []
+        if !productionWideDisabled {
+            blockers.append("production_wide_enablement_blocked")
+        }
+        if !explicitAllowlistsPresent {
+            if !diagnostics.lastCanonicalReadCandidateOrgAllowlisted {
+                blockers.append("org_allowlist_required")
+            }
+            if !diagnostics.lastCanonicalReadCandidatePropertyAllowlisted {
+                blockers.append("property_allowlist_required")
+            }
+            if !diagnostics.lastCanonicalReadCandidateSessionAllowlisted {
+                blockers.append("session_allowlist_required")
+            }
+        }
+        if !diagnostics.lastCanonicalReadCandidateAllowed {
+            blockers.append(diagnostics.lastCanonicalReadCandidateBlockedReason == "none" ? "canonical_candidate_not_allowed" : diagnostics.lastCanonicalReadCandidateBlockedReason)
+        }
+        if !canonicalCandidateResult {
+            blockers.append("canonical_diagnostics_not_candidate")
+        }
+        if !parityValidated {
+            blockers.append("parity_confidence_below_threshold")
+        }
+        if !replayValidated {
+            blockers.append("replay_confidence_below_threshold")
+        }
+        if !rollbackValidated {
+            blockers.append("rollback_validation_required")
+        }
+        if !noUnresolvedBlockers {
+            blockers.append("unresolved_rollout_blockers")
+        }
+        if diagnostics.lastCanonicalReadCandidateProductionWideEnabled {
+            blockers.append("production_wide_canonical_reads_not_allowed")
+        }
+
+        let dedupedBlockers = Array(Set(blockers)).sorted()
+        let hardBlocked = dedupedBlockers.contains("production_wide_enablement_blocked") ||
+            dedupedBlockers.contains("production_wide_canonical_reads_not_allowed") ||
+            dedupedBlockers.contains("rollback_validation_required") ||
+            dedupedBlockers.contains("unresolved_rollout_blockers") ||
+            dedupedBlockers.contains("parity_confidence_below_threshold") ||
+            dedupedBlockers.contains("replay_confidence_below_threshold")
+
+        var workflow: [ProductionOperatorWorkflowDiagnostic] = []
+        if !parityValidated {
+            workflow.append(.pendingParityValidation)
+        }
+        if !rollbackValidated {
+            workflow.append(.pendingRollbackValidation)
+        }
+        if dedupedBlockers.contains("unresolved_rollout_blockers") ||
+            dedupedBlockers.contains("production_wide_enablement_blocked") ||
+            dedupedBlockers.contains("production_wide_canonical_reads_not_allowed") {
+            workflow.append(.blockedByUnresolvedConflicts)
+        }
+
+        let candidateTechnicallyReady = dedupedBlockers.isEmpty
+        let state: ProductionAllowlistReadinessState
+        if hardBlocked {
+            state = .productionBlocked
+        } else if candidateTechnicallyReady && policy.operatorApproved {
+            state = .productionCandidateReady
+            workflow.append(.approvedForCandidate)
+        } else if candidateTechnicallyReady {
+            state = .productionAllowlistPendingOperatorApproval
+            workflow.append(.pendingOperatorReview)
+        } else {
+            state = .productionNotReady
+            if workflow.isEmpty {
+                workflow.append(.pendingOperatorReview)
+            }
+        }
+
+        let nextRecommendedAction: String
+        switch state {
+        case .productionNotReady:
+            nextRecommendedAction = "complete_allowlist_policy_and_candidate_evidence"
+        case .productionCandidateReady:
+            nextRecommendedAction = "hold_for_future_non_activation_production_allowlist_review"
+        case .productionAllowlistPendingOperatorApproval:
+            nextRecommendedAction = "operator_review_limited_production_allowlist"
+        case .productionBlocked:
+            nextRecommendedAction = "resolve_production_rollout_blockers_before_operator_review"
+        }
+
+        return ProductionAllowlistReadinessDiagnostics(
+            state: state,
+            blockers: dedupedBlockers,
+            operatorWorkflowDiagnostics: workflow,
+            operatorApprovalRequired: !policy.operatorApproved,
+            rollbackValidated: rollbackValidated,
+            productionCohortSizeRecommendation: policy.recommendedCohortSize,
+            parityConfidenceThreshold: policy.parityConfidenceThreshold,
+            replayConfidenceThreshold: policy.replayConfidenceThreshold,
+            nextRecommendedAction: nextRecommendedAction,
+            noBehaviorChangedText: "No behavior changed: limited production allowlist readiness is diagnostics-only. It does not enable production canonical reads, enable production-wide remote reads, activate production candidates, build or activate production overlays, discard local state, mutate production data, remove iCloud/local fallback, change export, seal, sync, media, or iCloud behavior, loosen RLS, or delete data."
+        )
+    }
+
+    nonisolated static func limitedProductionRolloutReadinessReportText(
+        _ readiness: ProductionAllowlistReadinessDiagnostics
+    ) -> String {
+        var lines: [String] = []
+        lines.append("Limited Production Rollout Readiness")
+        lines.append("- production_readiness_state: \(readiness.state.rawValue)")
+        lines.append("- production_rollout_blockers: \(readiness.blockers.isEmpty ? "none" : readiness.blockers.joined(separator: ", "))")
+        lines.append("- operator_workflow_diagnostics: \(readiness.operatorWorkflowDiagnostics.map(\.rawValue).joined(separator: ", "))")
+        lines.append("- operator_approval_required: \(readiness.operatorApprovalRequired)")
+        lines.append("- rollback_validated: \(readiness.rollbackValidated)")
+        lines.append("- parity_confidence_threshold: \(String(format: "%.2f", readiness.parityConfidenceThreshold))")
+        lines.append("- replay_confidence_threshold: \(String(format: "%.2f", readiness.replayConfidenceThreshold))")
+        lines.append("- production_cohort_size_recommendation: \(readiness.productionCohortSizeRecommendation)")
+        lines.append("- next_recommended_action: \(readiness.nextRecommendedAction)")
         lines.append(readiness.noBehaviorChangedText)
         return lines.joined(separator: "\n")
     }
