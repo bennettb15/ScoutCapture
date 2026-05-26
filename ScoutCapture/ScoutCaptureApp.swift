@@ -8673,6 +8673,7 @@ private struct DebugSessionSnapshotUploadDiagnosticsView: View {
     @State private var isRetrievingSnapshotMedia: Bool = false
     @State private var isShowingMediaRetrievalConfirmation: Bool = false
     @State private var isCheckingCanonicalReadDiagnostics: Bool = false
+    @State private var isBuildingCanonicalCandidateOverlay: Bool = false
     @State private var isRefreshingAuthPreflight: Bool = false
     @State private var isRepairingLocalOrgDrift: Bool = false
     @State private var isRunningLocalOrgDriftAudit: Bool = false
@@ -9174,6 +9175,18 @@ private struct DebugSessionSnapshotUploadDiagnosticsView: View {
                 if !diagnostics.lastCanonicalReadCandidateWarnings.isEmpty {
                     diagnosticRow("Candidate Warnings", diagnostics.lastCanonicalReadCandidateWarnings.joined(separator: ", "))
                 }
+                diagnosticRow("Overlay Built", diagnostics.lastCanonicalCandidateOverlayBuilt ? "true" : "false")
+                diagnosticRow("Overlay Allowed", diagnostics.lastCanonicalCandidateOverlayAllowed ? "true" : "false")
+                diagnosticRow("Overlay Blocked", diagnostics.lastCanonicalCandidateOverlayBlockedReason)
+                diagnosticRow("Overlay Source", diagnostics.lastCanonicalCandidateOverlaySource)
+                diagnosticRow("Overlay Property", diagnostics.lastCanonicalCandidateOverlayPropertyID?.uuidString ?? "none")
+                diagnosticRow("Overlay Session", diagnostics.lastCanonicalCandidateOverlaySessionID?.uuidString ?? "none")
+                diagnosticRow("Overlay Shots", "\(diagnostics.lastCanonicalCandidateOverlayShotCount)")
+                diagnosticRow("Overlay Issues", "\(diagnostics.lastCanonicalCandidateOverlayIssueObservationCount)")
+                diagnosticRow("Overlay Fallback", diagnostics.lastCanonicalCandidateOverlayFallbackSource)
+                diagnosticRow("Active Source", diagnostics.lastCanonicalCandidateOverlayActiveSource)
+                diagnosticRow("Rollback/Fallback", diagnostics.lastCanonicalCandidateOverlayRollbackAvailable ? "available" : "missing")
+                diagnosticRow("Overlay Production", diagnostics.lastCanonicalCandidateOverlayProductionBlocked ? "blocked" : "not blocked")
                 if !diagnostics.lastCanonicalReadRolloutBlockers.isEmpty {
                     diagnosticRow("Rollout Blockers", diagnostics.lastCanonicalReadRolloutBlockers.joined(separator: ", "))
                 }
@@ -9188,6 +9201,18 @@ private struct DebugSessionSnapshotUploadDiagnosticsView: View {
                     }
                 }
                 .disabled(isCheckingCanonicalReadDiagnostics)
+                .font(.system(size: 14, weight: .semibold))
+                Button(isBuildingCanonicalCandidateOverlay ? "Building..." : "Build Canonical Candidate Overlay") {
+                    guard !isBuildingCanonicalCandidateOverlay else { return }
+                    isBuildingCanonicalCandidateOverlay = true
+                    Task {
+                        _ = await appState.buildCanonicalCandidateOverlayForSelectedSession()
+                        await MainActor.run {
+                            isBuildingCanonicalCandidateOverlay = false
+                        }
+                    }
+                }
+                .disabled(isBuildingCanonicalCandidateOverlay)
                 .font(.system(size: 14, weight: .semibold))
             }
         }

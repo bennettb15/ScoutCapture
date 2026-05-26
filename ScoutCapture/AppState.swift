@@ -1425,6 +1425,19 @@ final class AppState: ObservableObject {
         var lastCanonicalReadCandidateSessionAllowlisted: Bool = false
         var lastCanonicalReadCandidateProductionWideEnabled: Bool = false
         var lastCanonicalReadCandidateWarnings: [String] = []
+        var lastCanonicalCandidateOverlayBuilt: Bool = false
+        var lastCanonicalCandidateOverlayAllowed: Bool = false
+        var lastCanonicalCandidateOverlayBlockedReason: String = "not_checked"
+        var lastCanonicalCandidateOverlaySource: String = "not_built"
+        var lastCanonicalCandidateOverlayPropertyID: UUID?
+        var lastCanonicalCandidateOverlaySessionID: UUID?
+        var lastCanonicalCandidateOverlayShotCount: Int = 0
+        var lastCanonicalCandidateOverlayIssueObservationCount: Int = 0
+        var lastCanonicalCandidateOverlayGuidedCount: Int?
+        var lastCanonicalCandidateOverlayFallbackSource: String = "local"
+        var lastCanonicalCandidateOverlayActiveSource: String = "local"
+        var lastCanonicalCandidateOverlayRollbackAvailable: Bool = true
+        var lastCanonicalCandidateOverlayProductionBlocked: Bool = true
     }
 
     struct LocalDiagnosticsState: Equatable {
@@ -2221,6 +2234,34 @@ final class AppState: ObservableObject {
         let remoteCandidateStateReadable: Bool
         let productionWideCanonicalReadsEnabled: Bool
         let warnings: [String]
+        let noBehaviorChangedText: String
+    }
+
+    struct CanonicalCandidateOverlay: Equatable {
+        let builtAt: Date
+        let source: String
+        let propertyID: UUID?
+        let sessionID: UUID?
+        let organizationID: UUID?
+        let remoteShotCount: Int
+        let remoteIssueObservationCount: Int
+        let remoteGuidedCount: Int?
+        let fallbackSource: String
+        let activeSource: String
+        let rollbackAvailable: Bool
+        let noBehaviorChangedText: String
+    }
+
+    struct CanonicalCandidateOverlayBuildResult: Equatable {
+        let checkedAt: Date
+        let allowed: Bool
+        let blockedReason: String?
+        let overlay: CanonicalCandidateOverlay?
+        let remoteCandidateRowCounts: [String: Int]
+        let localFallbackRetained: Bool
+        let activeSourceRemainsLocal: Bool
+        let rollbackAvailable: Bool
+        let productionBlocked: Bool
         let noBehaviorChangedText: String
     }
 
@@ -16682,6 +16723,21 @@ final class AppState: ObservableObject {
         lines.append("- canonical_candidate_production_wide_enabled: \(diagnostics.lastCanonicalReadCandidateProductionWideEnabled)")
         lines.append("- canonical_candidate_warnings: \(diagnostics.lastCanonicalReadCandidateWarnings.isEmpty ? "none" : diagnostics.lastCanonicalReadCandidateWarnings.joined(separator: ", "))")
         lines.append("")
+        lines.append("Canonical Candidate Overlay Test-Only")
+        lines.append("- canonical_candidate_overlay_built: \(diagnostics.lastCanonicalCandidateOverlayBuilt)")
+        lines.append("- canonical_candidate_overlay_allowed: \(diagnostics.lastCanonicalCandidateOverlayAllowed)")
+        lines.append("- canonical_candidate_overlay_blocked_reason: \(diagnosticsPreviewText(diagnostics.lastCanonicalCandidateOverlayBlockedReason, maxLength: 180) ?? "not_checked")")
+        lines.append("- canonical_candidate_overlay_source: \(diagnosticsPreviewText(diagnostics.lastCanonicalCandidateOverlaySource, maxLength: 120) ?? "not_built")")
+        lines.append("- canonical_candidate_overlay_property_id: \(diagnostics.lastCanonicalCandidateOverlayPropertyID?.uuidString ?? "none")")
+        lines.append("- canonical_candidate_overlay_session_id: \(diagnostics.lastCanonicalCandidateOverlaySessionID?.uuidString ?? "none")")
+        lines.append("- canonical_candidate_overlay_shot_count: \(diagnostics.lastCanonicalCandidateOverlayShotCount)")
+        lines.append("- canonical_candidate_overlay_issue_observation_count: \(diagnostics.lastCanonicalCandidateOverlayIssueObservationCount)")
+        lines.append("- canonical_candidate_overlay_guided_count: \(diagnostics.lastCanonicalCandidateOverlayGuidedCount.map(String.init) ?? "not_represented")")
+        lines.append("- canonical_candidate_overlay_fallback_source: \(diagnosticsPreviewText(diagnostics.lastCanonicalCandidateOverlayFallbackSource, maxLength: 80) ?? "local")")
+        lines.append("- canonical_candidate_overlay_active_source: \(diagnosticsPreviewText(diagnostics.lastCanonicalCandidateOverlayActiveSource, maxLength: 80) ?? "local")")
+        lines.append("- canonical_candidate_overlay_rollback_available: \(diagnostics.lastCanonicalCandidateOverlayRollbackAvailable)")
+        lines.append("- canonical_candidate_overlay_production_blocked: \(diagnostics.lastCanonicalCandidateOverlayProductionBlocked)")
+        lines.append("")
         lines.append("Redaction Notes")
         lines.append("- Report rows intentionally omit raw session.json text, local paths, storage object paths, signed URLs, auth tokens, and media bytes.")
         lines.append("- If storage upload succeeds and table insert fails, the app does not delete the object; orphan risk is reported for later controlled cleanup.")
@@ -17832,6 +17888,53 @@ final class AppState: ObservableObject {
         localDiagnostics = diagnostics
     }
 
+    @MainActor
+    func buildCanonicalCandidateOverlayForSelectedSession(checkedAt: Date = Date()) async -> CanonicalCandidateOverlayBuildResult {
+        let canonicalDiagnostics = await runCanonicalReadDiagnosticsForSelectedSession(checkedAt: checkedAt)
+        let parityReport = Self.makeNormalizedParityGapReport(
+            checkedAt: checkedAt,
+            canonicalDiagnostics: canonicalDiagnostics,
+            uploadDiagnostics: localDiagnostics.sessionSnapshotUpload
+        )
+        let candidateDiagnostics = Self.makeCanonicalReadCandidateDiagnostics(
+            checkedAt: checkedAt,
+            configuration: canonicalReadCandidateConfiguration,
+            targetClassification: supabaseConfiguration.targetClassification,
+            canonicalDiagnostics: canonicalDiagnostics,
+            parityReport: parityReport,
+            mediaRecoveryConfidence: Self.canonicalCandidateMediaRecoveryConfidence(
+                uploadDiagnostics: localDiagnostics.sessionSnapshotUpload
+            )
+        )
+        let result = Self.buildCanonicalCandidateOverlayTestOnly(
+            checkedAt: checkedAt,
+            targetClassification: supabaseConfiguration.targetClassification,
+            canonicalDiagnostics: canonicalDiagnostics,
+            parityReport: parityReport,
+            candidateDiagnostics: candidateDiagnostics
+        )
+        recordCanonicalCandidateOverlayBuild(result)
+        return result
+    }
+
+    private func recordCanonicalCandidateOverlayBuild(_ result: CanonicalCandidateOverlayBuildResult) {
+        var diagnostics = localDiagnostics
+        diagnostics.sessionSnapshotUpload.lastCanonicalCandidateOverlayBuilt = result.overlay != nil
+        diagnostics.sessionSnapshotUpload.lastCanonicalCandidateOverlayAllowed = result.allowed
+        diagnostics.sessionSnapshotUpload.lastCanonicalCandidateOverlayBlockedReason = result.blockedReason ?? "none"
+        diagnostics.sessionSnapshotUpload.lastCanonicalCandidateOverlaySource = result.overlay?.source ?? "not_built"
+        diagnostics.sessionSnapshotUpload.lastCanonicalCandidateOverlayPropertyID = result.overlay?.propertyID
+        diagnostics.sessionSnapshotUpload.lastCanonicalCandidateOverlaySessionID = result.overlay?.sessionID
+        diagnostics.sessionSnapshotUpload.lastCanonicalCandidateOverlayShotCount = result.overlay?.remoteShotCount ?? result.remoteCandidateRowCounts["remote_shots"] ?? 0
+        diagnostics.sessionSnapshotUpload.lastCanonicalCandidateOverlayIssueObservationCount = result.overlay?.remoteIssueObservationCount ?? result.remoteCandidateRowCounts["remote_issue_observations"] ?? 0
+        diagnostics.sessionSnapshotUpload.lastCanonicalCandidateOverlayGuidedCount = result.overlay?.remoteGuidedCount
+        diagnostics.sessionSnapshotUpload.lastCanonicalCandidateOverlayFallbackSource = result.overlay?.fallbackSource ?? "local"
+        diagnostics.sessionSnapshotUpload.lastCanonicalCandidateOverlayActiveSource = result.overlay?.activeSource ?? "local"
+        diagnostics.sessionSnapshotUpload.lastCanonicalCandidateOverlayRollbackAvailable = result.rollbackAvailable
+        diagnostics.sessionSnapshotUpload.lastCanonicalCandidateOverlayProductionBlocked = result.productionBlocked
+        localDiagnostics = diagnostics
+    }
+
     nonisolated static func makeCanonicalReadDiagnostics(
         checkedAt: Date = Date(),
         activeOrganizationID: UUID?,
@@ -18782,6 +18885,101 @@ final class AppState: ObservableObject {
         for warning in diagnostics.warnings {
             lines.append("- \(warning)")
         }
+        return lines.joined(separator: "\n")
+    }
+
+    nonisolated static func buildCanonicalCandidateOverlayTestOnly(
+        checkedAt: Date = Date(),
+        targetClassification: SupabaseRuntimeConfiguration.TargetClassification,
+        canonicalDiagnostics: CanonicalReadDiagnosticsResult,
+        parityReport: NormalizedParityGapReport,
+        candidateDiagnostics: CanonicalReadCandidateDiagnostics
+    ) -> CanonicalCandidateOverlayBuildResult {
+        var blockers: [String] = []
+        switch targetClassification {
+        case .localDev, .approvedStaging:
+            break
+        case .approvedProductionValidation:
+            blockers.append("production_canonical_candidate_overlay_blocked")
+        case .remote:
+            blockers.append("random_remote_canonical_candidate_overlay_blocked")
+        case .missing, .invalid:
+            blockers.append("supabase_target_not_verified")
+        }
+        if !candidateDiagnostics.candidateFlagEnabled {
+            blockers.append("canonical_read_candidate_flag_disabled")
+        }
+        if !candidateDiagnostics.allowed {
+            blockers.append(candidateDiagnostics.blockedReason ?? "canonical_candidate_not_allowed")
+        }
+        let candidateEvidencePasses = canonicalDiagnostics.result == .remoteMatchesLocal ||
+            canonicalDiagnostics.canonicalRecommendation == "remote_candidate_after_replay_validation"
+        if !candidateEvidencePasses {
+            blockers.append("canonical_read_diagnostic_result_not_candidate")
+        }
+        if canonicalDiagnostics.parentOrgConsistent != true || canonicalDiagnostics.parentPropertyConsistent != true {
+            blockers.append("parent_org_or_property_divergence")
+        }
+        if parityReport.missingChildCount > 0 || parityReport.taxonomy.contains(.missingRemoteChildren) {
+            blockers.append("missing_remote_children")
+        }
+        if !candidateDiagnostics.localFallbackAvailable {
+            blockers.append("local_fallback_unavailable")
+        }
+
+        let rowCounts = [
+            "remote_shots": canonicalDiagnostics.remoteShotCount ?? 0,
+            "remote_issue_observations": canonicalDiagnostics.remoteIssueObservationCount ?? 0,
+            "remote_guided": canonicalDiagnostics.remoteGuidedCount ?? 0
+        ]
+        let allowed = blockers.isEmpty
+        let overlay = allowed ? CanonicalCandidateOverlay(
+            builtAt: checkedAt,
+            source: "remote_normalized_candidate_overlay",
+            propertyID: canonicalDiagnostics.propertyID,
+            sessionID: canonicalDiagnostics.sessionID,
+            organizationID: canonicalDiagnostics.activeOrganizationID,
+            remoteShotCount: canonicalDiagnostics.remoteShotCount ?? 0,
+            remoteIssueObservationCount: canonicalDiagnostics.remoteIssueObservationCount ?? 0,
+            remoteGuidedCount: canonicalDiagnostics.remoteGuidedCount,
+            fallbackSource: "local",
+            activeSource: "local",
+            rollbackAvailable: true,
+            noBehaviorChangedText: "No behavior changed: this test-only canonical candidate overlay is inspectable candidate state only. It does not switch global reads, overwrite local files, delete local metadata, remove iCloud backup paths, change export, change seal, change sync, change media, loosen RLS, delete data, or mutate production data."
+        ) : nil
+        return CanonicalCandidateOverlayBuildResult(
+            checkedAt: checkedAt,
+            allowed: allowed,
+            blockedReason: blockers.isEmpty ? nil : blockers.joined(separator: ", "),
+            overlay: overlay,
+            remoteCandidateRowCounts: rowCounts,
+            localFallbackRetained: candidateDiagnostics.localFallbackAvailable,
+            activeSourceRemainsLocal: true,
+            rollbackAvailable: true,
+            productionBlocked: true,
+            noBehaviorChangedText: "No behavior changed: canonical candidate consumption is limited to a test-only overlay. Active app state remains local unless explicitly viewing the overlay, local fallback is retained, production canonical reads remain disabled, and export, seal, sync, media, and iCloud behavior are unchanged."
+        )
+    }
+
+    nonisolated static func canonicalCandidateOverlayReportText(_ result: CanonicalCandidateOverlayBuildResult) -> String {
+        var lines: [String] = []
+        lines.append("ScoutCapture Local Health - Canonical Candidate Overlay")
+        lines.append("Checked: \(result.checkedAt.formatted(date: .abbreviated, time: .standard))")
+        lines.append("Overlay Built: \(result.overlay != nil)")
+        lines.append("Consumption Allowed: \(result.allowed)")
+        lines.append("Consumption Blocked Reason: \(diagnosticsPreviewText(result.blockedReason, maxLength: 180) ?? "none")")
+        lines.append("Overlay Source: \(result.overlay?.source ?? "not_built")")
+        lines.append("Overlay Property ID: \(result.overlay?.propertyID?.uuidString ?? "none")")
+        lines.append("Overlay Session ID: \(result.overlay?.sessionID?.uuidString ?? "none")")
+        lines.append("Overlay Shot Count: \(result.overlay?.remoteShotCount ?? 0)")
+        lines.append("Overlay Issue/Observation Count: \(result.overlay?.remoteIssueObservationCount ?? 0)")
+        lines.append("Overlay Guided Count: \(result.overlay?.remoteGuidedCount.map(String.init) ?? "not_represented")")
+        lines.append("Fallback Source: \(result.overlay?.fallbackSource ?? "local")")
+        lines.append("Active Source: \(result.overlay?.activeSource ?? "local")")
+        lines.append("Local Fallback Retained: \(result.localFallbackRetained)")
+        lines.append("Rollback/Fallback Available: \(result.rollbackAvailable)")
+        lines.append("Production Blocked: \(result.productionBlocked)")
+        lines.append(result.noBehaviorChangedText)
         return lines.joined(separator: "\n")
     }
 
