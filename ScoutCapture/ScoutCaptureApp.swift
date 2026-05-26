@@ -8692,10 +8692,6 @@ private struct DebugSessionSnapshotUploadDiagnosticsView: View {
         AppState.sessionSnapshotUploadReportText(diagnostics)
     }
 
-    private var canonicalReadRolloutReportText: String {
-        AppState.canonicalReadRolloutReportText(diagnostics)
-    }
-
     private var uploadAvailability: (isAvailable: Bool, reason: String) {
         appState.manualSessionSnapshotUploadAvailability
     }
@@ -8795,16 +8791,6 @@ private struct DebugSessionSnapshotUploadDiagnosticsView: View {
                     DebugSessionSnapshotUploadTextView(snapshotText: reportText)
                 } label: {
                     Text("View Copyable Upload Report")
-                        .font(.system(size: 14, weight: .semibold))
-                }
-                NavigationLink {
-                    DebugSessionSnapshotUploadTextView(
-                        snapshotText: canonicalReadRolloutReportText,
-                        title: "Canonical Read Report",
-                        footerText: "Copies the sanitized canonical-read rollout report as plain text. It keeps full canonical details out of the primary diagnostic rows and does not include raw session.json, local paths, signed URLs, auth material, storage object paths, or media payloads."
-                    )
-                } label: {
-                    Text("View Canonical Read Rollout Report")
                         .font(.system(size: 14, weight: .semibold))
                 }
             }
@@ -9323,6 +9309,16 @@ private struct DebugSessionSnapshotCanonicalReadDiagnosticsSection: View {
         }
 
         Section("Canonical Read Actions") {
+            NavigationLink {
+                DebugSessionSnapshotUploadTextView(
+                    snapshotText: AppState.canonicalReadRolloutReportText(diagnostics),
+                    title: "Canonical Read Report",
+                    footerText: "Copies the sanitized canonical-read rollout report as plain text. It keeps full canonical details out of the primary diagnostic rows and does not include raw session.json, local paths, signed URLs, auth material, storage object paths, or media payloads."
+                )
+            } label: {
+                Text("View Canonical Read Rollout Report")
+                    .font(.system(size: 14, weight: .semibold))
+            }
             Button(isCheckingCanonicalReadDiagnostics ? "Checking..." : "Check Canonical Read Diagnostics") {
                 guard !isCheckingCanonicalReadDiagnostics else { return }
                 isCheckingCanonicalReadDiagnostics = true
