@@ -224,6 +224,20 @@ final class Phase2C26OCanonicalCandidateConsumptionTests: XCTestCase {
         return upload
     }
 
+    private func cohortPolicy(
+        requestedStage: AppState.ProductionCohortRolloutStage = .diagnosticsOnly,
+        approvalState: AppState.ProductionCohortOperatorApprovalState = .notRequested,
+        productionWideEnabled: Bool = false
+    ) -> AppState.ProductionCohortControlPlanePolicy {
+        AppState.ProductionCohortControlPlanePolicy(
+            requestedStage: requestedStage,
+            operatorApprovalState: approvalState,
+            productionWideCanonicalReadsEnabled: productionWideEnabled,
+            parityConfidenceThreshold: 0.95,
+            replayConfidenceThreshold: 0.95
+        )
+    }
+
     func testAllowlistedStagingCandidateBuildsOverlay() {
         let result = overlay()
 
@@ -757,6 +771,146 @@ final class Phase2C26OCanonicalCandidateConsumptionTests: XCTestCase {
         XCTAssertTrue(text.contains("- operator approval required: true"))
         XCTAssertTrue(text.contains("- rollback validated: true"))
         XCTAssertTrue(text.contains("- production cohort size recommendation: single_org_property_session"))
+        XCTAssertTrue(text.contains("does not enable production canonical reads"))
+    }
+
+    func testProductionCohortControlPlaneDefaultCohortBlocked() {
+        let diagnostics = AppState.makeProductionCohortControlPlaneDiagnostics(
+            AppState.SessionSnapshotUploadDiagnostics()
+        )
+
+        XCTAssertEqual(diagnostics.cohort.rolloutStage, .blocked)
+        XCTAssertEqual(diagnostics.cohort.activationEligibility, .blocked)
+        XCTAssertTrue(diagnostics.blockers.contains("org_id_required"))
+        XCTAssertTrue(diagnostics.blockers.contains("property_id_required"))
+        XCTAssertTrue(diagnostics.eligibility.productionWideDisabled)
+    }
+
+    func testProductionCohortControlPlaneDiagnosticsOnlyCohortAllowedAsDiagnostics() {
+        let upload = rolloutReadinessDiagnostics()
+
+        let diagnostics = AppState.makeProductionCohortControlPlaneDiagnostics(
+            upload,
+            orgID: orgID
+        )
+
+        XCTAssertEqual(diagnostics.cohort.orgID, orgID)
+        XCTAssertEqual(diagnostics.cohort.propertyID, propertyID)
+        XCTAssertEqual(diagnostics.cohort.sessionID, sessionID)
+        XCTAssertEqual(diagnostics.cohort.rolloutStage, .diagnosticsOnly)
+        XCTAssertEqual(diagnostics.cohort.activationEligibility, .diagnosticsOnly)
+        XCTAssertTrue(diagnostics.eligibility.productionWideDisabled)
+    }
+
+    func testProductionCohortControlPlaneMissingAllowlistBlocksActivation() {
+        let upload = rolloutReadinessDiagnostics(
+            configuration: AppState.CanonicalReadCandidateConfiguration(
+                enabled: true,
+                orgAllowlist: [],
+                propertyAllowlist: [],
+                sessionAllowlist: [],
+                parityCompletenessThreshold: 0.95,
+                mediaRecoveryConfidenceThreshold: 0.95
+            )
+        )
+
+        let diagnostics = AppState.makeProductionCohortControlPlaneDiagnostics(
+            upload,
+            orgID: orgID,
+            policy: cohortPolicy(
+                requestedStage: .singleSessionActivation,
+                approvalState: .approved
+            )
+        )
+
+        XCTAssertEqual(diagnostics.cohort.rolloutStage, .blocked)
+        XCTAssertTrue(diagnostics.blockers.contains("allowlist_incomplete"))
+        XCTAssertFalse(diagnostics.eligibility.allowlistComplete)
+    }
+
+    func testProductionCohortControlPlaneMissingRollbackValidationBlocksActivation() {
+        let upload = rolloutReadinessDiagnostics(rollbackAvailable: false)
+
+        let diagnostics = AppState.makeProductionCohortControlPlaneDiagnostics(
+            upload,
+            orgID: orgID,
+            policy: cohortPolicy(
+                requestedStage: .singleSessionActivation,
+                approvalState: .approved
+            )
+        )
+
+        XCTAssertEqual(diagnostics.cohort.rolloutStage, .blocked)
+        XCTAssertEqual(diagnostics.cohort.rollbackValidationState, .notValidated)
+        XCTAssertTrue(diagnostics.blockers.contains("activation_rollback_not_verified"))
+    }
+
+    func testProductionCohortControlPlaneOperatorRejectedBlocksActivation() {
+        let upload = rolloutReadinessDiagnostics()
+
+        let diagnostics = AppState.makeProductionCohortControlPlaneDiagnostics(
+            upload,
+            orgID: orgID,
+            policy: cohortPolicy(
+                requestedStage: .singleSessionActivation,
+                approvalState: .rejected
+            )
+        )
+
+        XCTAssertEqual(diagnostics.cohort.rolloutStage, .blocked)
+        XCTAssertEqual(diagnostics.cohort.operatorApprovalState, .rejected)
+        XCTAssertTrue(diagnostics.blockers.contains("operator_rejected"))
+    }
+
+    func testProductionCohortControlPlaneApprovedAllChecksReachesSingleSessionReadinessOnly() {
+        let upload = rolloutReadinessDiagnostics()
+
+        let diagnostics = AppState.makeProductionCohortControlPlaneDiagnostics(
+            upload,
+            orgID: orgID,
+            policy: cohortPolicy(
+                requestedStage: .singleSessionActivation,
+                approvalState: .approved
+            )
+        )
+
+        XCTAssertEqual(diagnostics.cohort.rolloutStage, .singleSessionActivation)
+        XCTAssertEqual(diagnostics.cohort.activationEligibility, .singleSessionReadinessOnly)
+        XCTAssertEqual(diagnostics.cohort.rollbackValidationState, .verified)
+        XCTAssertEqual(diagnostics.cohort.parityValidationState, .verified)
+        XCTAssertTrue(diagnostics.blockers.isEmpty)
+        XCTAssertTrue(diagnostics.noBehaviorChangedText.contains("does not enable production canonical reads"))
+        XCTAssertTrue(diagnostics.noBehaviorChangedText.contains("activate production candidates"))
+    }
+
+    func testProductionCohortControlPlaneProductionWideEnabledRemainsBlocked() {
+        let upload = rolloutReadinessDiagnostics(productionWideEnabled: true)
+
+        let diagnostics = AppState.makeProductionCohortControlPlaneDiagnostics(
+            upload,
+            orgID: orgID,
+            policy: cohortPolicy(
+                requestedStage: .singleSessionActivation,
+                approvalState: .approved,
+                productionWideEnabled: true
+            )
+        )
+
+        XCTAssertEqual(diagnostics.cohort.rolloutStage, .blocked)
+        XCTAssertFalse(diagnostics.eligibility.productionWideDisabled)
+        XCTAssertTrue(diagnostics.blockers.contains("production_wide_canonical_reads_not_disabled"))
+    }
+
+    func testCanonicalRolloutReportIncludesProductionCohortControlPlaneRows() {
+        let upload = rolloutReadinessDiagnostics()
+
+        let text = AppState.canonicalReadRolloutReportText(upload)
+
+        XCTAssertTrue(text.contains("Production Cohort Control Plane"))
+        XCTAssertTrue(text.contains("- cohort_rollout_stage: blocked"))
+        XCTAssertTrue(text.contains("- cohort approval state: not_requested"))
+        XCTAssertTrue(text.contains("- cohort eligibility: blocked"))
+        XCTAssertTrue(text.contains("- production-wide disabled confirmation: true"))
         XCTAssertTrue(text.contains("does not enable production canonical reads"))
     }
 }

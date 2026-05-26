@@ -2362,6 +2362,35 @@ final class AppState: ObservableObject {
         case blockedByUnresolvedConflicts = "blocked_by_unresolved_conflicts"
     }
 
+    enum ProductionCohortRolloutStage: String, CaseIterable, Equatable {
+        case diagnosticsOnly = "diagnostics_only"
+        case candidateOverlayOnly = "candidate_overlay_only"
+        case singleSessionActivation = "single_session_activation"
+        case propertyCohortActivation = "property_cohort_activation"
+        case blocked
+    }
+
+    enum ProductionCohortOperatorApprovalState: String, CaseIterable, Equatable {
+        case notRequested = "not_requested"
+        case pendingReview = "pending_review"
+        case approved
+        case rejected
+        case expired
+    }
+
+    enum ProductionCohortValidationState: String, CaseIterable, Equatable {
+        case notValidated = "not_validated"
+        case verified
+        case failed
+    }
+
+    enum ProductionCohortActivationEligibility: String, CaseIterable, Equatable {
+        case diagnosticsOnly = "diagnostics_only"
+        case notEligible = "not_eligible"
+        case singleSessionReadinessOnly = "single_session_readiness_only"
+        case blocked
+    }
+
     struct CanonicalRolloutChecklistItem: Equatable, Identifiable {
         let id: String
         let label: String
@@ -2402,6 +2431,51 @@ final class AppState: ObservableObject {
         let parityConfidenceThreshold: Double
         let replayConfidenceThreshold: Double
         let nextRecommendedAction: String
+        let noBehaviorChangedText: String
+    }
+
+    struct ProductionCohortControlPlanePolicy: Equatable {
+        let requestedStage: ProductionCohortRolloutStage
+        let operatorApprovalState: ProductionCohortOperatorApprovalState
+        let productionWideCanonicalReadsEnabled: Bool
+        let parityConfidenceThreshold: Double
+        let replayConfidenceThreshold: Double
+
+        nonisolated static let diagnosticsOnly = ProductionCohortControlPlanePolicy(
+            requestedStage: .diagnosticsOnly,
+            operatorApprovalState: .notRequested,
+            productionWideCanonicalReadsEnabled: false,
+            parityConfidenceThreshold: 0.95,
+            replayConfidenceThreshold: 0.95
+        )
+    }
+
+    struct ProductionCohortModel: Equatable {
+        let orgID: UUID?
+        let propertyID: UUID?
+        let sessionID: UUID?
+        let rolloutStage: ProductionCohortRolloutStage
+        let operatorApprovalState: ProductionCohortOperatorApprovalState
+        let rollbackValidationState: ProductionCohortValidationState
+        let parityValidationState: ProductionCohortValidationState
+        let activationEligibility: ProductionCohortActivationEligibility
+    }
+
+    struct ProductionCohortEligibilityDiagnostics: Equatable {
+        let allowlistComplete: Bool
+        let parityVerified: Bool
+        let replayBackfillVerified: Bool
+        let overlayVerified: Bool
+        let activationRollbackVerified: Bool
+        let productionWideDisabled: Bool
+        let unresolvedBlockers: [String]
+    }
+
+    struct ProductionCohortControlPlaneDiagnostics: Equatable {
+        let cohort: ProductionCohortModel
+        let eligibility: ProductionCohortEligibilityDiagnostics
+        let blockers: [String]
+        let recommendedNextAction: String
         let noBehaviorChangedText: String
     }
 
@@ -16914,6 +16988,7 @@ final class AppState: ObservableObject {
     nonisolated static func canonicalReadRolloutReportText(_ diagnostics: SessionSnapshotUploadDiagnostics) -> String {
         let readiness = makeCanonicalRolloutReadinessDiagnostics(diagnostics)
         let productionReadiness = makeProductionAllowlistReadinessDiagnostics(diagnostics)
+        let cohortControlPlane = makeProductionCohortControlPlaneDiagnostics(diagnostics)
         var lines: [String] = []
         lines.append("ScoutCapture Local Health - Canonical Read Rollout Report")
         lines.append("Operator validation report. This report is diagnostic-only: it does not switch canonical reads, enable production canonical reads, change candidate gating, build or activate overlays, mutate local/remote data, change export, seal, sync, media, or iCloud behavior, loosen RLS, or delete data.")
@@ -16949,6 +17024,16 @@ final class AppState: ObservableObject {
         lines.append("- operator approval required: \(productionReadiness.operatorApprovalRequired)")
         lines.append("- rollback validated: \(productionReadiness.rollbackValidated)")
         lines.append("- production cohort size recommendation: \(productionReadiness.productionCohortSizeRecommendation)")
+        lines.append("")
+        lines.append("Cohort Control Plane Rows")
+        lines.append("- cohort rollout stage: \(cohortControlPlane.cohort.rolloutStage.rawValue)")
+        lines.append("- cohort approval state: \(cohortControlPlane.cohort.operatorApprovalState.rawValue)")
+        lines.append("- cohort eligibility: \(cohortControlPlane.cohort.activationEligibility.rawValue)")
+        lines.append("- cohort blockers: \(cohortControlPlane.blockers.isEmpty ? "none" : cohortControlPlane.blockers.joined(separator: ", "))")
+        lines.append("- recommended next action: \(cohortControlPlane.recommendedNextAction)")
+        lines.append("- production-wide disabled confirmation: \(cohortControlPlane.eligibility.productionWideDisabled)")
+        lines.append("")
+        lines.append(productionCohortControlPlaneReportText(cohortControlPlane))
         lines.append("")
         lines.append(limitedProductionRolloutReadinessReportText(productionReadiness))
         lines.append("")
@@ -19924,6 +20009,212 @@ final class AppState: ObservableObject {
         lines.append("- production_cohort_size_recommendation: \(readiness.productionCohortSizeRecommendation)")
         lines.append("- next_recommended_action: \(readiness.nextRecommendedAction)")
         lines.append(readiness.noBehaviorChangedText)
+        return lines.joined(separator: "\n")
+    }
+
+    nonisolated static func makeProductionCohortControlPlaneDiagnostics(
+        _ diagnostics: SessionSnapshotUploadDiagnostics,
+        orgID: UUID? = nil,
+        policy: ProductionCohortControlPlanePolicy = .diagnosticsOnly
+    ) -> ProductionCohortControlPlaneDiagnostics {
+        let propertyID = diagnostics.lastCanonicalReadDiagnosticsPropertyID ?? diagnostics.lastCanonicalCandidateOverlayPropertyID
+        let sessionID = diagnostics.lastCanonicalReadDiagnosticsSessionID ?? diagnostics.lastCanonicalCandidateOverlaySessionID
+        let allowlistComplete = diagnostics.lastCanonicalReadCandidateOrgAllowlisted &&
+            diagnostics.lastCanonicalReadCandidatePropertyAllowlisted &&
+            diagnostics.lastCanonicalReadCandidateSessionAllowlisted
+        let parityVerified = diagnostics.lastParityCompletenessScore >= policy.parityConfidenceThreshold &&
+            diagnostics.lastCanonicalReadCandidateParityConfidence >= policy.parityConfidenceThreshold &&
+            diagnostics.lastCanonicalReadDiagnosticsParentOrgConsistent == true &&
+            diagnostics.lastCanonicalReadDiagnosticsParentPropertyConsistent == true
+        let replayBackfillVerified = diagnostics.lastCanonicalReadCandidateReplayConfidence >= policy.replayConfidenceThreshold &&
+            diagnostics.lastNormalizedBackfillRemoteNewerConflictCount == 0
+        let overlayVerified = diagnostics.lastCanonicalCandidateOverlayBuilt &&
+            diagnostics.lastCanonicalCandidateOverlayAllowed &&
+            diagnostics.lastCanonicalCandidateOverlayComparisonResult == CanonicalCandidateOverlayComparisonResult.candidateMatchesLocal.rawValue
+        let activationRollbackVerified = diagnostics.lastCanonicalCandidateOverlayRollbackAvailable &&
+            diagnostics.lastCanonicalCandidateActivationRollbackAvailable
+        let productionWideDisabled = !policy.productionWideCanonicalReadsEnabled &&
+            !diagnostics.lastCanonicalReadCandidateProductionWideEnabled &&
+            diagnostics.lastCanonicalCandidateOverlayProductionBlocked &&
+            diagnostics.lastCanonicalCandidateActivationProductionBlocked
+
+        var unresolved: [String] = []
+        if diagnostics.lastMissingChildCount > 0 ||
+            diagnostics.lastNormalizedParityGapTaxonomy.contains("missing_remote_children") {
+            unresolved.append("missing_remote_children")
+        }
+        if diagnostics.lastCanonicalReadDiagnosticsParentOrgConsistent == false ||
+            diagnostics.lastCanonicalReadDiagnosticsParentPropertyConsistent == false {
+            unresolved.append("parent_org_or_property_divergence")
+        }
+        if diagnostics.lastCanonicalReadDiagnosticsResult == CanonicalReadDiagnosticResult.remoteNewerCandidate.rawValue ||
+            diagnostics.lastNormalizedBackfillRemoteNewerConflictCount > 0 {
+            unresolved.append("remote_newer_conflict")
+        }
+        if !diagnostics.lastCanonicalReadCandidateLocalFallbackAvailable {
+            unresolved.append("local_fallback_unavailable")
+        }
+
+        var blockers: [String] = []
+        if orgID == nil {
+            blockers.append("org_id_required")
+        }
+        if propertyID == nil {
+            blockers.append("property_id_required")
+        }
+        if !productionWideDisabled {
+            blockers.append("production_wide_canonical_reads_not_disabled")
+        }
+        if policy.operatorApprovalState == .rejected {
+            blockers.append("operator_rejected")
+        }
+        if policy.operatorApprovalState == .expired {
+            blockers.append("operator_approval_expired")
+        }
+        if policy.requestedStage == .singleSessionActivation ||
+            policy.requestedStage == .propertyCohortActivation {
+            if sessionID == nil && policy.requestedStage == .singleSessionActivation {
+                blockers.append("session_id_required_for_single_session_activation_readiness")
+            }
+            if policy.requestedStage == .propertyCohortActivation {
+                blockers.append("property_cohort_activation_not_enabled_in_this_phase")
+            }
+            if !allowlistComplete {
+                blockers.append("allowlist_incomplete")
+            }
+            if !parityVerified {
+                blockers.append("parity_not_verified")
+            }
+            if !replayBackfillVerified {
+                blockers.append("replay_backfill_not_verified")
+            }
+            if !overlayVerified {
+                blockers.append("overlay_not_verified")
+            }
+            if !activationRollbackVerified {
+                blockers.append("activation_rollback_not_verified")
+            }
+            if policy.operatorApprovalState != .approved {
+                blockers.append("operator_approval_required")
+            }
+        } else if policy.requestedStage == .candidateOverlayOnly {
+            if !allowlistComplete {
+                blockers.append("allowlist_incomplete")
+            }
+            if !parityVerified {
+                blockers.append("parity_not_verified")
+            }
+            if !replayBackfillVerified {
+                blockers.append("replay_backfill_not_verified")
+            }
+            if !overlayVerified {
+                blockers.append("overlay_not_verified")
+            }
+        }
+        blockers.append(contentsOf: unresolved.map { "unresolved_\($0)" })
+
+        let dedupedBlockers = Array(Set(blockers)).sorted()
+        let stage: ProductionCohortRolloutStage
+        let activationEligibility: ProductionCohortActivationEligibility
+        if !dedupedBlockers.isEmpty {
+            if policy.requestedStage == .diagnosticsOnly &&
+                orgID != nil &&
+                propertyID != nil &&
+                productionWideDisabled &&
+                policy.operatorApprovalState != .rejected &&
+                policy.operatorApprovalState != .expired {
+                stage = .diagnosticsOnly
+                activationEligibility = .diagnosticsOnly
+            } else {
+                stage = .blocked
+                activationEligibility = .blocked
+            }
+        } else {
+            switch policy.requestedStage {
+            case .diagnosticsOnly:
+                stage = .diagnosticsOnly
+                activationEligibility = .diagnosticsOnly
+            case .candidateOverlayOnly:
+                stage = .candidateOverlayOnly
+                activationEligibility = .notEligible
+            case .singleSessionActivation:
+                stage = .singleSessionActivation
+                activationEligibility = .singleSessionReadinessOnly
+            case .propertyCohortActivation:
+                stage = .blocked
+                activationEligibility = .blocked
+            case .blocked:
+                stage = .blocked
+                activationEligibility = .blocked
+            }
+        }
+
+        let rollbackState: ProductionCohortValidationState = activationRollbackVerified ? .verified : .notValidated
+        let parityState: ProductionCohortValidationState = parityVerified ? .verified : .notValidated
+        let recommendedNextAction: String
+        switch stage {
+        case .diagnosticsOnly:
+            recommendedNextAction = "collect_cohort_overlay_parity_and_rollback_evidence"
+        case .candidateOverlayOnly:
+            recommendedNextAction = "review_candidate_overlay_before_any_activation_readiness"
+        case .singleSessionActivation:
+            recommendedNextAction = "hold_as_single_session_activation_readiness_only"
+        case .propertyCohortActivation:
+            recommendedNextAction = "not_available_in_phase_2c_27b"
+        case .blocked:
+            recommendedNextAction = "resolve_cohort_control_plane_blockers"
+        }
+
+        return ProductionCohortControlPlaneDiagnostics(
+            cohort: ProductionCohortModel(
+                orgID: orgID,
+                propertyID: propertyID,
+                sessionID: sessionID,
+                rolloutStage: stage,
+                operatorApprovalState: policy.operatorApprovalState,
+                rollbackValidationState: rollbackState,
+                parityValidationState: parityState,
+                activationEligibility: activationEligibility
+            ),
+            eligibility: ProductionCohortEligibilityDiagnostics(
+                allowlistComplete: allowlistComplete,
+                parityVerified: parityVerified,
+                replayBackfillVerified: replayBackfillVerified,
+                overlayVerified: overlayVerified,
+                activationRollbackVerified: activationRollbackVerified,
+                productionWideDisabled: productionWideDisabled,
+                unresolvedBlockers: Array(Set(unresolved)).sorted()
+            ),
+            blockers: dedupedBlockers,
+            recommendedNextAction: recommendedNextAction,
+            noBehaviorChangedText: "No behavior changed: production cohort control plane is diagnostics-only. It does not enable production canonical reads, activate production candidates, switch global canonical reads, mutate production data, discard local state, remove iCloud/local fallback, change export, seal, sync, media, or iCloud behavior, loosen RLS, or delete data."
+        )
+    }
+
+    nonisolated static func productionCohortControlPlaneReportText(
+        _ diagnostics: ProductionCohortControlPlaneDiagnostics
+    ) -> String {
+        var lines: [String] = []
+        lines.append("Production Cohort Control Plane")
+        lines.append("- org_id: \(diagnostics.cohort.orgID?.uuidString ?? "none")")
+        lines.append("- property_id: \(diagnostics.cohort.propertyID?.uuidString ?? "none")")
+        lines.append("- session_id: \(diagnostics.cohort.sessionID?.uuidString ?? "none")")
+        lines.append("- cohort_rollout_stage: \(diagnostics.cohort.rolloutStage.rawValue)")
+        lines.append("- cohort_approval_state: \(diagnostics.cohort.operatorApprovalState.rawValue)")
+        lines.append("- cohort_eligibility: \(diagnostics.cohort.activationEligibility.rawValue)")
+        lines.append("- cohort_blockers: \(diagnostics.blockers.isEmpty ? "none" : diagnostics.blockers.joined(separator: ", "))")
+        lines.append("- recommended_next_action: \(diagnostics.recommendedNextAction)")
+        lines.append("- production_wide_disabled_confirmation: \(diagnostics.eligibility.productionWideDisabled)")
+        lines.append("")
+        lines.append("Cohort Eligibility Diagnostics")
+        lines.append("- allowlist_complete: \(diagnostics.eligibility.allowlistComplete)")
+        lines.append("- parity_verified: \(diagnostics.eligibility.parityVerified)")
+        lines.append("- replay_backfill_verified: \(diagnostics.eligibility.replayBackfillVerified)")
+        lines.append("- overlay_verified: \(diagnostics.eligibility.overlayVerified)")
+        lines.append("- activation_rollback_verified: \(diagnostics.eligibility.activationRollbackVerified)")
+        lines.append("- production_wide_disabled: \(diagnostics.eligibility.productionWideDisabled)")
+        lines.append("- unresolved_blockers: \(diagnostics.eligibility.unresolvedBlockers.isEmpty ? "none" : diagnostics.eligibility.unresolvedBlockers.joined(separator: ", "))")
+        lines.append(diagnostics.noBehaviorChangedText)
         return lines.joined(separator: "\n")
     }
 
