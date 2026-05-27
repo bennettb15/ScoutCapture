@@ -145,6 +145,13 @@ final class Phase2C12B4CLockDisplayCleanupTests: XCTestCase {
         try? FileManager.default.removeItem(at: fixture.storageRoot)
     }
 
+    private func iso8601(_ date: Date) -> String {
+        let formatter = ISO8601DateFormatter()
+        formatter.timeZone = TimeZone(secondsFromGMT: 0)
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter.string(from: date)
+    }
+
     func testClearLockDisplayStateRemovesStaleDraftSessionCoordinationState() throws {
         let fixture = try makeFixture()
         defer { tearDownFixture(fixture) }
@@ -161,5 +168,129 @@ final class Phase2C12B4CLockDisplayCleanupTests: XCTestCase {
         fixture.appState._debugClearLockDisplayStateForTests(propertyIDs: [fixture.property.id])
 
         XCTAssertFalse(fixture.appState.isSessionLockedByOther(sessionID: fixture.draftSession.id))
+    }
+
+    func testRemoteCompletedSessionClearsStaleDraftAndLockUIState() throws {
+        let fixture = try makeFixture()
+        defer { tearDownFixture(fixture) }
+
+        fixture.appState._debugSetSessionCoordinationStateForTests(
+            sessionID: fixture.draftSession.id,
+            lockedByUserID: UUID(),
+            lockedByDeviceID: "other-device",
+            lockedAt: Date()
+        )
+
+        let completedAt = Date(timeIntervalSinceReferenceDate: 500)
+        let result = fixture.appState._debugApplySyncDeltaSessionsForTests(
+            records: [
+                AppState.DebugRemoteSessionDeltaInput(
+                    id: fixture.draftSession.id,
+                    orgID: fixture.orgID,
+                    propertyID: fixture.property.id,
+                    title: "Lock Cleanup",
+                    status: Session.Status.completed.rawValue,
+                    startedAt: iso8601(fixture.draftSession.startedAt),
+                    completedAt: iso8601(completedAt),
+                    exportedAt: completedAt,
+                    isSealed: true,
+                    firstDeliveredAt: completedAt,
+                    reExportExpiresAt: nil,
+                    updatedAt: Date(),
+                    deletedAt: nil
+                )
+            ],
+            orgID: fixture.orgID
+        )
+
+        XCTAssertEqual(result.applied, 1)
+        XCTAssertNil(fixture.appState.draftSession(for: fixture.property.id))
+        XCTAssertFalse(fixture.appState.isSessionLockedByOther(sessionID: fixture.draftSession.id))
+        let persisted = fixture.appState.sessions(for: fixture.property.id).first { $0.id == fixture.draftSession.id }
+        XCTAssertEqual(persisted?.status, .completed)
+        XCTAssertTrue(persisted?.isSealed == true)
+        XCTAssertEqual(persisted?.exportedAt, completedAt)
+    }
+
+    func testFinalSessionDiagnosticsSuppressDraftAndLockForSecondLogin() throws {
+        let fixture = try makeFixture()
+        defer { tearDownFixture(fixture) }
+
+        let exportedAt = Date(timeIntervalSinceReferenceDate: 600)
+        fixture.appState._debugSetSessionCoordinationFetchResultForTests(
+            AppState.DebugSessionCoordinationRemoteInput(
+                sessionID: fixture.draftSession.id,
+                orgID: fixture.orgID,
+                propertyID: fixture.property.id,
+                lockedByUserID: UUID(),
+                lockedByDeviceID: "other-device",
+                lockedAt: iso8601(exportedAt),
+                coordinationTier1Snapshot: nil,
+                updatedAt: exportedAt,
+                status: Session.Status.completed.rawValue,
+                exportedAt: exportedAt,
+                isSealed: true,
+                firstDeliveredAt: exportedAt,
+                reExportExpiresAt: nil
+            )
+        )
+        _ = fixture.appState._debugApplySyncDeltaSessionsForTests(
+            records: [
+                AppState.DebugRemoteSessionDeltaInput(
+                    id: fixture.draftSession.id,
+                    orgID: fixture.orgID,
+                    propertyID: fixture.property.id,
+                    title: "Lock Cleanup",
+                    status: Session.Status.completed.rawValue,
+                    startedAt: iso8601(fixture.draftSession.startedAt),
+                    completedAt: iso8601(exportedAt),
+                    exportedAt: exportedAt,
+                    isSealed: true,
+                    firstDeliveredAt: exportedAt,
+                    reExportExpiresAt: nil,
+                    updatedAt: exportedAt,
+                    deletedAt: nil
+                )
+            ],
+            orgID: fixture.orgID
+        )
+
+        let diagnostics = fixture.appState.sessionUIStateDiagnostics(
+            propertyID: fixture.property.id,
+            sessionID: fixture.draftSession.id
+        )
+
+        XCTAssertEqual(diagnostics?.computedShowsDraft, false)
+        XCTAssertEqual(diagnostics?.computedShowsLock, false)
+        XCTAssertEqual(diagnostics?.computedCanOpen, true)
+        XCTAssertEqual(diagnostics?.reason, "final_session_suppresses_draft_and_lock")
+    }
+
+    func testActiveDraftLockAppearsOnlyWhileFresh() throws {
+        let fixture = try makeFixture()
+        defer { tearDownFixture(fixture) }
+
+        fixture.appState._debugSetSessionCoordinationStateForTests(
+            sessionID: fixture.draftSession.id,
+            lockedByUserID: UUID(),
+            lockedByDeviceID: "other-device",
+            lockedAt: Date()
+        )
+
+        XCTAssertTrue(fixture.appState.isSessionLockedByOther(sessionID: fixture.draftSession.id))
+
+        fixture.appState._debugSetSessionCoordinationStateForTests(
+            sessionID: fixture.draftSession.id,
+            lockedByUserID: UUID(),
+            lockedByDeviceID: "other-device",
+            lockedAt: Date(timeIntervalSinceNow: -31 * 60)
+        )
+
+        XCTAssertFalse(fixture.appState.isSessionLockedByOther(sessionID: fixture.draftSession.id))
+        let diagnostics = fixture.appState.sessionUIStateDiagnostics(
+            propertyID: fixture.property.id,
+            sessionID: fixture.draftSession.id
+        )
+        XCTAssertEqual(diagnostics?.reason, "stale_lock_ignored")
     }
 }
