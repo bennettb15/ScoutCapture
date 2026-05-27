@@ -10248,6 +10248,7 @@ extension ContentView {
                 reason: "initial_capture",
                 allowInsert: true
             )
+            appState.promoteCurrentSessionToActiveCaptureLockIfNeeded(reason: "initial_capture")
             appState.uploadOperationalMediaIfNeeded(
                 propertyID: propertyID,
                 sessionID: session.id,

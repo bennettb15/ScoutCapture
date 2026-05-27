@@ -293,4 +293,138 @@ final class Phase2C12B4CLockDisplayCleanupTests: XCTestCase {
         )
         XCTAssertEqual(diagnostics?.reason, "stale_lock_ignored")
     }
+
+    func testZeroPhotoDraftDoesNotCreateBadgeOrGetReusedForEntry() throws {
+        let fixture = try makeFixture()
+        defer { tearDownFixture(fixture) }
+
+        let property = try fixture.localStore.createProperty(
+            Property(orgId: fixture.orgID, folderId: "zero-photo", name: "Zero Photo", address: "1 Empty Way")
+        )
+        let emptyDraft = try fixture.localStore.upsertSession(
+            Session(
+                id: UUID(),
+                propertyID: property.id,
+                startedAt: Date(timeIntervalSinceReferenceDate: 700),
+                status: .draft,
+                endedAt: nil,
+                exportedAt: nil,
+                isSealed: false
+            )
+        )
+        try fixture.localStore.ensureSessionMetadata(for: emptyDraft)
+        fixture.appState._debugRefreshPropertiesLocallyForTests()
+
+        XCTAssertNil(fixture.appState.draftSession(for: property.id))
+        fixture.appState.selectProperty(id: property.id)
+        let selected = try XCTUnwrap(fixture.appState.startSession())
+        XCTAssertNotEqual(selected.id, emptyDraft.id)
+        XCTAssertNil(fixture.appState.draftSession(for: property.id))
+        XCTAssertEqual(fixture.appState.sessionListContentDiagnostics(propertyID: property.id).badgeReason, "no_captured_draft")
+    }
+
+    func testActiveCapturedDraftLockBlocksDifferentSessionEntryForProperty() async throws {
+        let fixture = try makeFixture()
+        defer { tearDownFixture(fixture) }
+
+        fixture.appState._debugSetSessionCoordinationFetchResultForTests(
+            AppState.DebugSessionCoordinationRemoteInput(
+                sessionID: fixture.draftSession.id,
+                orgID: fixture.orgID,
+                propertyID: fixture.property.id,
+                lockedByUserID: UUID(),
+                lockedByDeviceID: "device-a",
+                lockedAt: iso8601(Date()),
+                coordinationTier1Snapshot: nil,
+                updatedAt: Date(),
+                status: Session.Status.draft.rawValue,
+                exportedAt: nil,
+                isSealed: false,
+                firstDeliveredAt: nil,
+                reExportExpiresAt: nil
+            )
+        )
+
+        let secondDeviceDraft = try fixture.localStore.upsertSession(
+            Session(
+                id: UUID(),
+                propertyID: fixture.property.id,
+                startedAt: Date(timeIntervalSinceReferenceDate: 800),
+                status: .draft,
+                endedAt: nil,
+                exportedAt: nil,
+                isSealed: false
+            )
+        )
+        try fixture.localStore.ensureSessionMetadata(for: secondDeviceDraft)
+        fixture.appState._debugRefreshPropertiesLocallyForTests()
+
+        let status = await fixture.appState.evaluateSessionEntryCoordination(
+            propertyID: fixture.property.id,
+            sessionID: secondDeviceDraft.id
+        )
+        if case .blocked = status {
+            XCTAssertTrue(fixture.appState.locallyLockedPropertyIDs.contains(fixture.property.id))
+        } else {
+            XCTFail("Expected active captured draft lock to block a different device/session entry.")
+        }
+    }
+
+    func testRemoteCompletedShotMetadataHydratesCompletedSessionNotPreviousSession() throws {
+        let fixture = try makeFixture()
+        defer { tearDownFixture(fixture) }
+
+        let completed = try fixture.localStore.upsertSession(
+            Session(
+                id: UUID(),
+                propertyID: fixture.property.id,
+                startedAt: Date(timeIntervalSinceReferenceDate: 900),
+                status: .completed,
+                endedAt: Date(timeIntervalSinceReferenceDate: 920),
+                exportedAt: Date(timeIntervalSinceReferenceDate: 925),
+                isSealed: true
+            )
+        )
+        try fixture.localStore.ensureSessionMetadata(for: completed)
+        fixture.appState._debugRefreshPropertiesLocallyForTests()
+
+        let shotID = UUID()
+        let json = """
+        [{
+          "id": "\(shotID.uuidString)",
+          "org_id": "\(fixture.orgID.uuidString)",
+          "property_id": "\(fixture.property.id.uuidString)",
+          "session_id": "\(completed.id.uuidString)",
+          "created_at": "2001-01-01T00:16:00Z",
+          "updated_at": "2001-01-01T00:16:01Z",
+          "building": "Main",
+          "elevation": "North",
+          "detail_type": "Overview",
+          "angle_index": 1,
+          "shot_key": "main|north|overview|1",
+          "is_guided": false,
+          "is_flagged": false,
+          "lifecycle_state": "active",
+          "storage_bucket": "session-media",
+          "storage_path": "org/property/session/\(shotID.uuidString).heic",
+          "upload_state": "uploaded"
+        }]
+        """
+        XCTAssertEqual(
+            fixture.appState._debugApplyRemoteShotMetadataJSONForTests(
+                json,
+                propertyID: fixture.property.id,
+                sessionID: completed.id
+            ),
+            1
+        )
+
+        let completedMetadata = try fixture.localStore.loadSessionMetadata(propertyID: fixture.property.id, sessionID: completed.id)
+        XCTAssertEqual(completedMetadata.shots.map(\.shotID), [shotID])
+        XCTAssertEqual(completedMetadata.shots.first?.sessionID, completed.id)
+        XCTAssertEqual(completedMetadata.shots.first?.originalRelativePath, "Originals/\(shotID.uuidString).heic")
+
+        let draftMetadata = try fixture.localStore.loadSessionMetadata(propertyID: fixture.property.id, sessionID: fixture.draftSession.id)
+        XCTAssertFalse(draftMetadata.shots.contains { $0.shotID == shotID })
+    }
 }

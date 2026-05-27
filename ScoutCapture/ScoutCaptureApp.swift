@@ -10589,6 +10589,9 @@ struct PropertySessionView: View {
                 didSetup = true
                 appState.selectProperty(id: propertyID)
                 appState.beginPropertyOpenFreshnessCheck(propertyID: propertyID)
+                Task {
+                    await appState.reconcileRemoteSessionContentForPropertyOpen(propertyID: propertyID)
+                }
                 if resumeDraft {
                     if appState.currentSession?.propertyID != propertyID || appState.currentSession?.status != .draft {
                         _ = appState.loadDraftSession(for: propertyID)
