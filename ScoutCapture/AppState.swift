@@ -1214,6 +1214,13 @@ final class AppState: ObservableObject {
         var lastDraftReuseBlockedReason: String?
         var lastDraftDuplicateDetected: Bool = false
         var lastDraftForegroundRefreshReconciliation: String = "not_checked"
+        var lastOrgPersistenceRepairAt: Date?
+        var lastOrgPersistencePropertyID: UUID?
+        var lastOrgPersistencePersistedOrgID: UUID?
+        var lastOrgPersistenceRuntimeOrgID: UUID?
+        var lastOrgPersistenceCanonicalSupabaseOrgID: UUID?
+        var lastOrgPersistenceMatch: Bool?
+        var lastOrgPersistenceRepairResult: String = "not_checked"
         var remoteAvailability: String = "not_checked"
         var attemptedCount: Int = 0
         var successCount: Int = 0
@@ -16834,6 +16841,15 @@ final class AppState: ObservableObject {
         lines.append("- duplicate_draft_detected: \(diagnostics.lastDraftDuplicateDetected)")
         lines.append("- foreground_refresh_session_reconciliation: \(diagnosticsPreviewText(diagnostics.lastDraftForegroundRefreshReconciliation, maxLength: 120) ?? "not_checked")")
         lines.append("")
+        lines.append("Canonical Org Persistence")
+        lines.append("- repair_at: \(diagnostics.lastOrgPersistenceRepairAt?.formatted(date: .abbreviated, time: .standard) ?? "none")")
+        lines.append("- property_id: \(diagnostics.lastOrgPersistencePropertyID?.uuidString ?? "none")")
+        lines.append("- persisted_org_id: \(diagnostics.lastOrgPersistencePersistedOrgID?.uuidString ?? "none")")
+        lines.append("- runtime_org_id: \(diagnostics.lastOrgPersistenceRuntimeOrgID?.uuidString ?? "none")")
+        lines.append("- canonical_supabase_org_id: \(diagnostics.lastOrgPersistenceCanonicalSupabaseOrgID?.uuidString ?? "none")")
+        lines.append("- org_persistence_match: \(diagnostics.lastOrgPersistenceMatch.map(String.init) ?? "not_checked")")
+        lines.append("- last_org_persistence_repair_result: \(diagnosticsPreviewText(diagnostics.lastOrgPersistenceRepairResult, maxLength: 140) ?? "not_checked")")
+        lines.append("")
         lines.append("Last Sanitized Attempt")
         lines.append("- snapshot_id: \(diagnostics.lastSnapshotID?.uuidString ?? "none")")
         lines.append("- property_id: \(diagnostics.lastPropertyID?.uuidString ?? "none")")
@@ -31293,6 +31309,7 @@ final class AppState: ObservableObject {
     @discardableResult
     func startSession() -> Session? {
         guard let selectedPropertyID else { return nil }
+        ensureCanonicalOrgPersistenceForSelectedPropertyIfKnown(reason: "start_session")
         let sessionsForProperty = sessions(for: selectedPropertyID)
         let reusableDrafts = sessionsForProperty
             .filter { $0.deletedAt == nil && $0.status == .draft && !$0.isSealed }
@@ -31400,6 +31417,84 @@ final class AppState: ObservableObject {
             diagnostics.sessionSnapshotUpload.lastDraftReuseBlockedReason = blockedReason
             diagnostics.sessionSnapshotUpload.lastDraftDuplicateDetected = candidateCount > 1
             diagnostics.sessionSnapshotUpload.lastDraftForegroundRefreshReconciliation = foregroundRefreshReconciliation
+        }
+    }
+
+    private func ensureCanonicalOrgPersistenceForSelectedPropertyIfKnown(reason: String) {
+        guard let propertyID = selectedPropertyID,
+              isAuthenticationReady,
+              authenticatedSupabaseUser != nil,
+              let canonicalOrgID = activeOrganizationID else {
+            return
+        }
+
+        let runtimeProperty = properties.first(where: { $0.id == propertyID }) ??
+            allProperties.first(where: { $0.id == propertyID })
+        let persistedProperty = (try? localStore.fetchProperties().first { $0.id == propertyID }) ?? runtimeProperty
+        let persistedOrgID = persistedProperty?.orgId
+        let runtimeOrgID = runtimeProperty?.orgId
+        guard persistedOrgID != canonicalOrgID || runtimeOrgID != canonicalOrgID else {
+            recordCanonicalOrgPersistence(
+                propertyID: propertyID,
+                persistedOrgID: persistedOrgID,
+                runtimeOrgID: runtimeOrgID,
+                canonicalOrgID: canonicalOrgID,
+                result: "already_matched_\(reason)"
+            )
+            return
+        }
+
+        do {
+            let organizationName = organizationSelectionOptions.first(where: { $0.id == canonicalOrgID })?.name
+                ?? allOrganizations.first(where: { $0.id == canonicalOrgID })?.name
+                ?? activeOrganization?.name
+                ?? "Remote Organization"
+            let repaired = try localStore.repairPropertyOrgIDForSessionSnapshotValidation(
+                propertyID: propertyID,
+                canonicalOrgID: canonicalOrgID,
+                organizationName: organizationName
+            )
+            allOrganizations = (try? localStore.fetchOrganizations()) ?? allOrganizations
+            if let index = allProperties.firstIndex(where: { $0.id == repaired.id }) {
+                allProperties[index] = repaired
+            } else {
+                allProperties.append(repaired)
+            }
+            let caches = makeHubCaches(for: allProperties)
+            applyHubCachePayload(properties: allProperties, organizations: allOrganizations, caches: caches)
+            recordCanonicalOrgPersistence(
+                propertyID: propertyID,
+                persistedOrgID: repaired.orgId,
+                runtimeOrgID: repaired.orgId,
+                canonicalOrgID: canonicalOrgID,
+                result: "repaired_\(reason)"
+            )
+        } catch {
+            recordCanonicalOrgPersistence(
+                propertyID: propertyID,
+                persistedOrgID: persistedOrgID,
+                runtimeOrgID: runtimeOrgID,
+                canonicalOrgID: canonicalOrgID,
+                result: "blocked_\(reason): \(Self.diagnosticsPreviewText(error.localizedDescription, maxLength: 90) ?? "unknown_error")"
+            )
+        }
+    }
+
+    private func recordCanonicalOrgPersistence(
+        propertyID: UUID,
+        persistedOrgID: UUID?,
+        runtimeOrgID: UUID?,
+        canonicalOrgID: UUID,
+        result: String
+    ) {
+        mutateLocalDiagnostics { diagnostics in
+            diagnostics.sessionSnapshotUpload.lastOrgPersistenceRepairAt = Date()
+            diagnostics.sessionSnapshotUpload.lastOrgPersistencePropertyID = propertyID
+            diagnostics.sessionSnapshotUpload.lastOrgPersistencePersistedOrgID = persistedOrgID
+            diagnostics.sessionSnapshotUpload.lastOrgPersistenceRuntimeOrgID = runtimeOrgID
+            diagnostics.sessionSnapshotUpload.lastOrgPersistenceCanonicalSupabaseOrgID = canonicalOrgID
+            diagnostics.sessionSnapshotUpload.lastOrgPersistenceMatch = persistedOrgID == canonicalOrgID && runtimeOrgID == canonicalOrgID
+            diagnostics.sessionSnapshotUpload.lastOrgPersistenceRepairResult = result
         }
     }
 

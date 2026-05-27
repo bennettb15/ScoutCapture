@@ -3439,6 +3439,7 @@ final class LocalStore {
             to: propertySyncEventsDirectoryURL.appendingPathComponent(filename, isDirectory: false),
             options: .atomic
         )
+        try reconcilePropertyLedgerFromSyncEvents()
     }
 
     private func appendPropertyOrgRepairSyncEvent(property: Property) throws {
@@ -3456,6 +3457,17 @@ final class LocalStore {
             property: property,
             occurredAt: occurredAt
         )
+    }
+
+    private func reconcilePropertyLedgerFromSyncEvents() throws {
+        guard let projected = try projectedPropertiesFromSyncEvents() else { return }
+        if projected.isEmpty {
+            if fileManager.fileExists(atPath: propertiesURL.path) {
+                try fileManager.removeItem(at: propertiesURL)
+            }
+            return
+        }
+        try writeProperties(projected)
     }
 
     private func seedPropertySyncEventsIfNeeded(from properties: [Property]) throws {
