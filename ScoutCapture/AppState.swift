@@ -1206,6 +1206,14 @@ final class AppState: ObservableObject {
         var lastAutoSnapshotID: UUID?
         var lastAutoUploadPath: String?
         var lastAutoUploadOutcome: String = "not_attempted"
+        var lastDraftReuseDecisionAt: Date?
+        var lastDraftReusePropertyID: UUID?
+        var lastDraftReuseSessionID: UUID?
+        var lastDraftReuseDecision: String = "not_checked"
+        var lastDraftReuseCandidateCount: Int = 0
+        var lastDraftReuseBlockedReason: String?
+        var lastDraftDuplicateDetected: Bool = false
+        var lastDraftForegroundRefreshReconciliation: String = "not_checked"
         var remoteAvailability: String = "not_checked"
         var attemptedCount: Int = 0
         var successCount: Int = 0
@@ -16816,6 +16824,16 @@ final class AppState: ObservableObject {
         lines.append("- last_auto_session_id: \(diagnostics.lastAutoSessionID?.uuidString ?? "none")")
         lines.append("- last_auto_upload_path_present: \(trimmedNonEmpty(diagnostics.lastAutoUploadPath) != nil)")
         lines.append("")
+        lines.append("Draft Session Reuse")
+        lines.append("- decision_at: \(diagnostics.lastDraftReuseDecisionAt?.formatted(date: .abbreviated, time: .standard) ?? "none")")
+        lines.append("- property_id: \(diagnostics.lastDraftReusePropertyID?.uuidString ?? "none")")
+        lines.append("- session_id: \(diagnostics.lastDraftReuseSessionID?.uuidString ?? "none")")
+        lines.append("- decision: \(diagnosticsPreviewText(diagnostics.lastDraftReuseDecision, maxLength: 80) ?? "not_checked")")
+        lines.append("- reuse_candidate_count: \(diagnostics.lastDraftReuseCandidateCount)")
+        lines.append("- reuse_blocked_reason: \(diagnosticsPreviewText(diagnostics.lastDraftReuseBlockedReason, maxLength: 140) ?? "none")")
+        lines.append("- duplicate_draft_detected: \(diagnostics.lastDraftDuplicateDetected)")
+        lines.append("- foreground_refresh_session_reconciliation: \(diagnosticsPreviewText(diagnostics.lastDraftForegroundRefreshReconciliation, maxLength: 120) ?? "not_checked")")
+        lines.append("")
         lines.append("Last Sanitized Attempt")
         lines.append("- snapshot_id: \(diagnostics.lastSnapshotID?.uuidString ?? "none")")
         lines.append("- property_id: \(diagnostics.lastPropertyID?.uuidString ?? "none")")
@@ -31276,22 +31294,45 @@ final class AppState: ObservableObject {
     func startSession() -> Session? {
         guard let selectedPropertyID else { return nil }
         let sessionsForProperty = sessions(for: selectedPropertyID)
+        let reusableDrafts = sessionsForProperty
+            .filter { $0.deletedAt == nil && $0.status == .draft && !$0.isSealed }
+            .sorted { $0.startedAt > $1.startedAt }
         let pendingDeliveryExists = sessionsForProperty.contains(where: { isPendingDelivery($0) })
         let reExportEligibleExists = sessionsForProperty.contains(where: { isReExportEligible($0) })
         if let currentSession, currentSession.status == .draft, currentSession.propertyID == selectedPropertyID {
+            let persistedCurrent = persistReusableDraftSessionIfNeeded(currentSession)
+            recordDraftSessionReuseDecision(
+                propertyID: selectedPropertyID,
+                session: persistedCurrent,
+                decision: "reuse_current_draft",
+                candidateCount: reusableDrafts.count,
+                blockedReason: nil,
+                foregroundRefreshReconciliation: "current_session_retained"
+            )
             print("[StartSession] propertyID=\(selectedPropertyID.uuidString) blockedReason=none pendingDeliveryExists=\(pendingDeliveryExists) reExportEligibleExists=\(reExportEligibleExists)")
-            logActiveSession(currentSession)
+            logActiveSession(persistedCurrent)
             cloudBackupManager?.setCaptureModeActive(true)
-            return currentSession
+            return persistedCurrent
         }
 
-        if let draft = canonicalDraftSession(for: selectedPropertyID, requireCaptures: false) {
+        if let draft = reusableDrafts.first {
             currentSession = draft
+            recordDraftSessionReuseDecision(
+                propertyID: selectedPropertyID,
+                session: draft,
+                decision: "reuse_persisted_draft",
+                candidateCount: reusableDrafts.count,
+                blockedReason: nil,
+                foregroundRefreshReconciliation: reusableDrafts.count > 1 ? "duplicate_drafts_detected_latest_reused" : "persisted_draft_reattached"
+            )
             print("[StartSession] propertyID=\(selectedPropertyID.uuidString) blockedReason=none pendingDeliveryExists=\(pendingDeliveryExists) reExportEligibleExists=\(reExportEligibleExists)")
             cloudBackupManager?.setCaptureModeActive(true)
             return draft
         }
 
+        let blockedReason = sessionsForProperty.contains { $0.deletedAt == nil && $0.status != .draft }
+            ? "no_reusable_active_draft_completed_or_sealed_sessions_only"
+            : "no_reusable_active_draft_found"
         let inheritedCaptureProfile = properties.first(where: { $0.id == selectedPropertyID })?.captureProfile ??
             allProperties.first(where: { $0.id == selectedPropertyID })?.captureProfile
         let session = Session(
@@ -31302,22 +31343,64 @@ final class AppState: ObservableObject {
             exportedAt: nil,
             captureProfile: inheritedCaptureProfile
         )
-        currentSession = session
+        let persisted = persistReusableDraftSessionIfNeeded(session)
+        currentSession = persisted
+        recordDraftSessionReuseDecision(
+            propertyID: selectedPropertyID,
+            session: persisted,
+            decision: "created_new_draft",
+            candidateCount: reusableDrafts.count,
+            blockedReason: blockedReason,
+            foregroundRefreshReconciliation: "new_draft_persisted_for_reentry_reuse"
+        )
         if let property = properties.first(where: { $0.id == session.propertyID }) ?? allProperties.first(where: { $0.id == session.propertyID }),
            let orgID = property.orgId {
             Task {
                 await emitAuditEvent(
                     orgID: orgID,
                     eventType: "session.started",
-                    sessionID: session.id,
-                    propertyID: session.propertyID,
+                    sessionID: persisted.id,
+                    propertyID: persisted.propertyID,
                     payload: [:]
                 )
             }
         }
         print("[StartSession] propertyID=\(selectedPropertyID.uuidString) blockedReason=none pendingDeliveryExists=\(pendingDeliveryExists) reExportEligibleExists=\(reExportEligibleExists)")
         cloudBackupManager?.setCaptureModeActive(true)
-        return session
+        return persisted
+    }
+
+    private func persistReusableDraftSessionIfNeeded(_ session: Session) -> Session {
+        let alreadyPersisted = sessions(for: session.propertyID).contains { $0.id == session.id }
+        guard !alreadyPersisted else {
+            currentSession = session
+            return session
+        }
+
+        let persisted = (try? localStore.upsertSession(session)) ?? session
+        currentSession = persisted
+        reloadSessionCache(for: session.propertyID)
+        return persisted
+    }
+
+    private func recordDraftSessionReuseDecision(
+        propertyID: UUID,
+        session: Session?,
+        decision: String,
+        candidateCount: Int,
+        blockedReason: String?,
+        foregroundRefreshReconciliation: String
+    ) {
+        mutateLocalDiagnostics { diagnostics in
+            diagnostics.sessionSnapshotUpload.lastDraftReuseDecisionAt = Date()
+            diagnostics.sessionSnapshotUpload.lastDraftReusePropertyID = propertyID
+            diagnostics.sessionSnapshotUpload.lastDraftReuseSessionID = session?.id
+            diagnostics.sessionSnapshotUpload.lastDraftReuseDecision = decision
+            diagnostics.sessionSnapshotUpload.lastDraftReuseCandidateCount = candidateCount
+            diagnostics.sessionSnapshotUpload.lastDraftReuseBlockedReason = blockedReason
+            diagnostics.sessionSnapshotUpload.lastDraftDuplicateDetected = candidateCount > 1
+            diagnostics.sessionSnapshotUpload.lastDraftForegroundRefreshReconciliation = foregroundRefreshReconciliation
+        }
     }
 
     @discardableResult
