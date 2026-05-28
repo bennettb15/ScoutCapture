@@ -480,6 +480,90 @@ final class Phase2C12B4CLockDisplayCleanupTests: XCTestCase {
         XCTAssertNil(fixture.appState.draftBadgeSession(for: fixture.property.id))
     }
 
+    func testRefreshHydratesLockBadgeFromActiveRemoteZeroPhotoOccupancy() async throws {
+        let fixture = try makeFixture()
+        defer { tearDownFixture(fixture) }
+
+        fixture.appState._debugSetRemotePropertySessionOccupancyOnlyForTests(
+            propertyID: fixture.property.id,
+            orgID: fixture.orgID,
+            occupiedByUserID: UUID(),
+            occupiedByDeviceID: "other-device",
+            occupiedAt: Date()
+        )
+
+        XCTAssertFalse(fixture.appState.propertyCardBadgeModel(for: fixture.property.id).showLock)
+
+        await fixture.appState._debugRefreshVisibleLockBadgesFromEntrySourcesForTests(
+            orgID: fixture.orgID,
+            propertyIDs: [fixture.property.id],
+            reason: "zero_photo_occupancy_test"
+        )
+
+        let badgeModel = fixture.appState.propertyCardBadgeModel(for: fixture.property.id)
+        XCTAssertTrue(badgeModel.showLock)
+        XCTAssertFalse(badgeModel.showDraft)
+        XCTAssertEqual(badgeModel.lockReason, "active_occupancy_other_device")
+    }
+
+    func testRefreshHydratesLockBadgeFromActiveRemoteMaterialDraftLock() async throws {
+        let fixture = try makeFixture()
+        defer { tearDownFixture(fixture) }
+
+        fixture.appState._debugSetSessionCoordinationFetchResultForTests(
+            AppState.DebugSessionCoordinationRemoteInput(
+                sessionID: fixture.draftSession.id,
+                orgID: fixture.orgID,
+                propertyID: fixture.property.id,
+                lockedByUserID: UUID(),
+                lockedByDeviceID: "other-device",
+                lockedAt: iso8601(Date()),
+                coordinationTier1Snapshot: nil,
+                updatedAt: Date(),
+                status: Session.Status.draft.rawValue,
+                exportedAt: nil,
+                isSealed: false,
+                firstDeliveredAt: nil,
+                reExportExpiresAt: nil
+            )
+        )
+
+        await fixture.appState._debugRefreshVisibleLockBadgesFromEntrySourcesForTests(
+            orgID: fixture.orgID,
+            propertyIDs: [fixture.property.id],
+            reason: "material_draft_lock_test"
+        )
+
+        let badgeModel = fixture.appState.propertyCardBadgeModel(for: fixture.property.id)
+        XCTAssertTrue(badgeModel.showLock)
+        XCTAssertFalse(badgeModel.showDraft)
+        XCTAssertEqual(badgeModel.lockReason, "active_occupancy_other_device")
+    }
+
+    func testRefreshClearsReleasedOrStaleLockBadge() async throws {
+        let fixture = try makeFixture()
+        defer { tearDownFixture(fixture) }
+
+        fixture.appState.locallyLockedPropertyIDs.insert(fixture.property.id)
+        fixture.appState._debugSetPropertySessionOccupancyForTests(
+            propertyID: fixture.property.id,
+            orgID: fixture.orgID,
+            occupiedByUserID: UUID(),
+            occupiedByDeviceID: "other-device",
+            occupiedAt: Date(timeIntervalSinceNow: -31 * 60)
+        )
+
+        await fixture.appState._debugRefreshVisibleLockBadgesFromEntrySourcesForTests(
+            orgID: fixture.orgID,
+            propertyIDs: [fixture.property.id],
+            reason: "stale_lock_clear_test"
+        )
+
+        let badgeModel = fixture.appState.propertyCardBadgeModel(for: fixture.property.id)
+        XCTAssertFalse(badgeModel.showLock)
+        XCTAssertFalse(fixture.appState.locallyLockedPropertyIDs.contains(fixture.property.id))
+    }
+
     func testStaleLocalDraftWithoutOwnershipDoesNotShowDraftBadge() throws {
         let fixture = try makeFixture()
         defer { tearDownFixture(fixture) }

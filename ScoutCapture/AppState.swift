@@ -28524,6 +28524,146 @@ final class AppState: ObservableObject {
         }
     }
 
+    private struct RefreshLockBadgeDecision {
+        let propertyID: UUID
+        let showLocked: Bool
+        let reason: String
+        let occupancyState: PropertySessionOccupancyState?
+        let sessionLockState: (sessionID: UUID, state: SessionCoordinationState)?
+        let clearSessionIDs: [UUID]
+    }
+
+    @MainActor
+    private func refreshVisibleLockBadgesFromEntrySources(
+        orgID: UUID,
+        propertyIDs: [UUID],
+        reason: String
+    ) async {
+        let uniquePropertyIDs = Array(Set(propertyIDs))
+        guard !uniquePropertyIDs.isEmpty else { return }
+
+        let currentUserID = authenticatedSupabaseUser?.id
+        let currentDeviceID = currentDeviceIdentifier()
+        var decisions: [RefreshLockBadgeDecision] = []
+
+        for propertyID in uniquePropertyIDs {
+            if let activeOtherLock = await activeRemotePropertyLockOwnedByOther(
+                orgID: orgID,
+                propertyID: propertyID,
+                currentUserID: currentUserID,
+                currentDeviceID: currentDeviceID
+            ) {
+                let propertyOccupancy = try? await fetchRemotePropertySessionOccupancyRecord(
+                    orgID: orgID,
+                    propertyID: propertyID
+                )
+                let occupancyState = PropertySessionOccupancyState(
+                    occupiedByUserID: propertyOccupancy?.occupiedByUserID ?? activeOtherLock.lockedByUserID,
+                    occupiedByDeviceID: normalizedSupabaseText(propertyOccupancy?.occupiedByDeviceID) ??
+                        normalizedSupabaseText(activeOtherLock.lockedByDeviceID),
+                    occupiedAt: propertyOccupancy?.occupiedAt.flatMap(parseSupabaseDateString) ??
+                        activeOtherLock.lockedAt.flatMap(parseSupabaseDateString)
+                )
+                decisions.append(
+                    RefreshLockBadgeDecision(
+                        propertyID: propertyID,
+                        showLocked: true,
+                        reason: "active_remote_property_lock",
+                        occupancyState: occupancyState,
+                        sessionLockState: (
+                            activeOtherLock.id,
+                            SessionCoordinationState(
+                                lockedByUserID: activeOtherLock.lockedByUserID,
+                                lockedByDeviceID: normalizedSupabaseText(activeOtherLock.lockedByDeviceID),
+                                lockedAt: activeOtherLock.lockedAt.flatMap(parseSupabaseDateString)
+                            )
+                        ),
+                        clearSessionIDs: []
+                    )
+                )
+                continue
+            }
+
+            let propertyOccupancy = try? await fetchRemotePropertySessionOccupancyRecord(
+                orgID: orgID,
+                propertyID: propertyID
+            )
+            if propertySessionOccupancyIsActive(propertyOccupancy) {
+                let occupancyOwnerUserID = propertyOccupancy?.occupiedByUserID
+                let occupancyOwnerDeviceID = normalizedSupabaseText(propertyOccupancy?.occupiedByDeviceID)
+                let occupancyOwnedByCurrentActor =
+                    occupancyOwnerUserID == currentUserID &&
+                    occupancyOwnerDeviceID == currentDeviceID
+                let occupancyState = PropertySessionOccupancyState(
+                    occupiedByUserID: occupancyOwnerUserID,
+                    occupiedByDeviceID: occupancyOwnerDeviceID,
+                    occupiedAt: propertyOccupancy?.occupiedAt.flatMap(parseSupabaseDateString)
+                )
+                decisions.append(
+                    RefreshLockBadgeDecision(
+                        propertyID: propertyID,
+                        showLocked: !occupancyOwnedByCurrentActor,
+                        reason: occupancyOwnedByCurrentActor ? "active_occupancy_owned_by_current_device" : "active_remote_occupancy",
+                        occupancyState: occupancyState,
+                        sessionLockState: nil,
+                        clearSessionIDs: []
+                    )
+                )
+                continue
+            }
+
+            let staleOccupancySeen = propertyOccupancy != nil
+            let sessionIDs = Set((allSessionIndexByProperty[propertyID] ?? []).map(\.id))
+                .union((sessionIndexByProperty[propertyID] ?? []).map(\.id))
+            decisions.append(
+                RefreshLockBadgeDecision(
+                    propertyID: propertyID,
+                    showLocked: false,
+                    reason: staleOccupancySeen ? "stale_or_released_occupancy_cleared" : "no_entry_lock_found",
+                    occupancyState: nil,
+                    sessionLockState: nil,
+                    clearSessionIDs: Array(sessionIDs)
+                )
+            )
+        }
+
+        var nextLockedPropertyIDs = locallyLockedPropertyIDs.subtracting(uniquePropertyIDs)
+        for decision in decisions {
+            if decision.showLocked {
+                nextLockedPropertyIDs.insert(decision.propertyID)
+            }
+            if let occupancyState = decision.occupancyState {
+                setPropertySessionOccupancyState(
+                    propertyID: decision.propertyID,
+                    occupiedByUserID: occupancyState.occupiedByUserID,
+                    occupiedByDeviceID: occupancyState.occupiedByDeviceID,
+                    occupiedAt: occupancyState.occupiedAt
+                )
+            } else {
+                propertySessionOccupancyByPropertyID.removeValue(forKey: decision.propertyID)
+            }
+            if let sessionLockState = decision.sessionLockState {
+                setSessionCoordinationState(
+                    sessionID: sessionLockState.sessionID,
+                    lockedByUserID: sessionLockState.state.lockedByUserID,
+                    lockedByDeviceID: sessionLockState.state.lockedByDeviceID,
+                    lockedAt: sessionLockState.state.lockedAt
+                )
+            }
+            for sessionID in decision.clearSessionIDs {
+                sessionCoordinationStateBySessionID.removeValue(forKey: sessionID)
+            }
+            print(
+                "[LockBadgeRefresh] source=entry_blocking " +
+                "trigger=\(reason) " +
+                "propertyID=\(decision.propertyID.uuidString) " +
+                "visible=\(decision.showLocked) " +
+                "reason=\(decision.reason)"
+            )
+        }
+        locallyLockedPropertyIDs = nextLockedPropertyIDs
+    }
+
     func isSessionLockedByOther(sessionID: UUID) -> Bool {
         guard let coord = sessionCoordinationStateBySessionID[sessionID] else { return false }
         let session = allSessionIndexByProperty.values.flatMap { $0 }.first(where: { $0.id == sessionID }) ??
@@ -29257,7 +29397,11 @@ final class AppState: ObservableObject {
                 authority: authority,
                 replacingOrganizationID: requestedOrganizationID
             )
-            await reconcileLocalLocksAfterRefresh()
+            await refreshVisibleLockBadgesFromEntrySources(
+                orgID: requestedOrganizationID,
+                propertyIDs: mergedPayload.properties.filter { $0.deletedAt == nil }.map(\.id),
+                reason: "foreground_refresh"
+            )
             lastLiveSyncFingerprint = localStore.propertiesLedgerFingerprint()
             logRemotePropertyFetchResult(
                 outcome: "foreground_success",
@@ -33761,6 +33905,26 @@ final class AppState: ObservableObject {
         }
     }
 
+    func _debugSetRemotePropertySessionOccupancyOnlyForTests(
+        propertyID: UUID,
+        orgID: UUID,
+        occupiedByUserID: UUID?,
+        occupiedByDeviceID: String?,
+        occupiedAt: Date?
+    ) {
+        if occupiedByUserID != nil || normalizedSupabaseText(occupiedByDeviceID) != nil || occupiedAt != nil {
+            propertySessionOccupancyDebugRemoteRecords[propertyID] = RemotePropertySessionOccupancyRecord(
+                propertyID: propertyID,
+                orgID: orgID,
+                occupiedByUserID: occupiedByUserID,
+                occupiedByDeviceID: normalizedSupabaseText(occupiedByDeviceID),
+                occupiedAt: occupiedAt?.ISO8601Format()
+            )
+        } else {
+            propertySessionOccupancyDebugRemoteRecords.removeValue(forKey: propertyID)
+        }
+    }
+
     func _debugReadPropertySessionOccupancyForTests(propertyID: UUID) -> (
         occupiedByUserID: UUID?,
         occupiedByDeviceID: String?,
@@ -33796,6 +33960,18 @@ final class AppState: ObservableObject {
 
     func _debugPromoteCurrentSessionToActiveCaptureLockForTests(reason: String = "test") async {
         await promoteCurrentSessionToActiveCaptureLock(reason: reason)
+    }
+
+    func _debugRefreshVisibleLockBadgesFromEntrySourcesForTests(
+        orgID: UUID,
+        propertyIDs: [UUID],
+        reason: String = "test"
+    ) async {
+        await refreshVisibleLockBadgesFromEntrySources(
+            orgID: orgID,
+            propertyIDs: propertyIDs,
+            reason: reason
+        )
     }
 
     func _debugSetActivityFeedFetchOverrideForTests(
