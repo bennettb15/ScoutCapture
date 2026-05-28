@@ -5767,6 +5767,7 @@ final class AppState: ObservableObject {
     private let reExportWindowDays = 7
     private let sessionMediaOffloadCooldown: TimeInterval = 30 * 60
     private let sessionCoordinationStaleLockThreshold: TimeInterval = 3 * 60
+    private let sessionOccupancyHeartbeatInterval: TimeInterval = 60
     private let activatedPropertyRetentionWindow: TimeInterval = 7 * 24 * 60 * 60
     private let offloadSweepQueue = DispatchQueue(label: "ScoutCapture.AppState.offloadSweep", qos: .utility)
     private let archiveSnapshotQueue = DispatchQueue(label: "ScoutCapture.AppState.archiveSnapshot", qos: .utility)
@@ -5814,6 +5815,7 @@ final class AppState: ObservableObject {
     private var sessionCoordinationStateBySessionID: [UUID: SessionCoordinationState] = [:]
     private var sessionCoordinationEntrySnapshotBySessionID: [UUID: String] = [:]
     private var occupancyOnlyClaimedSessionIDs: Set<UUID> = []
+    private var lastOccupancyHeartbeatAtByPropertyID: [UUID: Date] = [:]
     private var propertyReferenceReconcileAtByPropertyID: [UUID: Date] = [:]
     private var propertyReferenceMetadataRefreshAtByPropertyID: [UUID: Date] = [:]
     private var sessionArchiveAvailabilityCache: [String: (checkedAt: Date, availability: LocalStore.SessionArchivePackageAvailability)] = [:]
@@ -23889,7 +23891,9 @@ final class AppState: ObservableObject {
         lockedAt: Date?
     ) -> Bool {
         guard !isFinalSession(session) else { return false }
-        guard !isStaleCoordinationLock(lockedAt: lockedAt) else { return false }
+        if let session, !sessionHasCaptures(session) {
+            guard !isStaleCoordinationLock(lockedAt: lockedAt) else { return false }
+        }
         return lockedByUserID != nil || normalizedSupabaseText(lockedByDeviceID) != nil
     }
 
@@ -23901,8 +23905,113 @@ final class AppState: ObservableObject {
             isSealed: record.isSealed,
             firstDeliveredAt: record.firstDeliveredAt
         ) else { return false }
-        guard !isStaleCoordinationLock(lockedAt: record.lockedAt.flatMap(parseSupabaseDateString)) else { return false }
         return record.lockedByUserID != nil || normalizedSupabaseText(record.lockedByDeviceID) != nil
+    }
+
+    private func finalizationTimestamp(for record: RemotePropertySessionLockRecord) -> Date? {
+        [
+            record.completedAt,
+            record.exportedAt,
+            record.firstDeliveredAt
+        ]
+        .compactMap { $0 }
+        .max()
+    }
+
+    private func lockTimestamp(for record: RemotePropertySessionLockRecord) -> Date? {
+        record.lockedAt.flatMap(parseSupabaseDateString)
+    }
+
+    private func finalizationEventIsTerminal(_ eventType: String) -> Bool {
+        switch eventType.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "session.released",
+             "session.completed",
+             "session.exported",
+             "occupancy.expired":
+            return true
+        default:
+            return false
+        }
+    }
+
+    private func finalizationEvidenceBeatsLock(
+        _ evidence: PropertyFinalizationEvidence?,
+        lockTimestamp: Date?
+    ) -> Bool {
+        guard let evidence else { return false }
+        return evidence.timestamp > (lockTimestamp ?? .distantPast)
+    }
+
+    private func fetchRemotePropertySessionLockRecordsForPrecedence(
+        orgID: UUID,
+        propertyID: UUID
+    ) async -> [RemotePropertySessionLockRecord] {
+        let records = (try? await fetchRemotePropertySessionLockRecordsDirect(
+            orgID: orgID,
+            propertyID: propertyID
+        )) ?? []
+        applyRemoteFinalSessionStatesFromLockRecords(records, reason: "property_lock_precedence")
+        return records
+    }
+
+    private func latestFinalizationEvidence(
+        orgID: UUID,
+        propertyID: UUID,
+        lockRecords: [RemotePropertySessionLockRecord]
+    ) async -> PropertyFinalizationEvidence? {
+        var candidates: [PropertyFinalizationEvidence] = lockRecords.compactMap { record in
+            guard isFinalRemoteSessionState(
+                status: record.status,
+                completedAt: record.completedAt,
+                exportedAt: record.exportedAt,
+                isSealed: record.isSealed,
+                firstDeliveredAt: record.firstDeliveredAt
+            ), let timestamp = finalizationTimestamp(for: record) else {
+                return nil
+            }
+            return PropertyFinalizationEvidence(
+                sessionID: record.id,
+                eventType: normalizedSupabaseText(record.status) == Session.Status.completed.rawValue ? "session.completed" : "session.finalized",
+                timestamp: timestamp
+            )
+        }
+
+        let events: [ActivityFeedItem]
+#if DEBUG
+        if AppStateTestEnvironment.isRunningUnderXCTest,
+           activityFeedFetchOverride == nil {
+            events = []
+        } else {
+            events = (try? await fetchActivityFeed(orgID: orgID, propertyID: propertyID, limit: 50)) ?? []
+        }
+#else
+        events = (try? await fetchActivityFeed(orgID: orgID, propertyID: propertyID, limit: 50)) ?? []
+#endif
+        candidates.append(
+            contentsOf: events
+                .filter { finalizationEventIsTerminal($0.eventType) }
+                .map {
+                    PropertyFinalizationEvidence(
+                        sessionID: $0.sessionID,
+                        eventType: $0.eventType,
+                        timestamp: $0.createdAt
+                    )
+                }
+        )
+
+        return candidates.max { $0.timestamp < $1.timestamp }
+    }
+
+    private func remotePropertySessionLockRecordsSorted(
+        orgID: UUID,
+        propertyID: UUID
+    ) async -> [RemotePropertySessionLockRecord] {
+        (await fetchRemotePropertySessionLockRecordsForPrecedence(orgID: orgID, propertyID: propertyID))
+            .filter { hasActiveRemoteLock(record: $0) }
+            .sorted {
+                ($0.lockedAt.flatMap(parseSupabaseDateString) ?? .distantPast) >
+                ($1.lockedAt.flatMap(parseSupabaseDateString) ?? .distantPast)
+            }
     }
 
     private func activeRemotePropertyLockOwnedByOther(
@@ -23911,16 +24020,41 @@ final class AppState: ObservableObject {
         currentUserID: UUID?,
         currentDeviceID: String
     ) async -> RemotePropertySessionLockRecord? {
-        let locks = (try? await fetchRemotePropertySessionLockRecords(orgID: orgID, propertyID: propertyID)) ?? []
-        return locks
+        let records = await fetchRemotePropertySessionLockRecordsForPrecedence(orgID: orgID, propertyID: propertyID)
+        let finalizationEvidence = await latestFinalizationEvidence(
+            orgID: orgID,
+            propertyID: propertyID,
+            lockRecords: records
+        )
+        let locks = records
             .filter { hasActiveRemoteLock(record: $0) }
             .filter { record in
-                !(record.lockedByUserID == currentUserID &&
-                  normalizedSupabaseText(record.lockedByDeviceID) == currentDeviceID)
+                let lockAt = lockTimestamp(for: record)
+                let finalBeatsLock = finalizationEvidenceBeatsLock(finalizationEvidence, lockTimestamp: lockAt)
+                if finalBeatsLock {
+                    print(
+                        "[SessionCoordinationEval] event=property_lock_ignored " +
+                        "propertyID=\(propertyID.uuidString) " +
+                        "sessionID=\(record.id.uuidString) " +
+                        "reason=finalization_newer_than_property_lock " +
+                        "lockTimestamp=\(lockAt?.ISO8601Format() ?? "nil") " +
+                        "finalizationTimestamp=\(finalizationEvidence?.timestamp.ISO8601Format() ?? "nil") " +
+                        "precedenceWinner=finalization"
+                    )
+                }
+                return !finalBeatsLock
             }
             .sorted {
-                ($0.lockedAt.flatMap(parseSupabaseDateString) ?? .distantPast) >
-                ($1.lockedAt.flatMap(parseSupabaseDateString) ?? .distantPast)
+                (lockTimestamp(for: $0) ?? .distantPast) >
+                (lockTimestamp(for: $1) ?? .distantPast)
+            }
+        return locks
+            .filter { record in
+                let lockedByDeviceID = normalizedSupabaseText(record.lockedByDeviceID)
+                let ownedByCurrentActor =
+                    (lockedByDeviceID != nil && lockedByDeviceID == currentDeviceID) ||
+                    (record.lockedByUserID != nil && record.lockedByUserID == currentUserID)
+                return !ownedByCurrentActor
             }
             .first
     }
@@ -24149,6 +24283,132 @@ final class AppState: ObservableObject {
         } catch {}
     }
 
+    @MainActor
+    private func activeOccupancyHeartbeatContext() -> (session: Session, property: Property, orgID: UUID)? {
+        guard backendFeatureFlags.sessionCoordinationEnabled,
+              backendFeatureFlags.supabaseEnabled,
+              backendFeatureFlags.shadowWriteEnabled,
+              let session = currentSession,
+              session.status == .draft,
+              !isFinalSession(session),
+              let property = properties.first(where: { $0.id == session.propertyID }) ??
+                allProperties.first(where: { $0.id == session.propertyID }),
+              let orgID = property.orgId else {
+            return nil
+        }
+        return (session, property, orgID)
+    }
+
+    @MainActor
+    func refreshActiveOccupancyHeartbeatIfNeeded(
+        reason: String,
+        force: Bool = false
+    ) async {
+        guard let context = activeOccupancyHeartbeatContext() else { return }
+        let now = Date()
+        if !force,
+           let lastHeartbeatAt = lastOccupancyHeartbeatAtByPropertyID[context.session.propertyID],
+           now.timeIntervalSince(lastHeartbeatAt) < sessionOccupancyHeartbeatInterval {
+            return
+        }
+
+        let desiredOccupancy = PropertySessionOccupancyState(
+            occupiedByUserID: authenticatedSupabaseUser?.id,
+            occupiedByDeviceID: currentDeviceIdentifier(),
+            occupiedAt: now
+        )
+        let didPersist = await persistPropertySessionOccupancyMutation(
+            propertyID: context.session.propertyID,
+            orgID: context.orgID,
+            desiredState: desiredOccupancy
+        )
+        if didPersist {
+            lastOccupancyHeartbeatAtByPropertyID[context.session.propertyID] = now
+        }
+        print(
+            "[OccupancyRecovery] event=heartbeat " +
+            "reason=\(reason) " +
+            "propertyID=\(context.session.propertyID.uuidString) " +
+            "sessionID=\(context.session.id.uuidString) " +
+            "persisted=\(didPersist) " +
+            "occupiedAt=\(now.ISO8601Format())"
+        )
+    }
+
+    @MainActor
+    func reconcileOccupancyForAppLifecycle(reason: String) async {
+        guard backendFeatureFlags.sessionCoordinationEnabled,
+              backendFeatureFlags.supabaseEnabled,
+              backendFeatureFlags.shadowWriteEnabled,
+              let orgID = activeOrganizationID else {
+            return
+        }
+
+        let currentUserID = authenticatedSupabaseUser?.id
+        let currentDeviceID = currentDeviceIdentifier()
+        let remoteRecords = (try? await fetchRemotePropertySessionOccupancyRecords(activeOrganizationID: orgID))
+            ?? []
+        let orgRecords = remoteRecords.filter { $0.orgID == orgID }
+        var nextState = propertySessionOccupancyByPropertyID
+        for record in orgRecords {
+            nextState[record.propertyID] = PropertySessionOccupancyState(
+                occupiedByUserID: record.occupiedByUserID,
+                occupiedByDeviceID: normalizedSupabaseText(record.occupiedByDeviceID),
+                occupiedAt: record.occupiedAt.flatMap(parseSupabaseDateString)
+            )
+        }
+        propertySessionOccupancyByPropertyID = nextState
+
+        let activeSession = activeOccupancyHeartbeatContext()?.session
+        for record in orgRecords {
+            let occupiedByDeviceID = normalizedSupabaseText(record.occupiedByDeviceID)
+            let ownedByCurrentDevice = occupiedByDeviceID == currentDeviceID
+            let ownedBySameOrUnknownUser =
+                record.occupiedByUserID == nil ||
+                currentUserID == nil ||
+                record.occupiedByUserID == currentUserID
+            guard ownedByCurrentDevice && ownedBySameOrUnknownUser else {
+                continue
+            }
+
+            let activeSessionMatches = activeSession?.propertyID == record.propertyID
+            if activeSessionMatches {
+                print(
+                    "[OccupancyRecovery] event=own_occupancy_active " +
+                    "reason=\(reason) " +
+                    "propertyID=\(record.propertyID.uuidString) " +
+                    "occupiedAt=\(record.occupiedAt ?? "nil")"
+                )
+                continue
+            }
+
+            await releasePropertySessionOccupancyIfOwned(
+                propertyID: record.propertyID,
+                sessionID: nil,
+                emitReleasedEvent: false
+            )
+            await emitAuditEvent(
+                orgID: orgID,
+                eventType: "occupancy.expired",
+                sessionID: nil,
+                propertyID: record.propertyID,
+                payload: [
+                    "reason": reason,
+                    "expired_by_device_id": currentDeviceID,
+                    "previous_occupied_at": record.occupiedAt ?? ""
+                ]
+            )
+            print(
+                "[OccupancyRecovery] event=own_occupancy_expired " +
+                "reason=\(reason) " +
+                "propertyID=\(record.propertyID.uuidString) " +
+                "previousOccupiedAt=\(record.occupiedAt ?? "nil")"
+            )
+        }
+
+        await refreshActiveOccupancyHeartbeatIfNeeded(reason: reason, force: true)
+    }
+
     private func persistSessionCoordinationMutation(
         property: Property,
         session: Session,
@@ -24281,6 +24541,15 @@ final class AppState: ObservableObject {
 
         let currentUserID = authenticatedSupabaseUser?.id
         let currentDeviceID = currentDeviceIdentifier()
+        let propertyLockRecords = await fetchRemotePropertySessionLockRecordsForPrecedence(
+            orgID: orgID,
+            propertyID: propertyID
+        )
+        let propertyFinalizationEvidence = await latestFinalizationEvidence(
+            orgID: orgID,
+            propertyID: propertyID,
+            lockRecords: propertyLockRecords
+        )
         if !forceClaim,
            let activeOtherLock = await activeRemotePropertyLockOwnedByOther(
             orgID: orgID,
@@ -24375,7 +24644,22 @@ final class AppState: ObservableObject {
         if let propertyOccupancy,
            propertyOccupancy.occupiedByUserID != nil || normalizedSupabaseText(propertyOccupancy.occupiedByDeviceID) != nil {
             let occupiedAt = propertyOccupancy.occupiedAt.flatMap(parseSupabaseDateString)
-            if isStaleCoordinationLock(lockedAt: occupiedAt) {
+            if finalizationEvidenceBeatsLock(propertyFinalizationEvidence, lockTimestamp: occupiedAt) {
+                setPropertySessionOccupancyState(
+                    propertyID: propertyID,
+                    occupiedByUserID: nil,
+                    occupiedByDeviceID: nil,
+                    occupiedAt: nil
+                )
+                propertySessionOccupancyDebugRemoteRecords.removeValue(forKey: propertyID)
+                print(
+                    "[SessionCoordinationEval] event=occupancy_ignored " +
+                    "reason=finalization_newer_than_occupancy " +
+                    "lockTimestamp=\(occupiedAt?.ISO8601Format() ?? "nil") " +
+                    "finalizationTimestamp=\(propertyFinalizationEvidence?.timestamp.ISO8601Format() ?? "nil") " +
+                    "precedenceWinner=finalization"
+                )
+            } else if isStaleCoordinationLock(lockedAt: occupiedAt) {
                 setPropertySessionOccupancyState(
                     propertyID: propertyID,
                     occupiedByUserID: nil,
@@ -24411,6 +24695,21 @@ final class AppState: ObservableObject {
             lockedByDeviceID: remoteRecord.lockedByDeviceID,
             lockedAt: remoteRecord.lockedAt.flatMap(parseSupabaseDateString)
            ) {
+            let remoteLockedAt = remoteRecord.lockedAt.flatMap(parseSupabaseDateString)
+            if finalizationEvidenceBeatsLock(propertyFinalizationEvidence, lockTimestamp: remoteLockedAt) {
+                clearSessionLockDisplayState(
+                    propertyID: propertyID,
+                    sessionID: sessionID,
+                    reason: "finalization_newer_than_session_lock"
+                )
+                print(
+                    "[SessionCoordinationEval] event=session_lock_ignored " +
+                    "reason=finalization_newer_than_session_lock " +
+                    "lockTimestamp=\(remoteLockedAt?.ISO8601Format() ?? "nil") " +
+                    "finalizationTimestamp=\(propertyFinalizationEvidence?.timestamp.ISO8601Format() ?? "nil") " +
+                    "precedenceWinner=finalization"
+                )
+            } else {
             let isOwnedByCurrentActor =
                 remoteRecord.lockedByUserID == currentUserID &&
                 normalizedSupabaseText(remoteRecord.lockedByDeviceID) == currentDeviceID
@@ -24432,6 +24731,7 @@ final class AppState: ObservableObject {
                         lockedAt: remoteRecord.lockedAt.flatMap(parseSupabaseDateString)
                     )
                 )
+            }
             }
         }
 
@@ -28531,6 +28831,15 @@ final class AppState: ObservableObject {
         let occupancyState: PropertySessionOccupancyState?
         let sessionLockState: (sessionID: UUID, state: SessionCoordinationState)?
         let clearSessionIDs: [UUID]
+        let lockTimestamp: Date?
+        let finalizationTimestamp: Date?
+        let precedenceWinner: String
+    }
+
+    private struct PropertyFinalizationEvidence {
+        let sessionID: UUID?
+        let eventType: String
+        let timestamp: Date
     }
 
     @MainActor
@@ -28547,22 +28856,46 @@ final class AppState: ObservableObject {
         var decisions: [RefreshLockBadgeDecision] = []
 
         for propertyID in uniquePropertyIDs {
-            if let activeOtherLock = await activeRemotePropertyLockOwnedByOther(
+            let lockRecords = await fetchRemotePropertySessionLockRecordsForPrecedence(
+                orgID: orgID,
+                propertyID: propertyID
+            )
+            let finalizationEvidence = await latestFinalizationEvidence(
                 orgID: orgID,
                 propertyID: propertyID,
-                currentUserID: currentUserID,
-                currentDeviceID: currentDeviceID
-            ) {
+                lockRecords: lockRecords
+            )
+            let activeLockRecords = lockRecords
+                .filter { hasActiveRemoteLock(record: $0) }
+                .filter { !finalizationEvidenceBeatsLock(finalizationEvidence, lockTimestamp: lockTimestamp(for: $0)) }
+                .sorted {
+                    (lockTimestamp(for: $0) ?? .distantPast) >
+                    (lockTimestamp(for: $1) ?? .distantPast)
+                }
+            let activeOtherLock = activeLockRecords.first { record in
+                let lockedByDeviceID = normalizedSupabaseText(record.lockedByDeviceID)
+                let ownedByCurrentActor =
+                    (lockedByDeviceID != nil && lockedByDeviceID == currentDeviceID) ||
+                    (record.lockedByUserID != nil && record.lockedByUserID == currentUserID)
+                return !ownedByCurrentActor
+            }
+            let clearableSessionIDs = Array(
+                Set((allSessionIndexByProperty[propertyID] ?? []).map(\.id))
+                    .union((sessionIndexByProperty[propertyID] ?? []).map(\.id))
+                    .union(lockRecords.map(\.id))
+            )
+            if let activeOtherLock {
                 let propertyOccupancy = try? await fetchRemotePropertySessionOccupancyRecord(
                     orgID: orgID,
                     propertyID: propertyID
                 )
+                let activeLockTimestamp = lockTimestamp(for: activeOtherLock)
                 let occupancyState = PropertySessionOccupancyState(
                     occupiedByUserID: propertyOccupancy?.occupiedByUserID ?? activeOtherLock.lockedByUserID,
                     occupiedByDeviceID: normalizedSupabaseText(propertyOccupancy?.occupiedByDeviceID) ??
                         normalizedSupabaseText(activeOtherLock.lockedByDeviceID),
                     occupiedAt: propertyOccupancy?.occupiedAt.flatMap(parseSupabaseDateString) ??
-                        activeOtherLock.lockedAt.flatMap(parseSupabaseDateString)
+                        activeLockTimestamp
                 )
                 decisions.append(
                     RefreshLockBadgeDecision(
@@ -28578,7 +28911,49 @@ final class AppState: ObservableObject {
                                 lockedAt: activeOtherLock.lockedAt.flatMap(parseSupabaseDateString)
                             )
                         ),
-                        clearSessionIDs: []
+                        clearSessionIDs: [],
+                        lockTimestamp: activeLockTimestamp,
+                        finalizationTimestamp: finalizationEvidence?.timestamp,
+                        precedenceWinner: "lock"
+                    )
+                )
+                continue
+            }
+
+            if let activeOwnOrNeutralLock = activeLockRecords.first {
+                let lockOwnerDeviceID = normalizedSupabaseText(activeOwnOrNeutralLock.lockedByDeviceID)
+                let lockOwnedByCurrentActor =
+                    (lockOwnerDeviceID != nil && lockOwnerDeviceID == currentDeviceID) ||
+                    (activeOwnOrNeutralLock.lockedByUserID != nil && activeOwnOrNeutralLock.lockedByUserID == currentUserID)
+                let propertyOccupancy = try? await fetchRemotePropertySessionOccupancyRecord(
+                    orgID: orgID,
+                    propertyID: propertyID
+                )
+                let activeLockTimestamp = lockTimestamp(for: activeOwnOrNeutralLock)
+                let occupancyState = PropertySessionOccupancyState(
+                    occupiedByUserID: propertyOccupancy?.occupiedByUserID ?? activeOwnOrNeutralLock.lockedByUserID,
+                    occupiedByDeviceID: normalizedSupabaseText(propertyOccupancy?.occupiedByDeviceID) ?? lockOwnerDeviceID,
+                    occupiedAt: propertyOccupancy?.occupiedAt.flatMap(parseSupabaseDateString) ??
+                        activeLockTimestamp
+                )
+                decisions.append(
+                    RefreshLockBadgeDecision(
+                        propertyID: propertyID,
+                        showLocked: !lockOwnedByCurrentActor,
+                        reason: lockOwnedByCurrentActor ? "material_draft_lock_owned_by_current_device" : "material_draft_lock_other_device",
+                        occupancyState: occupancyState,
+                        sessionLockState: (
+                            activeOwnOrNeutralLock.id,
+                            SessionCoordinationState(
+                                lockedByUserID: activeOwnOrNeutralLock.lockedByUserID,
+                                lockedByDeviceID: lockOwnerDeviceID,
+                                lockedAt: activeOwnOrNeutralLock.lockedAt.flatMap(parseSupabaseDateString)
+                            )
+                        ),
+                        clearSessionIDs: [],
+                        lockTimestamp: activeLockTimestamp,
+                        finalizationTimestamp: finalizationEvidence?.timestamp,
+                        precedenceWinner: lockOwnedByCurrentActor ? "owner_draft" : "lock"
                     )
                 )
                 continue
@@ -28591,13 +28966,30 @@ final class AppState: ObservableObject {
             if propertySessionOccupancyIsActive(propertyOccupancy) {
                 let occupancyOwnerUserID = propertyOccupancy?.occupiedByUserID
                 let occupancyOwnerDeviceID = normalizedSupabaseText(propertyOccupancy?.occupiedByDeviceID)
+                let occupancyTimestamp = propertyOccupancy?.occupiedAt.flatMap(parseSupabaseDateString)
+                if finalizationEvidenceBeatsLock(finalizationEvidence, lockTimestamp: occupancyTimestamp) {
+                    decisions.append(
+                        RefreshLockBadgeDecision(
+                            propertyID: propertyID,
+                            showLocked: false,
+                            reason: "finalization_newer_than_occupancy",
+                            occupancyState: nil,
+                            sessionLockState: nil,
+                            clearSessionIDs: clearableSessionIDs,
+                            lockTimestamp: occupancyTimestamp,
+                            finalizationTimestamp: finalizationEvidence?.timestamp,
+                            precedenceWinner: "finalization"
+                        )
+                    )
+                    continue
+                }
                 let occupancyOwnedByCurrentActor =
                     occupancyOwnerUserID == currentUserID &&
                     occupancyOwnerDeviceID == currentDeviceID
                 let occupancyState = PropertySessionOccupancyState(
                     occupiedByUserID: occupancyOwnerUserID,
                     occupiedByDeviceID: occupancyOwnerDeviceID,
-                    occupiedAt: propertyOccupancy?.occupiedAt.flatMap(parseSupabaseDateString)
+                    occupiedAt: occupancyTimestamp
                 )
                 decisions.append(
                     RefreshLockBadgeDecision(
@@ -28606,23 +28998,27 @@ final class AppState: ObservableObject {
                         reason: occupancyOwnedByCurrentActor ? "active_occupancy_owned_by_current_device" : "active_remote_occupancy",
                         occupancyState: occupancyState,
                         sessionLockState: nil,
-                        clearSessionIDs: []
+                        clearSessionIDs: [],
+                        lockTimestamp: occupancyTimestamp,
+                        finalizationTimestamp: finalizationEvidence?.timestamp,
+                        precedenceWinner: "occupancy"
                     )
                 )
                 continue
             }
 
             let staleOccupancySeen = propertyOccupancy != nil
-            let sessionIDs = Set((allSessionIndexByProperty[propertyID] ?? []).map(\.id))
-                .union((sessionIndexByProperty[propertyID] ?? []).map(\.id))
             decisions.append(
                 RefreshLockBadgeDecision(
                     propertyID: propertyID,
                     showLocked: false,
-                    reason: staleOccupancySeen ? "stale_or_released_occupancy_cleared" : "no_entry_lock_found",
+                    reason: finalizationEvidence != nil ? "finalization_cleared_lock" : (staleOccupancySeen ? "stale_or_released_occupancy_cleared" : "no_entry_lock_found"),
                     occupancyState: nil,
                     sessionLockState: nil,
-                    clearSessionIDs: Array(sessionIDs)
+                    clearSessionIDs: clearableSessionIDs,
+                    lockTimestamp: nil,
+                    finalizationTimestamp: finalizationEvidence?.timestamp,
+                    precedenceWinner: finalizationEvidence != nil ? "finalization" : "none"
                 )
             )
         }
@@ -28658,7 +29054,10 @@ final class AppState: ObservableObject {
                 "trigger=\(reason) " +
                 "propertyID=\(decision.propertyID.uuidString) " +
                 "visible=\(decision.showLocked) " +
-                "reason=\(decision.reason)"
+                "reason=\(decision.reason) " +
+                "lockTimestamp=\(decision.lockTimestamp?.ISO8601Format() ?? "nil") " +
+                "finalizationTimestamp=\(decision.finalizationTimestamp?.ISO8601Format() ?? "nil") " +
+                "precedenceWinner=\(decision.precedenceWinner)"
             )
         }
         locallyLockedPropertyIDs = nextLockedPropertyIDs
@@ -28702,6 +29101,9 @@ final class AppState: ObservableObject {
         let lockedDraftByOther = materialDraft.map { isSessionLockedByOther(sessionID: $0.id) } ?? false
         let locallyLocked = locallyLockedPropertyIDs.contains(propertyID)
         let showLock = occupiedByOther || lockedDraftByOther || locallyLocked
+        let heartbeatExpired = occupancyHasOwner && !occupancyActive
+        let finalizedOrExported = isFinalSession(materialDraft)
+        let materialDraftUnresolved = materialDraft != nil && !finalizedOrExported
         let lockReason: String = {
             if occupiedByOther { return "active_occupancy_other_device" }
             if lockedDraftByOther { return "locked_by_other" }
@@ -28711,7 +29113,6 @@ final class AppState: ObservableObject {
             return "no_active_occupancy"
         }()
 
-        let finalizedOrExported = isFinalSession(materialDraft)
         let draftOwnedByCurrentActor: Bool = {
             guard let materialDraft else { return false }
             if currentSession?.id == materialDraft.id { return true }
@@ -28773,6 +29174,11 @@ final class AppState: ObservableObject {
             "draftOwnerUserID=\(draftOwnerUserID?.uuidString ?? "nil") " +
             "draftOwnerDeviceID=\(draftOwnerDeviceID ?? "nil") " +
             "finalizedOrExported=\(finalizedOrExported) " +
+            "zeroPhotoOccupancy=\(materialDraft == nil && occupancyHasOwner) " +
+            "heartbeatExpired=\(heartbeatExpired) " +
+            "materialDraftUnresolved=\(materialDraftUnresolved) " +
+            "accessDecision=\(showLock ? "blocked" : "allowed") " +
+            "badgeDecision=lock:\(showLock),draft:\(showDraft),reexport:\(showReExport) " +
             "showLock=\(showLock) showDraft=\(showDraft) showReexport=\(showReExport) " +
             "lockReason=\(lockReason) draftReason=\(draftReason) reExportReason=\(reExportReason)"
         )
@@ -28861,10 +29267,10 @@ final class AppState: ObservableObject {
         let reason: String
         if localFinal || remoteFinal {
             reason = "final_session_suppresses_draft_and_lock"
-        } else if isStaleCoordinationLock(lockedAt: effectiveLockedAt) {
-            reason = "stale_lock_ignored"
         } else if showsLock {
             reason = "active_remote_lock"
+        } else if isStaleCoordinationLock(lockedAt: effectiveLockedAt) {
+            reason = "stale_zero_photo_occupancy_ignored"
         } else if showsDraft {
             reason = "local_active_draft"
         } else {
@@ -29038,6 +29444,9 @@ final class AppState: ObservableObject {
             liveSyncTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
                 guard let self else { return }
                 if self.isLoading { return }
+                Task { @MainActor [weak self] in
+                    await self?.refreshActiveOccupancyHeartbeatIfNeeded(reason: "live_sync_timer")
+                }
                 let now = Date()
                 let isBurst = (self.liveSyncBurstUntil.map { $0 > now }) ?? false
                 if !isBurst,
@@ -33459,12 +33868,16 @@ final class AppState: ObservableObject {
 
     func handleSceneDidEnterBackground() {
         cloudBackupManager?.scheduleAutomaticBackup(after: 0)
+        Task { @MainActor [weak self] in
+            await self?.refreshActiveOccupancyHeartbeatIfNeeded(reason: "scene_background", force: true)
+        }
     }
 
     func handleSceneDidBecomeActive() {
         queuePendingSupabaseMediaBackfillIfNeeded(reason: "scene_active")
         Task { @MainActor [weak self] in
             guard let self else { return }
+            await self.reconcileOccupancyForAppLifecycle(reason: "scene_active")
             await self.performForegroundAccessRefreshSequence()
         }
     }
@@ -33972,6 +34385,21 @@ final class AppState: ObservableObject {
             propertyIDs: propertyIDs,
             reason: reason
         )
+    }
+
+    func _debugRefreshActiveOccupancyHeartbeatForTests(
+        reason: String = "test",
+        force: Bool = true
+    ) async {
+        await refreshActiveOccupancyHeartbeatIfNeeded(reason: reason, force: force)
+    }
+
+    func _debugReconcileOccupancyForAppLifecycleForTests(reason: String = "test") async {
+        await reconcileOccupancyForAppLifecycle(reason: reason)
+    }
+
+    func _debugCurrentDeviceIdentifierForTests() -> String {
+        currentDeviceIdentifier()
     }
 
     func _debugSetActivityFeedFetchOverrideForTests(
