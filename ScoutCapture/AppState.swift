@@ -3448,10 +3448,43 @@ final class AppState: ObservableObject {
         let badgeSessionID: UUID?
         let badgeReason: String
         let photoSourceSessionID: UUID?
+        let guidedCompletionSourceSessionID: UUID?
         let localLatestSessionID: UUID?
         let remoteLatestSessionID: UUID?
         let activeLockSessionID: UUID?
+        let occupancyActive: Bool
+        let occupancyStartedAt: Date?
+        let occupancyReleasedAt: Date?
+        let materialContentCount: Int
+        let badgeSourceSessionID: UUID?
+        let lockSourceSessionID: UUID?
+        let finalizationSource: String?
+        let staleStateReason: String?
+        let draftOwnerUserID: UUID?
+        let draftOwnerDeviceID: String?
+        let currentUserID: UUID?
+        let currentDeviceID: String
+        let lockVisibilityReason: String
         let computedOpenBehavior: String
+    }
+
+    struct PropertyCardBadgeModel: Equatable {
+        let propertyID: UUID
+        let activeOccupancySessionID: UUID?
+        let occupancyOwnerUserID: UUID?
+        let occupancyOwnerDeviceID: String?
+        let currentUserID: UUID?
+        let currentDeviceID: String
+        let materialDraftSessionID: UUID?
+        let draftOwnerUserID: UUID?
+        let draftOwnerDeviceID: String?
+        let finalizedOrExported: Bool
+        let showLock: Bool
+        let showDraft: Bool
+        let showReExport: Bool
+        let lockReason: String
+        let draftReason: String
+        let reExportReason: String
     }
 
     private struct SessionCoordinationTier1Snapshot: Codable, Equatable {
@@ -3670,6 +3703,7 @@ final class AppState: ObservableObject {
         let coordinationTier1Snapshot: String?
         let updatedAt: Date?
         var status: String? = nil
+        var completedAt: Date? = nil
         var exportedAt: Date? = nil
         var isSealed: Bool? = nil
         var firstDeliveredAt: Date? = nil
@@ -4425,6 +4459,7 @@ final class AppState: ObservableObject {
         let orgID: UUID
         let propertyID: UUID
         let status: String?
+        let completedAt: Date?
         let exportedAt: Date?
         let isSealed: Bool?
         let firstDeliveredAt: Date?
@@ -4440,6 +4475,7 @@ final class AppState: ObservableObject {
             case orgID = "org_id"
             case propertyID = "property_id"
             case status
+            case completedAt = "completed_at"
             case exportedAt = "exported_at"
             case isSealed = "is_sealed"
             case firstDeliveredAt = "first_delivered_at"
@@ -4491,6 +4527,7 @@ final class AppState: ObservableObject {
         let orgID: UUID
         let propertyID: UUID
         let status: String?
+        let completedAt: Date?
         let exportedAt: Date?
         let isSealed: Bool?
         let firstDeliveredAt: Date?
@@ -4503,6 +4540,7 @@ final class AppState: ObservableObject {
             case orgID = "org_id"
             case propertyID = "property_id"
             case status
+            case completedAt = "completed_at"
             case exportedAt = "exported_at"
             case isSealed = "is_sealed"
             case firstDeliveredAt = "first_delivered_at"
@@ -5728,7 +5766,7 @@ final class AppState: ObservableObject {
     private let deviceIdentifierDefaultsKey = "scoutcapture.deviceIdentifier.v1"
     private let reExportWindowDays = 7
     private let sessionMediaOffloadCooldown: TimeInterval = 30 * 60
-    private let sessionCoordinationStaleLockThreshold: TimeInterval = 30 * 60
+    private let sessionCoordinationStaleLockThreshold: TimeInterval = 3 * 60
     private let activatedPropertyRetentionWindow: TimeInterval = 7 * 24 * 60 * 60
     private let offloadSweepQueue = DispatchQueue(label: "ScoutCapture.AppState.offloadSweep", qos: .utility)
     private let archiveSnapshotQueue = DispatchQueue(label: "ScoutCapture.AppState.archiveSnapshot", qos: .utility)
@@ -5776,6 +5814,10 @@ final class AppState: ObservableObject {
     private var sessionCoordinationStateBySessionID: [UUID: SessionCoordinationState] = [:]
     private var sessionCoordinationEntrySnapshotBySessionID: [UUID: String] = [:]
     private var occupancyOnlyClaimedSessionIDs: Set<UUID> = []
+    private var propertyReferenceReconcileAtByPropertyID: [UUID: Date] = [:]
+    private var propertyReferenceMetadataRefreshAtByPropertyID: [UUID: Date] = [:]
+    private var sessionArchiveAvailabilityCache: [String: (checkedAt: Date, availability: LocalStore.SessionArchivePackageAvailability)] = [:]
+    private let sessionArchiveAvailabilityCacheTTL: TimeInterval = 15
 #if DEBUG
     private var propertySessionOccupancyDebugRemoteRecords: [UUID: RemotePropertySessionOccupancyRecord] = [:]
 #endif
@@ -7185,7 +7227,7 @@ final class AppState: ObservableObject {
 
         let orgValue = orgID.uuidString.lowercased()
 
-        let sessionIDFilterValues: [String]?
+        let sessionIDFilterValues: [String]
         if let propertyID {
             let propertySessionIDs = try await client
                 .from("sessions")
@@ -7195,28 +7237,56 @@ final class AppState: ObservableObject {
                 .execute()
                 .value as [SessionIDOnlyRecord]
 
-            let filteredIDs = propertySessionIDs.map { $0.id.uuidString.lowercased() }
-            guard !filteredIDs.isEmpty else { return [] }
-            sessionIDFilterValues = filteredIDs
+            sessionIDFilterValues = propertySessionIDs.map { $0.id.uuidString.lowercased() }
         } else {
-            sessionIDFilterValues = nil
+            sessionIDFilterValues = []
         }
 
-        var eventQuery = client
+        let baseEventQuery = client
             .from("session_events")
             .select("id, org_id, session_id, property_id, actor_user_id, event_type, payload, created_at")
             .eq("org_id", value: orgValue)
 
-        if let sessionIDFilterValues {
-            eventQuery = eventQuery.in("session_id", values: sessionIDFilterValues)
+        let eventRecords: [SupabaseSessionEventRecord]
+        if let propertyID {
+            let propertyRecords = try await baseEventQuery
+                .eq("property_id", value: propertyID.uuidString.lowercased())
+                .order("created_at", ascending: false)
+                .order("id", ascending: false)
+                .limit(normalizedLimit)
+                .execute()
+                .value as [SupabaseSessionEventRecord]
+            let sessionRecords: [SupabaseSessionEventRecord]
+            if sessionIDFilterValues.isEmpty {
+                sessionRecords = []
+            } else {
+                sessionRecords = try await baseEventQuery
+                    .in("session_id", values: sessionIDFilterValues)
+                    .order("created_at", ascending: false)
+                    .order("id", ascending: false)
+                    .limit(normalizedLimit)
+                    .execute()
+                    .value as [SupabaseSessionEventRecord]
+            }
+            var mergedByID: [UUID: SupabaseSessionEventRecord] = [:]
+            for record in propertyRecords + sessionRecords {
+                mergedByID[record.id] = record
+            }
+            eventRecords = Array(mergedByID.values)
+                .sorted {
+                    if $0.createdAt != $1.createdAt { return $0.createdAt > $1.createdAt }
+                    return $0.id.uuidString > $1.id.uuidString
+                }
+                .prefix(normalizedLimit)
+                .map { $0 }
+        } else {
+            eventRecords = try await baseEventQuery
+                .order("created_at", ascending: false)
+                .order("id", ascending: false)
+                .limit(normalizedLimit)
+                .execute()
+                .value as [SupabaseSessionEventRecord]
         }
-
-        let eventRecords = try await eventQuery
-            .order("created_at", ascending: false)
-            .order("id", ascending: false)
-            .limit(normalizedLimit)
-            .execute()
-            .value as [SupabaseSessionEventRecord]
 
         let eventSessionIDs = Array(Set(eventRecords.compactMap(\.sessionID)))
         let sessionLookupByID = try await fetchActivitySessionLookupByID(
@@ -7266,7 +7336,21 @@ final class AppState: ObservableObject {
         propertyID: UUID? = nil,
         payload: [String: Any]
     ) async {
-        let normalizedPayload = normalizedAuditEventPayload(payload)
+        var payloadWithActor = payload
+        if let actorID = authenticatedSupabaseUser?.id,
+           payloadWithActor["actor_user_id"] == nil,
+           payloadWithActor["actorUserID"] == nil {
+            payloadWithActor["actor_user_id"] = actorID.uuidString.lowercased()
+        }
+        if let actorEmail = normalizedSupabaseText(authenticatedSupabaseUser?.email),
+           payloadWithActor["actor_email"] == nil,
+           payloadWithActor["actorEmail"] == nil,
+           payloadWithActor["actor_name"] == nil,
+           payloadWithActor["actorName"] == nil,
+           payloadWithActor["actor"] == nil {
+            payloadWithActor["actor_email"] = actorEmail
+        }
+        let normalizedPayload = normalizedAuditEventPayload(payloadWithActor)
 #if DEBUG
         if let auditEventEmitOverride {
             do {
@@ -23472,7 +23556,7 @@ final class AppState: ObservableObject {
 
         let rows = try await client
             .from("sessions")
-            .select("id, org_id, property_id, status, exported_at, is_sealed, first_delivered_at, re_export_expires_at, locked_by_user_id, locked_by_device_id, locked_at, coordination_tier1_snapshot, updated_at")
+            .select("id, org_id, property_id, status, completed_at, exported_at, is_sealed, first_delivered_at, re_export_expires_at, locked_by_user_id, locked_by_device_id, locked_at, coordination_tier1_snapshot, updated_at")
             .eq("org_id", value: orgID.uuidString.lowercased())
             .eq("property_id", value: propertyID.uuidString.lowercased())
             .eq("id", value: sessionID.uuidString.lowercased())
@@ -23593,6 +23677,7 @@ final class AppState: ObservableObject {
                         orgID: $0.orgID,
                         propertyID: $0.propertyID,
                         status: $0.status,
+                        completedAt: $0.completedAt,
                         exportedAt: $0.exportedAt,
                         isSealed: $0.isSealed,
                         firstDeliveredAt: $0.firstDeliveredAt,
@@ -23607,6 +23692,7 @@ final class AppState: ObservableObject {
             orgID: orgID,
             propertyID: propertyID
         )
+        applyRemoteFinalSessionStatesFromLockRecords(rows, reason: "property_lock_refresh")
         return rows.filter { record in
             record.lockedByUserID != nil ||
             normalizedSupabaseText(record.lockedByDeviceID) != nil ||
@@ -23619,35 +23705,92 @@ final class AppState: ObservableObject {
         propertyID: UUID
     ) async throws -> [RemotePropertySessionLockRecord] {
 #if DEBUG
+        let debugRecords = sessionCoordinationDebugRemoteRecords.values
+            .filter { $0.orgID == orgID && $0.propertyID == propertyID }
+        if !debugRecords.isEmpty {
+            return debugRecords.map {
+                RemotePropertySessionLockRecord(
+                    id: $0.id,
+                    orgID: $0.orgID,
+                    propertyID: $0.propertyID,
+                    status: $0.status,
+                    completedAt: $0.completedAt,
+                    exportedAt: $0.exportedAt,
+                    isSealed: $0.isSealed,
+                    firstDeliveredAt: $0.firstDeliveredAt,
+                    lockedByUserID: $0.lockedByUserID,
+                    lockedByDeviceID: $0.lockedByDeviceID,
+                    lockedAt: $0.lockedAt
+                )
+            }
+        }
         if AppStateTestEnvironment.isRunningUnderXCTest {
-            return sessionCoordinationDebugRemoteRecords.values
-                .filter { $0.orgID == orgID && $0.propertyID == propertyID }
-                .map {
-                    RemotePropertySessionLockRecord(
-                        id: $0.id,
-                        orgID: $0.orgID,
-                        propertyID: $0.propertyID,
-                        status: $0.status,
-                        exportedAt: $0.exportedAt,
-                        isSealed: $0.isSealed,
-                        firstDeliveredAt: $0.firstDeliveredAt,
-                        lockedByUserID: $0.lockedByUserID,
-                        lockedByDeviceID: $0.lockedByDeviceID,
-                        lockedAt: $0.lockedAt
-                    )
-                }
+            return []
         }
 #endif
         guard let client = supabaseClient else { return [] }
 
         return try await client
             .from("sessions")
-            .select("id, org_id, property_id, status, exported_at, is_sealed, first_delivered_at, locked_by_user_id, locked_by_device_id, locked_at")
+            .select("id, org_id, property_id, status, completed_at, exported_at, is_sealed, first_delivered_at, locked_by_user_id, locked_by_device_id, locked_at")
             .eq("org_id", value: orgID.uuidString.lowercased())
             .eq("property_id", value: propertyID.uuidString.lowercased())
             .is("deleted_at", value: nil)
             .execute()
             .value
+    }
+
+    @MainActor
+    private func applyRemoteFinalSessionStatesFromLockRecords(
+        _ records: [RemotePropertySessionLockRecord],
+        reason: String
+    ) {
+        var mutatedPropertyIDs = Set<UUID>()
+        for record in records {
+            guard isFinalRemoteSessionState(
+                status: record.status,
+                completedAt: record.completedAt,
+                exportedAt: record.exportedAt,
+                isSealed: record.isSealed,
+                firstDeliveredAt: record.firstDeliveredAt
+            ) else { continue }
+            guard let existing = ((try? localStore.fetchSessionsForCacheBuild(propertyID: record.propertyID)) ?? [])
+                .first(where: { $0.id == record.id }) else {
+                clearSessionLockDisplayState(
+                    propertyID: record.propertyID,
+                    sessionID: record.id,
+                    reason: reason
+                )
+                continue
+            }
+
+            let updated = Session(
+                id: existing.id,
+                propertyID: existing.propertyID,
+                startedAt: existing.startedAt,
+                status: .completed,
+                endedAt: record.completedAt ?? existing.endedAt ?? record.exportedAt ?? record.firstDeliveredAt,
+                exportedAt: record.exportedAt ?? existing.exportedAt,
+                isSealed: true,
+                firstDeliveredAt: record.firstDeliveredAt ?? existing.firstDeliveredAt,
+                reExportExpiresAt: existing.reExportExpiresAt,
+                notes: existing.notes,
+                captureProfile: existing.captureProfile,
+                deletedAt: existing.deletedAt
+            )
+            if updated != existing {
+                _ = try? localStore.upsertSession(updated)
+                mutatedPropertyIDs.insert(existing.propertyID)
+            }
+            clearSessionLockDisplayState(
+                propertyID: existing.propertyID,
+                sessionID: existing.id,
+                reason: reason
+            )
+        }
+        for propertyID in mutatedPropertyIDs {
+            reloadSessionCache(for: propertyID)
+        }
     }
 
     private func ownerDescription(
@@ -23736,7 +23879,7 @@ final class AppState: ObservableObject {
 
     private func isStaleCoordinationLock(lockedAt: Date?, now: Date = Date()) -> Bool {
         guard let lockedAt else { return false }
-        return now.timeIntervalSince(lockedAt) > 30 * 60
+        return now.timeIntervalSince(lockedAt) > sessionCoordinationStaleLockThreshold
     }
 
     private func hasActiveRemoteLock(
@@ -23753,7 +23896,7 @@ final class AppState: ObservableObject {
     private func hasActiveRemoteLock(record: RemotePropertySessionLockRecord) -> Bool {
         guard !isFinalRemoteSessionState(
             status: record.status,
-            completedAt: nil,
+            completedAt: record.completedAt,
             exportedAt: record.exportedAt,
             isSealed: record.isSealed,
             firstDeliveredAt: record.firstDeliveredAt
@@ -23830,57 +23973,6 @@ final class AppState: ObservableObject {
             "sessionID=\(sessionID.uuidString) " +
             "reason=\(reason)"
         )
-    }
-
-    private func hydratePreTapLockVisibility(
-        orgID: UUID,
-        propertyIDs: [UUID]
-    ) async {
-        let displayPropertyIDs = Array(Set(propertyIDs))
-        await MainActor.run {
-            self.clearLockDisplayState(propertyIDs: displayPropertyIDs)
-        }
-
-        do {
-            try await refreshRemotePropertySessionOccupancyState(orgID: orgID)
-        } catch {
-            await MainActor.run {
-                self.clearLockDisplayState(propertyIDs: displayPropertyIDs)
-            }
-        }
-
-        for propertyID in displayPropertyIDs {
-            guard let session = canonicalLockSession(for: propertyID) else { continue }
-
-            let remoteRecord = try? await fetchRemoteSessionCoordinationRecord(
-                orgID: orgID,
-                propertyID: propertyID,
-                sessionID: session.id
-            )
-            let remoteLockedAt = remoteRecord?.lockedAt.flatMap(parseSupabaseDateString)
-            let remoteHasLockFields = hasActiveRemoteLock(
-                session: session,
-                lockedByUserID: remoteRecord?.lockedByUserID,
-                lockedByDeviceID: remoteRecord?.lockedByDeviceID,
-                lockedAt: remoteLockedAt
-            )
-
-            if remoteRecord != nil, remoteHasLockFields {
-                setSessionCoordinationState(
-                    sessionID: session.id,
-                    lockedByUserID: remoteRecord?.lockedByUserID,
-                    lockedByDeviceID: normalizedSupabaseText(remoteRecord?.lockedByDeviceID),
-                    lockedAt: remoteLockedAt
-                )
-            } else {
-                setSessionCoordinationState(
-                    sessionID: session.id,
-                    lockedByUserID: nil,
-                    lockedByDeviceID: nil,
-                    lockedAt: nil
-                )
-            }
-        }
     }
 
     private func persistPropertySessionOccupancyMutation(
@@ -24006,9 +24098,14 @@ final class AppState: ObservableObject {
         let state = propertySessionOccupancyByPropertyID[propertyID]
         let currentUserID = authenticatedSupabaseUser?.id
         let currentDeviceID = currentDeviceIdentifier()
+        let sameOccupancyDevice = normalizedSupabaseText(state?.occupiedByDeviceID) == currentDeviceID
+        let sameOrUnknownOccupancyUser =
+            state?.occupiedByUserID == nil ||
+            currentUserID == nil ||
+            state?.occupiedByUserID == currentUserID
         let ownsOccupancy =
-            state?.occupiedByUserID == currentUserID &&
-            normalizedSupabaseText(state?.occupiedByDeviceID) == currentDeviceID
+            sameOccupancyDevice &&
+            sameOrUnknownOccupancyUser
         guard ownsOccupancy else { return }
 
         setPropertySessionOccupancyState(
@@ -24022,6 +24119,13 @@ final class AppState: ObservableObject {
         if AppStateTestEnvironment.isRunningUnderXCTest {
             if emitReleasedEvent, let sessionID {
                 occupancyOnlyClaimedSessionIDs.remove(sessionID)
+                await emitAuditEvent(
+                    orgID: orgID,
+                    eventType: "session.released",
+                    sessionID: sessionID,
+                    propertyID: propertyID,
+                    payload: [:]
+                )
             }
             return
         }
@@ -24034,15 +24138,13 @@ final class AppState: ObservableObject {
             )
             if emitReleasedEvent, let sessionID {
                 occupancyOnlyClaimedSessionIDs.remove(sessionID)
-                Task {
-                    await emitAuditEvent(
-                        orgID: orgID,
-                        eventType: "session.released",
-                        sessionID: sessionID,
-                        propertyID: propertyID,
-                        payload: [:]
-                    )
-                }
+                await emitAuditEvent(
+                    orgID: orgID,
+                    eventType: "session.released",
+                    sessionID: sessionID,
+                    propertyID: propertyID,
+                    payload: [:]
+                )
             }
         } catch {}
     }
@@ -24072,6 +24174,7 @@ final class AppState: ObservableObject {
             orgID: property.orgId ?? UUID(),
             propertyID: property.id,
             status: session.status.rawValue,
+            completedAt: session.endedAt,
             exportedAt: session.exportedAt,
             isSealed: session.isSealed,
             firstDeliveredAt: session.firstDeliveredAt,
@@ -24185,11 +24288,22 @@ final class AppState: ObservableObject {
             currentUserID: currentUserID,
             currentDeviceID: currentDeviceID
         ) {
+            let propertyOccupancy = try? await fetchRemotePropertySessionOccupancyRecord(
+                orgID: orgID,
+                propertyID: propertyID
+            )
             let owner = await ownerDescription(
                 for: activeOtherLock.lockedByUserID,
                 lockedByDeviceID: activeOtherLock.lockedByDeviceID
             )
             self.locallyLockedPropertyIDs.insert(propertyID)
+            setPropertySessionOccupancyState(
+                propertyID: propertyID,
+                occupiedByUserID: propertyOccupancy?.occupiedByUserID ?? activeOtherLock.lockedByUserID,
+                occupiedByDeviceID: normalizedSupabaseText(propertyOccupancy?.occupiedByDeviceID) ?? normalizedSupabaseText(activeOtherLock.lockedByDeviceID),
+                occupiedAt: propertyOccupancy?.occupiedAt.flatMap(parseSupabaseDateString) ??
+                    activeOtherLock.lockedAt.flatMap(parseSupabaseDateString)
+            )
             print(
                 "[SessionCoordinationEval] event=return result=blocked " +
                 "reason=other_active_property_lock " +
@@ -24229,6 +24343,35 @@ final class AppState: ObservableObject {
             "lockedByDeviceID=\(remoteRecord?.lockedByDeviceID ?? "nil") " +
             "lockedAt=\(remoteRecord?.lockedAt ?? "nil")"
         )
+        if let remoteRecord,
+           isFinalRemoteSessionState(
+            status: remoteRecord.status,
+            completedAt: remoteRecord.completedAt,
+            exportedAt: remoteRecord.exportedAt,
+            isSealed: remoteRecord.isSealed,
+            firstDeliveredAt: remoteRecord.firstDeliveredAt
+           ) {
+            applyRemoteFinalSessionStatesFromLockRecords(
+                [
+                    RemotePropertySessionLockRecord(
+                        id: remoteRecord.id,
+                        orgID: remoteRecord.orgID,
+                        propertyID: remoteRecord.propertyID,
+                        status: remoteRecord.status,
+                        completedAt: remoteRecord.completedAt,
+                        exportedAt: remoteRecord.exportedAt,
+                        isSealed: remoteRecord.isSealed,
+                        firstDeliveredAt: remoteRecord.firstDeliveredAt,
+                        lockedByUserID: remoteRecord.lockedByUserID,
+                        lockedByDeviceID: remoteRecord.lockedByDeviceID,
+                        lockedAt: remoteRecord.lockedAt
+                    )
+                ],
+                reason: "remote_final_entry"
+            )
+            print("[SessionCoordinationEval] event=early_return result=allowed reason=remote_final_session_no_lock")
+            return .allowed
+        }
         if let propertyOccupancy,
            propertyOccupancy.occupiedByUserID != nil || normalizedSupabaseText(propertyOccupancy.occupiedByDeviceID) != nil {
             let occupiedAt = propertyOccupancy.occupiedAt.flatMap(parseSupabaseDateString)
@@ -24300,14 +24443,34 @@ final class AppState: ObservableObject {
 
         let isMateriallyRealSession = sessionHasCaptures(session)
         if remoteRecord == nil && !isMateriallyRealSession {
+            let desiredOccupancy = PropertySessionOccupancyState(
+                occupiedByUserID: currentUserID,
+                occupiedByDeviceID: currentDeviceID,
+                occupiedAt: Date()
+            )
+            let didPersistOccupancy = await persistPropertySessionOccupancyMutation(
+                propertyID: propertyID,
+                orgID: orgID,
+                desiredState: desiredOccupancy
+            )
+            guard didPersistOccupancy else {
+                locallyLockedPropertyIDs.insert(propertyID)
+                print("[SessionCoordinationEval] event=return result=blocked reason=zero_photo_occupancy_claim_unavailable")
+                return .blocked(
+                    SessionEntryCoordinationBlock(
+                        ownerDescription: "Remote coordination unavailable",
+                        lockedAt: nil
+                    )
+                )
+            }
             setSessionCoordinationState(
                 sessionID: sessionID,
                 lockedByUserID: nil,
                 lockedByDeviceID: nil,
                 lockedAt: nil
             )
-            occupancyOnlyClaimedSessionIDs.remove(sessionID)
-            print("[SessionCoordinationEval] event=return result=allowed reason=zero_photo_session_no_lock")
+            occupancyOnlyClaimedSessionIDs.insert(sessionID)
+            print("[SessionCoordinationEval] event=return result=allowed reason=zero_photo_occupancy_claimed")
             return .allowed
         }
 
@@ -24389,7 +24552,10 @@ final class AppState: ObservableObject {
               let sessionID = currentSession?.id else {
             return
         }
-        let emitReleasedFromOccupancy = occupancyOnlyClaimedSessionIDs.contains(sessionID)
+        let occupancyState = propertySessionOccupancyByPropertyID[propertyID]
+        let emitReleasedFromOccupancy =
+            occupancyOnlyClaimedSessionIDs.contains(sessionID) ||
+            normalizedSupabaseText(occupancyState?.occupiedByDeviceID) == currentDeviceIdentifier()
         await releasePropertySessionOccupancyIfOwned(
             propertyID: propertyID,
             sessionID: sessionID,
@@ -24479,6 +24645,7 @@ final class AppState: ObservableObject {
             allSessionIndexByProperty[propertyID] = indexedSessions
         }
 
+        let shouldEmitReleasedEvent = emitReleasedEvent
         setSessionCoordinationState(
             sessionID: sessionID,
             lockedByUserID: clearedState.lockedByUserID,
@@ -24492,6 +24659,7 @@ final class AppState: ObservableObject {
             orgID: cached?.orgID ?? property.orgId ?? UUID(),
             propertyID: cached?.propertyID ?? property.id,
             status: releasedSession.status.rawValue,
+            completedAt: releasedSession.endedAt,
             exportedAt: releasedSession.exportedAt,
             isSealed: releasedSession.isSealed,
             firstDeliveredAt: releasedSession.firstDeliveredAt,
@@ -24504,6 +24672,15 @@ final class AppState: ObservableObject {
         )
         if AppStateTestEnvironment.isRunningUnderXCTest {
             occupancyOnlyClaimedSessionIDs.remove(sessionID)
+            if shouldEmitReleasedEvent, let orgID = property.orgId {
+                await emitAuditEvent(
+                    orgID: orgID,
+                    eventType: "session.released",
+                    sessionID: releasedSession.id,
+                    propertyID: releasedSession.propertyID,
+                    payload: [:]
+                )
+            }
             return
         }
 #endif
@@ -24569,6 +24746,16 @@ final class AppState: ObservableObject {
     ) -> Bool {
         guard let lockedAt = record.lockedAt.flatMap(parseSupabaseDateString) else { return false }
         return now.timeIntervalSince(lockedAt) >= sessionCoordinationStaleLockThreshold
+    }
+
+    private func propertySessionOccupancyIsActive(_ record: RemotePropertySessionOccupancyRecord?) -> Bool {
+        guard let record else { return false }
+        guard record.occupiedByUserID != nil ||
+            normalizedSupabaseText(record.occupiedByDeviceID) != nil ||
+            normalizedSupabaseText(record.occupiedAt) != nil else {
+            return false
+        }
+        return !isStaleCoordinationLock(lockedAt: record.occupiedAt.flatMap(parseSupabaseDateString))
     }
 
     private func sessionCoordinationTier1Snapshot(metadata: SessionMetadata) -> SessionCoordinationTier1Snapshot {
@@ -24646,7 +24833,7 @@ final class AppState: ObservableObject {
         let localReasons = Dictionary(uniqueKeysWithValues: local.flaggedReasons.map { ($0.id, $0.value) })
 
         var diffs: [SessionCoordinationDiff] = []
-        for id in Set(remotePriorities.keys).union(localPriorities.keys).sorted(by: { $0.uuidString < $1.uuidString }) {
+        for id in Set(remotePriorities.keys).intersection(localPriorities.keys).sorted(by: { $0.uuidString < $1.uuidString }) {
             let remoteValue = remotePriorities[id] ?? ""
             let localValue = localPriorities[id] ?? ""
             guard remoteValue != localValue else { continue }
@@ -24657,7 +24844,7 @@ final class AppState: ObservableObject {
                 localValue: localValue
             ))
         }
-        for id in Set(remoteTrades.keys).union(localTrades.keys).sorted(by: { $0.uuidString < $1.uuidString }) {
+        for id in Set(remoteTrades.keys).intersection(localTrades.keys).sorted(by: { $0.uuidString < $1.uuidString }) {
             let remoteValue = remoteTrades[id] ?? ""
             let localValue = localTrades[id] ?? ""
             guard remoteValue != localValue else { continue }
@@ -24668,7 +24855,7 @@ final class AppState: ObservableObject {
                 localValue: localValue
             ))
         }
-        for id in Set(remoteReasons.keys).union(localReasons.keys).sorted(by: { $0.uuidString < $1.uuidString }) {
+        for id in Set(remoteReasons.keys).intersection(localReasons.keys).sorted(by: { $0.uuidString < $1.uuidString }) {
             let remoteValue = remoteReasons[id] ?? ""
             let localValue = localReasons[id] ?? ""
             guard remoteValue != localValue else { continue }
@@ -28242,9 +28429,39 @@ final class AppState: ObservableObject {
         var stillLocked: Set<UUID> = []
 
         for propertyID in locallyLockedPropertyIDs {
-            guard let session = canonicalLockSession(for: propertyID) else { continue }
             guard let property = properties.first(where: { $0.id == propertyID }),
                   let orgID = property.orgId else { continue }
+            let currentUserID = authenticatedSupabaseUser?.id
+            let currentDeviceID = currentDeviceIdentifier()
+
+            if let activeOtherLock = await activeRemotePropertyLockOwnedByOther(
+                orgID: orgID,
+                propertyID: propertyID,
+                currentUserID: currentUserID,
+                currentDeviceID: currentDeviceID
+            ) {
+                setSessionCoordinationState(
+                    sessionID: activeOtherLock.id,
+                    lockedByUserID: activeOtherLock.lockedByUserID,
+                    lockedByDeviceID: normalizedSupabaseText(activeOtherLock.lockedByDeviceID),
+                    lockedAt: activeOtherLock.lockedAt.flatMap(parseSupabaseDateString)
+                )
+                stillLocked.insert(propertyID)
+                print(
+                    "[LockBadge] propertyID=\(propertyID.uuidString) " +
+                    "visible=true reason=active_remote_property_lock " +
+                    "lockSessionID=\(activeOtherLock.id.uuidString)"
+                )
+                continue
+            }
+
+            guard let session = canonicalLockSession(for: propertyID) else {
+                print(
+                    "[LockBadge] propertyID=\(propertyID.uuidString) " +
+                    "visible=false reason=no_active_remote_or_local_lock_session"
+                )
+                continue
+            }
 
             let remoteRecord = try? await fetchRemoteSessionCoordinationRecord(
                 orgID: orgID,
@@ -28275,9 +28492,6 @@ final class AppState: ObservableObject {
                 )
             }
 
-            let currentUserID = authenticatedSupabaseUser?.id
-            let currentDeviceID = currentDeviceIdentifier()
-
             let isStillLocked: Bool = {
                 guard let remote = remoteRecord else { return false }
 
@@ -28297,6 +28511,11 @@ final class AppState: ObservableObject {
 
             if isStillLocked {
                 stillLocked.insert(propertyID)
+                print(
+                    "[LockBadge] propertyID=\(propertyID.uuidString) " +
+                    "visible=true reason=active_remote_session_lock " +
+                    "lockSessionID=\(session.id.uuidString)"
+                )
             }
         }
 
@@ -28316,8 +28535,147 @@ final class AppState: ObservableObject {
             lockedByDeviceID: coord.lockedByDeviceID,
             lockedAt: coord.lockedAt
         ) else { return false }
+        if let lockedByDeviceID = normalizedSupabaseText(coord.lockedByDeviceID) {
+            return lockedByDeviceID != currentDeviceIdentifier()
+        }
         guard let lockedByUser = coord.lockedByUserID else { return false }
         return lockedByUser != authenticatedSupabaseUser?.id
+    }
+
+    func propertyCardBadgeModel(for propertyID: UUID) -> PropertyCardBadgeModel {
+        let materialDraft = draftSession(for: propertyID)
+        let draftLockState = materialDraft.flatMap { sessionCoordinationStateBySessionID[$0.id] }
+        let draftOwnerUserID = draftLockState?.lockedByUserID
+        let draftOwnerDeviceID = normalizedSupabaseText(draftLockState?.lockedByDeviceID)
+        let currentUserID = authenticatedSupabaseUser?.id
+        let currentDeviceID = currentDeviceIdentifier()
+
+        let occupancy = propertySessionOccupancyByPropertyID[propertyID]
+        let occupancyOwnerUserID = occupancy?.occupiedByUserID
+        let occupancyOwnerDeviceID = normalizedSupabaseText(occupancy?.occupiedByDeviceID)
+        let occupancyHasOwner = occupancyOwnerUserID != nil || occupancyOwnerDeviceID != nil
+        let occupancyActive = occupancyHasOwner && !isStaleCoordinationLock(lockedAt: occupancy?.occupiedAt)
+        let occupancyOwnedByCurrentActor =
+            (occupancyOwnerDeviceID != nil && occupancyOwnerDeviceID == currentDeviceID) ||
+            (occupancyOwnerUserID != nil && occupancyOwnerUserID == currentUserID)
+        let occupiedByOther = occupancyActive && !occupancyOwnedByCurrentActor
+        let lockedDraftByOther = materialDraft.map { isSessionLockedByOther(sessionID: $0.id) } ?? false
+        let locallyLocked = locallyLockedPropertyIDs.contains(propertyID)
+        let showLock = occupiedByOther || lockedDraftByOther || locallyLocked
+        let lockReason: String = {
+            if occupiedByOther { return "active_occupancy_other_device" }
+            if lockedDraftByOther { return "locked_by_other" }
+            if locallyLocked { return "locally_locked" }
+            if occupancyActive { return "active_occupancy_owned_by_current_device" }
+            if occupancyHasOwner { return "stale_occupancy_ignored" }
+            return "no_active_occupancy"
+        }()
+
+        let finalizedOrExported = isFinalSession(materialDraft)
+        let draftOwnedByCurrentActor: Bool = {
+            guard let materialDraft else { return false }
+            if currentSession?.id == materialDraft.id { return true }
+            if let draftOwnerDeviceID {
+                return draftOwnerDeviceID == currentDeviceID
+            }
+            if let draftOwnerUserID {
+                return draftOwnerUserID == currentUserID
+            }
+            return false
+        }()
+        let showDraft = materialDraft != nil &&
+            !finalizedOrExported &&
+            !showLock &&
+            draftOwnedByCurrentActor
+        let draftReason: String = {
+            guard materialDraft != nil else { return "no_material_draft" }
+            if finalizedOrExported { return "finalized_or_exported" }
+            if showLock { return "hidden_by_other_device_occupancy" }
+            if draftOwnedByCurrentActor { return "visible_owned_by_current_device" }
+            if draftOwnerDeviceID != nil || draftOwnerUserID != nil {
+                return "hidden_non_owner"
+            }
+            return "hidden_unverified_local_owner"
+        }()
+
+        let reExportSession = sessions(for: propertyID)
+            .sorted { $0.startedAt > $1.startedAt }
+            .first(where: { isReExportLocallyAvailable($0) })
+        let showReExport = reExportSession != nil
+        let reExportReason = showReExport ? "local_archive_available" : "no_local_archive_available"
+
+        let model = PropertyCardBadgeModel(
+            propertyID: propertyID,
+            activeOccupancySessionID: nil,
+            occupancyOwnerUserID: occupancyOwnerUserID,
+            occupancyOwnerDeviceID: occupancyOwnerDeviceID,
+            currentUserID: currentUserID,
+            currentDeviceID: currentDeviceID,
+            materialDraftSessionID: materialDraft?.id,
+            draftOwnerUserID: draftOwnerUserID,
+            draftOwnerDeviceID: draftOwnerDeviceID,
+            finalizedOrExported: finalizedOrExported,
+            showLock: showLock,
+            showDraft: showDraft,
+            showReExport: showReExport,
+            lockReason: lockReason,
+            draftReason: draftReason,
+            reExportReason: reExportReason
+        )
+        print(
+            "[BadgeModel] propertyID=\(propertyID.uuidString) " +
+            "activeOccupancySessionID=\(model.activeOccupancySessionID?.uuidString ?? "nil") " +
+            "occupancyOwnerUserID=\(occupancyOwnerUserID?.uuidString ?? "nil") " +
+            "occupancyOwnerDeviceID=\(occupancyOwnerDeviceID ?? "nil") " +
+            "currentUserID=\(currentUserID?.uuidString ?? "nil") " +
+            "currentDeviceID=\(currentDeviceID) " +
+            "materialDraftSessionID=\(materialDraft?.id.uuidString ?? "nil") " +
+            "draftOwnerUserID=\(draftOwnerUserID?.uuidString ?? "nil") " +
+            "draftOwnerDeviceID=\(draftOwnerDeviceID ?? "nil") " +
+            "finalizedOrExported=\(finalizedOrExported) " +
+            "showLock=\(showLock) showDraft=\(showDraft) showReexport=\(showReExport) " +
+            "lockReason=\(lockReason) draftReason=\(draftReason) reExportReason=\(reExportReason)"
+        )
+        return model
+    }
+
+    func draftBadgeSession(for propertyID: UUID) -> Session? {
+        let model = propertyCardBadgeModel(for: propertyID)
+        guard let draftID = model.materialDraftSessionID,
+              let draft = sessions(for: propertyID).first(where: { $0.id == draftID }) else {
+            print(
+                "[DraftBadge] propertyID=\(propertyID.uuidString) visible=false " +
+                "badge_visibility_reason=\(model.draftReason)"
+            )
+            return nil
+        }
+        if model.showDraft {
+            print(
+                "[DraftBadge] propertyID=\(propertyID.uuidString) " +
+                "sessionID=\(draft.id.uuidString) " +
+                "visible=true " +
+                "draft_owner_user=\(model.draftOwnerUserID?.uuidString ?? "nil") " +
+                "draft_owner_device=\(model.draftOwnerDeviceID ?? "nil") " +
+                "current_user=\(model.currentUserID?.uuidString ?? "nil") " +
+                "current_device=\(model.currentDeviceID) " +
+                "badge_visibility_reason=\(model.draftReason) " +
+                "lock_visibility_reason=\(model.lockReason)"
+            )
+            return draft
+        } else {
+            print(
+                "[DraftBadge] propertyID=\(propertyID.uuidString) " +
+                "sessionID=\(draft.id.uuidString) " +
+                "visible=false " +
+                "draft_owner_user=\(model.draftOwnerUserID?.uuidString ?? "nil") " +
+                "draft_owner_device=\(model.draftOwnerDeviceID ?? "nil") " +
+                "current_user=\(model.currentUserID?.uuidString ?? "nil") " +
+                "current_device=\(model.currentDeviceID) " +
+                "badge_visibility_reason=\(model.draftReason) " +
+                "lock_visibility_reason=\(model.lockReason)"
+            )
+            return nil
+        }
     }
 
     func debugPropertyOccupancyDescription(propertyID: UUID) -> String {
@@ -28400,7 +28758,10 @@ final class AppState: ObservableObject {
     func sessionListContentDiagnostics(propertyID: UUID) -> SessionListContentDiagnostics {
         let localSessions = sessions(for: propertyID).sorted { $0.startedAt > $1.startedAt }
         let localLatest = localSessions.first
-        let badgeSession = draftSession(for: propertyID)
+        let badgeModel = propertyCardBadgeModel(for: propertyID)
+        let badgeSession = badgeModel.showDraft
+            ? localSessions.first(where: { $0.id == badgeModel.materialDraftSessionID })
+            : nil
         let capturedDraft = canonicalDraftSession(for: propertyID, requireCaptures: true)
         let selectedSession: Session? = {
             if let currentSession, currentSession.propertyID == propertyID {
@@ -28451,9 +28812,52 @@ final class AppState: ObservableObject {
         let remoteActiveLock: RemoteSessionCoordinationRecord? = nil
 #endif
         let resolvedActiveLockSessionID = remoteActiveLock?.id ?? activeLockSessionID
+        let resolvedLockState = resolvedActiveLockSessionID.flatMap { sessionCoordinationStateBySessionID[$0] }
+        let remoteFinal = remoteLatest.map {
+            isFinalRemoteSessionState(
+                status: $0.status,
+                completedAt: $0.completedAt,
+                exportedAt: $0.exportedAt,
+                isSealed: $0.isSealed,
+                firstDeliveredAt: $0.firstDeliveredAt
+            )
+        } ?? false
+        let localFinal = localLatest.map { isFinalSession($0) } ?? false
+        let occupancy = propertySessionOccupancyByPropertyID[propertyID]
+        let occupancyStartedAt = occupancy?.occupiedAt
+        let occupancyActive = {
+            guard let occupancy else { return false }
+            guard occupancy.occupiedByUserID != nil ||
+                normalizedSupabaseText(occupancy.occupiedByDeviceID) != nil ||
+                occupancy.occupiedAt != nil else {
+                return false
+            }
+            return !isStaleCoordinationLock(lockedAt: occupancy.occupiedAt)
+        }()
+        let materialContentCount = selectedSession.map { sessionMaterialContentCount($0) } ?? 0
+        let badgeReason: String = {
+            if badgeSession != nil { return "captured_draft_owned_by_current_device" }
+            if capturedDraft != nil { return badgeModel.draftReason }
+            return "no_captured_draft"
+        }()
+        let lockVisibilityReason: String = {
+            if badgeModel.showLock {
+                return "active_occupancy_visible"
+            }
+            guard resolvedActiveLockSessionID != nil else { return "no_active_lock" }
+            if let state = resolvedLockState,
+               normalizedSupabaseText(state.lockedByDeviceID) != nil ||
+                state.lockedByUserID != nil {
+                return "locked_by_other"
+            }
+            return "active_lock_visible"
+        }()
         let computedOpenBehavior: String = {
             if resolvedActiveLockSessionID != nil {
                 return "blocked_by_active_lock"
+            }
+            if occupancyActive {
+                return "blocked_by_active_occupancy"
             }
             if capturedDraft != nil {
                 return "open_existing_captured_draft"
@@ -28465,11 +28869,25 @@ final class AppState: ObservableObject {
             selectedSessionID: selectedSession?.id,
             selectedSessionSource: selectedSource,
             badgeSessionID: badgeSession?.id,
-            badgeReason: badgeSession == nil ? "no_captured_draft" : "captured_draft",
+            badgeReason: badgeReason,
             photoSourceSessionID: selectedSession?.id,
+            guidedCompletionSourceSessionID: selectedSession.flatMap { sessionHasCaptures($0) ? $0.id : nil },
             localLatestSessionID: localLatest?.id,
             remoteLatestSessionID: remoteLatest?.id,
             activeLockSessionID: resolvedActiveLockSessionID,
+            occupancyActive: occupancyActive,
+            occupancyStartedAt: occupancyStartedAt,
+            occupancyReleasedAt: occupancyActive ? nil : occupancyStartedAt,
+            materialContentCount: materialContentCount,
+            badgeSourceSessionID: badgeSession?.id,
+            lockSourceSessionID: resolvedActiveLockSessionID,
+            finalizationSource: remoteFinal ? "remote" : (localFinal ? "local" : nil),
+            staleStateReason: (remoteFinal && badgeSession != nil) ? "remote_final_overrides_local_draft" : nil,
+            draftOwnerUserID: badgeModel.draftOwnerUserID ?? resolvedLockState?.lockedByUserID,
+            draftOwnerDeviceID: badgeModel.draftOwnerDeviceID ?? normalizedSupabaseText(resolvedLockState?.lockedByDeviceID),
+            currentUserID: badgeModel.currentUserID,
+            currentDeviceID: badgeModel.currentDeviceID,
+            lockVisibilityReason: lockVisibilityReason,
             computedOpenBehavior: computedOpenBehavior
         )
     }
@@ -28839,10 +29257,6 @@ final class AppState: ObservableObject {
                 authority: authority,
                 replacingOrganizationID: requestedOrganizationID
             )
-            await hydratePreTapLockVisibility(
-                orgID: requestedOrganizationID,
-                propertyIDs: payload.properties.map(\.id)
-            )
             await reconcileLocalLocksAfterRefresh()
             lastLiveSyncFingerprint = localStore.propertiesLedgerFingerprint()
             logRemotePropertyFetchResult(
@@ -28965,10 +29379,6 @@ final class AppState: ObservableObject {
                 mergedPayload,
                 authority: authority,
                 replacingOrganizationID: requestedOrganizationID
-            )
-            await hydratePreTapLockVisibility(
-                orgID: requestedOrganizationID,
-                propertyIDs: mergedPayload.properties.map(\.id)
             )
             lastBackgroundRemoteFingerprint = mergedPayload.fingerprint
             lastBackgroundRemoteAttemptCompletedAt = Date()
@@ -29559,21 +29969,53 @@ final class AppState: ObservableObject {
                 propertyID: propertyID,
                 activeOrganizationID: activeOrganizationID
             )
-            let evaluation = Self.evaluatePropertyOpenFreshness(
-                localPropertyID: localProperty.id,
-                localOrgID: localProperty.orgId,
-                localUpdatedAt: localProperty.updatedAt,
-                localIsArchived: localProperty.isArchived,
+            var evaluatedProperty = localProperty
+            var evaluation = Self.evaluatePropertyOpenFreshness(
+                localPropertyID: evaluatedProperty.id,
+                localOrgID: evaluatedProperty.orgId,
+                localUpdatedAt: evaluatedProperty.updatedAt,
+                localIsArchived: evaluatedProperty.isArchived,
                 activeOrganizationID: activeOrganizationID,
                 remote: remote,
                 hasUnsyncedLocalPropertyWork: hasUnsyncedLocalPropertyWork
             )
+            if evaluation.status == .remoteUpdatesAvailable,
+               !hasUnsyncedLocalPropertyWork,
+               let remote,
+               let refreshedProperty = await applyRemotePropertyFreshnessUpdateIfNeeded(
+                propertyID: propertyID,
+                activeOrganizationID: activeOrganizationID,
+                remote: remote
+               ) {
+                evaluatedProperty = refreshedProperty
+                let refreshedEvaluation = Self.evaluatePropertyOpenFreshness(
+                    localPropertyID: evaluatedProperty.id,
+                    localOrgID: evaluatedProperty.orgId,
+                    localUpdatedAt: evaluatedProperty.updatedAt,
+                    localIsArchived: evaluatedProperty.isArchived,
+                    activeOrganizationID: activeOrganizationID,
+                    remote: remote,
+                    hasUnsyncedLocalPropertyWork: hasUnsyncedLocalPropertyWork
+                )
+                evaluation = refreshedEvaluation.status == .current
+                    ? (.current, "remote_update_applied")
+                    : refreshedEvaluation
+            }
+            if evaluation.status == .current,
+               !hasUnsyncedLocalPropertyWork,
+               let referenceFreshness = await reconcileLatestReferenceSessionFreshness(
+                propertyID: propertyID,
+                activeOrganizationID: activeOrganizationID
+               ),
+               referenceFreshness.hasPendingReferenceState {
+                evaluation = (.remoteUpdatesAvailable, referenceFreshness.reason)
+            }
             await MainActor.run {
                 self.propertyOpenFreshnessByPropertyID[propertyID] = PropertyOpenFreshnessSnapshot(
                     propertyID: propertyID,
                     status: evaluation.status,
                     checkedAt: Date(),
-                    localUpdatedAt: localProperty.updatedAt,
+                    localUpdatedAt: evaluatedProperty.updatedAt,
                     remoteUpdatedAt: remote?.updatedAt,
                     remoteRevision: remote?.revision,
                     hasUnsyncedLocalPropertyWork: hasUnsyncedLocalPropertyWork,
@@ -29582,7 +30024,10 @@ final class AppState: ObservableObject {
             }
             print(
                 "[PropertyFreshness] propertyID=\(propertyID.uuidString) " +
-                "status=\(evaluation.status.rawValue) reason=\(evaluation.reason)"
+                "status=\(evaluation.status.rawValue) reason=\(evaluation.reason) " +
+                "localUpdatedAt=\(evaluatedProperty.updatedAt) " +
+                "remoteUpdatedAt=\(remote?.updatedAt.description ?? "nil") " +
+                "remoteRevision=\(remote?.revision.map(String.init) ?? "nil")"
             )
         } catch {
             let status = Self.propertyOpenFreshnessStatusForRemoteFailure(error)
@@ -29657,6 +30102,251 @@ final class AppState: ObservableObject {
             isArchived: record.isArchived,
             captureProfile: record.captureProfile
         )
+    }
+
+    private func applyRemotePropertyFreshnessUpdateIfNeeded(
+        propertyID: UUID,
+        activeOrganizationID: UUID,
+        remote: PropertyOpenFreshnessRemoteSnapshot
+    ) async -> Property? {
+        do {
+            guard let record = try await fetchRemotePropertyDeltaRecord(
+                propertyID: propertyID,
+                activeOrganizationID: activeOrganizationID
+            ) else {
+                print(
+                    "[PropertyFreshness] propertyID=\(propertyID.uuidString) " +
+                    "action=apply_remote_update result=missing_remote_record"
+                )
+                return nil
+            }
+            let result = applySyncDeltaProperties(records: [record], orgID: activeOrganizationID)
+            let refreshed = properties.first(where: { $0.id == propertyID }) ??
+                allProperties.first(where: { $0.id == propertyID })
+            print(
+                "[PropertyFreshness] propertyID=\(propertyID.uuidString) " +
+                "action=apply_remote_update applied=\(result.applied) skipped=\(result.skipped) " +
+                "localUpdatedAt=\(refreshed?.updatedAt.description ?? "nil") " +
+                "remoteUpdatedAt=\(remote.updatedAt) remoteRevision=\(remote.revision.map(String.init) ?? "nil")"
+            )
+            return refreshed
+        } catch {
+            print(
+                "[PropertyFreshness] propertyID=\(propertyID.uuidString) " +
+                "action=apply_remote_update result=failed category=\(Self.diagnosticErrorCategory(for: error).rawValue)"
+            )
+            return nil
+        }
+    }
+
+    private func fetchRemotePropertyDeltaRecord(
+        propertyID: UUID,
+        activeOrganizationID: UUID
+    ) async throws -> RemotePropertyDeltaRecord? {
+        guard let client = supabaseClient else {
+            throw RemotePropertyFetchError.missingClient
+        }
+
+        let records = try await withThrowingTaskGroup(of: [RemotePropertyDeltaRecord].self) { group in
+            group.addTask {
+                try await client
+                    .from("properties")
+                    .select("id, org_id, folder_id, capture_profile, client_name, client_email, client_phone, name, address_line1, city, state, postal_code, baseline_session_id, is_archived, created_at, updated_at, updated_by, revision, deleted_at")
+                    .eq("id", value: propertyID.uuidString.lowercased())
+                    .eq("org_id", value: activeOrganizationID.uuidString.lowercased())
+                    .limit(1)
+                    .execute()
+                    .value as [RemotePropertyDeltaRecord]
+            }
+
+            group.addTask {
+                try await Task.sleep(nanoseconds: 3_000_000_000)
+                throw RemotePropertyFetchError.timedOut
+            }
+
+            guard let firstResult = try await group.next() else {
+                throw RemotePropertyFetchError.timedOut
+            }
+            group.cancelAll()
+            return firstResult
+        }
+
+        return records.first
+    }
+
+    private struct ReferenceFreshnessResult {
+        let hasPendingReferenceState: Bool
+        let reason: String
+    }
+
+    private func reconcileLatestReferenceSessionFreshness(
+        propertyID: UUID,
+        activeOrganizationID: UUID
+    ) async -> ReferenceFreshnessResult? {
+        let startedAt = Date()
+        if let last = propertyReferenceMetadataRefreshAtByPropertyID[propertyID],
+           startedAt.timeIntervalSince(last) < 5.0 {
+            print(
+                "[ReferenceFreshness] propertyID=\(propertyID.uuidString) " +
+                "result=skipped reason=throttled elapsedMs=0"
+            )
+            return ReferenceFreshnessResult(hasPendingReferenceState: false, reason: "reference_refresh_throttled")
+        }
+        propertyReferenceMetadataRefreshAtByPropertyID[propertyID] = startedAt
+        do {
+            guard let latestSession = try await fetchLatestFinalizedReferenceSession(
+                propertyID: propertyID,
+                activeOrganizationID: activeOrganizationID
+            ) else {
+                print(
+                    "[ReferenceFreshness] propertyID=\(propertyID.uuidString) " +
+                    "latestFinalizedSessionID=NONE reason=no_finalized_remote_session"
+                )
+                return ReferenceFreshnessResult(hasPendingReferenceState: false, reason: "no_finalized_reference_session")
+            }
+
+            let sessionApply = applySyncDeltaSessions(records: [latestSession], orgID: activeOrganizationID)
+            let remoteShots = try await fetchRemoteShotMetadataRows(
+                propertyID: propertyID,
+                sessionID: latestSession.id,
+                activeOrganizationID: activeOrganizationID
+            )
+            applyRemoteShotMetadataRows(remoteShots, propertyID: propertyID, sessionID: latestSession.id)
+
+            let localMetadata = try? localStore.loadSessionMetadata(propertyID: propertyID, sessionID: latestSession.id)
+            let expectedShotIDs = Set(remoteShots.map(\.id))
+            let localShotIDs = Set((localMetadata?.shots ?? [])
+                .filter { $0.sessionID == latestSession.id }
+                .map(\.shotID))
+            let missingMetadataCount = expectedShotIDs.subtracting(localShotIDs).count
+
+            let missingMediaRequests = (localMetadata?.shots ?? [])
+                .filter { shot in
+                    guard expectedShotIDs.contains(shot.shotID), shot.sessionID == latestSession.id else { return false }
+                    let relative = shot.originalRelativePath.trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard !relative.isEmpty else { return false }
+                    return localStore.resolveSessionRelativeFileURL(
+                        propertyID: propertyID,
+                        sessionID: latestSession.id,
+                        relativePath: relative
+                    ) == nil
+                }
+                .map {
+                    OperationalMediaHydrationRequest(
+                        propertyID: propertyID,
+                        sessionID: latestSession.id,
+                        shotID: $0.shotID,
+                        relativePathOverride: $0.originalRelativePath.trimmingCharacters(in: .whitespacesAndNewlines)
+                    )
+                }
+
+            if !missingMediaRequests.isEmpty {
+                _ = await ensureOperationalMediaAvailableForRequests(missingMediaRequests)
+            }
+
+            let refreshedMetadata = try? localStore.loadSessionMetadata(propertyID: propertyID, sessionID: latestSession.id)
+            let refreshedMissingMediaCount = (refreshedMetadata?.shots ?? [])
+                .filter { shot in
+                    guard expectedShotIDs.contains(shot.shotID), shot.sessionID == latestSession.id else { return false }
+                    let relative = shot.originalRelativePath.trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard !relative.isEmpty else { return true }
+                    return localStore.resolveSessionRelativeFileURL(
+                        propertyID: propertyID,
+                        sessionID: latestSession.id,
+                        relativePath: relative
+                    ) == nil
+                }
+                .count
+
+            let guidedReferenceCount = remoteShots.filter { $0.isGuided == true }.count
+            let flaggedReferenceCount = remoteShots.filter { $0.isFlagged == true }.count
+            let hasPending = missingMetadataCount > 0 || refreshedMissingMediaCount > 0
+            let reason: String
+            if missingMetadataCount > 0 {
+                reason = "reference_metadata_pending"
+            } else if refreshedMissingMediaCount > 0 {
+                reason = "reference_media_pending"
+            } else {
+                reason = "reference_metadata_current"
+            }
+            print(
+                "[ReferenceFreshness] propertyID=\(propertyID.uuidString) " +
+                "latestFinalizedSessionID=\(latestSession.id.uuidString) " +
+                "sessionApply=\(sessionApply.applied)/\(sessionApply.skipped) " +
+                "remoteShotCount=\(remoteShots.count) " +
+                "localAppliedShotCount=\(localShotIDs.count) " +
+                "guidedReferenceCount=\(guidedReferenceCount) " +
+                "flaggedReferenceCount=\(flaggedReferenceCount) " +
+                "missingMetadataCount=\(missingMetadataCount) " +
+                "missingMediaCount=\(refreshedMissingMediaCount) " +
+                "reason=\(reason) " +
+                "elapsedMs=\(Int(Date().timeIntervalSince(startedAt) * 1000))"
+            )
+            return ReferenceFreshnessResult(hasPendingReferenceState: hasPending, reason: reason)
+        } catch {
+            print(
+                "[ReferenceFreshness] propertyID=\(propertyID.uuidString) " +
+                "result=failed category=\(Self.diagnosticErrorCategory(for: error).rawValue) " +
+                "elapsedMs=\(Int(Date().timeIntervalSince(startedAt) * 1000))"
+            )
+            return ReferenceFreshnessResult(hasPendingReferenceState: true, reason: "reference_freshness_check_failed")
+        }
+    }
+
+    private func fetchLatestFinalizedReferenceSession(
+        propertyID: UUID,
+        activeOrganizationID: UUID
+    ) async throws -> RemoteSessionDeltaRecord? {
+        guard let client = supabaseClient else {
+            throw RemotePropertyFetchError.missingClient
+        }
+        let records = try await client
+            .from("sessions")
+            .select("id, org_id, property_id, title, status, started_at, completed_at, exported_at, is_sealed, first_delivered_at, re_export_expires_at, capture_profile, updated_at, updated_by, revision, deleted_at")
+            .eq("org_id", value: activeOrganizationID.uuidString.lowercased())
+            .eq("property_id", value: propertyID.uuidString.lowercased())
+            .eq("status", value: "completed")
+            .is("deleted_at", value: nil)
+            .order("updated_at", ascending: false)
+            .limit(5)
+            .execute()
+            .value as [RemoteSessionDeltaRecord]
+
+        return records
+            .filter {
+                isFinalRemoteSessionState(
+                    status: $0.status,
+                    completedAt: $0.completedAt.flatMap(parseSupabaseDateString),
+                    exportedAt: $0.exportedAt,
+                    isSealed: $0.isSealed,
+                    firstDeliveredAt: $0.firstDeliveredAt
+                )
+            }
+            .sorted {
+                let lhsDate = $0.firstDeliveredAt ?? $0.exportedAt ?? $0.completedAt.flatMap(parseSupabaseDateString) ?? $0.updatedAt
+                let rhsDate = $1.firstDeliveredAt ?? $1.exportedAt ?? $1.completedAt.flatMap(parseSupabaseDateString) ?? $1.updatedAt
+                return lhsDate > rhsDate
+            }
+            .first
+    }
+
+    private func fetchRemoteShotMetadataRows(
+        propertyID: UUID,
+        sessionID: UUID,
+        activeOrganizationID: UUID
+    ) async throws -> [RemoteShotMetadataRecord] {
+        guard let client = supabaseClient else {
+            throw RemotePropertyFetchError.missingClient
+        }
+        return try await client
+            .from("shots")
+            .select("id, org_id, property_id, session_id, created_at, updated_at, updated_by, revision, deleted_at, building, elevation, detail_type, angle_index, shot_key, logical_shot_identity, capture_kind, first_capture_kind, is_guided, is_flagged, issue_id, issue_status, trade, reason, priority, capture_mode, lens, latitude, longitude, accuracy_meters, image_width, image_height, lifecycle_state, retired_at, retired_reason, retired_by, superseded_by_shot_id, supersedes_shot_id, replacement_reason, hidden_from_reports, hidden_from_gallery, lifecycle_updated_at, storage_bucket, storage_path, checksum_sha256, byte_size, upload_state, upload_attempts, last_upload_error")
+            .eq("org_id", value: activeOrganizationID.uuidString.lowercased())
+            .eq("property_id", value: propertyID.uuidString.lowercased())
+            .eq("session_id", value: sessionID.uuidString.lowercased())
+            .is("deleted_at", value: nil)
+            .execute()
+            .value as [RemoteShotMetadataRecord]
     }
 
     nonisolated static func evaluatePropertyOpenFreshness(
@@ -31074,15 +31764,19 @@ final class AppState: ObservableObject {
             occupiedByDeviceID: normalizedSupabaseText(occupancy?.occupiedByDeviceID),
             occupiedAt: occupancy?.occupiedAt.flatMap(parseSupabaseDateString)
         )
-        if let occupancy,
-           occupancy.occupiedByUserID != nil ||
-            normalizedSupabaseText(occupancy.occupiedByDeviceID) != nil ||
-            normalizedSupabaseText(occupancy.occupiedAt) != nil {
+        if propertySessionOccupancyIsActive(occupancy) {
             return PropertyDeletePreflightSnapshot(
                 occupancyCount: 1,
                 lockCount: 0,
                 isBlocked: true,
                 blockedReason: "occupancy"
+            )
+        } else if occupancy != nil {
+            setPropertySessionOccupancyState(
+                propertyID: propertyID,
+                occupiedByUserID: nil,
+                occupiedByDeviceID: nil,
+                occupiedAt: nil
             )
         }
 
@@ -31091,9 +31785,7 @@ final class AppState: ObservableObject {
             propertyID: propertyID
         )
         let activeLockRecords = lockRecords.filter { record in
-            record.lockedByUserID != nil ||
-            normalizedSupabaseText(record.lockedByDeviceID) != nil ||
-            normalizedSupabaseText(record.lockedAt) != nil
+            hasActiveRemoteLock(record: record)
         }
         guard activeLockRecords.isEmpty else {
             return PropertyDeletePreflightSnapshot(
@@ -31274,16 +31966,20 @@ final class AppState: ObservableObject {
             occupiedByDeviceID: normalizedSupabaseText(occupancy?.occupiedByDeviceID),
             occupiedAt: occupancy?.occupiedAt.flatMap(parseSupabaseDateString)
         )
-        if let occupancy,
-           occupancy.occupiedByUserID != nil ||
-            normalizedSupabaseText(occupancy.occupiedByDeviceID) != nil ||
-            normalizedSupabaseText(occupancy.occupiedAt) != nil {
+        if propertySessionOccupancyIsActive(occupancy) {
             return SessionDeletePreflightSnapshot(
                 deletedAt: sessionRecord.deletedAt,
                 occupancyCount: 1,
                 lockCount: sessionDeletePreflightLockFieldsPresent(sessionRecord) ? 1 : 0,
                 isBlocked: true,
                 blockedReason: "property_occupancy"
+            )
+        } else if occupancy != nil {
+            setPropertySessionOccupancyState(
+                propertyID: propertyID,
+                occupiedByUserID: nil,
+                occupiedByDeviceID: nil,
+                occupiedAt: nil
             )
         }
 
@@ -31369,6 +32065,7 @@ final class AppState: ObservableObject {
                 orgID: sessionRecord.orgID,
                 propertyID: propertyID,
                 status: nil,
+                completedAt: nil,
                 exportedAt: nil,
                 isSealed: nil,
                 firstDeliveredAt: nil,
@@ -31735,15 +32432,14 @@ final class AppState: ObservableObject {
             exportedAt: nil,
             captureProfile: inheritedCaptureProfile
         )
-        let persisted = persistReusableDraftSessionIfNeeded(session)
-        currentSession = persisted
+        currentSession = session
         recordDraftSessionReuseDecision(
             propertyID: selectedPropertyID,
-            session: persisted,
+            session: session,
             decision: "created_new_draft",
             candidateCount: reusableDrafts.count,
             blockedReason: blockedReason,
-            foregroundRefreshReconciliation: "new_draft_persisted_for_reentry_reuse"
+            foregroundRefreshReconciliation: "new_occupancy_shell_created_not_persisted_until_capture"
         )
         if let property = properties.first(where: { $0.id == session.propertyID }) ?? allProperties.first(where: { $0.id == session.propertyID }),
            let orgID = property.orgId {
@@ -31751,21 +32447,29 @@ final class AppState: ObservableObject {
                 await emitAuditEvent(
                     orgID: orgID,
                     eventType: "session.started",
-                    sessionID: persisted.id,
-                    propertyID: persisted.propertyID,
+                    sessionID: session.id,
+                    propertyID: session.propertyID,
                     payload: [:]
                 )
             }
         }
         print("[StartSession] propertyID=\(selectedPropertyID.uuidString) blockedReason=none pendingDeliveryExists=\(pendingDeliveryExists) reExportEligibleExists=\(reExportEligibleExists)")
         cloudBackupManager?.setCaptureModeActive(true)
-        return persisted
+        return session
     }
 
     private func persistReusableDraftSessionIfNeeded(_ session: Session) -> Session {
         let alreadyPersisted = sessions(for: session.propertyID).contains { $0.id == session.id }
         guard !alreadyPersisted else {
             currentSession = session
+            return session
+        }
+        guard sessionHasCaptures(session) || isFinalSession(session) else {
+            currentSession = session
+            print(
+                "[StartSession] propertyID=\(session.propertyID.uuidString) " +
+                "sessionID=\(session.id.uuidString) persist=skipped reason=transient_zero_photo_occupancy_shell"
+            )
             return session
         }
 
@@ -31909,6 +32613,12 @@ final class AppState: ObservableObject {
     }
 
     func promoteCurrentSessionToActiveCaptureLockIfNeeded(reason: String) {
+        Task {
+            await promoteCurrentSessionToActiveCaptureLock(reason: reason)
+        }
+    }
+
+    private func promoteCurrentSessionToActiveCaptureLock(reason: String) async {
         guard backendFeatureFlags.sessionCoordinationEnabled,
               backendFeatureFlags.supabaseEnabled,
               backendFeatureFlags.shadowWriteEnabled,
@@ -31925,6 +32635,17 @@ final class AppState: ObservableObject {
 
         let currentUserID = authenticatedSupabaseUser?.id
         let currentDeviceID = currentDeviceIdentifier()
+        let renewedOccupancy = PropertySessionOccupancyState(
+            occupiedByUserID: currentUserID,
+            occupiedByDeviceID: currentDeviceID,
+            occupiedAt: Date()
+        )
+        _ = await persistPropertySessionOccupancyMutation(
+            propertyID: session.propertyID,
+            orgID: orgID,
+            desiredState: renewedOccupancy
+        )
+
         let existing = sessionCoordinationStateBySessionID[session.id]
         if existing?.lockedByUserID == currentUserID,
            normalizedSupabaseText(existing?.lockedByDeviceID) == currentDeviceID,
@@ -31932,34 +32653,32 @@ final class AppState: ObservableObject {
             return
         }
 
-        Task {
-            let desiredState = SessionCoordinationState(
-                lockedByUserID: currentUserID,
-                lockedByDeviceID: currentDeviceID,
-                lockedAt: Date()
+        let desiredState = SessionCoordinationState(
+            lockedByUserID: currentUserID,
+            lockedByDeviceID: currentDeviceID,
+            lockedAt: Date()
+        )
+        let didPersist = await persistSessionCoordinationMutation(
+            property: property,
+            session: session,
+            metadata: metadata,
+            desiredState: desiredState
+        )
+        if didPersist {
+            occupancyOnlyClaimedSessionIDs.remove(session.id)
+            print(
+                "[SessionCoordinationEval] event=promote_active_capture_lock " +
+                "reason=\(reason) " +
+                "propertyID=\(session.propertyID.uuidString) " +
+                "sessionID=\(session.id.uuidString)"
             )
-            let didPersist = await persistSessionCoordinationMutation(
-                property: property,
-                session: session,
-                metadata: metadata,
-                desiredState: desiredState
+            await emitAuditEvent(
+                orgID: orgID,
+                eventType: "session.locked",
+                sessionID: session.id,
+                propertyID: session.propertyID,
+                payload: [:]
             )
-            if didPersist {
-                occupancyOnlyClaimedSessionIDs.remove(session.id)
-                print(
-                    "[SessionCoordinationEval] event=promote_active_capture_lock " +
-                    "reason=\(reason) " +
-                    "propertyID=\(session.propertyID.uuidString) " +
-                    "sessionID=\(session.id.uuidString)"
-                )
-                await emitAuditEvent(
-                    orgID: orgID,
-                    eventType: "session.locked",
-                    sessionID: session.id,
-                    propertyID: session.propertyID,
-                    payload: [:]
-                )
-            }
         }
     }
 
@@ -31995,16 +32714,28 @@ final class AppState: ObservableObject {
         scheduleOffloadEligibleSessionMedia(excludingSessionID: currentSession?.id)
         if let session = currentSession {
             let ownershipState = sessionCoordinationStateBySessionID[session.id]
-            if ownershipState?.lockedByUserID != nil ||
+            let hasSessionCoordinationLock =
+                ownershipState?.lockedByUserID != nil ||
                 normalizedSupabaseText(ownershipState?.lockedByDeviceID) != nil ||
-                ownershipState?.lockedAt != nil {
+                ownershipState?.lockedAt != nil
+            let hasOccupancyOnlyClaim = occupancyOnlyClaimedSessionIDs.contains(session.id)
+            if hasSessionCoordinationLock || hasOccupancyOnlyClaim {
                 Task {
-                    await self.releaseSessionCoordinationLockIfOwnedUsingState(
-                        propertyID: session.propertyID,
-                        sessionID: session.id,
-                        emitReleasedEvent: true,
-                        ownershipState: ownershipState
-                    )
+                    if hasOccupancyOnlyClaim {
+                        await self.releasePropertySessionOccupancyIfOwned(
+                            propertyID: session.propertyID,
+                            sessionID: session.id,
+                            emitReleasedEvent: true
+                        )
+                    }
+                    if hasSessionCoordinationLock {
+                        await self.releaseSessionCoordinationLockIfOwnedUsingState(
+                            propertyID: session.propertyID,
+                            sessionID: session.id,
+                            emitReleasedEvent: !hasOccupancyOnlyClaim,
+                            ownershipState: ownershipState
+                        )
+                    }
                 }
             }
         }
@@ -32057,12 +32788,22 @@ final class AppState: ObservableObject {
             return cached
         }
         return sessions(for: propertyID)
-            .filter { isPendingDelivery($0) }
+            .filter { isPendingDelivery($0) && sessionHasCaptures($0) }
             .sorted { $0.startedAt > $1.startedAt }
             .first
     }
 
     func reconcileRemoteSessionContentForPropertyOpen(propertyID: UUID) async {
+        let startedAt = Date()
+        if let last = propertyReferenceReconcileAtByPropertyID[propertyID],
+           startedAt.timeIntervalSince(last) < 5.0 {
+            print(
+                "[ReferenceMetadataRefresh] propertyID=\(propertyID.uuidString) " +
+                "result=skipped reason=throttled elapsedMs=0"
+            )
+            return
+        }
+        propertyReferenceReconcileAtByPropertyID[propertyID] = startedAt
         guard backendFeatureFlags.supabaseEnabled,
               backendFeatureFlags.mediaSupabaseUploadEnabled,
               canAccessProperty(propertyID),
@@ -32071,6 +32812,10 @@ final class AppState: ObservableObject {
               let orgID = property.orgId,
               canAccessOrganization(orgID),
               let client = supabaseClient else {
+            print(
+                "[ReferenceMetadataRefresh] propertyID=\(propertyID.uuidString) " +
+                "result=skipped reason=prereq_failed elapsedMs=\(Int(Date().timeIntervalSince(startedAt) * 1000))"
+            )
             return
         }
 
@@ -32098,6 +32843,10 @@ final class AppState: ObservableObject {
                 recordDiagnosticsError(error)
             }
         }
+        print(
+            "[ReferenceMetadataRefresh] propertyID=\(propertyID.uuidString) " +
+            "sessionCount=\(targetSessions.count) elapsedMs=\(Int(Date().timeIntervalSince(startedAt) * 1000))"
+        )
     }
 
     private func applyRemoteShotMetadataRows(
@@ -32106,12 +32855,64 @@ final class AppState: ObservableObject {
         sessionID: UUID
     ) {
         guard !rows.isEmpty else { return }
+        var metadata = try? localStore.loadSessionMetadata(propertyID: propertyID, sessionID: sessionID)
+        let existingShots = Dictionary(uniqueKeysWithValues: (metadata?.shots ?? []).map { ($0.shotID, $0) })
+        var issueByID = Dictionary(uniqueKeysWithValues: (metadata?.issues ?? []).map { ($0.issueID, $0) })
+        var appliedFlaggedCount = 0
         for row in rows where row.deletedAt == nil {
-            let existing = (try? localStore.loadSessionMetadata(propertyID: propertyID, sessionID: sessionID))
-                .flatMap { metadata in metadata.shots.first(where: { $0.shotID == row.id }) }
+            if let rowPropertyID = row.propertyID, rowPropertyID != propertyID {
+                continue
+            }
+            if let rowSessionID = row.sessionID, rowSessionID != sessionID {
+                continue
+            }
+            let existing = existingShots[row.id]
             let local = existing ?? makeLocalShotMetadataShell(from: row, propertyID: propertyID, sessionID: sessionID)
             let merged = row.merged(withLocal: local)
             try? localStore.upsertShot(propertyID: propertyID, sessionID: sessionID, shot: merged, matchMode: .append)
+            guard merged.isFlagged, let issueID = merged.issueID else { continue }
+            var issue = issueByID[issueID] ?? IssueMetadata(
+                issueID: issueID,
+                issueStatus: merged.issueStatus ?? "active",
+                currentReason: merged.noteText,
+                firstSeenAt: merged.createdAt,
+                lastSeenAt: merged.updatedAt,
+                lastCaptureSessionId: sessionID,
+                detailNote: merged.noteText,
+                shotKey: merged.shotKey
+            )
+            issue.issueStatus = merged.issueStatus ?? issue.issueStatus
+            issue.currentReason = normalizedSupabaseText(merged.noteText) ?? issue.currentReason
+            issue.lastSeenAt = max(issue.lastSeenAt ?? merged.updatedAt, merged.updatedAt)
+            issue.lastCaptureSessionId = sessionID
+            issue.detailNote = normalizedSupabaseText(merged.noteText) ?? issue.detailNote
+            issue.shotKey = normalizedSupabaseText(merged.shotKey) ?? issue.shotKey
+            issueByID[issueID] = issue
+            appliedFlaggedCount += 1
+        }
+        if appliedFlaggedCount > 0,
+           var refreshed = try? localStore.loadSessionMetadata(propertyID: propertyID, sessionID: sessionID) {
+            refreshed.issues = Array(issueByID.values).sorted { lhs, rhs in
+                if (lhs.firstSeenAt ?? .distantPast) != (rhs.firstSeenAt ?? .distantPast) {
+                    return (lhs.firstSeenAt ?? .distantPast) < (rhs.firstSeenAt ?? .distantPast)
+                }
+                return lhs.issueID.uuidString < rhs.issueID.uuidString
+            }
+            try? localStore.saveSessionMetadataAtomically(propertyID: propertyID, sessionID: sessionID, metadata: refreshed)
+            try? localStore.mergeRemoteFlaggedReferenceObservations(
+                propertyID: propertyID,
+                sessionID: sessionID,
+                metadata: refreshed
+            )
+            let localFlaggedCount = (try? localStore.fetchObservations(propertyID: propertyID)
+                .filter { $0.sessionID == sessionID || $0.updatedInSessionID == sessionID }
+                .count) ?? 0
+            print(
+                "[FlaggedReferenceSync] latestFinalizedSessionID=\(sessionID.uuidString) " +
+                "remoteFlaggedShotCount=\(appliedFlaggedCount) " +
+                "localFlaggedRefCount=\(localFlaggedCount) " +
+                "flaggedMetadataPendingReason=none flaggedMediaPendingReason=checked_by_reference_freshness"
+            )
         }
     }
 
@@ -32186,7 +32987,7 @@ final class AppState: ObservableObject {
         }
         var pendingSessionIDs = Set<UUID>()
         for property in properties {
-            for session in sessions(for: property.id) where isPendingDelivery(session) {
+            for session in sessions(for: property.id) where isPendingDelivery(session) && sessionHasCaptures(session) {
                 pendingSessionIDs.insert(session.id)
             }
         }
@@ -32290,6 +33091,15 @@ final class AppState: ObservableObject {
     }
 
     func ensureSessionMetadataInBackground(for session: Session) {
+        guard sessionHasCaptures(session) || isFinalSession(session) else {
+            print(
+                "[SessionMetadata] event=skip_background_metadata " +
+                "propertyID=\(session.propertyID.uuidString) " +
+                "sessionID=\(session.id.uuidString) " +
+                "reason=transient_zero_photo_occupancy_shell"
+            )
+            return
+        }
         DispatchQueue.global(qos: .utility).async { [weak self] in
             guard let self else { return }
             try? self.localStore.ensureSessionMetadata(for: session)
@@ -32969,12 +33779,23 @@ final class AppState: ObservableObject {
         occupiedByDeviceID: String?,
         occupiedAt: String?
     ) {
+        if let state = propertySessionOccupancyByPropertyID[propertyID] {
+            return (
+                state.occupiedByUserID,
+                normalizedSupabaseText(state.occupiedByDeviceID),
+                state.occupiedAt?.ISO8601Format()
+            )
+        }
         let record = propertySessionOccupancyDebugRemoteRecords[propertyID]
         return (
             record?.occupiedByUserID,
             normalizedSupabaseText(record?.occupiedByDeviceID),
             record?.occupiedAt
         )
+    }
+
+    func _debugPromoteCurrentSessionToActiveCaptureLockForTests(reason: String = "test") async {
+        await promoteCurrentSessionToActiveCaptureLock(reason: reason)
     }
 
     func _debugSetActivityFeedFetchOverrideForTests(
@@ -33526,6 +34347,7 @@ final class AppState: ObservableObject {
                 orgID: record.orgID,
                 propertyID: record.propertyID,
                 status: record.status,
+                completedAt: record.completedAt,
                 exportedAt: record.exportedAt,
                 isSealed: record.isSealed,
                 firstDeliveredAt: record.firstDeliveredAt,
@@ -33550,6 +34372,7 @@ final class AppState: ObservableObject {
                 orgID: record.orgID == orgID ? record.orgID : orgID,
                 propertyID: propertyID,
                 status: record.status,
+                completedAt: record.completedAt,
                 exportedAt: record.exportedAt,
                 isSealed: record.isSealed,
                 firstDeliveredAt: record.firstDeliveredAt,
@@ -33580,6 +34403,7 @@ final class AppState: ObservableObject {
                 orgID: cached.orgID,
                 propertyID: cached.propertyID,
                 status: cached.status,
+                completedAt: cached.completedAt,
                 exportedAt: cached.exportedAt,
                 isSealed: cached.isSealed,
                 firstDeliveredAt: cached.firstDeliveredAt,
@@ -33597,6 +34421,9 @@ final class AppState: ObservableObject {
     func _debugReadSessionCoordinationStateForTests(
         sessionID: UUID
     ) -> (lockedByUserID: UUID?, lockedByDeviceID: String?, lockedAt: Date?) {
+        if let state = sessionCoordinationStateBySessionID[sessionID] {
+            return (state.lockedByUserID, state.lockedByDeviceID, state.lockedAt)
+        }
 #if DEBUG
         if let cached = sessionCoordinationDebugRemoteRecords[sessionID] {
             return (
@@ -33794,7 +34621,7 @@ final class AppState: ObservableObject {
             }
 
             if let pendingSession = sessions
-                .filter({ $0.deletedAt == nil && isPendingDelivery($0) })
+            .filter({ $0.deletedAt == nil && isPendingDelivery($0) && sessionHasCaptures($0) })
                 .sorted(by: { $0.startedAt > $1.startedAt })
                 .first {
                 pending[property.id] = pendingSession
@@ -33856,7 +34683,7 @@ final class AppState: ObservableObject {
         }
 
         let pendingSession = sessions
-            .filter { $0.deletedAt == nil && isPendingDelivery($0) }
+            .filter { $0.deletedAt == nil && isPendingDelivery($0) && sessionHasCaptures($0) }
             .sorted { $0.startedAt > $1.startedAt }
             .first
         if allPendingExportSessionByProperty[propertyID] != pendingSession {
@@ -33908,10 +34735,14 @@ final class AppState: ObservableObject {
     }
 
     private func sessionHasCaptures(_ session: Session) -> Bool {
+        sessionMaterialContentCount(session) > 0
+    }
+
+    private func sessionMaterialContentCount(_ session: Session) -> Int {
         guard let metadata = try? localStore.loadSessionMetadata(propertyID: session.propertyID, sessionID: session.id) else {
-            return false
+            return 0
         }
-        return metadata.shots.contains { shot in
+        return metadata.shots.filter { shot in
             let originalRelative = shot.originalRelativePath.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !originalRelative.isEmpty else { return false }
             return localStore.resolveSessionRelativeFileURL(
@@ -33919,7 +34750,7 @@ final class AppState: ObservableObject {
                 sessionID: session.id,
                 relativePath: originalRelative
             ) != nil
-        }
+        }.count
     }
 
     private func scheduleOffloadEligibleSessionMedia(excludingSessionID: UUID?) {
@@ -33931,10 +34762,22 @@ final class AppState: ObservableObject {
 
     private func scheduleSessionArchiveSnapshot(_ session: Session, trigger: String) {
         guard session.status == .completed, session.isSealed else { return }
+        let deviceID = currentDeviceIdentifier()
         archiveSnapshotQueue.async { [weak self] in
             guard let self else { return }
             do {
-                _ = try self.localStore.createSessionArchiveSnapshot(session: session, trigger: trigger)
+                _ = try self.localStore.createSessionArchiveSnapshot(
+                    session: session,
+                    trigger: trigger,
+                    deviceID: deviceID
+                )
+                DispatchQueue.main.async { [weak self] in
+                    self?.invalidateSessionArchiveAvailabilityCache(
+                        propertyID: session.propertyID,
+                        sessionID: session.id,
+                        reason: "archive_snapshot_created"
+                    )
+                }
                 Task {
                     await self.attemptAutomaticSessionSnapshotUploadForCompletedSealedCheckpoint(
                         session: session,
@@ -34118,7 +34961,34 @@ final class AppState: ObservableObject {
     }
 
     func isPendingDelivery(_ session: Session) -> Bool {
-        session.isSealed && session.firstDeliveredAt == nil
+        session.status == .completed && session.isSealed && session.firstDeliveredAt == nil
+    }
+
+    func isPendingDeliveryLocallyAvailable(_ session: Session) -> Bool {
+        guard isPendingDelivery(session) else { return false }
+        let availability = cachedSessionArchivePackageAvailability(
+            propertyID: session.propertyID,
+            sessionID: session.id,
+            requireDelivered: false,
+            expectedDeviceID: nil
+        )
+        print(
+            "[ExportButton] sessionID=\(session.id.uuidString) " +
+            "export_package_path=\(availability.archivePath ?? "nil") " +
+            "local_archive_path_exists=\(availability.pathExists) " +
+            "checksum_verified=\(availability.checksumVerified) " +
+            "local_export_package_available=\(availability.available) " +
+            "export_button_reason=\(availability.available ? "local_package_available" : availability.reason)"
+        )
+        return availability.available
+    }
+
+    func shouldDisplaySessionInSessionList(_ session: Session) -> Bool {
+        guard session.deletedAt == nil else { return false }
+        if session.status == .draft {
+            return sessionHasCaptures(session)
+        }
+        return true
     }
 
     func isReExportEligible(_ session: Session, now: Date = Date()) -> Bool {
@@ -34127,8 +34997,116 @@ final class AppState: ObservableObject {
         return now < expiresAt
     }
 
+    func isReExportLocallyAvailable(_ session: Session, now: Date = Date()) -> Bool {
+        guard isReExportEligible(session, now: now) else {
+            print(
+                "[ReExportButton] sessionID=\(session.id.uuidString) " +
+                "exported_by_device_id=unknown local_export_package_available=false " +
+                "export_retention_expires_at=\(session.reExportExpiresAt?.description ?? "nil") " +
+                "reexport_button_reason=window_expired_or_not_delivered"
+            )
+            return false
+        }
+        let availability = cachedSessionArchivePackageAvailability(
+            propertyID: session.propertyID,
+            sessionID: session.id,
+            requireDelivered: true,
+            expectedDeviceID: currentDeviceIdentifier()
+        )
+        let localPackageAvailable = availability.available
+        print(
+            "[ReExportButton] sessionID=\(session.id.uuidString) " +
+            "export_package_path=\(availability.archivePath ?? "nil") " +
+            "file_exists=\(availability.pathExists) " +
+            "checksum_verified=\(availability.checksumVerified) " +
+            "exported_by_device_id=\(availability.originatingDeviceID ?? "unknown") " +
+            "package_session_id=\(session.id.uuidString) " +
+            "package_device_id=\(availability.originatingDeviceID ?? "unknown") " +
+            "current_device_id=\(currentDeviceIdentifier()) " +
+            "local_archive_path_exists=\(availability.pathExists) " +
+            "local_export_package_available=\(localPackageAvailable) " +
+            "export_retention_expires_at=\(session.reExportExpiresAt?.description ?? "nil") " +
+            "reexport_button_reason=\(localPackageAvailable ? "local_package_available" : availability.reason)"
+        )
+        return localPackageAvailable
+    }
+
     func sessionNeedsDeliveryOrReExport(_ session: Session, now: Date = Date()) -> Bool {
-        isPendingDelivery(session) || isReExportEligible(session, now: now)
+        isPendingDeliveryLocallyAvailable(session) || isReExportLocallyAvailable(session, now: now)
+    }
+
+    private func cachedSessionArchivePackageAvailability(
+        propertyID: UUID,
+        sessionID: UUID,
+        requireDelivered: Bool,
+        expectedDeviceID: String?
+    ) -> LocalStore.SessionArchivePackageAvailability {
+        let startedAt = Date()
+        let key = [
+            propertyID.uuidString.lowercased(),
+            sessionID.uuidString.lowercased(),
+            requireDelivered ? "delivered" : "any",
+            normalizedSupabaseText(expectedDeviceID) ?? "any-device"
+        ].joined(separator: ":")
+        if let cached = sessionArchiveAvailabilityCache[key],
+           startedAt.timeIntervalSince(cached.checkedAt) < sessionArchiveAvailabilityCacheTTL {
+            print(
+                "[ArchiveAvailability] sessionID=\(sessionID.uuidString) " +
+                "result=cache_hit require_delivered=\(requireDelivered) " +
+                "expected_device_id=\(normalizedSupabaseText(expectedDeviceID) ?? "any") " +
+                "available=\(cached.availability.available) pathExists=\(cached.availability.pathExists) " +
+                "checksum_verified=\(cached.availability.checksumVerified) " +
+                "archive_path=\(cached.availability.archivePath ?? "nil") " +
+                "originating_device_id=\(cached.availability.originatingDeviceID ?? "unknown") " +
+                "reason=\(cached.availability.reason) elapsedMs=0"
+            )
+            return cached.availability
+        }
+
+        let result = (try? localStore.sessionArchivePackageAvailability(
+            propertyID: propertyID,
+            sessionID: sessionID,
+            requireDelivered: requireDelivered,
+            expectedDeviceID: expectedDeviceID
+        )) ?? LocalStore.SessionArchivePackageAvailability(
+            available: false,
+            pathExists: false,
+            checksumVerified: false,
+            archivePath: nil,
+            originatingDeviceID: nil,
+            reason: "archive_availability_check_failed"
+        )
+        sessionArchiveAvailabilityCache[key] = (
+            checkedAt: startedAt,
+            availability: result
+        )
+        print(
+            "[ArchiveAvailability] sessionID=\(sessionID.uuidString) " +
+            "result=fresh require_delivered=\(requireDelivered) " +
+            "expected_device_id=\(normalizedSupabaseText(expectedDeviceID) ?? "any") " +
+            "available=\(result.available) pathExists=\(result.pathExists) " +
+            "checksum_verified=\(result.checksumVerified) " +
+            "archive_path=\(result.archivePath ?? "nil") " +
+            "originating_device_id=\(result.originatingDeviceID ?? "unknown") " +
+            "reason=\(result.reason) " +
+            "elapsedMs=\(Int(Date().timeIntervalSince(startedAt) * 1000))"
+        )
+        return result
+    }
+
+    private func invalidateSessionArchiveAvailabilityCache(
+        propertyID: UUID,
+        sessionID: UUID,
+        reason: String
+    ) {
+        let prefix = "\(propertyID.uuidString.lowercased()):\(sessionID.uuidString.lowercased()):"
+        sessionArchiveAvailabilityCache = sessionArchiveAvailabilityCache.filter { key, _ in
+            !key.hasPrefix(prefix)
+        }
+        print(
+            "[ArchiveAvailability] sessionID=\(sessionID.uuidString) " +
+            "result=cache_invalidated reason=\(reason)"
+        )
     }
 
     func sessionReExportWindowExpired(_ session: Session, now: Date = Date()) -> Bool {

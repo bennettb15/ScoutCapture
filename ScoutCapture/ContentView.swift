@@ -555,6 +555,7 @@ final class ReportLibraryModel: ObservableObject {
                     return lhs.shotID.uuidString < rhs.shotID.uuidString
                 }
                 .compactMap { shot in
+                    guard shot.sessionID == sessionID else { return nil }
                     // Only surface shots that belong to this session's capture window.
                     if let window = sessionWindow {
                         if shot.createdAt < window.start { return nil }
@@ -4181,13 +4182,11 @@ struct ContentView: View {
         metadataCache: inout [UUID: SessionMetadata]
     ) -> GuidedSessionThumbnailResolution? {
         let key = guidedKey(for: guidedShot)
-
-        let priorSessions: [Session] = {
-            guard let currentSession else { return [] }
-            return orderedSessions
-                .filter { $0.id != currentSession.id && $0.startedAt < currentSession.startedAt }
-                .sorted { $0.startedAt > $1.startedAt }
-        }()
+        let priorSessions = guidedHistoricalReferenceSessions(
+            currentSession: currentSession,
+            baselineSessionID: baselineSessionID,
+            orderedSessions: orderedSessions
+        )
 
         func firstUsableResolution(
             in session: Session,
@@ -4219,14 +4218,20 @@ struct ContentView: View {
                         sessionID: session.id,
                         shotID: shot.shotID
                     )
-                    if !guidedHistoricalHydrationAttemptedRequestKeys.contains(hydrationKey) {
-                        return GuidedSessionThumbnailResolution(
-                            source: source,
-                            sessionID: session.id,
-                            path: path,
-                            exists: false
-                        )
-                    }
+                    let alreadyRequested = guidedHistoricalHydrationAttemptedRequestKeys.contains(hydrationKey)
+                    verboseLog(
+                        "[GuidedReferenceSelect] propertyID=\(propertyID.uuidString) " +
+                        "guidedKey=\(key) sourceSessionID=\(session.id.uuidString) " +
+                        "sourceFinalized=\(isGuidedFinalizedReferenceSession(session)) " +
+                        "sourceDate=\(guidedReferenceSortDate(session)) " +
+                        "exists=false hydrationRequested=\(alreadyRequested)"
+                    )
+                    return GuidedSessionThumbnailResolution(
+                        source: source,
+                        sessionID: session.id,
+                        path: path,
+                        exists: false
+                    )
                 }
             }
 
@@ -4243,7 +4248,7 @@ struct ContentView: View {
             return nil
         }
 
-        for prior in priorSessions where prior.id != baselineSessionID {
+        for prior in priorSessions {
             if let resolved = firstUsableResolution(in: prior, source: .prior) {
                 return resolved
             }
@@ -4268,13 +4273,11 @@ struct ContentView: View {
         metadataCache: inout [UUID: SessionMetadata]
     ) -> AppState.OperationalMediaHydrationRequest? {
         let key = guidedKey(for: guidedShot)
-
-        let priorSessions: [Session] = {
-            guard let currentSession else { return [] }
-            return orderedSessions
-                .filter { $0.id != currentSession.id && $0.startedAt < currentSession.startedAt }
-                .sorted { $0.startedAt > $1.startedAt }
-        }()
+        let priorSessions = guidedHistoricalReferenceSessions(
+            currentSession: currentSession,
+            baselineSessionID: baselineSessionID,
+            orderedSessions: orderedSessions
+        )
 
         func requestForBestHistoricalShot(in session: Session) -> AppState.OperationalMediaHydrationRequest? {
             guard let metadata = metadataForSession(propertyID: propertyID, sessionID: session.id, cache: &metadataCache) else {
@@ -4321,7 +4324,7 @@ struct ContentView: View {
             return nil
         }
 
-        for prior in priorSessions where prior.id != baselineSessionID {
+        for prior in priorSessions {
             if let request = requestForBestHistoricalShot(in: prior) {
                 return request
             }
@@ -4335,6 +4338,45 @@ struct ContentView: View {
         }
 
         return nil
+    }
+
+    private func guidedHistoricalReferenceSessions(
+        currentSession: Session?,
+        baselineSessionID: UUID?,
+        orderedSessions: [Session]
+    ) -> [Session] {
+        guard let currentSession else { return [] }
+        return orderedSessions
+            .filter { session in
+                session.id != currentSession.id &&
+                session.id != baselineSessionID &&
+                session.deletedAt == nil &&
+                session.startedAt < currentSession.startedAt
+            }
+            .sorted { lhs, rhs in
+                let lhsFinalized = isGuidedFinalizedReferenceSession(lhs)
+                let rhsFinalized = isGuidedFinalizedReferenceSession(rhs)
+                if lhsFinalized != rhsFinalized {
+                    return lhsFinalized && !rhsFinalized
+                }
+                let lhsDate = guidedReferenceSortDate(lhs)
+                let rhsDate = guidedReferenceSortDate(rhs)
+                if lhsDate != rhsDate {
+                    return lhsDate > rhsDate
+                }
+                return lhs.startedAt > rhs.startedAt
+            }
+    }
+
+    private func isGuidedFinalizedReferenceSession(_ session: Session) -> Bool {
+        session.status == .completed ||
+        session.isSealed ||
+        session.exportedAt != nil ||
+        session.firstDeliveredAt != nil
+    }
+
+    private func guidedReferenceSortDate(_ session: Session) -> Date {
+        session.firstDeliveredAt ?? session.exportedAt ?? session.endedAt ?? session.startedAt
     }
 
     private func scheduleGuidedHistoricalHydrationIfNeeded(
@@ -4432,6 +4474,7 @@ struct ContentView: View {
         guard let metadata else { return nil }
         return metadata.shots
             .compactMap { shot -> (ShotMetadata, String)? in
+                guard shot.sessionID == metadata.sessionID else { return nil }
                 guard let matchBy = shotMetadataMatchKind(shot, observation: observation, observationShotIDs: observationShotIDs) else {
                     return nil
                 }
@@ -4545,14 +4588,13 @@ struct ContentView: View {
             return currentCandidate
         }
 
-        let priorSessions: [Session] = {
-            guard let currentSession else { return [] }
-            return orderedSessions
-                .filter { $0.id != currentSession.id && $0.startedAt < currentSession.startedAt }
-                .sorted { $0.startedAt > $1.startedAt }
-        }()
+        let priorSessions = guidedHistoricalReferenceSessions(
+            currentSession: currentSession,
+            baselineSessionID: baselineSessionID,
+            orderedSessions: orderedSessions
+        )
 
-        for prior in priorSessions where prior.id != baselineSessionID {
+        for prior in priorSessions {
             let match = mostRecentMatchingFlaggedShot(
                 in: metadataForSession(propertyID: propertyID, sessionID: prior.id, cache: &metadataCache),
                 observation: observation,
@@ -4564,6 +4606,13 @@ struct ContentView: View {
                 source: .prior,
                 match: match
             ) {
+                verboseLog(
+                    "[FlaggedReferenceSelect] propertyID=\(propertyID.uuidString) " +
+                    "issueID=\(observation.id.uuidString) sourceSessionID=\(prior.id.uuidString) " +
+                    "sourceFinalized=\(isGuidedFinalizedReferenceSession(prior)) " +
+                    "sourceDate=\(guidedReferenceSortDate(prior)) " +
+                    "pathExists=\(candidate.resolution.exists)"
+                )
                 return candidate
             }
         }
@@ -6484,6 +6533,7 @@ struct ContentView: View {
             currentSessionID: appState.currentSession?.id,
             currentSessionStartedAt: appState.currentSession?.startedAt,
             currentSessionEndedAt: appState.currentSession?.endedAt,
+            currentSessionShotIDs: activeSessionShotIDs,
             canChangeShotLifecycle: appState.currentSession?.status == .draft && appState.currentSession?.isSealed == false,
             isBaselineSession: isCurrentSessionBaselineFromPersisted,
             allowReferenceFallback: shouldAllowChecklistReferenceFallback,
@@ -10460,7 +10510,11 @@ extension ContentView {
             "[BaselineState] propertyID=\(propertyID.uuidString) baselineSessionID=\(baselineState.baselineSessionID?.uuidString ?? "NONE") hasBaseline=\(baselineState.hasBaseline)"
         )
         let sessionMetadata = sessionMetadataForActiveSession(propertyID: propertyID, sessionID: activeSessionID)
-        var sessionShotIDs = Set((sessionMetadata?.shots ?? []).map(\.shotID))
+        var sessionShotIDs = currentSessionMaterialShotIDs(
+            propertyID: propertyID,
+            sessionID: activeSessionID,
+            metadata: sessionMetadata
+        )
         let isBaselineSessionActive = baselineState.baselineSessionID == activeSessionID
         let orderedSessions = ((try? localStore.fetchSessions(propertyID: propertyID)) ?? []).sorted { $0.startedAt < $1.startedAt }
         let currentSession = orderedSessions.first(where: { $0.id == activeSessionID }) ?? appState.currentSession
@@ -10479,7 +10533,16 @@ extension ContentView {
         if !isBaselineSessionActive {
             let currentGuidedMetadataByID = Dictionary(
                 uniqueKeysWithValues: (sessionMetadata?.shots ?? [])
-                    .filter(\.isGuided)
+                    .filter { shot in
+                        guard let activeSessionID else { return false }
+                        guard shot.isGuided, shot.sessionID == activeSessionID else { return false }
+                        return resolvedSessionImagePath(
+                            for: shot,
+                            propertyID: propertyID,
+                            sessionID: activeSessionID,
+                            suppressAutoHydration: true
+                        ).exists
+                    }
                     .map { ($0.shotID, $0) }
             )
 
@@ -10600,12 +10663,17 @@ extension ContentView {
             if normalized != existing {
                 try? localStore.saveGuidedShots(normalized, propertyID: propertyID)
             }
+            let scoped = guidedShotsScopedToCurrentSession(
+                normalized,
+                propertyID: propertyID,
+                sessionID: sessionID
+            )
             syncGuidedShotsToCurrentSessionMetadataIfPersisted(
                 propertyID: propertyID,
                 sessionID: sessionID,
-                guidedShots: normalized
+                guidedShots: scoped
             )
-            return visibleGuidedShots(from: normalized)
+            return visibleGuidedShots(from: scoped)
         }
 
         guard let sessionID else {
@@ -10681,6 +10749,66 @@ extension ContentView {
         }
         print("[GuidedSeed] session=\(sessionID.uuidString) seededCount=\(normalizedSeeded.count)")
         return visibleGuidedShots(from: normalizedSeeded)
+    }
+
+    private func guidedShotsScopedToCurrentSession(
+        _ guidedShots: [GuidedShot],
+        propertyID: UUID,
+        sessionID: UUID?
+    ) -> [GuidedShot] {
+        guard let sessionID,
+              let session = (((try? localStore.fetchSessions(propertyID: propertyID)) ?? [])
+                .first { $0.id == sessionID } ?? appState.currentSession),
+              let metadata = try? localStore.loadSessionMetadata(propertyID: propertyID, sessionID: sessionID) else {
+            return guidedShots.map { guided in
+                var scoped = guided
+                scoped.shot = nil
+                scoped.isCompleted = false
+                scoped.skipReason = nil
+                scoped.skipReasonNote = nil
+                scoped.skipSessionID = nil
+                return scoped
+            }
+        }
+
+        let sessionShotIDs = Set(metadata.shots.map(\.shotID))
+        return guidedShots.map { guided in
+            var scoped = guided
+            if let shot = guided.shot {
+                let rawPath = shot.imageLocalIdentifier?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                let belongsToSession =
+                    sessionShotIDs.contains(shot.id) &&
+                    shot.capturedAt >= session.startedAt &&
+                    (session.endedAt.map { shot.capturedAt <= $0 } ?? true) &&
+                    !rawPath.isEmpty &&
+                    Self.reportAsset(from: rawPath) != nil
+                if belongsToSession {
+                    scoped.isCompleted = true
+                } else {
+                    if !rawPath.isEmpty {
+                        let existingReferencePath = scoped.referenceImagePath?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                        let existingReferenceID = scoped.referenceImageLocalIdentifier?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                        if existingReferencePath.isEmpty {
+                            scoped.referenceImagePath = rawPath
+                        }
+                        if existingReferenceID.isEmpty {
+                            scoped.referenceImageLocalIdentifier = rawPath
+                        }
+                    }
+                    scoped.shot = nil
+                    scoped.isCompleted = false
+                }
+            } else {
+                scoped.isCompleted = false
+            }
+
+            if scoped.skipSessionID != sessionID {
+                scoped.skipReason = nil
+                scoped.skipReasonNote = nil
+                scoped.skipSessionID = nil
+            }
+            return scoped
+        }
     }
 
     private func refreshUIAfterRetakeSuccess(existingFilename: String?, newLocalIdentifier: String?) {
@@ -11659,8 +11787,8 @@ extension ContentView {
             propertyID: propertyID,
             session: currentSession
         )
-        let reExportEligibleNow = appState.isReExportEligible(currentSession)
-        let isPendingDelivery = appState.isPendingDelivery(currentSession)
+        let reExportEligibleNow = appState.isReExportLocallyAvailable(currentSession)
+        let isPendingDelivery = appState.isPendingDeliveryLocallyAvailable(currentSession)
 
         print(
             "[EndSession] sessionID=\(currentSession.id.uuidString) " +
@@ -11740,6 +11868,7 @@ extension ContentView {
         }
 
         let capturedShotKeys = Set(metadata.shots.compactMap { shot -> String? in
+            guard shot.sessionID == sessionID else { return nil }
             let originalRelative = shot.originalRelativePath.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !originalRelative.isEmpty else { return nil }
             guard localStore.resolveSessionRelativeFileURL(
@@ -11803,6 +11932,7 @@ extension ContentView {
 
     private func isGuidedShotCapturedInCurrentSession(_ shot: Shot?) -> Bool {
         guard let shot else { return false }
+        guard activeSessionShotIDs.contains(shot.id) else { return false }
         guard let startedAt = appState.currentSession?.startedAt else { return false }
         if shot.capturedAt < startedAt {
             return false
@@ -11848,8 +11978,11 @@ extension ContentView {
     }
 
     private func sessionShotIDsForActiveSession(propertyID: UUID, sessionID: UUID?) -> Set<UUID> {
-        let filtered = sessionMetadataForActiveSession(propertyID: propertyID, sessionID: sessionID)?.shots ?? []
-        return Set(filtered.map(\.shotID))
+        currentSessionMaterialShotIDs(
+            propertyID: propertyID,
+            sessionID: sessionID,
+            metadata: sessionMetadataForActiveSession(propertyID: propertyID, sessionID: sessionID)
+        )
     }
 
     private func sessionMetadataForActiveSession(propertyID: UUID, sessionID: UUID?) -> SessionMetadata? {
@@ -11857,6 +11990,27 @@ extension ContentView {
         let metadata = try? localStore.loadSessionMetadata(propertyID: propertyID, sessionID: sessionID)
         guard metadata?.propertyID == propertyID, metadata?.sessionID == sessionID else { return nil }
         return metadata
+    }
+
+    private func currentSessionMaterialShotIDs(
+        propertyID: UUID,
+        sessionID: UUID?,
+        metadata: SessionMetadata?
+    ) -> Set<UUID> {
+        guard let sessionID, let metadata else { return [] }
+        return Set(metadata.shots.compactMap { shot -> UUID? in
+            guard shot.sessionID == sessionID else { return nil }
+            let relative = shot.originalRelativePath.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !relative.isEmpty else { return nil }
+            guard localStore.resolveSessionRelativeFileURL(
+                propertyID: propertyID,
+                sessionID: sessionID,
+                relativePath: relative
+            ) != nil else {
+                return nil
+            }
+            return shot.shotID
+        })
     }
 
     private func resolvedSessionImagePath(
@@ -11899,6 +12053,21 @@ extension ContentView {
         sessionExportErrorMessage = nil
         isPreparingSessionExport = true
         sessionExportChecklist = ExportChecklistState()
+        waitForPendingCaptureSavesThenBeginExportNow()
+    }
+
+    private func waitForPendingCaptureSavesThenBeginExportNow() {
+        if pendingCaptureSaveCount > 0 {
+            print(
+                "[ExportProgress] event=wait_for_capture_saves " +
+                "pendingCaptureSaveCount=\(pendingCaptureSaveCount)"
+            )
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                waitForPendingCaptureSavesThenBeginExportNow()
+            }
+            return
+        }
+
         prepareSessionExportReferences()
         appState.sealCurrentSessionForExportNow()
 
@@ -11917,10 +12086,13 @@ extension ContentView {
                     }
                 })
                 DispatchQueue.main.async {
-                    isPreparingSessionExport = false
-                    showSessionActionsSheet = false
-                    awaitingSessionExportDismiss = true
-                    sessionExportFile = SessionExportFile(url: url)
+                    sessionExportChecklist.zipReady = true
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+                        isPreparingSessionExport = false
+                        showSessionActionsSheet = false
+                        awaitingSessionExportDismiss = true
+                        sessionExportFile = SessionExportFile(url: url)
+                    }
                 }
             } catch {
                 DispatchQueue.main.async {
@@ -11965,15 +12137,10 @@ extension ContentView {
             appState.triggerBackupForLifecycleEvent()
             appState.refreshPropertiesInBackground()
             showSessionActionsSheet = false
-            Task {
-                await appState.releaseCurrentSessionCoordinationLockIfOwned()
-                if let persistedDraft {
-                    appState.scheduleSessionShadowWriteAfterCoordinationRelease(for: persistedDraft)
-                }
-                await MainActor.run {
-                    onExitToHub?()
-                }
+            if let persistedDraft {
+                appState.scheduleSessionShadowWriteAfterCoordinationRelease(for: persistedDraft)
             }
+            onExitToHub?()
             return
         } else if let propertyID = appState.selectedPropertyID,
                   let sessionID = appState.currentSession?.id {
@@ -12130,6 +12297,7 @@ extension ContentView {
             }
             expectedPaths.insert("Originals/\(originalFile.filename)")
         }
+        progress?(.originals)
         try exportArtifacts.sessionData.write(to: exportRoot.appendingPathComponent("session.json"), options: .atomic)
         try exportArtifacts.validationData.write(to: exportRoot.appendingPathComponent("validation.txt"), options: .atomic)
         for csvFile in localStore.exportCSVFiles(for: exportArtifacts.metadata) {
@@ -12143,7 +12311,6 @@ extension ContentView {
                 userInfo: [NSLocalizedDescriptionKey: "Export validation failed before ZIP creation.\n\n\(message)"]
             )
         }
-        progress?(.originals)
 
 #if DEBUG
         let sourceURL = localStore.sessionJSONURL(propertyID: propertyID, sessionID: sessionID)
@@ -13733,9 +13900,13 @@ extension ContentView {
                         baselineSessionID: baselineState.baselineSessionID
                     )
                     if let referencePath = referenceResolved.path?.trimmingCharacters(in: .whitespacesAndNewlines),
-                       !referencePath.isEmpty,
-                       referenceResolved.exists {
+                       !referencePath.isEmpty {
                         referenceMap[observation.id] = referencePath
+                        verboseLog(
+                            "[FlaggedReferenceDisplay] issueID=\(observation.id.uuidString) " +
+                            "selectedPathExists=\(referenceResolved.exists) " +
+                            "flaggedMediaPendingReason=\(referenceResolved.exists ? "none" : "reference_media_missing_or_hydrating")"
+                        )
                     }
                     if let persistedAngle = persistedAngleIndexForIssue(propertyID: propertyID, issueID: observation.id) {
                         angleMap[observation.id] = max(1, persistedAngle)
@@ -16906,6 +17077,7 @@ extension ContentView {
         let currentSessionID: UUID?
         let currentSessionStartedAt: Date?
         let currentSessionEndedAt: Date?
+        let currentSessionShotIDs: Set<UUID>
         let canChangeShotLifecycle: Bool
         let isBaselineSession: Bool
         let allowReferenceFallback: Bool
@@ -17408,6 +17580,7 @@ extension ContentView {
 
         private func isCapturedInCurrentSession(_ guidedShot: GuidedShot) -> Bool {
             guard let shot = guidedShot.shot else { return false }
+            guard currentSessionShotIDs.contains(shot.id) else { return false }
             guard let startedAt = currentSessionStartedAt else { return false }
             if shot.capturedAt < startedAt {
                 return false

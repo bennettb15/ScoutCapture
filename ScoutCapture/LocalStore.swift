@@ -554,9 +554,19 @@ final class LocalStore {
         let firstDeliveredAt: Date?
         let reExportExpiresAt: Date?
         let exportedAt: Date?
+        let createdByDeviceID: String?
         let fileCount: Int
         let totalBytes: Int64
         let files: [FileRecord]
+    }
+
+    struct SessionArchivePackageAvailability {
+        let available: Bool
+        let pathExists: Bool
+        let checksumVerified: Bool
+        let archivePath: String?
+        let originatingDeviceID: String?
+        let reason: String
     }
 
     private let fileManager: FileManager
@@ -859,7 +869,8 @@ final class LocalStore {
         let sessionURL = sessionJSONURL(propertyID: session.propertyID, sessionID: session.id)
         let sessionData = try Data(contentsOf: sessionURL)
         let exportObjectPost = try decoder.decode(SessionMetadata.self, from: sessionData)
-        let exportReadyMetadata = sanitizedExportMetadata(exportObjectPost)
+        let exportPlan = try buildSessionExportPlan(for: exportObjectPost)
+        let exportReadyMetadata = exportPlan.metadata
         let validationReportPost = validateExport(exportReadyMetadata, phase: "postwrite")
         let validationData = Data(
             validationText(
@@ -869,7 +880,7 @@ final class LocalStore {
             ).utf8
         )
         let exportSessionData = try encoder.encode(exportReadyMetadata)
-        let originalFiles = exportOriginalFiles(for: exportReadyMetadata)
+        let originalFiles = exportPlan.originalFiles
 
         return ValidatedSessionExportArtifacts(
             metadata: exportReadyMetadata,
@@ -881,31 +892,68 @@ final class LocalStore {
         )
     }
 
+    private func buildSessionExportPlan(for metadata: SessionMetadata) throws -> (metadata: SessionMetadata, originalFiles: [ExportOriginalFile]) {
+        let exportShotIDs = Set(clientExportShots(in: metadata).map(\.shotID))
+        var exportReadyMetadata = metadata
+        var usedFilenames = Set<String>()
+        var originalFiles: [ExportOriginalFile] = []
+        var exportRelativePathByShotID: [UUID: String] = [:]
+
+        for index in exportReadyMetadata.shots.indices {
+            let sourceShot = metadata.shots[index]
+            guard exportShotIDs.contains(sourceShot.shotID) else { continue }
+
+            let sourceURL = try exportOriginalSourceURL(for: sourceShot, metadata: metadata)
+            let exportFilename = uniqueExportOriginalFilename(for: sourceShot, usedFilenames: &usedFilenames)
+            let exportRelativePath = "Originals/\(exportFilename)"
+            exportReadyMetadata.shots[index].originalFilename = exportFilename
+            exportReadyMetadata.shots[index].originalRelativePath = exportRelativePath
+            exportRelativePathByShotID[sourceShot.shotID] = exportRelativePath
+            originalFiles.append(ExportOriginalFile(filename: exportFilename, sourceURL: sourceURL))
+        }
+
+        exportReadyMetadata = sanitizedExportMetadata(
+            exportReadyMetadata,
+            shotRelativePathByID: exportRelativePathByShotID
+        )
+
+        let expectedExportShotCount = exportShotIDs.count
+        guard originalFiles.count == expectedExportShotCount else {
+            throw NSError(
+                domain: "LocalStore.ExportCompleteness",
+                code: 1,
+                userInfo: [
+                    NSLocalizedDescriptionKey: "Export media completeness check failed: expected \(expectedExportShotCount) originals, found \(originalFiles.count)."
+                ]
+            )
+        }
+
+        print(
+            "[ExportMediaCompleteness] sessionID=\(metadata.sessionID.uuidString) " +
+            "expectedShotCount=\(expectedExportShotCount) " +
+            "originalFileCount=\(originalFiles.count) " +
+            "uniqueFilenameCount=\(Set(originalFiles.map(\.filename)).count)"
+        )
+
+        return (exportReadyMetadata, originalFiles)
+    }
+
     func exportOriginalFiles(for metadata: SessionMetadata) -> [ExportOriginalFile] {
-        let originalsRoot = originalsFolderURL(propertyID: metadata.propertyID, sessionID: metadata.sessionID)
-        var seen = Set<String>()
-
+        var usedFilenames = Set<String>()
         return clientExportShots(in: metadata).compactMap { shot in
-            let filename = exportOriginalFilename(for: shot)
-            guard !filename.isEmpty else { return nil }
-            guard seen.insert(filename).inserted else { return nil }
-
-            let directURL = originalsRoot.appendingPathComponent(filename)
-            if fileManager.fileExists(atPath: directURL.path) {
-                return ExportOriginalFile(filename: filename, sourceURL: directURL)
-            }
-
-            let relativeName = URL(fileURLWithPath: shot.originalRelativePath).lastPathComponent
-            guard !relativeName.isEmpty else { return nil }
-            let relativeURL = originalsRoot.appendingPathComponent(relativeName)
-            guard fileManager.fileExists(atPath: relativeURL.path) else { return nil }
-            return ExportOriginalFile(filename: filename, sourceURL: relativeURL)
+            guard let sourceURL = try? exportOriginalSourceURL(for: shot, metadata: metadata) else { return nil }
+            let filename = uniqueExportOriginalFilename(for: shot, usedFilenames: &usedFilenames)
+            return ExportOriginalFile(filename: filename, sourceURL: sourceURL)
         }
     }
 
-    private func sanitizedExportMetadata(_ metadata: SessionMetadata) -> SessionMetadata {
+    private func sanitizedExportMetadata(
+        _ metadata: SessionMetadata,
+        shotRelativePathByID overrideShotRelativePathByID: [UUID: String]? = nil
+    ) -> SessionMetadata {
         var sanitized = metadata
-        let shotRelativePathByID = Dictionary(uniqueKeysWithValues: metadata.shots.map { ($0.shotID, $0.originalRelativePath) })
+        let shotRelativePathByID = overrideShotRelativePathByID ??
+            Dictionary(uniqueKeysWithValues: metadata.shots.map { ($0.shotID, $0.originalRelativePath) })
         sanitized.guidedShots = metadata.guidedShots.map { guided in
             sanitizeGuidedShotForExport(guided, shotRelativePathByID: shotRelativePathByID)
         }
@@ -963,6 +1011,80 @@ final class LocalStore {
             return directName
         }
         return URL(fileURLWithPath: shot.originalRelativePath).lastPathComponent
+    }
+
+    private func uniqueExportOriginalFilename(for shot: ShotMetadata, usedFilenames: inout Set<String>) -> String {
+        let rawName = exportOriginalFilename(for: shot)
+        let fallbackName = "\(shot.shotID.uuidString).heic"
+        let baseName = rawName.isEmpty ? fallbackName : rawName
+        let leaf = URL(fileURLWithPath: baseName).lastPathComponent
+        let candidate = leaf.isEmpty ? fallbackName : leaf
+        let lowerCandidate = candidate.lowercased()
+        if usedFilenames.insert(lowerCandidate).inserted {
+            return candidate
+        }
+
+        let url = URL(fileURLWithPath: candidate)
+        let stem = url.deletingPathExtension().lastPathComponent
+        let ext = url.pathExtension
+        let suffix = String(shot.shotID.uuidString.prefix(8)).lowercased()
+        let deduped = ext.isEmpty ? "\(stem)-\(suffix)" : "\(stem)-\(suffix).\(ext)"
+        var attempt = deduped
+        var counter = 2
+        while !usedFilenames.insert(attempt.lowercased()).inserted {
+            attempt = ext.isEmpty ? "\(stem)-\(suffix)-\(counter)" : "\(stem)-\(suffix)-\(counter).\(ext)"
+            counter += 1
+        }
+        return attempt
+    }
+
+    private func exportOriginalSourceURL(for shot: ShotMetadata, metadata: SessionMetadata) throws -> URL {
+        let sessionRoot = sessionFolderURL(propertyID: metadata.propertyID, sessionID: metadata.sessionID)
+        let originalsRoot = originalsFolderURL(propertyID: metadata.propertyID, sessionID: metadata.sessionID)
+        var candidates: [URL] = []
+
+        if let relative = trimmedNonEmpty(shot.originalRelativePath) {
+            let relativeURL = URL(fileURLWithPath: relative)
+            if (relative as NSString).isAbsolutePath {
+                candidates.append(relativeURL)
+            } else {
+                candidates.append(sessionRoot.appendingPathComponent(relative, isDirectory: false))
+                candidates.append(originalsRoot.appendingPathComponent(relativeURL.lastPathComponent, isDirectory: false))
+            }
+        }
+
+        if let filename = trimmedNonEmpty(shot.originalFilename) {
+            candidates.append(originalsRoot.appendingPathComponent(URL(fileURLWithPath: filename).lastPathComponent, isDirectory: false))
+        }
+
+        candidates.append(originalsRoot.appendingPathComponent("\(shot.shotID.uuidString).heic", isDirectory: false))
+
+        var seen = Set<String>()
+        var candidateDiagnostics: [String] = []
+        for candidate in candidates where seen.insert(candidate.path).inserted {
+            _ = ensureUbiquitousItemAvailable(at: candidate, timeout: 2.0)
+            guard fileManager.fileExists(atPath: candidate.path) else {
+                candidateDiagnostics.append("\(candidate.path)|exists=false|bytes=0")
+                continue
+            }
+            let attributes = try? fileManager.attributesOfItem(atPath: candidate.path)
+            let byteCount = (attributes?[.size] as? NSNumber)?.int64Value ?? 0
+            candidateDiagnostics.append("\(candidate.path)|exists=true|bytes=\(byteCount)")
+            guard byteCount > 0 else { continue }
+            return candidate
+        }
+
+        throw NSError(
+            domain: "LocalStore.ExportCompleteness",
+            code: 2,
+            userInfo: [
+                NSLocalizedDescriptionKey: "Missing export original for shot \(shot.shotID.uuidString).",
+                "shot_id": shot.shotID.uuidString,
+                "original_filename": shot.originalFilename,
+                "original_relative_path": shot.originalRelativePath,
+                "candidate_paths": candidateDiagnostics.joined(separator: "\n")
+            ]
+        )
     }
 
     private func clientExportShots(in metadata: SessionMetadata) -> [ShotMetadata] {
@@ -2630,7 +2752,7 @@ final class LocalStore {
     }
 
     @discardableResult
-    func createSessionArchiveSnapshot(session: Session, trigger: String) throws -> URL? {
+    func createSessionArchiveSnapshot(session: Session, trigger: String, deviceID: String? = nil) throws -> URL? {
         try performFileIOSync {
             guard session.status == .completed, session.isSealed else { return nil }
 
@@ -2709,6 +2831,7 @@ final class LocalStore {
                 firstDeliveredAt: session.firstDeliveredAt,
                 reExportExpiresAt: session.reExportExpiresAt,
                 exportedAt: session.exportedAt,
+                createdByDeviceID: trimmedNonEmpty(deviceID),
                 fileCount: fileRecords.count,
                 totalBytes: totalBytes,
                 files: fileRecords
@@ -2884,6 +3007,125 @@ final class LocalStore {
                 }
                 return lhs.createdAt > rhs.createdAt
             }
+        }
+    }
+
+    func deliveredSessionArchivePackageAvailability(propertyID: UUID, sessionID: UUID, expectedDeviceID: String? = nil) throws -> SessionArchivePackageAvailability {
+        try sessionArchivePackageAvailability(
+            propertyID: propertyID,
+            sessionID: sessionID,
+            requireDelivered: true,
+            expectedDeviceID: expectedDeviceID
+        )
+    }
+
+    func sessionArchivePackageAvailability(
+        propertyID: UUID,
+        sessionID: UUID,
+        requireDelivered: Bool,
+        expectedDeviceID: String? = nil
+    ) throws -> SessionArchivePackageAvailability {
+        try performFileIOSync {
+            let sessionRoot = activeRootURL
+                .appendingPathComponent("Archives", isDirectory: true)
+                .appendingPathComponent("Sessions", isDirectory: true)
+                .appendingPathComponent(propertyID.uuidString, isDirectory: true)
+                .appendingPathComponent(sessionID.uuidString, isDirectory: true)
+
+            guard fileManager.fileExists(atPath: sessionRoot.path) else {
+                return SessionArchivePackageAvailability(
+                    available: false,
+                    pathExists: false,
+                    checksumVerified: false,
+                    archivePath: sessionRoot.path,
+                    originatingDeviceID: nil,
+                    reason: "archive_session_folder_missing"
+                )
+            }
+
+            let snapshots = try fileManager.contentsOfDirectory(
+                at: sessionRoot,
+                includingPropertiesForKeys: [.isDirectoryKey],
+                options: [.skipsHiddenFiles]
+            ).sorted { $0.lastPathComponent > $1.lastPathComponent }
+
+            var sawManifest = false
+            var sawDeliveredManifest = false
+            var sawDeviceMismatch = false
+            var latestOriginatingDeviceID: String?
+            for snapshot in snapshots {
+                let snapshotValues = try snapshot.resourceValues(forKeys: [.isDirectoryKey])
+                guard snapshotValues.isDirectory == true else { continue }
+                let manifestURL = snapshot.appendingPathComponent("manifest.json", isDirectory: false)
+                guard fileManager.fileExists(atPath: manifestURL.path) else { continue }
+                sawManifest = true
+                let manifestData = try Data(contentsOf: manifestURL)
+                let manifest = try decoder.decode(SessionArchiveManifest.self, from: manifestData)
+                guard manifest.propertyID == propertyID, manifest.sessionID == sessionID else { continue }
+                latestOriginatingDeviceID = trimmedNonEmpty(manifest.createdByDeviceID)
+                if manifest.firstDeliveredAt != nil {
+                    sawDeliveredManifest = true
+                }
+                guard !requireDelivered || manifest.firstDeliveredAt != nil else { continue }
+                if let expectedDeviceID = trimmedNonEmpty(expectedDeviceID),
+                   trimmedNonEmpty(manifest.createdByDeviceID) != expectedDeviceID {
+                    sawDeviceMismatch = true
+                    continue
+                }
+                guard manifest.fileCount > 0, manifest.totalBytes > 0, !manifest.files.isEmpty else { continue }
+                do {
+                    try verifySessionArchiveSnapshot(at: snapshot, manifest: manifest)
+                    return SessionArchivePackageAvailability(
+                        available: true,
+                        pathExists: true,
+                        checksumVerified: true,
+                        archivePath: snapshot.path,
+                        originatingDeviceID: trimmedNonEmpty(manifest.createdByDeviceID),
+                        reason: "local_verified_delivered_archive"
+                    )
+                } catch {
+                    continue
+                }
+            }
+
+            if sawDeviceMismatch {
+                return SessionArchivePackageAvailability(
+                    available: false,
+                    pathExists: true,
+                    checksumVerified: false,
+                    archivePath: sessionRoot.path,
+                    originatingDeviceID: latestOriginatingDeviceID,
+                    reason: "archive_device_mismatch_or_missing"
+                )
+            }
+            if sawDeliveredManifest {
+                return SessionArchivePackageAvailability(
+                    available: false,
+                    pathExists: true,
+                    checksumVerified: false,
+                    archivePath: sessionRoot.path,
+                    originatingDeviceID: latestOriginatingDeviceID,
+                    reason: "delivered_archive_payload_missing_or_invalid"
+                )
+            }
+            if sawManifest {
+                return SessionArchivePackageAvailability(
+                    available: false,
+                    pathExists: true,
+                    checksumVerified: false,
+                    archivePath: sessionRoot.path,
+                    originatingDeviceID: latestOriginatingDeviceID,
+                    reason: "delivered_archive_manifest_missing"
+                )
+            }
+            return SessionArchivePackageAvailability(
+                available: false,
+                pathExists: true,
+                checksumVerified: false,
+                archivePath: sessionRoot.path,
+                originatingDeviceID: nil,
+                reason: "archive_manifest_missing"
+            )
         }
     }
 
@@ -3247,6 +3489,90 @@ final class LocalStore {
             return lhs.id.uuidString < rhs.id.uuidString
         }
         try writeObservations(merged, propertyID: propertyID)
+    }
+
+    func mergeRemoteFlaggedReferenceObservations(
+        propertyID: UUID,
+        sessionID: UUID,
+        metadata: SessionMetadata
+    ) throws {
+        try performFileIOSync {
+            try ensurePropertyExists(propertyID)
+            let sessionFolder = sessionFolderURL(propertyID: propertyID, sessionID: sessionID)
+            let flaggedShotsByIssueID = Dictionary(grouping: metadata.shots.filter { $0.isFlagged && $0.issueID != nil }) { shot in
+                shot.issueID!
+            }
+            guard !flaggedShotsByIssueID.isEmpty else { return }
+
+            var observations = try readObservations(propertyID: propertyID)
+            var observationsByID = Dictionary(uniqueKeysWithValues: observations.map { ($0.id, $0) })
+
+            func shotPath(for shot: ShotMetadata) -> String {
+                let relative = shot.originalRelativePath.trimmingCharacters(in: .whitespacesAndNewlines)
+                if relative.isEmpty {
+                    return sessionFolder
+                        .appendingPathComponent("Originals", isDirectory: true)
+                        .appendingPathComponent(shot.originalFilename, isDirectory: false)
+                        .path
+                }
+                return sessionFolder.appendingPathComponent(relative, isDirectory: false).path
+            }
+
+            var didMutate = false
+            for (issueID, flaggedShots) in flaggedShotsByIssueID {
+                let orderedShots = flaggedShots.sorted { $0.createdAt < $1.createdAt }
+                guard let latestShot = orderedShots.max(by: { $0.updatedAt < $1.updatedAt }) else { continue }
+                let issue = metadata.issues.first(where: { $0.issueID == issueID })
+                let createdAt = issue?.firstSeenAt ?? orderedShots.first?.createdAt ?? metadata.startedAt
+                let updatedAt = issue?.lastSeenAt ?? latestShot.updatedAt
+                let shots = orderedShots.map { shot in
+                    Shot(
+                        id: shot.shotID,
+                        capturedAt: shot.createdAt,
+                        imageLocalIdentifier: shotPath(for: shot),
+                        note: shot.noteText
+                    )
+                }
+                let status: Observation.Status = (issue?.issueStatus.lowercased() == "resolved") ? .resolved : .active
+                var next = observationsByID[issueID] ?? Observation(
+                    id: issueID,
+                    propertyID: propertyID,
+                    sessionID: sessionID,
+                    createdAt: createdAt,
+                    updatedAt: updatedAt,
+                    statement: trimmedNonEmpty(issue?.detailNote) ?? "",
+                    status: status
+                )
+                if next.updatedAt > updatedAt,
+                   next.updatedInSessionID != sessionID,
+                   next.resolvedInSessionID != sessionID {
+                    continue
+                }
+                next.updatedAt = updatedAt
+                next.status = status
+                next.linkedShotID = shots.last?.id
+                next.updatedInSessionID = issue?.lastCaptureSessionId ?? sessionID
+                next.resolvedInSessionID = status == .resolved ? (issue?.lastCaptureSessionId ?? sessionID) : nil
+                next.building = latestShot.building
+                next.targetElevation = latestShot.elevation
+                next.detailType = latestShot.detailType
+                next.priority = latestShot.priority
+                next.currentReason = trimmedNonEmpty(issue?.currentReason) ?? trimmedNonEmpty(issue?.detailNote) ?? trimmedNonEmpty(latestShot.noteText)
+                next.previousReason = trimmedNonEmpty(issue?.previousReason)
+                next.note = trimmedNonEmpty(issue?.detailNote)
+                next.shots = shots
+                observationsByID[issueID] = next
+                didMutate = true
+            }
+
+            guard didMutate else { return }
+            observations = observationsByID.values.sorted { lhs, rhs in
+                if lhs.createdAt != rhs.createdAt { return lhs.createdAt < rhs.createdAt }
+                if lhs.updatedAt != rhs.updatedAt { return lhs.updatedAt < rhs.updatedAt }
+                return lhs.id.uuidString < rhs.id.uuidString
+            }
+            try writeObservations(observations, propertyID: propertyID)
+        }
     }
 
     func wipeAllLocalData() throws {

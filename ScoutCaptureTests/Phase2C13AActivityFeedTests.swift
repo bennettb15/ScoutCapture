@@ -87,6 +87,29 @@ final class Phase2C13AActivityFeedTests: XCTestCase {
         XCTAssertEqual(item.displaySubtitle, "Brian revoked access for john@example.com")
     }
 
+    func testSessionReleaseUsesActorEmailPayloadWithoutMemberCache() {
+        let fixture = try! makeFixture()
+        defer { tearDownFixture(fixture) }
+
+        let item = fixture.appState._debugMakeActivityFeedItemForTests(
+            event: AppState.DebugActivityFeedEventInput(
+                id: UUID(),
+                orgID: UUID(),
+                sessionID: UUID(),
+                actorUserID: UUID(),
+                eventType: "session.released",
+                payload: [
+                    "actor_email": "bennettb15+2@gmail.com",
+                    "property_name": "Kohl's"
+                ],
+                createdAt: Date(timeIntervalSinceReferenceDate: 250)
+            )
+        )
+
+        XCTAssertEqual(item.displayTitle, "Session released")
+        XCTAssertEqual(item.displaySubtitle, "bennettb15+2@gmail.com released Kohl's")
+    }
+
     func testUnknownEventFallsBackToRawEventTypeAndSessionIdentifier() {
         let fixture = try! makeFixture()
         defer { tearDownFixture(fixture) }

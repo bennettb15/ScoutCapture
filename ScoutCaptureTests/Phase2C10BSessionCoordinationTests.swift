@@ -110,7 +110,7 @@ final class Phase2C10BSessionCoordinationTests: XCTestCase {
                 noteText: "Loose outlet cover",
                 noteCategory: nil,
                 originalFilename: "one.jpg",
-                originalRelativePath: "originals/one.jpg",
+                originalRelativePath: "Originals/one.jpg",
                 originalByteSize: 1024,
                 stampedFilename: nil,
                 stampedRelativePath: nil,
@@ -133,6 +133,14 @@ final class Phase2C10BSessionCoordinationTests: XCTestCase {
             )
         ]
         try localStore.saveSessionMetadataAtomically(propertyID: property.id, sessionID: session.id, metadata: metadata)
+        let originalURL = localStore
+            .sessionFolderURL(propertyID: property.id, sessionID: session.id)
+            .appendingPathComponent("Originals/one.jpg", isDirectory: false)
+        try FileManager.default.createDirectory(
+            at: originalURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try Data([0x01, 0x02, 0x03]).write(to: originalURL)
 
         let appState = AppState(
             localStore: localStore,
@@ -197,6 +205,84 @@ final class Phase2C10BSessionCoordinationTests: XCTestCase {
             sessionID: fixture.session.id,
             metadata: metadata
         )
+    }
+
+    private func addMaterialShot(to fixture: Fixture) throws {
+        var metadata = try fixture.localStore.loadSessionMetadata(
+            propertyID: fixture.property.id,
+            sessionID: fixture.session.id
+        )
+        let shotID = UUID()
+        let relativePath = "Originals/promoted.jpg"
+        metadata.shots = [
+            ShotMetadata(
+                shotID: shotID,
+                propertyID: fixture.property.id,
+                sessionID: fixture.session.id,
+                createdAt: Date(timeIntervalSinceReferenceDate: 230),
+                capturedAtLocal: nil,
+                updatedAt: Date(timeIntervalSinceReferenceDate: 231),
+                building: "A",
+                elevation: "North",
+                detailType: "Panel",
+                angleIndex: 1,
+                trade: nil,
+                priority: nil,
+                shotKey: "captured|\(shotID.uuidString.lowercased())",
+                isGuided: false,
+                isFlagged: false,
+                issueID: nil,
+                issueStatus: nil,
+                captureKind: "captured",
+                firstCaptureKind: "captured",
+                noteText: nil,
+                noteCategory: nil,
+                originalFilename: "promoted.jpg",
+                originalRelativePath: relativePath,
+                originalByteSize: 3,
+                stampedFilename: nil,
+                stampedRelativePath: nil,
+                captureMode: nil,
+                lens: nil,
+                exifOrientation: nil,
+                orientation: nil,
+                latitude: nil,
+                longitude: nil,
+                accuracyMeters: nil,
+                imageWidth: nil,
+                imageHeight: nil
+            )
+        ]
+        try fixture.localStore.saveSessionMetadataAtomically(
+            propertyID: fixture.property.id,
+            sessionID: fixture.session.id,
+            metadata: metadata
+        )
+
+        let originalURL = fixture.localStore
+            .sessionFolderURL(propertyID: fixture.property.id, sessionID: fixture.session.id)
+            .appendingPathComponent(relativePath, isDirectory: false)
+        try FileManager.default.createDirectory(
+            at: originalURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try Data([0x01, 0x02, 0x03]).write(to: originalURL)
+    }
+
+    private func makeOtherDraftSession(_ fixture: Fixture) throws -> Session {
+        let session = try fixture.localStore.upsertSession(
+            Session(
+                id: UUID(),
+                propertyID: fixture.property.id,
+                startedAt: Date(timeIntervalSinceReferenceDate: 240),
+                status: .draft,
+                endedAt: nil,
+                exportedAt: nil,
+                isSealed: false
+            )
+        )
+        try fixture.localStore.ensureSessionMetadata(for: session)
+        return session
     }
 
     func testEntryAllowsUnlockedSessionAndClaimsLock() async throws {
@@ -285,6 +371,85 @@ final class Phase2C10BSessionCoordinationTests: XCTestCase {
         XCTAssertNil(remoteOccupancy.occupiedByUserID)
         XCTAssertNil(remoteOccupancy.occupiedByDeviceID)
         XCTAssertNil(remoteOccupancy.occupiedAt)
+    }
+
+    func testFirstCapturePromotesOccupancyToMaterialLockAndBlocksOtherDevice() async throws {
+        let fixture = try makeFixture()
+        defer { tearDownFixture(fixture) }
+        fixture.appState._debugSetAuditEventEmitOverrideForTests { _, _, _, _, _ in }
+        try makeSessionUntouched(fixture)
+
+        let zeroPhotoEntry = await fixture.appState.evaluateSessionEntryCoordination(
+            propertyID: fixture.property.id,
+            sessionID: fixture.session.id
+        )
+        XCTAssertEqual(zeroPhotoEntry, .allowed)
+
+        try addMaterialShot(to: fixture)
+        await fixture.appState._debugPromoteCurrentSessionToActiveCaptureLockForTests(reason: "first_capture_test")
+
+        let remoteOccupancy = fixture.appState._debugReadRemotePropertySessionOccupancyForTests(
+            propertyID: fixture.property.id
+        )
+        XCTAssertEqual(remoteOccupancy.occupiedByUserID, fixture.userID)
+        XCTAssertNotNil(remoteOccupancy.occupiedByDeviceID)
+        XCTAssertNotNil(remoteOccupancy.occupiedAt)
+
+        let promotedLock = fixture.appState._debugReadSessionCoordinationStateForTests(sessionID: fixture.session.id)
+        XCTAssertEqual(promotedLock.lockedByUserID, fixture.userID)
+        XCTAssertNotNil(promotedLock.lockedByDeviceID)
+        XCTAssertNotNil(promotedLock.lockedAt)
+
+        let secondDeviceSession = try makeOtherDraftSession(fixture)
+        fixture.appState.currentSession = secondDeviceSession
+        fixture.appState._debugSetOfflineReplayEnvironmentForTests(
+            activeOrganizationID: fixture.organizationID,
+            ready: true,
+            clientConfigured: true,
+            authenticated: true,
+            authenticationReady: true,
+            authenticatedUserID: UUID()
+        )
+        fixture.appState._debugRefreshPropertiesLocallyForTests()
+
+        let secondDeviceEntry = await fixture.appState.evaluateSessionEntryCoordination(
+            propertyID: fixture.property.id,
+            sessionID: secondDeviceSession.id
+        )
+
+        guard case .blocked(let block) = secondDeviceEntry else {
+            return XCTFail("Expected active material draft to block the second device")
+        }
+        XCTAssertNotNil(block.lockedAt)
+    }
+
+    func testSaveDraftWithMaterialCapturesRetainsActiveLock() async throws {
+        let fixture = try makeFixture()
+        defer { tearDownFixture(fixture) }
+        fixture.appState._debugSetAuditEventEmitOverrideForTests { _, _, _, _, _ in }
+        try makeSessionUntouched(fixture)
+
+        let entryResult = await fixture.appState.evaluateSessionEntryCoordination(
+            propertyID: fixture.property.id,
+            sessionID: fixture.session.id
+        )
+        XCTAssertEqual(entryResult, .allowed)
+
+        try addMaterialShot(to: fixture)
+        await fixture.appState._debugPromoteCurrentSessionToActiveCaptureLockForTests(reason: "save_draft_test")
+        XCTAssertNotNil(fixture.appState.saveDraftCurrentSession(scheduleShadowWrite: false))
+
+        let remoteOccupancy = fixture.appState._debugReadRemotePropertySessionOccupancyForTests(
+            propertyID: fixture.property.id
+        )
+        XCTAssertEqual(remoteOccupancy.occupiedByUserID, fixture.userID)
+        XCTAssertNotNil(remoteOccupancy.occupiedByDeviceID)
+        XCTAssertNotNil(remoteOccupancy.occupiedAt)
+
+        let sessionLock = fixture.appState._debugReadSessionCoordinationStateForTests(sessionID: fixture.session.id)
+        XCTAssertEqual(sessionLock.lockedByUserID, fixture.userID)
+        XCTAssertNotNil(sessionLock.lockedByDeviceID)
+        XCTAssertNotNil(sessionLock.lockedAt)
     }
 
     func testFailedUntouchedOccupancyWriteDoesNotReturnAllowedClaimedState() async throws {

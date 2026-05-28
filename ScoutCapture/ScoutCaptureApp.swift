@@ -1081,25 +1081,18 @@ struct SessionHubView: View {
     private func propertyRow(_ property: Property) -> some View {
         let isPressed = pressedPropertyID == property.id
         let sessionsForProperty = appState.sessions(for: property.id).sorted { $0.startedAt > $1.startedAt }
-        let draft = appState.draftSession(for: property.id)
-        let pendingSession = sessionsForProperty.first(where: { appState.isPendingDelivery($0) })
+        let badgeModel = appState.propertyCardBadgeModel(for: property.id)
+        let draft = badgeModel.showDraft ? appState.draftBadgeSession(for: property.id) : nil
+        let pendingSession = sessionsForProperty.first(where: { appState.isPendingDeliveryLocallyAvailable($0) })
         let hasPendingExport = pendingSession != nil
         let latestReExportSession = reExportCandidateSession(for: property.id)
-        let hasReExportGlyph = latestReExportSession != nil
+        let hasReExportGlyph = badgeModel.showReExport && latestReExportSession != nil
         let clientLine = propertyClientLine(property)
         let addressLine = propertyAddressLine(property)
         let hasMapsButton = mapsAddressQuery(for: property) != nil
         let hasPhoneActions = hasValidPhoneNumber(property)
         let hasStatusRow = draft != nil || hasPendingExport || hasReExportGlyph
-        let isOccupiedByOther = appState.isPropertyOccupiedByOther(propertyID: property.id)
-        let canonicalLockSession = appState.canonicalLockSession(for: property.id)
-        let draftLockSession = appState.draftSession(for: property.id)
-        let isLockedByOther: Bool = {
-            guard let session = draftLockSession else { return false }
-            return appState.isSessionLockedByOther(sessionID: session.id)
-        }()
-        let locallyLocked = appState.locallyLockedPropertyIDs.contains(property.id)
-        let showLock = isOccupiedByOther || isLockedByOther || locallyLocked
+        let showLock = badgeModel.showLock
         HStack(alignment: .top, spacing: 10) {
             VStack(alignment: .leading, spacing: 4) {
                 HStack(alignment: .firstTextBaseline, spacing: 6) {
@@ -1672,16 +1665,16 @@ struct SessionHubView: View {
     }
 
     private func propertyHasDraft(_ property: Property) -> Bool {
-        appState.draftSession(for: property.id) != nil
+        appState.draftBadgeSession(for: property.id) != nil
     }
 
     private func propertyHasPendingExport(_ property: Property) -> Bool {
-        appState.sessions(for: property.id).contains(where: { appState.isPendingDelivery($0) })
+        appState.sessions(for: property.id).contains(where: { appState.isPendingDeliveryLocallyAvailable($0) })
     }
 
     private func reExportCandidateSession(for propertyID: UUID) -> Session? {
         appState.sessions(for: propertyID)
-            .filter { appState.isReExportEligible($0) }
+            .filter { appState.isReExportLocallyAvailable($0) }
             .sorted { lhs, rhs in
                 let l = lhs.firstDeliveredAt ?? .distantPast
                 let r = rhs.firstDeliveredAt ?? .distantPast
@@ -5190,7 +5183,7 @@ private struct EditContactSheet: View {
         let trimmedOriginal = property.name.trimmingCharacters(in: .whitespacesAndNewlines)
         let trimmedUpdated = propertyName.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedUpdated.isEmpty, trimmedUpdated != trimmedOriginal else { return false }
-        return appState.sessions(for: property.id).contains(where: { appState.isPendingDelivery($0) })
+        return appState.sessions(for: property.id).contains(where: { appState.isPendingDeliveryLocallyAvailable($0) })
     }
 
     private func loadFromProperty() {
@@ -6000,7 +5993,7 @@ private struct PropertySessionsManagerView: View {
                             Text("Started \(session.startedAt.formatted(date: .abbreviated, time: .shortened))")
                                 .font(.system(size: 13, weight: .medium))
                                 .foregroundColor(.secondary)
-                            if appState.isPendingDelivery(session) {
+                            if appState.isPendingDeliveryLocallyAvailable(session) {
                                 Text("Pending Export")
                                     .font(.system(size: 12, weight: .semibold))
                                     .foregroundColor(.orange)
@@ -6078,7 +6071,9 @@ private struct PropertySessionsManagerView: View {
     }
 
     private func reloadSessions() {
-        sessions = appState.sessions(for: property.id).sorted { $0.startedAt > $1.startedAt }
+        sessions = appState.sessions(for: property.id)
+            .filter { appState.shouldDisplaySessionInSessionList($0) }
+            .sorted { $0.startedAt > $1.startedAt }
     }
 
     private func handleDeleteTap(_ session: Session) {
@@ -10590,7 +10585,12 @@ struct PropertySessionView: View {
                 appState.selectProperty(id: propertyID)
                 appState.beginPropertyOpenFreshnessCheck(propertyID: propertyID)
                 Task {
+                    let openedAt = Date()
                     await appState.reconcileRemoteSessionContentForPropertyOpen(propertyID: propertyID)
+                    print(
+                        "[PropertyOpenPerf] propertyID=\(propertyID.uuidString) " +
+                        "elapsedMs=\(Int(Date().timeIntervalSince(openedAt) * 1000))"
+                    )
                 }
                 if resumeDraft {
                     if appState.currentSession?.propertyID != propertyID || appState.currentSession?.status != .draft {
