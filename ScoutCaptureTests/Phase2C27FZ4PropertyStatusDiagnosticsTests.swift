@@ -74,7 +74,14 @@ final class Phase2C27FZ4PropertyStatusDiagnosticsTests: XCTestCase {
             pendingExportDecision: false,
             lockedDecision: false,
             entryBlockingDecision: "allowed_by_existing_state",
-            deleteEligibilityDecision: "blocked_by_draft_badge"
+            deleteEligibilityDecision: "blocked_by_draft_badge",
+            compareAnswer: AppState.PropertyStatusCompareAnswer(
+                visibleBadgeState: .draft,
+                draftCountIncluded: true,
+                pendingExportCountIncluded: false,
+                entryBlocked: false,
+                deleteEligible: false
+            )
         )
 
         let comparison = AppState.makePropertyStatusDiagnosticComparison(
@@ -90,6 +97,7 @@ final class Phase2C27FZ4PropertyStatusDiagnosticsTests: XCTestCase {
         XCTAssertEqual(comparison.status, .draft)
         XCTAssertTrue(comparison.statusMatch)
         XCTAssertEqual(comparison.statusMismatchReason, "matched")
+        XCTAssertTrue(comparison.statusMismatchCategories.isEmpty)
     }
 
     func testNonOwnerDraftPropertyStatusExpectsLockedNotDraft() {
@@ -115,7 +123,14 @@ final class Phase2C27FZ4PropertyStatusDiagnosticsTests: XCTestCase {
             pendingExportDecision: false,
             lockedDecision: false,
             entryBlockingDecision: "allowed_by_existing_state",
-            deleteEligibilityDecision: "blocked_by_draft_badge"
+            deleteEligibilityDecision: "blocked_by_draft_badge",
+            compareAnswer: AppState.PropertyStatusCompareAnswer(
+                visibleBadgeState: .draft,
+                draftCountIncluded: true,
+                pendingExportCountIncluded: false,
+                entryBlocked: false,
+                deleteEligible: false
+            )
         )
 
         let comparison = AppState.makePropertyStatusDiagnosticComparison(
@@ -130,6 +145,8 @@ final class Phase2C27FZ4PropertyStatusDiagnosticsTests: XCTestCase {
         XCTAssertFalse(comparison.statusMatch)
         XCTAssertTrue(comparison.statusMismatchReason.contains("draft_badge expected=false actual=true"))
         XCTAssertTrue(comparison.statusMismatchReason.contains("locked expected=true actual=false"))
+        XCTAssertTrue(comparison.statusMismatchCategories.contains("badge_state"))
+        XCTAssertTrue(comparison.statusMismatchCategories.contains("entry_block"))
     }
 
     func testMissingPropertyStatusRowIsReportedAsDiagnosticMismatchOnly() {
@@ -153,5 +170,124 @@ final class Phase2C27FZ4PropertyStatusDiagnosticsTests: XCTestCase {
         XCTAssertFalse(comparison.rowFound)
         XCTAssertFalse(comparison.statusMatch)
         XCTAssertEqual(comparison.statusMismatchReason, "no_property_status_row")
+        XCTAssertEqual(comparison.statusMismatchCategories, ["missing_property_status"])
+    }
+
+    func testExportedPropertyStatusMatchesDerivedExportedBadge() {
+        let propertyID = UUID()
+        let userID = UUID()
+        let record = AppState.PropertyStatusRecord(
+            propertyID: propertyID,
+            orgID: UUID(),
+            status: .exported,
+            activeSessionID: nil,
+            draftSessionID: nil,
+            pendingExportSessionID: nil,
+            lastExportedSessionID: UUID(),
+            ownerUserID: nil,
+            ownerDeviceID: nil,
+            heartbeatAt: nil,
+            updatedAt: Date(),
+            updatedBy: userID,
+            statusReason: "test:exported",
+            revision: 3
+        )
+        let derived = AppState.PropertyStatusDerivedSummary(
+            draftBadgeDecision: false,
+            pendingExportDecision: false,
+            lockedDecision: false,
+            entryBlockingDecision: "allowed_by_existing_state",
+            deleteEligibilityDecision: "eligible_by_existing_state",
+            compareAnswer: AppState.PropertyStatusCompareAnswer(
+                visibleBadgeState: .exported,
+                draftCountIncluded: false,
+                pendingExportCountIncluded: false,
+                entryBlocked: false,
+                deleteEligible: true
+            )
+        )
+
+        let comparison = AppState.makePropertyStatusDiagnosticComparison(
+            propertyID: propertyID,
+            record: record,
+            derivedSummary: derived,
+            currentUserID: userID,
+            currentDeviceID: "device-a",
+            refreshElapsedMs: 2
+        )
+
+        XCTAssertTrue(comparison.statusMatch)
+        XCTAssertEqual(comparison.statusMismatchReason, "matched")
+    }
+
+    func testExportedPropertyStatusReportsIdleDerivedMismatchWithoutCrash() {
+        let propertyID = UUID()
+        let record = AppState.PropertyStatusRecord(
+            propertyID: propertyID,
+            orgID: UUID(),
+            status: .exported,
+            activeSessionID: nil,
+            draftSessionID: nil,
+            pendingExportSessionID: nil,
+            lastExportedSessionID: UUID(),
+            ownerUserID: nil,
+            ownerDeviceID: nil,
+            heartbeatAt: nil,
+            updatedAt: Date(),
+            updatedBy: nil,
+            statusReason: "test:exported",
+            revision: 3
+        )
+        let derived = AppState.PropertyStatusDerivedSummary(
+            draftBadgeDecision: false,
+            pendingExportDecision: false,
+            lockedDecision: false,
+            entryBlockingDecision: "allowed_by_existing_state",
+            deleteEligibilityDecision: "eligible_by_existing_state",
+            compareAnswer: AppState.PropertyStatusCompareAnswer(
+                visibleBadgeState: .idle,
+                draftCountIncluded: false,
+                pendingExportCountIncluded: false,
+                entryBlocked: false,
+                deleteEligible: true
+            )
+        )
+
+        let comparison = AppState.makePropertyStatusDiagnosticComparison(
+            propertyID: propertyID,
+            record: record,
+            derivedSummary: derived,
+            currentUserID: UUID(),
+            currentDeviceID: "device-a",
+            refreshElapsedMs: 2
+        )
+
+        XCTAssertFalse(comparison.statusMatch)
+        XCTAssertTrue(comparison.statusMismatchReason.contains("badge_state expected=exported actual=idle"))
+        XCTAssertEqual(comparison.statusMismatchCategories, ["badge_state"])
+    }
+
+    func testPropertyStatusCompareSummaryCountsCategories() {
+        let missing = AppState.makePropertyStatusDiagnosticComparison(
+            propertyID: UUID(),
+            record: nil,
+            derivedSummary: AppState.PropertyStatusDerivedSummary(
+                draftBadgeDecision: false,
+                pendingExportDecision: false,
+                lockedDecision: false,
+                entryBlockingDecision: "allowed_by_existing_state",
+                deleteEligibilityDecision: "eligible_by_existing_state"
+            ),
+            currentUserID: UUID(),
+            currentDeviceID: "device-a",
+            refreshElapsedMs: 1
+        )
+        let summary = AppState.makePropertyStatusCompareSummary(comparisons: [missing])
+
+        XCTAssertEqual(summary.comparedPropertyCount, 1)
+        XCTAssertEqual(summary.matchedCount, 0)
+        XCTAssertEqual(summary.mismatchCount, 1)
+        XCTAssertEqual(summary.missingPropertyStatusCount, 1)
+        XCTAssertEqual(summary.mismatchCategories["missing_property_status"], 1)
     }
 }

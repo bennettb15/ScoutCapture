@@ -3525,6 +3525,51 @@ final class AppState: ObservableObject {
         case exported
     }
 
+    enum PropertyStatusCompareBadgeState: String, Codable, CaseIterable, Equatable {
+        case draft
+        case locked
+        case pendingExport = "pending_export"
+        case exported
+        case idle
+    }
+
+    struct PropertyStatusCompareAnswer: Equatable {
+        let visibleBadgeState: PropertyStatusCompareBadgeState
+        let draftCountIncluded: Bool
+        let pendingExportCountIncluded: Bool
+        let entryBlocked: Bool
+        let deleteEligible: Bool
+
+        var diagnosticSummary: String {
+            [
+                "badge=\(visibleBadgeState.rawValue)",
+                "draft_count=\(draftCountIncluded)",
+                "pending_export_count=\(pendingExportCountIncluded)",
+                "entry_blocked=\(entryBlocked)",
+                "delete_eligible=\(deleteEligible)"
+            ].joined(separator: ",")
+        }
+    }
+
+    struct PropertyStatusCompareSummary: Equatable {
+        let comparedPropertyCount: Int
+        let matchedCount: Int
+        let mismatchCount: Int
+        let missingPropertyStatusCount: Int
+        let mismatchCategories: [String: Int]
+
+        var mismatchCategorySummary: String {
+            guard !mismatchCategories.isEmpty else { return "none" }
+            return mismatchCategories
+                .sorted { lhs, rhs in
+                    if lhs.value == rhs.value { return lhs.key < rhs.key }
+                    return lhs.value > rhs.value
+                }
+                .map { "\($0.key)=\($0.value)" }
+                .joined(separator: ",")
+        }
+    }
+
     struct PropertyStatusRecord: Decodable, Equatable, Identifiable {
         var id: UUID { propertyID }
 
@@ -3580,6 +3625,45 @@ final class AppState: ObservableObject {
         let lockedDecision: Bool
         let entryBlockingDecision: String
         let deleteEligibilityDecision: String
+        let compareAnswer: PropertyStatusCompareAnswer
+
+        init(
+            draftBadgeDecision: Bool,
+            pendingExportDecision: Bool,
+            lockedDecision: Bool,
+            entryBlockingDecision: String,
+            deleteEligibilityDecision: String,
+            compareAnswer: PropertyStatusCompareAnswer? = nil
+        ) {
+            self.draftBadgeDecision = draftBadgeDecision
+            self.pendingExportDecision = pendingExportDecision
+            self.lockedDecision = lockedDecision
+            self.entryBlockingDecision = entryBlockingDecision
+            self.deleteEligibilityDecision = deleteEligibilityDecision
+            self.compareAnswer = compareAnswer ?? PropertyStatusCompareAnswer(
+                visibleBadgeState: Self.defaultVisibleBadgeState(
+                    draftBadgeDecision: draftBadgeDecision,
+                    pendingExportDecision: pendingExportDecision,
+                    lockedDecision: lockedDecision
+                ),
+                draftCountIncluded: draftBadgeDecision,
+                pendingExportCountIncluded: pendingExportDecision,
+                entryBlocked: entryBlockingDecision.lowercased().contains("blocked"),
+                deleteEligible: deleteEligibilityDecision.lowercased().contains("eligible") &&
+                    !deleteEligibilityDecision.lowercased().contains("blocked")
+            )
+        }
+
+        private static func defaultVisibleBadgeState(
+            draftBadgeDecision: Bool,
+            pendingExportDecision: Bool,
+            lockedDecision: Bool
+        ) -> PropertyStatusCompareBadgeState {
+            if lockedDecision { return .locked }
+            if draftBadgeDecision { return .draft }
+            if pendingExportDecision { return .pendingExport }
+            return .idle
+        }
 
         var diagnosticSummary: String {
             [
@@ -3587,7 +3671,8 @@ final class AppState: ObservableObject {
                 "pending_export=\(pendingExportDecision)",
                 "locked=\(lockedDecision)",
                 "entry=\(entryBlockingDecision)",
-                "delete=\(deleteEligibilityDecision)"
+                "delete=\(deleteEligibilityDecision)",
+                "compare=\(compareAnswer.diagnosticSummary)"
             ].joined(separator: ",")
         }
     }
@@ -3603,6 +3688,9 @@ final class AppState: ObservableObject {
         let derivedStatusSummary: String
         let statusMatch: Bool
         let statusMismatchReason: String
+        let statusMismatchCategories: [String]
+        let propertyStatusAnswerSummary: String
+        let derivedAnswerSummary: String
         let refreshElapsedMs: Int
         let checkedAt: Date
     }
@@ -5394,6 +5482,12 @@ final class AppState: ObservableObject {
     private(set) var propertyStatusByPropertyID: [UUID: PropertyStatusRecord] = [:]
     private(set) var lastPropertyStatusRefreshAt: Date?
     private(set) var propertyStatusDiagnostics: [UUID: PropertyStatusDiagnosticComparison] = [:]
+    private var propertyStatusDiagnosticsRefreshTask: Task<Void, Never>?
+    private var propertyStatusDiagnosticsRefreshTaskID: UUID?
+    private var pendingPropertyStatusDiagnosticsSignature: String?
+    private var lastPropertyStatusDiagnosticsSignature: String?
+    private var lastPropertyStatusDiagnosticsCompletedAt: Date?
+    private let propertyStatusDiagnosticsDedupeInterval: TimeInterval = 5
     @Published private(set) var activeOrganizationID: UUID?
     @Published private(set) var accessibleOrganizations: [ActiveOrganizationMembership] = []
     @Published private(set) var isOrganizationContextReady: Bool = false
@@ -29602,24 +29696,113 @@ final class AppState: ObservableObject {
             return
         }
         let uniquePropertyIDs = Array(Set(propertyIDs)).sorted { $0.uuidString < $1.uuidString }
-        Task { @MainActor [weak self] in
+        let signature = propertyStatusDiagnosticsRequestSignature(
+            orgID: orgID,
+            propertyIDs: uniquePropertyIDs
+        )
+        let now = Date()
+        if pendingPropertyStatusDiagnosticsSignature == signature {
+            return
+        }
+        if lastPropertyStatusDiagnosticsSignature == signature,
+           let completedAt = lastPropertyStatusDiagnosticsCompletedAt,
+           now.timeIntervalSince(completedAt) < propertyStatusDiagnosticsDedupeInterval {
+            return
+        }
+        pendingPropertyStatusDiagnosticsSignature = signature
+        propertyStatusDiagnosticsRefreshTask?.cancel()
+        let taskID = UUID()
+        propertyStatusDiagnosticsRefreshTaskID = taskID
+        propertyStatusDiagnosticsRefreshTask = Task { @MainActor [weak self] in
+            do {
+                try await Task.sleep(nanoseconds: 200_000_000)
+            } catch {
+                return
+            }
+            guard !Task.isCancelled else { return }
             await self?.refreshPropertyStatusDiagnostics(
                 trigger: trigger,
                 orgID: orgID,
-                propertyIDs: uniquePropertyIDs
+                propertyIDs: uniquePropertyIDs,
+                requestSignature: signature,
+                taskID: taskID
             )
         }
+    }
+
+    private func propertyStatusDiagnosticsRequestSignature(
+        orgID: UUID,
+        propertyIDs: [UUID]
+    ) -> String {
+        let propertyPart = propertyIDs
+            .map { $0.uuidString.lowercased() }
+            .joined(separator: ",")
+        let statusPart = propertyIDs
+            .compactMap { propertyID -> String? in
+                guard let record = propertyStatusByPropertyID[propertyID] else { return nil }
+                return [
+                    propertyID.uuidString.lowercased(),
+                    record.status.rawValue,
+                    String(record.revision),
+                    record.activeSessionID?.uuidString.lowercased() ?? "nil",
+                    record.draftSessionID?.uuidString.lowercased() ?? "nil",
+                    record.pendingExportSessionID?.uuidString.lowercased() ?? "nil",
+                    record.lastExportedSessionID?.uuidString.lowercased() ?? "nil"
+                ].joined(separator: ":")
+            }
+            .joined(separator: "|")
+        let derivedPart = propertyIDs
+            .map { propertyStatusDerivedStateSignature(propertyID: $0) }
+            .joined(separator: "|")
+        return [
+            orgID.uuidString.lowercased(),
+            propertyPart,
+            localStore.propertiesLedgerFingerprint(),
+            statusPart,
+            derivedPart
+        ].joined(separator: "#")
+    }
+
+    private func propertyStatusDerivedStateSignature(propertyID: UUID) -> String {
+        let occupancy = propertySessionOccupancyByPropertyID[propertyID]
+        let draft = draftSession(for: propertyID)
+        let pending = pendingExportSessionByProperty[propertyID] ?? sessions(for: propertyID).first {
+            isPendingDelivery($0) && sessionHasCaptures($0)
+        }
+        let draftCoordination = draft.flatMap { sessionCoordinationStateBySessionID[$0.id] }
+        return [
+            propertyID.uuidString.lowercased(),
+            draft?.id.uuidString.lowercased() ?? "nil",
+            draft?.status.rawValue ?? "nil",
+            draftCoordination?.lockedByUserID?.uuidString.lowercased() ?? "nil",
+            normalizedSupabaseText(draftCoordination?.lockedByDeviceID) ?? "nil",
+            occupancy?.occupiedByUserID?.uuidString.lowercased() ?? "nil",
+            normalizedSupabaseText(occupancy?.occupiedByDeviceID) ?? "nil",
+            pending?.id.uuidString.lowercased() ?? "nil",
+            locallyLockedPropertyIDs.contains(propertyID) ? "locked" : "unlocked"
+        ].joined(separator: ":")
     }
 
     @MainActor
     private func refreshPropertyStatusDiagnostics(
         trigger: String,
         orgID: UUID,
-        propertyIDs: [UUID]
+        propertyIDs: [UUID],
+        requestSignature: String,
+        taskID: UUID
     ) async {
         let requestedPropertyIDs = Array(Set(propertyIDs)).sorted { $0.uuidString < $1.uuidString }
         guard !requestedPropertyIDs.isEmpty else { return }
         let start = Date()
+        defer {
+            if pendingPropertyStatusDiagnosticsSignature == requestSignature {
+                pendingPropertyStatusDiagnosticsSignature = nil
+            }
+            if propertyStatusDiagnosticsRefreshTaskID == taskID {
+                propertyStatusDiagnosticsRefreshTask = nil
+                propertyStatusDiagnosticsRefreshTaskID = nil
+            }
+        }
 
         do {
             let rows = try await fetchPropertyStatusRecords(
@@ -29655,24 +29838,36 @@ final class AppState: ObservableObject {
                 )
                 nextDiagnostics[propertyID] = comparison
                 logPropertyStatusDetailedDiagnosticsIfEnabled(comparison)
+                logPropertyStatusCompareDetailIfEnabled(comparison)
             }
             propertyStatusDiagnostics = nextDiagnostics
 
             let missingCount = requestedPropertyIDs.count - rows.count
-            let mismatchCount = requestedPropertyIDs
-                .compactMap { nextDiagnostics[$0] }
-                .filter { !$0.statusMatch }
-                .count
-            print(
-                "[PropertyStatusDiagnostics] badgeHydrationCompleted " +
-                "trigger=\(trigger) orgID=\(orgID.uuidString) " +
-                "requested=\(requestedPropertyIDs.count) rows=\(rows.count) " +
-                "missing=\(missingCount) mismatches=\(mismatchCount) " +
-                "draftCountHydrationSource=existing_derived_state " +
-                "pendingExportHydrationSource=existing_derived_state " +
-                "propertyBadgeHydrationSource=existing_derived_state " +
-                "propertyStatusHydrationSource=property_status " +
-                "hydrationDuration=\(elapsedMs)"
+            let refreshedComparisons = requestedPropertyIDs.compactMap { nextDiagnostics[$0] }
+            let mismatchCount = refreshedComparisons.filter { !$0.statusMatch }.count
+            let compareSummary = Self.makePropertyStatusCompareSummary(
+                comparisons: refreshedComparisons
+            )
+            lastPropertyStatusDiagnosticsSignature = requestSignature
+            lastPropertyStatusDiagnosticsCompletedAt = completedAt
+            if userDefaults.bool(forKey: "property_status_diagnostics_verbose_logging") {
+                print(
+                    "[PropertyStatusDiagnostics] badgeHydrationCompleted " +
+                    "trigger=\(trigger) orgID=\(orgID.uuidString) " +
+                    "requested=\(requestedPropertyIDs.count) rows=\(rows.count) " +
+                    "missing=\(missingCount) mismatches=\(mismatchCount) " +
+                    "draftCountHydrationSource=existing_derived_state " +
+                    "pendingExportHydrationSource=existing_derived_state " +
+                    "propertyBadgeHydrationSource=existing_derived_state " +
+                    "propertyStatusHydrationSource=property_status " +
+                    "hydrationDuration=\(elapsedMs)"
+                )
+            }
+            logPropertyStatusCompareSummary(
+                trigger: trigger,
+                orgID: orgID,
+                summary: compareSummary,
+                refreshElapsedMs: elapsedMs
             )
         } catch {
             let completedAt = Date()
@@ -29723,7 +29918,7 @@ final class AppState: ObservableObject {
             !finalizedOrExported &&
             !showLock &&
             draftOwnedByCurrentActor
-        let pendingExportDecision = pendingExportSessionByProperty[propertyID] != nil
+        let pendingExportDecision = propertyStatusDerivedPendingExportCountIncluded(propertyID: propertyID)
         let entryBlockingDecision = showLock ? "blocked_by_existing_lock_state" : "allowed_by_existing_state"
         let deleteEligibilityDecision: String = {
             if showLock { return "blocked_by_lock_state" }
@@ -29731,12 +29926,76 @@ final class AppState: ObservableObject {
             if pendingExportDecision { return "blocked_by_pending_export" }
             return "eligible_by_existing_state"
         }()
+        let visibleBadgeState: PropertyStatusCompareBadgeState = {
+            if showLock { return .locked }
+            if showDraft { return .draft }
+            if pendingExportDecision { return .pendingExport }
+            if propertyStatusDerivedExportedBadgeIncludedFromCache(propertyID: propertyID) { return .exported }
+            return .idle
+        }()
+        let compareAnswer = PropertyStatusCompareAnswer(
+            visibleBadgeState: visibleBadgeState,
+            draftCountIncluded: propertyStatusDerivedDraftCountIncluded(propertyID: propertyID),
+            pendingExportCountIncluded: pendingExportDecision,
+            entryBlocked: showLock,
+            deleteEligible: deleteEligibilityDecision == "eligible_by_existing_state"
+        )
         return PropertyStatusDerivedSummary(
             draftBadgeDecision: showDraft,
             pendingExportDecision: pendingExportDecision,
             lockedDecision: showLock,
             entryBlockingDecision: entryBlockingDecision,
-            deleteEligibilityDecision: deleteEligibilityDecision
+            deleteEligibilityDecision: deleteEligibilityDecision,
+            compareAnswer: compareAnswer
+        )
+    }
+
+    private func propertyStatusDerivedDraftCountIncluded(propertyID: UUID) -> Bool {
+        if !draftSessionByProperty.isEmpty {
+            return draftSessionByProperty[propertyID] != nil
+        }
+        return draftSession(for: propertyID) != nil
+    }
+
+    private func propertyStatusDerivedPendingExportCountIncluded(propertyID: UUID) -> Bool {
+        if !pendingExportSessionByProperty.isEmpty {
+            return pendingExportSessionByProperty[propertyID] != nil
+        }
+        return sessions(for: propertyID).contains { session in
+            isPendingDelivery(session) && sessionHasCaptures(session)
+        }
+    }
+
+    private func propertyStatusDerivedExportedBadgeIncludedFromCache(propertyID: UUID, now: Date = Date()) -> Bool {
+        let currentDeviceID = currentDeviceIdentifier()
+        return sessions(for: propertyID).contains { session in
+            guard isReExportEligible(session, now: now) else { return false }
+            let cacheKey = reExportAvailabilityCacheKey(session: session, currentDeviceID: currentDeviceID)
+            let signature = reExportAvailabilitySignature(session: session, currentDeviceID: currentDeviceID)
+            guard let cached = reExportAvailabilityCache[cacheKey],
+                  cached.signature == signature,
+                  now.timeIntervalSince(cached.checkedAt) < sessionArchiveAvailabilityCacheTTL else {
+                return false
+            }
+            return cached.available
+        }
+    }
+
+    private func logPropertyStatusCompareSummary(
+        trigger: String,
+        orgID: UUID,
+        summary: PropertyStatusCompareSummary,
+        refreshElapsedMs: Int
+    ) {
+        print(
+            "[PropertyStatusCompare] summary " +
+            "trigger=\(trigger) orgID=\(orgID.uuidString) " +
+            "compared_property_count=\(summary.comparedPropertyCount) " +
+            "matched_count=\(summary.matchedCount) " +
+            "mismatch_count=\(summary.mismatchCount) " +
+            "missing_property_status_count=\(summary.missingPropertyStatusCount) " +
+            "mismatch_categories=\(summary.mismatchCategorySummary) " +
+            "property_status_refresh_elapsed_ms=\(refreshElapsedMs)"
         )
     }
 
@@ -29760,6 +30019,25 @@ final class AppState: ObservableObject {
         )
     }
 
+    private func logPropertyStatusCompareDetailIfEnabled(
+        _ comparison: PropertyStatusDiagnosticComparison
+    ) {
+        guard userDefaults.bool(forKey: "property_status_compare_verbose"),
+              !comparison.statusMatch else {
+            return
+        }
+        print(
+            "[PropertyStatusCompare:Detail] " +
+            "propertyID=\(comparison.propertyID.uuidString) " +
+            "property_status_row_found=\(comparison.rowFound) " +
+            "property_status_status=\(comparison.status?.rawValue ?? "nil") " +
+            "property_status_answer=\(comparison.propertyStatusAnswerSummary) " +
+            "derived_answer=\(comparison.derivedAnswerSummary) " +
+            "mismatch_categories=\(comparison.statusMismatchCategories.joined(separator: ",")) " +
+            "status_mismatch_reason=\(comparison.statusMismatchReason)"
+        )
+    }
+
     static func makePropertyStatusDiagnosticComparison(
         propertyID: UUID,
         record: PropertyStatusRecord?,
@@ -29779,47 +30057,69 @@ final class AppState: ObservableObject {
                 derivedStatusSummary: derivedSummary.diagnosticSummary,
                 statusMatch: false,
                 statusMismatchReason: "no_property_status_row",
+                statusMismatchCategories: ["missing_property_status"],
+                propertyStatusAnswerSummary: "missing",
+                derivedAnswerSummary: derivedSummary.compareAnswer.diagnosticSummary,
                 refreshElapsedMs: refreshElapsedMs,
                 checkedAt: checkedAt
             )
         }
 
-        let ownedByCurrentActor = propertyStatusActorOwnedByCurrentActor(
+        let expectedAnswer = makePropertyStatusCompareAnswer(
             record: record,
             currentUserID: currentUserID,
             currentDeviceID: currentDeviceID
         )
-        let expectedDraftBadge: Bool
-        let expectedPendingExport: Bool
-        let expectedLocked: Bool
-        switch record.status {
-        case .idle, .exported:
-            expectedDraftBadge = false
-            expectedPendingExport = false
-            expectedLocked = false
-        case .occupied:
-            expectedDraftBadge = false
-            expectedPendingExport = false
-            expectedLocked = !ownedByCurrentActor
-        case .draft:
-            expectedDraftBadge = ownedByCurrentActor
-            expectedPendingExport = false
-            expectedLocked = !ownedByCurrentActor
-        case .pendingExport:
-            expectedDraftBadge = false
-            expectedPendingExport = true
-            expectedLocked = false
-        }
-
+        let derivedAnswer = derivedSummary.compareAnswer
         var mismatchReasons: [String] = []
-        if derivedSummary.draftBadgeDecision != expectedDraftBadge {
-            mismatchReasons.append("draft_badge expected=\(expectedDraftBadge) actual=\(derivedSummary.draftBadgeDecision)")
+        var mismatchCategories: [String] = []
+        if derivedAnswer.visibleBadgeState != expectedAnswer.visibleBadgeState {
+            mismatchCategories.append("badge_state")
+            mismatchReasons.append(
+                "badge_state expected=\(expectedAnswer.visibleBadgeState.rawValue) actual=\(derivedAnswer.visibleBadgeState.rawValue)"
+            )
         }
-        if derivedSummary.pendingExportDecision != expectedPendingExport {
-            mismatchReasons.append("pending_export expected=\(expectedPendingExport) actual=\(derivedSummary.pendingExportDecision)")
+        if derivedSummary.draftBadgeDecision != (expectedAnswer.visibleBadgeState == .draft) {
+            mismatchCategories.append("draft_badge")
+            mismatchReasons.append(
+                "draft_badge expected=\(expectedAnswer.visibleBadgeState == .draft) actual=\(derivedSummary.draftBadgeDecision)"
+            )
         }
-        if derivedSummary.lockedDecision != expectedLocked {
-            mismatchReasons.append("locked expected=\(expectedLocked) actual=\(derivedSummary.lockedDecision)")
+        if derivedSummary.pendingExportDecision != (expectedAnswer.visibleBadgeState == .pendingExport) {
+            mismatchCategories.append("pending_export_badge")
+            mismatchReasons.append(
+                "pending_export expected=\(expectedAnswer.visibleBadgeState == .pendingExport) actual=\(derivedSummary.pendingExportDecision)"
+            )
+        }
+        if derivedSummary.lockedDecision != (expectedAnswer.visibleBadgeState == .locked) {
+            mismatchCategories.append("locked_badge")
+            mismatchReasons.append(
+                "locked expected=\(expectedAnswer.visibleBadgeState == .locked) actual=\(derivedSummary.lockedDecision)"
+            )
+        }
+        if derivedAnswer.draftCountIncluded != expectedAnswer.draftCountIncluded {
+            mismatchCategories.append("draft_count")
+            mismatchReasons.append(
+                "draft_count expected=\(expectedAnswer.draftCountIncluded) actual=\(derivedAnswer.draftCountIncluded)"
+            )
+        }
+        if derivedAnswer.pendingExportCountIncluded != expectedAnswer.pendingExportCountIncluded {
+            mismatchCategories.append("pending_export_count")
+            mismatchReasons.append(
+                "pending_export_count expected=\(expectedAnswer.pendingExportCountIncluded) actual=\(derivedAnswer.pendingExportCountIncluded)"
+            )
+        }
+        if derivedAnswer.entryBlocked != expectedAnswer.entryBlocked {
+            mismatchCategories.append("entry_block")
+            mismatchReasons.append(
+                "entry_block expected=\(expectedAnswer.entryBlocked) actual=\(derivedAnswer.entryBlocked)"
+            )
+        }
+        if derivedAnswer.deleteEligible != expectedAnswer.deleteEligible {
+            mismatchCategories.append("delete_eligibility")
+            mismatchReasons.append(
+                "delete_eligibility expected=\(expectedAnswer.deleteEligible) actual=\(derivedAnswer.deleteEligible)"
+            )
         }
 
         return PropertyStatusDiagnosticComparison(
@@ -29831,8 +30131,86 @@ final class AppState: ObservableObject {
             derivedStatusSummary: derivedSummary.diagnosticSummary,
             statusMatch: mismatchReasons.isEmpty,
             statusMismatchReason: mismatchReasons.isEmpty ? "matched" : mismatchReasons.joined(separator: "; "),
+            statusMismatchCategories: mismatchCategories,
+            propertyStatusAnswerSummary: expectedAnswer.diagnosticSummary,
+            derivedAnswerSummary: derivedAnswer.diagnosticSummary,
             refreshElapsedMs: refreshElapsedMs,
             checkedAt: checkedAt
+        )
+    }
+
+    static func makePropertyStatusCompareAnswer(
+        record: PropertyStatusRecord,
+        currentUserID: UUID?,
+        currentDeviceID: String
+    ) -> PropertyStatusCompareAnswer {
+        let ownedByCurrentActor = propertyStatusActorOwnedByCurrentActor(
+            record: record,
+            currentUserID: currentUserID,
+            currentDeviceID: currentDeviceID
+        )
+
+        switch record.status {
+        case .idle:
+            return PropertyStatusCompareAnswer(
+                visibleBadgeState: .idle,
+                draftCountIncluded: false,
+                pendingExportCountIncluded: false,
+                entryBlocked: false,
+                deleteEligible: true
+            )
+        case .exported:
+            return PropertyStatusCompareAnswer(
+                visibleBadgeState: .exported,
+                draftCountIncluded: false,
+                pendingExportCountIncluded: false,
+                entryBlocked: false,
+                deleteEligible: true
+            )
+        case .occupied:
+            return PropertyStatusCompareAnswer(
+                visibleBadgeState: ownedByCurrentActor ? .idle : .locked,
+                draftCountIncluded: false,
+                pendingExportCountIncluded: false,
+                entryBlocked: !ownedByCurrentActor,
+                deleteEligible: false
+            )
+        case .draft:
+            return PropertyStatusCompareAnswer(
+                visibleBadgeState: ownedByCurrentActor ? .draft : .locked,
+                draftCountIncluded: ownedByCurrentActor,
+                pendingExportCountIncluded: false,
+                entryBlocked: !ownedByCurrentActor,
+                deleteEligible: false
+            )
+        case .pendingExport:
+            return PropertyStatusCompareAnswer(
+                visibleBadgeState: .pendingExport,
+                draftCountIncluded: false,
+                pendingExportCountIncluded: true,
+                entryBlocked: false,
+                deleteEligible: false
+            )
+        }
+    }
+
+    static func makePropertyStatusCompareSummary(
+        comparisons: [PropertyStatusDiagnosticComparison]
+    ) -> PropertyStatusCompareSummary {
+        var categories: [String: Int] = [:]
+        for comparison in comparisons where !comparison.statusMatch {
+            for category in comparison.statusMismatchCategories {
+                categories[category, default: 0] += 1
+            }
+        }
+        let missingCount = comparisons.filter { !$0.rowFound }.count
+        let mismatchCount = comparisons.filter { !$0.statusMatch }.count
+        return PropertyStatusCompareSummary(
+            comparedPropertyCount: comparisons.count,
+            matchedCount: comparisons.count - mismatchCount,
+            mismatchCount: mismatchCount,
+            missingPropertyStatusCount: missingCount,
+            mismatchCategories: categories
         )
     }
 
@@ -30635,11 +31013,6 @@ final class AppState: ObservableObject {
                 with: payload
             )
             let visiblePropertyIDs = mergedPayload.properties.filter { $0.deletedAt == nil }.map(\.id)
-            queuePropertyStatusDiagnosticsRefresh(
-                trigger: "background_refresh",
-                orgID: requestedOrganizationID,
-                propertyIDs: visiblePropertyIDs
-            )
             if lastBackgroundRemoteFingerprint == mergedPayload.fingerprint {
                 lastBackgroundRemoteAttemptCompletedAt = Date()
                 return
@@ -30661,6 +31034,11 @@ final class AppState: ObservableObject {
                 mergedPayload,
                 authority: authority,
                 replacingOrganizationID: requestedOrganizationID
+            )
+            queuePropertyStatusDiagnosticsRefresh(
+                trigger: "background_refresh",
+                orgID: requestedOrganizationID,
+                propertyIDs: visiblePropertyIDs
             )
             lastBackgroundRemoteFingerprint = mergedPayload.fingerprint
             lastBackgroundRemoteAttemptCompletedAt = Date()
@@ -36410,12 +36788,14 @@ final class AppState: ObservableObject {
                 expiresAt: session.reExportExpiresAt
             )
             reExportAvailabilityCache[cacheKey] = entry
-            logReExportButtonAvailability(
-                session: session,
-                entry: entry,
-                currentDeviceID: currentDeviceID,
-                source: "fresh"
-            )
+            if verboseLogging {
+                logReExportButtonAvailability(
+                    session: session,
+                    entry: entry,
+                    currentDeviceID: currentDeviceID,
+                    source: "fresh"
+                )
+            }
             logReExportAvailabilitySummaryIfNeeded(trigger: "reexport_cache_miss", now: now)
             return false
         }
@@ -36424,7 +36804,8 @@ final class AppState: ObservableObject {
             sessionID: session.id,
             requireDelivered: true,
             expectedDeviceID: currentDeviceID,
-            logCacheHit: verboseLogging
+            logCacheHit: verboseLogging,
+            logFresh: verboseLogging
         )
         let localPackageAvailable = availability.available
         let entry = ReExportAvailabilityCacheEntry(
@@ -36439,12 +36820,14 @@ final class AppState: ObservableObject {
             expiresAt: session.reExportExpiresAt
         )
         reExportAvailabilityCache[cacheKey] = entry
-        logReExportButtonAvailability(
-            session: session,
-            entry: entry,
-            currentDeviceID: currentDeviceID,
-            source: "fresh"
-        )
+        if verboseLogging {
+            logReExportButtonAvailability(
+                session: session,
+                entry: entry,
+                currentDeviceID: currentDeviceID,
+                source: "fresh"
+            )
+        }
         logReExportAvailabilitySummaryIfNeeded(trigger: "reexport_cache_miss", now: now)
         return localPackageAvailable
     }
@@ -36520,7 +36903,8 @@ final class AppState: ObservableObject {
         sessionID: UUID,
         requireDelivered: Bool,
         expectedDeviceID: String?,
-        logCacheHit: Bool = false
+        logCacheHit: Bool = false,
+        logFresh: Bool = false
     ) -> LocalStore.SessionArchivePackageAvailability {
         let startedAt = Date()
         let key = [
@@ -36565,17 +36949,21 @@ final class AppState: ObservableObject {
             checkedAt: startedAt,
             availability: result
         )
-        print(
-            "[ArchiveAvailability] sessionID=\(sessionID.uuidString) " +
-            "result=fresh require_delivered=\(requireDelivered) " +
-            "expected_device_id=\(normalizedSupabaseText(expectedDeviceID) ?? "any") " +
-            "available=\(result.available) pathExists=\(result.pathExists) " +
-            "checksum_verified=\(result.checksumVerified) " +
-            "archive_path=\(result.archivePath ?? "nil") " +
-            "originating_device_id=\(result.originatingDeviceID ?? "unknown") " +
-            "reason=\(result.reason) " +
-            "elapsedMs=\(Int(Date().timeIntervalSince(startedAt) * 1000))"
-        )
+        if logFresh {
+            print(
+                "[ArchiveAvailability] sessionID=\(sessionID.uuidString) " +
+                "result=fresh require_delivered=\(requireDelivered) " +
+                "expected_device_id=\(normalizedSupabaseText(expectedDeviceID) ?? "any") " +
+                "available=\(result.available) pathExists=\(result.pathExists) " +
+                "checksum_verified=\(result.checksumVerified) " +
+                "archive_path=\(result.archivePath ?? "nil") " +
+                "originating_device_id=\(result.originatingDeviceID ?? "unknown") " +
+                "reason=\(result.reason) " +
+                "elapsedMs=\(Int(Date().timeIntervalSince(startedAt) * 1000))"
+            )
+        } else {
+            reExportAvailabilityDiagnostics.logSuppressedCount += 1
+        }
         return result
     }
 
