@@ -290,4 +290,231 @@ final class Phase2C27FZ4PropertyStatusDiagnosticsTests: XCTestCase {
         XCTAssertEqual(summary.missingPropertyStatusCount, 1)
         XCTAssertEqual(summary.mismatchCategories["missing_property_status"], 1)
     }
+
+    func testPropertyStatusOwnerDraftDrivesBadgeAndDraftCount() throws {
+        let fixture = try makeCutoverFixture()
+        let deviceID = fixture.appState._debugCurrentDeviceIdentifierForTests()
+        let record = makeStatusRecord(
+            propertyID: fixture.property.id,
+            orgID: fixture.orgID,
+            status: .draft,
+            draftSessionID: UUID(),
+            ownerUserID: fixture.userID,
+            ownerDeviceID: deviceID
+        )
+
+        fixture.appState._debugReplacePropertyStatusCacheForTests([record])
+
+        let badge = fixture.appState.propertyCardBadgeModel(for: fixture.property.id)
+        XCTAssertEqual(badge.badgeSource, "property_status")
+        XCTAssertTrue(badge.showDraft)
+        XCTAssertFalse(badge.showLock)
+        XCTAssertFalse(badge.showPendingExport)
+        XCTAssertEqual(fixture.appState.draftPropertyCount(), 1)
+        XCTAssertEqual(fixture.appState.pendingExportCountAcrossProperties(), 0)
+        XCTAssertEqual(fixture.appState.draftCountSource(), "property_status_with_legacy_missing_rows")
+    }
+
+    func testPropertyStatusNonOwnerDraftDrivesLockedBadgeOnly() throws {
+        let fixture = try makeCutoverFixture()
+        let record = makeStatusRecord(
+            propertyID: fixture.property.id,
+            orgID: fixture.orgID,
+            status: .draft,
+            draftSessionID: UUID(),
+            ownerUserID: UUID(),
+            ownerDeviceID: "other-device"
+        )
+
+        fixture.appState._debugReplacePropertyStatusCacheForTests([record])
+
+        let badge = fixture.appState.propertyCardBadgeModel(for: fixture.property.id)
+        XCTAssertEqual(badge.badgeSource, "property_status")
+        XCTAssertTrue(badge.showLock)
+        XCTAssertFalse(badge.showDraft)
+        XCTAssertFalse(badge.showPendingExport)
+        XCTAssertEqual(fixture.appState.draftPropertyCount(), 0)
+        XCTAssertEqual(fixture.appState.pendingExportCountAcrossProperties(), 0)
+    }
+
+    func testPropertyStatusPendingExportDrivesBadgeAndPendingCount() throws {
+        let fixture = try makeCutoverFixture()
+        let record = makeStatusRecord(
+            propertyID: fixture.property.id,
+            orgID: fixture.orgID,
+            status: .pendingExport,
+            pendingExportSessionID: UUID(),
+            ownerUserID: fixture.userID,
+            ownerDeviceID: fixture.appState._debugCurrentDeviceIdentifierForTests()
+        )
+
+        fixture.appState._debugReplacePropertyStatusCacheForTests([record])
+
+        let badge = fixture.appState.propertyCardBadgeModel(for: fixture.property.id)
+        XCTAssertEqual(badge.badgeSource, "property_status")
+        XCTAssertFalse(badge.showDraft)
+        XCTAssertFalse(badge.showLock)
+        XCTAssertTrue(badge.showPendingExport)
+        XCTAssertEqual(fixture.appState.draftPropertyCount(), 0)
+        XCTAssertEqual(fixture.appState.pendingExportCountAcrossProperties(), 1)
+        XCTAssertEqual(fixture.appState.pendingExportCountSource(), "property_status_with_legacy_missing_rows")
+    }
+
+    func testMissingPropertyStatusRowFallsBackToLegacyDraftBadge() throws {
+        let fixture = try makeCutoverFixture()
+        let draft = try seedCapturedDraft(propertyID: fixture.property.id, localStore: fixture.localStore)
+        fixture.appState._debugRefreshPropertiesLocallyForTests()
+        fixture.appState._debugSetSessionCoordinationStateForTests(
+            sessionID: draft.id,
+            lockedByUserID: fixture.userID,
+            lockedByDeviceID: fixture.appState._debugCurrentDeviceIdentifierForTests(),
+            lockedAt: Date()
+        )
+
+        let badge = fixture.appState.propertyCardBadgeModel(for: fixture.property.id)
+        XCTAssertEqual(badge.badgeSource, "legacy")
+        XCTAssertTrue(badge.showDraft)
+        XCTAssertFalse(badge.showLock)
+        XCTAssertEqual(fixture.appState.draftPropertyCount(), 1)
+        XCTAssertEqual(fixture.appState.draftCountSource(), "legacy")
+    }
+
+    private struct CutoverFixture {
+        let localStore: LocalStore
+        let appState: AppState
+        let orgID: UUID
+        let userID: UUID
+        let property: Property
+    }
+
+    private func makeCutoverFixture() throws -> CutoverFixture {
+        let suiteName = "Phase2C27FZ4PropertyStatusCutover-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName) ?? .standard
+        defaults.removePersistentDomain(forName: suiteName)
+        defaults.set(true, forKey: "supabase_enabled")
+        defaults.set(true, forKey: "session_coordination_enabled")
+
+        let storageRoot = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ScoutCapture-2C27FZ4-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: storageRoot, withIntermediateDirectories: true)
+        let localStore = LocalStore(testStorageRootURL: storageRoot)
+        let orgID = UUID()
+        let userID = UUID()
+        _ = try localStore.createOrganization(Organization(id: orgID, name: "Status Cutover Org"))
+        let property = try localStore.createProperty(
+            Property(orgId: orgID, folderId: "status-cutover", name: "Status Cutover", address: "1 Status Way")
+        )
+        let appState = AppState(localStore: localStore, userDefaults: defaults, disableCloudBackupForTests: true)
+        appState._debugSetOrganizationContextForTests(
+            memberships: [
+                ActiveOrganizationMembership(id: orgID, name: "Status Cutover Org", role: "owner")
+            ],
+            activeOrganizationID: orgID,
+            ready: true
+        )
+        appState._debugSetOfflineReplayEnvironmentForTests(
+            activeOrganizationID: orgID,
+            ready: true,
+            clientConfigured: true,
+            authenticated: true,
+            authenticationReady: true,
+            authenticatedUserID: userID
+        )
+        appState._debugRefreshPropertiesLocallyForTests()
+        return CutoverFixture(
+            localStore: localStore,
+            appState: appState,
+            orgID: orgID,
+            userID: userID,
+            property: property
+        )
+    }
+
+    private func makeStatusRecord(
+        propertyID: UUID,
+        orgID: UUID,
+        status: AppState.PropertyStatusValue,
+        activeSessionID: UUID? = nil,
+        draftSessionID: UUID? = nil,
+        pendingExportSessionID: UUID? = nil,
+        lastExportedSessionID: UUID? = nil,
+        ownerUserID: UUID? = nil,
+        ownerDeviceID: String? = nil
+    ) -> AppState.PropertyStatusRecord {
+        AppState.PropertyStatusRecord(
+            propertyID: propertyID,
+            orgID: orgID,
+            status: status,
+            activeSessionID: activeSessionID,
+            draftSessionID: draftSessionID,
+            pendingExportSessionID: pendingExportSessionID,
+            lastExportedSessionID: lastExportedSessionID,
+            ownerUserID: ownerUserID,
+            ownerDeviceID: ownerDeviceID,
+            heartbeatAt: Date(),
+            updatedAt: Date(),
+            updatedBy: ownerUserID,
+            statusReason: "test:\(status.rawValue)",
+            revision: 1
+        )
+    }
+
+    private func seedCapturedDraft(propertyID: UUID, localStore: LocalStore) throws -> Session {
+        let session = try localStore.upsertSession(
+            Session(
+                id: UUID(),
+                propertyID: propertyID,
+                startedAt: Date(timeIntervalSinceReferenceDate: 100),
+                status: .draft,
+                endedAt: nil,
+                exportedAt: nil,
+                isSealed: false
+            )
+        )
+        try localStore.ensureSessionMetadata(for: session)
+        var metadata = try localStore.loadSessionMetadata(propertyID: propertyID, sessionID: session.id)
+        metadata.shots = [
+            ShotMetadata(
+                shotID: UUID(),
+                propertyID: propertyID,
+                sessionID: session.id,
+                createdAt: Date(timeIntervalSinceReferenceDate: 101),
+                updatedAt: Date(timeIntervalSinceReferenceDate: 101),
+                building: "",
+                elevation: "",
+                detailType: "",
+                angleIndex: 0,
+                shotKey: "status-cutover",
+                isGuided: false,
+                isFlagged: false,
+                issueID: nil,
+                issueStatus: nil,
+                noteText: nil,
+                noteCategory: nil,
+                originalFilename: "draft.jpg",
+                originalRelativePath: "Originals/draft.jpg",
+                originalByteSize: 1,
+                stampedFilename: nil,
+                stampedRelativePath: nil,
+                captureMode: nil,
+                lens: nil,
+                exifOrientation: nil,
+                latitude: nil,
+                longitude: nil,
+                accuracyMeters: nil,
+                imageWidth: nil,
+                imageHeight: nil
+            )
+        ]
+        try localStore.saveSessionMetadataAtomically(propertyID: propertyID, sessionID: session.id, metadata: metadata)
+        let originalURL = localStore
+            .sessionFolderURL(propertyID: propertyID, sessionID: session.id)
+            .appendingPathComponent("Originals/draft.jpg", isDirectory: false)
+        try FileManager.default.createDirectory(
+            at: originalURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try Data([0x01]).write(to: originalURL)
+        return session
+    }
 }

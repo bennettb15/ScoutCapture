@@ -3481,10 +3481,13 @@ final class AppState: ObservableObject {
         let finalizedOrExported: Bool
         let showLock: Bool
         let showDraft: Bool
+        let showPendingExport: Bool
         let showReExport: Bool
         let lockReason: String
         let draftReason: String
+        let pendingExportReason: String
         let reExportReason: String
+        let badgeSource: String
     }
 
     private struct ReExportAvailabilityCacheEntry {
@@ -5479,7 +5482,7 @@ final class AppState: ObservableObject {
     @Published var authenticationErrorMessage: String?
     @Published var locallyLockedPropertyIDs: Set<UUID> = []
     @Published private var propertySessionOccupancyByPropertyID: [UUID: PropertySessionOccupancyState] = [:]
-    private(set) var propertyStatusByPropertyID: [UUID: PropertyStatusRecord] = [:]
+    @Published private(set) var propertyStatusByPropertyID: [UUID: PropertyStatusRecord] = [:]
     private(set) var lastPropertyStatusRefreshAt: Date?
     private(set) var propertyStatusDiagnostics: [UUID: PropertyStatusDiagnosticComparison] = [:]
     private var propertyStatusDiagnosticsRefreshTask: Task<Void, Never>?
@@ -6946,6 +6949,12 @@ final class AppState: ObservableObject {
 
     func _debugRefreshPropertiesLocallyForTests() {
         performLocalPropertyRefreshFallback()
+    }
+
+    @MainActor
+    func _debugReplacePropertyStatusCacheForTests(_ records: [PropertyStatusRecord]) {
+        propertyStatusByPropertyID = Dictionary(uniqueKeysWithValues: records.map { ($0.propertyID, $0) })
+        lastPropertyStatusRefreshAt = Date()
     }
 #endif
 
@@ -29467,9 +29476,67 @@ final class AppState: ObservableObject {
             return "hidden_unverified_local_owner"
         }()
 
+        let legacyPendingExport = sessions(for: propertyID).contains { isPendingDeliveryLocallyAvailable($0) }
+        let legacyPendingExportReason = legacyPendingExport ? "pending_delivery_local_archive_available" : "no_pending_delivery_local_archive"
         let reExportSession = reExportCandidateSession(for: propertyID)
         let showReExport = reExportSession != nil
         let reExportReason = showReExport ? "local_archive_available" : "no_local_archive_available"
+
+        if let propertyStatus = propertyStatusByPropertyID[propertyID] {
+            let propertyStatusAnswer = Self.makePropertyStatusCompareAnswer(
+                record: propertyStatus,
+                currentUserID: currentUserID,
+                currentDeviceID: currentDeviceID
+            )
+            let propertyStatusBadgeState = propertyStatusAnswer.visibleBadgeState
+            let propertyStatusOwnedByCurrentActor = Self.propertyStatusActorOwnedByCurrentActor(
+                record: propertyStatus,
+                currentUserID: currentUserID,
+                currentDeviceID: currentDeviceID
+            )
+            let propertyStatusSourceSessionID: UUID? = {
+                switch propertyStatus.status {
+                case .occupied:
+                    return propertyStatus.activeSessionID
+                case .draft:
+                    return propertyStatus.draftSessionID
+                case .pendingExport:
+                    return propertyStatus.pendingExportSessionID
+                case .exported:
+                    return propertyStatus.lastExportedSessionID
+                case .idle:
+                    return nil
+                }
+            }()
+            let propertyStatusReasonPrefix = "property_status:\(propertyStatus.status.rawValue)"
+            return PropertyCardBadgeModel(
+                propertyID: propertyID,
+                activeOccupancySessionID: propertyStatus.status == .occupied ? propertyStatus.activeSessionID : nil,
+                occupancyOwnerUserID: propertyStatus.status == .occupied ? propertyStatus.ownerUserID : occupancyOwnerUserID,
+                occupancyOwnerDeviceID: propertyStatus.status == .occupied ? normalizedSupabaseText(propertyStatus.ownerDeviceID) : occupancyOwnerDeviceID,
+                currentUserID: currentUserID,
+                currentDeviceID: currentDeviceID,
+                materialDraftSessionID: propertyStatus.status == .draft ? propertyStatusSourceSessionID : nil,
+                draftOwnerUserID: propertyStatus.status == .draft ? propertyStatus.ownerUserID : draftOwnerUserID,
+                draftOwnerDeviceID: propertyStatus.status == .draft ? normalizedSupabaseText(propertyStatus.ownerDeviceID) : draftOwnerDeviceID,
+                finalizedOrExported: propertyStatus.status == .exported,
+                showLock: propertyStatusBadgeState == .locked,
+                showDraft: propertyStatusBadgeState == .draft,
+                showPendingExport: propertyStatusBadgeState == .pendingExport,
+                showReExport: showReExport,
+                lockReason: propertyStatusBadgeState == .locked
+                    ? "\(propertyStatusReasonPrefix):owner_mismatch"
+                    : "\(propertyStatusReasonPrefix):lock_hidden",
+                draftReason: propertyStatusBadgeState == .draft
+                    ? "\(propertyStatusReasonPrefix):owner_match"
+                    : "\(propertyStatusReasonPrefix):draft_hidden_owner_match=\(propertyStatusOwnedByCurrentActor)",
+                pendingExportReason: propertyStatusBadgeState == .pendingExport
+                    ? "\(propertyStatusReasonPrefix):pending_export"
+                    : "\(propertyStatusReasonPrefix):pending_export_hidden",
+                reExportReason: reExportReason,
+                badgeSource: "property_status"
+            )
+        }
 
         return PropertyCardBadgeModel(
             propertyID: propertyID,
@@ -29484,10 +29551,13 @@ final class AppState: ObservableObject {
             finalizedOrExported: finalizedOrExported,
             showLock: showLock,
             showDraft: showDraft,
+            showPendingExport: legacyPendingExport,
             showReExport: showReExport,
             lockReason: lockReason,
             draftReason: draftReason,
-            reExportReason: reExportReason
+            pendingExportReason: legacyPendingExportReason,
+            reExportReason: reExportReason,
+            badgeSource: "legacy"
         )
     }
 
@@ -29856,9 +29926,9 @@ final class AppState: ObservableObject {
                     "trigger=\(trigger) orgID=\(orgID.uuidString) " +
                     "requested=\(requestedPropertyIDs.count) rows=\(rows.count) " +
                     "missing=\(missingCount) mismatches=\(mismatchCount) " +
-                    "draftCountHydrationSource=existing_derived_state " +
-                    "pendingExportHydrationSource=existing_derived_state " +
-                    "propertyBadgeHydrationSource=existing_derived_state " +
+                    "draftCountHydrationSource=\(draftCountSource()) " +
+                    "pendingExportHydrationSource=\(pendingExportCountSource()) " +
+                    "propertyBadgeHydrationSource=\(badgeSourceSummary()) " +
                     "propertyStatusHydrationSource=property_status " +
                     "hydrationDuration=\(elapsedMs)"
                 )
@@ -29918,32 +29988,43 @@ final class AppState: ObservableObject {
             !finalizedOrExported &&
             !showLock &&
             draftOwnedByCurrentActor
-        let pendingExportDecision = propertyStatusDerivedPendingExportCountIncluded(propertyID: propertyID)
+        let legacyPendingExportDecision = propertyStatusDerivedPendingExportCountIncluded(propertyID: propertyID)
         let entryBlockingDecision = showLock ? "blocked_by_existing_lock_state" : "allowed_by_existing_state"
         let deleteEligibilityDecision: String = {
             if showLock { return "blocked_by_lock_state" }
             if showDraft { return "blocked_by_draft_state" }
-            if pendingExportDecision { return "blocked_by_pending_export" }
+            if legacyPendingExportDecision { return "blocked_by_pending_export" }
             return "eligible_by_existing_state"
         }()
-        let visibleBadgeState: PropertyStatusCompareBadgeState = {
+        let legacyVisibleBadgeState: PropertyStatusCompareBadgeState = {
             if showLock { return .locked }
             if showDraft { return .draft }
-            if pendingExportDecision { return .pendingExport }
+            if legacyPendingExportDecision { return .pendingExport }
             if propertyStatusDerivedExportedBadgeIncludedFromCache(propertyID: propertyID) { return .exported }
             return .idle
         }()
+        let propertyStatusAnswer = propertyStatusByPropertyID[propertyID].map {
+            Self.makePropertyStatusCompareAnswer(
+                record: $0,
+                currentUserID: currentUserID,
+                currentDeviceID: currentDeviceID
+            )
+        }
+        let visibleBadgeState = propertyStatusAnswer?.visibleBadgeState ?? legacyVisibleBadgeState
+        let cutoverShowDraft = visibleBadgeState == .draft
+        let cutoverShowLock = visibleBadgeState == .locked
+        let cutoverPendingExportDecision = visibleBadgeState == .pendingExport
         let compareAnswer = PropertyStatusCompareAnswer(
             visibleBadgeState: visibleBadgeState,
-            draftCountIncluded: propertyStatusDerivedDraftCountIncluded(propertyID: propertyID),
-            pendingExportCountIncluded: pendingExportDecision,
+            draftCountIncluded: propertyStatusAnswer?.draftCountIncluded ?? propertyStatusDerivedDraftCountIncluded(propertyID: propertyID),
+            pendingExportCountIncluded: propertyStatusAnswer?.pendingExportCountIncluded ?? legacyPendingExportDecision,
             entryBlocked: showLock,
             deleteEligible: deleteEligibilityDecision == "eligible_by_existing_state"
         )
         return PropertyStatusDerivedSummary(
-            draftBadgeDecision: showDraft,
-            pendingExportDecision: pendingExportDecision,
-            lockedDecision: showLock,
+            draftBadgeDecision: cutoverShowDraft,
+            pendingExportDecision: cutoverPendingExportDecision,
+            lockedDecision: cutoverShowLock,
             entryBlockingDecision: entryBlockingDecision,
             deleteEligibilityDecision: deleteEligibilityDecision,
             compareAnswer: compareAnswer
@@ -29990,6 +30071,9 @@ final class AppState: ObservableObject {
         print(
             "[PropertyStatusCompare] summary " +
             "trigger=\(trigger) orgID=\(orgID.uuidString) " +
+            "badge_source=\(badgeSourceSummary()) " +
+            "draft_count_source=\(draftCountSource()) " +
+            "pending_export_count_source=\(pendingExportCountSource()) " +
             "compared_property_count=\(summary.comparedPropertyCount) " +
             "matched_count=\(summary.matchedCount) " +
             "mismatch_count=\(summary.mismatchCount) " +
@@ -30236,6 +30320,48 @@ final class AppState: ObservableObject {
         let draftOwnerDeviceID = normalizedSupabaseText(draftLockState?.lockedByDeviceID)
         let currentUserID = authenticatedSupabaseUser?.id
         let currentDeviceID = currentDeviceIdentifier()
+
+        if let propertyStatus = propertyStatusByPropertyID[propertyID] {
+            let propertyStatusAnswer = Self.makePropertyStatusCompareAnswer(
+                record: propertyStatus,
+                currentUserID: currentUserID,
+                currentDeviceID: currentDeviceID
+            )
+            guard propertyStatusAnswer.visibleBadgeState == .draft else {
+                print(
+                    "[DraftBadge] propertyID=\(propertyID.uuidString) visible=false " +
+                    "badge_source=property_status " +
+                    "property_status_status=\(propertyStatus.status.rawValue) " +
+                    "badge_visibility_reason=property_status_not_owner_draft"
+                )
+                return nil
+            }
+            let statusDraft = propertyStatus.draftSessionID.flatMap { draftSessionID in
+                sessions(for: propertyID).first(where: { $0.id == draftSessionID })
+            } ?? materialDraft
+            guard let statusDraft else {
+                print(
+                    "[DraftBadge] propertyID=\(propertyID.uuidString) visible=true " +
+                    "badge_source=property_status " +
+                    "property_status_status=\(propertyStatus.status.rawValue) " +
+                    "badge_visibility_reason=property_status_owner_draft_missing_local_session"
+                )
+                return nil
+            }
+            print(
+                "[DraftBadge] propertyID=\(propertyID.uuidString) " +
+                "sessionID=\(statusDraft.id.uuidString) " +
+                "visible=true " +
+                "badge_source=property_status " +
+                "draft_owner_user=\(propertyStatus.ownerUserID?.uuidString ?? "nil") " +
+                "draft_owner_device=\(normalizedSupabaseText(propertyStatus.ownerDeviceID) ?? "nil") " +
+                "current_user=\(currentUserID?.uuidString ?? "nil") " +
+                "current_device=\(currentDeviceID) " +
+                "badge_visibility_reason=property_status_owner_draft"
+            )
+            return statusDraft
+        }
+
         let occupancy = propertySessionOccupancyByPropertyID[propertyID]
         let occupancyOwnerUserID = occupancy?.occupiedByUserID
         let occupancyOwnerDeviceID = normalizedSupabaseText(occupancy?.occupiedByDeviceID)
@@ -34662,6 +34788,33 @@ final class AppState: ObservableObject {
     }
     
     func pendingExportCountAcrossProperties() -> Int {
+        guard !propertyStatusByPropertyID.isEmpty else {
+            return legacyPendingExportCountAcrossProperties()
+        }
+        var pendingCount = 0
+        var legacyPendingSessionIDs = Set<UUID>()
+        let currentUserID = authenticatedSupabaseUser?.id
+        let currentDeviceID = currentDeviceIdentifier()
+        for property in properties {
+            if let record = propertyStatusByPropertyID[property.id] {
+                let answer = Self.makePropertyStatusCompareAnswer(
+                    record: record,
+                    currentUserID: currentUserID,
+                    currentDeviceID: currentDeviceID
+                )
+                if answer.pendingExportCountIncluded {
+                    pendingCount += 1
+                }
+            } else {
+                for session in sessions(for: property.id) where isPendingDelivery(session) && sessionHasCaptures(session) {
+                    legacyPendingSessionIDs.insert(session.id)
+                }
+            }
+        }
+        return pendingCount + legacyPendingSessionIDs.count
+    }
+
+    private func legacyPendingExportCountAcrossProperties() -> Int {
         if !pendingExportSessionByProperty.isEmpty {
             return Set(pendingExportSessionByProperty.values.map(\.id)).count
         }
@@ -34675,10 +34828,48 @@ final class AppState: ObservableObject {
     }
     
     func draftPropertyCount() -> Int {
+        guard !propertyStatusByPropertyID.isEmpty else {
+            return legacyDraftPropertyCount()
+        }
+        let currentUserID = authenticatedSupabaseUser?.id
+        let currentDeviceID = currentDeviceIdentifier()
+        return properties.reduce(0) { count, property in
+            if let record = propertyStatusByPropertyID[property.id] {
+                let answer = Self.makePropertyStatusCompareAnswer(
+                    record: record,
+                    currentUserID: currentUserID,
+                    currentDeviceID: currentDeviceID
+                )
+                return count + (answer.draftCountIncluded ? 1 : 0)
+            }
+            return count + (legacyDraftCountIncluded(propertyID: property.id) ? 1 : 0)
+        }
+    }
+
+    private func legacyDraftPropertyCount() -> Int {
         if !draftSessionByProperty.isEmpty {
             return draftSessionByProperty.count
         }
         return properties.filter { draftSession(for: $0.id) != nil }.count
+    }
+
+    private func legacyDraftCountIncluded(propertyID: UUID) -> Bool {
+        if !draftSessionByProperty.isEmpty {
+            return draftSessionByProperty[propertyID] != nil
+        }
+        return draftSession(for: propertyID) != nil
+    }
+
+    func draftCountSource() -> String {
+        propertyStatusByPropertyID.isEmpty ? "legacy" : "property_status_with_legacy_missing_rows"
+    }
+
+    func pendingExportCountSource() -> String {
+        propertyStatusByPropertyID.isEmpty ? "legacy" : "property_status_with_legacy_missing_rows"
+    }
+
+    func badgeSourceSummary() -> String {
+        propertyStatusByPropertyID.isEmpty ? "legacy" : "property_status_with_legacy_missing_rows"
     }
     
     func markCurrentSessionExported() {

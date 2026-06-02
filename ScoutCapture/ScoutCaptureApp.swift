@@ -1082,16 +1082,16 @@ struct SessionHubView: View {
         let isPressed = pressedPropertyID == property.id
         let sessionsForProperty = appState.sessions(for: property.id).sorted { $0.startedAt > $1.startedAt }
         let badgeModel = appState.propertyCardBadgeModel(for: property.id)
-        let draft = badgeModel.showDraft ? appState.draftBadgeSession(for: property.id) : nil
         let pendingSession = sessionsForProperty.first(where: { appState.isPendingDeliveryLocallyAvailable($0) })
-        let hasPendingExport = pendingSession != nil
+        let hasDraft = badgeModel.showDraft
+        let hasPendingExport = badgeModel.showPendingExport
         let latestReExportSession = reExportCandidateSession(for: property.id)
         let hasReExportGlyph = badgeModel.showReExport && latestReExportSession != nil
         let clientLine = propertyClientLine(property)
         let addressLine = propertyAddressLine(property)
         let hasMapsButton = mapsAddressQuery(for: property) != nil
         let hasPhoneActions = hasValidPhoneNumber(property)
-        let hasStatusRow = draft != nil || hasPendingExport || hasReExportGlyph
+        let hasStatusRow = hasDraft || hasPendingExport || hasReExportGlyph
         let showLock = badgeModel.showLock
         HStack(alignment: .top, spacing: 10) {
             VStack(alignment: .leading, spacing: 4) {
@@ -1135,7 +1135,7 @@ struct SessionHubView: View {
                 if hasStatusRow {
                     VStack(alignment: .trailing, spacing: 4) {
                         HStack(spacing: 8) {
-                            if draft != nil {
+                            if hasDraft {
                                 chipLabel("Draft", tint: .orange)
                             }
 
@@ -1665,11 +1665,11 @@ struct SessionHubView: View {
     }
 
     private func propertyHasDraft(_ property: Property) -> Bool {
-        appState.draftBadgeSession(for: property.id) != nil
+        appState.propertyCardBadgeModel(for: property.id).showDraft
     }
 
     private func propertyHasPendingExport(_ property: Property) -> Bool {
-        appState.sessions(for: property.id).contains(where: { appState.isPendingDeliveryLocallyAvailable($0) })
+        appState.propertyCardBadgeModel(for: property.id).showPendingExport
     }
 
     private func reExportCandidateSession(for propertyID: UUID) -> Session? {
