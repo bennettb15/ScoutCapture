@@ -1673,14 +1673,7 @@ struct SessionHubView: View {
     }
 
     private func reExportCandidateSession(for propertyID: UUID) -> Session? {
-        appState.sessions(for: propertyID)
-            .filter { appState.isReExportLocallyAvailable($0) }
-            .sorted { lhs, rhs in
-                let l = lhs.firstDeliveredAt ?? .distantPast
-                let r = rhs.firstDeliveredAt ?? .distantPast
-                return l > r
-            }
-            .first
+        appState.reExportCandidateSession(for: propertyID)
     }
 
     private func matchesPropertyFilter(_ property: Property) -> Bool {

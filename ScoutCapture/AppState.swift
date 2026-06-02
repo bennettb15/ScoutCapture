@@ -3487,6 +3487,126 @@ final class AppState: ObservableObject {
         let reExportReason: String
     }
 
+    private struct ReExportAvailabilityCacheEntry {
+        let signature: String
+        let checkedAt: Date
+        let available: Bool
+        let reason: String
+        let archivePath: String?
+        let pathExists: Bool
+        let checksumVerified: Bool
+        let originatingDeviceID: String?
+        let expiresAt: Date?
+    }
+
+    private struct ReExportAvailabilityDiagnostics {
+        var cacheHits: Int = 0
+        var cacheMisses: Int = 0
+        var candidatesScanned: Int = 0
+        var logSuppressedCount: Int = 0
+
+        var hasActivity: Bool {
+            cacheHits > 0 || cacheMisses > 0 || candidatesScanned > 0 || logSuppressedCount > 0
+        }
+
+        mutating func reset() {
+            cacheHits = 0
+            cacheMisses = 0
+            candidatesScanned = 0
+            logSuppressedCount = 0
+        }
+    }
+
+    enum PropertyStatusValue: String, Codable, CaseIterable, Equatable {
+        case idle
+        case occupied
+        case draft
+        case pendingExport = "pending_export"
+        case exported
+    }
+
+    struct PropertyStatusRecord: Decodable, Equatable, Identifiable {
+        var id: UUID { propertyID }
+
+        let propertyID: UUID
+        let orgID: UUID
+        let status: PropertyStatusValue
+        let activeSessionID: UUID?
+        let draftSessionID: UUID?
+        let pendingExportSessionID: UUID?
+        let lastExportedSessionID: UUID?
+        let ownerUserID: UUID?
+        let ownerDeviceID: String?
+        let heartbeatAt: Date?
+        let updatedAt: Date
+        let updatedBy: UUID?
+        let statusReason: String?
+        let revision: Int64
+
+        enum CodingKeys: String, CodingKey {
+            case propertyID = "property_id"
+            case orgID = "org_id"
+            case status
+            case activeSessionID = "active_session_id"
+            case draftSessionID = "draft_session_id"
+            case pendingExportSessionID = "pending_export_session_id"
+            case lastExportedSessionID = "last_exported_session_id"
+            case ownerUserID = "owner_user_id"
+            case ownerDeviceID = "owner_device_id"
+            case heartbeatAt = "heartbeat_at"
+            case updatedAt = "updated_at"
+            case updatedBy = "updated_by"
+            case statusReason = "status_reason"
+            case revision
+        }
+
+        var ownerDiagnosticSummary: String {
+            "user=\(ownerUserID?.uuidString ?? "nil"),device=\(ownerDeviceID ?? "nil")"
+        }
+
+        var sessionIDDiagnosticSummary: String {
+            [
+                "active=\(activeSessionID?.uuidString ?? "nil")",
+                "draft=\(draftSessionID?.uuidString ?? "nil")",
+                "pending_export=\(pendingExportSessionID?.uuidString ?? "nil")",
+                "last_exported=\(lastExportedSessionID?.uuidString ?? "nil")"
+            ].joined(separator: ",")
+        }
+    }
+
+    struct PropertyStatusDerivedSummary: Equatable {
+        let draftBadgeDecision: Bool
+        let pendingExportDecision: Bool
+        let lockedDecision: Bool
+        let entryBlockingDecision: String
+        let deleteEligibilityDecision: String
+
+        var diagnosticSummary: String {
+            [
+                "draft_badge=\(draftBadgeDecision)",
+                "pending_export=\(pendingExportDecision)",
+                "locked=\(lockedDecision)",
+                "entry=\(entryBlockingDecision)",
+                "delete=\(deleteEligibilityDecision)"
+            ].joined(separator: ",")
+        }
+    }
+
+    struct PropertyStatusDiagnosticComparison: Equatable, Identifiable {
+        var id: UUID { propertyID }
+
+        let propertyID: UUID
+        let rowFound: Bool
+        let status: PropertyStatusValue?
+        let ownerSummary: String
+        let sessionIDSummary: String
+        let derivedStatusSummary: String
+        let statusMatch: Bool
+        let statusMismatchReason: String
+        let refreshElapsedMs: Int
+        let checkedAt: Date
+    }
+
     private struct SessionCoordinationTier1Snapshot: Codable, Equatable {
         struct Entry: Codable, Equatable {
             let id: UUID
@@ -4255,6 +4375,67 @@ final class AppState: ObservableObject {
             case targetOrgID = "target_org_id"
             case targetUserID = "target_user_id"
             case targetInvitationID = "target_invitation_id"
+        }
+    }
+
+    private struct PropertyStatusSessionRPCPayload: Encodable {
+        let targetPropertyID: UUID
+        let targetSessionID: UUID
+        let targetDeviceID: String
+        let targetStatusReason: String
+
+        enum CodingKeys: String, CodingKey {
+            case targetPropertyID = "target_property_id"
+            case targetSessionID = "target_session_id"
+            case targetDeviceID = "target_device_id"
+            case targetStatusReason = "target_status_reason"
+        }
+    }
+
+    private struct PropertyStatusDeviceRPCPayload: Encodable {
+        let targetPropertyID: UUID
+        let targetDeviceID: String
+        let targetStatusReason: String
+
+        enum CodingKeys: String, CodingKey {
+            case targetPropertyID = "target_property_id"
+            case targetDeviceID = "target_device_id"
+            case targetStatusReason = "target_status_reason"
+        }
+    }
+
+    private enum PropertyStatusShadowTransition: String {
+        case claim = "claim"
+        case heartbeat = "heartbeat"
+        case promoteDraft = "promote_draft"
+        case pendingExport = "pending_export"
+        case exported = "exported"
+        case release = "release"
+
+        var rpcName: String {
+            switch self {
+            case .claim:
+                return "claim_property_status"
+            case .heartbeat:
+                return "heartbeat_property_status"
+            case .promoteDraft:
+                return "promote_property_status_draft"
+            case .pendingExport:
+                return "set_property_status_pending_export"
+            case .exported:
+                return "set_property_status_exported"
+            case .release:
+                return "release_property_status_if_owner"
+            }
+        }
+
+        var requiresSessionID: Bool {
+            switch self {
+            case .claim, .promoteDraft, .pendingExport, .exported:
+                return true
+            case .heartbeat, .release:
+                return false
+            }
         }
     }
 
@@ -5210,6 +5391,9 @@ final class AppState: ObservableObject {
     @Published var authenticationErrorMessage: String?
     @Published var locallyLockedPropertyIDs: Set<UUID> = []
     @Published private var propertySessionOccupancyByPropertyID: [UUID: PropertySessionOccupancyState] = [:]
+    private(set) var propertyStatusByPropertyID: [UUID: PropertyStatusRecord] = [:]
+    private(set) var lastPropertyStatusRefreshAt: Date?
+    private(set) var propertyStatusDiagnostics: [UUID: PropertyStatusDiagnosticComparison] = [:]
     @Published private(set) var activeOrganizationID: UUID?
     @Published private(set) var accessibleOrganizations: [ActiveOrganizationMembership] = []
     @Published private(set) var isOrganizationContextReady: Bool = false
@@ -5820,6 +6004,9 @@ final class AppState: ObservableObject {
     private var propertyReferenceMetadataRefreshAtByPropertyID: [UUID: Date] = [:]
     private var sessionArchiveAvailabilityCache: [String: (checkedAt: Date, availability: LocalStore.SessionArchivePackageAvailability)] = [:]
     private let sessionArchiveAvailabilityCacheTTL: TimeInterval = 15
+    private var reExportAvailabilityCache: [String: ReExportAvailabilityCacheEntry] = [:]
+    private var reExportAvailabilityDiagnostics = ReExportAvailabilityDiagnostics()
+    private var lastReExportAvailabilitySummaryLogAt: Date?
 #if DEBUG
     private var propertySessionOccupancyDebugRemoteRecords: [UUID: RemotePropertySessionOccupancyRecord] = [:]
 #endif
@@ -8206,6 +8393,18 @@ final class AppState: ObservableObject {
                 propertySessionOccupancyByPropertyID.removeValue(forKey: propertyID)
             }
         }
+        let hiddenPropertyStatusIDs = Set(propertyStatusByPropertyID.keys).subtracting(scopedPropertyIDs)
+        if !hiddenPropertyStatusIDs.isEmpty {
+            for propertyID in hiddenPropertyStatusIDs {
+                propertyStatusByPropertyID.removeValue(forKey: propertyID)
+            }
+        }
+        let hiddenPropertyStatusDiagnosticIDs = Set(propertyStatusDiagnostics.keys).subtracting(scopedPropertyIDs)
+        if !hiddenPropertyStatusDiagnosticIDs.isEmpty {
+            for propertyID in hiddenPropertyStatusDiagnosticIDs {
+                propertyStatusDiagnostics.removeValue(forKey: propertyID)
+            }
+        }
         if !locallyLockedPropertyIDs.isSubset(of: scopedPropertyIDs) {
             locallyLockedPropertyIDs = locallyLockedPropertyIDs.intersection(scopedPropertyIDs)
         }
@@ -9435,6 +9634,11 @@ final class AppState: ObservableObject {
     private func performRemoteConvergenceCycle(source: String) async {
         _ = await performOfflineReplay(source: source)
         await performSyncDeltaPull(source: source)
+        queuePropertyStatusDiagnosticsRefresh(
+            trigger: "convergence_\(source)",
+            orgID: activeOrganizationID,
+            propertyIDs: properties.map(\.id)
+        )
     }
 
     private func offlineReplayNotReadySummary(source: String, reason: String) -> OfflineReplayRunSummary {
@@ -24270,6 +24474,12 @@ final class AppState: ObservableObject {
                 orgID: orgID,
                 propertyID: propertyID
             )
+            schedulePropertyStatusShadowWrite(
+                transition: .release,
+                propertyID: propertyID,
+                sessionID: sessionID,
+                reason: "zero_photo_or_occupancy_release"
+            )
             if emitReleasedEvent, let sessionID {
                 occupancyOnlyClaimedSessionIDs.remove(sessionID)
                 await emitAuditEvent(
@@ -24324,6 +24534,12 @@ final class AppState: ObservableObject {
         )
         if didPersist {
             lastOccupancyHeartbeatAtByPropertyID[context.session.propertyID] = now
+            schedulePropertyStatusShadowWrite(
+                transition: .heartbeat,
+                propertyID: context.session.propertyID,
+                sessionID: context.session.id,
+                reason: "occupancy_heartbeat_\(reason)"
+            )
         }
         print(
             "[OccupancyRecovery] event=heartbeat " +
@@ -24770,6 +24986,12 @@ final class AppState: ObservableObject {
                 lockedAt: nil
             )
             occupancyOnlyClaimedSessionIDs.insert(sessionID)
+            schedulePropertyStatusShadowWrite(
+                transition: .claim,
+                propertyID: propertyID,
+                sessionID: sessionID,
+                reason: "property_entry_zero_photo_occupancy"
+            )
             print("[SessionCoordinationEval] event=return result=allowed reason=zero_photo_occupancy_claimed")
             return .allowed
         }
@@ -24799,6 +25021,12 @@ final class AppState: ObservableObject {
         }
         locallyLockedPropertyIDs.remove(propertyID)
         occupancyOnlyClaimedSessionIDs.remove(sessionID)
+        schedulePropertyStatusShadowWrite(
+            transition: .claim,
+            propertyID: propertyID,
+            sessionID: sessionID,
+            reason: "property_entry_material_claim"
+        )
         Task {
             await emitAuditEvent(
                 orgID: orgID,
@@ -24997,6 +25225,14 @@ final class AppState: ObservableObject {
             lockedByDeviceID: clearedState.lockedByDeviceID,
             lockedAt: clearedState.lockedAt
         )
+        if didRelease {
+            schedulePropertyStatusShadowWrite(
+                transition: .release,
+                propertyID: propertyID,
+                sessionID: sessionID,
+                reason: "session_coordination_release"
+            )
+        }
         if didRelease, emitReleasedEvent, let orgID = property.orgId {
             Task {
                 await emitAuditEvent(
@@ -29101,9 +29337,7 @@ final class AppState: ObservableObject {
         let lockedDraftByOther = materialDraft.map { isSessionLockedByOther(sessionID: $0.id) } ?? false
         let locallyLocked = locallyLockedPropertyIDs.contains(propertyID)
         let showLock = occupiedByOther || lockedDraftByOther || locallyLocked
-        let heartbeatExpired = occupancyHasOwner && !occupancyActive
         let finalizedOrExported = isFinalSession(materialDraft)
-        let materialDraftUnresolved = materialDraft != nil && !finalizedOrExported
         let lockReason: String = {
             if occupiedByOther { return "active_occupancy_other_device" }
             if lockedDraftByOther { return "locked_by_other" }
@@ -29139,13 +29373,11 @@ final class AppState: ObservableObject {
             return "hidden_unverified_local_owner"
         }()
 
-        let reExportSession = sessions(for: propertyID)
-            .sorted { $0.startedAt > $1.startedAt }
-            .first(where: { isReExportLocallyAvailable($0) })
+        let reExportSession = reExportCandidateSession(for: propertyID)
         let showReExport = reExportSession != nil
         let reExportReason = showReExport ? "local_archive_available" : "no_local_archive_available"
 
-        let model = PropertyCardBadgeModel(
+        return PropertyCardBadgeModel(
             propertyID: propertyID,
             activeOccupancySessionID: nil,
             occupancyOwnerUserID: occupancyOwnerUserID,
@@ -29163,49 +29395,534 @@ final class AppState: ObservableObject {
             draftReason: draftReason,
             reExportReason: reExportReason
         )
+    }
+
+    func reExportCandidateSession(for propertyID: UUID, now: Date = Date()) -> Session? {
+        let candidates = sessions(for: propertyID)
+            .sorted { lhs, rhs in
+                let l = lhs.firstDeliveredAt ?? .distantPast
+                let r = rhs.firstDeliveredAt ?? .distantPast
+                if l == r {
+                    return lhs.startedAt > rhs.startedAt
+                }
+                return l > r
+            }
+        reExportAvailabilityDiagnostics.candidatesScanned += candidates.count
+        return candidates.first { isReExportLocallyAvailable($0, now: now) }
+    }
+
+    func propertyStatusRecord(for propertyID: UUID) -> PropertyStatusRecord? {
+        propertyStatusByPropertyID[propertyID]
+    }
+
+    func propertyStatusDiagnostic(for propertyID: UUID) -> PropertyStatusDiagnosticComparison? {
+        propertyStatusDiagnostics[propertyID]
+    }
+
+    private func schedulePropertyStatusShadowWrite(
+        transition: PropertyStatusShadowTransition,
+        propertyID: UUID,
+        sessionID: UUID? = nil,
+        reason: String
+    ) {
+        guard backendFeatureFlags.supabaseEnabled,
+              backendFeatureFlags.shadowWriteEnabled,
+              supabaseClient != nil,
+              canAccessProperty(propertyID) else {
+            return
+        }
+        guard !transition.requiresSessionID || sessionID != nil else {
+            print(
+                "[PropertyStatusShadowWrite] property_status_shadow_write_failure " +
+                "property_status_transition=\(transition.rawValue) " +
+                "rpc=\(transition.rpcName) " +
+                "propertyID=\(propertyID.uuidString) " +
+                "sessionID=nil " +
+                "reason=\(reason) " +
+                "error=missing_session_id"
+            )
+            return
+        }
+
+        let deviceID = currentDeviceIdentifier()
         print(
-            "[BadgeModel] propertyID=\(propertyID.uuidString) " +
-            "activeOccupancySessionID=\(model.activeOccupancySessionID?.uuidString ?? "nil") " +
-            "occupancyOwnerUserID=\(occupancyOwnerUserID?.uuidString ?? "nil") " +
-            "occupancyOwnerDeviceID=\(occupancyOwnerDeviceID ?? "nil") " +
-            "currentUserID=\(currentUserID?.uuidString ?? "nil") " +
-            "currentDeviceID=\(currentDeviceID) " +
-            "materialDraftSessionID=\(materialDraft?.id.uuidString ?? "nil") " +
-            "draftOwnerUserID=\(draftOwnerUserID?.uuidString ?? "nil") " +
-            "draftOwnerDeviceID=\(draftOwnerDeviceID ?? "nil") " +
-            "finalizedOrExported=\(finalizedOrExported) " +
-            "zeroPhotoOccupancy=\(materialDraft == nil && occupancyHasOwner) " +
-            "heartbeatExpired=\(heartbeatExpired) " +
-            "materialDraftUnresolved=\(materialDraftUnresolved) " +
-            "accessDecision=\(showLock ? "blocked" : "allowed") " +
-            "badgeDecision=lock:\(showLock),draft:\(showDraft),reexport:\(showReExport) " +
-            "showLock=\(showLock) showDraft=\(showDraft) showReexport=\(showReExport) " +
-            "lockReason=\(lockReason) draftReason=\(draftReason) reExportReason=\(reExportReason)"
+            "[PropertyStatusShadowWrite] property_status_shadow_write_started " +
+            "property_status_transition=\(transition.rawValue) " +
+            "rpc=\(transition.rpcName) " +
+            "propertyID=\(propertyID.uuidString) " +
+            "sessionID=\(sessionID?.uuidString ?? "nil") " +
+            "ownerDeviceID=\(deviceID) " +
+            "reason=\(reason)"
         )
-        return model
+        Task { @MainActor [weak self] in
+            await self?.performPropertyStatusShadowWrite(
+                transition: transition,
+                propertyID: propertyID,
+                sessionID: sessionID,
+                deviceID: deviceID,
+                reason: reason
+            )
+        }
+    }
+
+    private func performPropertyStatusShadowWrite(
+        transition: PropertyStatusShadowTransition,
+        propertyID: UUID,
+        sessionID: UUID?,
+        deviceID: String,
+        reason: String
+    ) async {
+        guard let client = supabaseClient else {
+            print(
+                "[PropertyStatusShadowWrite] property_status_shadow_write_failure " +
+                "property_status_transition=\(transition.rawValue) " +
+                "rpc=\(transition.rpcName) " +
+                "propertyID=\(propertyID.uuidString) " +
+                "sessionID=\(sessionID?.uuidString ?? "nil") " +
+                "reason=\(reason) " +
+                "error=missing_supabase_client"
+            )
+            return
+        }
+
+        do {
+            switch transition {
+            case .claim, .promoteDraft, .pendingExport, .exported:
+                guard let sessionID else {
+                    throw NSError(
+                        domain: "ScoutCapture.PropertyStatusShadowWrite",
+                        code: 1,
+                        userInfo: [NSLocalizedDescriptionKey: "Missing session id for \(transition.rawValue)."]
+                    )
+                }
+                let params = PropertyStatusSessionRPCPayload(
+                    targetPropertyID: propertyID,
+                    targetSessionID: sessionID,
+                    targetDeviceID: deviceID,
+                    targetStatusReason: reason
+                )
+                _ = try await (try client.rpc(transition.rpcName, params: params)).execute()
+            case .heartbeat, .release:
+                let params = PropertyStatusDeviceRPCPayload(
+                    targetPropertyID: propertyID,
+                    targetDeviceID: deviceID,
+                    targetStatusReason: reason
+                )
+                _ = try await (try client.rpc(transition.rpcName, params: params)).execute()
+            }
+
+            print(
+                "[PropertyStatusShadowWrite] property_status_shadow_write_success " +
+                "property_status_transition=\(transition.rawValue) " +
+                "rpc=\(transition.rpcName) " +
+                "propertyID=\(propertyID.uuidString) " +
+                "sessionID=\(sessionID?.uuidString ?? "nil") " +
+                "ownerDeviceID=\(deviceID) " +
+                "reason=\(reason)"
+            )
+        } catch {
+            print(
+                "[PropertyStatusShadowWrite] property_status_shadow_write_failure " +
+                "property_status_transition=\(transition.rawValue) " +
+                "rpc=\(transition.rpcName) " +
+                "propertyID=\(propertyID.uuidString) " +
+                "sessionID=\(sessionID?.uuidString ?? "nil") " +
+                "ownerDeviceID=\(deviceID) " +
+                "reason=\(reason) " +
+                "error=\(Self.diagnosticsPreviewText(error.localizedDescription, maxLength: 160) ?? "unknown_error")"
+            )
+        }
+    }
+
+    func fetchPropertyStatusRecord(propertyID: UUID) async throws -> PropertyStatusRecord? {
+        guard let activeOrganizationID else {
+            return nil
+        }
+        return try await fetchPropertyStatusRecords(
+            orgID: activeOrganizationID,
+            propertyIDs: [propertyID]
+        ).first
+    }
+
+    private func fetchPropertyStatusRecords(
+        orgID: UUID,
+        propertyIDs: [UUID]
+    ) async throws -> [PropertyStatusRecord] {
+        let uniquePropertyIDValues = Array(Set(propertyIDs))
+            .map { $0.uuidString.lowercased() }
+            .sorted()
+        guard !uniquePropertyIDValues.isEmpty else { return [] }
+#if DEBUG
+        if AppStateTestEnvironment.isRunningUnderXCTest {
+            return uniquePropertyIDValues.compactMap { value in
+                guard let propertyID = UUID(uuidString: value) else { return nil }
+                return propertyStatusByPropertyID[propertyID]
+            }
+        }
+#endif
+        guard let client = supabaseClient else {
+            throw RemotePropertyFetchError.missingClient
+        }
+
+        return try await client
+            .from("property_status")
+            .select(
+                """
+                property_id,
+                org_id,
+                status,
+                active_session_id,
+                draft_session_id,
+                pending_export_session_id,
+                last_exported_session_id,
+                owner_user_id,
+                owner_device_id,
+                heartbeat_at,
+                updated_at,
+                updated_by,
+                status_reason,
+                revision
+                """
+            )
+            .eq("org_id", value: orgID.uuidString.lowercased())
+            .in("property_id", values: uniquePropertyIDValues)
+            .execute()
+            .value as [PropertyStatusRecord]
+    }
+
+    @MainActor
+    private func queuePropertyStatusDiagnosticsRefresh(
+        trigger: String,
+        orgID: UUID?,
+        propertyIDs: [UUID]
+    ) {
+        guard isRemotePropertyRefreshEnabled,
+              let orgID,
+              !propertyIDs.isEmpty else {
+            return
+        }
+        let uniquePropertyIDs = Array(Set(propertyIDs)).sorted { $0.uuidString < $1.uuidString }
+        Task { @MainActor [weak self] in
+            await self?.refreshPropertyStatusDiagnostics(
+                trigger: trigger,
+                orgID: orgID,
+                propertyIDs: uniquePropertyIDs
+            )
+        }
+    }
+
+    @MainActor
+    private func refreshPropertyStatusDiagnostics(
+        trigger: String,
+        orgID: UUID,
+        propertyIDs: [UUID]
+    ) async {
+        let requestedPropertyIDs = Array(Set(propertyIDs)).sorted { $0.uuidString < $1.uuidString }
+        guard !requestedPropertyIDs.isEmpty else { return }
+        let start = Date()
+
+        do {
+            let rows = try await fetchPropertyStatusRecords(
+                orgID: orgID,
+                propertyIDs: requestedPropertyIDs
+            )
+            let rowsByPropertyID = Dictionary(uniqueKeysWithValues: rows.map { ($0.propertyID, $0) })
+            let completedAt = Date()
+            let elapsedMs = Int(completedAt.timeIntervalSince(start) * 1000)
+
+            var nextCache = propertyStatusByPropertyID
+            for propertyID in requestedPropertyIDs {
+                if let row = rowsByPropertyID[propertyID] {
+                    nextCache[propertyID] = row
+                } else {
+                    nextCache.removeValue(forKey: propertyID)
+                }
+            }
+            propertyStatusByPropertyID = nextCache
+            lastPropertyStatusRefreshAt = completedAt
+
+            var nextDiagnostics = propertyStatusDiagnostics
+            for propertyID in requestedPropertyIDs {
+                let derived = makePropertyStatusDerivedSummary(propertyID: propertyID)
+                let comparison = Self.makePropertyStatusDiagnosticComparison(
+                    propertyID: propertyID,
+                    record: rowsByPropertyID[propertyID],
+                    derivedSummary: derived,
+                    currentUserID: authenticatedSupabaseUser?.id,
+                    currentDeviceID: currentDeviceIdentifier(),
+                    refreshElapsedMs: elapsedMs,
+                    checkedAt: completedAt
+                )
+                nextDiagnostics[propertyID] = comparison
+                logPropertyStatusDetailedDiagnosticsIfEnabled(comparison)
+            }
+            propertyStatusDiagnostics = nextDiagnostics
+
+            let missingCount = requestedPropertyIDs.count - rows.count
+            let mismatchCount = requestedPropertyIDs
+                .compactMap { nextDiagnostics[$0] }
+                .filter { !$0.statusMatch }
+                .count
+            print(
+                "[PropertyStatusDiagnostics] badgeHydrationCompleted " +
+                "trigger=\(trigger) orgID=\(orgID.uuidString) " +
+                "requested=\(requestedPropertyIDs.count) rows=\(rows.count) " +
+                "missing=\(missingCount) mismatches=\(mismatchCount) " +
+                "draftCountHydrationSource=existing_derived_state " +
+                "pendingExportHydrationSource=existing_derived_state " +
+                "propertyBadgeHydrationSource=existing_derived_state " +
+                "propertyStatusHydrationSource=property_status " +
+                "hydrationDuration=\(elapsedMs)"
+            )
+        } catch {
+            let completedAt = Date()
+            let elapsedMs = Int(completedAt.timeIntervalSince(start) * 1000)
+            let category = Self.diagnosticErrorCategory(for: error)
+            print(
+                "[PropertyStatusDiagnostics] badgeHydrationCompleted " +
+                "trigger=\(trigger) orgID=\(orgID.uuidString) " +
+                "requested=\(requestedPropertyIDs.count) rows=0 " +
+                "errorCategory=\(category.rawValue) " +
+                "property_status_refresh_elapsed_ms=\(elapsedMs)"
+            )
+        }
+    }
+
+    private func makePropertyStatusDerivedSummary(propertyID: UUID) -> PropertyStatusDerivedSummary {
+        let currentUserID = authenticatedSupabaseUser?.id
+        let currentDeviceID = currentDeviceIdentifier()
+        let materialDraft = draftSession(for: propertyID)
+        let draftLockState = materialDraft.flatMap { sessionCoordinationStateBySessionID[$0.id] }
+        let draftOwnerUserID = draftLockState?.lockedByUserID
+        let draftOwnerDeviceID = normalizedSupabaseText(draftLockState?.lockedByDeviceID)
+        let occupancy = propertySessionOccupancyByPropertyID[propertyID]
+        let occupancyOwnerUserID = occupancy?.occupiedByUserID
+        let occupancyOwnerDeviceID = normalizedSupabaseText(occupancy?.occupiedByDeviceID)
+        let occupancyHasOwner = occupancyOwnerUserID != nil || occupancyOwnerDeviceID != nil
+        let occupancyActive = occupancyHasOwner && !isStaleCoordinationLock(lockedAt: occupancy?.occupiedAt)
+        let occupancyOwnedByCurrentActor =
+            (occupancyOwnerDeviceID != nil && occupancyOwnerDeviceID == currentDeviceID) ||
+            (occupancyOwnerUserID != nil && occupancyOwnerUserID == currentUserID)
+        let occupiedByOther = occupancyActive && !occupancyOwnedByCurrentActor
+        let lockedDraftByOther = materialDraft.map { isSessionLockedByOther(sessionID: $0.id) } ?? false
+        let locallyLocked = locallyLockedPropertyIDs.contains(propertyID)
+        let showLock = occupiedByOther || lockedDraftByOther || locallyLocked
+        let finalizedOrExported = isFinalSession(materialDraft)
+        let draftOwnedByCurrentActor: Bool = {
+            guard let materialDraft else { return false }
+            if currentSession?.id == materialDraft.id { return true }
+            if let draftOwnerDeviceID {
+                return draftOwnerDeviceID == currentDeviceID
+            }
+            if let draftOwnerUserID {
+                return draftOwnerUserID == currentUserID
+            }
+            return false
+        }()
+        let showDraft = materialDraft != nil &&
+            !finalizedOrExported &&
+            !showLock &&
+            draftOwnedByCurrentActor
+        let pendingExportDecision = pendingExportSessionByProperty[propertyID] != nil
+        let entryBlockingDecision = showLock ? "blocked_by_existing_lock_state" : "allowed_by_existing_state"
+        let deleteEligibilityDecision: String = {
+            if showLock { return "blocked_by_lock_state" }
+            if showDraft { return "blocked_by_draft_state" }
+            if pendingExportDecision { return "blocked_by_pending_export" }
+            return "eligible_by_existing_state"
+        }()
+        return PropertyStatusDerivedSummary(
+            draftBadgeDecision: showDraft,
+            pendingExportDecision: pendingExportDecision,
+            lockedDecision: showLock,
+            entryBlockingDecision: entryBlockingDecision,
+            deleteEligibilityDecision: deleteEligibilityDecision
+        )
+    }
+
+    private func logPropertyStatusDetailedDiagnosticsIfEnabled(
+        _ comparison: PropertyStatusDiagnosticComparison
+    ) {
+        guard userDefaults.bool(forKey: "property_status_diagnostics_verbose_logging") else {
+            return
+        }
+        print(
+            "[PropertyStatusDiagnostics:Detail] " +
+            "property_status_row_found=\(comparison.rowFound) " +
+            "propertyID=\(comparison.propertyID.uuidString) " +
+            "property_status_status=\(comparison.status?.rawValue ?? "nil") " +
+            "property_status_owner=\(comparison.ownerSummary) " +
+            "property_status_session_ids=\(comparison.sessionIDSummary) " +
+            "derived_status_summary=\(comparison.derivedStatusSummary) " +
+            "status_match=\(comparison.statusMatch) " +
+            "status_mismatch_reason=\(comparison.statusMismatchReason) " +
+            "property_status_refresh_elapsed_ms=\(comparison.refreshElapsedMs)"
+        )
+    }
+
+    static func makePropertyStatusDiagnosticComparison(
+        propertyID: UUID,
+        record: PropertyStatusRecord?,
+        derivedSummary: PropertyStatusDerivedSummary,
+        currentUserID: UUID?,
+        currentDeviceID: String,
+        refreshElapsedMs: Int,
+        checkedAt: Date = Date()
+    ) -> PropertyStatusDiagnosticComparison {
+        guard let record else {
+            return PropertyStatusDiagnosticComparison(
+                propertyID: propertyID,
+                rowFound: false,
+                status: nil,
+                ownerSummary: "user=nil,device=nil",
+                sessionIDSummary: "active=nil,draft=nil,pending_export=nil,last_exported=nil",
+                derivedStatusSummary: derivedSummary.diagnosticSummary,
+                statusMatch: false,
+                statusMismatchReason: "no_property_status_row",
+                refreshElapsedMs: refreshElapsedMs,
+                checkedAt: checkedAt
+            )
+        }
+
+        let ownedByCurrentActor = propertyStatusActorOwnedByCurrentActor(
+            record: record,
+            currentUserID: currentUserID,
+            currentDeviceID: currentDeviceID
+        )
+        let expectedDraftBadge: Bool
+        let expectedPendingExport: Bool
+        let expectedLocked: Bool
+        switch record.status {
+        case .idle, .exported:
+            expectedDraftBadge = false
+            expectedPendingExport = false
+            expectedLocked = false
+        case .occupied:
+            expectedDraftBadge = false
+            expectedPendingExport = false
+            expectedLocked = !ownedByCurrentActor
+        case .draft:
+            expectedDraftBadge = ownedByCurrentActor
+            expectedPendingExport = false
+            expectedLocked = !ownedByCurrentActor
+        case .pendingExport:
+            expectedDraftBadge = false
+            expectedPendingExport = true
+            expectedLocked = false
+        }
+
+        var mismatchReasons: [String] = []
+        if derivedSummary.draftBadgeDecision != expectedDraftBadge {
+            mismatchReasons.append("draft_badge expected=\(expectedDraftBadge) actual=\(derivedSummary.draftBadgeDecision)")
+        }
+        if derivedSummary.pendingExportDecision != expectedPendingExport {
+            mismatchReasons.append("pending_export expected=\(expectedPendingExport) actual=\(derivedSummary.pendingExportDecision)")
+        }
+        if derivedSummary.lockedDecision != expectedLocked {
+            mismatchReasons.append("locked expected=\(expectedLocked) actual=\(derivedSummary.lockedDecision)")
+        }
+
+        return PropertyStatusDiagnosticComparison(
+            propertyID: propertyID,
+            rowFound: true,
+            status: record.status,
+            ownerSummary: record.ownerDiagnosticSummary,
+            sessionIDSummary: record.sessionIDDiagnosticSummary,
+            derivedStatusSummary: derivedSummary.diagnosticSummary,
+            statusMatch: mismatchReasons.isEmpty,
+            statusMismatchReason: mismatchReasons.isEmpty ? "matched" : mismatchReasons.joined(separator: "; "),
+            refreshElapsedMs: refreshElapsedMs,
+            checkedAt: checkedAt
+        )
+    }
+
+    private static func propertyStatusActorOwnedByCurrentActor(
+        record: PropertyStatusRecord,
+        currentUserID: UUID?,
+        currentDeviceID: String
+    ) -> Bool {
+        if let ownerDeviceID = record.ownerDeviceID?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !ownerDeviceID.isEmpty {
+            return ownerDeviceID == currentDeviceID
+        }
+        if let ownerUserID = record.ownerUserID {
+            return ownerUserID == currentUserID
+        }
+        return false
     }
 
     func draftBadgeSession(for propertyID: UUID) -> Session? {
-        let model = propertyCardBadgeModel(for: propertyID)
-        guard let draftID = model.materialDraftSessionID,
-              let draft = sessions(for: propertyID).first(where: { $0.id == draftID }) else {
+        let materialDraft = draftSession(for: propertyID)
+        let draftLockState = materialDraft.flatMap { sessionCoordinationStateBySessionID[$0.id] }
+        let draftOwnerUserID = draftLockState?.lockedByUserID
+        let draftOwnerDeviceID = normalizedSupabaseText(draftLockState?.lockedByDeviceID)
+        let currentUserID = authenticatedSupabaseUser?.id
+        let currentDeviceID = currentDeviceIdentifier()
+        let occupancy = propertySessionOccupancyByPropertyID[propertyID]
+        let occupancyOwnerUserID = occupancy?.occupiedByUserID
+        let occupancyOwnerDeviceID = normalizedSupabaseText(occupancy?.occupiedByDeviceID)
+        let occupancyHasOwner = occupancyOwnerUserID != nil || occupancyOwnerDeviceID != nil
+        let occupancyActive = occupancyHasOwner && !isStaleCoordinationLock(lockedAt: occupancy?.occupiedAt)
+        let occupancyOwnedByCurrentActor =
+            (occupancyOwnerDeviceID != nil && occupancyOwnerDeviceID == currentDeviceID) ||
+            (occupancyOwnerUserID != nil && occupancyOwnerUserID == currentUserID)
+        let occupiedByOther = occupancyActive && !occupancyOwnedByCurrentActor
+        let lockedDraftByOther = materialDraft.map { isSessionLockedByOther(sessionID: $0.id) } ?? false
+        let locallyLocked = locallyLockedPropertyIDs.contains(propertyID)
+        let showLock = occupiedByOther || lockedDraftByOther || locallyLocked
+        let finalizedOrExported = isFinalSession(materialDraft)
+        let lockReason: String = {
+            if occupiedByOther { return "active_occupancy_other_device" }
+            if lockedDraftByOther { return "locked_by_other" }
+            if locallyLocked { return "locally_locked" }
+            if occupancyActive { return "active_occupancy_owned_by_current_device" }
+            if occupancyHasOwner { return "stale_occupancy_ignored" }
+            return "no_active_occupancy"
+        }()
+        let draftOwnedByCurrentActor: Bool = {
+            guard let materialDraft else { return false }
+            if currentSession?.id == materialDraft.id { return true }
+            if let draftOwnerDeviceID {
+                return draftOwnerDeviceID == currentDeviceID
+            }
+            if let draftOwnerUserID {
+                return draftOwnerUserID == currentUserID
+            }
+            return false
+        }()
+        let showDraft = materialDraft != nil &&
+            !finalizedOrExported &&
+            !showLock &&
+            draftOwnedByCurrentActor
+        let draftReason: String = {
+            guard materialDraft != nil else { return "no_material_draft" }
+            if finalizedOrExported { return "finalized_or_exported" }
+            if showLock { return "hidden_by_other_device_occupancy" }
+            if draftOwnedByCurrentActor { return "visible_owned_by_current_device" }
+            if draftOwnerDeviceID != nil || draftOwnerUserID != nil {
+                return "hidden_non_owner"
+            }
+            return "hidden_unverified_local_owner"
+        }()
+
+        guard let draft = materialDraft else {
             print(
                 "[DraftBadge] propertyID=\(propertyID.uuidString) visible=false " +
-                "badge_visibility_reason=\(model.draftReason)"
+                "badge_visibility_reason=\(draftReason)"
             )
             return nil
         }
-        if model.showDraft {
+        if showDraft {
             print(
                 "[DraftBadge] propertyID=\(propertyID.uuidString) " +
                 "sessionID=\(draft.id.uuidString) " +
                 "visible=true " +
-                "draft_owner_user=\(model.draftOwnerUserID?.uuidString ?? "nil") " +
-                "draft_owner_device=\(model.draftOwnerDeviceID ?? "nil") " +
-                "current_user=\(model.currentUserID?.uuidString ?? "nil") " +
-                "current_device=\(model.currentDeviceID) " +
-                "badge_visibility_reason=\(model.draftReason) " +
-                "lock_visibility_reason=\(model.lockReason)"
+                "draft_owner_user=\(draftOwnerUserID?.uuidString ?? "nil") " +
+                "draft_owner_device=\(draftOwnerDeviceID ?? "nil") " +
+                "current_user=\(currentUserID?.uuidString ?? "nil") " +
+                "current_device=\(currentDeviceID) " +
+                "badge_visibility_reason=\(draftReason) " +
+                "lock_visibility_reason=\(lockReason)"
             )
             return draft
         } else {
@@ -29213,12 +29930,12 @@ final class AppState: ObservableObject {
                 "[DraftBadge] propertyID=\(propertyID.uuidString) " +
                 "sessionID=\(draft.id.uuidString) " +
                 "visible=false " +
-                "draft_owner_user=\(model.draftOwnerUserID?.uuidString ?? "nil") " +
-                "draft_owner_device=\(model.draftOwnerDeviceID ?? "nil") " +
-                "current_user=\(model.currentUserID?.uuidString ?? "nil") " +
-                "current_device=\(model.currentDeviceID) " +
-                "badge_visibility_reason=\(model.draftReason) " +
-                "lock_visibility_reason=\(model.lockReason)"
+                "draft_owner_user=\(draftOwnerUserID?.uuidString ?? "nil") " +
+                "draft_owner_device=\(draftOwnerDeviceID ?? "nil") " +
+                "current_user=\(currentUserID?.uuidString ?? "nil") " +
+                "current_device=\(currentDeviceID) " +
+                "badge_visibility_reason=\(draftReason) " +
+                "lock_visibility_reason=\(lockReason)"
             )
             return nil
         }
@@ -29806,9 +30523,15 @@ final class AppState: ObservableObject {
                 authority: authority,
                 replacingOrganizationID: requestedOrganizationID
             )
+            let visiblePropertyIDs = mergedPayload.properties.filter { $0.deletedAt == nil }.map(\.id)
+            queuePropertyStatusDiagnosticsRefresh(
+                trigger: "foreground_refresh",
+                orgID: requestedOrganizationID,
+                propertyIDs: visiblePropertyIDs
+            )
             await refreshVisibleLockBadgesFromEntrySources(
                 orgID: requestedOrganizationID,
-                propertyIDs: mergedPayload.properties.filter { $0.deletedAt == nil }.map(\.id),
+                propertyIDs: visiblePropertyIDs,
                 reason: "foreground_refresh"
             )
             lastLiveSyncFingerprint = localStore.propertiesLedgerFingerprint()
@@ -29910,6 +30633,12 @@ final class AppState: ObservableObject {
             let mergedPayload = mergedBackingRefreshPayload(
                 replacingOrganizationID: requestedOrganizationID,
                 with: payload
+            )
+            let visiblePropertyIDs = mergedPayload.properties.filter { $0.deletedAt == nil }.map(\.id)
+            queuePropertyStatusDiagnosticsRefresh(
+                trigger: "background_refresh",
+                orgID: requestedOrganizationID,
+                propertyIDs: visiblePropertyIDs
             )
             if lastBackgroundRemoteFingerprint == mergedPayload.fingerprint {
                 lastBackgroundRemoteAttemptCompletedAt = Date()
@@ -33158,6 +33887,14 @@ final class AppState: ObservableObject {
         if scheduleShadowWrite {
             schedulePhaseBSessionShadowWrite(for: persisted)
         }
+        if sessionHasCaptures(persisted) {
+            schedulePropertyStatusShadowWrite(
+                transition: .promoteDraft,
+                propertyID: persisted.propertyID,
+                sessionID: persisted.id,
+                reason: "save_draft_with_captures"
+            )
+        }
         return persisted
     }
 
@@ -33225,6 +33962,12 @@ final class AppState: ObservableObject {
                 "propertyID=\(session.propertyID.uuidString) " +
                 "sessionID=\(session.id.uuidString)"
             )
+            schedulePropertyStatusShadowWrite(
+                transition: .promoteDraft,
+                propertyID: session.propertyID,
+                sessionID: session.id,
+                reason: "first_capture_\(reason)"
+            )
             await emitAuditEvent(
                 orgID: orgID,
                 eventType: "session.locked",
@@ -33257,6 +34000,12 @@ final class AppState: ObservableObject {
         currentSession = persisted
         reloadSessionCache(for: persisted.propertyID)
         schedulePhaseBSessionShadowWrite(for: persisted)
+        schedulePropertyStatusShadowWrite(
+            transition: markExported ? .exported : .pendingExport,
+            propertyID: persisted.propertyID,
+            sessionID: persisted.id,
+            reason: markExported ? "complete_current_session_exported" : "complete_current_session_pending_export"
+        )
         scheduleOffloadEligibleSessionMedia(excludingSessionID: currentSession?.id)
         cloudBackupManager?.setCaptureModeActive(false)
         triggerBackupForLifecycleEvent()
@@ -33572,6 +34321,12 @@ final class AppState: ObservableObject {
         reloadSessionCache(for: persisted.propertyID)
         schedulePhaseBSessionShadowWrite(for: persisted)
         scheduleSessionArchiveSnapshot(persisted, trigger: "markCurrentSessionExported")
+        schedulePropertyStatusShadowWrite(
+            transition: .exported,
+            propertyID: persisted.propertyID,
+            sessionID: persisted.id,
+            reason: "mark_current_session_exported"
+        )
         scheduleOffloadEligibleSessionMedia(excludingSessionID: currentSession?.id)
         cloudBackupManager?.setCaptureModeActive(false)
         triggerBackupForLifecycleEvent()
@@ -33606,6 +34361,12 @@ final class AppState: ObservableObject {
         reloadSessionCache(for: persisted.propertyID)
         schedulePhaseBSessionShadowWrite(for: persisted)
         scheduleSessionArchiveSnapshot(persisted, trigger: "sealCurrentSessionForExportLater")
+        schedulePropertyStatusShadowWrite(
+            transition: .pendingExport,
+            propertyID: persisted.propertyID,
+            sessionID: persisted.id,
+            reason: "export_later_sealed"
+        )
         scheduleOffloadEligibleSessionMedia(excludingSessionID: currentSession?.id)
         cloudBackupManager?.setCaptureModeActive(false)
         triggerBackupForLifecycleEvent()
@@ -33628,6 +34389,12 @@ final class AppState: ObservableObject {
         reloadSessionCache(for: persisted.propertyID)
         schedulePhaseBSessionShadowWrite(for: persisted)
         scheduleSessionArchiveSnapshot(persisted, trigger: "sealCurrentSessionForExportNow")
+        schedulePropertyStatusShadowWrite(
+            transition: .pendingExport,
+            propertyID: persisted.propertyID,
+            sessionID: persisted.id,
+            reason: "export_now_sealed"
+        )
         scheduleOffloadEligibleSessionMedia(excludingSessionID: currentSession?.id)
         cloudBackupManager?.setCaptureModeActive(false)
         triggerBackupForLifecycleEvent()
@@ -33707,6 +34474,12 @@ final class AppState: ObservableObject {
             reloadSessionCache(for: propertyID)
             schedulePhaseBSessionShadowWrite(for: persisted)
             scheduleSessionArchiveSnapshot(persisted, trigger: "markSessionExported")
+            schedulePropertyStatusShadowWrite(
+                transition: .exported,
+                propertyID: persisted.propertyID,
+                sessionID: persisted.id,
+                reason: "mark_session_exported"
+            )
             scheduleOffloadEligibleSessionMedia(excludingSessionID: currentSession?.id)
             cloudBackupManager?.setCaptureModeActive(false)
             triggerBackupForLifecycleEvent()
@@ -35602,37 +36375,140 @@ final class AppState: ObservableObject {
     }
 
     func isReExportLocallyAvailable(_ session: Session, now: Date = Date()) -> Bool {
+        let currentDeviceID = currentDeviceIdentifier()
+        let cacheKey = reExportAvailabilityCacheKey(session: session, currentDeviceID: currentDeviceID)
+        let signature = reExportAvailabilitySignature(session: session, currentDeviceID: currentDeviceID)
+        let verboseLogging = isReExportAvailabilityVerboseLoggingEnabled
+        if let cached = reExportAvailabilityCache[cacheKey],
+           cached.signature == signature,
+           now.timeIntervalSince(cached.checkedAt) < sessionArchiveAvailabilityCacheTTL {
+            reExportAvailabilityDiagnostics.cacheHits += 1
+            reExportAvailabilityDiagnostics.logSuppressedCount += 1
+            if verboseLogging {
+                logReExportButtonAvailability(
+                    session: session,
+                    entry: cached,
+                    currentDeviceID: currentDeviceID,
+                    source: "cache_hit"
+                )
+            }
+            logReExportAvailabilitySummaryIfNeeded(trigger: "reexport_cache_hit", now: now)
+            return cached.available
+        }
+
+        reExportAvailabilityDiagnostics.cacheMisses += 1
         guard isReExportEligible(session, now: now) else {
-            print(
-                "[ReExportButton] sessionID=\(session.id.uuidString) " +
-                "exported_by_device_id=unknown local_export_package_available=false " +
-                "export_retention_expires_at=\(session.reExportExpiresAt?.description ?? "nil") " +
-                "reexport_button_reason=window_expired_or_not_delivered"
+            let entry = ReExportAvailabilityCacheEntry(
+                signature: signature,
+                checkedAt: now,
+                available: false,
+                reason: "window_expired_or_not_delivered",
+                archivePath: nil,
+                pathExists: false,
+                checksumVerified: false,
+                originatingDeviceID: nil,
+                expiresAt: session.reExportExpiresAt
             )
+            reExportAvailabilityCache[cacheKey] = entry
+            logReExportButtonAvailability(
+                session: session,
+                entry: entry,
+                currentDeviceID: currentDeviceID,
+                source: "fresh"
+            )
+            logReExportAvailabilitySummaryIfNeeded(trigger: "reexport_cache_miss", now: now)
             return false
         }
         let availability = cachedSessionArchivePackageAvailability(
             propertyID: session.propertyID,
             sessionID: session.id,
             requireDelivered: true,
-            expectedDeviceID: currentDeviceIdentifier()
+            expectedDeviceID: currentDeviceID,
+            logCacheHit: verboseLogging
         )
         let localPackageAvailable = availability.available
+        let entry = ReExportAvailabilityCacheEntry(
+            signature: signature,
+            checkedAt: now,
+            available: localPackageAvailable,
+            reason: localPackageAvailable ? "local_package_available" : availability.reason,
+            archivePath: availability.archivePath,
+            pathExists: availability.pathExists,
+            checksumVerified: availability.checksumVerified,
+            originatingDeviceID: availability.originatingDeviceID,
+            expiresAt: session.reExportExpiresAt
+        )
+        reExportAvailabilityCache[cacheKey] = entry
+        logReExportButtonAvailability(
+            session: session,
+            entry: entry,
+            currentDeviceID: currentDeviceID,
+            source: "fresh"
+        )
+        logReExportAvailabilitySummaryIfNeeded(trigger: "reexport_cache_miss", now: now)
+        return localPackageAvailable
+    }
+
+    private var isReExportAvailabilityVerboseLoggingEnabled: Bool {
+        userDefaults.bool(forKey: "reexport_availability_verbose_logging")
+    }
+
+    private func reExportAvailabilityCacheKey(session: Session, currentDeviceID: String) -> String {
+        [
+            session.propertyID.uuidString.lowercased(),
+            session.id.uuidString.lowercased(),
+            normalizedSupabaseText(currentDeviceID) ?? "unknown-device"
+        ].joined(separator: ":")
+    }
+
+    private func reExportAvailabilitySignature(session: Session, currentDeviceID: String) -> String {
+        [
+            session.status.rawValue,
+            session.isSealed ? "sealed" : "unsealed",
+            session.firstDeliveredAt?.timeIntervalSinceReferenceDate.description ?? "nil",
+            session.reExportExpiresAt?.timeIntervalSinceReferenceDate.description ?? "nil",
+            normalizedSupabaseText(currentDeviceID) ?? "unknown-device"
+        ].joined(separator: "|")
+    }
+
+    private func logReExportButtonAvailability(
+        session: Session,
+        entry: ReExportAvailabilityCacheEntry,
+        currentDeviceID: String,
+        source: String
+    ) {
         print(
             "[ReExportButton] sessionID=\(session.id.uuidString) " +
-            "export_package_path=\(availability.archivePath ?? "nil") " +
-            "file_exists=\(availability.pathExists) " +
-            "checksum_verified=\(availability.checksumVerified) " +
-            "exported_by_device_id=\(availability.originatingDeviceID ?? "unknown") " +
+            "source=\(source) " +
+            "export_package_path=\(entry.archivePath ?? "nil") " +
+            "file_exists=\(entry.pathExists) " +
+            "checksum_verified=\(entry.checksumVerified) " +
+            "exported_by_device_id=\(entry.originatingDeviceID ?? "unknown") " +
             "package_session_id=\(session.id.uuidString) " +
-            "package_device_id=\(availability.originatingDeviceID ?? "unknown") " +
-            "current_device_id=\(currentDeviceIdentifier()) " +
-            "local_archive_path_exists=\(availability.pathExists) " +
-            "local_export_package_available=\(localPackageAvailable) " +
-            "export_retention_expires_at=\(session.reExportExpiresAt?.description ?? "nil") " +
-            "reexport_button_reason=\(localPackageAvailable ? "local_package_available" : availability.reason)"
+            "package_device_id=\(entry.originatingDeviceID ?? "unknown") " +
+            "current_device_id=\(currentDeviceID) " +
+            "local_archive_path_exists=\(entry.pathExists) " +
+            "local_export_package_available=\(entry.available) " +
+            "export_retention_expires_at=\(entry.expiresAt?.description ?? "nil") " +
+            "reexport_button_reason=\(entry.reason)"
         )
-        return localPackageAvailable
+    }
+
+    private func logReExportAvailabilitySummaryIfNeeded(trigger: String, now: Date = Date()) {
+        guard reExportAvailabilityDiagnostics.hasActivity else { return }
+        if let lastReExportAvailabilitySummaryLogAt,
+           now.timeIntervalSince(lastReExportAvailabilitySummaryLogAt) < 5 {
+            return
+        }
+        lastReExportAvailabilitySummaryLogAt = now
+        print(
+            "[ReExportAvailabilitySummary] trigger=\(trigger) " +
+            "reexport_cache_hits=\(reExportAvailabilityDiagnostics.cacheHits) " +
+            "reexport_cache_misses=\(reExportAvailabilityDiagnostics.cacheMisses) " +
+            "reexport_candidates_scanned=\(reExportAvailabilityDiagnostics.candidatesScanned) " +
+            "reexport_log_suppressed_count=\(reExportAvailabilityDiagnostics.logSuppressedCount)"
+        )
+        reExportAvailabilityDiagnostics.reset()
     }
 
     func sessionNeedsDeliveryOrReExport(_ session: Session, now: Date = Date()) -> Bool {
@@ -35643,7 +36519,8 @@ final class AppState: ObservableObject {
         propertyID: UUID,
         sessionID: UUID,
         requireDelivered: Bool,
-        expectedDeviceID: String?
+        expectedDeviceID: String?,
+        logCacheHit: Bool = false
     ) -> LocalStore.SessionArchivePackageAvailability {
         let startedAt = Date()
         let key = [
@@ -35654,16 +36531,20 @@ final class AppState: ObservableObject {
         ].joined(separator: ":")
         if let cached = sessionArchiveAvailabilityCache[key],
            startedAt.timeIntervalSince(cached.checkedAt) < sessionArchiveAvailabilityCacheTTL {
-            print(
-                "[ArchiveAvailability] sessionID=\(sessionID.uuidString) " +
-                "result=cache_hit require_delivered=\(requireDelivered) " +
-                "expected_device_id=\(normalizedSupabaseText(expectedDeviceID) ?? "any") " +
-                "available=\(cached.availability.available) pathExists=\(cached.availability.pathExists) " +
-                "checksum_verified=\(cached.availability.checksumVerified) " +
-                "archive_path=\(cached.availability.archivePath ?? "nil") " +
-                "originating_device_id=\(cached.availability.originatingDeviceID ?? "unknown") " +
-                "reason=\(cached.availability.reason) elapsedMs=0"
-            )
+            if logCacheHit {
+                print(
+                    "[ArchiveAvailability] sessionID=\(sessionID.uuidString) " +
+                    "result=cache_hit require_delivered=\(requireDelivered) " +
+                    "expected_device_id=\(normalizedSupabaseText(expectedDeviceID) ?? "any") " +
+                    "available=\(cached.availability.available) pathExists=\(cached.availability.pathExists) " +
+                    "checksum_verified=\(cached.availability.checksumVerified) " +
+                    "archive_path=\(cached.availability.archivePath ?? "nil") " +
+                    "originating_device_id=\(cached.availability.originatingDeviceID ?? "unknown") " +
+                    "reason=\(cached.availability.reason) elapsedMs=0"
+                )
+            } else {
+                reExportAvailabilityDiagnostics.logSuppressedCount += 1
+            }
             return cached.availability
         }
 
@@ -35705,6 +36586,9 @@ final class AppState: ObservableObject {
     ) {
         let prefix = "\(propertyID.uuidString.lowercased()):\(sessionID.uuidString.lowercased()):"
         sessionArchiveAvailabilityCache = sessionArchiveAvailabilityCache.filter { key, _ in
+            !key.hasPrefix(prefix)
+        }
+        reExportAvailabilityCache = reExportAvailabilityCache.filter { key, _ in
             !key.hasPrefix(prefix)
         }
         print(
