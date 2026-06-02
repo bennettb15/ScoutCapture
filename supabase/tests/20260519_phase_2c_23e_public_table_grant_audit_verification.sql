@@ -42,7 +42,8 @@ values
     ('org_invitations', true, false, false, false),
     ('property_access_grants', true, true, true, false),
     ('property_session_occupancy', true, true, true, true),
-    ('session_snapshots', true, true, false, false);
+    ('session_snapshots', true, true, false, false),
+    ('property_status', true, false, false, false);
 
 select public.test_assert(
     not exists (
