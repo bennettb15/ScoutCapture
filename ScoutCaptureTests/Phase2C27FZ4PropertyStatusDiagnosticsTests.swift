@@ -379,6 +379,290 @@ final class Phase2C27FZ4PropertyStatusDiagnosticsTests: XCTestCase {
         XCTAssertEqual(fixture.appState.draftCountSource(), "legacy")
     }
 
+    func testPropertyStatusNonOwnerDraftBlocksEntryBeforeSessionCreation() throws {
+        let fixture = try makeCutoverFixture()
+        let record = makeStatusRecord(
+            propertyID: fixture.property.id,
+            orgID: fixture.orgID,
+            status: .draft,
+            draftSessionID: UUID(),
+            ownerUserID: UUID(),
+            ownerDeviceID: "other-device"
+        )
+        fixture.appState._debugReplacePropertyStatusCacheForTests([record])
+
+        fixture.appState.selectProperty(id: fixture.property.id)
+        let session = fixture.appState.startSession()
+
+        XCTAssertNil(session)
+        XCTAssertNil(fixture.appState.currentSession)
+        XCTAssertTrue(fixture.appState.sessions(for: fixture.property.id).isEmpty)
+    }
+
+    func testPropertyStatusOwnerDraftAllowsEntryAndReusesDraft() throws {
+        let fixture = try makeCutoverFixture()
+        let draft = try seedCapturedDraft(propertyID: fixture.property.id, localStore: fixture.localStore)
+        fixture.appState._debugRefreshPropertiesLocallyForTests()
+        let record = makeStatusRecord(
+            propertyID: fixture.property.id,
+            orgID: fixture.orgID,
+            status: .draft,
+            draftSessionID: draft.id,
+            ownerUserID: fixture.userID,
+            ownerDeviceID: fixture.appState._debugCurrentDeviceIdentifierForTests()
+        )
+        fixture.appState._debugReplacePropertyStatusCacheForTests([record])
+
+        fixture.appState.selectProperty(id: fixture.property.id)
+        let session = fixture.appState.startSession()
+
+        XCTAssertEqual(session?.id, draft.id)
+        XCTAssertEqual(fixture.appState.currentSession?.id, draft.id)
+    }
+
+    func testPropertyStatusNonOwnerOccupiedBlocksEntry() throws {
+        let fixture = try makeCutoverFixture()
+        let record = makeStatusRecord(
+            propertyID: fixture.property.id,
+            orgID: fixture.orgID,
+            status: .occupied,
+            activeSessionID: UUID(),
+            ownerUserID: UUID(),
+            ownerDeviceID: "other-device"
+        )
+        fixture.appState._debugReplacePropertyStatusCacheForTests([record])
+
+        fixture.appState.selectProperty(id: fixture.property.id)
+        let session = fixture.appState.startSession()
+
+        XCTAssertNil(session)
+        XCTAssertNil(fixture.appState.currentSession)
+        XCTAssertTrue(fixture.appState.sessions(for: fixture.property.id).isEmpty)
+    }
+
+    func testPropertyStatusPendingExportBlocksEntryBeforeNewDraft() throws {
+        let fixture = try makeCutoverFixture()
+        let record = makeStatusRecord(
+            propertyID: fixture.property.id,
+            orgID: fixture.orgID,
+            status: .pendingExport,
+            pendingExportSessionID: UUID(),
+            ownerUserID: fixture.userID,
+            ownerDeviceID: fixture.appState._debugCurrentDeviceIdentifierForTests()
+        )
+        fixture.appState._debugReplacePropertyStatusCacheForTests([record])
+
+        fixture.appState.selectProperty(id: fixture.property.id)
+        let session = fixture.appState.startSession()
+
+        XCTAssertNil(session)
+        XCTAssertNil(fixture.appState.currentSession)
+        XCTAssertTrue(fixture.appState.sessions(for: fixture.property.id).isEmpty)
+    }
+
+    func testPropertyStatusExportedAllowsEntry() throws {
+        let fixture = try makeCutoverFixture()
+        let record = makeStatusRecord(
+            propertyID: fixture.property.id,
+            orgID: fixture.orgID,
+            status: .exported,
+            lastExportedSessionID: UUID(),
+            ownerUserID: nil,
+            ownerDeviceID: nil
+        )
+        fixture.appState._debugReplacePropertyStatusCacheForTests([record])
+
+        fixture.appState.selectProperty(id: fixture.property.id)
+        let session = fixture.appState.startSession()
+
+        XCTAssertNotNil(session)
+        XCTAssertEqual(session?.propertyID, fixture.property.id)
+        XCTAssertEqual(fixture.appState.currentSession?.id, session?.id)
+    }
+
+    func testMissingPropertyStatusEntryFallsBackToLegacyStartSession() throws {
+        let fixture = try makeCutoverFixture()
+
+        fixture.appState.selectProperty(id: fixture.property.id)
+        let session = fixture.appState.startSession()
+
+        XCTAssertNotNil(session)
+        XCTAssertEqual(session?.propertyID, fixture.property.id)
+        XCTAssertEqual(fixture.appState.currentSession?.id, session?.id)
+    }
+
+    func testLoadDraftSessionBlockedByNonOwnerPropertyStatus() throws {
+        let fixture = try makeCutoverFixture()
+        _ = try seedCapturedDraft(propertyID: fixture.property.id, localStore: fixture.localStore)
+        fixture.appState._debugRefreshPropertiesLocallyForTests()
+        let record = makeStatusRecord(
+            propertyID: fixture.property.id,
+            orgID: fixture.orgID,
+            status: .draft,
+            draftSessionID: UUID(),
+            ownerUserID: UUID(),
+            ownerDeviceID: "other-device"
+        )
+        fixture.appState._debugReplacePropertyStatusCacheForTests([record])
+
+        let loaded = fixture.appState.loadDraftSession(for: fixture.property.id)
+
+        XCTAssertNil(loaded)
+        XCTAssertNil(fixture.appState.currentSession)
+    }
+
+    func testDraftPromotionLocalCacheUpdateShowsOwnerDraftBadgeImmediately() throws {
+        let fixture = try makeCutoverFixture()
+        let sessionID = UUID()
+        let record = makeStatusRecord(
+            propertyID: fixture.property.id,
+            orgID: fixture.orgID,
+            status: .draft,
+            draftSessionID: sessionID,
+            ownerUserID: fixture.userID,
+            ownerDeviceID: fixture.appState._debugCurrentDeviceIdentifierForTests()
+        )
+
+        fixture.appState._debugUpdateLocalPropertyStatusCacheAfterDraftPromotionForTests(
+            record,
+            propertyID: fixture.property.id,
+            sessionID: sessionID,
+            reason: "test_draft_promotion_cache_update"
+        )
+
+        let badge = fixture.appState.propertyCardBadgeModel(for: fixture.property.id)
+        XCTAssertEqual(fixture.appState.propertyStatusRecord(for: fixture.property.id)?.status, .draft)
+        XCTAssertTrue(badge.showDraft)
+        XCTAssertFalse(badge.showLock)
+        XCTAssertFalse(badge.showPendingExport)
+        XCTAssertEqual(fixture.appState.draftPropertyCount(), 1)
+    }
+
+    func testDraftPromotionLocalCacheUpdateRejectsNonOwnerReturnedRow() throws {
+        let fixture = try makeCutoverFixture()
+        let sessionID = UUID()
+        let record = makeStatusRecord(
+            propertyID: fixture.property.id,
+            orgID: fixture.orgID,
+            status: .draft,
+            draftSessionID: sessionID,
+            ownerUserID: UUID(),
+            ownerDeviceID: "other-device"
+        )
+
+        fixture.appState._debugUpdateLocalPropertyStatusCacheAfterDraftPromotionForTests(
+            record,
+            propertyID: fixture.property.id,
+            sessionID: sessionID,
+            reason: "test_reject_non_owner_draft_cache_update"
+        )
+
+        XCTAssertNil(fixture.appState.propertyStatusRecord(for: fixture.property.id))
+        let badge = fixture.appState.propertyCardBadgeModel(for: fixture.property.id)
+        XCTAssertFalse(badge.showDraft)
+        XCTAssertFalse(badge.showLock)
+        XCTAssertEqual(fixture.appState.draftPropertyCount(), 0)
+    }
+
+    func testExportedPropertyStatusCacheUpdateClearsPendingExportBadge() throws {
+        let fixture = try makeCutoverFixture()
+        let sessionID = UUID()
+        let pendingRecord = makeStatusRecord(
+            propertyID: fixture.property.id,
+            orgID: fixture.orgID,
+            status: .pendingExport,
+            pendingExportSessionID: sessionID,
+            ownerUserID: fixture.userID,
+            ownerDeviceID: fixture.appState._debugCurrentDeviceIdentifierForTests()
+        )
+        let exportedRecord = makeStatusRecord(
+            propertyID: fixture.property.id,
+            orgID: fixture.orgID,
+            status: .exported,
+            lastExportedSessionID: sessionID,
+            ownerUserID: nil,
+            ownerDeviceID: nil
+        )
+        fixture.appState._debugReplacePropertyStatusCacheForTests([pendingRecord])
+        XCTAssertTrue(fixture.appState.propertyCardBadgeModel(for: fixture.property.id).showPendingExport)
+
+        fixture.appState._debugUpdateLocalPropertyStatusCacheAfterExportForTests(
+            exportedRecord,
+            propertyID: fixture.property.id,
+            sessionID: sessionID,
+            reason: "test_exported_cache_update"
+        )
+
+        let badge = fixture.appState.propertyCardBadgeModel(for: fixture.property.id)
+        XCTAssertEqual(fixture.appState.propertyStatusRecord(for: fixture.property.id)?.status, .exported)
+        XCTAssertFalse(badge.showPendingExport)
+        XCTAssertFalse(badge.showDraft)
+        XCTAssertFalse(badge.showLock)
+        XCTAssertEqual(fixture.appState.pendingExportCountAcrossProperties(), 0)
+    }
+
+    func testExportedPropertyStatusCacheUpdateIgnoresNonExportedReturnedRow() throws {
+        let fixture = try makeCutoverFixture()
+        let sessionID = UUID()
+        let pendingRecord = makeStatusRecord(
+            propertyID: fixture.property.id,
+            orgID: fixture.orgID,
+            status: .pendingExport,
+            pendingExportSessionID: sessionID,
+            ownerUserID: fixture.userID,
+            ownerDeviceID: fixture.appState._debugCurrentDeviceIdentifierForTests()
+        )
+        let nonExportedReturnedRecord = makeStatusRecord(
+            propertyID: fixture.property.id,
+            orgID: fixture.orgID,
+            status: .draft,
+            draftSessionID: UUID(),
+            ownerUserID: fixture.userID,
+            ownerDeviceID: fixture.appState._debugCurrentDeviceIdentifierForTests()
+        )
+        fixture.appState._debugReplacePropertyStatusCacheForTests([pendingRecord])
+
+        fixture.appState._debugUpdateLocalPropertyStatusCacheAfterExportForTests(
+            nonExportedReturnedRecord,
+            propertyID: fixture.property.id,
+            sessionID: sessionID,
+            reason: "test_reject_non_exported_cache_update"
+        )
+
+        let badge = fixture.appState.propertyCardBadgeModel(for: fixture.property.id)
+        XCTAssertEqual(fixture.appState.propertyStatusRecord(for: fixture.property.id)?.status, .pendingExport)
+        XCTAssertTrue(badge.showPendingExport)
+        XCTAssertEqual(fixture.appState.pendingExportCountAcrossProperties(), 1)
+    }
+
+    func testPropertyStatusEntryBlockUsesFriendlyOwnerDescriptionWhenAvailable() throws {
+        let fixture = try makeCutoverFixture()
+        let ownerID = UUID()
+        fixture.appState._debugSetActiveOrganizationMembersForTests([
+            OrganizationAccessMember(
+                id: ownerID,
+                email: "owner@example.com",
+                fullName: "Morgan Owner",
+                role: "member",
+                accessScope: "organization"
+            )
+        ])
+        let record = makeStatusRecord(
+            propertyID: fixture.property.id,
+            orgID: fixture.orgID,
+            status: .draft,
+            draftSessionID: UUID(),
+            ownerUserID: ownerID,
+            ownerDeviceID: "owner-device-abcdef"
+        )
+        fixture.appState._debugReplacePropertyStatusCacheForTests([record])
+
+        let decision = fixture.appState.evaluatePropertyStatusEntryPreflight(propertyID: fixture.property.id)
+
+        XCTAssertEqual(decision?.decision, "block")
+        XCTAssertEqual(decision?.block?.ownerDescription, "Morgan Owner on Device owner-de")
+    }
+
     private struct CutoverFixture {
         let localStore: LocalStore
         let appState: AppState

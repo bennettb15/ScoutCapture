@@ -10577,6 +10577,13 @@ struct PropertySessionView: View {
                 didSetup = true
                 appState.selectProperty(id: propertyID)
                 appState.beginPropertyOpenFreshnessCheck(propertyID: propertyID)
+                if let propertyStatusEntryPreflight = appState.evaluatePropertyStatusEntryPreflight(
+                    propertyID: propertyID,
+                    context: "property_session_view"
+                ), let block = propertyStatusEntryPreflight.block {
+                    sessionEntryBlock = block
+                    return
+                }
                 Task {
                     let openedAt = Date()
                     await appState.reconcileRemoteSessionContentForPropertyOpen(propertyID: propertyID)

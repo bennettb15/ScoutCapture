@@ -3622,6 +3622,17 @@ final class AppState: ObservableObject {
         }
     }
 
+    struct PropertyStatusEntryPreflightDecision: Equatable {
+        let source: String
+        let decision: String
+        let reason: String
+        let block: SessionEntryCoordinationBlock?
+
+        var isBlocked: Bool {
+            block != nil
+        }
+    }
+
     struct PropertyStatusDerivedSummary: Equatable {
         let draftBadgeDecision: Bool
         let pendingExportDecision: Bool
@@ -6955,6 +6966,37 @@ final class AppState: ObservableObject {
     func _debugReplacePropertyStatusCacheForTests(_ records: [PropertyStatusRecord]) {
         propertyStatusByPropertyID = Dictionary(uniqueKeysWithValues: records.map { ($0.propertyID, $0) })
         lastPropertyStatusRefreshAt = Date()
+    }
+
+    @MainActor
+    func _debugUpdateLocalPropertyStatusCacheAfterExportForTests(
+        _ record: PropertyStatusRecord,
+        propertyID: UUID,
+        sessionID: UUID,
+        reason: String
+    ) {
+        updateLocalPropertyStatusCacheAfterExport(
+            record,
+            propertyID: propertyID,
+            sessionID: sessionID,
+            reason: reason
+        )
+    }
+
+    @MainActor
+    func _debugUpdateLocalPropertyStatusCacheAfterDraftPromotionForTests(
+        _ record: PropertyStatusRecord,
+        propertyID: UUID,
+        sessionID: UUID,
+        reason: String
+    ) {
+        updateLocalPropertyStatusCacheAfterDraftPromotion(
+            record,
+            propertyID: propertyID,
+            sessionID: sessionID,
+            deviceID: currentDeviceIdentifier(),
+            reason: reason
+        )
     }
 #endif
 
@@ -24106,17 +24148,21 @@ final class AppState: ObservableObject {
         for lockedByUserID: UUID?,
         lockedByDeviceID: String?
     ) async -> String {
-        if let lockedByUserID, lockedByUserID == authenticatedSupabaseUser?.id {
-            return "You"
-        }
+        let deviceDescription = friendlyDeviceDescription(for: lockedByDeviceID)
         guard let lockedByUserID else {
-            if normalizedSupabaseText(lockedByDeviceID) != nil {
-                return "Another device"
-            }
-            return "Another user"
+            return deviceDescription ?? "Another user"
+        }
+        if let localName = localOwnerDisplayName(for: lockedByUserID) {
+            return combineOwnerAndDeviceDescription(
+                owner: localName,
+                device: deviceDescription
+            )
         }
         guard let client = supabaseClient else {
-            return "User \(lockedByUserID.uuidString.prefix(8))"
+            return combineOwnerAndDeviceDescription(
+                owner: fallbackOwnerDisplayName(for: lockedByUserID),
+                device: deviceDescription
+            )
         }
 
         struct OwnerRecord: Decodable {
@@ -24143,14 +24189,55 @@ final class AppState: ObservableObject {
         }
         if let first = rows.first {
             if let fullName = normalizedSupabaseText(first.fullName) {
-                return fullName
+                return combineOwnerAndDeviceDescription(
+                    owner: fullName,
+                    device: deviceDescription
+                )
             }
             if let email = normalizedSupabaseText(first.email) {
-                return email
+                return combineOwnerAndDeviceDescription(
+                    owner: email,
+                    device: deviceDescription
+                )
             }
         }
 
-        return "User \(lockedByUserID.uuidString.prefix(8))"
+        return combineOwnerAndDeviceDescription(
+            owner: fallbackOwnerDisplayName(for: lockedByUserID),
+            device: deviceDescription
+        )
+    }
+
+    private func localOwnerDisplayName(for ownerUserID: UUID) -> String? {
+        if ownerUserID == authenticatedSupabaseUser?.id {
+            if let email = normalizedSupabaseText(authenticatedSupabaseUser?.email) {
+                return email
+            }
+            return "You"
+        }
+        if let member = activeOrganizationMembers.first(where: { $0.id == ownerUserID }) {
+            return member.displayName
+        }
+        return nil
+    }
+
+    private func fallbackOwnerDisplayName(for ownerUserID: UUID) -> String {
+        "User \(ownerUserID.uuidString.prefix(8))"
+    }
+
+    private func friendlyDeviceDescription(for ownerDeviceID: String?) -> String? {
+        guard let ownerDeviceID = normalizedSupabaseText(ownerDeviceID) else {
+            return nil
+        }
+        if ownerDeviceID == currentDeviceIdentifier() {
+            return "this device"
+        }
+        return "Device \(ownerDeviceID.prefix(8))"
+    }
+
+    private func combineOwnerAndDeviceDescription(owner: String, device: String?) -> String {
+        guard let device else { return owner }
+        return "\(owner) on \(device)"
     }
 
     private func setSessionCoordinationState(
@@ -29579,6 +29666,149 @@ final class AppState: ObservableObject {
         propertyStatusByPropertyID[propertyID]
     }
 
+    func evaluatePropertyStatusEntryPreflight(
+        propertyID: UUID,
+        context: String? = nil
+    ) -> PropertyStatusEntryPreflightDecision? {
+        guard let record = propertyStatusByPropertyID[propertyID] else {
+            if let context {
+                logPropertyStatusEntryPreflight(
+                    propertyID: propertyID,
+                    decision: nil,
+                    context: context
+                )
+            }
+            return nil
+        }
+        let decision = makePropertyStatusEntryPreflightDecision(propertyID: propertyID, record: record)
+        if let context {
+            logPropertyStatusEntryPreflight(
+                propertyID: propertyID,
+                decision: decision,
+                context: context
+            )
+        }
+        return decision
+    }
+
+    private func makePropertyStatusEntryPreflightDecision(
+        propertyID: UUID,
+        record: PropertyStatusRecord
+    ) -> PropertyStatusEntryPreflightDecision {
+        let currentUserID = authenticatedSupabaseUser?.id
+        let currentDeviceID = currentDeviceIdentifier()
+        let ownedByCurrentActor = Self.propertyStatusActorOwnedByCurrentActor(
+            record: record,
+            currentUserID: currentUserID,
+            currentDeviceID: currentDeviceID
+        )
+        let ownerDescription = propertyStatusEntryOwnerDescription(record: record)
+        let lockedAt = record.heartbeatAt ?? record.updatedAt
+
+        switch record.status {
+        case .idle:
+            return PropertyStatusEntryPreflightDecision(
+                source: "property_status",
+                decision: "allow",
+                reason: "status_idle",
+                block: nil
+            )
+        case .exported:
+            return PropertyStatusEntryPreflightDecision(
+                source: "property_status",
+                decision: "allow",
+                reason: "status_exported",
+                block: nil
+            )
+        case .occupied:
+            guard !ownedByCurrentActor else {
+                return PropertyStatusEntryPreflightDecision(
+                    source: "property_status",
+                    decision: "allow",
+                    reason: "occupied_owned_by_current_actor",
+                    block: nil
+                )
+            }
+            return PropertyStatusEntryPreflightDecision(
+                source: "property_status",
+                decision: "block",
+                reason: "occupied_owned_by_other_actor",
+                block: SessionEntryCoordinationBlock(
+                    ownerDescription: ownerDescription,
+                    lockedAt: lockedAt
+                )
+            )
+        case .draft:
+            guard !ownedByCurrentActor else {
+                return PropertyStatusEntryPreflightDecision(
+                    source: "property_status",
+                    decision: "allow",
+                    reason: "draft_owned_by_current_actor",
+                    block: nil
+                )
+            }
+            return PropertyStatusEntryPreflightDecision(
+                source: "property_status",
+                decision: "block",
+                reason: "draft_owned_by_other_actor",
+                block: SessionEntryCoordinationBlock(
+                    ownerDescription: ownerDescription,
+                    lockedAt: lockedAt
+                )
+            )
+        case .pendingExport:
+            return PropertyStatusEntryPreflightDecision(
+                source: "property_status",
+                decision: "block",
+                reason: "pending_export",
+                block: SessionEntryCoordinationBlock(
+                    ownerDescription: "pending export",
+                    lockedAt: lockedAt
+                )
+            )
+        }
+    }
+
+    private func propertyStatusEntryOwnerDescription(record: PropertyStatusRecord) -> String {
+        let deviceDescription = friendlyDeviceDescription(for: record.ownerDeviceID)
+        if let ownerUserID = record.ownerUserID {
+            let owner = localOwnerDisplayName(for: ownerUserID) ?? fallbackOwnerDisplayName(for: ownerUserID)
+            return combineOwnerAndDeviceDescription(owner: owner, device: deviceDescription)
+        }
+        return deviceDescription ?? "another user"
+    }
+
+    private func logPropertyStatusEntryPreflight(
+        propertyID: UUID,
+        decision: PropertyStatusEntryPreflightDecision?,
+        context: String
+    ) {
+        if let decision {
+            let legacyDecision = makePropertyStatusDerivedSummary(propertyID: propertyID)
+                .compareAnswer
+                .entryBlocked ? "block" : "allow"
+            print(
+                "[PropertyStatusEntry] " +
+                "context=\(context) " +
+                "propertyID=\(propertyID.uuidString) " +
+                "entry_source=\(decision.source) " +
+                "property_status_entry_decision=\(decision.decision) " +
+                "property_status_entry_reason=\(decision.reason) " +
+                "legacy_entry_decision_compare=\(legacyDecision)"
+            )
+        } else {
+            print(
+                "[PropertyStatusEntry] " +
+                "context=\(context) " +
+                "propertyID=\(propertyID.uuidString) " +
+                "entry_source=legacy " +
+                "property_status_entry_decision=missing_row " +
+                "property_status_entry_reason=no_property_status_row " +
+                "legacy_entry_decision_compare=not_checked"
+            )
+        }
+    }
+
     func propertyStatusDiagnostic(for propertyID: UUID) -> PropertyStatusDiagnosticComparison? {
         propertyStatusDiagnostics[propertyID]
     }
@@ -29665,7 +29895,30 @@ final class AppState: ObservableObject {
                     targetDeviceID: deviceID,
                     targetStatusReason: reason
                 )
-                _ = try await (try client.rpc(transition.rpcName, params: params)).execute()
+                if transition == .promoteDraft {
+                    let returnedRecord = try await (try client.rpc(transition.rpcName, params: params))
+                        .execute()
+                        .value as PropertyStatusRecord
+                    updateLocalPropertyStatusCacheAfterDraftPromotion(
+                        returnedRecord,
+                        propertyID: propertyID,
+                        sessionID: sessionID,
+                        deviceID: deviceID,
+                        reason: reason
+                    )
+                } else if transition == .exported {
+                    let returnedRecord = try await (try client.rpc(transition.rpcName, params: params))
+                        .execute()
+                        .value as PropertyStatusRecord
+                    updateLocalPropertyStatusCacheAfterExport(
+                        returnedRecord,
+                        propertyID: propertyID,
+                        sessionID: sessionID,
+                        reason: reason
+                    )
+                } else {
+                    _ = try await (try client.rpc(transition.rpcName, params: params)).execute()
+                }
             case .heartbeat, .release:
                 let params = PropertyStatusDeviceRPCPayload(
                     targetPropertyID: propertyID,
@@ -29696,6 +29949,89 @@ final class AppState: ObservableObject {
                 "error=\(Self.diagnosticsPreviewText(error.localizedDescription, maxLength: 160) ?? "unknown_error")"
             )
         }
+    }
+
+    private func updateLocalPropertyStatusCacheAfterDraftPromotion(
+        _ record: PropertyStatusRecord,
+        propertyID: UUID,
+        sessionID: UUID,
+        deviceID: String,
+        reason: String
+    ) {
+        let currentUserID = authenticatedSupabaseUser?.id
+        let ownerDeviceMatches = normalizedSupabaseText(record.ownerDeviceID) == deviceID
+        let ownerUserMatches = record.ownerUserID == currentUserID
+        guard record.propertyID == propertyID,
+              record.status == .draft,
+              record.draftSessionID == sessionID,
+              ownerDeviceMatches,
+              ownerUserMatches else {
+            print(
+                "[PropertyStatusShadowWrite] property_status_local_cache_updated_after_draft=false " +
+                "propertyID=\(propertyID.uuidString) " +
+                "sessionID=\(sessionID.uuidString) " +
+                "returnedPropertyID=\(record.propertyID.uuidString) " +
+                "property_status_status=\(record.status.rawValue) " +
+                "draftSessionID=\(record.draftSessionID?.uuidString ?? "nil") " +
+                "ownerUserMatches=\(ownerUserMatches) " +
+                "ownerDeviceMatches=\(ownerDeviceMatches) " +
+                "reason=returned_row_not_owner_draft_match " +
+                "statusReason=\(reason)"
+            )
+            return
+        }
+
+        var nextCache = propertyStatusByPropertyID
+        nextCache[propertyID] = record
+        propertyStatusByPropertyID = nextCache
+        lastPropertyStatusRefreshAt = Date()
+        let badge = propertyCardBadgeModel(for: propertyID)
+        print(
+            "[PropertyStatusShadowWrite] property_status_local_cache_updated_after_draft " +
+            "propertyID=\(propertyID.uuidString) " +
+            "sessionID=\(sessionID.uuidString) " +
+            "property_status_status=\(record.status.rawValue) " +
+            "draft_badge_visible_after_local_cache_update=\(badge.showDraft) " +
+            "reason=\(reason)"
+        )
+    }
+
+    private func updateLocalPropertyStatusCacheAfterExport(
+        _ record: PropertyStatusRecord,
+        propertyID: UUID,
+        sessionID: UUID,
+        reason: String
+    ) {
+        guard record.propertyID == propertyID,
+              record.status == .exported,
+              record.lastExportedSessionID == sessionID else {
+            print(
+                "[PropertyStatusShadowWrite] property_status_local_cache_updated_after_export=false " +
+                "propertyID=\(propertyID.uuidString) " +
+                "sessionID=\(sessionID.uuidString) " +
+                "returnedPropertyID=\(record.propertyID.uuidString) " +
+                "property_status_status=\(record.status.rawValue) " +
+                "lastExportedSessionID=\(record.lastExportedSessionID?.uuidString ?? "nil") " +
+                "pending_export_cleared_after_export=false " +
+                "reason=returned_row_not_exported_match " +
+                "statusReason=\(reason)"
+            )
+            return
+        }
+        let hadPendingExport = propertyStatusByPropertyID[propertyID]?.status == .pendingExport
+        var nextCache = propertyStatusByPropertyID
+        nextCache[propertyID] = record
+        propertyStatusByPropertyID = nextCache
+        lastPropertyStatusRefreshAt = Date()
+        print(
+            "[PropertyStatusShadowWrite] property_status_local_cache_updated_after_export " +
+            "propertyID=\(propertyID.uuidString) " +
+            "sessionID=\(sessionID.uuidString) " +
+            "property_status_status=\(record.status.rawValue) " +
+            "pending_export_cleared_after_export=\(record.status == .exported && record.pendingExportSessionID == nil) " +
+            "had_pending_export_before_update=\(hadPendingExport) " +
+            "reason=\(reason)"
+        )
     }
 
     func fetchPropertyStatusRecord(propertyID: UUID) async throws -> PropertyStatusRecord? {
@@ -34167,6 +34503,27 @@ final class AppState: ObservableObject {
     @discardableResult
     func startSession() -> Session? {
         guard let selectedPropertyID else { return nil }
+        let propertyStatusEntryPreflight = evaluatePropertyStatusEntryPreflight(
+            propertyID: selectedPropertyID,
+            context: "start_session"
+        )
+        if let propertyStatusEntryPreflight,
+           propertyStatusEntryPreflight.isBlocked {
+            recordDraftSessionReuseDecision(
+                propertyID: selectedPropertyID,
+                session: nil,
+                decision: "blocked_property_status_entry_preflight",
+                candidateCount: 0,
+                blockedReason: propertyStatusEntryPreflight.reason,
+                foregroundRefreshReconciliation: "property_status_entry_preflight_blocked_before_session_selection"
+            )
+            print(
+                "[StartSession] propertyID=\(selectedPropertyID.uuidString) " +
+                "blockedReason=property_status_entry_preflight:\(propertyStatusEntryPreflight.reason) " +
+                "pendingDeliveryExists=not_evaluated reExportEligibleExists=not_evaluated"
+            )
+            return nil
+        }
         ensureCanonicalOrgPersistenceForSelectedPropertyIfKnown(reason: "start_session")
         let sessionsForProperty = sessions(for: selectedPropertyID)
         let reusableDrafts = sessionsForProperty
@@ -34972,6 +35329,18 @@ final class AppState: ObservableObject {
     
     func loadDraftSession(for propertyID: UUID) -> Session? {
         guard canAccessProperty(propertyID) else { return nil }
+        let propertyStatusEntryPreflight = evaluatePropertyStatusEntryPreflight(
+            propertyID: propertyID,
+            context: "load_draft_session"
+        )
+        if let propertyStatusEntryPreflight,
+           propertyStatusEntryPreflight.isBlocked {
+            print(
+                "[LoadDraftSession] propertyID=\(propertyID.uuidString) " +
+                "blockedReason=property_status_entry_preflight:\(propertyStatusEntryPreflight.reason)"
+            )
+            return nil
+        }
         guard let draft = canonicalDraftSession(for: propertyID, requireCaptures: true) else { return nil }
         selectedPropertyID = propertyID
         currentSession = draft
