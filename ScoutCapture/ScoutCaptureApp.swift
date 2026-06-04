@@ -10547,6 +10547,7 @@ struct PropertySessionView: View {
     @State private var didStartOpenFlow: Bool = false
     @State private var openFlowToken: Int = 0
     @State private var hasSessionReadyForProperty: Bool = false
+    @State private var isCheckingSessionBeforeOpen: Bool = true
     @State private var isCheckingSessionCoordination: Bool = false
     @State private var sessionEntryBlock: AppState.SessionEntryCoordinationBlock? = nil
 
@@ -10577,30 +10578,39 @@ struct PropertySessionView: View {
                 didSetup = true
                 appState.selectProperty(id: propertyID)
                 appState.beginPropertyOpenFreshnessCheck(propertyID: propertyID)
-                if let propertyStatusEntryPreflight = appState.evaluatePropertyStatusEntryPreflight(
-                    propertyID: propertyID,
-                    context: "property_session_view"
-                ), let block = propertyStatusEntryPreflight.block {
-                    sessionEntryBlock = block
-                    return
-                }
-                Task {
+                Task { @MainActor in
+                    let propertyStatusPreflight = await appState.evaluateFreshPropertyStatusEntryPreflight(
+                        propertyID: propertyID,
+                        context: "property_session_view"
+                    )
+                    if let block = propertyStatusPreflight.decision?.block {
+                        isCheckingSessionBeforeOpen = false
+                        sessionEntryBlock = block
+                        return
+                    }
                     let openedAt = Date()
                     await appState.reconcileRemoteSessionContentForPropertyOpen(propertyID: propertyID)
                     print(
                         "[PropertyOpenPerf] propertyID=\(propertyID.uuidString) " +
                         "elapsedMs=\(Int(Date().timeIntervalSince(openedAt) * 1000))"
                     )
-                }
-                if resumeDraft {
-                    if appState.currentSession?.propertyID != propertyID || appState.currentSession?.status != .draft {
-                        _ = appState.loadDraftSession(for: propertyID)
+                    let skipCachedPropertyStatusPreflight = propertyStatusPreflight.skipCachedPropertyStatusPreflight
+                    if resumeDraft {
+                        if appState.currentSession?.propertyID != propertyID || appState.currentSession?.status != .draft {
+                            _ = appState.loadDraftSession(
+                                for: propertyID,
+                                skipPropertyStatusPreflight: skipCachedPropertyStatusPreflight
+                            )
+                        }
+                    } else {
+                        _ = appState.startSession(
+                            skipPropertyStatusPreflight: skipCachedPropertyStatusPreflight
+                        )
                     }
-                } else {
-                    _ = appState.startSession()
+                    refreshSessionReadiness()
+                    isCheckingSessionBeforeOpen = false
+                    beginSessionCoordinationFlow()
                 }
-                refreshSessionReadiness()
-                beginSessionCoordinationFlow()
             }
             .onChange(of: appState.currentSession?.id) { _, _ in
                 refreshSessionReadiness()
@@ -10717,7 +10727,7 @@ struct PropertySessionView: View {
                         .disabled(isCheckingSessionCoordination)
                     }
                 } else {
-                    Text(isCheckingSessionCoordination ? "Checking session..." : "Opening camera...")
+                    Text(isCheckingSessionBeforeOpen || isCheckingSessionCoordination ? "Checking Session" : "Opening Camera")
                         .font(.system(size: 24, weight: .bold))
                         .foregroundColor(.white)
                     ProgressView()
@@ -10740,6 +10750,7 @@ struct PropertySessionView: View {
 
     private func beginOpenFlow(forceRetry: Bool = false) {
         if !forceRetry, didStartOpenFlow { return }
+        isCheckingSessionBeforeOpen = false
         didStartOpenFlow = true
         showOpenCameraTimeout = false
         openFlowToken += 1
@@ -10837,9 +10848,8 @@ struct PropertySessionView: View {
         let formatter = DateFormatter()
         formatter.dateStyle = .medium
         formatter.timeStyle = .short
-        if let lockedAt = block.lockedAt {
-            return "Locked by \(block.ownerDescription) since \(formatter.string(from: lockedAt))."
+        return AppState.sessionEntryBlockMessage(for: block) { lockedAt in
+            formatter.string(from: lockedAt)
         }
-        return "Locked by \(block.ownerDescription)."
     }
 }

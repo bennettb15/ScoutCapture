@@ -176,9 +176,9 @@ select public.test_expect_exception(
 
 select public.claim_property_status(
     '27f30000-0000-0000-0000-000000000001',
-    null,
+    '27f4aaaa-0000-0000-0000-000000000001',
     'device-a',
-    'test:claim'
+    'test:transient-zero-photo-claim'
 );
 
 select public.test_assert(
@@ -187,23 +187,44 @@ select public.test_assert(
         from public.property_status
         where property_id = '27f30000-0000-0000-0000-000000000001'
           and status = 'occupied'
+          and active_session_id = '27f4aaaa-0000-0000-0000-000000000001'
           and owner_user_id = '27f00000-0000-0000-0000-000000000001'
           and owner_device_id = 'device-a'
     ),
-    'claim should persist fresh occupied status with owner identity'
+    'claim should persist occupied status with a transient zero-photo session id'
 );
 
 select set_config('request.jwt.claim.sub', '27f00000-0000-0000-0000-000000000002', true);
 
 select public.test_expect_exception(
-    $$select public.claim_property_status('27f30000-0000-0000-0000-000000000001', null, 'device-b', 'test:b-blocked')$$,
+    $$select public.claim_property_status('27f30000-0000-0000-0000-000000000001', '27f4bbbb-0000-0000-0000-000000000001', 'device-b', 'test:b-blocked')$$,
     'fresh occupancy should block a different actor'
 );
 
 reset role;
 
+select public.test_assert(
+    not public.property_status_is_stale('occupied', timezone('utc', now()) - interval '2 minutes'),
+    'occupied property_status should remain fresh inside the 3 minute ttl'
+);
+
+select public.test_assert(
+    public.property_status_is_stale('occupied', timezone('utc', now()) - interval '4 minutes'),
+    'occupied property_status should become stale after the 3 minute ttl'
+);
+
+select public.test_assert(
+    not public.property_status_is_stale('draft', timezone('utc', now()) - interval '4 minutes'),
+    'draft property_status should not auto-expire through stale ttl'
+);
+
+select public.test_assert(
+    not public.property_status_is_stale('pending_export', timezone('utc', now()) - interval '4 minutes'),
+    'pending_export property_status should not auto-expire through stale ttl'
+);
+
 update public.property_status
-set heartbeat_at = timezone('utc', now()) - interval '45 minutes'
+set heartbeat_at = timezone('utc', now()) - interval '4 minutes'
 where property_id = '27f30000-0000-0000-0000-000000000001';
 
 set local role authenticated;
@@ -212,7 +233,7 @@ select set_config('request.jwt.claim.sub', '27f00000-0000-0000-0000-000000000002
 
 select public.claim_property_status(
     '27f30000-0000-0000-0000-000000000001',
-    null,
+    '27f4bbbb-0000-0000-0000-000000000001',
     'device-b',
     'test:stale-override'
 );
@@ -223,6 +244,7 @@ select public.test_assert(
         from public.property_status
         where property_id = '27f30000-0000-0000-0000-000000000001'
           and status = 'occupied'
+          and active_session_id = '27f4bbbb-0000-0000-0000-000000000001'
           and owner_user_id = '27f00000-0000-0000-0000-000000000002'
           and owner_device_id = 'device-b'
     ),
@@ -230,6 +252,11 @@ select public.test_assert(
 );
 
 select set_config('request.jwt.claim.sub', '27f00000-0000-0000-0000-000000000001', true);
+
+select public.test_expect_exception(
+    $$select public.promote_property_status_draft('27f30000-0000-0000-0000-000000000002', '27f4cccc-0000-0000-0000-000000000002', 'device-a', 'test:missing-draft-session')$$,
+    'draft promotion should still require a matching remote session'
+);
 
 select public.promote_property_status_draft(
     '27f30000-0000-0000-0000-000000000002',
@@ -264,6 +291,16 @@ select public.test_expect_exception(
 );
 
 select set_config('request.jwt.claim.sub', '27f00000-0000-0000-0000-000000000001', true);
+
+select public.test_expect_exception(
+    $$select public.set_property_status_pending_export('27f30000-0000-0000-0000-000000000002', '27f4cccc-0000-0000-0000-000000000002', 'device-a', 'test:missing-pending-session')$$,
+    'pending export should still require a matching remote session'
+);
+
+select public.test_expect_exception(
+    $$select public.set_property_status_exported('27f30000-0000-0000-0000-000000000002', '27f4cccc-0000-0000-0000-000000000002', 'device-a', 'test:missing-exported-session')$$,
+    'exported should still require a matching remote session'
+);
 
 select public.test_expect_exception(
     $$select public.set_property_status_pending_export('27f30000-0000-0000-0000-000000000002', '27f40000-0000-0000-0000-000000000002', 'device-a-other', 'test:same-user-wrong-device')$$,
