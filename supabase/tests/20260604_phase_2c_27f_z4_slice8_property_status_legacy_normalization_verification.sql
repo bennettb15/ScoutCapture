@@ -70,7 +70,10 @@ values
     ('28f30000-0000-0000-0000-000000000007', '28f10000-0000-0000-0000-000000000001', 'Slice 8 Valid Draft', '28f00000-0000-0000-0000-000000000001', 1, null, false),
     ('28f30000-0000-0000-0000-000000000008', '28f10000-0000-0000-0000-000000000001', 'Slice 8 Valid Pending', '28f00000-0000-0000-0000-000000000001', 1, null, false),
     ('28f30000-0000-0000-0000-000000000009', '28f10000-0000-0000-0000-000000000001', 'Slice 8 Fresh Occupied', '28f00000-0000-0000-0000-000000000001', 1, null, false),
-    ('28f30000-0000-0000-0000-000000000010', '28f10000-0000-0000-0000-000000000001', 'Slice 8 False Draft Pending', '28f00000-0000-0000-0000-000000000001', 1, null, false)
+    ('28f30000-0000-0000-0000-000000000010', '28f10000-0000-0000-0000-000000000001', 'Slice 8 False Draft Pending', '28f00000-0000-0000-0000-000000000001', 1, null, false),
+    ('28f30000-0000-0000-0000-000000000011', '28f10000-0000-0000-0000-000000000001', 'Slice 8 Retired Shot Draft', '28f00000-0000-0000-0000-000000000001', 1, null, false),
+    ('28f30000-0000-0000-0000-000000000012', '28f10000-0000-0000-0000-000000000001', 'Slice 8 Hidden Shot Draft', '28f00000-0000-0000-0000-000000000001', 1, null, false),
+    ('28f30000-0000-0000-0000-000000000013', '28f10000-0000-0000-0000-000000000001', 'Slice 8 Finalish Draft', '28f00000-0000-0000-0000-000000000001', 1, null, false)
 on conflict (id) do update
 set org_id = excluded.org_id,
     name = excluded.name,
@@ -102,7 +105,10 @@ values
     ('28f40000-0000-0000-0000-000000000004', '28f10000-0000-0000-0000-000000000001', '28f30000-0000-0000-0000-000000000004', 'False Draft Exported Session', 'completed', '2026-06-01T10:00:00Z', '2026-06-01T11:00:00Z', '2026-06-01T12:00:00Z', true, '2026-06-01T12:00:00Z', '28f00000-0000-0000-0000-000000000001', '28f00000-0000-0000-0000-000000000002', 'stale-device', '2026-06-01T10:00:00Z', null),
     ('28f40000-0000-0000-0000-000000000007', '28f10000-0000-0000-0000-000000000001', '28f30000-0000-0000-0000-000000000007', 'Valid Draft Session', 'draft', '2026-06-01T10:00:00Z', null, null, false, null, '28f00000-0000-0000-0000-000000000002', null, null, null, null),
     ('28f40000-0000-0000-0000-000000000008', '28f10000-0000-0000-0000-000000000001', '28f30000-0000-0000-0000-000000000008', 'Valid Pending Session', 'completed', '2026-06-01T10:00:00Z', '2026-06-01T11:00:00Z', null, true, null, '28f00000-0000-0000-0000-000000000001', null, null, null, null),
-    ('28f40000-0000-0000-0000-000000000010', '28f10000-0000-0000-0000-000000000001', '28f30000-0000-0000-0000-000000000010', 'False Draft Pending Session', 'completed', '2026-06-01T10:00:00Z', '2026-06-01T11:00:00Z', null, true, null, '28f00000-0000-0000-0000-000000000001', null, null, null, null)
+    ('28f40000-0000-0000-0000-000000000010', '28f10000-0000-0000-0000-000000000001', '28f30000-0000-0000-0000-000000000010', 'False Draft Pending Session', 'completed', '2026-06-01T10:00:00Z', '2026-06-01T11:00:00Z', null, true, null, '28f00000-0000-0000-0000-000000000001', null, null, null, null),
+    ('28f40000-0000-0000-0000-000000000011', '28f10000-0000-0000-0000-000000000001', '28f30000-0000-0000-0000-000000000011', 'Retired Shot Draft Session', 'draft', '2026-06-01T10:00:00Z', null, null, false, null, '28f00000-0000-0000-0000-000000000001', '28f00000-0000-0000-0000-000000000001', 'device-a', '2026-06-01T10:05:00Z', null),
+    ('28f40000-0000-0000-0000-000000000012', '28f10000-0000-0000-0000-000000000001', '28f30000-0000-0000-0000-000000000012', 'Hidden Shot Draft Session', 'draft', '2026-06-01T10:00:00Z', null, null, false, null, '28f00000-0000-0000-0000-000000000001', '28f00000-0000-0000-0000-000000000001', 'device-a', '2026-06-01T10:05:00Z', null),
+    ('28f40000-0000-0000-0000-000000000013', '28f10000-0000-0000-0000-000000000001', '28f30000-0000-0000-0000-000000000013', 'Finalish Draft Session', 'draft', '2026-06-01T10:00:00Z', '2026-06-01T11:00:00Z', '2026-06-01T12:00:00Z', false, '2026-06-01T12:00:00Z', '28f00000-0000-0000-0000-000000000001', '28f00000-0000-0000-0000-000000000001', 'device-a', '2026-06-01T10:05:00Z', null)
 on conflict (id) do update
 set org_id = excluded.org_id,
     property_id = excluded.property_id,
@@ -126,7 +132,10 @@ values
     ('28f50000-0000-0000-0000-000000000004', '28f10000-0000-0000-0000-000000000001', '28f40000-0000-0000-0000-000000000004', 'overview', 1, '28f00000-0000-0000-0000-000000000001', null),
     ('28f50000-0000-0000-0000-000000000007', '28f10000-0000-0000-0000-000000000001', '28f40000-0000-0000-0000-000000000007', 'overview', 1, '28f00000-0000-0000-0000-000000000002', null),
     ('28f50000-0000-0000-0000-000000000008', '28f10000-0000-0000-0000-000000000001', '28f40000-0000-0000-0000-000000000008', 'overview', 1, '28f00000-0000-0000-0000-000000000001', null),
-    ('28f50000-0000-0000-0000-000000000010', '28f10000-0000-0000-0000-000000000001', '28f40000-0000-0000-0000-000000000010', 'overview', 1, '28f00000-0000-0000-0000-000000000001', null)
+    ('28f50000-0000-0000-0000-000000000010', '28f10000-0000-0000-0000-000000000001', '28f40000-0000-0000-0000-000000000010', 'overview', 1, '28f00000-0000-0000-0000-000000000001', null),
+    ('28f50000-0000-0000-0000-000000000011', '28f10000-0000-0000-0000-000000000001', '28f40000-0000-0000-0000-000000000011', 'overview', 1, '28f00000-0000-0000-0000-000000000001', null),
+    ('28f50000-0000-0000-0000-000000000012', '28f10000-0000-0000-0000-000000000001', '28f40000-0000-0000-0000-000000000012', 'overview', 1, '28f00000-0000-0000-0000-000000000001', null),
+    ('28f50000-0000-0000-0000-000000000013', '28f10000-0000-0000-0000-000000000001', '28f40000-0000-0000-0000-000000000013', 'overview', 1, '28f00000-0000-0000-0000-000000000001', null)
 on conflict (id) do update
 set org_id = excluded.org_id,
     session_id = excluded.session_id,
@@ -134,6 +143,37 @@ set org_id = excluded.org_id,
     position = excluded.position,
     updated_by = excluded.updated_by,
     deleted_at = excluded.deleted_at;
+
+update public.shots
+set lifecycle_state = 'retired',
+    retired_at = '2026-06-01T10:10:00Z',
+    retired_reason = 'accidental capture',
+    retired_by = '28f00000-0000-0000-0000-000000000001',
+    lifecycle_updated_at = '2026-06-01T10:10:00Z',
+    hidden_from_gallery = null,
+    storage_bucket = 'scoutcapture-originals',
+    storage_path = 'slice8/retired-shot.heic',
+    upload_state = 'uploaded',
+    byte_size = 100
+where id = '28f50000-0000-0000-0000-000000000011';
+
+update public.shots
+set lifecycle_state = null,
+    hidden_from_gallery = true,
+    storage_bucket = 'scoutcapture-originals',
+    storage_path = 'slice8/hidden-shot.heic',
+    upload_state = 'uploaded',
+    byte_size = 100
+where id = '28f50000-0000-0000-0000-000000000012';
+
+update public.shots
+set lifecycle_state = null,
+    hidden_from_gallery = false,
+    storage_bucket = 'scoutcapture-originals',
+    storage_path = 'slice8/finalish-draft-shot.heic',
+    upload_state = 'uploaded',
+    byte_size = 100
+where id = '28f50000-0000-0000-0000-000000000013';
 
 insert into public.property_session_occupancy (
     property_id,
@@ -212,6 +252,9 @@ select public.rebuild_property_status('28f30000-0000-0000-0000-000000000007', 't
 select public.rebuild_property_status('28f30000-0000-0000-0000-000000000008', 'test:slice8-valid-pending');
 select public.rebuild_property_status('28f30000-0000-0000-0000-000000000009', 'test:slice8-fresh-occupied');
 select public.rebuild_property_status('28f30000-0000-0000-0000-000000000010', 'test:slice8-false-draft-pending');
+select public.rebuild_property_status('28f30000-0000-0000-0000-000000000011', 'test:slice8-retired-shot-draft');
+select public.rebuild_property_status('28f30000-0000-0000-0000-000000000012', 'test:slice8-hidden-shot-draft');
+select public.rebuild_property_status('28f30000-0000-0000-0000-000000000013', 'test:slice8-finalish-draft');
 
 reset role;
 
@@ -316,6 +359,48 @@ select public.test_assert(
           and heartbeat_at is null
     ),
     'false draft status should not block rebuild to pending export'
+);
+
+select public.test_assert(
+    exists (
+        select 1
+        from public.property_status
+        where property_id = '28f30000-0000-0000-0000-000000000011'
+          and status = 'idle'
+          and draft_session_id is null
+          and owner_user_id is null
+          and owner_device_id is null
+          and heartbeat_at is null
+    ),
+    'retired accidental-capture shot should not make a material draft'
+);
+
+select public.test_assert(
+    exists (
+        select 1
+        from public.property_status
+        where property_id = '28f30000-0000-0000-0000-000000000012'
+          and status = 'idle'
+          and draft_session_id is null
+          and owner_user_id is null
+          and owner_device_id is null
+          and heartbeat_at is null
+    ),
+    'hidden_from_gallery shot should not make a material draft'
+);
+
+select public.test_assert(
+    exists (
+        select 1
+        from public.property_status
+        where property_id = '28f30000-0000-0000-0000-000000000013'
+          and status = 'exported'
+          and last_exported_session_id = '28f40000-0000-0000-0000-000000000013'
+          and draft_session_id is null
+          and owner_user_id is null
+          and owner_device_id is null
+    ),
+    'final-ish draft session should not make a material draft'
 );
 
 select public.test_assert(
