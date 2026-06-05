@@ -73,7 +73,10 @@ values
     ('28f30000-0000-0000-0000-000000000010', '28f10000-0000-0000-0000-000000000001', 'Slice 8 False Draft Pending', '28f00000-0000-0000-0000-000000000001', 1, null, false),
     ('28f30000-0000-0000-0000-000000000011', '28f10000-0000-0000-0000-000000000001', 'Slice 8 Retired Shot Draft', '28f00000-0000-0000-0000-000000000001', 1, null, false),
     ('28f30000-0000-0000-0000-000000000012', '28f10000-0000-0000-0000-000000000001', 'Slice 8 Hidden Shot Draft', '28f00000-0000-0000-0000-000000000001', 1, null, false),
-    ('28f30000-0000-0000-0000-000000000013', '28f10000-0000-0000-0000-000000000001', 'Slice 8 Finalish Draft', '28f00000-0000-0000-0000-000000000001', 1, null, false)
+    ('28f30000-0000-0000-0000-000000000013', '28f10000-0000-0000-0000-000000000001', 'Slice 8 Finalish Draft', '28f00000-0000-0000-0000-000000000001', 1, null, false),
+    ('28f30000-0000-0000-0000-000000000014', '28f10000-0000-0000-0000-000000000001', 'Slice 8 Shot Owner Draft', '28f00000-0000-0000-0000-000000000001', 1, null, false),
+    ('28f30000-0000-0000-0000-000000000015', '28f10000-0000-0000-0000-000000000001', 'Slice 8 Event Owner Draft', '28f00000-0000-0000-0000-000000000001', 1, null, false),
+    ('28f30000-0000-0000-0000-000000000016', '28f10000-0000-0000-0000-000000000001', 'Slice 8 Actor Fallback Draft', '28f00000-0000-0000-0000-000000000001', 1, null, false)
 on conflict (id) do update
 set org_id = excluded.org_id,
     name = excluded.name,
@@ -108,7 +111,10 @@ values
     ('28f40000-0000-0000-0000-000000000010', '28f10000-0000-0000-0000-000000000001', '28f30000-0000-0000-0000-000000000010', 'False Draft Pending Session', 'completed', '2026-06-01T10:00:00Z', '2026-06-01T11:00:00Z', null, true, null, '28f00000-0000-0000-0000-000000000001', null, null, null, null),
     ('28f40000-0000-0000-0000-000000000011', '28f10000-0000-0000-0000-000000000001', '28f30000-0000-0000-0000-000000000011', 'Retired Shot Draft Session', 'draft', '2026-06-01T10:00:00Z', null, null, false, null, '28f00000-0000-0000-0000-000000000001', '28f00000-0000-0000-0000-000000000001', 'device-a', '2026-06-01T10:05:00Z', null),
     ('28f40000-0000-0000-0000-000000000012', '28f10000-0000-0000-0000-000000000001', '28f30000-0000-0000-0000-000000000012', 'Hidden Shot Draft Session', 'draft', '2026-06-01T10:00:00Z', null, null, false, null, '28f00000-0000-0000-0000-000000000001', '28f00000-0000-0000-0000-000000000001', 'device-a', '2026-06-01T10:05:00Z', null),
-    ('28f40000-0000-0000-0000-000000000013', '28f10000-0000-0000-0000-000000000001', '28f30000-0000-0000-0000-000000000013', 'Finalish Draft Session', 'draft', '2026-06-01T10:00:00Z', '2026-06-01T11:00:00Z', '2026-06-01T12:00:00Z', false, '2026-06-01T12:00:00Z', '28f00000-0000-0000-0000-000000000001', '28f00000-0000-0000-0000-000000000001', 'device-a', '2026-06-01T10:05:00Z', null)
+    ('28f40000-0000-0000-0000-000000000013', '28f10000-0000-0000-0000-000000000001', '28f30000-0000-0000-0000-000000000013', 'Finalish Draft Session', 'draft', '2026-06-01T10:00:00Z', '2026-06-01T11:00:00Z', '2026-06-01T12:00:00Z', false, '2026-06-01T12:00:00Z', '28f00000-0000-0000-0000-000000000001', '28f00000-0000-0000-0000-000000000001', 'device-a', '2026-06-01T10:05:00Z', null),
+    ('28f40000-0000-0000-0000-000000000014', '28f10000-0000-0000-0000-000000000001', '28f30000-0000-0000-0000-000000000014', 'Shot Owner Draft Session', 'draft', '2026-06-01T10:00:00Z', null, null, false, null, '28f00000-0000-0000-0000-000000000002', '28f00000-0000-0000-0000-000000000002', 'device-b', '2026-06-01T10:05:00Z', null),
+    ('28f40000-0000-0000-0000-000000000015', '28f10000-0000-0000-0000-000000000001', '28f30000-0000-0000-0000-000000000015', 'Event Owner Draft Session', 'draft', '2026-06-01T10:00:00Z', null, null, false, null, '28f00000-0000-0000-0000-000000000002', '28f00000-0000-0000-0000-000000000002', 'device-b', '2026-06-01T10:05:00Z', null),
+    ('28f40000-0000-0000-0000-000000000016', '28f10000-0000-0000-0000-000000000001', '28f30000-0000-0000-0000-000000000016', 'Actor Fallback Draft Session', 'draft', '2026-06-01T10:00:00Z', null, null, false, null, null, null, null, null, null)
 on conflict (id) do update
 set org_id = excluded.org_id,
     property_id = excluded.property_id,
@@ -135,7 +141,10 @@ values
     ('28f50000-0000-0000-0000-000000000010', '28f10000-0000-0000-0000-000000000001', '28f40000-0000-0000-0000-000000000010', 'overview', 1, '28f00000-0000-0000-0000-000000000001', null),
     ('28f50000-0000-0000-0000-000000000011', '28f10000-0000-0000-0000-000000000001', '28f40000-0000-0000-0000-000000000011', 'overview', 1, '28f00000-0000-0000-0000-000000000001', null),
     ('28f50000-0000-0000-0000-000000000012', '28f10000-0000-0000-0000-000000000001', '28f40000-0000-0000-0000-000000000012', 'overview', 1, '28f00000-0000-0000-0000-000000000001', null),
-    ('28f50000-0000-0000-0000-000000000013', '28f10000-0000-0000-0000-000000000001', '28f40000-0000-0000-0000-000000000013', 'overview', 1, '28f00000-0000-0000-0000-000000000001', null)
+    ('28f50000-0000-0000-0000-000000000013', '28f10000-0000-0000-0000-000000000001', '28f40000-0000-0000-0000-000000000013', 'overview', 1, '28f00000-0000-0000-0000-000000000001', null),
+    ('28f50000-0000-0000-0000-000000000014', '28f10000-0000-0000-0000-000000000001', '28f40000-0000-0000-0000-000000000014', 'overview', 1, '28f00000-0000-0000-0000-000000000001', null),
+    ('28f50000-0000-0000-0000-000000000015', '28f10000-0000-0000-0000-000000000001', '28f40000-0000-0000-0000-000000000015', 'overview', 1, null, null),
+    ('28f50000-0000-0000-0000-000000000016', '28f10000-0000-0000-0000-000000000001', '28f40000-0000-0000-0000-000000000016', 'overview', 1, null, null)
 on conflict (id) do update
 set org_id = excluded.org_id,
     session_id = excluded.session_id,
@@ -174,6 +183,19 @@ set lifecycle_state = null,
     upload_state = 'uploaded',
     byte_size = 100
 where id = '28f50000-0000-0000-0000-000000000013';
+
+insert into public.session_events (id, org_id, session_id, property_id, actor_user_id, event_type, payload, created_at)
+values
+    ('28f60000-0000-0000-0000-000000000015', '28f10000-0000-0000-0000-000000000001', '28f40000-0000-0000-0000-000000000015', '28f30000-0000-0000-0000-000000000015', '28f00000-0000-0000-0000-000000000001', 'session.started', '{}'::jsonb, '2026-06-01T10:01:00Z'),
+    ('28f60000-0000-0000-0000-000000000016', '28f10000-0000-0000-0000-000000000001', '28f40000-0000-0000-0000-000000000015', '28f30000-0000-0000-0000-000000000015', '28f00000-0000-0000-0000-000000000002', 'session.locked', '{}'::jsonb, '2026-06-01T10:02:00Z')
+on conflict (id) do update
+set org_id = excluded.org_id,
+    session_id = excluded.session_id,
+    property_id = excluded.property_id,
+    actor_user_id = excluded.actor_user_id,
+    event_type = excluded.event_type,
+    payload = excluded.payload,
+    created_at = excluded.created_at;
 
 insert into public.property_session_occupancy (
     property_id,
@@ -255,6 +277,11 @@ select public.rebuild_property_status('28f30000-0000-0000-0000-000000000010', 't
 select public.rebuild_property_status('28f30000-0000-0000-0000-000000000011', 'test:slice8-retired-shot-draft');
 select public.rebuild_property_status('28f30000-0000-0000-0000-000000000012', 'test:slice8-hidden-shot-draft');
 select public.rebuild_property_status('28f30000-0000-0000-0000-000000000013', 'test:slice8-finalish-draft');
+select public.rebuild_property_status('28f30000-0000-0000-0000-000000000014', 'test:slice8-shot-owner-draft');
+select public.rebuild_property_status('28f30000-0000-0000-0000-000000000015', 'test:slice8-event-owner-draft');
+
+select set_config('request.jwt.claim.sub', '28f00000-0000-0000-0000-000000000002', true);
+select public.rebuild_property_status('28f30000-0000-0000-0000-000000000016', 'test:slice8-actor-fallback-draft');
 
 reset role;
 
@@ -416,6 +443,45 @@ select public.test_assert(
           and pending_export_session_id is null
     ),
     'valid material draft should rebuild as draft with conservative updated_by owner fallback'
+);
+
+select public.test_assert(
+    exists (
+        select 1
+        from public.property_status
+        where property_id = '28f30000-0000-0000-0000-000000000014'
+          and status = 'draft'
+          and draft_session_id = '28f40000-0000-0000-0000-000000000014'
+          and owner_user_id = '28f00000-0000-0000-0000-000000000001'
+          and owner_device_id is null
+    ),
+    'rebuild should derive material draft owner from earliest usable shot provenance before stale session lock'
+);
+
+select public.test_assert(
+    exists (
+        select 1
+        from public.property_status
+        where property_id = '28f30000-0000-0000-0000-000000000015'
+          and status = 'draft'
+          and draft_session_id = '28f40000-0000-0000-0000-000000000015'
+          and owner_user_id = '28f00000-0000-0000-0000-000000000001'
+          and owner_device_id is null
+    ),
+    'rebuild should derive material draft owner from earliest session started/locked event when shots have no owner'
+);
+
+select public.test_assert(
+    exists (
+        select 1
+        from public.property_status
+        where property_id = '28f30000-0000-0000-0000-000000000016'
+          and status = 'draft'
+          and draft_session_id = '28f40000-0000-0000-0000-000000000016'
+          and owner_user_id = '28f00000-0000-0000-0000-000000000002'
+          and owner_device_id is null
+    ),
+    'rebuild should fall back to current actor only when material draft has no durable owner provenance'
 );
 
 select public.test_assert(

@@ -82,7 +82,11 @@ values
     ('27f30000-0000-0000-0000-000000000001', '27f10000-0000-0000-0000-000000000001', 'Status Occupancy', '27f00000-0000-0000-0000-000000000001', 1, null, false),
     ('27f30000-0000-0000-0000-000000000002', '27f10000-0000-0000-0000-000000000001', 'Status Draft', '27f00000-0000-0000-0000-000000000001', 1, null, false),
     ('27f30000-0000-0000-0000-000000000003', '27f10000-0000-0000-0000-000000000001', 'Status Release', '27f00000-0000-0000-0000-000000000001', 1, null, false),
-    ('27f30000-0000-0000-0000-000000000004', '27f10000-0000-0000-0000-000000000001', 'Status Rebuild', '27f00000-0000-0000-0000-000000000001', 1, null, false)
+    ('27f30000-0000-0000-0000-000000000004', '27f10000-0000-0000-0000-000000000001', 'Status Rebuild', '27f00000-0000-0000-0000-000000000001', 1, null, false),
+    ('27f30000-0000-0000-0000-000000000005', '27f10000-0000-0000-0000-000000000001', 'Status Preserve Draft Owner', '27f00000-0000-0000-0000-000000000001', 1, null, false),
+    ('27f30000-0000-0000-0000-000000000006', '27f10000-0000-0000-0000-000000000001', 'Status Shot Provenance Owner', '27f00000-0000-0000-0000-000000000001', 1, null, false),
+    ('27f30000-0000-0000-0000-000000000007', '27f10000-0000-0000-0000-000000000001', 'Status Event Provenance Owner', '27f00000-0000-0000-0000-000000000001', 1, null, false),
+    ('27f30000-0000-0000-0000-000000000008', '27f10000-0000-0000-0000-000000000001', 'Status Actor Fallback Owner', '27f00000-0000-0000-0000-000000000001', 1, null, false)
 on conflict (id) do update
 set org_id = excluded.org_id,
     name = excluded.name,
@@ -109,7 +113,11 @@ insert into public.sessions (
 values
     ('27f40000-0000-0000-0000-000000000002', '27f10000-0000-0000-0000-000000000001', '27f30000-0000-0000-0000-000000000002', 'Draft Session', 'draft', timezone('utc', now()), null, '27f00000-0000-0000-0000-000000000001', false, '27f00000-0000-0000-0000-000000000001', 'device-a', timezone('utc', now()), null),
     ('27f40000-0000-0000-0000-000000000003', '27f10000-0000-0000-0000-000000000001', '27f30000-0000-0000-0000-000000000003', 'Release Session', 'draft', timezone('utc', now()), null, '27f00000-0000-0000-0000-000000000001', false, null, null, null, null),
-    ('27f40000-0000-0000-0000-000000000004', '27f10000-0000-0000-0000-000000000001', '27f30000-0000-0000-0000-000000000004', 'Rebuild Draft Session', 'draft', timezone('utc', now()), null, '27f00000-0000-0000-0000-000000000001', false, '27f00000-0000-0000-0000-000000000001', 'device-a', timezone('utc', now()), null)
+    ('27f40000-0000-0000-0000-000000000004', '27f10000-0000-0000-0000-000000000001', '27f30000-0000-0000-0000-000000000004', 'Rebuild Draft Session', 'draft', timezone('utc', now()), null, '27f00000-0000-0000-0000-000000000001', false, '27f00000-0000-0000-0000-000000000001', 'device-a', timezone('utc', now()), null),
+    ('27f40000-0000-0000-0000-000000000005', '27f10000-0000-0000-0000-000000000001', '27f30000-0000-0000-0000-000000000005', 'Preserve Draft Owner Session', 'draft', timezone('utc', now()), null, '27f00000-0000-0000-0000-000000000001', false, '27f00000-0000-0000-0000-000000000001', 'device-a', timezone('utc', now()), null),
+    ('27f40000-0000-0000-0000-000000000006', '27f10000-0000-0000-0000-000000000001', '27f30000-0000-0000-0000-000000000006', 'Shot Provenance Owner Session', 'draft', timezone('utc', now()), null, '27f00000-0000-0000-0000-000000000002', false, '27f00000-0000-0000-0000-000000000002', 'device-b', timezone('utc', now()), null),
+    ('27f40000-0000-0000-0000-000000000007', '27f10000-0000-0000-0000-000000000001', '27f30000-0000-0000-0000-000000000007', 'Event Provenance Owner Session', 'draft', timezone('utc', now()), null, '27f00000-0000-0000-0000-000000000002', false, '27f00000-0000-0000-0000-000000000002', 'device-b', timezone('utc', now()), null),
+    ('27f40000-0000-0000-0000-000000000008', '27f10000-0000-0000-0000-000000000001', '27f30000-0000-0000-0000-000000000008', 'Actor Fallback Owner Session', 'draft', timezone('utc', now()), null, null, false, null, null, null, null)
 on conflict (id) do update
 set org_id = excluded.org_id,
     property_id = excluded.property_id,
@@ -125,7 +133,12 @@ set org_id = excluded.org_id,
     deleted_at = excluded.deleted_at;
 
 insert into public.shots (id, org_id, session_id, shot_type, position, updated_by, deleted_at)
-values ('27f50000-0000-0000-0000-000000000004', '27f10000-0000-0000-0000-000000000001', '27f40000-0000-0000-0000-000000000004', 'overview', 1, '27f00000-0000-0000-0000-000000000001', null)
+values
+    ('27f50000-0000-0000-0000-000000000004', '27f10000-0000-0000-0000-000000000001', '27f40000-0000-0000-0000-000000000004', 'overview', 1, '27f00000-0000-0000-0000-000000000001', null),
+    ('27f50000-0000-0000-0000-000000000005', '27f10000-0000-0000-0000-000000000001', '27f40000-0000-0000-0000-000000000005', 'overview', 1, '27f00000-0000-0000-0000-000000000001', null),
+    ('27f50000-0000-0000-0000-000000000006', '27f10000-0000-0000-0000-000000000001', '27f40000-0000-0000-0000-000000000006', 'overview', 1, '27f00000-0000-0000-0000-000000000001', null),
+    ('27f50000-0000-0000-0000-000000000007', '27f10000-0000-0000-0000-000000000001', '27f40000-0000-0000-0000-000000000007', 'overview', 1, null, null),
+    ('27f50000-0000-0000-0000-000000000008', '27f10000-0000-0000-0000-000000000001', '27f40000-0000-0000-0000-000000000008', 'overview', 1, null, null)
 on conflict (id) do update
 set org_id = excluded.org_id,
     session_id = excluded.session_id,
@@ -133,6 +146,19 @@ set org_id = excluded.org_id,
     position = excluded.position,
     updated_by = excluded.updated_by,
     deleted_at = excluded.deleted_at;
+
+insert into public.session_events (id, org_id, session_id, property_id, actor_user_id, event_type, payload, created_at)
+values
+    ('27f60000-0000-0000-0000-000000000007', '27f10000-0000-0000-0000-000000000001', '27f40000-0000-0000-0000-000000000007', '27f30000-0000-0000-0000-000000000007', '27f00000-0000-0000-0000-000000000001', 'session.started', '{}'::jsonb, timezone('utc', now()) - interval '2 minutes'),
+    ('27f60000-0000-0000-0000-000000000008', '27f10000-0000-0000-0000-000000000001', '27f40000-0000-0000-0000-000000000007', '27f30000-0000-0000-0000-000000000007', '27f00000-0000-0000-0000-000000000002', 'session.locked', '{}'::jsonb, timezone('utc', now()) - interval '1 minute')
+on conflict (id) do update
+set org_id = excluded.org_id,
+    session_id = excluded.session_id,
+    property_id = excluded.property_id,
+    actor_user_id = excluded.actor_user_id,
+    event_type = excluded.event_type,
+    payload = excluded.payload,
+    created_at = excluded.created_at;
 
 insert into public.property_session_occupancy (
     property_id,
@@ -156,6 +182,41 @@ set org_id = excluded.org_id,
     occupied_by_device_id = excluded.occupied_by_device_id,
     occupied_at = excluded.occupied_at,
     updated_by = excluded.updated_by;
+
+insert into public.property_status (
+    property_id,
+    org_id,
+    status,
+    active_session_id,
+    draft_session_id,
+    owner_user_id,
+    owner_device_id,
+    heartbeat_at,
+    updated_by,
+    status_reason
+)
+values (
+    '27f30000-0000-0000-0000-000000000005',
+    '27f10000-0000-0000-0000-000000000001',
+    'draft',
+    '27f40000-0000-0000-0000-000000000005',
+    '27f40000-0000-0000-0000-000000000005',
+    '27f00000-0000-0000-0000-000000000001',
+    'device-a',
+    timezone('utc', now()),
+    '27f00000-0000-0000-0000-000000000001',
+    'test:existing-material-draft-before'
+)
+on conflict (property_id) do update
+set org_id = excluded.org_id,
+    status = excluded.status,
+    active_session_id = excluded.active_session_id,
+    draft_session_id = excluded.draft_session_id,
+    owner_user_id = excluded.owner_user_id,
+    owner_device_id = excluded.owner_device_id,
+    heartbeat_at = excluded.heartbeat_at,
+    updated_by = excluded.updated_by,
+    status_reason = excluded.status_reason;
 
 set local role authenticated;
 select set_config('request.jwt.claim.role', 'authenticated', true);
@@ -322,6 +383,87 @@ select public.test_assert(
     'null owner fields should not own property status'
 );
 
+select set_config('request.jwt.claim.sub', '27f00000-0000-0000-0000-000000000002', true);
+
+select public.promote_property_status_draft(
+    '27f30000-0000-0000-0000-000000000005',
+    '27f40000-0000-0000-0000-000000000005',
+    'device-a',
+    'test:different-user-same-device-resave'
+);
+
+select public.test_assert(
+    exists (
+        select 1
+        from public.property_status
+        where property_id = '27f30000-0000-0000-0000-000000000005'
+          and status = 'draft'
+          and draft_session_id = '27f40000-0000-0000-0000-000000000005'
+          and owner_user_id = '27f00000-0000-0000-0000-000000000001'
+          and owner_device_id = 'device-a'
+    ),
+    're-saving an existing material draft should preserve established property_status ownership'
+);
+
+select public.promote_property_status_draft(
+    '27f30000-0000-0000-0000-000000000006',
+    '27f40000-0000-0000-0000-000000000006',
+    'device-b',
+    'test:shot-provenance-owner'
+);
+
+select public.test_assert(
+    exists (
+        select 1
+        from public.property_status
+        where property_id = '27f30000-0000-0000-0000-000000000006'
+          and status = 'draft'
+          and owner_user_id = '27f00000-0000-0000-0000-000000000001'
+          and owner_device_id is null
+    ),
+    'missing property_status should derive draft owner from usable shot provenance before stale session lock'
+);
+
+select public.promote_property_status_draft(
+    '27f30000-0000-0000-0000-000000000007',
+    '27f40000-0000-0000-0000-000000000007',
+    'device-b',
+    'test:event-provenance-owner'
+);
+
+select public.test_assert(
+    exists (
+        select 1
+        from public.property_status
+        where property_id = '27f30000-0000-0000-0000-000000000007'
+          and status = 'draft'
+          and owner_user_id = '27f00000-0000-0000-0000-000000000001'
+          and owner_device_id is null
+    ),
+    'missing property_status should derive draft owner from the earliest session started/locked event when shots have no owner'
+);
+
+select public.promote_property_status_draft(
+    '27f30000-0000-0000-0000-000000000008',
+    '27f40000-0000-0000-0000-000000000008',
+    'device-b',
+    'test:actor-fallback-owner'
+);
+
+select public.test_assert(
+    exists (
+        select 1
+        from public.property_status
+        where property_id = '27f30000-0000-0000-0000-000000000008'
+          and status = 'draft'
+          and owner_user_id = '27f00000-0000-0000-0000-000000000002'
+          and owner_device_id = 'device-b'
+    ),
+    'new material draft with no durable owner provenance should fall back to current actor and device'
+);
+
+select set_config('request.jwt.claim.sub', '27f00000-0000-0000-0000-000000000001', true);
+
 select public.set_property_status_pending_export(
     '27f30000-0000-0000-0000-000000000002',
     '27f40000-0000-0000-0000-000000000002',
@@ -436,9 +578,9 @@ select public.test_assert(
           and status = 'draft'
           and draft_session_id = '27f40000-0000-0000-0000-000000000004'
           and owner_user_id = '27f00000-0000-0000-0000-000000000001'
-          and owner_device_id = 'device-a'
+          and owner_device_id is null
     ),
-    'rebuild should prefer an unresolved material draft over legacy occupancy'
+    'rebuild should prefer an unresolved material draft over legacy occupancy and derive owner from material provenance'
 );
 
 reset role;
