@@ -25590,11 +25590,14 @@ final class AppState: ObservableObject {
             normalizedSupabaseText(record.lockedAt) != nil
     }
 
-    private func sessionDeletePreflightLockIsOwnedByCurrentDevice(
+    private func sessionDeletePreflightLockIsOwnedByCurrentActor(
         _ record: RemoteSessionDeletePreflightRecord
     ) -> Bool {
-        record.lockedByUserID == authenticatedSupabaseUser?.id &&
-            normalizedSupabaseText(record.lockedByDeviceID) == currentDeviceIdentifier()
+        if let lockedByUserID = record.lockedByUserID,
+           lockedByUserID == authenticatedSupabaseUser?.id {
+            return true
+        }
+        return normalizedSupabaseText(record.lockedByDeviceID) == currentDeviceIdentifier()
     }
 
     private func sessionDeletePreflightLockIsStale(
@@ -31129,12 +31132,13 @@ final class AppState: ObservableObject {
         currentUserID: UUID?,
         currentDeviceID: String
     ) -> Bool {
+        if let ownerUserID = record.ownerUserID,
+           ownerUserID == currentUserID {
+            return true
+        }
         if let ownerDeviceID = record.ownerDeviceID?.trimmingCharacters(in: .whitespacesAndNewlines),
            !ownerDeviceID.isEmpty {
             return ownerDeviceID == currentDeviceID
-        }
-        if let ownerUserID = record.ownerUserID {
-            return ownerUserID == currentUserID
         }
         return false
     }
@@ -34608,7 +34612,7 @@ final class AppState: ObservableObject {
         }
 
         if sessionDeletePreflightLockFieldsPresent(sessionRecord) {
-            let isStaleOwnLock = sessionDeletePreflightLockIsOwnedByCurrentDevice(sessionRecord) &&
+            let isStaleOwnLock = sessionDeletePreflightLockIsOwnedByCurrentActor(sessionRecord) &&
                 sessionDeletePreflightLockIsStale(sessionRecord) &&
                 currentSession?.id != sessionID
 
@@ -34652,7 +34656,7 @@ final class AppState: ObservableObject {
         propertyID: UUID,
         sessionID: UUID
     ) async -> Bool {
-        guard sessionDeletePreflightLockIsOwnedByCurrentDevice(sessionRecord),
+        guard sessionDeletePreflightLockIsOwnedByCurrentActor(sessionRecord),
               sessionDeletePreflightLockIsStale(sessionRecord),
               currentSession?.id != sessionID,
               let property = properties.first(where: { $0.id == propertyID }) ?? allProperties.first(where: { $0.id == propertyID }),

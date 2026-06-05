@@ -302,16 +302,31 @@ select public.test_expect_exception(
     'exported should still require a matching remote session'
 );
 
-select public.test_expect_exception(
-    $$select public.set_property_status_pending_export('27f30000-0000-0000-0000-000000000002', '27f40000-0000-0000-0000-000000000002', 'device-a-other', 'test:same-user-wrong-device')$$,
-    'same user on a different device should not own a device-scoped draft'
+select public.test_assert(
+    public.property_status_actor_owns('27f00000-0000-0000-0000-000000000001', 'device-a', 'device-a-other'),
+    'same user on a different device should own property status'
+);
+
+select public.test_assert(
+    public.property_status_actor_owns('27f00000-0000-0000-0000-000000000002', 'device-a', 'device-a'),
+    'different user on the same device should own property status when device ownership is present'
+);
+
+select public.test_assert(
+    not public.property_status_actor_owns('27f00000-0000-0000-0000-000000000002', 'device-a', 'device-a-other'),
+    'different user on a different device should not own property status'
+);
+
+select public.test_assert(
+    not public.property_status_actor_owns(null, null, 'device-a'),
+    'null owner fields should not own property status'
 );
 
 select public.set_property_status_pending_export(
     '27f30000-0000-0000-0000-000000000002',
     '27f40000-0000-0000-0000-000000000002',
-    'device-a',
-    'test:pending'
+    'device-a-other',
+    'test:same-user-different-device-pending'
 );
 
 select public.test_assert(

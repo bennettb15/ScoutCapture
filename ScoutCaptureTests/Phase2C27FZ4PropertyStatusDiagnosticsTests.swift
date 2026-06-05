@@ -315,6 +315,31 @@ final class Phase2C27FZ4PropertyStatusDiagnosticsTests: XCTestCase {
         XCTAssertEqual(fixture.appState.draftCountSource(), "property_status_with_legacy_missing_rows")
     }
 
+    func testPropertyStatusOwnerDraftSameUserDifferentDeviceStillOwns() throws {
+        let fixture = try makeCutoverFixture()
+        let record = makeStatusRecord(
+            propertyID: fixture.property.id,
+            orgID: fixture.orgID,
+            status: .draft,
+            draftSessionID: UUID(),
+            ownerUserID: fixture.userID,
+            ownerDeviceID: "old-device"
+        )
+
+        fixture.appState._debugReplacePropertyStatusCacheForTests([record])
+
+        let badge = fixture.appState.propertyCardBadgeModel(for: fixture.property.id)
+        XCTAssertEqual(badge.badgeSource, "property_status")
+        XCTAssertTrue(badge.showDraft)
+        XCTAssertFalse(badge.showLock)
+        XCTAssertEqual(fixture.appState.draftPropertyCount(), 1)
+
+        let preflight = fixture.appState.evaluatePropertyStatusEntryPreflight(propertyID: fixture.property.id)
+        XCTAssertEqual(preflight?.decision, "allow")
+        XCTAssertEqual(preflight?.reason, "draft_owned_by_current_actor")
+        XCTAssertNil(preflight?.block)
+    }
+
     func testPropertyStatusNonOwnerDraftDrivesLockedBadgeOnly() throws {
         let fixture = try makeCutoverFixture()
         let record = makeStatusRecord(
