@@ -86,7 +86,8 @@ values
     ('27f30000-0000-0000-0000-000000000005', '27f10000-0000-0000-0000-000000000001', 'Status Preserve Draft Owner', '27f00000-0000-0000-0000-000000000001', 1, null, false),
     ('27f30000-0000-0000-0000-000000000006', '27f10000-0000-0000-0000-000000000001', 'Status Shot Provenance Owner', '27f00000-0000-0000-0000-000000000001', 1, null, false),
     ('27f30000-0000-0000-0000-000000000007', '27f10000-0000-0000-0000-000000000001', 'Status Event Provenance Owner', '27f00000-0000-0000-0000-000000000001', 1, null, false),
-    ('27f30000-0000-0000-0000-000000000008', '27f10000-0000-0000-0000-000000000001', 'Status Actor Fallback Owner', '27f00000-0000-0000-0000-000000000001', 1, null, false)
+    ('27f30000-0000-0000-0000-000000000008', '27f10000-0000-0000-0000-000000000001', 'Status Actor Fallback Owner', '27f00000-0000-0000-0000-000000000001', 1, null, false),
+    ('27f30000-0000-0000-0000-000000000009', '27f10000-0000-0000-0000-000000000001', 'Status Retired Draft Release', '27f00000-0000-0000-0000-000000000001', 1, null, false)
 on conflict (id) do update
 set org_id = excluded.org_id,
     name = excluded.name,
@@ -117,7 +118,8 @@ values
     ('27f40000-0000-0000-0000-000000000005', '27f10000-0000-0000-0000-000000000001', '27f30000-0000-0000-0000-000000000005', 'Preserve Draft Owner Session', 'draft', timezone('utc', now()), null, '27f00000-0000-0000-0000-000000000001', false, '27f00000-0000-0000-0000-000000000001', 'device-a', timezone('utc', now()), null),
     ('27f40000-0000-0000-0000-000000000006', '27f10000-0000-0000-0000-000000000001', '27f30000-0000-0000-0000-000000000006', 'Shot Provenance Owner Session', 'draft', timezone('utc', now()), null, '27f00000-0000-0000-0000-000000000002', false, '27f00000-0000-0000-0000-000000000002', 'device-b', timezone('utc', now()), null),
     ('27f40000-0000-0000-0000-000000000007', '27f10000-0000-0000-0000-000000000001', '27f30000-0000-0000-0000-000000000007', 'Event Provenance Owner Session', 'draft', timezone('utc', now()), null, '27f00000-0000-0000-0000-000000000002', false, '27f00000-0000-0000-0000-000000000002', 'device-b', timezone('utc', now()), null),
-    ('27f40000-0000-0000-0000-000000000008', '27f10000-0000-0000-0000-000000000001', '27f30000-0000-0000-0000-000000000008', 'Actor Fallback Owner Session', 'draft', timezone('utc', now()), null, null, false, null, null, null, null)
+    ('27f40000-0000-0000-0000-000000000008', '27f10000-0000-0000-0000-000000000001', '27f30000-0000-0000-0000-000000000008', 'Actor Fallback Owner Session', 'draft', timezone('utc', now()), null, null, false, null, null, null, null),
+    ('27f40000-0000-0000-0000-000000000009', '27f10000-0000-0000-0000-000000000001', '27f30000-0000-0000-0000-000000000009', 'Retired Draft Release Session', 'draft', timezone('utc', now()), null, '27f00000-0000-0000-0000-000000000001', false, '27f00000-0000-0000-0000-000000000001', 'device-a', timezone('utc', now()), null)
 on conflict (id) do update
 set org_id = excluded.org_id,
     property_id = excluded.property_id,
@@ -138,7 +140,8 @@ values
     ('27f50000-0000-0000-0000-000000000005', '27f10000-0000-0000-0000-000000000001', '27f40000-0000-0000-0000-000000000005', 'overview', 1, '27f00000-0000-0000-0000-000000000001', null),
     ('27f50000-0000-0000-0000-000000000006', '27f10000-0000-0000-0000-000000000001', '27f40000-0000-0000-0000-000000000006', 'overview', 1, '27f00000-0000-0000-0000-000000000001', null),
     ('27f50000-0000-0000-0000-000000000007', '27f10000-0000-0000-0000-000000000001', '27f40000-0000-0000-0000-000000000007', 'overview', 1, null, null),
-    ('27f50000-0000-0000-0000-000000000008', '27f10000-0000-0000-0000-000000000001', '27f40000-0000-0000-0000-000000000008', 'overview', 1, null, null)
+    ('27f50000-0000-0000-0000-000000000008', '27f10000-0000-0000-0000-000000000001', '27f40000-0000-0000-0000-000000000008', 'overview', 1, null, null),
+    ('27f50000-0000-0000-0000-000000000009', '27f10000-0000-0000-0000-000000000001', '27f40000-0000-0000-0000-000000000009', 'overview', 1, '27f00000-0000-0000-0000-000000000001', null)
 on conflict (id) do update
 set org_id = excluded.org_id,
     session_id = excluded.session_id,
@@ -146,6 +149,15 @@ set org_id = excluded.org_id,
     position = excluded.position,
     updated_by = excluded.updated_by,
     deleted_at = excluded.deleted_at;
+
+update public.shots
+set lifecycle_state = 'retired',
+    retired_at = timezone('utc', now()),
+    retired_reason = 'test retired draft release guard',
+    retired_by = '27f00000-0000-0000-0000-000000000001',
+    lifecycle_updated_at = timezone('utc', now()),
+    hidden_from_gallery = null
+where id = '27f50000-0000-0000-0000-000000000009';
 
 insert into public.session_events (id, org_id, session_id, property_id, actor_user_id, event_type, payload, created_at)
 values
@@ -206,6 +218,41 @@ values (
     timezone('utc', now()),
     '27f00000-0000-0000-0000-000000000001',
     'test:existing-material-draft-before'
+)
+on conflict (property_id) do update
+set org_id = excluded.org_id,
+    status = excluded.status,
+    active_session_id = excluded.active_session_id,
+    draft_session_id = excluded.draft_session_id,
+    owner_user_id = excluded.owner_user_id,
+    owner_device_id = excluded.owner_device_id,
+    heartbeat_at = excluded.heartbeat_at,
+    updated_by = excluded.updated_by,
+    status_reason = excluded.status_reason;
+
+insert into public.property_status (
+    property_id,
+    org_id,
+    status,
+    active_session_id,
+    draft_session_id,
+    owner_user_id,
+    owner_device_id,
+    heartbeat_at,
+    updated_by,
+    status_reason
+)
+values (
+    '27f30000-0000-0000-0000-000000000009',
+    '27f10000-0000-0000-0000-000000000001',
+    'draft',
+    '27f40000-0000-0000-0000-000000000009',
+    '27f40000-0000-0000-0000-000000000009',
+    '27f00000-0000-0000-0000-000000000001',
+    'device-a',
+    timezone('utc', now()),
+    '27f00000-0000-0000-0000-000000000001',
+    'test:retired-draft-before-release'
 )
 on conflict (property_id) do update
 set org_id = excluded.org_id,
@@ -463,6 +510,57 @@ select public.test_assert(
 );
 
 select set_config('request.jwt.claim.sub', '27f00000-0000-0000-0000-000000000001', true);
+
+select set_config('request.jwt.claim.sub', '27f00000-0000-0000-0000-000000000002', true);
+
+select public.test_expect_exception(
+    $$select public.release_property_status_if_owner('27f30000-0000-0000-0000-000000000005', 'device-b', 'test:non-owner-material-draft-release')$$,
+    'non-owner should not release another actor material draft'
+);
+
+select set_config('request.jwt.claim.sub', '27f00000-0000-0000-0000-000000000001', true);
+
+select public.release_property_status_if_owner(
+    '27f30000-0000-0000-0000-000000000005',
+    'device-a',
+    'test:material-draft-release'
+);
+
+select public.test_assert(
+    exists (
+        select 1
+        from public.property_status
+        where property_id = '27f30000-0000-0000-0000-000000000005'
+          and status = 'draft'
+          and active_session_id = '27f40000-0000-0000-0000-000000000005'
+          and draft_session_id = '27f40000-0000-0000-0000-000000000005'
+          and owner_user_id = '27f00000-0000-0000-0000-000000000001'
+          and owner_device_id = 'device-a'
+          and status_reason = 'test:material-draft-release:material_draft_preserved'
+    ),
+    'release on valid material draft should preserve draft status and owner fields'
+);
+
+select public.release_property_status_if_owner(
+    '27f30000-0000-0000-0000-000000000009',
+    'device-a',
+    'test:retired-draft-release'
+);
+
+select public.test_assert(
+    exists (
+        select 1
+        from public.property_status
+        where property_id = '27f30000-0000-0000-0000-000000000009'
+          and status = 'idle'
+          and active_session_id is null
+          and draft_session_id is null
+          and owner_user_id is null
+          and owner_device_id is null
+          and heartbeat_at is null
+    ),
+    'release on retired-shot draft should not preserve draft status'
+);
 
 select public.set_property_status_pending_export(
     '27f30000-0000-0000-0000-000000000002',
