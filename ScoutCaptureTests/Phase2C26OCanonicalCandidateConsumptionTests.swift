@@ -282,47 +282,115 @@ final class Phase2C26OCanonicalCandidateConsumptionTests: XCTestCase {
         checkedAt: Date = Date(timeIntervalSinceReferenceDate: 8_600)
     ) -> AppState.ProductionAllowlistDecisionRecord {
         let upload = upload ?? rolloutReadinessDiagnostics()
-        let package = AppState.generateProductionRolloutDryRun(
+        let package = approvedDryRunPackage(upload: upload, checkedAt: checkedAt)
+        return AppState.makeProductionAllowlistDecisionRecord(from: package)
+    }
+
+    private func approvedDryRunPackage(
+        upload: AppState.SessionSnapshotUploadDiagnostics? = nil,
+        approvalTimestamp: Date? = Date(timeIntervalSinceReferenceDate: 8_500),
+        expirationTimestamp: Date? = Date(timeIntervalSinceReferenceDate: 9_500),
+        checkedAt: Date = Date(timeIntervalSinceReferenceDate: 8_600)
+    ) -> AppState.ProductionRolloutDryRunPackage {
+        let upload = upload ?? rolloutReadinessDiagnostics()
+        return AppState.generateProductionRolloutDryRun(
             upload,
             orgID: orgID,
             policy: cohortPolicy(
                 requestedStage: .singleSessionActivation,
                 approvalState: .approved
             ),
-            approvalTimestamp: Date(timeIntervalSinceReferenceDate: 8_500),
-            expirationTimestamp: Date(timeIntervalSinceReferenceDate: 9_500),
+            approvalTimestamp: approvalTimestamp,
+            expirationTimestamp: expirationTimestamp,
             checkedAt: checkedAt
         )
-        return AppState.makeProductionAllowlistDecisionRecord(from: package)
     }
 
     private func decisionRecord(
         from record: AppState.ProductionAllowlistDecisionRecord,
-        activationPerformed: Bool? = nil
+        sessionID: UUID? = nil,
+        approvalState: AppState.ProductionCohortOperatorApprovalState? = nil,
+        approvalTimestamp: Date? = nil,
+        expirationTimestamp: Date? = nil,
+        approvalStale: Bool? = nil,
+        rollbackReady: Bool? = nil,
+        fallbackRetained: Bool? = nil,
+        activationPerformed: Bool? = nil,
+        readyForOperatorRecord: Bool? = nil
     ) -> AppState.ProductionAllowlistDecisionRecord {
         AppState.ProductionAllowlistDecisionRecord(
             orgID: record.orgID,
             propertyID: record.propertyID,
-            sessionID: record.sessionID,
+            sessionID: sessionID ?? record.sessionID,
             dryRunCheckedAt: record.dryRunCheckedAt,
-            approvalState: record.approvalState,
-            approvalTimestamp: record.approvalTimestamp,
-            expirationTimestamp: record.expirationTimestamp,
-            approvalStale: record.approvalStale,
+            approvalState: approvalState ?? record.approvalState,
+            approvalTimestamp: approvalTimestamp ?? record.approvalTimestamp,
+            expirationTimestamp: expirationTimestamp ?? record.expirationTimestamp,
+            approvalStale: approvalStale ?? record.approvalStale,
             blockers: record.blockers,
             parityReady: record.parityReady,
             replayReady: record.replayReady,
             candidateReady: record.candidateReady,
             overlayReady: record.overlayReady,
-            rollbackReady: record.rollbackReady,
-            fallbackRetained: record.fallbackRetained,
+            rollbackReady: rollbackReady ?? record.rollbackReady,
+            fallbackRetained: fallbackRetained ?? record.fallbackRetained,
             activationReadinessOnly: record.activationReadinessOnly,
             productionWideDisabledConfirmation: record.productionWideDisabledConfirmation,
             exactSingleScopeSelected: record.exactSingleScopeSelected,
             activationPerformed: activationPerformed ?? record.activationPerformed,
             activeSource: record.activeSource,
-            readyForOperatorRecord: record.readyForOperatorRecord,
+            readyForOperatorRecord: readyForOperatorRecord ?? record.readyForOperatorRecord,
             noBehaviorChangedText: record.noBehaviorChangedText
+        )
+    }
+
+    private func preflightAudit(
+        upload: AppState.SessionSnapshotUploadDiagnostics? = nil,
+        record: AppState.ProductionAllowlistDecisionRecord? = nil
+    ) -> AppState.ProductionSingleSessionActivationPreflightAudit {
+        let upload = upload ?? rolloutReadinessDiagnostics()
+        let record = record ?? approvedDecisionRecord(upload: upload)
+        let approval = approvedSingleSessionApproval(upload: upload)
+        let gate = AppState.makeProductionSingleSessionActivationGateDiagnostics(
+            policy: singleSessionGatePolicy(enabled: false),
+            approval: approval,
+            targetClassification: .approvedProductionValidation,
+            diagnostics: upload
+        )
+        return AppState.makeProductionSingleSessionActivationPreflightAudit(
+            decisionRecord: record,
+            gateDiagnostics: gate
+        )
+    }
+
+    private func activationPreflight(
+        from audit: AppState.ProductionSingleSessionActivationPreflightAudit,
+        state: AppState.ProductionSingleSessionActivationPreflightState? = nil,
+        blockers: [String]? = nil,
+        actualActivationBlockers: [String]? = nil,
+        fallbackRetained: Bool? = nil,
+        rollbackReady: Bool? = nil,
+        activationPerformed: Bool? = nil
+    ) -> AppState.ProductionSingleSessionActivationPreflightAudit {
+        AppState.ProductionSingleSessionActivationPreflightAudit(
+            checkedAt: audit.checkedAt,
+            state: state ?? audit.state,
+            blockers: blockers ?? audit.blockers,
+            recordScope: audit.recordScope,
+            gateSelectedScope: audit.gateSelectedScope,
+            gateApprovedScope: audit.gateApprovedScope,
+            decisionRecordReady: audit.decisionRecordReady,
+            gateEvidenceReady: audit.gateEvidenceReady,
+            actualActivationGateAllowed: audit.actualActivationGateAllowed,
+            actualActivationGateBlockedReason: audit.actualActivationGateBlockedReason,
+            actualActivationBlockers: actualActivationBlockers ?? audit.actualActivationBlockers,
+            productionWideDisabledConfirmation: audit.productionWideDisabledConfirmation,
+            fallbackRetained: fallbackRetained ?? audit.fallbackRetained,
+            rollbackReady: rollbackReady ?? audit.rollbackReady,
+            activationReadinessOnly: audit.activationReadinessOnly,
+            activationPerformed: activationPerformed ?? audit.activationPerformed,
+            activeSource: audit.activeSource,
+            noBehaviorChangedText: audit.noBehaviorChangedText
         )
     }
 
@@ -1730,6 +1798,225 @@ final class Phase2C26OCanonicalCandidateConsumptionTests: XCTestCase {
         XCTAssertTrue(text.contains("loosen RLS"))
         XCTAssertTrue(text.contains("change schema"))
         XCTAssertTrue(text.contains("delete data"))
+    }
+
+    func testProductionOperatorRolloutRecordPersistencePreflightReadyForReviewOnly() {
+        let upload = rolloutReadinessDiagnostics()
+        let package = approvedDryRunPackage(upload: upload)
+        let record = AppState.makeProductionAllowlistDecisionRecord(from: package)
+        let audit = preflightAudit(upload: upload, record: record)
+
+        let preflight = AppState.makeProductionOperatorRolloutRecordPersistencePreflight(
+            checkedAt: Date(timeIntervalSinceReferenceDate: 8_900),
+            dryRunPackage: package,
+            decisionRecord: record,
+            activationPreflight: audit
+        )
+
+        XCTAssertEqual(preflight.state, .readyForOperatorRecordPersistenceReviewOnly)
+        XCTAssertTrue(preflight.blockers.isEmpty)
+        XCTAssertEqual(preflight.packageScope, preflight.decisionRecordScope)
+        XCTAssertEqual(preflight.packageScope, preflight.preflightRecordScope)
+        XCTAssertTrue(preflight.approvalFreshnessRepresented)
+        XCTAssertTrue(preflight.approvalFresh)
+        XCTAssertTrue(preflight.exactSingleScopeSelected)
+        XCTAssertTrue(preflight.decisionRecordReady)
+        XCTAssertTrue(preflight.preflightManualReviewOnly)
+        XCTAssertTrue(preflight.disabledProductionGateBlockerPresent)
+        XCTAssertTrue(preflight.productionWideDisabledConfirmation)
+        XCTAssertTrue(preflight.fallbackRetained)
+        XCTAssertTrue(preflight.rollbackReady)
+        XCTAssertEqual(preflight.activeSource, .local)
+        XCTAssertFalse(preflight.activationPerformed)
+        XCTAssertFalse(preflight.persistencePerformed)
+    }
+
+    func testProductionOperatorRolloutRecordPersistencePreflightMissingApprovalTimestampBlocks() {
+        let upload = rolloutReadinessDiagnostics()
+        let package = approvedDryRunPackage(
+            upload: upload,
+            approvalTimestamp: nil,
+            expirationTimestamp: Date(timeIntervalSinceReferenceDate: 9_500)
+        )
+        let record = AppState.makeProductionAllowlistDecisionRecord(from: package)
+        let audit = preflightAudit(upload: upload, record: record)
+
+        let preflight = AppState.makeProductionOperatorRolloutRecordPersistencePreflight(
+            dryRunPackage: package,
+            decisionRecord: record,
+            activationPreflight: audit
+        )
+
+        XCTAssertEqual(preflight.state, .blocked)
+        XCTAssertNil(preflight.approvalTimestamp)
+        XCTAssertFalse(preflight.approvalFreshnessRepresented)
+        XCTAssertTrue(preflight.blockers.contains("operator_approval_timestamp_required"))
+        XCTAssertTrue(preflight.blockers.contains("operator_approval_freshness_not_represented"))
+    }
+
+    func testProductionOperatorRolloutRecordPersistencePreflightExpiredApprovalBlocks() {
+        let upload = rolloutReadinessDiagnostics()
+        let package = approvedDryRunPackage(
+            upload: upload,
+            approvalTimestamp: Date(timeIntervalSinceReferenceDate: 8_200),
+            expirationTimestamp: Date(timeIntervalSinceReferenceDate: 8_300),
+            checkedAt: Date(timeIntervalSinceReferenceDate: 8_400)
+        )
+        let record = AppState.makeProductionAllowlistDecisionRecord(from: package)
+        let audit = preflightAudit(upload: upload, record: record)
+
+        let preflight = AppState.makeProductionOperatorRolloutRecordPersistencePreflight(
+            dryRunPackage: package,
+            decisionRecord: record,
+            activationPreflight: audit
+        )
+
+        XCTAssertEqual(preflight.state, .blocked)
+        XCTAssertEqual(preflight.approvalState, .expired)
+        XCTAssertFalse(preflight.approvalFresh)
+        XCTAssertTrue(preflight.blockers.contains("operator_approval_expired_or_stale"))
+    }
+
+    func testProductionOperatorRolloutRecordPersistencePreflightScopeMismatchBlocks() {
+        let upload = rolloutReadinessDiagnostics()
+        let package = approvedDryRunPackage(upload: upload)
+        let record = AppState.makeProductionAllowlistDecisionRecord(from: package)
+        let wrongSessionID = UUID(uuidString: "55555555-5555-5555-5555-555555555555")!
+        let wrongRecord = decisionRecord(from: record, sessionID: wrongSessionID)
+        let audit = preflightAudit(upload: upload, record: record)
+
+        let preflight = AppState.makeProductionOperatorRolloutRecordPersistencePreflight(
+            dryRunPackage: package,
+            decisionRecord: wrongRecord,
+            activationPreflight: audit
+        )
+
+        XCTAssertEqual(preflight.state, .blocked)
+        XCTAssertNotEqual(preflight.packageScope, preflight.decisionRecordScope)
+        XCTAssertTrue(preflight.blockers.contains("operator_rollout_record_scope_mismatch"))
+    }
+
+    func testProductionOperatorRolloutRecordPersistencePreflightRequiresManualReviewOnlyAudit() {
+        let upload = rolloutReadinessDiagnostics()
+        let package = approvedDryRunPackage(upload: upload)
+        let record = AppState.makeProductionAllowlistDecisionRecord(from: package)
+        let audit = activationPreflight(
+            from: preflightAudit(upload: upload, record: record),
+            state: .blocked,
+            blockers: ["activation_preflight_test_blocker"]
+        )
+
+        let preflight = AppState.makeProductionOperatorRolloutRecordPersistencePreflight(
+            dryRunPackage: package,
+            decisionRecord: record,
+            activationPreflight: audit
+        )
+
+        XCTAssertEqual(preflight.state, .blocked)
+        XCTAssertFalse(preflight.preflightManualReviewOnly)
+        XCTAssertTrue(preflight.blockers.contains("activation_preflight_not_manual_review_only"))
+    }
+
+    func testProductionOperatorRolloutRecordPersistencePreflightRequiresDisabledProductionGateBlocker() {
+        let upload = rolloutReadinessDiagnostics()
+        let package = approvedDryRunPackage(upload: upload)
+        let record = AppState.makeProductionAllowlistDecisionRecord(from: package)
+        let audit = activationPreflight(
+            from: preflightAudit(upload: upload, record: record),
+            actualActivationBlockers: []
+        )
+
+        let preflight = AppState.makeProductionOperatorRolloutRecordPersistencePreflight(
+            dryRunPackage: package,
+            decisionRecord: record,
+            activationPreflight: audit
+        )
+
+        XCTAssertEqual(preflight.state, .blocked)
+        XCTAssertFalse(preflight.disabledProductionGateBlockerPresent)
+        XCTAssertTrue(preflight.blockers.contains("disabled_production_activation_gate_blocker_required"))
+    }
+
+    func testProductionOperatorRolloutRecordPersistencePreflightMissingFallbackBlocks() {
+        var upload = rolloutReadinessDiagnostics()
+        upload.lastCanonicalReadCandidateLocalFallbackAvailable = false
+        let package = approvedDryRunPackage(upload: upload)
+        let record = AppState.makeProductionAllowlistDecisionRecord(from: package)
+        let audit = preflightAudit(upload: upload, record: record)
+
+        let preflight = AppState.makeProductionOperatorRolloutRecordPersistencePreflight(
+            dryRunPackage: package,
+            decisionRecord: record,
+            activationPreflight: audit
+        )
+
+        XCTAssertEqual(preflight.state, .blocked)
+        XCTAssertFalse(preflight.fallbackRetained)
+        XCTAssertTrue(preflight.blockers.contains("local_fallback_unavailable"))
+    }
+
+    func testProductionOperatorRolloutRecordPersistencePreflightMissingRollbackBlocks() {
+        let upload = rolloutReadinessDiagnostics(rollbackAvailable: false)
+        let package = approvedDryRunPackage(upload: upload)
+        let record = AppState.makeProductionAllowlistDecisionRecord(from: package)
+        let audit = preflightAudit(upload: upload, record: record)
+
+        let preflight = AppState.makeProductionOperatorRolloutRecordPersistencePreflight(
+            dryRunPackage: package,
+            decisionRecord: record,
+            activationPreflight: audit
+        )
+
+        XCTAssertEqual(preflight.state, .blocked)
+        XCTAssertFalse(preflight.rollbackReady)
+        XCTAssertTrue(preflight.blockers.contains("rollback_not_ready"))
+    }
+
+    func testProductionOperatorRolloutRecordPersistencePreflightActivationPerformedBlocks() {
+        let upload = rolloutReadinessDiagnostics()
+        let package = approvedDryRunPackage(upload: upload)
+        let record = decisionRecord(
+            from: AppState.makeProductionAllowlistDecisionRecord(from: package),
+            activationPerformed: true
+        )
+        let audit = activationPreflight(
+            from: preflightAudit(upload: upload, record: record),
+            activationPerformed: true
+        )
+
+        let preflight = AppState.makeProductionOperatorRolloutRecordPersistencePreflight(
+            dryRunPackage: package,
+            decisionRecord: record,
+            activationPreflight: audit
+        )
+
+        XCTAssertEqual(preflight.state, .blocked)
+        XCTAssertTrue(preflight.activationPerformed)
+        XCTAssertTrue(preflight.blockers.contains("activation_performed_must_be_false"))
+    }
+
+    func testProductionOperatorRolloutRecordPersistencePreflightReportIncludesNoBehaviorChanges() {
+        let upload = rolloutReadinessDiagnostics()
+        let package = approvedDryRunPackage(upload: upload)
+        let record = AppState.makeProductionAllowlistDecisionRecord(from: package)
+        let audit = preflightAudit(upload: upload, record: record)
+        let preflight = AppState.makeProductionOperatorRolloutRecordPersistencePreflight(
+            dryRunPackage: package,
+            decisionRecord: record,
+            activationPreflight: audit
+        )
+
+        let text = AppState.productionOperatorRolloutRecordPersistencePreflightReportText(preflight)
+
+        XCTAssertTrue(text.contains("Production Operator Rollout Record Persistence Preflight"))
+        XCTAssertTrue(text.contains("- persistence_preflight_state: ready_for_operator_record_persistence_review_only"))
+        XCTAssertTrue(text.contains("- persistence_performed: false"))
+        XCTAssertTrue(text.contains("No operator rollout record was persisted"))
+        XCTAssertTrue(text.contains("no activation occurred"))
+        XCTAssertTrue(text.contains("no production reads were enabled"))
+        XCTAssertTrue(text.contains("no local or remote state was written"))
+        XCTAssertTrue(text.contains("no fallback was removed"))
+        XCTAssertTrue(text.contains("export, seal, sync, media, iCloud, RLS, schema, and data behavior are unchanged"))
     }
 
     func testProductionSingleSessionActivationGateDefaultFalseBlocksProduction() {

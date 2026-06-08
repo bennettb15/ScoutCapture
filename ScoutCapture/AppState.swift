@@ -2409,6 +2409,11 @@ final class AppState: ObservableObject {
         case readyForManualReviewOnly = "ready_for_manual_review_only"
     }
 
+    enum ProductionOperatorRolloutRecordPersistencePreflightState: String, CaseIterable, Equatable {
+        case blocked
+        case readyForOperatorRecordPersistenceReviewOnly = "ready_for_operator_record_persistence_review_only"
+    }
+
     enum ProductionCohortValidationState: String, CaseIterable, Equatable {
         case notValidated = "not_validated"
         case verified
@@ -2647,6 +2652,34 @@ final class AppState: ObservableObject {
         let activationReadinessOnly: Bool
         let activationPerformed: Bool
         let activeSource: CanonicalCandidateActivationSource
+        let noBehaviorChangedText: String
+    }
+
+    struct ProductionOperatorRolloutRecordPersistencePreflight: Equatable {
+        let checkedAt: Date
+        let state: ProductionOperatorRolloutRecordPersistencePreflightState
+        let blockers: [String]
+        let packageScope: ProductionCohortApprovalScope
+        let decisionRecordScope: ProductionCohortApprovalScope
+        let preflightRecordScope: ProductionCohortApprovalScope
+        let preflightGateSelectedScope: ProductionCohortApprovalScope
+        let preflightGateApprovedScope: ProductionCohortApprovalScope
+        let dryRunState: ProductionRolloutDryRunState
+        let approvalState: ProductionCohortOperatorApprovalState
+        let approvalTimestamp: Date?
+        let expirationTimestamp: Date?
+        let approvalFreshnessRepresented: Bool
+        let approvalFresh: Bool
+        let exactSingleScopeSelected: Bool
+        let decisionRecordReady: Bool
+        let preflightManualReviewOnly: Bool
+        let disabledProductionGateBlockerPresent: Bool
+        let productionWideDisabledConfirmation: Bool
+        let fallbackRetained: Bool
+        let rollbackReady: Bool
+        let activeSource: CanonicalCandidateActivationSource
+        let activationPerformed: Bool
+        let persistencePerformed: Bool
         let noBehaviorChangedText: String
     }
 
@@ -21861,6 +21894,165 @@ final class AppState: ObservableObject {
         lines.append("- active_source: \(audit.activeSource.rawValue)")
         lines.append("- activation_performed: \(audit.activationPerformed)")
         lines.append(audit.noBehaviorChangedText)
+        return lines.joined(separator: "\n")
+    }
+
+    nonisolated static func makeProductionOperatorRolloutRecordPersistencePreflight(
+        checkedAt: Date = Date(),
+        dryRunPackage package: ProductionRolloutDryRunPackage,
+        decisionRecord record: ProductionAllowlistDecisionRecord,
+        activationPreflight preflight: ProductionSingleSessionActivationPreflightAudit
+    ) -> ProductionOperatorRolloutRecordPersistencePreflight {
+        let packageCohort = package.cohortControlPlane.cohort
+        let packageScope = ProductionCohortApprovalScope(
+            orgID: packageCohort.orgID,
+            propertyID: packageCohort.propertyID,
+            sessionID: packageCohort.sessionID
+        )
+        let decisionRecordScope = ProductionCohortApprovalScope(
+            orgID: record.orgID,
+            propertyID: record.propertyID,
+            sessionID: record.sessionID
+        )
+        func scopesAreEqual(
+            _ lhs: ProductionCohortApprovalScope,
+            _ rhs: ProductionCohortApprovalScope
+        ) -> Bool {
+            lhs.orgID == rhs.orgID &&
+                lhs.propertyID == rhs.propertyID &&
+                lhs.sessionID == rhs.sessionID
+        }
+        let exactSingleScopeSelected = packageScope.orgID != nil &&
+            packageScope.propertyID != nil &&
+            packageScope.sessionID != nil &&
+            record.exactSingleScopeSelected
+        let scopesMatch = scopesAreEqual(packageScope, decisionRecordScope) &&
+            scopesAreEqual(packageScope, preflight.recordScope) &&
+            scopesAreEqual(packageScope, preflight.gateSelectedScope) &&
+            scopesAreEqual(packageScope, preflight.gateApprovedScope)
+        let approvalFreshnessRepresented = record.approvalTimestamp != nil &&
+            record.expirationTimestamp != nil
+        let approvalFresh = record.approvalState == .approved &&
+            !record.approvalStale
+        let preflightManualReviewOnly = preflight.state == .readyForManualReviewOnly &&
+            preflight.blockers.isEmpty
+        let disabledProductionGateBlockerPresent = preflight.actualActivationBlockers.contains(
+            "production_single_session_canonical_activation_disabled"
+        )
+        let productionWideDisabledConfirmation = package.productionWideDisabledConfirmation &&
+            record.productionWideDisabledConfirmation &&
+            preflight.productionWideDisabledConfirmation
+        let fallbackRetained = record.fallbackRetained && preflight.fallbackRetained
+        let rollbackReady = record.rollbackReady && preflight.rollbackReady
+        let persistencePerformed = false
+
+        var blockers = package.blockers + record.blockers + preflight.blockers
+        if !exactSingleScopeSelected {
+            blockers.append("exact_single_org_property_session_scope_required")
+        }
+        if !scopesMatch {
+            blockers.append("operator_rollout_record_scope_mismatch")
+        }
+        if package.state != .dryRunReadyForSingleSessionAllowlist {
+            blockers.append("dry_run_not_ready_for_single_session_allowlist")
+        }
+        if !record.readyForOperatorRecord {
+            blockers.append("decision_record_not_ready_for_operator_record")
+        }
+        if record.approvalState != .approved {
+            blockers.append("operator_approval_not_approved")
+        }
+        if record.approvalTimestamp == nil {
+            blockers.append("operator_approval_timestamp_required")
+        }
+        if !approvalFreshnessRepresented {
+            blockers.append("operator_approval_freshness_not_represented")
+        }
+        if record.approvalState == .expired || record.approvalStale || !approvalFresh {
+            blockers.append("operator_approval_expired_or_stale")
+        }
+        if !preflightManualReviewOnly {
+            blockers.append("activation_preflight_not_manual_review_only")
+        }
+        if !disabledProductionGateBlockerPresent {
+            blockers.append("disabled_production_activation_gate_blocker_required")
+        }
+        if !productionWideDisabledConfirmation {
+            blockers.append("production_wide_canonical_reads_not_disabled")
+        }
+        if !fallbackRetained {
+            blockers.append("local_fallback_unavailable")
+        }
+        if !rollbackReady {
+            blockers.append("rollback_not_ready")
+        }
+        if record.activeSource != .local || preflight.activeSource != .local {
+            blockers.append("active_source_must_remain_local")
+        }
+        if record.activationPerformed || preflight.activationPerformed {
+            blockers.append("activation_performed_must_be_false")
+        }
+
+        let dedupedBlockers = Array(Set(blockers)).sorted()
+        return ProductionOperatorRolloutRecordPersistencePreflight(
+            checkedAt: checkedAt,
+            state: dedupedBlockers.isEmpty ? .readyForOperatorRecordPersistenceReviewOnly : .blocked,
+            blockers: dedupedBlockers,
+            packageScope: packageScope,
+            decisionRecordScope: decisionRecordScope,
+            preflightRecordScope: preflight.recordScope,
+            preflightGateSelectedScope: preflight.gateSelectedScope,
+            preflightGateApprovedScope: preflight.gateApprovedScope,
+            dryRunState: package.state,
+            approvalState: record.approvalState,
+            approvalTimestamp: record.approvalTimestamp,
+            expirationTimestamp: record.expirationTimestamp,
+            approvalFreshnessRepresented: approvalFreshnessRepresented,
+            approvalFresh: approvalFresh,
+            exactSingleScopeSelected: exactSingleScopeSelected,
+            decisionRecordReady: record.readyForOperatorRecord,
+            preflightManualReviewOnly: preflightManualReviewOnly,
+            disabledProductionGateBlockerPresent: disabledProductionGateBlockerPresent,
+            productionWideDisabledConfirmation: productionWideDisabledConfirmation,
+            fallbackRetained: fallbackRetained,
+            rollbackReady: rollbackReady,
+            activeSource: record.activeSource,
+            activationPerformed: record.activationPerformed || preflight.activationPerformed,
+            persistencePerformed: persistencePerformed,
+            noBehaviorChangedText: "No behavior changed: production operator rollout record persistence preflight is diagnostics-only and review-only. No operator rollout record was persisted, no activation occurred, no production reads were enabled, no local or remote state was written, no fallback was removed, and export, seal, sync, media, iCloud, RLS, schema, and data behavior are unchanged."
+        )
+    }
+
+    nonisolated static func productionOperatorRolloutRecordPersistencePreflightReportText(
+        _ preflight: ProductionOperatorRolloutRecordPersistencePreflight
+    ) -> String {
+        var lines: [String] = []
+        lines.append("Production Operator Rollout Record Persistence Preflight")
+        lines.append("- persistence_preflight_checked_at: \(preflight.checkedAt.formatted(date: .abbreviated, time: .standard))")
+        lines.append("- persistence_preflight_state: \(preflight.state.rawValue)")
+        lines.append("- blockers: \(preflight.blockers.isEmpty ? "none" : preflight.blockers.joined(separator: ", "))")
+        lines.append("- package_scope: \(preflight.packageScope.description)")
+        lines.append("- decision_record_scope: \(preflight.decisionRecordScope.description)")
+        lines.append("- preflight_record_scope: \(preflight.preflightRecordScope.description)")
+        lines.append("- preflight_gate_selected_scope: \(preflight.preflightGateSelectedScope.description)")
+        lines.append("- preflight_gate_approved_scope: \(preflight.preflightGateApprovedScope.description)")
+        lines.append("- dry_run_state: \(preflight.dryRunState.rawValue)")
+        lines.append("- approval_state: \(preflight.approvalState.rawValue)")
+        lines.append("- approval_timestamp: \(preflight.approvalTimestamp?.formatted(date: .abbreviated, time: .standard) ?? "none")")
+        lines.append("- expiration_timestamp: \(preflight.expirationTimestamp?.formatted(date: .abbreviated, time: .standard) ?? "none")")
+        lines.append("- approval_freshness_represented: \(preflight.approvalFreshnessRepresented)")
+        lines.append("- approval_fresh: \(preflight.approvalFresh)")
+        lines.append("- exact_single_scope_selected: \(preflight.exactSingleScopeSelected)")
+        lines.append("- decision_record_ready: \(preflight.decisionRecordReady)")
+        lines.append("- activation_preflight_manual_review_only: \(preflight.preflightManualReviewOnly)")
+        lines.append("- disabled_production_gate_blocker_present: \(preflight.disabledProductionGateBlockerPresent)")
+        lines.append("- production_wide_disabled_confirmation: \(preflight.productionWideDisabledConfirmation)")
+        lines.append("- fallback_retained: \(preflight.fallbackRetained)")
+        lines.append("- rollback_ready: \(preflight.rollbackReady)")
+        lines.append("- active_source: \(preflight.activeSource.rawValue)")
+        lines.append("- activation_performed: \(preflight.activationPerformed)")
+        lines.append("- persistence_performed: \(preflight.persistencePerformed)")
+        lines.append(preflight.noBehaviorChangedText)
         return lines.joined(separator: "\n")
     }
 
