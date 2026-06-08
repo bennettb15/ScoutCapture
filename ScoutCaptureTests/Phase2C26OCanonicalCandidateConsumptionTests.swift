@@ -1276,6 +1276,173 @@ final class Phase2C26OCanonicalCandidateConsumptionTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: directory.path))
     }
 
+    func testProductionAllowlistDecisionRecordBuildsFromDryRunOnlyAndDoesNotActivate() {
+        let upload = rolloutReadinessDiagnostics()
+        let checkedAt = Date(timeIntervalSinceReferenceDate: 8_100)
+        let package = AppState.generateProductionRolloutDryRun(
+            upload,
+            orgID: orgID,
+            policy: cohortPolicy(
+                requestedStage: .singleSessionActivation,
+                approvalState: .approved
+            ),
+            approvalTimestamp: Date(timeIntervalSinceReferenceDate: 8_000),
+            expirationTimestamp: Date(timeIntervalSinceReferenceDate: 9_000),
+            checkedAt: checkedAt
+        )
+
+        let record = AppState.makeProductionAllowlistDecisionRecord(from: package)
+
+        XCTAssertEqual(record.orgID, orgID)
+        XCTAssertEqual(record.propertyID, propertyID)
+        XCTAssertEqual(record.sessionID, sessionID)
+        XCTAssertEqual(record.dryRunCheckedAt, checkedAt)
+        XCTAssertEqual(record.approvalState, .approved)
+        XCTAssertTrue(record.exactSingleScopeSelected)
+        XCTAssertTrue(record.parityReady)
+        XCTAssertTrue(record.replayReady)
+        XCTAssertTrue(record.candidateReady)
+        XCTAssertTrue(record.overlayReady)
+        XCTAssertTrue(record.rollbackReady)
+        XCTAssertTrue(record.fallbackRetained)
+        XCTAssertTrue(record.productionWideDisabledConfirmation)
+        XCTAssertTrue(record.activationReadinessOnly)
+        XCTAssertFalse(record.activationPerformed)
+        XCTAssertEqual(record.activeSource, .local)
+        XCTAssertTrue(record.readyForOperatorRecord)
+    }
+
+    func testProductionAllowlistDecisionRecordRequiresExactSingleScope() {
+        let package = AppState.generateProductionRolloutDryRun(
+            AppState.SessionSnapshotUploadDiagnostics()
+        )
+
+        let record = AppState.makeProductionAllowlistDecisionRecord(from: package)
+
+        XCTAssertFalse(record.exactSingleScopeSelected)
+        XCTAssertFalse(record.readyForOperatorRecord)
+        XCTAssertTrue(record.blockers.contains("org_id_required"))
+        XCTAssertTrue(record.blockers.contains("property_id_required"))
+        XCTAssertTrue(record.blockers.contains("session_id_required"))
+        XCTAssertTrue(record.blockers.contains("exact_single_org_property_session_scope_required"))
+    }
+
+    func testProductionAllowlistDecisionRecordPreservesExpiredApprovalAndBlocksReadiness() {
+        let upload = rolloutReadinessDiagnostics()
+        let package = AppState.generateProductionRolloutDryRun(
+            upload,
+            orgID: orgID,
+            policy: cohortPolicy(
+                requestedStage: .singleSessionActivation,
+                approvalState: .approved
+            ),
+            approvalTimestamp: Date(timeIntervalSinceReferenceDate: 8_200),
+            expirationTimestamp: Date(timeIntervalSinceReferenceDate: 8_300),
+            checkedAt: Date(timeIntervalSinceReferenceDate: 8_400)
+        )
+
+        let record = AppState.makeProductionAllowlistDecisionRecord(from: package)
+
+        XCTAssertEqual(record.approvalState, .expired)
+        XCTAssertTrue(record.approvalStale)
+        XCTAssertFalse(record.readyForOperatorRecord)
+        XCTAssertTrue(record.blockers.contains("operator_approval_expired"))
+    }
+
+    func testProductionAllowlistDecisionRecordPreservesUnresolvedBlockers() {
+        let upload = rolloutReadinessDiagnostics(
+            diagnostics: diagnostics(
+                result: .divergentConflict,
+                recommendation: "local_first_block_canonical_read",
+                localShotCount: 5,
+                remoteShotCount: 1,
+                localIssueObservationCount: 2,
+                remoteIssueObservationCount: 0,
+                countParity: false
+            )
+        )
+        let package = AppState.generateProductionRolloutDryRun(upload, orgID: orgID)
+
+        let record = AppState.makeProductionAllowlistDecisionRecord(from: package)
+
+        XCTAssertFalse(record.readyForOperatorRecord)
+        XCTAssertTrue(record.blockers.contains("unresolved_missing_remote_children"))
+        XCTAssertTrue(record.blockers.contains("unresolved_rollout_blockers") || record.blockers.contains("parity_or_replay_not_verified"))
+    }
+
+    func testProductionAllowlistDecisionRecordBlocksWhenProductionWideReadsAreEnabled() {
+        let upload = rolloutReadinessDiagnostics(productionWideEnabled: true)
+        let package = AppState.generateProductionRolloutDryRun(
+            upload,
+            orgID: orgID,
+            policy: cohortPolicy(
+                requestedStage: .singleSessionActivation,
+                approvalState: .approved,
+                productionWideEnabled: true
+            )
+        )
+
+        let record = AppState.makeProductionAllowlistDecisionRecord(from: package)
+
+        XCTAssertFalse(record.productionWideDisabledConfirmation)
+        XCTAssertFalse(record.readyForOperatorRecord)
+        XCTAssertTrue(record.blockers.contains("production_wide_canonical_reads_not_disabled"))
+    }
+
+    func testProductionAllowlistDecisionRecordRequiresLocalICloudFallbackRetained() {
+        var upload = rolloutReadinessDiagnostics()
+        upload.lastCanonicalReadCandidateLocalFallbackAvailable = false
+        let package = AppState.generateProductionRolloutDryRun(
+            upload,
+            orgID: orgID,
+            policy: cohortPolicy(
+                requestedStage: .singleSessionActivation,
+                approvalState: .approved
+            )
+        )
+
+        let record = AppState.makeProductionAllowlistDecisionRecord(from: package)
+
+        XCTAssertFalse(record.fallbackRetained)
+        XCTAssertFalse(record.readyForOperatorRecord)
+        XCTAssertTrue(record.blockers.contains("local_fallback_unavailable"))
+    }
+
+    func testProductionAllowlistDecisionRecordReportIsCopyReadyAndNonActivating() {
+        let upload = rolloutReadinessDiagnostics()
+        let package = AppState.generateProductionRolloutDryRun(
+            upload,
+            orgID: orgID,
+            policy: cohortPolicy(
+                requestedStage: .singleSessionActivation,
+                approvalState: .approved
+            ),
+            approvalTimestamp: Date(timeIntervalSinceReferenceDate: 8_500),
+            expirationTimestamp: Date(timeIntervalSinceReferenceDate: 9_500),
+            checkedAt: Date(timeIntervalSinceReferenceDate: 8_600)
+        )
+        let record = AppState.makeProductionAllowlistDecisionRecord(from: package)
+
+        let text = AppState.productionAllowlistDecisionRecordReportText(record)
+
+        XCTAssertTrue(text.contains("Production Allowlist Decision Record"))
+        XCTAssertTrue(text.contains("- org_id: \(orgID.uuidString)"))
+        XCTAssertTrue(text.contains("- property_id: \(propertyID.uuidString)"))
+        XCTAssertTrue(text.contains("- session_id: \(sessionID.uuidString)"))
+        XCTAssertTrue(text.contains("- active_source: local"))
+        XCTAssertTrue(text.contains("- activation_performed: false"))
+        XCTAssertTrue(text.contains("- ready_for_operator_record: true"))
+        XCTAssertTrue(text.contains("does not enable production canonical reads"))
+        XCTAssertTrue(text.contains("enable production-wide remote reads"))
+        XCTAssertTrue(text.contains("production writes"))
+        XCTAssertTrue(text.contains("write local or remote state"))
+        XCTAssertTrue(text.contains("activate candidates"))
+        XCTAssertTrue(text.contains("activate overlays"))
+        XCTAssertTrue(text.contains("remove local/iCloud fallback"))
+        XCTAssertTrue(text.contains("change export, seal, sync, media, or iCloud behavior"))
+        XCTAssertTrue(text.contains("change schema"))
+    }
+
     func testProductionSingleSessionActivationGateDefaultFalseBlocksProduction() {
         let upload = rolloutReadinessDiagnostics()
         let approval = approvedSingleSessionApproval(upload: upload)

@@ -2545,6 +2545,7 @@ final class AppState: ObservableObject {
     }
 
     struct ProductionRolloutDryRunPackage: Equatable {
+        let checkedAt: Date
         let state: ProductionRolloutDryRunState
         let canonicalDiagnostics: SessionSnapshotUploadDiagnostics
         let rolloutReadiness: CanonicalRolloutReadinessDiagnostics
@@ -2564,6 +2565,31 @@ final class AppState: ObservableObject {
         let productionWideDisabledConfirmation: Bool
         let localHealthAction: String
         let noChangesPerformedText: String
+    }
+
+    struct ProductionAllowlistDecisionRecord: Equatable {
+        let orgID: UUID?
+        let propertyID: UUID?
+        let sessionID: UUID?
+        let dryRunCheckedAt: Date
+        let approvalState: ProductionCohortOperatorApprovalState
+        let approvalTimestamp: Date?
+        let expirationTimestamp: Date?
+        let approvalStale: Bool
+        let blockers: [String]
+        let parityReady: Bool
+        let replayReady: Bool
+        let candidateReady: Bool
+        let overlayReady: Bool
+        let rollbackReady: Bool
+        let fallbackRetained: Bool
+        let activationReadinessOnly: Bool
+        let productionWideDisabledConfirmation: Bool
+        let exactSingleScopeSelected: Bool
+        let activationPerformed: Bool
+        let activeSource: CanonicalCandidateActivationSource
+        let readyForOperatorRecord: Bool
+        let noBehaviorChangedText: String
     }
 
     struct ProductionSingleSessionActivationGatePolicy: Equatable {
@@ -21531,6 +21557,7 @@ final class AppState: ObservableObject {
         ].joined(separator: " ")
 
         return ProductionRolloutDryRunPackage(
+            checkedAt: checkedAt,
             state: state,
             canonicalDiagnostics: diagnostics,
             rolloutReadiness: rolloutReadiness,
@@ -21558,6 +21585,7 @@ final class AppState: ObservableObject {
     ) -> String {
         var lines: [String] = []
         lines.append("Production Rollout Dry Run")
+        lines.append("- dry_run_checked_at: \(package.checkedAt.formatted(date: .abbreviated, time: .standard))")
         lines.append("- selected_org_id: \(package.cohortControlPlane.cohort.orgID?.uuidString ?? "none")")
         lines.append("- selected_property_id: \(package.cohortControlPlane.cohort.propertyID?.uuidString ?? "none")")
         lines.append("- selected_session_id: \(package.cohortControlPlane.cohort.sessionID?.uuidString ?? "none")")
@@ -21575,6 +21603,103 @@ final class AppState: ObservableObject {
         lines.append("- rollback_fallback_ready: \(package.rollbackFallbackReady)")
         lines.append("- local_health_action: \(package.localHealthAction)")
         lines.append(package.noChangesPerformedText)
+        return lines.joined(separator: "\n")
+    }
+
+    nonisolated static func makeProductionAllowlistDecisionRecord(
+        from package: ProductionRolloutDryRunPackage
+    ) -> ProductionAllowlistDecisionRecord {
+        let cohort = package.cohortControlPlane.cohort
+        let approval = package.operatorApprovalReadiness
+        let exactSingleScopeSelected = cohort.orgID != nil &&
+            cohort.propertyID != nil &&
+            cohort.sessionID != nil
+        let fallbackRetained = package.canonicalDiagnostics.lastCanonicalReadCandidateLocalFallbackAvailable
+        let activationReadinessOnly = package.activationReady &&
+            package.cohortControlPlane.cohort.activationEligibility == .singleSessionReadinessOnly
+        let approvalBlocked = approval.approvalBlockedReason?
+            .split(separator: ",")
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty } ?? []
+
+        var blockers = package.blockers + approvalBlocked
+        if !exactSingleScopeSelected {
+            blockers.append("exact_single_org_property_session_scope_required")
+        }
+        if approval.state == .expired || approval.staleApproval {
+            blockers.append("operator_approval_expired")
+        }
+        if approval.state == .rejected {
+            blockers.append("operator_rejected")
+        }
+        if !package.productionWideDisabledConfirmation {
+            blockers.append("production_wide_canonical_reads_not_disabled")
+        }
+        if !fallbackRetained {
+            blockers.append("local_fallback_unavailable")
+        }
+
+        let dedupedBlockers = Array(Set(blockers)).sorted()
+        let readyForOperatorRecord = dedupedBlockers.isEmpty &&
+            exactSingleScopeSelected &&
+            package.productionWideDisabledConfirmation &&
+            fallbackRetained &&
+            (approval.state == .approved || approval.state == .pendingReview || approval.state == .notRequested)
+
+        return ProductionAllowlistDecisionRecord(
+            orgID: cohort.orgID,
+            propertyID: cohort.propertyID,
+            sessionID: cohort.sessionID,
+            dryRunCheckedAt: package.checkedAt,
+            approvalState: approval.state,
+            approvalTimestamp: approval.approvalTimestamp,
+            expirationTimestamp: approval.expirationTimestamp,
+            approvalStale: approval.staleApproval,
+            blockers: dedupedBlockers,
+            parityReady: package.cohortControlPlane.eligibility.parityVerified,
+            replayReady: package.cohortControlPlane.eligibility.replayBackfillVerified,
+            candidateReady: package.candidateReady,
+            overlayReady: package.overlayReady,
+            rollbackReady: package.cohortControlPlane.eligibility.activationRollbackVerified,
+            fallbackRetained: fallbackRetained,
+            activationReadinessOnly: activationReadinessOnly,
+            productionWideDisabledConfirmation: package.productionWideDisabledConfirmation,
+            exactSingleScopeSelected: exactSingleScopeSelected,
+            activationPerformed: false,
+            activeSource: .local,
+            readyForOperatorRecord: readyForOperatorRecord,
+            noBehaviorChangedText: "No behavior changed: production allowlist decision record is local/in-memory diagnostics only. It does not enable production canonical reads, enable production-wide remote reads, perform production writes, write local or remote state, activate candidates, activate overlays, switch global canonical reads, remove local/iCloud fallback, change export, seal, sync, media, or iCloud behavior, hydrate sessions, loosen RLS, change schema, or delete data."
+        )
+    }
+
+    nonisolated static func productionAllowlistDecisionRecordReportText(
+        _ record: ProductionAllowlistDecisionRecord
+    ) -> String {
+        var lines: [String] = []
+        lines.append("Production Allowlist Decision Record")
+        lines.append("- record_scope: single_org_property_session")
+        lines.append("- org_id: \(record.orgID?.uuidString ?? "none")")
+        lines.append("- property_id: \(record.propertyID?.uuidString ?? "none")")
+        lines.append("- session_id: \(record.sessionID?.uuidString ?? "none")")
+        lines.append("- exact_single_scope_selected: \(record.exactSingleScopeSelected)")
+        lines.append("- dry_run_checked_at: \(record.dryRunCheckedAt.formatted(date: .abbreviated, time: .standard))")
+        lines.append("- approval_state: \(record.approvalState.rawValue)")
+        lines.append("- approval_timestamp: \(record.approvalTimestamp?.formatted(date: .abbreviated, time: .standard) ?? "none")")
+        lines.append("- expiration_timestamp: \(record.expirationTimestamp?.formatted(date: .abbreviated, time: .standard) ?? "none")")
+        lines.append("- approval_stale: \(record.approvalStale)")
+        lines.append("- blockers: \(record.blockers.isEmpty ? "none" : record.blockers.joined(separator: ", "))")
+        lines.append("- parity_ready: \(record.parityReady)")
+        lines.append("- replay_ready: \(record.replayReady)")
+        lines.append("- candidate_ready: \(record.candidateReady)")
+        lines.append("- overlay_ready: \(record.overlayReady)")
+        lines.append("- rollback_ready: \(record.rollbackReady)")
+        lines.append("- fallback_retained: \(record.fallbackRetained)")
+        lines.append("- activation_readiness_only: \(record.activationReadinessOnly)")
+        lines.append("- production_wide_disabled_confirmation: \(record.productionWideDisabledConfirmation)")
+        lines.append("- active_source: \(record.activeSource.rawValue)")
+        lines.append("- activation_performed: \(record.activationPerformed)")
+        lines.append("- ready_for_operator_record: \(record.readyForOperatorRecord)")
+        lines.append(record.noBehaviorChangedText)
         return lines.joined(separator: "\n")
     }
 
