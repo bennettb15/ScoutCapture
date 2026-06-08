@@ -887,6 +887,66 @@ final class Phase2C27FZ4PropertyStatusDiagnosticsTests: XCTestCase {
         XCTAssertEqual(fixture.appState.draftPropertyCount(), 1)
     }
 
+    func testDraftPromotionLocalCacheUpdateAcceptsSameUserNullDeviceDraft() throws {
+        let fixture = try makeCutoverFixture()
+        let sessionID = UUID()
+        let record = makeStatusRecord(
+            propertyID: fixture.property.id,
+            orgID: fixture.orgID,
+            status: .draft,
+            draftSessionID: sessionID,
+            ownerUserID: fixture.userID,
+            ownerDeviceID: nil
+        )
+
+        fixture.appState._debugUpdateLocalPropertyStatusCacheAfterDraftPromotionForTests(
+            record,
+            propertyID: fixture.property.id,
+            sessionID: sessionID,
+            reason: "test_same_user_null_device_draft_cache_update"
+        )
+
+        let cached = fixture.appState.propertyStatusRecord(for: fixture.property.id)
+        let badge = fixture.appState.propertyCardBadgeModel(for: fixture.property.id)
+        XCTAssertEqual(cached?.status, .draft)
+        XCTAssertEqual(cached?.draftSessionID, sessionID)
+        XCTAssertEqual(cached?.ownerUserID, fixture.userID)
+        XCTAssertNil(cached?.ownerDeviceID)
+        XCTAssertTrue(badge.showDraft)
+        XCTAssertFalse(badge.showLock)
+        XCTAssertEqual(fixture.appState.draftPropertyCount(), 1)
+    }
+
+    func testDraftPromotionLocalCacheUpdateAcceptsSameUserDifferentDeviceDraft() throws {
+        let fixture = try makeCutoverFixture()
+        let sessionID = UUID()
+        let record = makeStatusRecord(
+            propertyID: fixture.property.id,
+            orgID: fixture.orgID,
+            status: .draft,
+            draftSessionID: sessionID,
+            ownerUserID: fixture.userID,
+            ownerDeviceID: "old-device"
+        )
+
+        fixture.appState._debugUpdateLocalPropertyStatusCacheAfterDraftPromotionForTests(
+            record,
+            propertyID: fixture.property.id,
+            sessionID: sessionID,
+            reason: "test_same_user_different_device_draft_cache_update"
+        )
+
+        let cached = fixture.appState.propertyStatusRecord(for: fixture.property.id)
+        let badge = fixture.appState.propertyCardBadgeModel(for: fixture.property.id)
+        XCTAssertEqual(cached?.status, .draft)
+        XCTAssertEqual(cached?.draftSessionID, sessionID)
+        XCTAssertEqual(cached?.ownerUserID, fixture.userID)
+        XCTAssertEqual(cached?.ownerDeviceID, "old-device")
+        XCTAssertTrue(badge.showDraft)
+        XCTAssertFalse(badge.showLock)
+        XCTAssertEqual(fixture.appState.draftPropertyCount(), 1)
+    }
+
     func testClaimReturnedOccupiedUpdatesLocalPropertyStatusCache() throws {
         let fixture = try makeCutoverFixture()
         fixture.appState.selectProperty(id: fixture.property.id)
@@ -915,6 +975,51 @@ final class Phase2C27FZ4PropertyStatusDiagnosticsTests: XCTestCase {
         XCTAssertFalse(badge.showLock)
         XCTAssertFalse(badge.showDraft)
         XCTAssertFalse(badge.showPendingExport)
+    }
+
+    func testReleaseReturnedDraftWithSameUserNullDevicePreservesLocalDraftCache() throws {
+        let fixture = try makeCutoverFixture()
+        fixture.appState.selectProperty(id: fixture.property.id)
+        let session = try XCTUnwrap(fixture.appState.startSession())
+        let occupiedRecord = makeStatusRecord(
+            propertyID: fixture.property.id,
+            orgID: fixture.orgID,
+            status: .occupied,
+            activeSessionID: session.id,
+            ownerUserID: fixture.userID,
+            ownerDeviceID: fixture.appState._debugCurrentDeviceIdentifierForTests()
+        )
+        let draftRecord = makeStatusRecord(
+            propertyID: fixture.property.id,
+            orgID: fixture.orgID,
+            status: .draft,
+            activeSessionID: session.id,
+            draftSessionID: session.id,
+            ownerUserID: fixture.userID,
+            ownerDeviceID: nil
+        )
+        fixture.appState._debugUpdateLocalPropertyStatusCacheAfterClaimForTests(
+            occupiedRecord,
+            propertyID: fixture.property.id,
+            sessionID: session.id,
+            reason: "test_claim_before_draft_preserving_release"
+        )
+
+        fixture.appState._debugUpdateLocalPropertyStatusCacheAfterReleaseForTests(
+            draftRecord,
+            propertyID: fixture.property.id,
+            reason: "test_release_returned_draft"
+        )
+
+        let cached = fixture.appState.propertyStatusRecord(for: fixture.property.id)
+        let badge = fixture.appState.propertyCardBadgeModel(for: fixture.property.id)
+        XCTAssertEqual(cached?.status, .draft)
+        XCTAssertEqual(cached?.draftSessionID, session.id)
+        XCTAssertEqual(cached?.ownerUserID, fixture.userID)
+        XCTAssertNil(cached?.ownerDeviceID)
+        XCTAssertTrue(badge.showDraft)
+        XCTAssertFalse(badge.showLock)
+        XCTAssertEqual(fixture.appState.draftPropertyCount(), 1)
     }
 
     func testZeroPhotoReleaseUpdatesLocalPropertyStatusCacheToIdle() throws {

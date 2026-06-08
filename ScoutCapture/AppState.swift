@@ -30276,7 +30276,23 @@ final class AppState: ObservableObject {
                     .execute()
                     .value as PropertyStatusRecord
                 if transition == .release {
-                    localCacheApplied = updateLocalPropertyStatusCacheAfterRelease(
+                    if returnedRecord.status == .draft {
+                        localCacheApplied = updateLocalPropertyStatusCacheAfterReturnedDraft(
+                            returnedRecord,
+                            propertyID: propertyID,
+                            deviceID: deviceID,
+                            reason: reason
+                        )
+                    } else {
+                        localCacheApplied = updateLocalPropertyStatusCacheAfterRelease(
+                            returnedRecord,
+                            propertyID: propertyID,
+                            deviceID: deviceID,
+                            reason: reason
+                        )
+                    }
+                } else if returnedRecord.status == .draft {
+                    localCacheApplied = updateLocalPropertyStatusCacheAfterReturnedDraft(
                         returnedRecord,
                         propertyID: propertyID,
                         deviceID: deviceID,
@@ -30320,11 +30336,15 @@ final class AppState: ObservableObject {
         let currentUserID = authenticatedSupabaseUser?.id
         let ownerDeviceMatches = normalizedSupabaseText(record.ownerDeviceID) == deviceID
         let ownerUserMatches = record.ownerUserID == currentUserID
+        let ownedByCurrentActor = Self.propertyStatusActorOwnedByCurrentActor(
+            record: record,
+            currentUserID: currentUserID,
+            currentDeviceID: deviceID
+        )
         guard record.propertyID == propertyID,
               record.status == .draft,
               record.draftSessionID == sessionID,
-              ownerDeviceMatches,
-              ownerUserMatches else {
+              ownedByCurrentActor else {
             print(
                 "[PropertyStatusShadowWrite] property_status_local_cache_updated_after_draft=false " +
                 "propertyID=\(propertyID.uuidString) " +
@@ -30334,6 +30354,7 @@ final class AppState: ObservableObject {
                 "draftSessionID=\(record.draftSessionID?.uuidString ?? "nil") " +
                 "ownerUserMatches=\(ownerUserMatches) " +
                 "ownerDeviceMatches=\(ownerDeviceMatches) " +
+                "ownedByCurrentActor=\(ownedByCurrentActor) " +
                 "reason=returned_row_not_owner_draft_match " +
                 "statusReason=\(reason)"
             )
@@ -30425,6 +30446,14 @@ final class AppState: ObservableObject {
         deviceID: String,
         reason: String
     ) -> Bool {
+        if record.status == .draft {
+            return updateLocalPropertyStatusCacheAfterReturnedDraft(
+                record,
+                propertyID: propertyID,
+                deviceID: deviceID,
+                reason: reason
+            )
+        }
         guard record.propertyID == propertyID,
               record.status == .idle || record.status == .exported else {
             print(
@@ -30448,6 +30477,55 @@ final class AppState: ObservableObject {
             "propertyID=\(propertyID.uuidString) " +
             "property_status_status=\(record.status.rawValue) " +
             "ownerDeviceID=\(deviceID) " +
+            "reason=\(reason)"
+        )
+        return true
+    }
+
+    @discardableResult
+    private func updateLocalPropertyStatusCacheAfterReturnedDraft(
+        _ record: PropertyStatusRecord,
+        propertyID: UUID,
+        deviceID: String,
+        reason: String
+    ) -> Bool {
+        guard let draftSessionID = record.draftSessionID else {
+            return false
+        }
+        let currentUserID = authenticatedSupabaseUser?.id
+        let ownedByCurrentActor = Self.propertyStatusActorOwnedByCurrentActor(
+            record: record,
+            currentUserID: currentUserID,
+            currentDeviceID: deviceID
+        )
+        guard record.propertyID == propertyID,
+              record.status == .draft,
+              ownedByCurrentActor else {
+            print(
+                "[PropertyStatusShadowWrite] property_status_returned_draft_cache_applied=false " +
+                "propertyID=\(propertyID.uuidString) " +
+                "returnedPropertyID=\(record.propertyID.uuidString) " +
+                "property_status_status=\(record.status.rawValue) " +
+                "draftSessionID=\(record.draftSessionID?.uuidString ?? "nil") " +
+                "ownedByCurrentActor=\(ownedByCurrentActor) " +
+                "ownerDeviceID=\(deviceID) " +
+                "reason=returned_row_not_owner_draft_match " +
+                "statusReason=\(reason)"
+            )
+            return false
+        }
+
+        var nextCache = propertyStatusByPropertyID
+        nextCache[propertyID] = record
+        propertyStatusByPropertyID = nextCache
+        lastPropertyStatusRefreshAt = Date()
+        let badge = propertyCardBadgeModel(for: propertyID)
+        print(
+            "[PropertyStatusShadowWrite] property_status_returned_draft_cache_applied=true " +
+            "propertyID=\(propertyID.uuidString) " +
+            "sessionID=\(draftSessionID.uuidString) " +
+            "property_status_status=\(record.status.rawValue) " +
+            "draft_badge_visible_after_local_cache_update=\(badge.showDraft) " +
             "reason=\(reason)"
         )
         return true
