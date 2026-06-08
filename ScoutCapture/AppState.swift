@@ -2404,6 +2404,11 @@ final class AppState: ObservableObject {
         case dryRunBlocked = "dry_run_blocked"
     }
 
+    enum ProductionSingleSessionActivationPreflightState: String, CaseIterable, Equatable {
+        case blocked
+        case readyForManualReviewOnly = "ready_for_manual_review_only"
+    }
+
     enum ProductionCohortValidationState: String, CaseIterable, Equatable {
         case notValidated = "not_validated"
         case verified
@@ -2621,6 +2626,27 @@ final class AppState: ObservableObject {
         let productionWideDisabledConfirmed: Bool
         let selectedScope: ProductionCohortApprovalScope
         let approvedScope: ProductionCohortApprovalScope
+        let noBehaviorChangedText: String
+    }
+
+    struct ProductionSingleSessionActivationPreflightAudit: Equatable {
+        let checkedAt: Date
+        let state: ProductionSingleSessionActivationPreflightState
+        let blockers: [String]
+        let recordScope: ProductionCohortApprovalScope
+        let gateSelectedScope: ProductionCohortApprovalScope
+        let gateApprovedScope: ProductionCohortApprovalScope
+        let decisionRecordReady: Bool
+        let gateEvidenceReady: Bool
+        let actualActivationGateAllowed: Bool
+        let actualActivationGateBlockedReason: String?
+        let actualActivationBlockers: [String]
+        let productionWideDisabledConfirmation: Bool
+        let fallbackRetained: Bool
+        let rollbackReady: Bool
+        let activationReadinessOnly: Bool
+        let activationPerformed: Bool
+        let activeSource: CanonicalCandidateActivationSource
         let noBehaviorChangedText: String
     }
 
@@ -21700,6 +21726,141 @@ final class AppState: ObservableObject {
         lines.append("- activation_performed: \(record.activationPerformed)")
         lines.append("- ready_for_operator_record: \(record.readyForOperatorRecord)")
         lines.append(record.noBehaviorChangedText)
+        return lines.joined(separator: "\n")
+    }
+
+    nonisolated static func makeProductionSingleSessionActivationPreflightAudit(
+        checkedAt: Date = Date(),
+        decisionRecord record: ProductionAllowlistDecisionRecord,
+        gateDiagnostics gate: ProductionSingleSessionActivationGateDiagnostics
+    ) -> ProductionSingleSessionActivationPreflightAudit {
+        let recordScope = ProductionCohortApprovalScope(
+            orgID: record.orgID,
+            propertyID: record.propertyID,
+            sessionID: record.sessionID
+        )
+        let recordMatchesGate = recordScope.orgID == gate.approvedScope.orgID &&
+            recordScope.propertyID == gate.approvedScope.propertyID &&
+            recordScope.sessionID == gate.approvedScope.sessionID &&
+            recordScope.orgID == gate.selectedScope.orgID &&
+            recordScope.propertyID == gate.selectedScope.propertyID &&
+            recordScope.sessionID == gate.selectedScope.sessionID
+        let gateEvidenceReady = gate.exactScopeMatch &&
+            gate.operatorApprovalMatch &&
+            gate.preflightPassed &&
+            gate.rollbackPreflightPassed &&
+            gate.productionWideDisabledConfirmed
+
+        var blockers = record.blockers
+        if !record.exactSingleScopeSelected {
+            blockers.append("exact_single_org_property_session_scope_required")
+        }
+        if !record.readyForOperatorRecord {
+            blockers.append("decision_record_not_ready_for_operator_record")
+        }
+        if record.approvalState == .expired || record.approvalStale {
+            blockers.append("operator_approval_expired")
+        }
+        if record.approvalState == .rejected {
+            blockers.append("operator_rejected")
+        }
+        if !record.productionWideDisabledConfirmation {
+            blockers.append("production_wide_canonical_reads_not_disabled")
+        }
+        if !record.fallbackRetained {
+            blockers.append("local_fallback_unavailable")
+        }
+        if !record.rollbackReady {
+            blockers.append("rollback_not_ready")
+        }
+        if !record.activationReadinessOnly {
+            blockers.append("activation_readiness_only_required")
+        }
+        if record.activeSource != .local {
+            blockers.append("active_source_must_remain_local")
+        }
+        if record.activationPerformed {
+            blockers.append("activation_performed_must_be_false")
+        }
+        if !recordMatchesGate {
+            blockers.append("decision_record_gate_scope_mismatch")
+        }
+        if !gate.exactScopeMatch {
+            blockers.append("gate_exact_scope_match_required")
+        }
+        if !gate.operatorApprovalMatch {
+            blockers.append("gate_operator_approval_match_required")
+        }
+        if !gate.preflightPassed {
+            blockers.append("gate_preflight_not_passed")
+        }
+        if !gate.rollbackPreflightPassed {
+            blockers.append("gate_rollback_preflight_not_passed")
+        }
+        if !gate.productionWideDisabledConfirmed {
+            blockers.append("gate_production_wide_disabled_not_confirmed")
+        }
+
+        let dedupedBlockers = Array(Set(blockers)).sorted()
+        var actualActivationBlockers: [String] = []
+        if !gate.productionSingleSessionActivationGateEnabled {
+            actualActivationBlockers.append("production_single_session_canonical_activation_disabled")
+        }
+        if !gate.gateAllowed {
+            actualActivationBlockers.append(
+                contentsOf: gate.gateBlockedReason?
+                    .split(separator: ",")
+                    .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                    .filter { !$0.isEmpty } ?? []
+            )
+        }
+        let dedupedActualActivationBlockers = Array(Set(actualActivationBlockers)).sorted()
+        return ProductionSingleSessionActivationPreflightAudit(
+            checkedAt: checkedAt,
+            state: dedupedBlockers.isEmpty ? .readyForManualReviewOnly : .blocked,
+            blockers: dedupedBlockers,
+            recordScope: recordScope,
+            gateSelectedScope: gate.selectedScope,
+            gateApprovedScope: gate.approvedScope,
+            decisionRecordReady: record.readyForOperatorRecord,
+            gateEvidenceReady: gateEvidenceReady,
+            actualActivationGateAllowed: gate.gateAllowed,
+            actualActivationGateBlockedReason: gate.gateBlockedReason,
+            actualActivationBlockers: dedupedActualActivationBlockers,
+            productionWideDisabledConfirmation: record.productionWideDisabledConfirmation &&
+                gate.productionWideDisabledConfirmed,
+            fallbackRetained: record.fallbackRetained,
+            rollbackReady: record.rollbackReady && gate.rollbackPreflightPassed,
+            activationReadinessOnly: record.activationReadinessOnly,
+            activationPerformed: record.activationPerformed,
+            activeSource: record.activeSource,
+            noBehaviorChangedText: "No behavior changed: production single-session activation preflight audit is diagnostics-only and manual-review-only. It does not enable production canonical reads, activate candidates, activate overlays, switch reads, hydrate sessions, write local or remote state, remove fallback, change export, seal, sync, media, or iCloud behavior, loosen RLS, change schema, or delete data."
+        )
+    }
+
+    nonisolated static func productionSingleSessionActivationPreflightAuditReportText(
+        _ audit: ProductionSingleSessionActivationPreflightAudit
+    ) -> String {
+        var lines: [String] = []
+        lines.append("Production Single-Session Activation Preflight Audit")
+        lines.append("- preflight_checked_at: \(audit.checkedAt.formatted(date: .abbreviated, time: .standard))")
+        lines.append("- preflight_state: \(audit.state.rawValue)")
+        lines.append("- blockers: \(audit.blockers.isEmpty ? "none" : audit.blockers.joined(separator: ", "))")
+        lines.append("- record_scope: \(audit.recordScope.description)")
+        lines.append("- gate_selected_scope: \(audit.gateSelectedScope.description)")
+        lines.append("- gate_approved_scope: \(audit.gateApprovedScope.description)")
+        lines.append("- decision_record_ready: \(audit.decisionRecordReady)")
+        lines.append("- gate_evidence_ready: \(audit.gateEvidenceReady)")
+        lines.append("- actual_activation_gate_allowed: \(audit.actualActivationGateAllowed)")
+        lines.append("- actual_activation_gate_blocked_reason: \(diagnosticsPreviewText(audit.actualActivationGateBlockedReason, maxLength: 220) ?? "none")")
+        lines.append("- actual_activation_blockers: \(audit.actualActivationBlockers.isEmpty ? "none" : audit.actualActivationBlockers.joined(separator: ", "))")
+        lines.append("- production_wide_disabled_confirmation: \(audit.productionWideDisabledConfirmation)")
+        lines.append("- fallback_retained: \(audit.fallbackRetained)")
+        lines.append("- rollback_ready: \(audit.rollbackReady)")
+        lines.append("- activation_readiness_only: \(audit.activationReadinessOnly)")
+        lines.append("- active_source: \(audit.activeSource.rawValue)")
+        lines.append("- activation_performed: \(audit.activationPerformed)")
+        lines.append(audit.noBehaviorChangedText)
         return lines.joined(separator: "\n")
     }
 
