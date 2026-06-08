@@ -1082,16 +1082,16 @@ struct SessionHubView: View {
         let isPressed = pressedPropertyID == property.id
         let sessionsForProperty = appState.sessions(for: property.id).sorted { $0.startedAt > $1.startedAt }
         let badgeModel = appState.propertyCardBadgeModel(for: property.id)
-        let draft = badgeModel.showDraft ? appState.draftBadgeSession(for: property.id) : nil
         let pendingSession = sessionsForProperty.first(where: { appState.isPendingDeliveryLocallyAvailable($0) })
-        let hasPendingExport = pendingSession != nil
+        let hasDraft = badgeModel.showDraft
+        let hasPendingExport = badgeModel.showPendingExport
         let latestReExportSession = reExportCandidateSession(for: property.id)
         let hasReExportGlyph = badgeModel.showReExport && latestReExportSession != nil
         let clientLine = propertyClientLine(property)
         let addressLine = propertyAddressLine(property)
         let hasMapsButton = mapsAddressQuery(for: property) != nil
         let hasPhoneActions = hasValidPhoneNumber(property)
-        let hasStatusRow = draft != nil || hasPendingExport || hasReExportGlyph
+        let hasStatusRow = hasDraft || hasPendingExport || hasReExportGlyph
         let showLock = badgeModel.showLock
         HStack(alignment: .top, spacing: 10) {
             VStack(alignment: .leading, spacing: 4) {
@@ -1135,7 +1135,7 @@ struct SessionHubView: View {
                 if hasStatusRow {
                     VStack(alignment: .trailing, spacing: 4) {
                         HStack(spacing: 8) {
-                            if draft != nil {
+                            if hasDraft {
                                 chipLabel("Draft", tint: .orange)
                             }
 
@@ -1665,22 +1665,15 @@ struct SessionHubView: View {
     }
 
     private func propertyHasDraft(_ property: Property) -> Bool {
-        appState.draftBadgeSession(for: property.id) != nil
+        appState.propertyCardBadgeModel(for: property.id).showDraft
     }
 
     private func propertyHasPendingExport(_ property: Property) -> Bool {
-        appState.sessions(for: property.id).contains(where: { appState.isPendingDeliveryLocallyAvailable($0) })
+        appState.propertyCardBadgeModel(for: property.id).showPendingExport
     }
 
     private func reExportCandidateSession(for propertyID: UUID) -> Session? {
-        appState.sessions(for: propertyID)
-            .filter { appState.isReExportLocallyAvailable($0) }
-            .sorted { lhs, rhs in
-                let l = lhs.firstDeliveredAt ?? .distantPast
-                let r = rhs.firstDeliveredAt ?? .distantPast
-                return l > r
-            }
-            .first
+        appState.reExportCandidateSession(for: propertyID)
     }
 
     private func matchesPropertyFilter(_ property: Property) -> Bool {
@@ -10554,6 +10547,7 @@ struct PropertySessionView: View {
     @State private var didStartOpenFlow: Bool = false
     @State private var openFlowToken: Int = 0
     @State private var hasSessionReadyForProperty: Bool = false
+    @State private var isCheckingSessionBeforeOpen: Bool = true
     @State private var isCheckingSessionCoordination: Bool = false
     @State private var sessionEntryBlock: AppState.SessionEntryCoordinationBlock? = nil
 
@@ -10584,23 +10578,39 @@ struct PropertySessionView: View {
                 didSetup = true
                 appState.selectProperty(id: propertyID)
                 appState.beginPropertyOpenFreshnessCheck(propertyID: propertyID)
-                Task {
+                Task { @MainActor in
+                    let propertyStatusPreflight = await appState.evaluateFreshPropertyStatusEntryPreflight(
+                        propertyID: propertyID,
+                        context: "property_session_view"
+                    )
+                    if let block = propertyStatusPreflight.decision?.block {
+                        isCheckingSessionBeforeOpen = false
+                        sessionEntryBlock = block
+                        return
+                    }
                     let openedAt = Date()
                     await appState.reconcileRemoteSessionContentForPropertyOpen(propertyID: propertyID)
                     print(
                         "[PropertyOpenPerf] propertyID=\(propertyID.uuidString) " +
                         "elapsedMs=\(Int(Date().timeIntervalSince(openedAt) * 1000))"
                     )
-                }
-                if resumeDraft {
-                    if appState.currentSession?.propertyID != propertyID || appState.currentSession?.status != .draft {
-                        _ = appState.loadDraftSession(for: propertyID)
+                    let skipCachedPropertyStatusPreflight = propertyStatusPreflight.skipCachedPropertyStatusPreflight
+                    if resumeDraft {
+                        if appState.currentSession?.propertyID != propertyID || appState.currentSession?.status != .draft {
+                            _ = appState.loadDraftSession(
+                                for: propertyID,
+                                skipPropertyStatusPreflight: skipCachedPropertyStatusPreflight
+                            )
+                        }
+                    } else {
+                        _ = appState.startSession(
+                            skipPropertyStatusPreflight: skipCachedPropertyStatusPreflight
+                        )
                     }
-                } else {
-                    _ = appState.startSession()
+                    refreshSessionReadiness()
+                    isCheckingSessionBeforeOpen = false
+                    beginSessionCoordinationFlow()
                 }
-                refreshSessionReadiness()
-                beginSessionCoordinationFlow()
             }
             .onChange(of: appState.currentSession?.id) { _, _ in
                 refreshSessionReadiness()
@@ -10717,7 +10727,7 @@ struct PropertySessionView: View {
                         .disabled(isCheckingSessionCoordination)
                     }
                 } else {
-                    Text(isCheckingSessionCoordination ? "Checking session..." : "Opening camera...")
+                    Text(isCheckingSessionBeforeOpen || isCheckingSessionCoordination ? "Checking Session" : "Opening Camera")
                         .font(.system(size: 24, weight: .bold))
                         .foregroundColor(.white)
                     ProgressView()
@@ -10740,6 +10750,7 @@ struct PropertySessionView: View {
 
     private func beginOpenFlow(forceRetry: Bool = false) {
         if !forceRetry, didStartOpenFlow { return }
+        isCheckingSessionBeforeOpen = false
         didStartOpenFlow = true
         showOpenCameraTimeout = false
         openFlowToken += 1
@@ -10837,9 +10848,8 @@ struct PropertySessionView: View {
         let formatter = DateFormatter()
         formatter.dateStyle = .medium
         formatter.timeStyle = .short
-        if let lockedAt = block.lockedAt {
-            return "Locked by \(block.ownerDescription) since \(formatter.string(from: lockedAt))."
+        return AppState.sessionEntryBlockMessage(for: block) { lockedAt in
+            formatter.string(from: lockedAt)
         }
-        return "Locked by \(block.ownerDescription)."
     }
 }

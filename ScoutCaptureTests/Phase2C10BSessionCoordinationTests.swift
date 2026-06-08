@@ -468,7 +468,7 @@ final class Phase2C10BSessionCoordinationTests: XCTestCase {
         guard case .blocked(let block) = result else {
             return XCTFail("Expected blocked entry when remote occupancy cannot be persisted")
         }
-        XCTAssertEqual(block.ownerDescription, "Remote coordination unavailable")
+        XCTAssertEqual(block.ownerDescription, AppState.coordinationUnavailableLockMessage)
         let remoteOccupancy = fixture.appState._debugReadRemotePropertySessionOccupancyForTests(
             propertyID: fixture.property.id
         )
