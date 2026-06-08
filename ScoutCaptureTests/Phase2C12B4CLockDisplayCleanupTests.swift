@@ -186,6 +186,37 @@ final class Phase2C12B4CLockDisplayCleanupTests: XCTestCase {
         return wholeSeconds.date(from: value)
     }
 
+    private func seedPropertyStatus(
+        fixture: Fixture,
+        status: AppState.PropertyStatusValue,
+        activeSessionID: UUID? = nil,
+        draftSessionID: UUID? = nil,
+        pendingExportSessionID: UUID? = nil,
+        lastExportedSessionID: UUID? = nil,
+        ownerUserID: UUID? = nil,
+        ownerDeviceID: String? = nil,
+        heartbeatAt: Date? = Date()
+    ) {
+        fixture.appState._debugReplacePropertyStatusCacheForTests([
+            AppState.PropertyStatusRecord(
+                propertyID: fixture.property.id,
+                orgID: fixture.orgID,
+                status: status,
+                activeSessionID: activeSessionID,
+                draftSessionID: draftSessionID,
+                pendingExportSessionID: pendingExportSessionID,
+                lastExportedSessionID: lastExportedSessionID,
+                ownerUserID: ownerUserID,
+                ownerDeviceID: ownerDeviceID,
+                heartbeatAt: heartbeatAt,
+                updatedAt: Date(),
+                updatedBy: ownerUserID,
+                statusReason: "test",
+                revision: 1
+            )
+        ])
+    }
+
     private func writeDeliveredArchivePackage(
         storageRoot: URL,
         propertyID: UUID,
@@ -440,19 +471,33 @@ final class Phase2C12B4CLockDisplayCleanupTests: XCTestCase {
             lockedByDeviceID: currentDeviceID,
             lockedAt: Date()
         )
+        seedPropertyStatus(
+            fixture: fixture,
+            status: .draft,
+            activeSessionID: fixture.draftSession.id,
+            draftSessionID: fixture.draftSession.id,
+            ownerDeviceID: currentDeviceID
+        )
 
         XCTAssertNotNil(fixture.appState.draftBadgeSession(for: fixture.property.id))
         XCTAssertFalse(fixture.appState.isSessionLockedByOther(sessionID: fixture.draftSession.id))
         var badgeModel = fixture.appState.propertyCardBadgeModel(for: fixture.property.id)
         XCTAssertTrue(badgeModel.showDraft)
         XCTAssertFalse(badgeModel.showLock)
-        XCTAssertEqual(badgeModel.draftReason, "visible_owned_by_current_device")
+        XCTAssertEqual(badgeModel.draftReason, "property_status:draft:owner_match")
 
         fixture.appState._debugSetSessionCoordinationStateForTests(
             sessionID: fixture.draftSession.id,
             lockedByUserID: nil,
             lockedByDeviceID: "other-device",
             lockedAt: Date()
+        )
+        seedPropertyStatus(
+            fixture: fixture,
+            status: .draft,
+            activeSessionID: fixture.draftSession.id,
+            draftSessionID: fixture.draftSession.id,
+            ownerDeviceID: "other-device"
         )
 
         XCTAssertNil(fixture.appState.draftBadgeSession(for: fixture.property.id))
@@ -466,8 +511,8 @@ final class Phase2C12B4CLockDisplayCleanupTests: XCTestCase {
         badgeModel = fixture.appState.propertyCardBadgeModel(for: fixture.property.id)
         XCTAssertFalse(badgeModel.showDraft)
         XCTAssertTrue(badgeModel.showLock)
-        XCTAssertEqual(badgeModel.lockReason, "locked_by_other")
-        XCTAssertEqual(badgeModel.draftReason, "hidden_by_other_device_occupancy")
+        XCTAssertEqual(badgeModel.lockReason, "property_status:draft:owner_mismatch")
+        XCTAssertEqual(badgeModel.draftReason, "property_status:draft:draft_hidden_owner_match=false")
     }
 
     func testMaterialDraftShowsLockedOnlyOnNonOwnerWhenOccupancyIsActive() throws {
@@ -487,16 +532,23 @@ final class Phase2C12B4CLockDisplayCleanupTests: XCTestCase {
             occupiedByDeviceID: "other-device",
             occupiedAt: Date()
         )
+        seedPropertyStatus(
+            fixture: fixture,
+            status: .draft,
+            activeSessionID: fixture.draftSession.id,
+            draftSessionID: fixture.draftSession.id,
+            ownerDeviceID: "other-device"
+        )
 
         let badgeModel = fixture.appState.propertyCardBadgeModel(for: fixture.property.id)
         XCTAssertTrue(badgeModel.showLock)
         XCTAssertFalse(badgeModel.showDraft)
-        XCTAssertEqual(badgeModel.lockReason, "locked_by_other")
-        XCTAssertEqual(badgeModel.draftReason, "hidden_by_other_device_occupancy")
+        XCTAssertEqual(badgeModel.lockReason, "property_status:draft:owner_mismatch")
+        XCTAssertEqual(badgeModel.draftReason, "property_status:draft:draft_hidden_owner_match=false")
         XCTAssertNil(fixture.appState.draftBadgeSession(for: fixture.property.id))
     }
 
-    func testRefreshHydratesLockBadgeFromActiveRemoteZeroPhotoOccupancy() async throws {
+    func testRefreshDoesNotHydrateVisibleLockBadgeFromMissingStatusOccupancy() async throws {
         let fixture = try makeFixture()
         defer { tearDownFixture(fixture) }
 
@@ -517,12 +569,13 @@ final class Phase2C12B4CLockDisplayCleanupTests: XCTestCase {
         )
 
         let badgeModel = fixture.appState.propertyCardBadgeModel(for: fixture.property.id)
-        XCTAssertTrue(badgeModel.showLock)
+        XCTAssertFalse(badgeModel.showLock)
         XCTAssertFalse(badgeModel.showDraft)
-        XCTAssertEqual(badgeModel.lockReason, "active_occupancy_other_device")
+        XCTAssertEqual(badgeModel.badgeSource, "property_status_missing")
+        XCTAssertEqual(badgeModel.lockReason, "missing_property_status_row")
     }
 
-    func testRefreshHydratesLockBadgeFromActiveRemoteMaterialDraftLock() async throws {
+    func testRefreshDoesNotHydrateVisibleLockBadgeFromMissingStatusMaterialDraftLock() async throws {
         let fixture = try makeFixture()
         defer { tearDownFixture(fixture) }
 
@@ -551,12 +604,13 @@ final class Phase2C12B4CLockDisplayCleanupTests: XCTestCase {
         )
 
         let badgeModel = fixture.appState.propertyCardBadgeModel(for: fixture.property.id)
-        XCTAssertTrue(badgeModel.showLock)
+        XCTAssertFalse(badgeModel.showLock)
         XCTAssertFalse(badgeModel.showDraft)
-        XCTAssertEqual(badgeModel.lockReason, "active_occupancy_other_device")
+        XCTAssertEqual(badgeModel.badgeSource, "property_status_missing")
+        XCTAssertEqual(badgeModel.lockReason, "missing_property_status_row")
     }
 
-    func testRefreshHydratesLockBadgeFromExpiredHeartbeatMaterialDraftLock() async throws {
+    func testRefreshDoesNotHydrateVisibleLockBadgeFromMissingStatusExpiredMaterialDraftLock() async throws {
         let fixture = try makeFixture()
         defer { tearDownFixture(fixture) }
 
@@ -585,9 +639,10 @@ final class Phase2C12B4CLockDisplayCleanupTests: XCTestCase {
         )
 
         let badgeModel = fixture.appState.propertyCardBadgeModel(for: fixture.property.id)
-        XCTAssertTrue(badgeModel.showLock)
+        XCTAssertFalse(badgeModel.showLock)
         XCTAssertFalse(badgeModel.showDraft)
-        XCTAssertEqual(badgeModel.lockReason, "locked_by_other")
+        XCTAssertEqual(badgeModel.badgeSource, "property_status_missing")
+        XCTAssertEqual(badgeModel.lockReason, "missing_property_status_row")
     }
 
     func testNewerExportEventClearsOlderLockOnRefresh() async throws {
@@ -727,8 +782,9 @@ final class Phase2C12B4CLockDisplayCleanupTests: XCTestCase {
 
         let badgeModel = fixture.appState.propertyCardBadgeModel(for: fixture.property.id)
         XCTAssertFalse(badgeModel.showLock)
-        XCTAssertTrue(badgeModel.showDraft)
-        XCTAssertEqual(badgeModel.draftReason, "visible_owned_by_current_device")
+        XCTAssertFalse(badgeModel.showDraft)
+        XCTAssertEqual(badgeModel.badgeSource, "property_status_missing")
+        XCTAssertEqual(badgeModel.draftReason, "missing_property_status_row")
         XCTAssertNotNil(fixture.appState.draftBadgeSession(for: fixture.property.id))
     }
 
@@ -785,7 +841,7 @@ final class Phase2C12B4CLockDisplayCleanupTests: XCTestCase {
         defer { tearDownFixture(fixture) }
 
         fixture.appState.selectProperty(id: fixture.property.id)
-        let activeSession = try XCTUnwrap(fixture.appState.startSession())
+        let activeSession = try XCTUnwrap(fixture.appState.startSession(skipPropertyStatusPreflight: true))
         let deviceID = fixture.appState._debugCurrentDeviceIdentifierForTests()
         let oldOccupiedAt = Date(timeIntervalSinceNow: -31 * 60)
         fixture.appState._debugSetRemotePropertySessionOccupancyOnlyForTests(
@@ -1043,7 +1099,7 @@ final class Phase2C12B4CLockDisplayCleanupTests: XCTestCase {
 
         XCTAssertNil(fixture.appState.draftSession(for: property.id))
         fixture.appState.selectProperty(id: property.id)
-        let selected = try XCTUnwrap(fixture.appState.startSession())
+        let selected = try XCTUnwrap(fixture.appState.startSession(skipPropertyStatusPreflight: true))
         XCTAssertNotEqual(selected.id, emptyDraft.id)
         XCTAssertNil(fixture.appState.draftSession(for: property.id))
         XCTAssertEqual(fixture.appState.sessionListContentDiagnostics(propertyID: property.id).badgeReason, "no_captured_draft")
@@ -1058,7 +1114,7 @@ final class Phase2C12B4CLockDisplayCleanupTests: XCTestCase {
         )
         fixture.appState._debugRefreshPropertiesLocallyForTests()
         fixture.appState.selectProperty(id: property.id)
-        let session = try XCTUnwrap(fixture.appState.startSession())
+        let session = try XCTUnwrap(fixture.appState.startSession(skipPropertyStatusPreflight: true))
 
         let emittedEvents = AuditEventRecorder()
         fixture.appState._debugSetAuditEventEmitOverrideForTests { _, eventType, _, _, _ in
@@ -1193,8 +1249,10 @@ final class Phase2C12B4CLockDisplayCleanupTests: XCTestCase {
         if case .blocked = status {
             XCTAssertTrue(fixture.appState.locallyLockedPropertyIDs.contains(fixture.property.id))
             let badgeModel = fixture.appState.propertyCardBadgeModel(for: fixture.property.id)
-            XCTAssertTrue(badgeModel.showLock)
+            XCTAssertFalse(badgeModel.showLock)
             XCTAssertFalse(badgeModel.showDraft)
+            XCTAssertEqual(badgeModel.badgeSource, "property_status_missing")
+            XCTAssertEqual(badgeModel.lockReason, "missing_property_status_row")
             XCTAssertNil(fixture.appState.draftBadgeSession(for: fixture.property.id))
         } else {
             XCTFail("Expected active captured draft lock to block a different device/session entry.")

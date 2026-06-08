@@ -312,7 +312,7 @@ final class Phase2C27FZ4PropertyStatusDiagnosticsTests: XCTestCase {
         XCTAssertFalse(badge.showPendingExport)
         XCTAssertEqual(fixture.appState.draftPropertyCount(), 1)
         XCTAssertEqual(fixture.appState.pendingExportCountAcrossProperties(), 0)
-        XCTAssertEqual(fixture.appState.draftCountSource(), "property_status_with_legacy_missing_rows")
+        XCTAssertEqual(fixture.appState.draftCountSource(), "property_status")
     }
 
     func testPropertyStatusOwnerDraftSameUserDifferentDeviceStillOwns() throws {
@@ -382,7 +382,7 @@ final class Phase2C27FZ4PropertyStatusDiagnosticsTests: XCTestCase {
         XCTAssertTrue(badge.showPendingExport)
         XCTAssertEqual(fixture.appState.draftPropertyCount(), 0)
         XCTAssertEqual(fixture.appState.pendingExportCountAcrossProperties(), 1)
-        XCTAssertEqual(fixture.appState.pendingExportCountSource(), "property_status_with_legacy_missing_rows")
+        XCTAssertEqual(fixture.appState.pendingExportCountSource(), "property_status")
     }
 
     func testFreshOccupiedPropertyStatusShowsLockedBadgeForNonOwner() throws {
@@ -469,7 +469,7 @@ final class Phase2C27FZ4PropertyStatusDiagnosticsTests: XCTestCase {
         XCTAssertTrue(badge.showPendingExport)
     }
 
-    func testMissingPropertyStatusRowFallsBackToLegacyDraftBadge() throws {
+    func testMissingPropertyStatusRowDoesNotReconstructLegacyDraftBadge() throws {
         let fixture = try makeCutoverFixture()
         let draft = try seedCapturedDraft(propertyID: fixture.property.id, localStore: fixture.localStore)
         fixture.appState._debugRefreshPropertiesLocallyForTests()
@@ -481,11 +481,14 @@ final class Phase2C27FZ4PropertyStatusDiagnosticsTests: XCTestCase {
         )
 
         let badge = fixture.appState.propertyCardBadgeModel(for: fixture.property.id)
-        XCTAssertEqual(badge.badgeSource, "legacy")
-        XCTAssertTrue(badge.showDraft)
+        XCTAssertEqual(badge.badgeSource, "property_status_missing")
+        XCTAssertFalse(badge.showDraft)
         XCTAssertFalse(badge.showLock)
-        XCTAssertEqual(fixture.appState.draftPropertyCount(), 1)
-        XCTAssertEqual(fixture.appState.draftCountSource(), "legacy")
+        XCTAssertFalse(badge.showPendingExport)
+        XCTAssertEqual(badge.draftReason, "missing_property_status_row")
+        XCTAssertEqual(badge.lockReason, "missing_property_status_row")
+        XCTAssertEqual(fixture.appState.draftPropertyCount(), 0)
+        XCTAssertEqual(fixture.appState.draftCountSource(), "property_status_missing_rows")
     }
 
     func testPropertyStatusNonOwnerDraftBlocksEntryBeforeSessionCreation() throws {
@@ -773,7 +776,7 @@ final class Phase2C27FZ4PropertyStatusDiagnosticsTests: XCTestCase {
         XCTAssertEqual(session?.propertyID, fixture.property.id)
     }
 
-    func testRemotePropertyStatusReadFailureFallsBackToLegacyEntryPath() async throws {
+    func testRemotePropertyStatusReadFailureBlocksCanonicalEntryPath() async throws {
         let fixture = try makeCutoverFixture()
         let cachedExported = makeStatusRecord(
             propertyID: fixture.property.id,
@@ -797,20 +800,21 @@ final class Phase2C27FZ4PropertyStatusDiagnosticsTests: XCTestCase {
             context: "test_fresh_read_failure"
         )
 
-        XCTAssertNil(evaluation.decision)
-        XCTAssertTrue(evaluation.skipCachedPropertyStatusPreflight)
-        XCTAssertEqual(evaluation.source, "legacy")
+        XCTAssertEqual(evaluation.decision?.decision, "block")
+        XCTAssertEqual(evaluation.decision?.block?.blockContext, "missing_property_status")
+        XCTAssertFalse(evaluation.skipCachedPropertyStatusPreflight)
+        XCTAssertEqual(evaluation.source, "property_status_unverified")
         XCTAssertEqual(evaluation.reason, "fresh_read_failed")
 
         fixture.appState.selectProperty(id: fixture.property.id)
         let session = fixture.appState.startSession(
             skipPropertyStatusPreflight: evaluation.skipCachedPropertyStatusPreflight
         )
-        XCTAssertNotNil(session)
-        XCTAssertEqual(session?.propertyID, fixture.property.id)
+        XCTAssertNil(session)
+        XCTAssertNil(fixture.appState.currentSession)
     }
 
-    func testMissingPropertyStatusFreshPreflightKeepsLegacyFallback() async throws {
+    func testMissingPropertyStatusFreshPreflightBlocksUntilCanonicalRowExists() async throws {
         let fixture = try makeCutoverFixture()
 
         let evaluation = await fixture.appState._debugEvaluateFreshPropertyStatusEntryPreflightForTests(
@@ -818,26 +822,26 @@ final class Phase2C27FZ4PropertyStatusDiagnosticsTests: XCTestCase {
             context: "test_missing_row"
         )
 
-        XCTAssertNil(evaluation.decision)
+        XCTAssertEqual(evaluation.decision?.decision, "block")
+        XCTAssertEqual(evaluation.decision?.block?.blockContext, "missing_property_status")
         XCTAssertFalse(evaluation.skipCachedPropertyStatusPreflight)
-        XCTAssertEqual(evaluation.source, "legacy")
+        XCTAssertEqual(evaluation.source, "property_status_missing")
         XCTAssertEqual(evaluation.reason, "missing_property_status_row")
 
         fixture.appState.selectProperty(id: fixture.property.id)
         let session = fixture.appState.startSession()
-        XCTAssertNotNil(session)
-        XCTAssertEqual(session?.propertyID, fixture.property.id)
+        XCTAssertNil(session)
+        XCTAssertNil(fixture.appState.currentSession)
     }
 
-    func testMissingPropertyStatusEntryFallsBackToLegacyStartSession() throws {
+    func testMissingPropertyStatusEntryBlocksLegacyStartSession() throws {
         let fixture = try makeCutoverFixture()
 
         fixture.appState.selectProperty(id: fixture.property.id)
         let session = fixture.appState.startSession()
 
-        XCTAssertNotNil(session)
-        XCTAssertEqual(session?.propertyID, fixture.property.id)
-        XCTAssertEqual(fixture.appState.currentSession?.id, session?.id)
+        XCTAssertNil(session)
+        XCTAssertNil(fixture.appState.currentSession)
     }
 
     func testLoadDraftSessionBlockedByNonOwnerPropertyStatus() throws {
@@ -950,7 +954,7 @@ final class Phase2C27FZ4PropertyStatusDiagnosticsTests: XCTestCase {
     func testClaimReturnedOccupiedUpdatesLocalPropertyStatusCache() throws {
         let fixture = try makeCutoverFixture()
         fixture.appState.selectProperty(id: fixture.property.id)
-        let session = try XCTUnwrap(fixture.appState.startSession())
+        let session = try XCTUnwrap(fixture.appState.startSession(skipPropertyStatusPreflight: true))
         let record = makeStatusRecord(
             propertyID: fixture.property.id,
             orgID: fixture.orgID,
@@ -980,7 +984,7 @@ final class Phase2C27FZ4PropertyStatusDiagnosticsTests: XCTestCase {
     func testReleaseReturnedDraftWithSameUserNullDevicePreservesLocalDraftCache() throws {
         let fixture = try makeCutoverFixture()
         fixture.appState.selectProperty(id: fixture.property.id)
-        let session = try XCTUnwrap(fixture.appState.startSession())
+        let session = try XCTUnwrap(fixture.appState.startSession(skipPropertyStatusPreflight: true))
         let occupiedRecord = makeStatusRecord(
             propertyID: fixture.property.id,
             orgID: fixture.orgID,
@@ -1025,7 +1029,7 @@ final class Phase2C27FZ4PropertyStatusDiagnosticsTests: XCTestCase {
     func testZeroPhotoReleaseUpdatesLocalPropertyStatusCacheToIdle() throws {
         let fixture = try makeCutoverFixture()
         fixture.appState.selectProperty(id: fixture.property.id)
-        let session = try XCTUnwrap(fixture.appState.startSession())
+        let session = try XCTUnwrap(fixture.appState.startSession(skipPropertyStatusPreflight: true))
         let occupiedRecord = makeStatusRecord(
             propertyID: fixture.property.id,
             orgID: fixture.orgID,

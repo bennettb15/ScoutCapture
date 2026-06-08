@@ -29418,225 +29418,29 @@ final class AppState: ObservableObject {
         let uniquePropertyIDs = Array(Set(propertyIDs))
         guard !uniquePropertyIDs.isEmpty else { return }
 
-        let currentUserID = authenticatedSupabaseUser?.id
-        let currentDeviceID = currentDeviceIdentifier()
         let statusOwnedPropertyIDs = Set(uniquePropertyIDs.filter { propertyStatusByPropertyID[$0] != nil })
         let legacyPropertyIDs = uniquePropertyIDs.filter { propertyStatusByPropertyID[$0] == nil }
-        var decisions: [RefreshLockBadgeDecision] = []
 
-        for propertyID in legacyPropertyIDs {
-            let lockRecords = await fetchRemotePropertySessionLockRecordsForPrecedence(
-                orgID: orgID,
-                propertyID: propertyID
-            )
-            let finalizationEvidence = await latestFinalizationEvidence(
-                orgID: orgID,
-                propertyID: propertyID,
-                lockRecords: lockRecords
-            )
-            let activeLockRecords = lockRecords
-                .filter { hasActiveRemoteLock(record: $0) }
-                .filter { !finalizationEvidenceBeatsLock(finalizationEvidence, lockTimestamp: lockTimestamp(for: $0)) }
-                .sorted {
-                    (lockTimestamp(for: $0) ?? .distantPast) >
-                    (lockTimestamp(for: $1) ?? .distantPast)
-                }
-            let activeOtherLock = activeLockRecords.first { record in
-                let lockedByDeviceID = normalizedSupabaseText(record.lockedByDeviceID)
-                let ownedByCurrentActor =
-                    (lockedByDeviceID != nil && lockedByDeviceID == currentDeviceID) ||
-                    (record.lockedByUserID != nil && record.lockedByUserID == currentUserID)
-                return !ownedByCurrentActor
-            }
-            let clearableSessionIDs = Array(
-                Set((allSessionIndexByProperty[propertyID] ?? []).map(\.id))
-                    .union((sessionIndexByProperty[propertyID] ?? []).map(\.id))
-                    .union(lockRecords.map(\.id))
-            )
-            if let activeOtherLock {
-                let propertyOccupancy = try? await fetchRemotePropertySessionOccupancyRecord(
-                    orgID: orgID,
-                    propertyID: propertyID
-                )
-                let activeLockTimestamp = lockTimestamp(for: activeOtherLock)
-                let occupancyState = PropertySessionOccupancyState(
-                    occupiedByUserID: propertyOccupancy?.occupiedByUserID ?? activeOtherLock.lockedByUserID,
-                    occupiedByDeviceID: normalizedSupabaseText(propertyOccupancy?.occupiedByDeviceID) ??
-                        normalizedSupabaseText(activeOtherLock.lockedByDeviceID),
-                    occupiedAt: propertyOccupancy?.occupiedAt.flatMap(parseSupabaseDateString) ??
-                        activeLockTimestamp
-                )
-                decisions.append(
-                    RefreshLockBadgeDecision(
-                        propertyID: propertyID,
-                        showLocked: true,
-                        reason: "active_remote_property_lock",
-                        occupancyState: occupancyState,
-                        sessionLockState: (
-                            activeOtherLock.id,
-                            SessionCoordinationState(
-                                lockedByUserID: activeOtherLock.lockedByUserID,
-                                lockedByDeviceID: normalizedSupabaseText(activeOtherLock.lockedByDeviceID),
-                                lockedAt: activeOtherLock.lockedAt.flatMap(parseSupabaseDateString)
-                            )
-                        ),
-                        clearSessionIDs: [],
-                        lockTimestamp: activeLockTimestamp,
-                        finalizationTimestamp: finalizationEvidence?.timestamp,
-                        precedenceWinner: "lock"
-                    )
-                )
-                continue
-            }
-
-            if let activeOwnOrNeutralLock = activeLockRecords.first {
-                let lockOwnerDeviceID = normalizedSupabaseText(activeOwnOrNeutralLock.lockedByDeviceID)
-                let lockOwnedByCurrentActor =
-                    (lockOwnerDeviceID != nil && lockOwnerDeviceID == currentDeviceID) ||
-                    (activeOwnOrNeutralLock.lockedByUserID != nil && activeOwnOrNeutralLock.lockedByUserID == currentUserID)
-                let propertyOccupancy = try? await fetchRemotePropertySessionOccupancyRecord(
-                    orgID: orgID,
-                    propertyID: propertyID
-                )
-                let activeLockTimestamp = lockTimestamp(for: activeOwnOrNeutralLock)
-                let occupancyState = PropertySessionOccupancyState(
-                    occupiedByUserID: propertyOccupancy?.occupiedByUserID ?? activeOwnOrNeutralLock.lockedByUserID,
-                    occupiedByDeviceID: normalizedSupabaseText(propertyOccupancy?.occupiedByDeviceID) ?? lockOwnerDeviceID,
-                    occupiedAt: propertyOccupancy?.occupiedAt.flatMap(parseSupabaseDateString) ??
-                        activeLockTimestamp
-                )
-                decisions.append(
-                    RefreshLockBadgeDecision(
-                        propertyID: propertyID,
-                        showLocked: !lockOwnedByCurrentActor,
-                        reason: lockOwnedByCurrentActor ? "material_draft_lock_owned_by_current_device" : "material_draft_lock_other_device",
-                        occupancyState: occupancyState,
-                        sessionLockState: (
-                            activeOwnOrNeutralLock.id,
-                            SessionCoordinationState(
-                                lockedByUserID: activeOwnOrNeutralLock.lockedByUserID,
-                                lockedByDeviceID: lockOwnerDeviceID,
-                                lockedAt: activeOwnOrNeutralLock.lockedAt.flatMap(parseSupabaseDateString)
-                            )
-                        ),
-                        clearSessionIDs: [],
-                        lockTimestamp: activeLockTimestamp,
-                        finalizationTimestamp: finalizationEvidence?.timestamp,
-                        precedenceWinner: lockOwnedByCurrentActor ? "owner_draft" : "lock"
-                    )
-                )
-                continue
-            }
-
-            let propertyOccupancy = try? await fetchRemotePropertySessionOccupancyRecord(
-                orgID: orgID,
-                propertyID: propertyID
-            )
-            if propertySessionOccupancyIsActive(propertyOccupancy) {
-                let occupancyOwnerUserID = propertyOccupancy?.occupiedByUserID
-                let occupancyOwnerDeviceID = normalizedSupabaseText(propertyOccupancy?.occupiedByDeviceID)
-                let occupancyTimestamp = propertyOccupancy?.occupiedAt.flatMap(parseSupabaseDateString)
-                if finalizationEvidenceBeatsLock(finalizationEvidence, lockTimestamp: occupancyTimestamp) {
-                    decisions.append(
-                        RefreshLockBadgeDecision(
-                            propertyID: propertyID,
-                            showLocked: false,
-                            reason: "finalization_newer_than_occupancy",
-                            occupancyState: nil,
-                            sessionLockState: nil,
-                            clearSessionIDs: clearableSessionIDs,
-                            lockTimestamp: occupancyTimestamp,
-                            finalizationTimestamp: finalizationEvidence?.timestamp,
-                            precedenceWinner: "finalization"
-                        )
-                    )
-                    continue
-                }
-                let occupancyOwnedByCurrentActor =
-                    occupancyOwnerUserID == currentUserID &&
-                    occupancyOwnerDeviceID == currentDeviceID
-                let occupancyState = PropertySessionOccupancyState(
-                    occupiedByUserID: occupancyOwnerUserID,
-                    occupiedByDeviceID: occupancyOwnerDeviceID,
-                    occupiedAt: occupancyTimestamp
-                )
-                decisions.append(
-                    RefreshLockBadgeDecision(
-                        propertyID: propertyID,
-                        showLocked: !occupancyOwnedByCurrentActor,
-                        reason: occupancyOwnedByCurrentActor ? "active_occupancy_owned_by_current_device" : "active_remote_occupancy",
-                        occupancyState: occupancyState,
-                        sessionLockState: nil,
-                        clearSessionIDs: [],
-                        lockTimestamp: occupancyTimestamp,
-                        finalizationTimestamp: finalizationEvidence?.timestamp,
-                        precedenceWinner: "occupancy"
-                    )
-                )
-                continue
-            }
-
-            let staleOccupancySeen = propertyOccupancy != nil
-            decisions.append(
-                RefreshLockBadgeDecision(
-                    propertyID: propertyID,
-                    showLocked: false,
-                    reason: finalizationEvidence != nil ? "finalization_cleared_lock" : (staleOccupancySeen ? "stale_or_released_occupancy_cleared" : "no_entry_lock_found"),
-                    occupancyState: nil,
-                    sessionLockState: nil,
-                    clearSessionIDs: clearableSessionIDs,
-                    lockTimestamp: nil,
-                    finalizationTimestamp: finalizationEvidence?.timestamp,
-                    precedenceWinner: finalizationEvidence != nil ? "finalization" : "none"
-                )
-            )
-        }
-
-        var nextLockedPropertyIDs = locallyLockedPropertyIDs.subtracting(uniquePropertyIDs)
+        let nextLockedPropertyIDs = locallyLockedPropertyIDs.subtracting(legacyPropertyIDs)
         if !statusOwnedPropertyIDs.isEmpty || !legacyPropertyIDs.isEmpty {
             print(
                 "[LockBadgeRefresh] summary " +
                 "trigger=\(reason) " +
                 "property_status_legacy_skipped_count=\(statusOwnedPropertyIDs.count) " +
-                "legacy_fallback_count=\(legacyPropertyIDs.count) " +
+                "missing_property_status_count=\(legacyPropertyIDs.count) " +
+                "visible_legacy_fallback_count=0 " +
                 "lock_badge_refresh_skipped_property_status_count=\(statusOwnedPropertyIDs.count)"
             )
         }
-        for decision in decisions {
-            if decision.showLocked {
-                nextLockedPropertyIDs.insert(decision.propertyID)
-            }
-            if let occupancyState = decision.occupancyState {
-                setPropertySessionOccupancyState(
-                    propertyID: decision.propertyID,
-                    occupiedByUserID: occupancyState.occupiedByUserID,
-                    occupiedByDeviceID: occupancyState.occupiedByDeviceID,
-                    occupiedAt: occupancyState.occupiedAt
-                )
-            } else {
-                propertySessionOccupancyByPropertyID.removeValue(forKey: decision.propertyID)
-            }
-            if let sessionLockState = decision.sessionLockState {
-                setSessionCoordinationState(
-                    sessionID: sessionLockState.sessionID,
-                    lockedByUserID: sessionLockState.state.lockedByUserID,
-                    lockedByDeviceID: sessionLockState.state.lockedByDeviceID,
-                    lockedAt: sessionLockState.state.lockedAt
-                )
-            }
-            for sessionID in decision.clearSessionIDs {
-                sessionCoordinationStateBySessionID.removeValue(forKey: sessionID)
-            }
+        for propertyID in legacyPropertyIDs {
+            propertySessionOccupancyByPropertyID.removeValue(forKey: propertyID)
             if userDefaults.bool(forKey: "lock_badge_refresh_verbose_logging") {
                 print(
-                    "[LockBadgeRefresh] source=entry_blocking " +
+                    "[LockBadgeRefresh] source=property_status_missing " +
                     "trigger=\(reason) " +
-                    "propertyID=\(decision.propertyID.uuidString) " +
-                    "visible=\(decision.showLocked) " +
-                    "reason=\(decision.reason) " +
-                    "lockTimestamp=\(decision.lockTimestamp?.ISO8601Format() ?? "nil") " +
-                    "finalizationTimestamp=\(decision.finalizationTimestamp?.ISO8601Format() ?? "nil") " +
-                    "precedenceWinner=\(decision.precedenceWinner)"
+                    "propertyID=\(propertyID.uuidString) " +
+                    "visible=false " +
+                    "reason=missing_property_status_row"
                 )
             }
         }
@@ -29724,82 +29528,26 @@ final class AppState: ObservableObject {
             )
         }
 
-        let materialDraft = draftSession(for: propertyID)
-        let draftLockState = materialDraft.flatMap { sessionCoordinationStateBySessionID[$0.id] }
-        let draftOwnerUserID = draftLockState?.lockedByUserID
-        let draftOwnerDeviceID = normalizedSupabaseText(draftLockState?.lockedByDeviceID)
-
-        let occupancy = propertySessionOccupancyByPropertyID[propertyID]
-        let occupancyOwnerUserID = occupancy?.occupiedByUserID
-        let occupancyOwnerDeviceID = normalizedSupabaseText(occupancy?.occupiedByDeviceID)
-        let occupancyHasOwner = occupancyOwnerUserID != nil || occupancyOwnerDeviceID != nil
-        let occupancyActive = occupancyHasOwner && !isStaleCoordinationLock(lockedAt: occupancy?.occupiedAt)
-        let occupancyOwnedByCurrentActor =
-            (occupancyOwnerDeviceID != nil && occupancyOwnerDeviceID == currentDeviceID) ||
-            (occupancyOwnerUserID != nil && occupancyOwnerUserID == currentUserID)
-        let occupiedByOther = occupancyActive && !occupancyOwnedByCurrentActor
-        let lockedDraftByOther = materialDraft.map { isSessionLockedByOther(sessionID: $0.id) } ?? false
-        let locallyLocked = locallyLockedPropertyIDs.contains(propertyID)
-        let showLock = occupiedByOther || lockedDraftByOther || locallyLocked
-        let finalizedOrExported = isFinalSession(materialDraft)
-        let lockReason: String = {
-            if occupiedByOther { return "active_occupancy_other_device" }
-            if lockedDraftByOther { return "locked_by_other" }
-            if locallyLocked { return "locally_locked" }
-            if occupancyActive { return "active_occupancy_owned_by_current_device" }
-            if occupancyHasOwner { return "stale_occupancy_ignored" }
-            return "no_active_occupancy"
-        }()
-
-        let draftOwnedByCurrentActor: Bool = {
-            guard let materialDraft else { return false }
-            if currentSession?.id == materialDraft.id { return true }
-            if let draftOwnerDeviceID {
-                return draftOwnerDeviceID == currentDeviceID
-            }
-            if let draftOwnerUserID {
-                return draftOwnerUserID == currentUserID
-            }
-            return false
-        }()
-        let showDraft = materialDraft != nil &&
-            !finalizedOrExported &&
-            !showLock &&
-            draftOwnedByCurrentActor
-        let draftReason: String = {
-            guard materialDraft != nil else { return "no_material_draft" }
-            if finalizedOrExported { return "finalized_or_exported" }
-            if showLock { return "hidden_by_other_device_occupancy" }
-            if draftOwnedByCurrentActor { return "visible_owned_by_current_device" }
-            if draftOwnerDeviceID != nil || draftOwnerUserID != nil {
-                return "hidden_non_owner"
-            }
-            return "hidden_unverified_local_owner"
-        }()
-
-        let legacyPendingExport = sessions(for: propertyID).contains { isPendingDeliveryLocallyAvailable($0) }
-        let legacyPendingExportReason = legacyPendingExport ? "pending_delivery_local_archive_available" : "no_pending_delivery_local_archive"
-
         return PropertyCardBadgeModel(
             propertyID: propertyID,
             activeOccupancySessionID: nil,
-            occupancyOwnerUserID: occupancyOwnerUserID,
-            occupancyOwnerDeviceID: occupancyOwnerDeviceID,
+            occupancyOwnerUserID: nil,
+            occupancyOwnerDeviceID: nil,
             currentUserID: currentUserID,
             currentDeviceID: currentDeviceID,
-            materialDraftSessionID: materialDraft?.id,
-            draftOwnerUserID: draftOwnerUserID,
-            draftOwnerDeviceID: draftOwnerDeviceID,
-            finalizedOrExported: finalizedOrExported,
-            showLock: showLock,
-            showDraft: showDraft,
-            showPendingExport: legacyPendingExport,
+            materialDraftSessionID: nil,
+            draftOwnerUserID: nil,
+            draftOwnerDeviceID: nil,
+            finalizedOrExported: false,
+            showLock: false,
+            showDraft: false,
+            showPendingExport: false,
             showReExport: showReExport,
-            lockReason: lockReason,
-            draftReason: draftReason,
-            pendingExportReason: legacyPendingExportReason,
+            lockReason: "missing_property_status_row",
+            draftReason: "missing_property_status_row",
+            pendingExportReason: "missing_property_status_row",
             reExportReason: reExportReason,
-            badgeSource: "legacy"
+            badgeSource: "property_status_missing"
         )
     }
 
@@ -29826,14 +29574,15 @@ final class AppState: ObservableObject {
         context: String? = nil
     ) -> PropertyStatusEntryPreflightDecision? {
         guard let record = propertyStatusByPropertyID[propertyID] else {
+            let decision = missingPropertyStatusEntryPreflightDecision()
             if let context {
                 logPropertyStatusEntryPreflight(
                     propertyID: propertyID,
-                    decision: nil,
+                    decision: decision,
                     context: context
                 )
             }
-            return nil
+            return decision
         }
         let decision = makePropertyStatusEntryPreflightDecision(propertyID: propertyID, record: record)
         if let context {
@@ -29852,15 +29601,16 @@ final class AppState: ObservableObject {
         context: String
     ) async -> PropertyStatusEntryPreflightEvaluation {
         guard let cachedRecord = propertyStatusByPropertyID[propertyID] else {
+            let decision = missingPropertyStatusEntryPreflightDecision()
             logPropertyStatusEntryPreflight(
                 propertyID: propertyID,
-                decision: nil,
+                decision: decision,
                 context: context
             )
             return PropertyStatusEntryPreflightEvaluation(
-                decision: nil,
+                decision: decision,
                 skipCachedPropertyStatusPreflight: false,
-                source: "legacy",
+                source: "property_status_missing",
                 reason: "missing_property_status_row"
             )
         }
@@ -29898,15 +29648,18 @@ final class AppState: ObservableObject {
                     "[PropertyStatusEntry] " +
                     "context=\(context) " +
                     "propertyID=\(propertyID.uuidString) " +
-                    "entry_source=legacy " +
-                    "property_status_entry_decision=missing_fresh_row " +
+                    "entry_source=property_status_missing " +
+                    "property_status_entry_decision=block " +
                     "property_status_entry_reason=fresh_read_missing_row " +
                     "cached_status=\(cachedRecord.status.rawValue)"
                 )
+                let decision = missingPropertyStatusEntryPreflightDecision(
+                    reason: "fresh_read_missing_row"
+                )
                 return PropertyStatusEntryPreflightEvaluation(
-                    decision: nil,
-                    skipCachedPropertyStatusPreflight: true,
-                    source: "legacy",
+                    decision: decision,
+                    skipCachedPropertyStatusPreflight: false,
+                    source: "property_status_missing",
                     reason: "fresh_read_missing_row"
                 )
             }
@@ -29949,21 +29702,41 @@ final class AppState: ObservableObject {
             propertyStatusByPropertyID.removeValue(forKey: propertyID)
             print(
                 "[PropertyStatusEntry] " +
-                "context=\(context) " +
-                "propertyID=\(propertyID.uuidString) " +
-                "entry_source=legacy " +
-                "property_status_entry_decision=fresh_read_failed " +
-                "property_status_entry_reason=legacy_fallback_after_fresh_read_failure " +
-                "cached_status=\(cachedRecord.status.rawValue) " +
-                "error=\(Self.diagnosticsPreviewText(error.localizedDescription, maxLength: 120) ?? "unknown_error")"
+                    "context=\(context) " +
+                    "propertyID=\(propertyID.uuidString) " +
+                    "entry_source=property_status_unverified " +
+                    "property_status_entry_decision=block " +
+                    "property_status_entry_reason=fresh_read_failed " +
+                    "cached_status=\(cachedRecord.status.rawValue) " +
+                    "error=\(Self.diagnosticsPreviewText(error.localizedDescription, maxLength: 120) ?? "unknown_error")"
+            )
+            let decision = missingPropertyStatusEntryPreflightDecision(
+                source: "property_status_unverified",
+                reason: "fresh_read_failed"
             )
             return PropertyStatusEntryPreflightEvaluation(
-                decision: nil,
-                skipCachedPropertyStatusPreflight: true,
-                source: "legacy",
+                decision: decision,
+                skipCachedPropertyStatusPreflight: false,
+                source: "property_status_unverified",
                 reason: "fresh_read_failed"
             )
         }
+    }
+
+    private func missingPropertyStatusEntryPreflightDecision(
+        source: String = "property_status_missing",
+        reason: String = "missing_property_status_row"
+    ) -> PropertyStatusEntryPreflightDecision {
+        PropertyStatusEntryPreflightDecision(
+            source: source,
+            decision: "block",
+            reason: reason,
+            block: SessionEntryCoordinationBlock(
+                ownerDescription: Self.coordinationUnavailableLockMessage,
+                lockedAt: nil,
+                blockContext: "missing_property_status"
+            )
+        )
     }
 
     private func makePropertyStatusEntryPreflightDecision(
@@ -30129,10 +29902,10 @@ final class AppState: ObservableObject {
                 "[PropertyStatusEntry] " +
                 "context=\(context) " +
                 "propertyID=\(propertyID.uuidString) " +
-                "entry_source=legacy " +
+                "entry_source=property_status_missing " +
                 "property_status_entry_decision=missing_row " +
                 "property_status_entry_reason=no_property_status_row " +
-                "legacy_entry_decision_compare=not_checked"
+                "legacy_entry_decision_compare=diagnostic_only"
             )
         }
     }
@@ -30962,7 +30735,7 @@ final class AppState: ObservableObject {
         refreshElapsedMs: Int
     ) {
         let propertyStatusLegacySkippedCount = properties.filter { propertyStatusByPropertyID[$0.id] != nil }.count
-        let legacyFallbackCount = properties.count - propertyStatusLegacySkippedCount
+        let missingPropertyStatusCount = properties.count - propertyStatusLegacySkippedCount
         print(
             "[PropertyStatusCompare] summary " +
             "trigger=\(trigger) orgID=\(orgID.uuidString) " +
@@ -30970,12 +30743,13 @@ final class AppState: ObservableObject {
             "draft_count_source=\(draftCountSource()) " +
             "pending_export_count_source=\(pendingExportCountSource()) " +
             "property_status_legacy_skipped_count=\(propertyStatusLegacySkippedCount) " +
-            "legacy_fallback_count=\(legacyFallbackCount) " +
+            "visible_legacy_fallback_count=0 " +
+            "missing_property_status_count=\(missingPropertyStatusCount) " +
             "lock_badge_refresh_skipped_property_status_count=\(propertyStatusLegacySkippedCount) " +
             "compared_property_count=\(summary.comparedPropertyCount) " +
             "matched_count=\(summary.matchedCount) " +
             "mismatch_count=\(summary.mismatchCount) " +
-            "missing_property_status_count=\(summary.missingPropertyStatusCount) " +
+            "diagnostic_missing_property_status_count=\(summary.missingPropertyStatusCount) " +
             "mismatch_categories=\(summary.mismatchCategorySummary) " +
             "property_status_refresh_elapsed_ms=\(refreshElapsedMs)"
         )
@@ -35731,88 +35505,56 @@ final class AppState: ObservableObject {
     }
     
     func pendingExportCountAcrossProperties() -> Int {
-        guard !propertyStatusByPropertyID.isEmpty else {
-            return legacyPendingExportCountAcrossProperties()
-        }
-        var pendingCount = 0
-        var legacyPendingSessionIDs = Set<UUID>()
-        let currentUserID = authenticatedSupabaseUser?.id
-        let currentDeviceID = currentDeviceIdentifier()
-        for property in properties {
-            if let record = propertyStatusByPropertyID[property.id] {
-                let answer = Self.makePropertyStatusCompareAnswer(
-                    record: record,
-                    currentUserID: currentUserID,
-                    currentDeviceID: currentDeviceID
-                )
-                if answer.pendingExportCountIncluded {
-                    pendingCount += 1
-                }
-            } else {
-                for session in sessions(for: property.id) where isPendingDelivery(session) && sessionHasCaptures(session) {
-                    legacyPendingSessionIDs.insert(session.id)
-                }
-            }
-        }
-        return pendingCount + legacyPendingSessionIDs.count
-    }
-
-    private func legacyPendingExportCountAcrossProperties() -> Int {
-        if !pendingExportSessionByProperty.isEmpty {
-            return Set(pendingExportSessionByProperty.values.map(\.id)).count
-        }
-        var pendingSessionIDs = Set<UUID>()
-        for property in properties {
-            for session in sessions(for: property.id) where isPendingDelivery(session) && sessionHasCaptures(session) {
-                pendingSessionIDs.insert(session.id)
-            }
-        }
-        return pendingSessionIDs.count
-    }
-    
-    func draftPropertyCount() -> Int {
-        guard !propertyStatusByPropertyID.isEmpty else {
-            return legacyDraftPropertyCount()
-        }
         let currentUserID = authenticatedSupabaseUser?.id
         let currentDeviceID = currentDeviceIdentifier()
         return properties.reduce(0) { count, property in
-            if let record = propertyStatusByPropertyID[property.id] {
-                let answer = Self.makePropertyStatusCompareAnswer(
-                    record: record,
-                    currentUserID: currentUserID,
-                    currentDeviceID: currentDeviceID
-                )
-                return count + (answer.draftCountIncluded ? 1 : 0)
+            guard let record = propertyStatusByPropertyID[property.id] else {
+                return count
             }
-            return count + (legacyDraftCountIncluded(propertyID: property.id) ? 1 : 0)
+            let answer = Self.makePropertyStatusCompareAnswer(
+                record: record,
+                currentUserID: currentUserID,
+                currentDeviceID: currentDeviceID
+            )
+            return count + (answer.pendingExportCountIncluded ? 1 : 0)
         }
     }
 
-    private func legacyDraftPropertyCount() -> Int {
-        if !draftSessionByProperty.isEmpty {
-            return draftSessionByProperty.count
+    func draftPropertyCount() -> Int {
+        let currentUserID = authenticatedSupabaseUser?.id
+        let currentDeviceID = currentDeviceIdentifier()
+        return properties.reduce(0) { count, property in
+            guard let record = propertyStatusByPropertyID[property.id] else {
+                return count
+            }
+            let answer = Self.makePropertyStatusCompareAnswer(
+                record: record,
+                currentUserID: currentUserID,
+                currentDeviceID: currentDeviceID
+            )
+            return count + (answer.draftCountIncluded ? 1 : 0)
         }
-        return properties.filter { draftSession(for: $0.id) != nil }.count
-    }
-
-    private func legacyDraftCountIncluded(propertyID: UUID) -> Bool {
-        if !draftSessionByProperty.isEmpty {
-            return draftSessionByProperty[propertyID] != nil
-        }
-        return draftSession(for: propertyID) != nil
     }
 
     func draftCountSource() -> String {
-        propertyStatusByPropertyID.isEmpty ? "legacy" : "property_status_with_legacy_missing_rows"
+        propertyStatusSourceSummary()
     }
 
     func pendingExportCountSource() -> String {
-        propertyStatusByPropertyID.isEmpty ? "legacy" : "property_status_with_legacy_missing_rows"
+        propertyStatusSourceSummary()
     }
 
     func badgeSourceSummary() -> String {
-        propertyStatusByPropertyID.isEmpty ? "legacy" : "property_status_with_legacy_missing_rows"
+        propertyStatusSourceSummary()
+    }
+
+    private func propertyStatusSourceSummary() -> String {
+        let visiblePropertyIDs = Set(properties.map(\.id))
+        guard !visiblePropertyIDs.isEmpty else { return "property_status" }
+        let statusPropertyIDs = Set(propertyStatusByPropertyID.keys)
+        return visiblePropertyIDs.isSubset(of: statusPropertyIDs)
+            ? "property_status"
+            : "property_status_missing_rows"
     }
     
     func markCurrentSessionExported() {
