@@ -2424,6 +2424,11 @@ final class AppState: ObservableObject {
         case readyForActivationReadinessReviewOnly = "ready_for_activation_readiness_review_only"
     }
 
+    enum ProductionSingleSessionHydrationReadinessPreflightState: String, CaseIterable, Equatable {
+        case blocked
+        case readyForHydrationReadinessReviewOnly = "ready_for_hydration_readiness_review_only"
+    }
+
     enum ProductionCohortValidationState: String, CaseIterable, Equatable {
         case notValidated = "not_validated"
         case verified
@@ -2748,6 +2753,38 @@ final class AppState: ObservableObject {
         let candidateEvidenceReady: Bool
         let overlayEvidenceReady: Bool
         let comparisonEvidenceMatchesLocal: Bool
+        let noBehaviorChangedText: String
+    }
+
+    struct ProductionSingleSessionHydrationReadinessPreflight: Equatable {
+        let checkedAt: Date
+        let state: ProductionSingleSessionHydrationReadinessPreflightState
+        let blockers: [String]
+        let blockedConditions: [String]
+        let activationReadinessScope: ProductionCohortApprovalScope
+        let candidatePackageScope: ProductionCohortApprovalScope
+        let restoreDiagnosticsScope: ProductionCohortApprovalScope
+        let activationReadinessReviewOnly: Bool
+        let exactSingleScopeSelected: Bool
+        let restoreDiagnosticsScopeMatchesPackage: Bool
+        let hydrationConfirmationMatchesScope: Bool
+        let restoreResult: SessionSnapshotRestoreDiagnosticOutcome
+        let snapshotIDPresent: Bool
+        let checksumVerified: Bool
+        let rowObjectVerified: Bool
+        let parentRemoteVerified: Bool
+        let snapshotSchemaSupported: Bool
+        let freshnessNotLocalNewer: Bool
+        let hydrationConfirmationRequired: Bool
+        let productionHydrationDisabledNonWriting: Bool
+        let productionHydrationBlockedReason: String?
+        let hydrationExecutionBlocked: Bool
+        let hydrationPerformed: Bool
+        let activeSource: CanonicalCandidateActivationSource
+        let activationPerformed: Bool
+        let persistencePerformed: Bool
+        let fallbackRetained: Bool
+        let rollbackReady: Bool
         let noBehaviorChangedText: String
     }
 
@@ -22561,6 +22598,206 @@ final class AppState: ObservableObject {
         lines.append("- overlay_evidence_ready: \(validation.overlayEvidenceReady)")
         lines.append("- comparison_evidence_matches_local: \(validation.comparisonEvidenceMatchesLocal)")
         lines.append(validation.noBehaviorChangedText)
+        return lines.joined(separator: "\n")
+    }
+
+    nonisolated static func makeProductionSingleSessionHydrationReadinessPreflight(
+        checkedAt: Date = Date(),
+        activationReadiness validation: ProductionSingleSessionActivationReadinessValidation,
+        candidatePackage package: ProductionSingleSessionActivationCandidatePackage,
+        restoreDiagnostics restore: SessionSnapshotRestoreDiagnosticsResult,
+        hydrationPolicy policy: SessionSnapshotHydrationPolicyDiagnostics,
+        hydrationConfirmation confirmation: SessionSnapshotHydrationConfirmation
+    ) -> ProductionSingleSessionHydrationReadinessPreflight {
+        func scopesAreEqual(
+            _ lhs: ProductionCohortApprovalScope,
+            _ rhs: ProductionCohortApprovalScope
+        ) -> Bool {
+            lhs.orgID == rhs.orgID &&
+                lhs.propertyID == rhs.propertyID &&
+                lhs.sessionID == rhs.sessionID
+        }
+
+        let restoreScope = ProductionCohortApprovalScope(
+            orgID: package.packageScope.orgID,
+            propertyID: restore.propertyID,
+            sessionID: restore.sessionID
+        )
+        let activationReadinessReviewOnly = validation.state == .readyForActivationReadinessReviewOnly &&
+            validation.blockers.isEmpty
+        let exactSingleScopeSelected = package.exactSingleScopeSelected &&
+            validation.exactSingleScopeSelected &&
+            package.packageScope.orgID != nil &&
+            package.packageScope.propertyID != nil &&
+            package.packageScope.sessionID != nil
+        let restoreDiagnosticsScopeMatchesPackage = scopesAreEqual(package.packageScope, validation.candidatePackageScope) &&
+            scopesAreEqual(package.packageScope, restoreScope)
+        let expectedPropertyIDText = package.packageScope.propertyID?.uuidString ?? "none"
+        let expectedSessionIDText = package.packageScope.sessionID?.uuidString ?? "none"
+        let expectedSnapshotIDText = restore.snapshotID?.uuidString ?? "none"
+        let hydrationConfirmationMatchesScope = confirmation.propertyIDText == expectedPropertyIDText &&
+            confirmation.sessionIDText == expectedSessionIDText &&
+            confirmation.snapshotIDText == expectedSnapshotIDText &&
+            confirmation.restoreResult == restore.result.rawValue
+        let snapshotIDPresent = restore.snapshotID != nil
+        let snapshotSchemaSupported = restore.snapshotSchemaVersion == 1
+        let freshnessNotLocalNewer = restore.freshness != "local_newer"
+        let productionHydrationDisabledNonWriting = !policy.productionHydrationAllowed &&
+            policy.hydrationMode != "operator_approved_single_session" &&
+            policy.hydrationScope != "single_selected_session"
+        let hydrationExecutionBlocked = !policy.hydrationAvailable &&
+            !confirmation.canHydrate &&
+            (policy.productionHydrationBlockedReason != nil || confirmation.blockedReason != nil)
+        let hydrationPerformed = validation.hydrationPerformed
+        let activeSourceRemainsLocal = validation.activeSource == .local &&
+            package.activeSource == .local
+        let activationPerformed = validation.activationPerformed || package.activationPerformed
+        let persistencePerformed = validation.persistencePerformed || package.persistencePerformed
+        let fallbackRetained = validation.fallbackRetained && package.fallbackRetained
+        let rollbackReady = validation.rollbackReady && package.rollbackReady
+
+        var blockers = validation.blockers + package.blockers
+        if !activationReadinessReviewOnly {
+            blockers.append("activation_readiness_validation_not_review_only")
+        }
+        if !exactSingleScopeSelected {
+            blockers.append("exact_single_org_property_session_scope_required")
+        }
+        if !restoreDiagnosticsScopeMatchesPackage {
+            blockers.append("hydration_readiness_scope_mismatch")
+        }
+        if restore.result != .restorableMetadataCandidate {
+            blockers.append("restore_diagnostics_not_restorable")
+        }
+        if !snapshotIDPresent {
+            blockers.append("snapshot_id_required")
+        }
+        if !restore.checksumVerified {
+            blockers.append("restore_checksum_not_verified")
+        }
+        if !restore.rowObjectVerified {
+            blockers.append("restore_row_object_not_verified")
+        }
+        if !restore.parentRemoteVerified {
+            blockers.append("restore_parent_remote_not_verified")
+        }
+        if !snapshotSchemaSupported {
+            blockers.append("restore_snapshot_schema_not_supported")
+        }
+        if !freshnessNotLocalNewer {
+            blockers.append("restore_freshness_local_newer")
+        }
+        if !hydrationConfirmationMatchesScope {
+            blockers.append("hydration_confirmation_scope_mismatch")
+        }
+        if !confirmation.confirmationRequired {
+            blockers.append("hydration_confirmation_required")
+        }
+        if !productionHydrationDisabledNonWriting {
+            blockers.append("production_hydration_must_remain_disabled")
+        }
+        if !hydrationExecutionBlocked {
+            blockers.append("hydration_execution_must_remain_blocked")
+        }
+        if hydrationPerformed {
+            blockers.append("hydration_performed_must_be_false")
+        }
+        if !activeSourceRemainsLocal {
+            blockers.append("active_source_must_remain_local")
+        }
+        if activationPerformed {
+            blockers.append("activation_performed_must_be_false")
+        }
+        if persistencePerformed {
+            blockers.append("persistence_performed_must_be_false")
+        }
+        if !fallbackRetained {
+            blockers.append("local_fallback_unavailable")
+        }
+        if !rollbackReady {
+            blockers.append("rollback_not_ready")
+        }
+
+        let blockedConditions = [
+            productionHydrationDisabledNonWriting ? "production_hydration_disabled_non_writing" : nil,
+            hydrationExecutionBlocked ? "hydration_execution_blocked" : nil,
+            validation.actualActivationRemainsBlocked ? "actual_activation_blocked" : nil,
+            validation.productionWideDisabledConfirmation ? "production_canonical_reads_disabled" : nil,
+            activeSourceRemainsLocal ? "active_source_remains_local" : nil,
+            "local_remote_state_writes_blocked",
+            !hydrationPerformed ? "hydration_not_performed" : nil,
+            !activationPerformed ? "activation_not_performed" : nil,
+            !persistencePerformed ? "persistence_not_performed" : nil
+        ].compactMap { $0 }
+        let dedupedBlockers = Array(Set(blockers)).sorted()
+
+        return ProductionSingleSessionHydrationReadinessPreflight(
+            checkedAt: checkedAt,
+            state: dedupedBlockers.isEmpty ? .readyForHydrationReadinessReviewOnly : .blocked,
+            blockers: dedupedBlockers,
+            blockedConditions: Array(Set(blockedConditions)).sorted(),
+            activationReadinessScope: validation.candidatePackageScope,
+            candidatePackageScope: package.packageScope,
+            restoreDiagnosticsScope: restoreScope,
+            activationReadinessReviewOnly: activationReadinessReviewOnly,
+            exactSingleScopeSelected: exactSingleScopeSelected,
+            restoreDiagnosticsScopeMatchesPackage: restoreDiagnosticsScopeMatchesPackage,
+            hydrationConfirmationMatchesScope: hydrationConfirmationMatchesScope,
+            restoreResult: restore.result,
+            snapshotIDPresent: snapshotIDPresent,
+            checksumVerified: restore.checksumVerified,
+            rowObjectVerified: restore.rowObjectVerified,
+            parentRemoteVerified: restore.parentRemoteVerified,
+            snapshotSchemaSupported: snapshotSchemaSupported,
+            freshnessNotLocalNewer: freshnessNotLocalNewer,
+            hydrationConfirmationRequired: confirmation.confirmationRequired,
+            productionHydrationDisabledNonWriting: productionHydrationDisabledNonWriting,
+            productionHydrationBlockedReason: policy.productionHydrationBlockedReason ?? confirmation.blockedReason,
+            hydrationExecutionBlocked: hydrationExecutionBlocked,
+            hydrationPerformed: hydrationPerformed,
+            activeSource: validation.activeSource,
+            activationPerformed: activationPerformed,
+            persistencePerformed: persistencePerformed,
+            fallbackRetained: fallbackRetained,
+            rollbackReady: rollbackReady,
+            noBehaviorChangedText: "No behavior changed: production single-session hydration readiness preflight is diagnostics-only and review-only. No hydration occurred, production hydration remains disabled and non-writing, no production reads were enabled, no activation occurred, no overlay was activated, no reads were switched, no local or remote state was written, no fallback was removed, and export, seal, sync, media, iCloud, RLS, schema, and data behavior is unchanged."
+        )
+    }
+
+    nonisolated static func productionSingleSessionHydrationReadinessPreflightReportText(
+        _ preflight: ProductionSingleSessionHydrationReadinessPreflight
+    ) -> String {
+        var lines: [String] = []
+        lines.append("Production Single-Session Hydration Readiness Preflight")
+        lines.append("- hydration_readiness_preflight_checked_at: \(preflight.checkedAt.formatted(date: .abbreviated, time: .standard))")
+        lines.append("- hydration_readiness_preflight_state: \(preflight.state.rawValue)")
+        lines.append("- blockers: \(preflight.blockers.isEmpty ? "none" : preflight.blockers.joined(separator: ", "))")
+        lines.append("- blocked_conditions: \(preflight.blockedConditions.isEmpty ? "none" : preflight.blockedConditions.joined(separator: ", "))")
+        lines.append("- activation_readiness_scope: \(preflight.activationReadinessScope.description)")
+        lines.append("- candidate_package_scope: \(preflight.candidatePackageScope.description)")
+        lines.append("- restore_diagnostics_scope: \(preflight.restoreDiagnosticsScope.description)")
+        lines.append("- activation_readiness_review_only: \(preflight.activationReadinessReviewOnly)")
+        lines.append("- exact_single_scope_selected: \(preflight.exactSingleScopeSelected)")
+        lines.append("- restore_diagnostics_scope_matches_package: \(preflight.restoreDiagnosticsScopeMatchesPackage)")
+        lines.append("- hydration_confirmation_matches_scope: \(preflight.hydrationConfirmationMatchesScope)")
+        lines.append("- restore_result: \(preflight.restoreResult.rawValue)")
+        lines.append("- snapshot_id_present: \(preflight.snapshotIDPresent)")
+        lines.append("- checksum_verified: \(preflight.checksumVerified)")
+        lines.append("- row_object_verified: \(preflight.rowObjectVerified)")
+        lines.append("- parent_remote_verified: \(preflight.parentRemoteVerified)")
+        lines.append("- snapshot_schema_supported: \(preflight.snapshotSchemaSupported)")
+        lines.append("- freshness_not_local_newer: \(preflight.freshnessNotLocalNewer)")
+        lines.append("- hydration_confirmation_required: \(preflight.hydrationConfirmationRequired)")
+        lines.append("- production_hydration_disabled_non_writing: \(preflight.productionHydrationDisabledNonWriting)")
+        lines.append("- production_hydration_blocked_reason: \(diagnosticsPreviewText(preflight.productionHydrationBlockedReason, maxLength: 140) ?? "none")")
+        lines.append("- hydration_execution_blocked: \(preflight.hydrationExecutionBlocked)")
+        lines.append("- active_source: \(preflight.activeSource.rawValue)")
+        lines.append("- activation_performed: \(preflight.activationPerformed)")
+        lines.append("- persistence_performed: \(preflight.persistencePerformed)")
+        lines.append("- hydration_performed: \(preflight.hydrationPerformed)")
+        lines.append("- fallback_retained: \(preflight.fallbackRetained)")
+        lines.append("- rollback_ready: \(preflight.rollbackReady)")
+        lines.append(preflight.noBehaviorChangedText)
         return lines.joined(separator: "\n")
     }
 

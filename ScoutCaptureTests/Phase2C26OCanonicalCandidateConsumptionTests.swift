@@ -5,6 +5,7 @@ final class Phase2C26OCanonicalCandidateConsumptionTests: XCTestCase {
     private let orgID = UUID(uuidString: "11111111-1111-1111-1111-111111111111")!
     private let propertyID = UUID(uuidString: "22222222-2222-2222-2222-222222222222")!
     private let sessionID = UUID(uuidString: "33333333-3333-3333-3333-333333333333")!
+    private let snapshotID = UUID(uuidString: "44444444-4444-4444-4444-444444444444")!
 
     private func configuration(enabled: Bool = true) -> AppState.CanonicalReadCandidateConfiguration {
         AppState.CanonicalReadCandidateConfiguration(
@@ -562,6 +563,147 @@ final class Phase2C26OCanonicalCandidateConsumptionTests: XCTestCase {
             activationResult: inputs.activation
         )
         return (inputs.upload, candidatePackage, inputs.gate, inputs.activation)
+    }
+
+    private func activationReadinessValidation(
+        from validation: AppState.ProductionSingleSessionActivationReadinessValidation,
+        state: AppState.ProductionSingleSessionActivationReadinessValidationState? = nil,
+        blockers: [String]? = nil,
+        activeSource: AppState.CanonicalCandidateActivationSource? = nil,
+        activationPerformed: Bool? = nil,
+        persistencePerformed: Bool? = nil,
+        hydrationPerformed: Bool? = nil,
+        fallbackRetained: Bool? = nil,
+        rollbackReady: Bool? = nil
+    ) -> AppState.ProductionSingleSessionActivationReadinessValidation {
+        AppState.ProductionSingleSessionActivationReadinessValidation(
+            checkedAt: validation.checkedAt,
+            state: state ?? validation.state,
+            blockers: blockers ?? validation.blockers,
+            candidatePackageScope: validation.candidatePackageScope,
+            gateSelectedScope: validation.gateSelectedScope,
+            gateApprovedScope: validation.gateApprovedScope,
+            activationResultScope: validation.activationResultScope,
+            candidatePackageReadyForManualReviewOnly: validation.candidatePackageReadyForManualReviewOnly,
+            exactSingleScopeSelected: validation.exactSingleScopeSelected,
+            productionWideDisabledConfirmation: validation.productionWideDisabledConfirmation,
+            productionSingleSessionGateDisabled: validation.productionSingleSessionGateDisabled,
+            actualActivationRemainsBlocked: validation.actualActivationRemainsBlocked,
+            actualActivationBlockers: validation.actualActivationBlockers,
+            activeSource: activeSource ?? validation.activeSource,
+            activationPerformed: activationPerformed ?? validation.activationPerformed,
+            persistencePerformed: persistencePerformed ?? validation.persistencePerformed,
+            hydrationPerformed: hydrationPerformed ?? validation.hydrationPerformed,
+            productionHydrationDisabledConfirmation: validation.productionHydrationDisabledConfirmation,
+            fallbackRetained: fallbackRetained ?? validation.fallbackRetained,
+            rollbackReady: rollbackReady ?? validation.rollbackReady,
+            candidateEvidenceReady: validation.candidateEvidenceReady,
+            overlayEvidenceReady: validation.overlayEvidenceReady,
+            comparisonEvidenceMatchesLocal: validation.comparisonEvidenceMatchesLocal,
+            noBehaviorChangedText: validation.noBehaviorChangedText
+        )
+    }
+
+    private func restoreDiagnostics(
+        result: AppState.SessionSnapshotRestoreDiagnosticOutcome = .restorableMetadataCandidate,
+        propertyID: UUID? = nil,
+        sessionID: UUID? = nil,
+        includeSnapshotID: Bool = true,
+        checksumVerified: Bool = true,
+        rowObjectVerified: Bool = true,
+        parentRemoteVerified: Bool = true,
+        snapshotSchemaVersion: Int? = 1,
+        freshness: String = "same_as_local"
+    ) -> AppState.SessionSnapshotRestoreDiagnosticsResult {
+        AppState.SessionSnapshotRestoreDiagnosticsResult(
+            checkedAt: Date(timeIntervalSinceReferenceDate: 9_400),
+            propertyID: propertyID ?? self.propertyID,
+            sessionID: sessionID ?? self.sessionID,
+            snapshotID: includeSnapshotID ? snapshotID : nil,
+            result: result,
+            failureReason: result == .restorableMetadataCandidate ? nil : "test_restore_blocker",
+            rowFound: true,
+            objectReadable: true,
+            checksumVerified: checksumVerified,
+            byteSizeMatches: checksumVerified,
+            rowObjectVerified: rowObjectVerified,
+            parentRemoteVerified: parentRemoteVerified,
+            snapshotSchemaVersion: snapshotSchemaVersion,
+            snapshotCreatedAt: Date(timeIntervalSinceReferenceDate: 9_000),
+            snapshotGeneratedAt: Date(timeIntervalSinceReferenceDate: 9_000),
+            localSessionExists: true,
+            localSessionStatus: "completed",
+            localShotCount: 3,
+            localIssueCount: 2,
+            localGuidedCount: 0,
+            snapshotShotCount: 3,
+            snapshotIssueCount: 2,
+            snapshotGuidedCount: 0,
+            snapshotMediaManifestCount: 0,
+            snapshotMissingLocalOriginalsCount: 0,
+            snapshotSupabaseStorageMetadataCount: 0,
+            freshness: freshness,
+            mediaRecoveryDiagnostics: .notChecked
+        )
+    }
+
+    private func hydrationPolicy(
+        productionHydrationAllowed: Bool = false,
+        hydrationAvailable: Bool = false
+    ) -> AppState.SessionSnapshotHydrationPolicyDiagnostics {
+        AppState.SessionSnapshotHydrationPolicyDiagnostics(
+            hydrationAvailable: hydrationAvailable,
+            productionHydrationAllowed: productionHydrationAllowed,
+            hydrationMode: productionHydrationAllowed ? "operator_approved_single_session" : "blocked_by_default",
+            hydrationScope: productionHydrationAllowed ? "single_selected_session" : "none",
+            productionHydrationBlockedReason: productionHydrationAllowed ? nil : "production_hydration_gate_disabled"
+        )
+    }
+
+    private func hydrationConfirmation(
+        restore: AppState.SessionSnapshotRestoreDiagnosticsResult,
+        policy: AppState.SessionSnapshotHydrationPolicyDiagnostics,
+        propertyIDText: String? = nil,
+        sessionIDText: String? = nil,
+        snapshotIDText: String? = nil,
+        restoreResult: String? = nil,
+        canHydrate: Bool? = nil
+    ) -> AppState.SessionSnapshotHydrationConfirmation {
+        let resolvedCanHydrate = canHydrate ?? policy.hydrationAvailable
+        return AppState.SessionSnapshotHydrationConfirmation(
+            confirmationRequired: true,
+            canHydrate: resolvedCanHydrate,
+            blockedReason: resolvedCanHydrate ? nil : (policy.productionHydrationBlockedReason ?? "hydration_execution_blocked"),
+            propertyIDText: propertyIDText ?? (restore.propertyID?.uuidString ?? "none"),
+            sessionIDText: sessionIDText ?? (restore.sessionID?.uuidString ?? "none"),
+            snapshotIDText: snapshotIDText ?? (restore.snapshotID?.uuidString ?? "none"),
+            restoreResult: restoreResult ?? restore.result.rawValue,
+            shotCountText: restore.snapshotShotCount.map(String.init) ?? "none",
+            issueCountText: restore.snapshotIssueCount.map(String.init) ?? "none",
+            guidedCountText: restore.snapshotGuidedCount.map(String.init) ?? "none",
+            messageText: "hydration confirmation test fixture"
+        )
+    }
+
+    private func hydrationReadinessPreflightInputs() -> (
+        upload: AppState.SessionSnapshotUploadDiagnostics,
+        candidatePackage: AppState.ProductionSingleSessionActivationCandidatePackage,
+        validation: AppState.ProductionSingleSessionActivationReadinessValidation,
+        restore: AppState.SessionSnapshotRestoreDiagnosticsResult,
+        policy: AppState.SessionSnapshotHydrationPolicyDiagnostics,
+        confirmation: AppState.SessionSnapshotHydrationConfirmation
+    ) {
+        let activationInputs = activationReadinessValidationInputs()
+        let validation = AppState.makeProductionSingleSessionActivationReadinessValidation(
+            checkedAt: Date(timeIntervalSinceReferenceDate: 9_300),
+            candidatePackage: activationInputs.candidatePackage,
+            gateDiagnostics: activationInputs.gate,
+            activationResult: activationInputs.activation
+        )
+        let restore = restoreDiagnostics()
+        let policy = hydrationPolicy()
+        let confirmation = hydrationConfirmation(restore: restore, policy: policy)
+        return (activationInputs.upload, activationInputs.candidatePackage, validation, restore, policy, confirmation)
     }
 
     func testAllowlistedStagingCandidateBuildsOverlay() {
@@ -2675,6 +2817,344 @@ final class Phase2C26OCanonicalCandidateConsumptionTests: XCTestCase {
         XCTAssertTrue(text.contains("no activation occurred"))
         XCTAssertTrue(text.contains("no overlay was activated"))
         XCTAssertTrue(text.contains("no hydration occurred"))
+        XCTAssertTrue(text.contains("no reads were switched"))
+        XCTAssertTrue(text.contains("no local or remote state was written"))
+        XCTAssertTrue(text.contains("no fallback was removed"))
+        XCTAssertTrue(text.contains("export, seal, sync, media, iCloud, RLS, schema, and data behavior is unchanged"))
+    }
+
+    func testProductionSingleSessionHydrationReadinessPreflightReadyForReviewOnly() {
+        let inputs = hydrationReadinessPreflightInputs()
+
+        let preflight = AppState.makeProductionSingleSessionHydrationReadinessPreflight(
+            checkedAt: Date(timeIntervalSinceReferenceDate: 9_500),
+            activationReadiness: inputs.validation,
+            candidatePackage: inputs.candidatePackage,
+            restoreDiagnostics: inputs.restore,
+            hydrationPolicy: inputs.policy,
+            hydrationConfirmation: inputs.confirmation
+        )
+
+        XCTAssertEqual(preflight.state, .readyForHydrationReadinessReviewOnly)
+        XCTAssertTrue(preflight.blockers.isEmpty)
+        XCTAssertTrue(preflight.activationReadinessReviewOnly)
+        XCTAssertTrue(preflight.exactSingleScopeSelected)
+        XCTAssertEqual(preflight.activationReadinessScope, preflight.candidatePackageScope)
+        XCTAssertEqual(preflight.candidatePackageScope, preflight.restoreDiagnosticsScope)
+        XCTAssertTrue(preflight.restoreDiagnosticsScopeMatchesPackage)
+        XCTAssertTrue(preflight.hydrationConfirmationMatchesScope)
+        XCTAssertEqual(preflight.restoreResult, .restorableMetadataCandidate)
+        XCTAssertTrue(preflight.snapshotIDPresent)
+        XCTAssertTrue(preflight.checksumVerified)
+        XCTAssertTrue(preflight.rowObjectVerified)
+        XCTAssertTrue(preflight.parentRemoteVerified)
+        XCTAssertTrue(preflight.snapshotSchemaSupported)
+        XCTAssertTrue(preflight.freshnessNotLocalNewer)
+        XCTAssertTrue(preflight.productionHydrationDisabledNonWriting)
+        XCTAssertEqual(preflight.productionHydrationBlockedReason, "production_hydration_gate_disabled")
+        XCTAssertTrue(preflight.hydrationExecutionBlocked)
+        XCTAssertFalse(preflight.hydrationPerformed)
+        XCTAssertEqual(preflight.activeSource, .local)
+        XCTAssertFalse(preflight.activationPerformed)
+        XCTAssertFalse(preflight.persistencePerformed)
+        XCTAssertTrue(preflight.fallbackRetained)
+        XCTAssertTrue(preflight.rollbackReady)
+    }
+
+    func testProductionSingleSessionHydrationReadinessPreflightReportsExplicitBlockedConditions() {
+        let inputs = hydrationReadinessPreflightInputs()
+
+        let preflight = AppState.makeProductionSingleSessionHydrationReadinessPreflight(
+            activationReadiness: inputs.validation,
+            candidatePackage: inputs.candidatePackage,
+            restoreDiagnostics: inputs.restore,
+            hydrationPolicy: inputs.policy,
+            hydrationConfirmation: inputs.confirmation
+        )
+        let text = AppState.productionSingleSessionHydrationReadinessPreflightReportText(preflight)
+
+        XCTAssertTrue(preflight.blockedConditions.contains("production_hydration_disabled_non_writing"))
+        XCTAssertTrue(preflight.blockedConditions.contains("hydration_execution_blocked"))
+        XCTAssertTrue(preflight.blockedConditions.contains("actual_activation_blocked"))
+        XCTAssertTrue(preflight.blockedConditions.contains("production_canonical_reads_disabled"))
+        XCTAssertTrue(preflight.blockedConditions.contains("local_remote_state_writes_blocked"))
+        XCTAssertTrue(text.contains("- blocked_conditions:"))
+        XCTAssertTrue(text.contains("production_hydration_disabled_non_writing"))
+        XCTAssertTrue(text.contains("local_remote_state_writes_blocked"))
+        XCTAssertTrue(text.contains("- production_hydration_disabled_non_writing: true"))
+        XCTAssertTrue(text.contains("- hydration_execution_blocked: true"))
+        XCTAssertTrue(text.contains("production hydration remains disabled and non-writing"))
+    }
+
+    func testProductionSingleSessionHydrationReadinessPreflightRequires27KReady() {
+        let inputs = hydrationReadinessPreflightInputs()
+        let validation = activationReadinessValidation(
+            from: inputs.validation,
+            state: .blocked,
+            blockers: ["activation_readiness_test_blocker"]
+        )
+
+        let preflight = AppState.makeProductionSingleSessionHydrationReadinessPreflight(
+            activationReadiness: validation,
+            candidatePackage: inputs.candidatePackage,
+            restoreDiagnostics: inputs.restore,
+            hydrationPolicy: inputs.policy,
+            hydrationConfirmation: inputs.confirmation
+        )
+
+        XCTAssertEqual(preflight.state, .blocked)
+        XCTAssertFalse(preflight.activationReadinessReviewOnly)
+        XCTAssertTrue(preflight.blockers.contains("activation_readiness_validation_not_review_only"))
+    }
+
+    func testProductionSingleSessionHydrationReadinessPreflightScopeMismatchBlocks() {
+        let inputs = hydrationReadinessPreflightInputs()
+        let restore = restoreDiagnostics(propertyID: UUID(uuidString: "55555555-5555-5555-5555-555555555555")!)
+        let confirmation = hydrationConfirmation(restore: restore, policy: inputs.policy)
+
+        let preflight = AppState.makeProductionSingleSessionHydrationReadinessPreflight(
+            activationReadiness: inputs.validation,
+            candidatePackage: inputs.candidatePackage,
+            restoreDiagnostics: restore,
+            hydrationPolicy: inputs.policy,
+            hydrationConfirmation: confirmation
+        )
+
+        XCTAssertEqual(preflight.state, .blocked)
+        XCTAssertFalse(preflight.restoreDiagnosticsScopeMatchesPackage)
+        XCTAssertTrue(preflight.blockers.contains("hydration_readiness_scope_mismatch"))
+    }
+
+    func testProductionSingleSessionHydrationReadinessPreflightRestoreNotRestorableBlocks() {
+        let inputs = hydrationReadinessPreflightInputs()
+        let restore = restoreDiagnostics(result: .objectMissing)
+        let confirmation = hydrationConfirmation(restore: restore, policy: inputs.policy)
+
+        let preflight = AppState.makeProductionSingleSessionHydrationReadinessPreflight(
+            activationReadiness: inputs.validation,
+            candidatePackage: inputs.candidatePackage,
+            restoreDiagnostics: restore,
+            hydrationPolicy: inputs.policy,
+            hydrationConfirmation: confirmation
+        )
+
+        XCTAssertEqual(preflight.state, .blocked)
+        XCTAssertEqual(preflight.restoreResult, .objectMissing)
+        XCTAssertTrue(preflight.blockers.contains("restore_diagnostics_not_restorable"))
+    }
+
+    func testProductionSingleSessionHydrationReadinessPreflightMissingSnapshotIDBlocks() {
+        let inputs = hydrationReadinessPreflightInputs()
+        let restore = restoreDiagnostics(includeSnapshotID: false)
+        let confirmation = hydrationConfirmation(restore: restore, policy: inputs.policy)
+
+        let preflight = AppState.makeProductionSingleSessionHydrationReadinessPreflight(
+            activationReadiness: inputs.validation,
+            candidatePackage: inputs.candidatePackage,
+            restoreDiagnostics: restore,
+            hydrationPolicy: inputs.policy,
+            hydrationConfirmation: confirmation
+        )
+
+        XCTAssertEqual(preflight.state, .blocked)
+        XCTAssertFalse(preflight.snapshotIDPresent)
+        XCTAssertTrue(preflight.blockers.contains("snapshot_id_required"))
+    }
+
+    func testProductionSingleSessionHydrationReadinessPreflightChecksumFailureBlocks() {
+        let inputs = hydrationReadinessPreflightInputs()
+        let restore = restoreDiagnostics(checksumVerified: false)
+        let confirmation = hydrationConfirmation(restore: restore, policy: inputs.policy)
+
+        let preflight = AppState.makeProductionSingleSessionHydrationReadinessPreflight(
+            activationReadiness: inputs.validation,
+            candidatePackage: inputs.candidatePackage,
+            restoreDiagnostics: restore,
+            hydrationPolicy: inputs.policy,
+            hydrationConfirmation: confirmation
+        )
+
+        XCTAssertEqual(preflight.state, .blocked)
+        XCTAssertFalse(preflight.checksumVerified)
+        XCTAssertTrue(preflight.blockers.contains("restore_checksum_not_verified"))
+    }
+
+    func testProductionSingleSessionHydrationReadinessPreflightParentAndRowVerificationFailureBlocks() {
+        let inputs = hydrationReadinessPreflightInputs()
+        let restore = restoreDiagnostics(rowObjectVerified: false, parentRemoteVerified: false)
+        let confirmation = hydrationConfirmation(restore: restore, policy: inputs.policy)
+
+        let preflight = AppState.makeProductionSingleSessionHydrationReadinessPreflight(
+            activationReadiness: inputs.validation,
+            candidatePackage: inputs.candidatePackage,
+            restoreDiagnostics: restore,
+            hydrationPolicy: inputs.policy,
+            hydrationConfirmation: confirmation
+        )
+
+        XCTAssertEqual(preflight.state, .blocked)
+        XCTAssertFalse(preflight.rowObjectVerified)
+        XCTAssertFalse(preflight.parentRemoteVerified)
+        XCTAssertTrue(preflight.blockers.contains("restore_row_object_not_verified"))
+        XCTAssertTrue(preflight.blockers.contains("restore_parent_remote_not_verified"))
+    }
+
+    func testProductionSingleSessionHydrationReadinessPreflightUnsupportedSchemaBlocks() {
+        let inputs = hydrationReadinessPreflightInputs()
+        let restore = restoreDiagnostics(snapshotSchemaVersion: 2)
+        let confirmation = hydrationConfirmation(restore: restore, policy: inputs.policy)
+
+        let preflight = AppState.makeProductionSingleSessionHydrationReadinessPreflight(
+            activationReadiness: inputs.validation,
+            candidatePackage: inputs.candidatePackage,
+            restoreDiagnostics: restore,
+            hydrationPolicy: inputs.policy,
+            hydrationConfirmation: confirmation
+        )
+
+        XCTAssertEqual(preflight.state, .blocked)
+        XCTAssertFalse(preflight.snapshotSchemaSupported)
+        XCTAssertTrue(preflight.blockers.contains("restore_snapshot_schema_not_supported"))
+    }
+
+    func testProductionSingleSessionHydrationReadinessPreflightLocalNewerFreshnessBlocks() {
+        let inputs = hydrationReadinessPreflightInputs()
+        let restore = restoreDiagnostics(freshness: "local_newer")
+        let confirmation = hydrationConfirmation(restore: restore, policy: inputs.policy)
+
+        let preflight = AppState.makeProductionSingleSessionHydrationReadinessPreflight(
+            activationReadiness: inputs.validation,
+            candidatePackage: inputs.candidatePackage,
+            restoreDiagnostics: restore,
+            hydrationPolicy: inputs.policy,
+            hydrationConfirmation: confirmation
+        )
+
+        XCTAssertEqual(preflight.state, .blocked)
+        XCTAssertFalse(preflight.freshnessNotLocalNewer)
+        XCTAssertTrue(preflight.blockers.contains("restore_freshness_local_newer"))
+    }
+
+    func testProductionSingleSessionHydrationReadinessPreflightProductionHydrationEnabledBlocks() {
+        let inputs = hydrationReadinessPreflightInputs()
+        let policy = hydrationPolicy(productionHydrationAllowed: true, hydrationAvailable: true)
+        let confirmation = hydrationConfirmation(restore: inputs.restore, policy: policy)
+
+        let preflight = AppState.makeProductionSingleSessionHydrationReadinessPreflight(
+            activationReadiness: inputs.validation,
+            candidatePackage: inputs.candidatePackage,
+            restoreDiagnostics: inputs.restore,
+            hydrationPolicy: policy,
+            hydrationConfirmation: confirmation
+        )
+
+        XCTAssertEqual(preflight.state, .blocked)
+        XCTAssertFalse(preflight.productionHydrationDisabledNonWriting)
+        XCTAssertFalse(preflight.hydrationExecutionBlocked)
+        XCTAssertTrue(preflight.blockers.contains("production_hydration_must_remain_disabled"))
+        XCTAssertTrue(preflight.blockers.contains("hydration_execution_must_remain_blocked"))
+    }
+
+    func testProductionSingleSessionHydrationReadinessPreflightActivationPerformedBlocks() {
+        let inputs = hydrationReadinessPreflightInputs()
+        let validation = activationReadinessValidation(
+            from: inputs.validation,
+            activationPerformed: true
+        )
+
+        let preflight = AppState.makeProductionSingleSessionHydrationReadinessPreflight(
+            activationReadiness: validation,
+            candidatePackage: inputs.candidatePackage,
+            restoreDiagnostics: inputs.restore,
+            hydrationPolicy: inputs.policy,
+            hydrationConfirmation: inputs.confirmation
+        )
+
+        XCTAssertEqual(preflight.state, .blocked)
+        XCTAssertTrue(preflight.activationPerformed)
+        XCTAssertTrue(preflight.blockers.contains("activation_performed_must_be_false"))
+    }
+
+    func testProductionSingleSessionHydrationReadinessPreflightPersistencePerformedBlocks() {
+        let inputs = hydrationReadinessPreflightInputs()
+        let validation = activationReadinessValidation(
+            from: inputs.validation,
+            persistencePerformed: true
+        )
+
+        let preflight = AppState.makeProductionSingleSessionHydrationReadinessPreflight(
+            activationReadiness: validation,
+            candidatePackage: inputs.candidatePackage,
+            restoreDiagnostics: inputs.restore,
+            hydrationPolicy: inputs.policy,
+            hydrationConfirmation: inputs.confirmation
+        )
+
+        XCTAssertEqual(preflight.state, .blocked)
+        XCTAssertTrue(preflight.persistencePerformed)
+        XCTAssertTrue(preflight.blockers.contains("persistence_performed_must_be_false"))
+    }
+
+    func testProductionSingleSessionHydrationReadinessPreflightMissingFallbackBlocks() {
+        let inputs = hydrationReadinessPreflightInputs()
+        let validation = activationReadinessValidation(
+            from: inputs.validation,
+            fallbackRetained: false
+        )
+
+        let preflight = AppState.makeProductionSingleSessionHydrationReadinessPreflight(
+            activationReadiness: validation,
+            candidatePackage: inputs.candidatePackage,
+            restoreDiagnostics: inputs.restore,
+            hydrationPolicy: inputs.policy,
+            hydrationConfirmation: inputs.confirmation
+        )
+
+        XCTAssertEqual(preflight.state, .blocked)
+        XCTAssertFalse(preflight.fallbackRetained)
+        XCTAssertTrue(preflight.blockers.contains("local_fallback_unavailable"))
+    }
+
+    func testProductionSingleSessionHydrationReadinessPreflightMissingRollbackBlocks() {
+        let inputs = hydrationReadinessPreflightInputs()
+        let validation = activationReadinessValidation(
+            from: inputs.validation,
+            rollbackReady: false
+        )
+
+        let preflight = AppState.makeProductionSingleSessionHydrationReadinessPreflight(
+            activationReadiness: validation,
+            candidatePackage: inputs.candidatePackage,
+            restoreDiagnostics: inputs.restore,
+            hydrationPolicy: inputs.policy,
+            hydrationConfirmation: inputs.confirmation
+        )
+
+        XCTAssertEqual(preflight.state, .blocked)
+        XCTAssertFalse(preflight.rollbackReady)
+        XCTAssertTrue(preflight.blockers.contains("rollback_not_ready"))
+    }
+
+    func testProductionSingleSessionHydrationReadinessPreflightReportIncludesNoBehaviorChanges() {
+        let inputs = hydrationReadinessPreflightInputs()
+        let preflight = AppState.makeProductionSingleSessionHydrationReadinessPreflight(
+            activationReadiness: inputs.validation,
+            candidatePackage: inputs.candidatePackage,
+            restoreDiagnostics: inputs.restore,
+            hydrationPolicy: inputs.policy,
+            hydrationConfirmation: inputs.confirmation
+        )
+
+        let text = AppState.productionSingleSessionHydrationReadinessPreflightReportText(preflight)
+
+        XCTAssertTrue(text.contains("Production Single-Session Hydration Readiness Preflight"))
+        XCTAssertTrue(text.contains("- hydration_readiness_preflight_state: ready_for_hydration_readiness_review_only"))
+        XCTAssertTrue(text.contains("- hydration_performed: false"))
+        XCTAssertTrue(text.contains("No hydration occurred"))
+        XCTAssertTrue(text.contains("production hydration remains disabled and non-writing"))
+        XCTAssertTrue(text.contains("no production reads were enabled"))
+        XCTAssertTrue(text.contains("no activation occurred"))
+        XCTAssertTrue(text.contains("no overlay was activated"))
         XCTAssertTrue(text.contains("no reads were switched"))
         XCTAssertTrue(text.contains("no local or remote state was written"))
         XCTAssertTrue(text.contains("no fallback was removed"))
