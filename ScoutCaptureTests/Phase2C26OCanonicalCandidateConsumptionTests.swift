@@ -475,6 +475,95 @@ final class Phase2C26OCanonicalCandidateConsumptionTests: XCTestCase {
         return (upload, package, record, audit, persistence, gate, activation)
     }
 
+    private func activationCandidatePackage(
+        from package: AppState.ProductionSingleSessionActivationCandidatePackage,
+        state: AppState.ProductionSingleSessionActivationCandidatePackageState? = nil,
+        blockers: [String]? = nil,
+        productionWideDisabledConfirmation: Bool? = nil,
+        productionSingleSessionGateDisabled: Bool? = nil,
+        actualActivationRemainsBlocked: Bool? = nil,
+        candidateEvidenceReady: Bool? = nil,
+        overlayEvidenceReady: Bool? = nil,
+        comparisonEvidenceMatchesLocal: Bool? = nil,
+        fallbackRetained: Bool? = nil,
+        rollbackReady: Bool? = nil,
+        activeSource: AppState.CanonicalCandidateActivationSource? = nil,
+        activationPerformed: Bool? = nil,
+        persistencePerformed: Bool? = nil
+    ) -> AppState.ProductionSingleSessionActivationCandidatePackage {
+        AppState.ProductionSingleSessionActivationCandidatePackage(
+            checkedAt: package.checkedAt,
+            state: state ?? package.state,
+            blockers: blockers ?? package.blockers,
+            packageScope: package.packageScope,
+            decisionRecordScope: package.decisionRecordScope,
+            activationPreflightScope: package.activationPreflightScope,
+            persistencePreflightScope: package.persistencePreflightScope,
+            gateSelectedScope: package.gateSelectedScope,
+            gateApprovedScope: package.gateApprovedScope,
+            activationResultScope: package.activationResultScope,
+            dryRunState: package.dryRunState,
+            decisionRecordReady: package.decisionRecordReady,
+            activationPreflightManualReviewOnly: package.activationPreflightManualReviewOnly,
+            operatorRecordPersistencePreflightReviewOnly: package.operatorRecordPersistencePreflightReviewOnly,
+            exactSingleScopeSelected: package.exactSingleScopeSelected,
+            productionWideDisabledConfirmation: productionWideDisabledConfirmation ?? package.productionWideDisabledConfirmation,
+            productionSingleSessionGateDisabled: productionSingleSessionGateDisabled ?? package.productionSingleSessionGateDisabled,
+            actualActivationRemainsBlocked: actualActivationRemainsBlocked ?? package.actualActivationRemainsBlocked,
+            actualActivationBlockers: package.actualActivationBlockers,
+            candidateEvidenceReady: candidateEvidenceReady ?? package.candidateEvidenceReady,
+            overlayEvidenceReady: overlayEvidenceReady ?? package.overlayEvidenceReady,
+            comparisonEvidenceMatchesLocal: comparisonEvidenceMatchesLocal ?? package.comparisonEvidenceMatchesLocal,
+            fallbackRetained: fallbackRetained ?? package.fallbackRetained,
+            rollbackReady: rollbackReady ?? package.rollbackReady,
+            activeSource: activeSource ?? package.activeSource,
+            activationPerformed: activationPerformed ?? package.activationPerformed,
+            persistencePerformed: persistencePerformed ?? package.persistencePerformed,
+            noBehaviorChangedText: package.noBehaviorChangedText
+        )
+    }
+
+    private func activationResult(
+        from result: AppState.CanonicalCandidateActivationResult,
+        allowed: Bool? = nil,
+        activeSource: AppState.CanonicalCandidateActivationSource? = nil,
+        productionBlocked: Bool? = nil
+    ) -> AppState.CanonicalCandidateActivationResult {
+        AppState.CanonicalCandidateActivationResult(
+            checkedAt: result.checkedAt,
+            allowed: allowed ?? result.allowed,
+            blockedReason: (allowed ?? result.allowed) ? nil : result.blockedReason,
+            activeSource: activeSource ?? result.activeSource,
+            rollbackSource: result.rollbackSource,
+            activationScope: result.activationScope,
+            propertyID: result.propertyID,
+            sessionID: result.sessionID,
+            rollbackAvailable: result.rollbackAvailable,
+            productionBlocked: productionBlocked ?? result.productionBlocked,
+            noBehaviorChangedText: result.noBehaviorChangedText
+        )
+    }
+
+    private func activationReadinessValidationInputs(
+        upload: AppState.SessionSnapshotUploadDiagnostics? = nil
+    ) -> (
+        upload: AppState.SessionSnapshotUploadDiagnostics,
+        candidatePackage: AppState.ProductionSingleSessionActivationCandidatePackage,
+        gate: AppState.ProductionSingleSessionActivationGateDiagnostics,
+        activation: AppState.CanonicalCandidateActivationResult
+    ) {
+        let inputs = activationCandidatePackageInputs(upload: upload)
+        let candidatePackage = AppState.makeProductionSingleSessionActivationCandidatePackage(
+            dryRunPackage: inputs.package,
+            decisionRecord: inputs.record,
+            activationPreflight: inputs.audit,
+            operatorRecordPersistencePreflight: inputs.persistence,
+            gateDiagnostics: inputs.gate,
+            activationResult: inputs.activation
+        )
+        return (inputs.upload, candidatePackage, inputs.gate, inputs.activation)
+    }
+
     func testAllowlistedStagingCandidateBuildsOverlay() {
         let result = overlay()
 
@@ -2348,6 +2437,240 @@ final class Phase2C26OCanonicalCandidateConsumptionTests: XCTestCase {
         XCTAssertTrue(text.contains("- actual_activation_remains_blocked: true"))
         XCTAssertTrue(text.contains("- activation_performed: false"))
         XCTAssertTrue(text.contains("- persistence_performed: false"))
+        XCTAssertTrue(text.contains("No production reads were enabled"))
+        XCTAssertTrue(text.contains("no activation occurred"))
+        XCTAssertTrue(text.contains("no overlay was activated"))
+        XCTAssertTrue(text.contains("no hydration occurred"))
+        XCTAssertTrue(text.contains("no reads were switched"))
+        XCTAssertTrue(text.contains("no local or remote state was written"))
+        XCTAssertTrue(text.contains("no fallback was removed"))
+        XCTAssertTrue(text.contains("export, seal, sync, media, iCloud, RLS, schema, and data behavior is unchanged"))
+    }
+
+    func testProductionSingleSessionActivationReadinessValidationReadyForReviewOnly() {
+        let inputs = activationReadinessValidationInputs()
+
+        let validation = AppState.makeProductionSingleSessionActivationReadinessValidation(
+            checkedAt: Date(timeIntervalSinceReferenceDate: 9_300),
+            candidatePackage: inputs.candidatePackage,
+            gateDiagnostics: inputs.gate,
+            activationResult: inputs.activation
+        )
+
+        XCTAssertEqual(validation.state, .readyForActivationReadinessReviewOnly)
+        XCTAssertTrue(validation.blockers.isEmpty)
+        XCTAssertTrue(validation.candidatePackageReadyForManualReviewOnly)
+        XCTAssertTrue(validation.exactSingleScopeSelected)
+        XCTAssertEqual(validation.candidatePackageScope, validation.gateSelectedScope)
+        XCTAssertEqual(validation.candidatePackageScope, validation.gateApprovedScope)
+        XCTAssertEqual(validation.candidatePackageScope, validation.activationResultScope)
+        XCTAssertTrue(validation.productionWideDisabledConfirmation)
+        XCTAssertTrue(validation.productionSingleSessionGateDisabled)
+        XCTAssertTrue(validation.actualActivationRemainsBlocked)
+        XCTAssertTrue(validation.actualActivationBlockers.contains("production_single_session_canonical_activation_disabled"))
+        XCTAssertTrue(validation.actualActivationBlockers.contains("production_canonical_candidate_activation_blocked"))
+        XCTAssertEqual(validation.activeSource, .local)
+        XCTAssertFalse(validation.activationPerformed)
+        XCTAssertFalse(validation.persistencePerformed)
+        XCTAssertFalse(validation.hydrationPerformed)
+        XCTAssertTrue(validation.productionHydrationDisabledConfirmation)
+        XCTAssertTrue(validation.fallbackRetained)
+        XCTAssertTrue(validation.rollbackReady)
+        XCTAssertTrue(validation.candidateEvidenceReady)
+        XCTAssertTrue(validation.overlayEvidenceReady)
+        XCTAssertTrue(validation.comparisonEvidenceMatchesLocal)
+    }
+
+    func testProductionSingleSessionActivationReadinessValidationRequires27JReady() {
+        let inputs = activationReadinessValidationInputs()
+        let candidatePackage = activationCandidatePackage(
+            from: inputs.candidatePackage,
+            state: .blocked,
+            blockers: ["candidate_package_test_blocker"]
+        )
+
+        let validation = AppState.makeProductionSingleSessionActivationReadinessValidation(
+            candidatePackage: candidatePackage,
+            gateDiagnostics: inputs.gate,
+            activationResult: inputs.activation
+        )
+
+        XCTAssertEqual(validation.state, .blocked)
+        XCTAssertFalse(validation.candidatePackageReadyForManualReviewOnly)
+        XCTAssertTrue(validation.blockers.contains("activation_candidate_package_not_manual_review_only"))
+    }
+
+    func testProductionSingleSessionActivationReadinessValidationGateEnabledBlocks() {
+        let inputs = activationReadinessValidationInputs()
+        let enabledGate = AppState.makeProductionSingleSessionActivationGateDiagnostics(
+            policy: singleSessionGatePolicy(enabled: true),
+            approval: approvedSingleSessionApproval(upload: inputs.upload),
+            targetClassification: .approvedProductionValidation,
+            diagnostics: inputs.upload
+        )
+
+        let validation = AppState.makeProductionSingleSessionActivationReadinessValidation(
+            candidatePackage: inputs.candidatePackage,
+            gateDiagnostics: enabledGate,
+            activationResult: inputs.activation
+        )
+
+        XCTAssertEqual(validation.state, .blocked)
+        XCTAssertFalse(validation.productionSingleSessionGateDisabled)
+        XCTAssertFalse(validation.actualActivationRemainsBlocked)
+        XCTAssertTrue(validation.blockers.contains("production_single_session_activation_gate_must_remain_disabled"))
+        XCTAssertTrue(validation.blockers.contains("actual_activation_must_remain_blocked"))
+    }
+
+    func testProductionSingleSessionActivationReadinessValidationActualActivationAllowedBlocks() {
+        let inputs = activationReadinessValidationInputs()
+        let activation = activationResult(
+            from: inputs.activation,
+            allowed: true,
+            activeSource: .local
+        )
+
+        let validation = AppState.makeProductionSingleSessionActivationReadinessValidation(
+            candidatePackage: inputs.candidatePackage,
+            gateDiagnostics: inputs.gate,
+            activationResult: activation
+        )
+
+        XCTAssertEqual(validation.state, .blocked)
+        XCTAssertFalse(validation.actualActivationRemainsBlocked)
+        XCTAssertTrue(validation.activationPerformed)
+        XCTAssertTrue(validation.blockers.contains("actual_activation_must_remain_blocked"))
+        XCTAssertTrue(validation.blockers.contains("activation_performed_must_be_false"))
+    }
+
+    func testProductionSingleSessionActivationReadinessValidationActiveSourceNotLocalBlocks() {
+        let inputs = activationReadinessValidationInputs()
+        let activation = activationResult(
+            from: inputs.activation,
+            allowed: false,
+            activeSource: .canonicalCandidate
+        )
+
+        let validation = AppState.makeProductionSingleSessionActivationReadinessValidation(
+            candidatePackage: inputs.candidatePackage,
+            gateDiagnostics: inputs.gate,
+            activationResult: activation
+        )
+
+        XCTAssertEqual(validation.state, .blocked)
+        XCTAssertEqual(validation.activeSource, .canonicalCandidate)
+        XCTAssertTrue(validation.activationPerformed)
+        XCTAssertTrue(validation.blockers.contains("active_source_must_remain_local"))
+        XCTAssertTrue(validation.blockers.contains("activation_performed_must_be_false"))
+    }
+
+    func testProductionSingleSessionActivationReadinessValidationActivationPerformedBlocks() {
+        let inputs = activationReadinessValidationInputs()
+        let candidatePackage = activationCandidatePackage(
+            from: inputs.candidatePackage,
+            activationPerformed: true
+        )
+
+        let validation = AppState.makeProductionSingleSessionActivationReadinessValidation(
+            candidatePackage: candidatePackage,
+            gateDiagnostics: inputs.gate,
+            activationResult: inputs.activation
+        )
+
+        XCTAssertEqual(validation.state, .blocked)
+        XCTAssertTrue(validation.activationPerformed)
+        XCTAssertTrue(validation.blockers.contains("activation_performed_must_be_false"))
+    }
+
+    func testProductionSingleSessionActivationReadinessValidationPersistencePerformedBlocks() {
+        let inputs = activationReadinessValidationInputs()
+        let candidatePackage = activationCandidatePackage(
+            from: inputs.candidatePackage,
+            persistencePerformed: true
+        )
+
+        let validation = AppState.makeProductionSingleSessionActivationReadinessValidation(
+            candidatePackage: candidatePackage,
+            gateDiagnostics: inputs.gate,
+            activationResult: inputs.activation
+        )
+
+        XCTAssertEqual(validation.state, .blocked)
+        XCTAssertTrue(validation.persistencePerformed)
+        XCTAssertTrue(validation.blockers.contains("persistence_performed_must_be_false"))
+    }
+
+    func testProductionSingleSessionActivationReadinessValidationMissingFallbackBlocks() {
+        let inputs = activationReadinessValidationInputs()
+        let candidatePackage = activationCandidatePackage(
+            from: inputs.candidatePackage,
+            fallbackRetained: false
+        )
+
+        let validation = AppState.makeProductionSingleSessionActivationReadinessValidation(
+            candidatePackage: candidatePackage,
+            gateDiagnostics: inputs.gate,
+            activationResult: inputs.activation
+        )
+
+        XCTAssertEqual(validation.state, .blocked)
+        XCTAssertFalse(validation.fallbackRetained)
+        XCTAssertTrue(validation.blockers.contains("local_fallback_unavailable"))
+    }
+
+    func testProductionSingleSessionActivationReadinessValidationMissingRollbackBlocks() {
+        let inputs = activationReadinessValidationInputs()
+        let candidatePackage = activationCandidatePackage(
+            from: inputs.candidatePackage,
+            rollbackReady: false
+        )
+
+        let validation = AppState.makeProductionSingleSessionActivationReadinessValidation(
+            candidatePackage: candidatePackage,
+            gateDiagnostics: inputs.gate,
+            activationResult: inputs.activation
+        )
+
+        XCTAssertEqual(validation.state, .blocked)
+        XCTAssertFalse(validation.rollbackReady)
+        XCTAssertTrue(validation.blockers.contains("rollback_not_ready"))
+    }
+
+    func testProductionSingleSessionActivationReadinessValidationProductionWideEnabledBlocks() {
+        let inputs = activationReadinessValidationInputs()
+        let candidatePackage = activationCandidatePackage(
+            from: inputs.candidatePackage,
+            productionWideDisabledConfirmation: false
+        )
+
+        let validation = AppState.makeProductionSingleSessionActivationReadinessValidation(
+            candidatePackage: candidatePackage,
+            gateDiagnostics: inputs.gate,
+            activationResult: inputs.activation
+        )
+
+        XCTAssertEqual(validation.state, .blocked)
+        XCTAssertFalse(validation.productionWideDisabledConfirmation)
+        XCTAssertTrue(validation.blockers.contains("production_wide_canonical_reads_not_disabled"))
+    }
+
+    func testProductionSingleSessionActivationReadinessValidationReportIncludesNoBehaviorChanges() {
+        let inputs = activationReadinessValidationInputs()
+        let validation = AppState.makeProductionSingleSessionActivationReadinessValidation(
+            candidatePackage: inputs.candidatePackage,
+            gateDiagnostics: inputs.gate,
+            activationResult: inputs.activation
+        )
+
+        let text = AppState.productionSingleSessionActivationReadinessValidationReportText(validation)
+
+        XCTAssertTrue(text.contains("Production Single-Session Activation Readiness Validation"))
+        XCTAssertTrue(text.contains("- activation_readiness_validation_state: ready_for_activation_readiness_review_only"))
+        XCTAssertTrue(text.contains("- production_single_session_gate_disabled: true"))
+        XCTAssertTrue(text.contains("- actual_activation_remains_blocked: true"))
+        XCTAssertTrue(text.contains("- activation_performed: false"))
+        XCTAssertTrue(text.contains("- persistence_performed: false"))
+        XCTAssertTrue(text.contains("- hydration_performed: false"))
         XCTAssertTrue(text.contains("No production reads were enabled"))
         XCTAssertTrue(text.contains("no activation occurred"))
         XCTAssertTrue(text.contains("no overlay was activated"))

@@ -2419,6 +2419,11 @@ final class AppState: ObservableObject {
         case readyForActivationCandidateManualReviewOnly = "ready_for_activation_candidate_manual_review_only"
     }
 
+    enum ProductionSingleSessionActivationReadinessValidationState: String, CaseIterable, Equatable {
+        case blocked
+        case readyForActivationReadinessReviewOnly = "ready_for_activation_readiness_review_only"
+    }
+
     enum ProductionCohortValidationState: String, CaseIterable, Equatable {
         case notValidated = "not_validated"
         case verified
@@ -2716,6 +2721,33 @@ final class AppState: ObservableObject {
         let activeSource: CanonicalCandidateActivationSource
         let activationPerformed: Bool
         let persistencePerformed: Bool
+        let noBehaviorChangedText: String
+    }
+
+    struct ProductionSingleSessionActivationReadinessValidation: Equatable {
+        let checkedAt: Date
+        let state: ProductionSingleSessionActivationReadinessValidationState
+        let blockers: [String]
+        let candidatePackageScope: ProductionCohortApprovalScope
+        let gateSelectedScope: ProductionCohortApprovalScope
+        let gateApprovedScope: ProductionCohortApprovalScope
+        let activationResultScope: ProductionCohortApprovalScope
+        let candidatePackageReadyForManualReviewOnly: Bool
+        let exactSingleScopeSelected: Bool
+        let productionWideDisabledConfirmation: Bool
+        let productionSingleSessionGateDisabled: Bool
+        let actualActivationRemainsBlocked: Bool
+        let actualActivationBlockers: [String]
+        let activeSource: CanonicalCandidateActivationSource
+        let activationPerformed: Bool
+        let persistencePerformed: Bool
+        let hydrationPerformed: Bool
+        let productionHydrationDisabledConfirmation: Bool
+        let fallbackRetained: Bool
+        let rollbackReady: Bool
+        let candidateEvidenceReady: Bool
+        let overlayEvidenceReady: Bool
+        let comparisonEvidenceMatchesLocal: Bool
         let noBehaviorChangedText: String
     }
 
@@ -22336,6 +22368,199 @@ final class AppState: ObservableObject {
         lines.append("- activation_performed: \(package.activationPerformed)")
         lines.append("- persistence_performed: \(package.persistencePerformed)")
         lines.append(package.noBehaviorChangedText)
+        return lines.joined(separator: "\n")
+    }
+
+    nonisolated static func makeProductionSingleSessionActivationReadinessValidation(
+        checkedAt: Date = Date(),
+        candidatePackage package: ProductionSingleSessionActivationCandidatePackage,
+        gateDiagnostics gate: ProductionSingleSessionActivationGateDiagnostics,
+        activationResult: CanonicalCandidateActivationResult,
+        hydrationPolicy: SessionSnapshotHydrationPolicyDiagnostics? = nil
+    ) -> ProductionSingleSessionActivationReadinessValidation {
+        let activationResultScope = ProductionCohortApprovalScope(
+            orgID: package.packageScope.orgID,
+            propertyID: activationResult.propertyID,
+            sessionID: activationResult.sessionID
+        )
+        func scopesAreEqual(
+            _ lhs: ProductionCohortApprovalScope,
+            _ rhs: ProductionCohortApprovalScope
+        ) -> Bool {
+            lhs.orgID == rhs.orgID &&
+                lhs.propertyID == rhs.propertyID &&
+                lhs.sessionID == rhs.sessionID
+        }
+
+        let candidatePackageReadyForManualReviewOnly = package.state == .readyForActivationCandidateManualReviewOnly &&
+            package.blockers.isEmpty
+        let exactSingleScopeSelected = package.exactSingleScopeSelected &&
+            package.packageScope.orgID != nil &&
+            package.packageScope.propertyID != nil &&
+            package.packageScope.sessionID != nil
+        let scopesMatch = scopesAreEqual(package.packageScope, package.decisionRecordScope) &&
+            scopesAreEqual(package.packageScope, package.activationPreflightScope) &&
+            scopesAreEqual(package.packageScope, package.persistencePreflightScope) &&
+            scopesAreEqual(package.packageScope, package.gateSelectedScope) &&
+            scopesAreEqual(package.packageScope, package.gateApprovedScope) &&
+            scopesAreEqual(package.packageScope, package.activationResultScope) &&
+            scopesAreEqual(package.packageScope, gate.selectedScope) &&
+            scopesAreEqual(package.packageScope, gate.approvedScope) &&
+            scopesAreEqual(package.packageScope, activationResultScope)
+        let productionWideDisabledConfirmation = package.productionWideDisabledConfirmation &&
+            gate.productionWideDisabledConfirmed
+        let productionSingleSessionGateDisabled = package.productionSingleSessionGateDisabled &&
+            !gate.productionSingleSessionActivationGateEnabled
+        var actualActivationBlockers = package.actualActivationBlockers
+        if productionSingleSessionGateDisabled {
+            actualActivationBlockers.append("production_single_session_canonical_activation_disabled")
+        }
+        if !gate.gateAllowed {
+            actualActivationBlockers.append(
+                contentsOf: gate.gateBlockedReason?
+                    .split(separator: ",")
+                    .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                    .filter { !$0.isEmpty } ?? []
+            )
+        }
+        if !activationResult.allowed {
+            actualActivationBlockers.append(
+                contentsOf: activationResult.blockedReason?
+                    .split(separator: ",")
+                    .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                    .filter { !$0.isEmpty } ?? []
+            )
+        }
+        if !activationResult.productionBlocked {
+            actualActivationBlockers.append("production_activation_not_marked_blocked")
+        }
+        if activationResult.activeSource != .local {
+            actualActivationBlockers.append("activation_result_active_source_not_local")
+        }
+        let dedupedActualActivationBlockers = Array(Set(actualActivationBlockers)).sorted()
+        let actualActivationRemainsBlocked = package.actualActivationRemainsBlocked &&
+            !gate.gateAllowed &&
+            !activationResult.allowed &&
+            activationResult.productionBlocked &&
+            activationResult.activeSource == .local &&
+            !dedupedActualActivationBlockers.isEmpty
+        let activeSourceRemainsLocal = package.activeSource == .local &&
+            activationResult.activeSource == .local
+        let activationPerformed = package.activationPerformed ||
+            activationResult.allowed ||
+            activationResult.activeSource != .local
+        let persistencePerformed = package.persistencePerformed
+        let hydrationPerformed = false
+        let productionHydrationDisabledConfirmation = hydrationPolicy?.productionHydrationAllowed != true
+
+        var blockers = package.blockers
+        if !candidatePackageReadyForManualReviewOnly {
+            blockers.append("activation_candidate_package_not_manual_review_only")
+        }
+        if !exactSingleScopeSelected {
+            blockers.append("exact_single_org_property_session_scope_required")
+        }
+        if !scopesMatch {
+            blockers.append("activation_readiness_scope_mismatch")
+        }
+        if !productionWideDisabledConfirmation {
+            blockers.append("production_wide_canonical_reads_not_disabled")
+        }
+        if !productionSingleSessionGateDisabled {
+            blockers.append("production_single_session_activation_gate_must_remain_disabled")
+        }
+        if !actualActivationRemainsBlocked {
+            blockers.append("actual_activation_must_remain_blocked")
+        }
+        if !activeSourceRemainsLocal {
+            blockers.append("active_source_must_remain_local")
+        }
+        if activationPerformed {
+            blockers.append("activation_performed_must_be_false")
+        }
+        if persistencePerformed {
+            blockers.append("persistence_performed_must_be_false")
+        }
+        if hydrationPerformed {
+            blockers.append("hydration_performed_must_be_false")
+        }
+        if !productionHydrationDisabledConfirmation {
+            blockers.append("production_hydration_must_remain_disabled")
+        }
+        if !package.fallbackRetained {
+            blockers.append("local_fallback_unavailable")
+        }
+        if !package.rollbackReady {
+            blockers.append("rollback_not_ready")
+        }
+        if !package.candidateEvidenceReady {
+            blockers.append("candidate_evidence_not_ready")
+        }
+        if !package.overlayEvidenceReady {
+            blockers.append("overlay_evidence_not_ready")
+        }
+        if !package.comparisonEvidenceMatchesLocal {
+            blockers.append("overlay_comparison_not_matching_local")
+        }
+
+        let dedupedBlockers = Array(Set(blockers)).sorted()
+        return ProductionSingleSessionActivationReadinessValidation(
+            checkedAt: checkedAt,
+            state: dedupedBlockers.isEmpty ? .readyForActivationReadinessReviewOnly : .blocked,
+            blockers: dedupedBlockers,
+            candidatePackageScope: package.packageScope,
+            gateSelectedScope: gate.selectedScope,
+            gateApprovedScope: gate.approvedScope,
+            activationResultScope: activationResultScope,
+            candidatePackageReadyForManualReviewOnly: candidatePackageReadyForManualReviewOnly,
+            exactSingleScopeSelected: exactSingleScopeSelected,
+            productionWideDisabledConfirmation: productionWideDisabledConfirmation,
+            productionSingleSessionGateDisabled: productionSingleSessionGateDisabled,
+            actualActivationRemainsBlocked: actualActivationRemainsBlocked,
+            actualActivationBlockers: dedupedActualActivationBlockers,
+            activeSource: activationResult.activeSource,
+            activationPerformed: activationPerformed,
+            persistencePerformed: persistencePerformed,
+            hydrationPerformed: hydrationPerformed,
+            productionHydrationDisabledConfirmation: productionHydrationDisabledConfirmation,
+            fallbackRetained: package.fallbackRetained,
+            rollbackReady: package.rollbackReady,
+            candidateEvidenceReady: package.candidateEvidenceReady,
+            overlayEvidenceReady: package.overlayEvidenceReady,
+            comparisonEvidenceMatchesLocal: package.comparisonEvidenceMatchesLocal,
+            noBehaviorChangedText: "No behavior changed: production single-session activation readiness validation is diagnostics-only and review-only. No production reads were enabled, no activation occurred, no overlay was activated, no hydration occurred, no reads were switched, no local or remote state was written, no fallback was removed, and export, seal, sync, media, iCloud, RLS, schema, and data behavior is unchanged."
+        )
+    }
+
+    nonisolated static func productionSingleSessionActivationReadinessValidationReportText(
+        _ validation: ProductionSingleSessionActivationReadinessValidation
+    ) -> String {
+        var lines: [String] = []
+        lines.append("Production Single-Session Activation Readiness Validation")
+        lines.append("- activation_readiness_validation_checked_at: \(validation.checkedAt.formatted(date: .abbreviated, time: .standard))")
+        lines.append("- activation_readiness_validation_state: \(validation.state.rawValue)")
+        lines.append("- blockers: \(validation.blockers.isEmpty ? "none" : validation.blockers.joined(separator: ", "))")
+        lines.append("- candidate_package_scope: \(validation.candidatePackageScope.description)")
+        lines.append("- gate_selected_scope: \(validation.gateSelectedScope.description)")
+        lines.append("- gate_approved_scope: \(validation.gateApprovedScope.description)")
+        lines.append("- activation_result_scope: \(validation.activationResultScope.description)")
+        lines.append("- candidate_package_manual_review_only: \(validation.candidatePackageReadyForManualReviewOnly)")
+        lines.append("- exact_single_scope_selected: \(validation.exactSingleScopeSelected)")
+        lines.append("- production_wide_disabled_confirmation: \(validation.productionWideDisabledConfirmation)")
+        lines.append("- production_single_session_gate_disabled: \(validation.productionSingleSessionGateDisabled)")
+        lines.append("- actual_activation_remains_blocked: \(validation.actualActivationRemainsBlocked)")
+        lines.append("- actual_activation_blockers: \(validation.actualActivationBlockers.isEmpty ? "none" : validation.actualActivationBlockers.joined(separator: ", "))")
+        lines.append("- active_source: \(validation.activeSource.rawValue)")
+        lines.append("- activation_performed: \(validation.activationPerformed)")
+        lines.append("- persistence_performed: \(validation.persistencePerformed)")
+        lines.append("- hydration_performed: \(validation.hydrationPerformed)")
+        lines.append("- production_hydration_disabled_confirmation: \(validation.productionHydrationDisabledConfirmation)")
+        lines.append("- fallback_retained: \(validation.fallbackRetained)")
+        lines.append("- rollback_ready: \(validation.rollbackReady)")
+        lines.append("- candidate_evidence_ready: \(validation.candidateEvidenceReady)")
+        lines.append("- overlay_evidence_ready: \(validation.overlayEvidenceReady)")
+        lines.append("- comparison_evidence_matches_local: \(validation.comparisonEvidenceMatchesLocal)")
+        lines.append(validation.noBehaviorChangedText)
         return lines.joined(separator: "\n")
     }
 
