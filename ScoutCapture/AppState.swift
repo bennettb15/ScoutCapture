@@ -2414,6 +2414,11 @@ final class AppState: ObservableObject {
         case readyForOperatorRecordPersistenceReviewOnly = "ready_for_operator_record_persistence_review_only"
     }
 
+    enum ProductionSingleSessionActivationCandidatePackageState: String, CaseIterable, Equatable {
+        case blocked
+        case readyForActivationCandidateManualReviewOnly = "ready_for_activation_candidate_manual_review_only"
+    }
+
     enum ProductionCohortValidationState: String, CaseIterable, Equatable {
         case notValidated = "not_validated"
         case verified
@@ -2675,6 +2680,37 @@ final class AppState: ObservableObject {
         let preflightManualReviewOnly: Bool
         let disabledProductionGateBlockerPresent: Bool
         let productionWideDisabledConfirmation: Bool
+        let fallbackRetained: Bool
+        let rollbackReady: Bool
+        let activeSource: CanonicalCandidateActivationSource
+        let activationPerformed: Bool
+        let persistencePerformed: Bool
+        let noBehaviorChangedText: String
+    }
+
+    struct ProductionSingleSessionActivationCandidatePackage: Equatable {
+        let checkedAt: Date
+        let state: ProductionSingleSessionActivationCandidatePackageState
+        let blockers: [String]
+        let packageScope: ProductionCohortApprovalScope
+        let decisionRecordScope: ProductionCohortApprovalScope
+        let activationPreflightScope: ProductionCohortApprovalScope
+        let persistencePreflightScope: ProductionCohortApprovalScope
+        let gateSelectedScope: ProductionCohortApprovalScope
+        let gateApprovedScope: ProductionCohortApprovalScope
+        let activationResultScope: ProductionCohortApprovalScope
+        let dryRunState: ProductionRolloutDryRunState
+        let decisionRecordReady: Bool
+        let activationPreflightManualReviewOnly: Bool
+        let operatorRecordPersistencePreflightReviewOnly: Bool
+        let exactSingleScopeSelected: Bool
+        let productionWideDisabledConfirmation: Bool
+        let productionSingleSessionGateDisabled: Bool
+        let actualActivationRemainsBlocked: Bool
+        let actualActivationBlockers: [String]
+        let candidateEvidenceReady: Bool
+        let overlayEvidenceReady: Bool
+        let comparisonEvidenceMatchesLocal: Bool
         let fallbackRetained: Bool
         let rollbackReady: Bool
         let activeSource: CanonicalCandidateActivationSource
@@ -22053,6 +22089,253 @@ final class AppState: ObservableObject {
         lines.append("- activation_performed: \(preflight.activationPerformed)")
         lines.append("- persistence_performed: \(preflight.persistencePerformed)")
         lines.append(preflight.noBehaviorChangedText)
+        return lines.joined(separator: "\n")
+    }
+
+    nonisolated static func makeProductionSingleSessionActivationCandidatePackage(
+        checkedAt: Date = Date(),
+        dryRunPackage package: ProductionRolloutDryRunPackage,
+        decisionRecord record: ProductionAllowlistDecisionRecord,
+        activationPreflight: ProductionSingleSessionActivationPreflightAudit,
+        operatorRecordPersistencePreflight persistencePreflight: ProductionOperatorRolloutRecordPersistencePreflight,
+        gateDiagnostics gate: ProductionSingleSessionActivationGateDiagnostics,
+        activationResult: CanonicalCandidateActivationResult
+    ) -> ProductionSingleSessionActivationCandidatePackage {
+        let packageCohort = package.cohortControlPlane.cohort
+        let packageScope = ProductionCohortApprovalScope(
+            orgID: packageCohort.orgID,
+            propertyID: packageCohort.propertyID,
+            sessionID: packageCohort.sessionID
+        )
+        let decisionRecordScope = ProductionCohortApprovalScope(
+            orgID: record.orgID,
+            propertyID: record.propertyID,
+            sessionID: record.sessionID
+        )
+        let activationResultScope = ProductionCohortApprovalScope(
+            orgID: packageScope.orgID,
+            propertyID: activationResult.propertyID,
+            sessionID: activationResult.sessionID
+        )
+        func scopesAreEqual(
+            _ lhs: ProductionCohortApprovalScope,
+            _ rhs: ProductionCohortApprovalScope
+        ) -> Bool {
+            lhs.orgID == rhs.orgID &&
+                lhs.propertyID == rhs.propertyID &&
+                lhs.sessionID == rhs.sessionID
+        }
+
+        let exactSingleScopeSelected = packageScope.orgID != nil &&
+            packageScope.propertyID != nil &&
+            packageScope.sessionID != nil &&
+            record.exactSingleScopeSelected &&
+            persistencePreflight.exactSingleScopeSelected
+        let scopesMatch = scopesAreEqual(packageScope, decisionRecordScope) &&
+            scopesAreEqual(packageScope, activationPreflight.recordScope) &&
+            scopesAreEqual(packageScope, activationPreflight.gateSelectedScope) &&
+            scopesAreEqual(packageScope, activationPreflight.gateApprovedScope) &&
+            scopesAreEqual(packageScope, persistencePreflight.packageScope) &&
+            scopesAreEqual(packageScope, persistencePreflight.decisionRecordScope) &&
+            scopesAreEqual(packageScope, persistencePreflight.preflightRecordScope) &&
+            scopesAreEqual(packageScope, persistencePreflight.preflightGateSelectedScope) &&
+            scopesAreEqual(packageScope, persistencePreflight.preflightGateApprovedScope) &&
+            scopesAreEqual(packageScope, gate.selectedScope) &&
+            scopesAreEqual(packageScope, gate.approvedScope) &&
+            scopesAreEqual(packageScope, activationResultScope)
+        let activationPreflightManualReviewOnly = activationPreflight.state == .readyForManualReviewOnly &&
+            activationPreflight.blockers.isEmpty
+        let operatorRecordPersistencePreflightReviewOnly = persistencePreflight.state == .readyForOperatorRecordPersistenceReviewOnly &&
+            persistencePreflight.blockers.isEmpty
+        let productionWideDisabledConfirmation = package.productionWideDisabledConfirmation &&
+            record.productionWideDisabledConfirmation &&
+            activationPreflight.productionWideDisabledConfirmation &&
+            persistencePreflight.productionWideDisabledConfirmation &&
+            gate.productionWideDisabledConfirmed &&
+            !package.canonicalDiagnostics.lastCanonicalReadCandidateProductionWideEnabled
+        let productionSingleSessionGateDisabled = !gate.productionSingleSessionActivationGateEnabled
+        var actualActivationBlockers: [String] = []
+        if productionSingleSessionGateDisabled {
+            actualActivationBlockers.append("production_single_session_canonical_activation_disabled")
+        }
+        if !gate.gateAllowed {
+            actualActivationBlockers.append(
+                contentsOf: gate.gateBlockedReason?
+                    .split(separator: ",")
+                    .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                    .filter { !$0.isEmpty } ?? []
+            )
+        }
+        if !activationResult.allowed {
+            actualActivationBlockers.append(
+                contentsOf: activationResult.blockedReason?
+                    .split(separator: ",")
+                    .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                    .filter { !$0.isEmpty } ?? []
+            )
+        }
+        if !activationResult.productionBlocked {
+            actualActivationBlockers.append("production_activation_not_marked_blocked")
+        }
+        if activationResult.activeSource != .local {
+            actualActivationBlockers.append("activation_result_active_source_not_local")
+        }
+        let dedupedActualActivationBlockers = Array(Set(actualActivationBlockers)).sorted()
+        let actualActivationRemainsBlocked = !gate.gateAllowed &&
+            !activationResult.allowed &&
+            activationResult.productionBlocked &&
+            activationResult.activeSource == .local &&
+            !dedupedActualActivationBlockers.isEmpty
+        let candidateEvidenceReady = package.candidateReady &&
+            record.candidateReady &&
+            package.canonicalDiagnostics.lastCanonicalReadCandidateAllowed
+        let overlayEvidenceReady = package.overlayReady &&
+            record.overlayReady &&
+            package.canonicalDiagnostics.lastCanonicalCandidateOverlayBuilt &&
+            package.canonicalDiagnostics.lastCanonicalCandidateOverlayAllowed
+        let comparisonEvidenceMatchesLocal = package.canonicalDiagnostics.lastCanonicalCandidateOverlayComparisonResult ==
+            CanonicalCandidateOverlayComparisonResult.candidateMatchesLocal.rawValue
+        let fallbackRetained = record.fallbackRetained &&
+            activationPreflight.fallbackRetained &&
+            persistencePreflight.fallbackRetained &&
+            package.canonicalDiagnostics.lastCanonicalReadCandidateLocalFallbackAvailable
+        let rollbackReady = record.rollbackReady &&
+            activationPreflight.rollbackReady &&
+            persistencePreflight.rollbackReady &&
+            activationResult.rollbackAvailable
+        let activeSourceRemainsLocal = record.activeSource == .local &&
+            activationPreflight.activeSource == .local &&
+            persistencePreflight.activeSource == .local &&
+            activationResult.activeSource == .local
+        let activationPerformed = record.activationPerformed ||
+            activationPreflight.activationPerformed ||
+            persistencePreflight.activationPerformed ||
+            activationResult.allowed ||
+            activationResult.activeSource != .local
+        let persistencePerformed = persistencePreflight.persistencePerformed
+
+        var blockers = package.blockers +
+            record.blockers +
+            activationPreflight.blockers +
+            persistencePreflight.blockers
+        if !exactSingleScopeSelected {
+            blockers.append("exact_single_org_property_session_scope_required")
+        }
+        if !scopesMatch {
+            blockers.append("activation_candidate_package_scope_mismatch")
+        }
+        if package.state != .dryRunReadyForSingleSessionAllowlist {
+            blockers.append("dry_run_not_ready_for_single_session_allowlist")
+        }
+        if !record.readyForOperatorRecord {
+            blockers.append("decision_record_not_ready_for_operator_record")
+        }
+        if !activationPreflightManualReviewOnly {
+            blockers.append("activation_preflight_not_manual_review_only")
+        }
+        if !operatorRecordPersistencePreflightReviewOnly {
+            blockers.append("operator_record_persistence_preflight_not_ready_for_review")
+        }
+        if !productionWideDisabledConfirmation {
+            blockers.append("production_wide_canonical_reads_not_disabled")
+        }
+        if !productionSingleSessionGateDisabled {
+            blockers.append("production_single_session_activation_gate_must_remain_disabled")
+        }
+        if !actualActivationRemainsBlocked {
+            blockers.append("actual_activation_must_remain_blocked")
+        }
+        if !activeSourceRemainsLocal {
+            blockers.append("active_source_must_remain_local")
+        }
+        if activationPerformed {
+            blockers.append("activation_performed_must_be_false")
+        }
+        if persistencePerformed {
+            blockers.append("persistence_performed_must_be_false")
+        }
+        if !fallbackRetained {
+            blockers.append("local_fallback_unavailable")
+        }
+        if !rollbackReady {
+            blockers.append("rollback_not_ready")
+        }
+        if !candidateEvidenceReady {
+            blockers.append("candidate_evidence_not_ready")
+        }
+        if !overlayEvidenceReady {
+            blockers.append("overlay_evidence_not_ready")
+        }
+        if !comparisonEvidenceMatchesLocal {
+            blockers.append("overlay_comparison_not_matching_local")
+        }
+
+        let dedupedBlockers = Array(Set(blockers)).sorted()
+        return ProductionSingleSessionActivationCandidatePackage(
+            checkedAt: checkedAt,
+            state: dedupedBlockers.isEmpty ? .readyForActivationCandidateManualReviewOnly : .blocked,
+            blockers: dedupedBlockers,
+            packageScope: packageScope,
+            decisionRecordScope: decisionRecordScope,
+            activationPreflightScope: activationPreflight.recordScope,
+            persistencePreflightScope: persistencePreflight.packageScope,
+            gateSelectedScope: gate.selectedScope,
+            gateApprovedScope: gate.approvedScope,
+            activationResultScope: activationResultScope,
+            dryRunState: package.state,
+            decisionRecordReady: record.readyForOperatorRecord,
+            activationPreflightManualReviewOnly: activationPreflightManualReviewOnly,
+            operatorRecordPersistencePreflightReviewOnly: operatorRecordPersistencePreflightReviewOnly,
+            exactSingleScopeSelected: exactSingleScopeSelected,
+            productionWideDisabledConfirmation: productionWideDisabledConfirmation,
+            productionSingleSessionGateDisabled: productionSingleSessionGateDisabled,
+            actualActivationRemainsBlocked: actualActivationRemainsBlocked,
+            actualActivationBlockers: dedupedActualActivationBlockers,
+            candidateEvidenceReady: candidateEvidenceReady,
+            overlayEvidenceReady: overlayEvidenceReady,
+            comparisonEvidenceMatchesLocal: comparisonEvidenceMatchesLocal,
+            fallbackRetained: fallbackRetained,
+            rollbackReady: rollbackReady,
+            activeSource: activationResult.activeSource,
+            activationPerformed: activationPerformed,
+            persistencePerformed: persistencePerformed,
+            noBehaviorChangedText: "No behavior changed: production single-session activation candidate package is diagnostics-only and manual-review-only. No production reads were enabled, no activation occurred, no overlay was activated, no hydration occurred, no reads were switched, no local or remote state was written, no fallback was removed, and export, seal, sync, media, iCloud, RLS, schema, and data behavior is unchanged."
+        )
+    }
+
+    nonisolated static func productionSingleSessionActivationCandidatePackageReportText(
+        _ package: ProductionSingleSessionActivationCandidatePackage
+    ) -> String {
+        var lines: [String] = []
+        lines.append("Production Single-Session Activation Candidate Package")
+        lines.append("- activation_candidate_package_checked_at: \(package.checkedAt.formatted(date: .abbreviated, time: .standard))")
+        lines.append("- candidate_package_state: \(package.state.rawValue)")
+        lines.append("- blockers: \(package.blockers.isEmpty ? "none" : package.blockers.joined(separator: ", "))")
+        lines.append("- package_scope: \(package.packageScope.description)")
+        lines.append("- decision_record_scope: \(package.decisionRecordScope.description)")
+        lines.append("- activation_preflight_scope: \(package.activationPreflightScope.description)")
+        lines.append("- persistence_preflight_scope: \(package.persistencePreflightScope.description)")
+        lines.append("- gate_selected_scope: \(package.gateSelectedScope.description)")
+        lines.append("- gate_approved_scope: \(package.gateApprovedScope.description)")
+        lines.append("- activation_result_scope: \(package.activationResultScope.description)")
+        lines.append("- dry_run_state: \(package.dryRunState.rawValue)")
+        lines.append("- decision_record_ready: \(package.decisionRecordReady)")
+        lines.append("- activation_preflight_manual_review_only: \(package.activationPreflightManualReviewOnly)")
+        lines.append("- operator_record_persistence_preflight_review_only: \(package.operatorRecordPersistencePreflightReviewOnly)")
+        lines.append("- exact_single_scope_selected: \(package.exactSingleScopeSelected)")
+        lines.append("- production_wide_disabled_confirmation: \(package.productionWideDisabledConfirmation)")
+        lines.append("- production_single_session_gate_disabled: \(package.productionSingleSessionGateDisabled)")
+        lines.append("- actual_activation_remains_blocked: \(package.actualActivationRemainsBlocked)")
+        lines.append("- actual_activation_blockers: \(package.actualActivationBlockers.isEmpty ? "none" : package.actualActivationBlockers.joined(separator: ", "))")
+        lines.append("- candidate_evidence_ready: \(package.candidateEvidenceReady)")
+        lines.append("- overlay_evidence_ready: \(package.overlayEvidenceReady)")
+        lines.append("- comparison_evidence_matches_local: \(package.comparisonEvidenceMatchesLocal)")
+        lines.append("- fallback_retained: \(package.fallbackRetained)")
+        lines.append("- rollback_ready: \(package.rollbackReady)")
+        lines.append("- active_source: \(package.activeSource.rawValue)")
+        lines.append("- activation_performed: \(package.activationPerformed)")
+        lines.append("- persistence_performed: \(package.persistencePerformed)")
+        lines.append(package.noBehaviorChangedText)
         return lines.joined(separator: "\n")
     }
 

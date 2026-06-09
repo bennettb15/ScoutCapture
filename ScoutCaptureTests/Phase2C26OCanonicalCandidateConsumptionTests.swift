@@ -394,6 +394,87 @@ final class Phase2C26OCanonicalCandidateConsumptionTests: XCTestCase {
         )
     }
 
+    private func persistencePreflight(
+        from preflight: AppState.ProductionOperatorRolloutRecordPersistencePreflight,
+        state: AppState.ProductionOperatorRolloutRecordPersistencePreflightState? = nil,
+        blockers: [String]? = nil,
+        fallbackRetained: Bool? = nil,
+        rollbackReady: Bool? = nil,
+        activationPerformed: Bool? = nil,
+        persistencePerformed: Bool? = nil
+    ) -> AppState.ProductionOperatorRolloutRecordPersistencePreflight {
+        AppState.ProductionOperatorRolloutRecordPersistencePreflight(
+            checkedAt: preflight.checkedAt,
+            state: state ?? preflight.state,
+            blockers: blockers ?? preflight.blockers,
+            packageScope: preflight.packageScope,
+            decisionRecordScope: preflight.decisionRecordScope,
+            preflightRecordScope: preflight.preflightRecordScope,
+            preflightGateSelectedScope: preflight.preflightGateSelectedScope,
+            preflightGateApprovedScope: preflight.preflightGateApprovedScope,
+            dryRunState: preflight.dryRunState,
+            approvalState: preflight.approvalState,
+            approvalTimestamp: preflight.approvalTimestamp,
+            expirationTimestamp: preflight.expirationTimestamp,
+            approvalFreshnessRepresented: preflight.approvalFreshnessRepresented,
+            approvalFresh: preflight.approvalFresh,
+            exactSingleScopeSelected: preflight.exactSingleScopeSelected,
+            decisionRecordReady: preflight.decisionRecordReady,
+            preflightManualReviewOnly: preflight.preflightManualReviewOnly,
+            disabledProductionGateBlockerPresent: preflight.disabledProductionGateBlockerPresent,
+            productionWideDisabledConfirmation: preflight.productionWideDisabledConfirmation,
+            fallbackRetained: fallbackRetained ?? preflight.fallbackRetained,
+            rollbackReady: rollbackReady ?? preflight.rollbackReady,
+            activeSource: preflight.activeSource,
+            activationPerformed: activationPerformed ?? preflight.activationPerformed,
+            persistencePerformed: persistencePerformed ?? preflight.persistencePerformed,
+            noBehaviorChangedText: preflight.noBehaviorChangedText
+        )
+    }
+
+    private func disabledProductionGate(
+        upload: AppState.SessionSnapshotUploadDiagnostics
+    ) -> AppState.ProductionSingleSessionActivationGateDiagnostics {
+        AppState.makeProductionSingleSessionActivationGateDiagnostics(
+            policy: singleSessionGatePolicy(enabled: false),
+            approval: approvedSingleSessionApproval(upload: upload),
+            targetClassification: .approvedProductionValidation,
+            diagnostics: upload
+        )
+    }
+
+    private func activationCandidatePackageInputs(
+        upload: AppState.SessionSnapshotUploadDiagnostics? = nil
+    ) -> (
+        upload: AppState.SessionSnapshotUploadDiagnostics,
+        package: AppState.ProductionRolloutDryRunPackage,
+        record: AppState.ProductionAllowlistDecisionRecord,
+        audit: AppState.ProductionSingleSessionActivationPreflightAudit,
+        persistence: AppState.ProductionOperatorRolloutRecordPersistencePreflight,
+        gate: AppState.ProductionSingleSessionActivationGateDiagnostics,
+        activation: AppState.CanonicalCandidateActivationResult
+    ) {
+        let upload = upload ?? rolloutReadinessDiagnostics()
+        let package = approvedDryRunPackage(upload: upload)
+        let record = AppState.makeProductionAllowlistDecisionRecord(from: package)
+        let gate = disabledProductionGate(upload: upload)
+        let audit = AppState.makeProductionSingleSessionActivationPreflightAudit(
+            decisionRecord: record,
+            gateDiagnostics: gate
+        )
+        let persistence = AppState.makeProductionOperatorRolloutRecordPersistencePreflight(
+            dryRunPackage: package,
+            decisionRecord: record,
+            activationPreflight: audit
+        )
+        let activation = AppState.makeCanonicalCandidateActivationResult(
+            targetClassification: .approvedProductionValidation,
+            diagnostics: upload,
+            productionActivationGate: gate
+        )
+        return (upload, package, record, audit, persistence, gate, activation)
+    }
+
     func testAllowlistedStagingCandidateBuildsOverlay() {
         let result = overlay()
 
@@ -2017,6 +2098,264 @@ final class Phase2C26OCanonicalCandidateConsumptionTests: XCTestCase {
         XCTAssertTrue(text.contains("no local or remote state was written"))
         XCTAssertTrue(text.contains("no fallback was removed"))
         XCTAssertTrue(text.contains("export, seal, sync, media, iCloud, RLS, schema, and data behavior are unchanged"))
+    }
+
+    func testProductionSingleSessionActivationCandidatePackageReadyForManualReviewOnly() {
+        let inputs = activationCandidatePackageInputs()
+
+        let candidatePackage = AppState.makeProductionSingleSessionActivationCandidatePackage(
+            checkedAt: Date(timeIntervalSinceReferenceDate: 9_100),
+            dryRunPackage: inputs.package,
+            decisionRecord: inputs.record,
+            activationPreflight: inputs.audit,
+            operatorRecordPersistencePreflight: inputs.persistence,
+            gateDiagnostics: inputs.gate,
+            activationResult: inputs.activation
+        )
+
+        XCTAssertEqual(candidatePackage.state, .readyForActivationCandidateManualReviewOnly)
+        XCTAssertTrue(candidatePackage.blockers.isEmpty)
+        XCTAssertEqual(candidatePackage.packageScope, candidatePackage.decisionRecordScope)
+        XCTAssertEqual(candidatePackage.packageScope, candidatePackage.activationPreflightScope)
+        XCTAssertEqual(candidatePackage.packageScope, candidatePackage.persistencePreflightScope)
+        XCTAssertEqual(candidatePackage.packageScope, candidatePackage.gateSelectedScope)
+        XCTAssertEqual(candidatePackage.packageScope, candidatePackage.gateApprovedScope)
+        XCTAssertEqual(candidatePackage.packageScope, candidatePackage.activationResultScope)
+        XCTAssertEqual(candidatePackage.dryRunState, .dryRunReadyForSingleSessionAllowlist)
+        XCTAssertTrue(candidatePackage.decisionRecordReady)
+        XCTAssertTrue(candidatePackage.activationPreflightManualReviewOnly)
+        XCTAssertTrue(candidatePackage.operatorRecordPersistencePreflightReviewOnly)
+        XCTAssertTrue(candidatePackage.exactSingleScopeSelected)
+        XCTAssertTrue(candidatePackage.productionWideDisabledConfirmation)
+        XCTAssertTrue(candidatePackage.productionSingleSessionGateDisabled)
+        XCTAssertTrue(candidatePackage.actualActivationRemainsBlocked)
+        XCTAssertTrue(candidatePackage.actualActivationBlockers.contains("production_single_session_canonical_activation_disabled"))
+        XCTAssertTrue(candidatePackage.actualActivationBlockers.contains("production_canonical_candidate_activation_blocked"))
+        XCTAssertTrue(candidatePackage.candidateEvidenceReady)
+        XCTAssertTrue(candidatePackage.overlayEvidenceReady)
+        XCTAssertTrue(candidatePackage.comparisonEvidenceMatchesLocal)
+        XCTAssertTrue(candidatePackage.fallbackRetained)
+        XCTAssertTrue(candidatePackage.rollbackReady)
+        XCTAssertEqual(candidatePackage.activeSource, .local)
+        XCTAssertFalse(candidatePackage.activationPerformed)
+        XCTAssertFalse(candidatePackage.persistencePerformed)
+    }
+
+    func testProductionSingleSessionActivationCandidatePackageRequires27IPreflightReady() {
+        let inputs = activationCandidatePackageInputs()
+        let persistence = persistencePreflight(
+            from: inputs.persistence,
+            state: .blocked,
+            blockers: ["persistence_preflight_test_blocker"]
+        )
+
+        let candidatePackage = AppState.makeProductionSingleSessionActivationCandidatePackage(
+            dryRunPackage: inputs.package,
+            decisionRecord: inputs.record,
+            activationPreflight: inputs.audit,
+            operatorRecordPersistencePreflight: persistence,
+            gateDiagnostics: inputs.gate,
+            activationResult: inputs.activation
+        )
+
+        XCTAssertEqual(candidatePackage.state, .blocked)
+        XCTAssertFalse(candidatePackage.operatorRecordPersistencePreflightReviewOnly)
+        XCTAssertTrue(candidatePackage.blockers.contains("operator_record_persistence_preflight_not_ready_for_review"))
+    }
+
+    func testProductionSingleSessionActivationCandidatePackageRequires27HPreflightReady() {
+        let inputs = activationCandidatePackageInputs()
+        let audit = activationPreflight(
+            from: inputs.audit,
+            state: .blocked,
+            blockers: ["activation_preflight_test_blocker"]
+        )
+
+        let candidatePackage = AppState.makeProductionSingleSessionActivationCandidatePackage(
+            dryRunPackage: inputs.package,
+            decisionRecord: inputs.record,
+            activationPreflight: audit,
+            operatorRecordPersistencePreflight: inputs.persistence,
+            gateDiagnostics: inputs.gate,
+            activationResult: inputs.activation
+        )
+
+        XCTAssertEqual(candidatePackage.state, .blocked)
+        XCTAssertFalse(candidatePackage.activationPreflightManualReviewOnly)
+        XCTAssertTrue(candidatePackage.blockers.contains("activation_preflight_not_manual_review_only"))
+    }
+
+    func testProductionSingleSessionActivationCandidatePackageGateEnabledOrActivationAllowedBlocks() {
+        let inputs = activationCandidatePackageInputs()
+        let enabledGate = AppState.makeProductionSingleSessionActivationGateDiagnostics(
+            policy: singleSessionGatePolicy(enabled: true),
+            approval: approvedSingleSessionApproval(upload: inputs.upload),
+            targetClassification: .approvedProductionValidation,
+            diagnostics: inputs.upload
+        )
+        let activation = AppState.makeCanonicalCandidateActivationResult(
+            targetClassification: .approvedProductionValidation,
+            diagnostics: inputs.upload,
+            productionActivationGate: enabledGate
+        )
+
+        let candidatePackage = AppState.makeProductionSingleSessionActivationCandidatePackage(
+            dryRunPackage: inputs.package,
+            decisionRecord: inputs.record,
+            activationPreflight: inputs.audit,
+            operatorRecordPersistencePreflight: inputs.persistence,
+            gateDiagnostics: enabledGate,
+            activationResult: activation
+        )
+
+        XCTAssertEqual(candidatePackage.state, .blocked)
+        XCTAssertFalse(candidatePackage.productionSingleSessionGateDisabled)
+        XCTAssertFalse(candidatePackage.actualActivationRemainsBlocked)
+        XCTAssertTrue(candidatePackage.activationPerformed)
+        XCTAssertTrue(candidatePackage.blockers.contains("production_single_session_activation_gate_must_remain_disabled"))
+        XCTAssertTrue(candidatePackage.blockers.contains("actual_activation_must_remain_blocked"))
+        XCTAssertTrue(candidatePackage.blockers.contains("activation_performed_must_be_false"))
+    }
+
+    func testProductionSingleSessionActivationCandidatePackageActivationPerformedBlocks() {
+        let inputs = activationCandidatePackageInputs()
+        let record = decisionRecord(from: inputs.record, activationPerformed: true)
+        let audit = activationPreflight(from: inputs.audit, activationPerformed: true)
+        let persistence = persistencePreflight(from: inputs.persistence, activationPerformed: true)
+
+        let candidatePackage = AppState.makeProductionSingleSessionActivationCandidatePackage(
+            dryRunPackage: inputs.package,
+            decisionRecord: record,
+            activationPreflight: audit,
+            operatorRecordPersistencePreflight: persistence,
+            gateDiagnostics: inputs.gate,
+            activationResult: inputs.activation
+        )
+
+        XCTAssertEqual(candidatePackage.state, .blocked)
+        XCTAssertTrue(candidatePackage.activationPerformed)
+        XCTAssertTrue(candidatePackage.blockers.contains("activation_performed_must_be_false"))
+    }
+
+    func testProductionSingleSessionActivationCandidatePackagePersistencePerformedBlocks() {
+        let inputs = activationCandidatePackageInputs()
+        let persistence = persistencePreflight(from: inputs.persistence, persistencePerformed: true)
+
+        let candidatePackage = AppState.makeProductionSingleSessionActivationCandidatePackage(
+            dryRunPackage: inputs.package,
+            decisionRecord: inputs.record,
+            activationPreflight: inputs.audit,
+            operatorRecordPersistencePreflight: persistence,
+            gateDiagnostics: inputs.gate,
+            activationResult: inputs.activation
+        )
+
+        XCTAssertEqual(candidatePackage.state, .blocked)
+        XCTAssertTrue(candidatePackage.persistencePerformed)
+        XCTAssertTrue(candidatePackage.blockers.contains("persistence_performed_must_be_false"))
+    }
+
+    func testProductionSingleSessionActivationCandidatePackageScopeMismatchBlocks() {
+        let inputs = activationCandidatePackageInputs()
+        let wrongSessionID = UUID(uuidString: "66666666-6666-6666-6666-666666666666")!
+        let record = decisionRecord(from: inputs.record, sessionID: wrongSessionID)
+
+        let candidatePackage = AppState.makeProductionSingleSessionActivationCandidatePackage(
+            dryRunPackage: inputs.package,
+            decisionRecord: record,
+            activationPreflight: inputs.audit,
+            operatorRecordPersistencePreflight: inputs.persistence,
+            gateDiagnostics: inputs.gate,
+            activationResult: inputs.activation
+        )
+
+        XCTAssertEqual(candidatePackage.state, .blocked)
+        XCTAssertNotEqual(candidatePackage.packageScope, candidatePackage.decisionRecordScope)
+        XCTAssertTrue(candidatePackage.blockers.contains("activation_candidate_package_scope_mismatch"))
+    }
+
+    func testProductionSingleSessionActivationCandidatePackageMissingFallbackBlocks() {
+        var upload = rolloutReadinessDiagnostics()
+        upload.lastCanonicalReadCandidateLocalFallbackAvailable = false
+        let inputs = activationCandidatePackageInputs(upload: upload)
+
+        let candidatePackage = AppState.makeProductionSingleSessionActivationCandidatePackage(
+            dryRunPackage: inputs.package,
+            decisionRecord: inputs.record,
+            activationPreflight: inputs.audit,
+            operatorRecordPersistencePreflight: inputs.persistence,
+            gateDiagnostics: inputs.gate,
+            activationResult: inputs.activation
+        )
+
+        XCTAssertEqual(candidatePackage.state, .blocked)
+        XCTAssertFalse(candidatePackage.fallbackRetained)
+        XCTAssertTrue(candidatePackage.blockers.contains("local_fallback_unavailable"))
+    }
+
+    func testProductionSingleSessionActivationCandidatePackageMissingRollbackBlocks() {
+        let upload = rolloutReadinessDiagnostics(rollbackAvailable: false)
+        let inputs = activationCandidatePackageInputs(upload: upload)
+
+        let candidatePackage = AppState.makeProductionSingleSessionActivationCandidatePackage(
+            dryRunPackage: inputs.package,
+            decisionRecord: inputs.record,
+            activationPreflight: inputs.audit,
+            operatorRecordPersistencePreflight: inputs.persistence,
+            gateDiagnostics: inputs.gate,
+            activationResult: inputs.activation
+        )
+
+        XCTAssertEqual(candidatePackage.state, .blocked)
+        XCTAssertFalse(candidatePackage.rollbackReady)
+        XCTAssertTrue(candidatePackage.blockers.contains("rollback_not_ready"))
+    }
+
+    func testProductionSingleSessionActivationCandidatePackageProductionWideEnabledBlocks() {
+        let upload = rolloutReadinessDiagnostics(productionWideEnabled: true)
+        let inputs = activationCandidatePackageInputs(upload: upload)
+
+        let candidatePackage = AppState.makeProductionSingleSessionActivationCandidatePackage(
+            dryRunPackage: inputs.package,
+            decisionRecord: inputs.record,
+            activationPreflight: inputs.audit,
+            operatorRecordPersistencePreflight: inputs.persistence,
+            gateDiagnostics: inputs.gate,
+            activationResult: inputs.activation
+        )
+
+        XCTAssertEqual(candidatePackage.state, .blocked)
+        XCTAssertFalse(candidatePackage.productionWideDisabledConfirmation)
+        XCTAssertTrue(candidatePackage.blockers.contains("production_wide_canonical_reads_not_disabled"))
+    }
+
+    func testProductionSingleSessionActivationCandidatePackageReportIncludesNoBehaviorChanges() {
+        let inputs = activationCandidatePackageInputs()
+        let candidatePackage = AppState.makeProductionSingleSessionActivationCandidatePackage(
+            dryRunPackage: inputs.package,
+            decisionRecord: inputs.record,
+            activationPreflight: inputs.audit,
+            operatorRecordPersistencePreflight: inputs.persistence,
+            gateDiagnostics: inputs.gate,
+            activationResult: inputs.activation
+        )
+
+        let text = AppState.productionSingleSessionActivationCandidatePackageReportText(candidatePackage)
+
+        XCTAssertTrue(text.contains("Production Single-Session Activation Candidate Package"))
+        XCTAssertTrue(text.contains("- candidate_package_state: ready_for_activation_candidate_manual_review_only"))
+        XCTAssertTrue(text.contains("- production_single_session_gate_disabled: true"))
+        XCTAssertTrue(text.contains("- actual_activation_remains_blocked: true"))
+        XCTAssertTrue(text.contains("- activation_performed: false"))
+        XCTAssertTrue(text.contains("- persistence_performed: false"))
+        XCTAssertTrue(text.contains("No production reads were enabled"))
+        XCTAssertTrue(text.contains("no activation occurred"))
+        XCTAssertTrue(text.contains("no overlay was activated"))
+        XCTAssertTrue(text.contains("no hydration occurred"))
+        XCTAssertTrue(text.contains("no reads were switched"))
+        XCTAssertTrue(text.contains("no local or remote state was written"))
+        XCTAssertTrue(text.contains("no fallback was removed"))
+        XCTAssertTrue(text.contains("export, seal, sync, media, iCloud, RLS, schema, and data behavior is unchanged"))
     }
 
     func testProductionSingleSessionActivationGateDefaultFalseBlocksProduction() {
