@@ -2429,6 +2429,11 @@ final class AppState: ObservableObject {
         case readyForHydrationReadinessReviewOnly = "ready_for_hydration_readiness_review_only"
     }
 
+    enum ProductionSingleSessionHydrationExecutionRehearsalState: String, CaseIterable, Equatable {
+        case blocked
+        case testOnlyHydrationRehearsalPassed = "test_only_hydration_rehearsal_passed"
+    }
+
     enum ProductionCohortValidationState: String, CaseIterable, Equatable {
         case notValidated = "not_validated"
         case verified
@@ -2786,6 +2791,60 @@ final class AppState: ObservableObject {
         let fallbackRetained: Bool
         let rollbackReady: Bool
         let noBehaviorChangedText: String
+    }
+
+    struct ProductionSingleSessionHydrationFixtureMetadataEvidence: Equatable {
+        let scope: ProductionCohortApprovalScope
+        let metadataFingerprint: String
+        let shotCount: Int
+        let issueCount: Int
+        let guidedCount: Int
+        let fallbackRetained: Bool
+    }
+
+    struct ProductionSingleSessionHydrationRehearsalOperationEvidence: Equatable {
+        let operationName: String
+        let targetScope: ProductionCohortApprovalScope
+        let succeeded: Bool
+        let executedInIsolatedFixture: Bool
+        let productionTarget: Bool
+        let productionReadsEnabled: Bool
+        let remoteStateWriteAttempted: Bool
+        let realLocalUserStateWriteAttempted: Bool
+        let metadataFingerprint: String?
+        let shotCount: Int?
+        let issueCount: Int?
+        let guidedCount: Int?
+        let failureReason: String?
+    }
+
+    struct ProductionSingleSessionHydrationExecutionRehearsal: Equatable {
+        let checkedAt: Date
+        let state: ProductionSingleSessionHydrationExecutionRehearsalState
+        let blockers: [String]
+        let blockedConditions: [String]
+        let hydrationReadinessScope: ProductionCohortApprovalScope
+        let restoreDiagnosticsScope: ProductionCohortApprovalScope
+        let preHydrationFixtureScope: ProductionCohortApprovalScope
+        let hydrationOperationScope: ProductionCohortApprovalScope
+        let postHydrationFixtureScope: ProductionCohortApprovalScope
+        let rollbackOperationScope: ProductionCohortApprovalScope
+        let restoredFixtureScope: ProductionCohortApprovalScope
+        let hydrationReadinessReviewOnly: Bool
+        let exactSingleScopeSelected: Bool
+        let scopesMatch: Bool
+        let productionHydrationDisabled: Bool
+        let executionTargetIsLocalTestFixture: Bool
+        let productionTargetBlocked: Bool
+        let productionReadsBlocked: Bool
+        let remoteStateWritesBlocked: Bool
+        let realLocalUserStateWritesBlocked: Bool
+        let hydrationOperationSucceeded: Bool
+        let postHydrationMatchesSnapshotEvidence: Bool
+        let rollbackOperationSucceeded: Bool
+        let rollbackRestoredPreHydrationFixture: Bool
+        let fallbackRetained: Bool
+        let noProductionBehaviorChangedText: String
     }
 
     struct CanonicalTransitionPolicyDiagnostics: Equatable {
@@ -22798,6 +22857,209 @@ final class AppState: ObservableObject {
         lines.append("- fallback_retained: \(preflight.fallbackRetained)")
         lines.append("- rollback_ready: \(preflight.rollbackReady)")
         lines.append(preflight.noBehaviorChangedText)
+        return lines.joined(separator: "\n")
+    }
+
+    nonisolated static func makeProductionSingleSessionHydrationExecutionRehearsal(
+        checkedAt: Date = Date(),
+        hydrationReadiness preflight: ProductionSingleSessionHydrationReadinessPreflight,
+        restoreDiagnostics restore: SessionSnapshotRestoreDiagnosticsResult,
+        hydrationPolicy policy: SessionSnapshotHydrationPolicyDiagnostics,
+        preHydrationFixture: ProductionSingleSessionHydrationFixtureMetadataEvidence,
+        hydrationOperation: ProductionSingleSessionHydrationRehearsalOperationEvidence,
+        postHydrationFixture: ProductionSingleSessionHydrationFixtureMetadataEvidence,
+        rollbackOperation: ProductionSingleSessionHydrationRehearsalOperationEvidence,
+        restoredFixture: ProductionSingleSessionHydrationFixtureMetadataEvidence
+    ) -> ProductionSingleSessionHydrationExecutionRehearsal {
+        func scopesAreEqual(
+            _ lhs: ProductionCohortApprovalScope,
+            _ rhs: ProductionCohortApprovalScope
+        ) -> Bool {
+            lhs.orgID == rhs.orgID &&
+                lhs.propertyID == rhs.propertyID &&
+                lhs.sessionID == rhs.sessionID
+        }
+
+        let restoreScope = ProductionCohortApprovalScope(
+            orgID: preflight.candidatePackageScope.orgID,
+            propertyID: restore.propertyID,
+            sessionID: restore.sessionID
+        )
+        let hydrationReadinessReviewOnly = preflight.state == .readyForHydrationReadinessReviewOnly &&
+            preflight.blockers.isEmpty
+        let exactSingleScopeSelected = preflight.exactSingleScopeSelected &&
+            preflight.candidatePackageScope.orgID != nil &&
+            preflight.candidatePackageScope.propertyID != nil &&
+            preflight.candidatePackageScope.sessionID != nil
+        let scopesMatch = [
+            restoreScope,
+            preHydrationFixture.scope,
+            hydrationOperation.targetScope,
+            postHydrationFixture.scope,
+            rollbackOperation.targetScope,
+            restoredFixture.scope
+        ].allSatisfy { scopesAreEqual(preflight.candidatePackageScope, $0) }
+        let productionHydrationDisabled = preflight.productionHydrationDisabledNonWriting &&
+            !policy.productionHydrationAllowed &&
+            policy.hydrationMode != "operator_approved_single_session" &&
+            policy.hydrationScope != "single_selected_session"
+        let executionTargetIsLocalTestFixture = hydrationOperation.executedInIsolatedFixture &&
+            rollbackOperation.executedInIsolatedFixture
+        let productionTargetBlocked = !hydrationOperation.productionTarget &&
+            !rollbackOperation.productionTarget
+        let productionReadsBlocked = !hydrationOperation.productionReadsEnabled &&
+            !rollbackOperation.productionReadsEnabled
+        let remoteStateWritesBlocked = !hydrationOperation.remoteStateWriteAttempted &&
+            !rollbackOperation.remoteStateWriteAttempted
+        let realLocalUserStateWritesBlocked = !hydrationOperation.realLocalUserStateWriteAttempted &&
+            !rollbackOperation.realLocalUserStateWriteAttempted
+        let hydrationOperationSucceeded = hydrationOperation.succeeded &&
+            hydrationOperation.failureReason == nil
+        let postHydrationMatchesSnapshotEvidence = postHydrationFixture.shotCount == restore.snapshotShotCount &&
+            postHydrationFixture.issueCount == restore.snapshotIssueCount &&
+            postHydrationFixture.guidedCount == restore.snapshotGuidedCount &&
+            hydrationOperation.metadataFingerprint == postHydrationFixture.metadataFingerprint &&
+            hydrationOperation.shotCount == postHydrationFixture.shotCount &&
+            hydrationOperation.issueCount == postHydrationFixture.issueCount &&
+            hydrationOperation.guidedCount == postHydrationFixture.guidedCount
+        let rollbackOperationSucceeded = rollbackOperation.succeeded &&
+            rollbackOperation.failureReason == nil
+        let rollbackRestoredPreHydrationFixture = restoredFixture.metadataFingerprint == preHydrationFixture.metadataFingerprint &&
+            restoredFixture.shotCount == preHydrationFixture.shotCount &&
+            restoredFixture.issueCount == preHydrationFixture.issueCount &&
+            restoredFixture.guidedCount == preHydrationFixture.guidedCount &&
+            rollbackOperation.metadataFingerprint == restoredFixture.metadataFingerprint &&
+            rollbackOperation.shotCount == restoredFixture.shotCount &&
+            rollbackOperation.issueCount == restoredFixture.issueCount &&
+            rollbackOperation.guidedCount == restoredFixture.guidedCount
+        let fallbackRetained = preflight.fallbackRetained &&
+            preHydrationFixture.fallbackRetained &&
+            postHydrationFixture.fallbackRetained &&
+            restoredFixture.fallbackRetained
+
+        var blockers = preflight.blockers
+        if !hydrationReadinessReviewOnly {
+            blockers.append("hydration_readiness_preflight_not_review_only")
+        }
+        if !exactSingleScopeSelected {
+            blockers.append("exact_single_org_property_session_scope_required")
+        }
+        if !scopesMatch {
+            blockers.append("hydration_rehearsal_scope_mismatch")
+        }
+        if !productionHydrationDisabled {
+            blockers.append("production_hydration_must_remain_disabled")
+        }
+        if !executionTargetIsLocalTestFixture {
+            blockers.append("isolated_local_test_fixture_required")
+        }
+        if !productionTargetBlocked {
+            blockers.append("production_target_not_allowed_for_hydration_rehearsal")
+        }
+        if !productionReadsBlocked {
+            blockers.append("production_reads_must_remain_disabled")
+        }
+        if !remoteStateWritesBlocked {
+            blockers.append("remote_state_write_attempted")
+        }
+        if !realLocalUserStateWritesBlocked {
+            blockers.append("real_local_user_state_write_attempted")
+        }
+        if !hydrationOperationSucceeded {
+            blockers.append("fixture_hydration_operation_failed")
+        }
+        if !postHydrationMatchesSnapshotEvidence {
+            blockers.append("post_hydration_fixture_mismatch")
+        }
+        if !rollbackOperationSucceeded {
+            blockers.append("fixture_rollback_operation_failed")
+        }
+        if !rollbackRestoredPreHydrationFixture {
+            blockers.append("rollback_restored_fixture_mismatch")
+        }
+        if !fallbackRetained {
+            blockers.append("local_fallback_unavailable")
+        }
+
+        let blockedConditions = [
+            executionTargetIsLocalTestFixture ? "test_only_fixture_hydration_only" : nil,
+            productionHydrationDisabled ? "production_hydration_blocked" : nil,
+            productionReadsBlocked ? "production_reads_blocked" : nil,
+            preflight.activeSource == .local ? "active_source_remains_local" : nil,
+            !preflight.activationPerformed ? "activation_not_performed" : nil,
+            !preflight.persistencePerformed ? "persistence_not_performed" : nil,
+            preflight.hydrationExecutionBlocked ? "production_hydration_execution_blocked" : nil,
+            remoteStateWritesBlocked ? "remote_state_writes_blocked" : nil,
+            realLocalUserStateWritesBlocked ? "real_local_user_state_writes_blocked" : nil,
+            rollbackRestoredPreHydrationFixture ? "rollback_restored_pre_hydration_fixture_state" : nil,
+            fallbackRetained ? "fallback_retained" : nil,
+            "production_activation_blocked",
+            "overlay_activation_blocked",
+            "reads_not_switched"
+        ].compactMap { $0 }
+        let dedupedBlockers = Array(Set(blockers)).sorted()
+
+        return ProductionSingleSessionHydrationExecutionRehearsal(
+            checkedAt: checkedAt,
+            state: dedupedBlockers.isEmpty ? .testOnlyHydrationRehearsalPassed : .blocked,
+            blockers: dedupedBlockers,
+            blockedConditions: Array(Set(blockedConditions)).sorted(),
+            hydrationReadinessScope: preflight.candidatePackageScope,
+            restoreDiagnosticsScope: restoreScope,
+            preHydrationFixtureScope: preHydrationFixture.scope,
+            hydrationOperationScope: hydrationOperation.targetScope,
+            postHydrationFixtureScope: postHydrationFixture.scope,
+            rollbackOperationScope: rollbackOperation.targetScope,
+            restoredFixtureScope: restoredFixture.scope,
+            hydrationReadinessReviewOnly: hydrationReadinessReviewOnly,
+            exactSingleScopeSelected: exactSingleScopeSelected,
+            scopesMatch: scopesMatch,
+            productionHydrationDisabled: productionHydrationDisabled,
+            executionTargetIsLocalTestFixture: executionTargetIsLocalTestFixture,
+            productionTargetBlocked: productionTargetBlocked,
+            productionReadsBlocked: productionReadsBlocked,
+            remoteStateWritesBlocked: remoteStateWritesBlocked,
+            realLocalUserStateWritesBlocked: realLocalUserStateWritesBlocked,
+            hydrationOperationSucceeded: hydrationOperationSucceeded,
+            postHydrationMatchesSnapshotEvidence: postHydrationMatchesSnapshotEvidence,
+            rollbackOperationSucceeded: rollbackOperationSucceeded,
+            rollbackRestoredPreHydrationFixture: rollbackRestoredPreHydrationFixture,
+            fallbackRetained: fallbackRetained,
+            noProductionBehaviorChangedText: "No production behavior changed: production single-session hydration execution rehearsal is test-only fixture hydration only. No production hydration occurred, no production reads were enabled, no activation occurred, no overlay was activated, no reads were switched, no remote state was written, no real local user state was written, no fallback was removed, rollback restored pre-hydration fixture state or fallback remained retained, and export, seal, sync, media, iCloud, RLS, schema, and data behavior is unchanged."
+        )
+    }
+
+    nonisolated static func productionSingleSessionHydrationExecutionRehearsalReportText(
+        _ rehearsal: ProductionSingleSessionHydrationExecutionRehearsal
+    ) -> String {
+        var lines: [String] = []
+        lines.append("Production Single-Session Hydration Execution Rehearsal")
+        lines.append("- hydration_execution_rehearsal_checked_at: \(rehearsal.checkedAt.formatted(date: .abbreviated, time: .standard))")
+        lines.append("- hydration_execution_rehearsal_state: \(rehearsal.state.rawValue)")
+        lines.append("- blockers: \(rehearsal.blockers.isEmpty ? "none" : rehearsal.blockers.joined(separator: ", "))")
+        lines.append("- blocked_conditions: \(rehearsal.blockedConditions.isEmpty ? "none" : rehearsal.blockedConditions.joined(separator: ", "))")
+        lines.append("- hydration_readiness_scope: \(rehearsal.hydrationReadinessScope.description)")
+        lines.append("- restore_diagnostics_scope: \(rehearsal.restoreDiagnosticsScope.description)")
+        lines.append("- pre_hydration_fixture_scope: \(rehearsal.preHydrationFixtureScope.description)")
+        lines.append("- hydration_operation_scope: \(rehearsal.hydrationOperationScope.description)")
+        lines.append("- post_hydration_fixture_scope: \(rehearsal.postHydrationFixtureScope.description)")
+        lines.append("- rollback_operation_scope: \(rehearsal.rollbackOperationScope.description)")
+        lines.append("- restored_fixture_scope: \(rehearsal.restoredFixtureScope.description)")
+        lines.append("- hydration_readiness_review_only: \(rehearsal.hydrationReadinessReviewOnly)")
+        lines.append("- exact_single_scope_selected: \(rehearsal.exactSingleScopeSelected)")
+        lines.append("- scopes_match: \(rehearsal.scopesMatch)")
+        lines.append("- production_hydration_disabled: \(rehearsal.productionHydrationDisabled)")
+        lines.append("- execution_target_is_local_test_fixture: \(rehearsal.executionTargetIsLocalTestFixture)")
+        lines.append("- production_target_blocked: \(rehearsal.productionTargetBlocked)")
+        lines.append("- production_reads_blocked: \(rehearsal.productionReadsBlocked)")
+        lines.append("- remote_state_writes_blocked: \(rehearsal.remoteStateWritesBlocked)")
+        lines.append("- real_local_user_state_writes_blocked: \(rehearsal.realLocalUserStateWritesBlocked)")
+        lines.append("- hydration_operation_succeeded: \(rehearsal.hydrationOperationSucceeded)")
+        lines.append("- post_hydration_matches_snapshot_evidence: \(rehearsal.postHydrationMatchesSnapshotEvidence)")
+        lines.append("- rollback_operation_succeeded: \(rehearsal.rollbackOperationSucceeded)")
+        lines.append("- rollback_restored_pre_hydration_fixture: \(rehearsal.rollbackRestoredPreHydrationFixture)")
+        lines.append("- fallback_retained: \(rehearsal.fallbackRetained)")
+        lines.append(rehearsal.noProductionBehaviorChangedText)
         return lines.joined(separator: "\n")
     }
 

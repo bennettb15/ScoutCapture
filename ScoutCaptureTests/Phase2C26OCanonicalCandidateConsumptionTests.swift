@@ -706,6 +706,152 @@ final class Phase2C26OCanonicalCandidateConsumptionTests: XCTestCase {
         return (activationInputs.upload, activationInputs.candidatePackage, validation, restore, policy, confirmation)
     }
 
+    private func hydrationReadinessPreflight(
+        state: AppState.ProductionSingleSessionHydrationReadinessPreflightState? = nil,
+        blockers: [String]? = nil,
+        fallbackRetained: Bool? = nil
+    ) -> AppState.ProductionSingleSessionHydrationReadinessPreflight {
+        let inputs = hydrationReadinessPreflightInputs()
+        let preflight = AppState.makeProductionSingleSessionHydrationReadinessPreflight(
+            activationReadiness: inputs.validation,
+            candidatePackage: inputs.candidatePackage,
+            restoreDiagnostics: inputs.restore,
+            hydrationPolicy: inputs.policy,
+            hydrationConfirmation: inputs.confirmation
+        )
+        return AppState.ProductionSingleSessionHydrationReadinessPreflight(
+            checkedAt: preflight.checkedAt,
+            state: state ?? preflight.state,
+            blockers: blockers ?? preflight.blockers,
+            blockedConditions: preflight.blockedConditions,
+            activationReadinessScope: preflight.activationReadinessScope,
+            candidatePackageScope: preflight.candidatePackageScope,
+            restoreDiagnosticsScope: preflight.restoreDiagnosticsScope,
+            activationReadinessReviewOnly: preflight.activationReadinessReviewOnly,
+            exactSingleScopeSelected: preflight.exactSingleScopeSelected,
+            restoreDiagnosticsScopeMatchesPackage: preflight.restoreDiagnosticsScopeMatchesPackage,
+            hydrationConfirmationMatchesScope: preflight.hydrationConfirmationMatchesScope,
+            restoreResult: preflight.restoreResult,
+            snapshotIDPresent: preflight.snapshotIDPresent,
+            checksumVerified: preflight.checksumVerified,
+            rowObjectVerified: preflight.rowObjectVerified,
+            parentRemoteVerified: preflight.parentRemoteVerified,
+            snapshotSchemaSupported: preflight.snapshotSchemaSupported,
+            freshnessNotLocalNewer: preflight.freshnessNotLocalNewer,
+            hydrationConfirmationRequired: preflight.hydrationConfirmationRequired,
+            productionHydrationDisabledNonWriting: preflight.productionHydrationDisabledNonWriting,
+            productionHydrationBlockedReason: preflight.productionHydrationBlockedReason,
+            hydrationExecutionBlocked: preflight.hydrationExecutionBlocked,
+            hydrationPerformed: preflight.hydrationPerformed,
+            activeSource: preflight.activeSource,
+            activationPerformed: preflight.activationPerformed,
+            persistencePerformed: preflight.persistencePerformed,
+            fallbackRetained: fallbackRetained ?? preflight.fallbackRetained,
+            rollbackReady: preflight.rollbackReady,
+            noBehaviorChangedText: preflight.noBehaviorChangedText
+        )
+    }
+
+    private func fixtureMetadataEvidence(
+        fingerprint: String,
+        scope: AppState.ProductionCohortApprovalScope? = nil,
+        shotCount: Int = 3,
+        issueCount: Int = 2,
+        guidedCount: Int = 0,
+        fallbackRetained: Bool = true
+    ) -> AppState.ProductionSingleSessionHydrationFixtureMetadataEvidence {
+        AppState.ProductionSingleSessionHydrationFixtureMetadataEvidence(
+            scope: scope ?? AppState.ProductionCohortApprovalScope(
+                orgID: orgID,
+                propertyID: propertyID,
+                sessionID: sessionID
+            ),
+            metadataFingerprint: fingerprint,
+            shotCount: shotCount,
+            issueCount: issueCount,
+            guidedCount: guidedCount,
+            fallbackRetained: fallbackRetained
+        )
+    }
+
+    private func rehearsalOperationEvidence(
+        operationName: String,
+        scope: AppState.ProductionCohortApprovalScope? = nil,
+        succeeded: Bool = true,
+        executedInIsolatedFixture: Bool = true,
+        productionTarget: Bool = false,
+        productionReadsEnabled: Bool = false,
+        remoteStateWriteAttempted: Bool = false,
+        realLocalUserStateWriteAttempted: Bool = false,
+        fingerprint: String? = "post-fixture",
+        shotCount: Int? = 3,
+        issueCount: Int? = 2,
+        guidedCount: Int? = 0,
+        failureReason: String? = nil
+    ) -> AppState.ProductionSingleSessionHydrationRehearsalOperationEvidence {
+        AppState.ProductionSingleSessionHydrationRehearsalOperationEvidence(
+            operationName: operationName,
+            targetScope: scope ?? AppState.ProductionCohortApprovalScope(
+                orgID: orgID,
+                propertyID: propertyID,
+                sessionID: sessionID
+            ),
+            succeeded: succeeded,
+            executedInIsolatedFixture: executedInIsolatedFixture,
+            productionTarget: productionTarget,
+            productionReadsEnabled: productionReadsEnabled,
+            remoteStateWriteAttempted: remoteStateWriteAttempted,
+            realLocalUserStateWriteAttempted: realLocalUserStateWriteAttempted,
+            metadataFingerprint: fingerprint,
+            shotCount: shotCount,
+            issueCount: issueCount,
+            guidedCount: guidedCount,
+            failureReason: failureReason
+        )
+    }
+
+    private func hydrationExecutionRehearsalInputs() -> (
+        preflight: AppState.ProductionSingleSessionHydrationReadinessPreflight,
+        restore: AppState.SessionSnapshotRestoreDiagnosticsResult,
+        policy: AppState.SessionSnapshotHydrationPolicyDiagnostics,
+        preFixture: AppState.ProductionSingleSessionHydrationFixtureMetadataEvidence,
+        hydrationOperation: AppState.ProductionSingleSessionHydrationRehearsalOperationEvidence,
+        postFixture: AppState.ProductionSingleSessionHydrationFixtureMetadataEvidence,
+        rollbackOperation: AppState.ProductionSingleSessionHydrationRehearsalOperationEvidence,
+        restoredFixture: AppState.ProductionSingleSessionHydrationFixtureMetadataEvidence
+    ) {
+        let inputs = hydrationReadinessPreflightInputs()
+        let preflight = AppState.makeProductionSingleSessionHydrationReadinessPreflight(
+            activationReadiness: inputs.validation,
+            candidatePackage: inputs.candidatePackage,
+            restoreDiagnostics: inputs.restore,
+            hydrationPolicy: inputs.policy,
+            hydrationConfirmation: inputs.confirmation
+        )
+        let preFixture = fixtureMetadataEvidence(
+            fingerprint: "pre-fixture",
+            shotCount: 1,
+            issueCount: 0,
+            guidedCount: 0
+        )
+        let postFixture = fixtureMetadataEvidence(fingerprint: "post-fixture")
+        let hydrationOperation = rehearsalOperationEvidence(operationName: "fixture_hydration")
+        let rollbackOperation = rehearsalOperationEvidence(
+            operationName: "fixture_rollback",
+            fingerprint: "pre-fixture",
+            shotCount: 1,
+            issueCount: 0,
+            guidedCount: 0
+        )
+        let restoredFixture = fixtureMetadataEvidence(
+            fingerprint: "pre-fixture",
+            shotCount: 1,
+            issueCount: 0,
+            guidedCount: 0
+        )
+        return (preflight, inputs.restore, inputs.policy, preFixture, hydrationOperation, postFixture, rollbackOperation, restoredFixture)
+    }
+
     func testAllowlistedStagingCandidateBuildsOverlay() {
         let result = overlay()
 
@@ -3158,6 +3304,336 @@ final class Phase2C26OCanonicalCandidateConsumptionTests: XCTestCase {
         XCTAssertTrue(text.contains("no reads were switched"))
         XCTAssertTrue(text.contains("no local or remote state was written"))
         XCTAssertTrue(text.contains("no fallback was removed"))
+        XCTAssertTrue(text.contains("export, seal, sync, media, iCloud, RLS, schema, and data behavior is unchanged"))
+    }
+
+    func testProductionSingleSessionHydrationExecutionRehearsalPassesForTestOnlyFixture() {
+        let inputs = hydrationExecutionRehearsalInputs()
+
+        let rehearsal = AppState.makeProductionSingleSessionHydrationExecutionRehearsal(
+            checkedAt: Date(timeIntervalSinceReferenceDate: 9_600),
+            hydrationReadiness: inputs.preflight,
+            restoreDiagnostics: inputs.restore,
+            hydrationPolicy: inputs.policy,
+            preHydrationFixture: inputs.preFixture,
+            hydrationOperation: inputs.hydrationOperation,
+            postHydrationFixture: inputs.postFixture,
+            rollbackOperation: inputs.rollbackOperation,
+            restoredFixture: inputs.restoredFixture
+        )
+
+        XCTAssertEqual(rehearsal.state, .testOnlyHydrationRehearsalPassed)
+        XCTAssertTrue(rehearsal.blockers.isEmpty)
+        XCTAssertTrue(rehearsal.blockedConditions.contains("test_only_fixture_hydration_only"))
+        XCTAssertTrue(rehearsal.blockedConditions.contains("production_hydration_blocked"))
+        XCTAssertTrue(rehearsal.blockedConditions.contains("production_reads_blocked"))
+        XCTAssertTrue(rehearsal.blockedConditions.contains("remote_state_writes_blocked"))
+        XCTAssertTrue(rehearsal.blockedConditions.contains("real_local_user_state_writes_blocked"))
+        XCTAssertTrue(rehearsal.blockedConditions.contains("rollback_restored_pre_hydration_fixture_state"))
+        XCTAssertTrue(rehearsal.hydrationReadinessReviewOnly)
+        XCTAssertTrue(rehearsal.exactSingleScopeSelected)
+        XCTAssertTrue(rehearsal.scopesMatch)
+        XCTAssertTrue(rehearsal.productionHydrationDisabled)
+        XCTAssertTrue(rehearsal.executionTargetIsLocalTestFixture)
+        XCTAssertTrue(rehearsal.productionTargetBlocked)
+        XCTAssertTrue(rehearsal.productionReadsBlocked)
+        XCTAssertTrue(rehearsal.remoteStateWritesBlocked)
+        XCTAssertTrue(rehearsal.realLocalUserStateWritesBlocked)
+        XCTAssertTrue(rehearsal.hydrationOperationSucceeded)
+        XCTAssertTrue(rehearsal.postHydrationMatchesSnapshotEvidence)
+        XCTAssertTrue(rehearsal.rollbackOperationSucceeded)
+        XCTAssertTrue(rehearsal.rollbackRestoredPreHydrationFixture)
+        XCTAssertTrue(rehearsal.fallbackRetained)
+    }
+
+    func testProductionSingleSessionHydrationExecutionRehearsalRequires27LReady() {
+        var inputs = hydrationExecutionRehearsalInputs()
+        inputs.preflight = hydrationReadinessPreflight(
+            state: .blocked,
+            blockers: ["hydration_readiness_test_blocker"]
+        )
+
+        let rehearsal = AppState.makeProductionSingleSessionHydrationExecutionRehearsal(
+            hydrationReadiness: inputs.preflight,
+            restoreDiagnostics: inputs.restore,
+            hydrationPolicy: inputs.policy,
+            preHydrationFixture: inputs.preFixture,
+            hydrationOperation: inputs.hydrationOperation,
+            postHydrationFixture: inputs.postFixture,
+            rollbackOperation: inputs.rollbackOperation,
+            restoredFixture: inputs.restoredFixture
+        )
+
+        XCTAssertEqual(rehearsal.state, .blocked)
+        XCTAssertFalse(rehearsal.hydrationReadinessReviewOnly)
+        XCTAssertTrue(rehearsal.blockers.contains("hydration_readiness_preflight_not_review_only"))
+    }
+
+    func testProductionSingleSessionHydrationExecutionRehearsalProductionTargetBlocks() {
+        var inputs = hydrationExecutionRehearsalInputs()
+        inputs.hydrationOperation = rehearsalOperationEvidence(
+            operationName: "fixture_hydration",
+            productionTarget: true
+        )
+
+        let rehearsal = AppState.makeProductionSingleSessionHydrationExecutionRehearsal(
+            hydrationReadiness: inputs.preflight,
+            restoreDiagnostics: inputs.restore,
+            hydrationPolicy: inputs.policy,
+            preHydrationFixture: inputs.preFixture,
+            hydrationOperation: inputs.hydrationOperation,
+            postHydrationFixture: inputs.postFixture,
+            rollbackOperation: inputs.rollbackOperation,
+            restoredFixture: inputs.restoredFixture
+        )
+
+        XCTAssertEqual(rehearsal.state, .blocked)
+        XCTAssertFalse(rehearsal.productionTargetBlocked)
+        XCTAssertTrue(rehearsal.blockers.contains("production_target_not_allowed_for_hydration_rehearsal"))
+    }
+
+    func testProductionSingleSessionHydrationExecutionRehearsalScopeMismatchBlocks() {
+        var inputs = hydrationExecutionRehearsalInputs()
+        let mismatchedScope = AppState.ProductionCohortApprovalScope(
+            orgID: orgID,
+            propertyID: UUID(uuidString: "55555555-5555-5555-5555-555555555555")!,
+            sessionID: sessionID
+        )
+        inputs.postFixture = fixtureMetadataEvidence(fingerprint: "post-fixture", scope: mismatchedScope)
+
+        let rehearsal = AppState.makeProductionSingleSessionHydrationExecutionRehearsal(
+            hydrationReadiness: inputs.preflight,
+            restoreDiagnostics: inputs.restore,
+            hydrationPolicy: inputs.policy,
+            preHydrationFixture: inputs.preFixture,
+            hydrationOperation: inputs.hydrationOperation,
+            postHydrationFixture: inputs.postFixture,
+            rollbackOperation: inputs.rollbackOperation,
+            restoredFixture: inputs.restoredFixture
+        )
+
+        XCTAssertEqual(rehearsal.state, .blocked)
+        XCTAssertFalse(rehearsal.scopesMatch)
+        XCTAssertTrue(rehearsal.blockers.contains("hydration_rehearsal_scope_mismatch"))
+    }
+
+    func testProductionSingleSessionHydrationExecutionRehearsalHydrationOperationFailureBlocks() {
+        var inputs = hydrationExecutionRehearsalInputs()
+        inputs.hydrationOperation = rehearsalOperationEvidence(
+            operationName: "fixture_hydration",
+            succeeded: false,
+            failureReason: "fixture_hydration_failed"
+        )
+
+        let rehearsal = AppState.makeProductionSingleSessionHydrationExecutionRehearsal(
+            hydrationReadiness: inputs.preflight,
+            restoreDiagnostics: inputs.restore,
+            hydrationPolicy: inputs.policy,
+            preHydrationFixture: inputs.preFixture,
+            hydrationOperation: inputs.hydrationOperation,
+            postHydrationFixture: inputs.postFixture,
+            rollbackOperation: inputs.rollbackOperation,
+            restoredFixture: inputs.restoredFixture
+        )
+
+        XCTAssertEqual(rehearsal.state, .blocked)
+        XCTAssertFalse(rehearsal.hydrationOperationSucceeded)
+        XCTAssertTrue(rehearsal.blockers.contains("fixture_hydration_operation_failed"))
+    }
+
+    func testProductionSingleSessionHydrationExecutionRehearsalPostHydrationMismatchBlocks() {
+        var inputs = hydrationExecutionRehearsalInputs()
+        inputs.postFixture = fixtureMetadataEvidence(fingerprint: "post-fixture", shotCount: 4)
+
+        let rehearsal = AppState.makeProductionSingleSessionHydrationExecutionRehearsal(
+            hydrationReadiness: inputs.preflight,
+            restoreDiagnostics: inputs.restore,
+            hydrationPolicy: inputs.policy,
+            preHydrationFixture: inputs.preFixture,
+            hydrationOperation: inputs.hydrationOperation,
+            postHydrationFixture: inputs.postFixture,
+            rollbackOperation: inputs.rollbackOperation,
+            restoredFixture: inputs.restoredFixture
+        )
+
+        XCTAssertEqual(rehearsal.state, .blocked)
+        XCTAssertFalse(rehearsal.postHydrationMatchesSnapshotEvidence)
+        XCTAssertTrue(rehearsal.blockers.contains("post_hydration_fixture_mismatch"))
+    }
+
+    func testProductionSingleSessionHydrationExecutionRehearsalRollbackFailureBlocks() {
+        var inputs = hydrationExecutionRehearsalInputs()
+        inputs.rollbackOperation = rehearsalOperationEvidence(
+            operationName: "fixture_rollback",
+            succeeded: false,
+            fingerprint: "pre-fixture",
+            shotCount: 1,
+            issueCount: 0,
+            guidedCount: 0,
+            failureReason: "fixture_rollback_failed"
+        )
+
+        let rehearsal = AppState.makeProductionSingleSessionHydrationExecutionRehearsal(
+            hydrationReadiness: inputs.preflight,
+            restoreDiagnostics: inputs.restore,
+            hydrationPolicy: inputs.policy,
+            preHydrationFixture: inputs.preFixture,
+            hydrationOperation: inputs.hydrationOperation,
+            postHydrationFixture: inputs.postFixture,
+            rollbackOperation: inputs.rollbackOperation,
+            restoredFixture: inputs.restoredFixture
+        )
+
+        XCTAssertEqual(rehearsal.state, .blocked)
+        XCTAssertFalse(rehearsal.rollbackOperationSucceeded)
+        XCTAssertTrue(rehearsal.blockers.contains("fixture_rollback_operation_failed"))
+    }
+
+    func testProductionSingleSessionHydrationExecutionRehearsalRollbackRestoredMismatchBlocks() {
+        var inputs = hydrationExecutionRehearsalInputs()
+        inputs.restoredFixture = fixtureMetadataEvidence(
+            fingerprint: "wrong-restored-fixture",
+            shotCount: 1,
+            issueCount: 0,
+            guidedCount: 0
+        )
+
+        let rehearsal = AppState.makeProductionSingleSessionHydrationExecutionRehearsal(
+            hydrationReadiness: inputs.preflight,
+            restoreDiagnostics: inputs.restore,
+            hydrationPolicy: inputs.policy,
+            preHydrationFixture: inputs.preFixture,
+            hydrationOperation: inputs.hydrationOperation,
+            postHydrationFixture: inputs.postFixture,
+            rollbackOperation: inputs.rollbackOperation,
+            restoredFixture: inputs.restoredFixture
+        )
+
+        XCTAssertEqual(rehearsal.state, .blocked)
+        XCTAssertFalse(rehearsal.rollbackRestoredPreHydrationFixture)
+        XCTAssertTrue(rehearsal.blockers.contains("rollback_restored_fixture_mismatch"))
+    }
+
+    func testProductionSingleSessionHydrationExecutionRehearsalRemoteWriteAttemptBlocks() {
+        var inputs = hydrationExecutionRehearsalInputs()
+        inputs.hydrationOperation = rehearsalOperationEvidence(
+            operationName: "fixture_hydration",
+            remoteStateWriteAttempted: true
+        )
+
+        let rehearsal = AppState.makeProductionSingleSessionHydrationExecutionRehearsal(
+            hydrationReadiness: inputs.preflight,
+            restoreDiagnostics: inputs.restore,
+            hydrationPolicy: inputs.policy,
+            preHydrationFixture: inputs.preFixture,
+            hydrationOperation: inputs.hydrationOperation,
+            postHydrationFixture: inputs.postFixture,
+            rollbackOperation: inputs.rollbackOperation,
+            restoredFixture: inputs.restoredFixture
+        )
+
+        XCTAssertEqual(rehearsal.state, .blocked)
+        XCTAssertFalse(rehearsal.remoteStateWritesBlocked)
+        XCTAssertTrue(rehearsal.blockers.contains("remote_state_write_attempted"))
+    }
+
+    func testProductionSingleSessionHydrationExecutionRehearsalProductionReadAttemptBlocks() {
+        var inputs = hydrationExecutionRehearsalInputs()
+        inputs.hydrationOperation = rehearsalOperationEvidence(
+            operationName: "fixture_hydration",
+            productionReadsEnabled: true
+        )
+
+        let rehearsal = AppState.makeProductionSingleSessionHydrationExecutionRehearsal(
+            hydrationReadiness: inputs.preflight,
+            restoreDiagnostics: inputs.restore,
+            hydrationPolicy: inputs.policy,
+            preHydrationFixture: inputs.preFixture,
+            hydrationOperation: inputs.hydrationOperation,
+            postHydrationFixture: inputs.postFixture,
+            rollbackOperation: inputs.rollbackOperation,
+            restoredFixture: inputs.restoredFixture
+        )
+
+        XCTAssertEqual(rehearsal.state, .blocked)
+        XCTAssertFalse(rehearsal.productionReadsBlocked)
+        XCTAssertTrue(rehearsal.blockers.contains("production_reads_must_remain_disabled"))
+    }
+
+    func testProductionSingleSessionHydrationExecutionRehearsalRealLocalUserStateWriteAttemptBlocks() {
+        var inputs = hydrationExecutionRehearsalInputs()
+        inputs.hydrationOperation = rehearsalOperationEvidence(
+            operationName: "fixture_hydration",
+            realLocalUserStateWriteAttempted: true
+        )
+
+        let rehearsal = AppState.makeProductionSingleSessionHydrationExecutionRehearsal(
+            hydrationReadiness: inputs.preflight,
+            restoreDiagnostics: inputs.restore,
+            hydrationPolicy: inputs.policy,
+            preHydrationFixture: inputs.preFixture,
+            hydrationOperation: inputs.hydrationOperation,
+            postHydrationFixture: inputs.postFixture,
+            rollbackOperation: inputs.rollbackOperation,
+            restoredFixture: inputs.restoredFixture
+        )
+
+        XCTAssertEqual(rehearsal.state, .blocked)
+        XCTAssertFalse(rehearsal.realLocalUserStateWritesBlocked)
+        XCTAssertTrue(rehearsal.blockers.contains("real_local_user_state_write_attempted"))
+    }
+
+    func testProductionSingleSessionHydrationExecutionRehearsalMissingFallbackBlocks() {
+        var inputs = hydrationExecutionRehearsalInputs()
+        inputs.preflight = hydrationReadinessPreflight(fallbackRetained: false)
+
+        let rehearsal = AppState.makeProductionSingleSessionHydrationExecutionRehearsal(
+            hydrationReadiness: inputs.preflight,
+            restoreDiagnostics: inputs.restore,
+            hydrationPolicy: inputs.policy,
+            preHydrationFixture: inputs.preFixture,
+            hydrationOperation: inputs.hydrationOperation,
+            postHydrationFixture: inputs.postFixture,
+            rollbackOperation: inputs.rollbackOperation,
+            restoredFixture: inputs.restoredFixture
+        )
+
+        XCTAssertEqual(rehearsal.state, .blocked)
+        XCTAssertFalse(rehearsal.fallbackRetained)
+        XCTAssertTrue(rehearsal.blockers.contains("local_fallback_unavailable"))
+    }
+
+    func testProductionSingleSessionHydrationExecutionRehearsalReportIncludesNoProductionBehaviorChanges() {
+        let inputs = hydrationExecutionRehearsalInputs()
+        let rehearsal = AppState.makeProductionSingleSessionHydrationExecutionRehearsal(
+            hydrationReadiness: inputs.preflight,
+            restoreDiagnostics: inputs.restore,
+            hydrationPolicy: inputs.policy,
+            preHydrationFixture: inputs.preFixture,
+            hydrationOperation: inputs.hydrationOperation,
+            postHydrationFixture: inputs.postFixture,
+            rollbackOperation: inputs.rollbackOperation,
+            restoredFixture: inputs.restoredFixture
+        )
+
+        let text = AppState.productionSingleSessionHydrationExecutionRehearsalReportText(rehearsal)
+
+        XCTAssertTrue(text.contains("Production Single-Session Hydration Execution Rehearsal"))
+        XCTAssertTrue(text.contains("- hydration_execution_rehearsal_state: test_only_hydration_rehearsal_passed"))
+        XCTAssertTrue(text.contains("- blocked_conditions:"))
+        XCTAssertTrue(text.contains("test_only_fixture_hydration_only"))
+        XCTAssertTrue(text.contains("- remote_state_writes_blocked: true"))
+        XCTAssertTrue(text.contains("- real_local_user_state_writes_blocked: true"))
+        XCTAssertTrue(text.contains("test-only fixture hydration only"))
+        XCTAssertTrue(text.contains("No production hydration occurred"))
+        XCTAssertTrue(text.contains("no production reads were enabled"))
+        XCTAssertTrue(text.contains("no activation occurred"))
+        XCTAssertTrue(text.contains("no overlay was activated"))
+        XCTAssertTrue(text.contains("no reads were switched"))
+        XCTAssertTrue(text.contains("no remote state was written"))
+        XCTAssertTrue(text.contains("no real local user state was written"))
+        XCTAssertTrue(text.contains("no fallback was removed"))
+        XCTAssertTrue(text.contains("rollback restored pre-hydration fixture state or fallback remained retained"))
         XCTAssertTrue(text.contains("export, seal, sync, media, iCloud, RLS, schema, and data behavior is unchanged"))
     }
 
