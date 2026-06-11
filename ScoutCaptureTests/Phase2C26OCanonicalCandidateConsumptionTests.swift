@@ -7,6 +7,184 @@ final class Phase2C26OCanonicalCandidateConsumptionTests: XCTestCase {
     private let sessionID = UUID(uuidString: "33333333-3333-3333-3333-333333333333")!
     private let snapshotID = UUID(uuidString: "44444444-4444-4444-4444-444444444444")!
 
+    private struct ActivationExecutionFixture {
+        let suiteName: String
+        let defaults: UserDefaults
+        let storageRoot: URL
+        let store: LocalStore
+        let appState: AppState
+        let property: Property
+        let session: Session
+    }
+
+    private func makeTempStorageRoot() throws -> URL {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ScoutCapture-2C26O-27N-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        return root
+    }
+
+    private func makeDefaults() -> (suiteName: String, defaults: UserDefaults) {
+        let suiteName = "ScoutCapture-2C26O-27N-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName) ?? .standard
+        defaults.removePersistentDomain(forName: suiteName)
+        defaults.set(false, forKey: "supabase_enabled")
+        defaults.set(false, forKey: "shadow_write_enabled")
+        defaults.set(false, forKey: "supabase_read_enabled")
+        defaults.set(false, forKey: "supabase_property_read_enabled")
+        defaults.set(false, forKey: "media_supabase_upload_enabled")
+        defaults.set(false, forKey: "sync_delta_enabled")
+        return (suiteName, defaults)
+    }
+
+    private func activationExecutionEnvironment() -> [String: String] {
+        [
+            "SCOUTCAPTURE_SUPABASE_URL": "http://127.0.0.1:54321",
+            "SCOUTCAPTURE_SUPABASE_ANON_KEY": "local-anon-key",
+            SupabaseRuntimeConfiguration.canonicalReadCandidateEnabledEnvKey: "true",
+            SupabaseRuntimeConfiguration.canonicalReadCandidateOrgAllowlistEnvKey: orgID.uuidString,
+            SupabaseRuntimeConfiguration.canonicalReadCandidatePropertyAllowlistEnvKey: propertyID.uuidString,
+            SupabaseRuntimeConfiguration.canonicalReadCandidateSessionAllowlistEnvKey: sessionID.uuidString
+        ]
+    }
+
+    @MainActor
+    private func makeActivationExecutionFixture() throws -> ActivationExecutionFixture {
+        let defaultsFixture = makeDefaults()
+        let root = try makeTempStorageRoot()
+        let store = LocalStore(testStorageRootURL: root)
+        _ = try store.createOrganization(Organization(id: orgID, name: "27N Activation Org"))
+        let property = try store.createProperty(
+            Property(id: propertyID, orgId: orgID, name: "27N Activation Property")
+        )
+        let session = try store.upsertSession(
+            Session(
+                id: sessionID,
+                propertyID: property.id,
+                startedAt: Date(timeIntervalSinceReferenceDate: 7_000),
+                status: .completed,
+                endedAt: nil,
+                exportedAt: nil,
+                isSealed: true,
+                firstDeliveredAt: nil,
+                reExportExpiresAt: nil
+            )
+        )
+        try saveActivationExecutionMetadata(store: store, property: property, session: session)
+
+        let remoteUpdatedAt = [
+            property.updatedAt,
+            session.startedAt
+        ].compactMap { $0 }.max() ?? session.startedAt
+        let remoteSnapshot = AppState.CanonicalReadRemoteSnapshot(
+            properties: [
+                AppState.CanonicalReadRemotePropertyRow(
+                    id: property.id,
+                    orgID: orgID,
+                    updatedAt: remoteUpdatedAt,
+                    revision: 27,
+                    deletedAt: nil
+                )
+            ],
+            sessions: [
+                AppState.CanonicalReadRemoteSessionRow(
+                    id: session.id,
+                    orgID: orgID,
+                    propertyID: property.id,
+                    status: session.status.rawValue,
+                    updatedAt: remoteUpdatedAt,
+                    revision: 27,
+                    deletedAt: nil
+                )
+            ],
+            shots: [],
+            observations: []
+        )
+        let expectedPropertyID = propertyID
+        let expectedSessionID = sessionID
+        let appState = AppState(
+            localStore: store,
+            userDefaults: defaultsFixture.defaults,
+            environment: activationExecutionEnvironment(),
+            sessionSnapshotStorageUploadOverride: { _ in
+                XCTFail("27N activation rehearsal must not upload session snapshots")
+            },
+            sessionSnapshotRowInsertOverride: { _ in
+                XCTFail("27N activation rehearsal must not insert session snapshot rows")
+            },
+            sessionSnapshotMediaDownloadOverride: { _, _ in
+                XCTFail("27N activation rehearsal must not download media")
+                return Data()
+            },
+            canonicalReadRemoteSnapshotFetchOverride: { _, requestedPropertyID, requestedSessionID in
+                XCTAssertEqual(requestedPropertyID, expectedPropertyID)
+                XCTAssertEqual(requestedSessionID, expectedSessionID)
+                return remoteSnapshot
+            },
+            disableCloudBackupForTests: true
+        )
+        appState._debugSetOrganizationContextForTests(
+            memberships: [
+                ActiveOrganizationMembership(
+                    id: orgID,
+                    name: "27N Activation Org",
+                    role: "owner"
+                )
+            ],
+            activeOrganizationID: orgID,
+            ready: true
+        )
+        appState._debugRefreshPropertiesLocallyForTests()
+        appState.selectedPropertyID = property.id
+        appState.currentSession = session
+
+        return ActivationExecutionFixture(
+            suiteName: defaultsFixture.suiteName,
+            defaults: defaultsFixture.defaults,
+            storageRoot: root,
+            store: store,
+            appState: appState,
+            property: property,
+            session: session
+        )
+    }
+
+    private func tearDownActivationExecutionFixture(_ fixture: ActivationExecutionFixture) {
+        fixture.appState.shutdown()
+        fixture.defaults.removePersistentDomain(forName: fixture.suiteName)
+        try? FileManager.default.removeItem(at: fixture.storageRoot)
+    }
+
+    private func saveActivationExecutionMetadata(
+        store: LocalStore,
+        property: Property,
+        session: Session
+    ) throws {
+        let metadata = SessionMetadata(
+            schemaVersion: 12,
+            propertyID: property.id,
+            sessionID: session.id,
+            orgID: orgID,
+            propertyNameAtCapture: property.name,
+            propertyNameAtExport: nil,
+            startedAt: session.startedAt,
+            endedAt: session.endedAt,
+            status: session.status,
+            isBaselineSession: false,
+            exportedAt: session.exportedAt,
+            isSealed: session.isSealed,
+            firstDeliveredAt: session.firstDeliveredAt,
+            reExportExpiresAt: session.reExportExpiresAt,
+            appVersion: "test-app",
+            deviceModel: "test-device",
+            osVersion: "test-os",
+            shots: [],
+            issues: [],
+            guidedShots: []
+        )
+        try store.saveSessionMetadataAtomically(propertyID: property.id, sessionID: session.id, metadata: metadata)
+    }
+
     private func configuration(enabled: Bool = true) -> AppState.CanonicalReadCandidateConfiguration {
         AppState.CanonicalReadCandidateConfiguration(
             enabled: enabled,
@@ -1203,6 +1381,106 @@ final class Phase2C26OCanonicalCandidateConsumptionTests: XCTestCase {
         XCTAssertEqual(result.propertyID, propertyID)
         XCTAssertEqual(result.sessionID, sessionID)
         XCTAssertTrue(result.rollbackAvailable)
+    }
+
+    @MainActor
+    func testNonProductionActivationExecutionRehearsalActivatesAndRollsBackSelectedSession() async throws {
+        let fixture = try makeActivationExecutionFixture()
+        defer { tearDownActivationExecutionFixture(fixture) }
+        let metadataBefore = try fixture.store.loadSessionMetadata(
+            propertyID: fixture.property.id,
+            sessionID: fixture.session.id
+        )
+
+        XCTAssertEqual(fixture.appState.supabaseConfiguration.targetClassification, .localDev)
+        XCTAssertFalse(fixture.appState.backendFeatureFlags.supabaseReadEnabled)
+        XCTAssertFalse(fixture.appState.backendFeatureFlags.supabasePropertyReadEnabled)
+        XCTAssertFalse(fixture.appState.backendFeatureFlags.mediaSupabaseUploadEnabled)
+
+        let overlay = await fixture.appState.buildCanonicalCandidateOverlayForSelectedSession(
+            checkedAt: Date(timeIntervalSinceReferenceDate: 7_100)
+        )
+        XCTAssertTrue(overlay.allowed)
+        XCTAssertEqual(overlay.overlay?.organizationID, orgID)
+        XCTAssertEqual(overlay.overlay?.propertyID, propertyID)
+        XCTAssertEqual(overlay.overlay?.sessionID, sessionID)
+        XCTAssertEqual(overlay.overlay?.activeSource, "local")
+        XCTAssertEqual(overlay.overlay?.fallbackSource, "local")
+        XCTAssertTrue(overlay.localFallbackRetained)
+        XCTAssertTrue(overlay.rollbackAvailable)
+        XCTAssertTrue(overlay.productionBlocked)
+
+        let activation = fixture.appState.activateCanonicalCandidateForSelectedSession(
+            checkedAt: Date(timeIntervalSinceReferenceDate: 7_200)
+        )
+        let activatedDiagnostics = fixture.appState._debugLocalDiagnosticsForTests().sessionSnapshotUpload
+
+        XCTAssertTrue(activation.allowed)
+        XCTAssertEqual(activation.activeSource, .canonicalCandidate)
+        XCTAssertEqual(activation.rollbackSource, .local)
+        XCTAssertEqual(activation.propertyID, propertyID)
+        XCTAssertEqual(activation.sessionID, sessionID)
+        XCTAssertTrue(activation.rollbackAvailable)
+        XCTAssertTrue(activation.productionBlocked)
+        XCTAssertEqual(activatedDiagnostics.lastCanonicalCandidateActivationActiveSource, "canonical_candidate")
+        XCTAssertEqual(activatedDiagnostics.lastCanonicalCandidateActivationRollbackSource, "local")
+        XCTAssertEqual(activatedDiagnostics.lastCanonicalCandidateActivationScope, "selected_session_only")
+        XCTAssertEqual(activatedDiagnostics.lastCanonicalCandidateActivationPropertyID, propertyID)
+        XCTAssertEqual(activatedDiagnostics.lastCanonicalCandidateActivationSessionID, sessionID)
+        XCTAssertTrue(activatedDiagnostics.lastCanonicalReadCandidateLocalFallbackAvailable)
+        XCTAssertTrue(activatedDiagnostics.lastCanonicalCandidateActivationRollbackAvailable)
+        XCTAssertTrue(activatedDiagnostics.lastCanonicalCandidateActivationProductionBlocked)
+        XCTAssertNotNil(activatedDiagnostics.lastCanonicalCandidateActivationLastActivatedAt)
+        XCTAssertNil(activatedDiagnostics.lastHydrationAt)
+        XCTAssertFalse(activatedDiagnostics.lastHydrationAllowed)
+        XCTAssertNil(activatedDiagnostics.lastMediaRetrievalAt)
+        XCTAssertFalse(activatedDiagnostics.lastMediaRetrievalAllowed)
+        XCTAssertEqual(activatedDiagnostics.lastMediaRetrievalAttemptedCount, 0)
+        XCTAssertEqual(activatedDiagnostics.attemptedCount, 0)
+        XCTAssertFalse(activatedDiagnostics.lastStorageUploadCompleted)
+        XCTAssertFalse(activatedDiagnostics.lastRowInsertCompleted)
+
+        let rollback = fixture.appState.rollbackCanonicalCandidateToLocalSource(
+            checkedAt: Date(timeIntervalSinceReferenceDate: 7_300)
+        )
+        let rolledBackDiagnostics = fixture.appState._debugLocalDiagnosticsForTests().sessionSnapshotUpload
+        let metadataAfter = try fixture.store.loadSessionMetadata(
+            propertyID: fixture.property.id,
+            sessionID: fixture.session.id
+        )
+
+        XCTAssertTrue(rollback.allowed)
+        XCTAssertEqual(rollback.activeSource, .local)
+        XCTAssertEqual(rollback.rollbackSource, .local)
+        XCTAssertEqual(rollback.propertyID, propertyID)
+        XCTAssertEqual(rollback.sessionID, sessionID)
+        XCTAssertTrue(rollback.rollbackAvailable)
+        XCTAssertTrue(rollback.productionBlocked)
+        XCTAssertEqual(rolledBackDiagnostics.lastCanonicalCandidateActivationActiveSource, "local")
+        XCTAssertEqual(rolledBackDiagnostics.lastCanonicalCandidateActivationRollbackSource, "local")
+        XCTAssertEqual(rolledBackDiagnostics.lastCanonicalCandidateActivationScope, "selected_session_only")
+        XCTAssertEqual(rolledBackDiagnostics.lastCanonicalCandidateActivationPropertyID, propertyID)
+        XCTAssertEqual(rolledBackDiagnostics.lastCanonicalCandidateActivationSessionID, sessionID)
+        XCTAssertTrue(rolledBackDiagnostics.lastCanonicalReadCandidateLocalFallbackAvailable)
+        XCTAssertTrue(rolledBackDiagnostics.lastCanonicalCandidateActivationRollbackAvailable)
+        XCTAssertTrue(rolledBackDiagnostics.lastCanonicalCandidateActivationProductionBlocked)
+        XCTAssertNotNil(rolledBackDiagnostics.lastCanonicalCandidateActivationLastActivatedAt)
+        XCTAssertNotNil(rolledBackDiagnostics.lastCanonicalCandidateActivationLastRolledBackAt)
+        XCTAssertNil(rolledBackDiagnostics.lastHydrationAt)
+        XCTAssertFalse(rolledBackDiagnostics.lastHydrationAllowed)
+        XCTAssertNil(rolledBackDiagnostics.lastMediaRetrievalAt)
+        XCTAssertFalse(rolledBackDiagnostics.lastMediaRetrievalAllowed)
+        XCTAssertEqual(rolledBackDiagnostics.lastMediaRetrievalAttemptedCount, 0)
+        XCTAssertEqual(rolledBackDiagnostics.attemptedCount, 0)
+        XCTAssertFalse(rolledBackDiagnostics.lastStorageUploadCompleted)
+        XCTAssertFalse(rolledBackDiagnostics.lastRowInsertCompleted)
+        XCTAssertEqual(metadataAfter.orgID, metadataBefore.orgID)
+        XCTAssertEqual(metadataAfter.propertyID, metadataBefore.propertyID)
+        XCTAssertEqual(metadataAfter.sessionID, metadataBefore.sessionID)
+        XCTAssertEqual(metadataAfter.status, metadataBefore.status)
+        XCTAssertEqual(metadataAfter.shots.count, metadataBefore.shots.count)
+        XCTAssertEqual(metadataAfter.issues.count, metadataBefore.issues.count)
+        XCTAssertEqual(metadataAfter.guidedShots.count, metadataBefore.guidedShots.count)
     }
 
     func testActivationDoesNotMutateLocalStateOrBehaviorRails() {
