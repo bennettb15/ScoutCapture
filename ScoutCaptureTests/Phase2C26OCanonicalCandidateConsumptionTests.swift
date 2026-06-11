@@ -1,4 +1,5 @@
 import XCTest
+import CryptoKit
 @testable import ScoutCapture
 
 final class Phase2C26OCanonicalCandidateConsumptionTests: XCTestCase {
@@ -6,6 +7,10 @@ final class Phase2C26OCanonicalCandidateConsumptionTests: XCTestCase {
     private let propertyID = UUID(uuidString: "22222222-2222-2222-2222-222222222222")!
     private let sessionID = UUID(uuidString: "33333333-3333-3333-3333-333333333333")!
     private let snapshotID = UUID(uuidString: "44444444-4444-4444-4444-444444444444")!
+
+    private func sha256Hex(_ data: Data) -> String {
+        SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+    }
 
     private struct ActivationExecutionFixture {
         let suiteName: String
@@ -1028,6 +1033,36 @@ final class Phase2C26OCanonicalCandidateConsumptionTests: XCTestCase {
             guidedCount: 0
         )
         return (preflight, inputs.restore, inputs.policy, preFixture, hydrationOperation, postFixture, rollbackOperation, restoredFixture)
+    }
+
+    private func hydrationExecutionRehearsal() -> AppState.ProductionSingleSessionHydrationExecutionRehearsal {
+        let inputs = hydrationExecutionRehearsalInputs()
+        return AppState.makeProductionSingleSessionHydrationExecutionRehearsal(
+            hydrationReadiness: inputs.preflight,
+            restoreDiagnostics: inputs.restore,
+            hydrationPolicy: inputs.policy,
+            preHydrationFixture: inputs.preFixture,
+            hydrationOperation: inputs.hydrationOperation,
+            postHydrationFixture: inputs.postFixture,
+            rollbackOperation: inputs.rollbackOperation,
+            restoredFixture: inputs.restoredFixture
+        )
+    }
+
+    private func mediaRestorationItem(
+        id: UUID = UUID(),
+        filename: String,
+        data: Data?,
+        expectedData: Data? = nil,
+        failureReason: String? = nil
+    ) -> AppState.ProductionSingleSessionMediaRestorationItem {
+        AppState.ProductionSingleSessionMediaRestorationItem(
+            id: id,
+            originalFilename: filename,
+            payloadData: data,
+            expectedChecksumSHA256: (expectedData ?? data).map(sha256Hex),
+            failureReason: failureReason
+        )
     }
 
     func testAllowlistedStagingCandidateBuildsOverlay() {
@@ -3913,6 +3948,318 @@ final class Phase2C26OCanonicalCandidateConsumptionTests: XCTestCase {
         XCTAssertTrue(text.contains("no fallback was removed"))
         XCTAssertTrue(text.contains("rollback restored pre-hydration fixture state or fallback remained retained"))
         XCTAssertTrue(text.contains("export, seal, sync, media, iCloud, RLS, schema, and data behavior is unchanged"))
+    }
+
+    @MainActor
+    func testProductionSingleSessionMediaRestorationRehearsalRestoresChecksumVerifiedMediaIntoPackageCandidate() throws {
+        let fixture = try makeActivationExecutionFixture()
+        defer { tearDownActivationExecutionFixture(fixture) }
+        let candidateID = UUID()
+        let bytes = Data("phase-2c-27o-media".utf8)
+
+        let rehearsal = fixture.appState.rehearseProductionSingleSessionMediaRestorationForTests(
+            hydrationRehearsal: hydrationExecutionRehearsal(),
+            candidateID: candidateID,
+            mediaItems: [
+                mediaRestorationItem(filename: "verified.jpg", data: bytes)
+            ],
+            targetClassification: .localDev
+        )
+
+        let candidateURL = fixture.appState.productionSingleSessionMediaRestorationCandidateDirectoryURLForTests(
+            propertyID: propertyID,
+            sessionID: sessionID,
+            candidateID: candidateID
+        )
+        let restoredURL = candidateURL.appendingPathComponent("verified.jpg", isDirectory: false)
+        let originalURL = fixture.store
+            .originalsFolderURL(propertyID: propertyID, sessionID: sessionID)
+            .appendingPathComponent("verified.jpg", isDirectory: false)
+
+        XCTAssertEqual(rehearsal.state, .testOnlyMediaRestorationRehearsalPassed)
+        XCTAssertTrue(rehearsal.blockers.isEmpty)
+        XCTAssertTrue(rehearsal.hydrationExecutionRehearsalPassed)
+        XCTAssertTrue(rehearsal.executionTargetIsLocalTestFixture)
+        XCTAssertTrue(rehearsal.productionReadsBlocked)
+        XCTAssertTrue(rehearsal.broadCanonicalReadBlocked)
+        XCTAssertTrue(rehearsal.remoteStateWritesBlocked)
+        XCTAssertTrue(rehearsal.realLocalUserStateWritesBlocked)
+        XCTAssertTrue(rehearsal.checksumVerificationRequired)
+        XCTAssertTrue(rehearsal.restoredMediaLandedInPackageCandidate)
+        XCTAssertTrue(rehearsal.originalsOverwriteBlocked)
+        XCTAssertTrue(rehearsal.existingOriginalsPreserved)
+        XCTAssertTrue(rehearsal.fallbackRetained)
+        XCTAssertTrue(rehearsal.exportSealSyncMediaICloudUnchanged)
+        XCTAssertEqual(rehearsal.restoredCount, 1)
+        XCTAssertEqual(rehearsal.acceptedCandidateMediaCount, 1)
+        XCTAssertEqual(rehearsal.itemEvidence.first?.status, .restored)
+        XCTAssertEqual(rehearsal.itemEvidence.first?.checksumVerifiedBeforeAcceptance, true)
+        XCTAssertEqual(try Data(contentsOf: restoredURL), bytes)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: originalURL.path))
+
+        let text = AppState.productionSingleSessionMediaRestorationRehearsalReportText(rehearsal)
+        XCTAssertTrue(text.contains("Production Single-Session Media Restoration Rehearsal"))
+        XCTAssertTrue(text.contains("- media_restoration_rehearsal_state: test_only_media_restoration_rehearsal_passed"))
+        XCTAssertTrue(text.contains("No production reads were enabled"))
+        XCTAssertTrue(text.contains("no remote state was written"))
+        XCTAssertTrue(text.contains("no originals were overwritten"))
+    }
+
+    @MainActor
+    func testProductionSingleSessionMediaRestorationRehearsalSkipsChecksumVerifiedDuplicateAndRollbackPreservesIt() throws {
+        let fixture = try makeActivationExecutionFixture()
+        defer { tearDownActivationExecutionFixture(fixture) }
+        let candidateID = UUID()
+        let existingBytes = Data("existing-candidate".utf8)
+        let candidateURL = fixture.appState.productionSingleSessionMediaRestorationCandidateDirectoryURLForTests(
+            propertyID: propertyID,
+            sessionID: sessionID,
+            candidateID: candidateID
+        )
+        try FileManager.default.createDirectory(at: candidateURL, withIntermediateDirectories: true)
+        let existingURL = candidateURL.appendingPathComponent("duplicate.jpg", isDirectory: false)
+        try existingBytes.write(to: existingURL, options: .atomic)
+
+        let rehearsal = fixture.appState.rehearseProductionSingleSessionMediaRestorationForTests(
+            hydrationRehearsal: hydrationExecutionRehearsal(),
+            candidateID: candidateID,
+            mediaItems: [
+                mediaRestorationItem(filename: "duplicate.jpg", data: existingBytes)
+            ],
+            targetClassification: .localDev
+        )
+
+        XCTAssertEqual(rehearsal.state, .testOnlyMediaRestorationRehearsalPassed)
+        XCTAssertEqual(rehearsal.restoredCount, 0)
+        XCTAssertEqual(rehearsal.skippedExistingCount, 1)
+        XCTAssertEqual(rehearsal.acceptedCandidateMediaCount, 1)
+        XCTAssertTrue(rehearsal.duplicateRestorationIdempotent)
+        XCTAssertEqual(rehearsal.itemEvidence.first?.status, .skippedExisting)
+        XCTAssertEqual(rehearsal.itemEvidence.first?.checksumVerifiedBeforeAcceptance, true)
+        XCTAssertTrue(rehearsal.createdCandidateFilePaths.isEmpty)
+        XCTAssertTrue(rehearsal.createdCandidateDirectoryPaths.isEmpty)
+        XCTAssertEqual(try Data(contentsOf: existingURL), existingBytes)
+
+        let rollback = fixture.appState.rollbackProductionSingleSessionMediaRestorationRehearsalForTests(
+            rehearsal: rehearsal
+        )
+
+        XCTAssertEqual(rollback.state, .restoredPreRestorationFixture)
+        XCTAssertFalse(rollback.removedCandidateDirectory)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: existingURL.path))
+        XCTAssertEqual(try Data(contentsOf: existingURL), existingBytes)
+    }
+
+    @MainActor
+    func testProductionSingleSessionMediaRestorationRehearsalRejectsCorruptPreexistingCandidate() throws {
+        let fixture = try makeActivationExecutionFixture()
+        defer { tearDownActivationExecutionFixture(fixture) }
+        let candidateID = UUID()
+        let expectedBytes = Data("expected-candidate".utf8)
+        let corruptBytes = Data("corrupt-candidate".utf8)
+        let candidateURL = fixture.appState.productionSingleSessionMediaRestorationCandidateDirectoryURLForTests(
+            propertyID: propertyID,
+            sessionID: sessionID,
+            candidateID: candidateID
+        )
+        try FileManager.default.createDirectory(at: candidateURL, withIntermediateDirectories: true)
+        let existingURL = candidateURL.appendingPathComponent("duplicate.jpg", isDirectory: false)
+        try corruptBytes.write(to: existingURL, options: .atomic)
+
+        let rehearsal = fixture.appState.rehearseProductionSingleSessionMediaRestorationForTests(
+            hydrationRehearsal: hydrationExecutionRehearsal(),
+            candidateID: candidateID,
+            mediaItems: [
+                mediaRestorationItem(filename: "duplicate.jpg", data: expectedBytes)
+            ],
+            targetClassification: .localDev
+        )
+
+        XCTAssertEqual(rehearsal.state, .testOnlyMediaRestorationPartialFailureReported)
+        XCTAssertEqual(rehearsal.restoredCount, 0)
+        XCTAssertEqual(rehearsal.skippedExistingCount, 0)
+        XCTAssertEqual(rehearsal.checksumMismatchCount, 1)
+        XCTAssertEqual(rehearsal.failedCount, 1)
+        XCTAssertEqual(rehearsal.acceptedCandidateMediaCount, 0)
+        XCTAssertEqual(rehearsal.itemEvidence.first?.status, .rejectedChecksumMismatch)
+        XCTAssertEqual(rehearsal.itemEvidence.first?.checksumVerifiedBeforeAcceptance, false)
+        XCTAssertEqual(rehearsal.itemEvidence.first?.failureReason, "existing_candidate_checksum_mismatch")
+        XCTAssertTrue(rehearsal.createdCandidateFilePaths.isEmpty)
+        XCTAssertTrue(rehearsal.createdCandidateDirectoryPaths.isEmpty)
+        XCTAssertEqual(try Data(contentsOf: existingURL), corruptBytes)
+    }
+
+    @MainActor
+    func testProductionSingleSessionMediaRestorationRehearsalRejectsChecksumMismatch() throws {
+        let fixture = try makeActivationExecutionFixture()
+        defer { tearDownActivationExecutionFixture(fixture) }
+        let candidateID = UUID()
+        let expected = Data("expected".utf8)
+        let downloaded = Data("downloaded".utf8)
+
+        let rehearsal = fixture.appState.rehearseProductionSingleSessionMediaRestorationForTests(
+            hydrationRehearsal: hydrationExecutionRehearsal(),
+            candidateID: candidateID,
+            mediaItems: [
+                mediaRestorationItem(filename: "mismatch.jpg", data: downloaded, expectedData: expected)
+            ],
+            targetClassification: .localDev
+        )
+
+        let candidateURL = fixture.appState.productionSingleSessionMediaRestorationCandidateDirectoryURLForTests(
+            propertyID: propertyID,
+            sessionID: sessionID,
+            candidateID: candidateID
+        )
+        let rejectedURL = candidateURL.appendingPathComponent("mismatch.jpg", isDirectory: false)
+
+        XCTAssertEqual(rehearsal.state, .testOnlyMediaRestorationPartialFailureReported)
+        XCTAssertEqual(rehearsal.restoredCount, 0)
+        XCTAssertEqual(rehearsal.checksumMismatchCount, 1)
+        XCTAssertEqual(rehearsal.failedCount, 1)
+        XCTAssertEqual(rehearsal.acceptedCandidateMediaCount, 0)
+        XCTAssertTrue(rehearsal.partialFailureReported)
+        XCTAssertEqual(rehearsal.itemEvidence.first?.status, .rejectedChecksumMismatch)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: rejectedURL.path))
+    }
+
+    @MainActor
+    func testProductionSingleSessionMediaRestorationRehearsalReportsPartialFailurePerItem() throws {
+        let fixture = try makeActivationExecutionFixture()
+        defer { tearDownActivationExecutionFixture(fixture) }
+        let candidateID = UUID()
+        let goodBytes = Data("good-media".utf8)
+
+        let rehearsal = fixture.appState.rehearseProductionSingleSessionMediaRestorationForTests(
+            hydrationRehearsal: hydrationExecutionRehearsal(),
+            candidateID: candidateID,
+            mediaItems: [
+                mediaRestorationItem(filename: "good.jpg", data: goodBytes),
+                mediaRestorationItem(filename: "failed.jpg", data: nil, failureReason: "download_failed")
+            ],
+            targetClassification: .localDev
+        )
+
+        let goodEvidence = rehearsal.itemEvidence.first { $0.filename == "good.jpg" }
+        let failedEvidence = rehearsal.itemEvidence.first { $0.filename == "failed.jpg" }
+        let candidateURL = fixture.appState.productionSingleSessionMediaRestorationCandidateDirectoryURLForTests(
+            propertyID: propertyID,
+            sessionID: sessionID,
+            candidateID: candidateID
+        )
+        let goodURL = candidateURL.appendingPathComponent("good.jpg", isDirectory: false)
+        let failedURL = candidateURL.appendingPathComponent("failed.jpg", isDirectory: false)
+
+        XCTAssertEqual(rehearsal.state, .testOnlyMediaRestorationPartialFailureReported)
+        XCTAssertEqual(rehearsal.restoredCount, 1)
+        XCTAssertEqual(rehearsal.failedCount, 1)
+        XCTAssertEqual(rehearsal.acceptedCandidateMediaCount, 1)
+        XCTAssertTrue(rehearsal.partialFailureReported)
+        XCTAssertEqual(goodEvidence?.status, .restored)
+        XCTAssertEqual(failedEvidence?.status, .failed)
+        XCTAssertEqual(failedEvidence?.failureReason, "download_failed")
+        XCTAssertEqual(try Data(contentsOf: goodURL), goodBytes)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: failedURL.path))
+    }
+
+    @MainActor
+    func testProductionSingleSessionMediaRestorationRollbackRemovesOnlyCandidateAndRestoresFingerprint() throws {
+        let fixture = try makeActivationExecutionFixture()
+        defer { tearDownActivationExecutionFixture(fixture) }
+        let candidateID = UUID()
+        let originalBytes = Data("pre-existing-original".utf8)
+        let restoredBytes = Data("restored-copy".utf8)
+        let originals = fixture.store.originalsFolderURL(propertyID: propertyID, sessionID: sessionID)
+        try FileManager.default.createDirectory(at: originals, withIntermediateDirectories: true)
+        let originalURL = originals.appendingPathComponent("keep.jpg", isDirectory: false)
+        try originalBytes.write(to: originalURL, options: .atomic)
+
+        let rehearsal = fixture.appState.rehearseProductionSingleSessionMediaRestorationForTests(
+            hydrationRehearsal: hydrationExecutionRehearsal(),
+            candidateID: candidateID,
+            mediaItems: [
+                mediaRestorationItem(filename: "keep.jpg", data: restoredBytes)
+            ],
+            targetClassification: .localDev
+        )
+        let candidateURL = fixture.appState.productionSingleSessionMediaRestorationCandidateDirectoryURLForTests(
+            propertyID: propertyID,
+            sessionID: sessionID,
+            candidateID: candidateID
+        )
+        let restoredURL = candidateURL.appendingPathComponent("keep.jpg", isDirectory: false)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: candidateURL.path))
+        XCTAssertNotEqual(rehearsal.preRestorationFixtureFingerprint, rehearsal.postRestorationFixtureFingerprint)
+        XCTAssertEqual(rehearsal.createdCandidateFilePaths, [restoredURL.path])
+        XCTAssertTrue(rehearsal.createdCandidateDirectoryPaths.contains(candidateURL.path))
+        XCTAssertEqual(try Data(contentsOf: originalURL), originalBytes)
+
+        let rollback = fixture.appState.rollbackProductionSingleSessionMediaRestorationRehearsalForTests(
+            rehearsal: rehearsal
+        )
+
+        XCTAssertEqual(rollback.state, .restoredPreRestorationFixture)
+        XCTAssertTrue(rollback.blockers.isEmpty)
+        XCTAssertTrue(rollback.removedCandidateDirectory)
+        XCTAssertTrue(rollback.restoredPreRestorationFixture)
+        XCTAssertEqual(rollback.preRestorationFixtureFingerprint, rollback.restoredFixtureFingerprint)
+        XCTAssertTrue(rollback.existingOriginalsPreserved)
+        XCTAssertEqual(try Data(contentsOf: originalURL), originalBytes)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: restoredURL.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: candidateURL.path))
+
+        let text = AppState.productionSingleSessionMediaRestorationRollbackReportText(rollback)
+        XCTAssertTrue(text.contains("Production Single-Session Media Restoration Rollback"))
+        XCTAssertTrue(text.contains("- media_restoration_rollback_state: restored_pre_restoration_fixture"))
+        XCTAssertTrue(text.contains("removed only isolated rehearsal-created package-candidate media"))
+    }
+
+    @MainActor
+    func testProductionSingleSessionMediaRestorationRehearsalGuardrailsBlockUnsafeRequests() throws {
+        let fixture = try makeActivationExecutionFixture()
+        defer { tearDownActivationExecutionFixture(fixture) }
+        let candidateID = UUID()
+        let bytes = Data("unsafe-request".utf8)
+
+        let rehearsal = fixture.appState.rehearseProductionSingleSessionMediaRestorationForTests(
+            hydrationRehearsal: hydrationExecutionRehearsal(),
+            candidateID: candidateID,
+            mediaItems: [
+                mediaRestorationItem(filename: "blocked.jpg", data: bytes)
+            ],
+            targetClassification: .approvedProductionValidation,
+            productionReadsEnabled: true,
+            broadCanonicalReadRequired: true,
+            remoteStateWriteAttempted: true,
+            realLocalUserStateWriteAttempted: true,
+            overwriteOriginalsAttempted: true,
+            fallbackRetained: false,
+            exportSealSyncMediaICloudBehaviorChanged: true
+        )
+        let candidateURL = fixture.appState.productionSingleSessionMediaRestorationCandidateDirectoryURLForTests(
+            propertyID: propertyID,
+            sessionID: sessionID,
+            candidateID: candidateID
+        )
+
+        XCTAssertEqual(rehearsal.state, .blocked)
+        XCTAssertTrue(rehearsal.blockers.contains("production_target_blocked"))
+        XCTAssertTrue(rehearsal.blockers.contains("production_reads_must_remain_disabled"))
+        XCTAssertTrue(rehearsal.blockers.contains("broad_canonical_read_requirement_blocked"))
+        XCTAssertTrue(rehearsal.blockers.contains("remote_state_write_attempted"))
+        XCTAssertTrue(rehearsal.blockers.contains("real_local_user_state_write_attempted"))
+        XCTAssertTrue(rehearsal.blockers.contains("original_overwrite_attempted"))
+        XCTAssertTrue(rehearsal.blockers.contains("local_fallback_unavailable"))
+        XCTAssertTrue(rehearsal.blockers.contains("export_seal_sync_media_icloud_behavior_changed"))
+        XCTAssertFalse(rehearsal.productionReadsBlocked)
+        XCTAssertFalse(rehearsal.broadCanonicalReadBlocked)
+        XCTAssertFalse(rehearsal.remoteStateWritesBlocked)
+        XCTAssertFalse(rehearsal.realLocalUserStateWritesBlocked)
+        XCTAssertFalse(rehearsal.originalsOverwriteBlocked)
+        XCTAssertFalse(rehearsal.fallbackRetained)
+        XCTAssertFalse(rehearsal.exportSealSyncMediaICloudUnchanged)
+        XCTAssertEqual(rehearsal.acceptedCandidateMediaCount, 0)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: candidateURL.path))
     }
 
     func testProductionSingleSessionActivationGateDefaultFalseBlocksProduction() {

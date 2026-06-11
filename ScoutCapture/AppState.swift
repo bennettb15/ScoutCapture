@@ -2434,6 +2434,25 @@ final class AppState: ObservableObject {
         case testOnlyHydrationRehearsalPassed = "test_only_hydration_rehearsal_passed"
     }
 
+    enum ProductionSingleSessionMediaRestorationRehearsalState: String, CaseIterable, Equatable {
+        case blocked
+        case testOnlyMediaRestorationRehearsalPassed = "test_only_media_restoration_rehearsal_passed"
+        case testOnlyMediaRestorationPartialFailureReported = "test_only_media_restoration_partial_failure_reported"
+    }
+
+    enum ProductionSingleSessionMediaRestorationRollbackState: String, CaseIterable, Equatable {
+        case blocked
+        case restoredPreRestorationFixture = "restored_pre_restoration_fixture"
+    }
+
+    enum ProductionSingleSessionMediaRestorationItemStatus: String, Codable, Equatable {
+        case restored
+        case skippedExisting = "skipped_existing"
+        case skippedChecksumMissing = "skipped_checksum_missing"
+        case rejectedChecksumMismatch = "rejected_checksum_mismatch"
+        case failed
+    }
+
     enum ProductionCohortValidationState: String, CaseIterable, Equatable {
         case notValidated = "not_validated"
         case verified
@@ -2844,6 +2863,93 @@ final class AppState: ObservableObject {
         let rollbackOperationSucceeded: Bool
         let rollbackRestoredPreHydrationFixture: Bool
         let fallbackRetained: Bool
+        let noProductionBehaviorChangedText: String
+    }
+
+    struct ProductionSingleSessionMediaRestorationItem: Equatable, Identifiable {
+        let id: UUID
+        let originalFilename: String
+        let payloadData: Data?
+        let expectedChecksumSHA256: String?
+        let failureReason: String?
+
+        init(
+            id: UUID,
+            originalFilename: String,
+            payloadData: Data?,
+            expectedChecksumSHA256: String?,
+            failureReason: String? = nil
+        ) {
+            self.id = id
+            self.originalFilename = originalFilename
+            self.payloadData = payloadData
+            self.expectedChecksumSHA256 = expectedChecksumSHA256
+            self.failureReason = failureReason
+        }
+    }
+
+    struct ProductionSingleSessionMediaRestorationItemEvidence: Equatable, Identifiable {
+        let id: UUID
+        let filename: String
+        let status: ProductionSingleSessionMediaRestorationItemStatus
+        let checksumVerifiedBeforeAcceptance: Bool
+        let candidateLocalPathPresent: Bool
+        let originalExistedBefore: Bool
+        let originalPreserved: Bool
+        let failureReason: String?
+    }
+
+    struct ProductionSingleSessionMediaRestorationRehearsal: Equatable {
+        let checkedAt: Date
+        let state: ProductionSingleSessionMediaRestorationRehearsalState
+        let blockers: [String]
+        let blockedConditions: [String]
+        let targetScope: ProductionCohortApprovalScope
+        let candidateID: UUID
+        let candidateDirectoryPath: String?
+        let hydrationExecutionRehearsalPassed: Bool
+        let executionTargetIsLocalTestFixture: Bool
+        let productionTargetBlocked: Bool
+        let productionReadsBlocked: Bool
+        let broadCanonicalReadBlocked: Bool
+        let remoteStateWritesBlocked: Bool
+        let realLocalUserStateWritesBlocked: Bool
+        let checksumVerificationRequired: Bool
+        let restoredMediaLandedInPackageCandidate: Bool
+        let originalsOverwriteBlocked: Bool
+        let existingOriginalsPreserved: Bool
+        let duplicateRestorationIdempotent: Bool
+        let partialFailureReported: Bool
+        let fallbackRetained: Bool
+        let exportSealSyncMediaICloudUnchanged: Bool
+        let preRestorationFixtureFingerprint: String?
+        let postRestorationFixtureFingerprint: String?
+        let restoredCount: Int
+        let skippedExistingCount: Int
+        let checksumMismatchCount: Int
+        let failedCount: Int
+        let acceptedCandidateMediaCount: Int
+        let createdCandidateFilePaths: [String]
+        let createdCandidateDirectoryPaths: [String]
+        let existingOriginalPathsBefore: [String]
+        let itemEvidence: [ProductionSingleSessionMediaRestorationItemEvidence]
+        let noProductionBehaviorChangedText: String
+    }
+
+    struct ProductionSingleSessionMediaRestorationRollback: Equatable {
+        let checkedAt: Date
+        let state: ProductionSingleSessionMediaRestorationRollbackState
+        let blockers: [String]
+        let targetScope: ProductionCohortApprovalScope
+        let candidateID: UUID
+        let candidateDirectoryPath: String?
+        let removedCandidateDirectory: Bool
+        let preRestorationFixtureFingerprint: String?
+        let restoredFixtureFingerprint: String?
+        let restoredPreRestorationFixture: Bool
+        let existingOriginalsPreserved: Bool
+        let fallbackRetained: Bool
+        let exportSealSyncMediaICloudUnchanged: Bool
         let noProductionBehaviorChangedText: String
     }
 
@@ -23061,6 +23167,669 @@ final class AppState: ObservableObject {
         lines.append("- fallback_retained: \(rehearsal.fallbackRetained)")
         lines.append(rehearsal.noProductionBehaviorChangedText)
         return lines.joined(separator: "\n")
+    }
+
+    func productionSingleSessionMediaRestorationCandidateDirectoryURLForTests(
+        propertyID: UUID,
+        sessionID: UUID,
+        candidateID: UUID
+    ) -> URL {
+        localStore
+            .sessionFolderURL(propertyID: propertyID, sessionID: sessionID)
+            .appendingPathComponent("RecoveredMedia", isDirectory: true)
+            .appendingPathComponent("PackageCandidate", isDirectory: true)
+            .appendingPathComponent("Phase2C27O", isDirectory: true)
+            .appendingPathComponent(candidateID.uuidString.lowercased(), isDirectory: true)
+    }
+
+    func phase2C27OMediaRestorationFixtureFingerprintForTests(
+        propertyID: UUID,
+        sessionID: UUID,
+        candidateID: UUID
+    ) -> String {
+        let roots = [
+            ("originals", localStore.originalsFolderURL(propertyID: propertyID, sessionID: sessionID)),
+            ("candidate", productionSingleSessionMediaRestorationCandidateDirectoryURLForTests(
+                propertyID: propertyID,
+                sessionID: sessionID,
+                candidateID: candidateID
+            ))
+        ]
+        var lines: [String] = []
+        for (label, root) in roots {
+            guard FileManager.default.fileExists(atPath: root.path) else {
+                lines.append("\(label):missing")
+                continue
+            }
+            let files = ((try? FileManager.default.subpathsOfDirectory(atPath: root.path)) ?? [])
+                .sorted()
+            lines.append("\(label):present")
+            for relativePath in files {
+                let url = root.appendingPathComponent(relativePath, isDirectory: false)
+                var isDirectory: ObjCBool = false
+                guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory),
+                      !isDirectory.boolValue,
+                      let data = try? Data(contentsOf: url) else {
+                    continue
+                }
+                lines.append("\(label)/\(relativePath):\(sha256Hex(for: data))")
+            }
+        }
+        return sha256Hex(for: Data(lines.joined(separator: "\n").utf8))
+    }
+
+    @discardableResult
+    func rehearseProductionSingleSessionMediaRestorationForTests(
+        checkedAt: Date = Date(),
+        hydrationRehearsal: ProductionSingleSessionHydrationExecutionRehearsal,
+        candidateID: UUID = UUID(),
+        mediaItems: [ProductionSingleSessionMediaRestorationItem],
+        targetClassification: SupabaseRuntimeConfiguration.TargetClassification? = nil,
+        productionReadsEnabled: Bool = false,
+        broadCanonicalReadRequired: Bool = false,
+        remoteStateWriteAttempted: Bool = false,
+        realLocalUserStateWriteAttempted: Bool = false,
+        overwriteOriginalsAttempted: Bool = false,
+        fallbackRetained: Bool = true,
+        exportSealSyncMediaICloudBehaviorChanged: Bool = false
+    ) -> ProductionSingleSessionMediaRestorationRehearsal {
+        let scope = hydrationRehearsal.hydrationReadinessScope
+        let classification = targetClassification ?? supabaseConfiguration.targetClassification
+        let productionTargetBlocked = classification != .approvedProductionValidation
+        let productionReadsBlocked = !productionReadsEnabled
+        let broadCanonicalReadBlocked = !broadCanonicalReadRequired
+        let remoteStateWritesBlocked = !remoteStateWriteAttempted
+        let realLocalUserStateWritesBlocked = !realLocalUserStateWriteAttempted
+        let originalsOverwriteBlocked = !overwriteOriginalsAttempted
+        let combinedFallbackRetained = fallbackRetained && hydrationRehearsal.fallbackRetained
+        let exportSealSyncMediaICloudUnchanged = !exportSealSyncMediaICloudBehaviorChanged
+
+        var blockers = hydrationRehearsal.blockers
+        if hydrationRehearsal.state != .testOnlyHydrationRehearsalPassed {
+            blockers.append("hydration_execution_rehearsal_not_passed")
+        }
+        if !hydrationRehearsal.executionTargetIsLocalTestFixture {
+            blockers.append("isolated_local_test_fixture_required")
+        }
+        if classification == .approvedProductionValidation {
+            blockers.append("production_target_blocked")
+        }
+        if classification == .remote {
+            blockers.append("unapproved_remote_target_blocked")
+        }
+        if !productionReadsBlocked {
+            blockers.append("production_reads_must_remain_disabled")
+        }
+        if !broadCanonicalReadBlocked {
+            blockers.append("broad_canonical_read_requirement_blocked")
+        }
+        if !remoteStateWritesBlocked {
+            blockers.append("remote_state_write_attempted")
+        }
+        if !realLocalUserStateWritesBlocked {
+            blockers.append("real_local_user_state_write_attempted")
+        }
+        if !originalsOverwriteBlocked {
+            blockers.append("original_overwrite_attempted")
+        }
+        if !combinedFallbackRetained {
+            blockers.append("local_fallback_unavailable")
+        }
+        if !exportSealSyncMediaICloudUnchanged {
+            blockers.append("export_seal_sync_media_icloud_behavior_changed")
+        }
+        guard let propertyID = scope.propertyID,
+              let sessionID = scope.sessionID else {
+            blockers.append("exact_single_property_session_scope_required")
+            return makeBlockedMediaRestorationRehearsal(
+                checkedAt: checkedAt,
+                blockers: blockers,
+                scope: scope,
+                candidateID: candidateID,
+                hydrationRehearsal: hydrationRehearsal,
+                productionTargetBlocked: productionTargetBlocked,
+                productionReadsBlocked: productionReadsBlocked,
+                broadCanonicalReadBlocked: broadCanonicalReadBlocked,
+                remoteStateWritesBlocked: remoteStateWritesBlocked,
+                realLocalUserStateWritesBlocked: realLocalUserStateWritesBlocked,
+                originalsOverwriteBlocked: originalsOverwriteBlocked,
+                fallbackRetained: combinedFallbackRetained,
+                exportSealSyncMediaICloudUnchanged: exportSealSyncMediaICloudUnchanged
+            )
+        }
+
+        let candidateDirectory = productionSingleSessionMediaRestorationCandidateDirectoryURLForTests(
+            propertyID: propertyID,
+            sessionID: sessionID,
+            candidateID: candidateID
+        )
+        let phaseDirectory = candidateDirectory.deletingLastPathComponent()
+        let packageDirectory = phaseDirectory.deletingLastPathComponent()
+        let recoveredDirectory = packageDirectory.deletingLastPathComponent()
+        let candidateDirectoryHierarchy = [
+            recoveredDirectory,
+            packageDirectory,
+            phaseDirectory,
+            candidateDirectory
+        ]
+        let missingCandidateDirectoryPathsBefore = Set(candidateDirectoryHierarchy
+            .filter { !FileManager.default.fileExists(atPath: $0.path) }
+            .map(\.path))
+        let preFingerprint = phase2C27OMediaRestorationFixtureFingerprintForTests(
+            propertyID: propertyID,
+            sessionID: sessionID,
+            candidateID: candidateID
+        )
+
+        if !blockers.isEmpty {
+            return makeBlockedMediaRestorationRehearsal(
+                checkedAt: checkedAt,
+                blockers: blockers,
+                scope: scope,
+                candidateID: candidateID,
+                hydrationRehearsal: hydrationRehearsal,
+                productionTargetBlocked: productionTargetBlocked,
+                productionReadsBlocked: productionReadsBlocked,
+                broadCanonicalReadBlocked: broadCanonicalReadBlocked,
+                remoteStateWritesBlocked: remoteStateWritesBlocked,
+                realLocalUserStateWritesBlocked: realLocalUserStateWritesBlocked,
+                originalsOverwriteBlocked: originalsOverwriteBlocked,
+                fallbackRetained: combinedFallbackRetained,
+                exportSealSyncMediaICloudUnchanged: exportSealSyncMediaICloudUnchanged,
+                candidateDirectoryPath: candidateDirectory.path,
+                preRestorationFixtureFingerprint: preFingerprint
+            )
+        }
+
+        let originalsDirectory = localStore.originalsFolderURL(propertyID: propertyID, sessionID: sessionID)
+        var originalFingerprintsBefore: [String: String] = [:]
+        var originalPathsBefore: [String] = []
+        for item in mediaItems {
+            let filename = sanitizedStorageFilename(item.originalFilename, fallbackShotID: item.id)
+            let originalURL = originalsDirectory.appendingPathComponent(filename, isDirectory: false)
+            if FileManager.default.fileExists(atPath: originalURL.path),
+               let data = try? Data(contentsOf: originalURL) {
+                originalPathsBefore.append(originalURL.path)
+                originalFingerprintsBefore[originalURL.path] = sha256Hex(for: data)
+            }
+        }
+
+        var itemEvidence: [ProductionSingleSessionMediaRestorationItemEvidence] = []
+        var createdCandidateFilePaths = Set<String>()
+        var createdCandidateDirectoryPaths = Set<String>()
+        for item in mediaItems {
+            let filename = sanitizedStorageFilename(item.originalFilename, fallbackShotID: item.id)
+            let targetURL = candidateDirectory.appendingPathComponent(filename, isDirectory: false)
+            let originalURL = originalsDirectory.appendingPathComponent(filename, isDirectory: false)
+            let originalExistedBefore = originalFingerprintsBefore[originalURL.path] != nil
+
+            if FileManager.default.fileExists(atPath: targetURL.path) {
+                guard let existingData = try? Data(contentsOf: targetURL) else {
+                    itemEvidence.append(ProductionSingleSessionMediaRestorationItemEvidence(
+                        id: item.id,
+                        filename: filename,
+                        status: .failed,
+                        checksumVerifiedBeforeAcceptance: false,
+                        candidateLocalPathPresent: true,
+                        originalExistedBefore: originalExistedBefore,
+                        originalPreserved: originalPreserved(path: originalURL.path, before: originalFingerprintsBefore),
+                        failureReason: "existing_candidate_unreadable"
+                    ))
+                    continue
+                }
+                guard let expectedChecksum = Self.trimmedNonEmpty(item.expectedChecksumSHA256)?.lowercased() else {
+                    itemEvidence.append(ProductionSingleSessionMediaRestorationItemEvidence(
+                        id: item.id,
+                        filename: filename,
+                        status: .skippedChecksumMissing,
+                        checksumVerifiedBeforeAcceptance: false,
+                        candidateLocalPathPresent: true,
+                        originalExistedBefore: originalExistedBefore,
+                        originalPreserved: originalPreserved(path: originalURL.path, before: originalFingerprintsBefore),
+                        failureReason: "checksum_unknown"
+                    ))
+                    continue
+                }
+                guard sha256Hex(for: existingData) == expectedChecksum else {
+                    itemEvidence.append(ProductionSingleSessionMediaRestorationItemEvidence(
+                        id: item.id,
+                        filename: filename,
+                        status: .rejectedChecksumMismatch,
+                        checksumVerifiedBeforeAcceptance: false,
+                        candidateLocalPathPresent: true,
+                        originalExistedBefore: originalExistedBefore,
+                        originalPreserved: originalPreserved(path: originalURL.path, before: originalFingerprintsBefore),
+                        failureReason: "existing_candidate_checksum_mismatch"
+                    ))
+                    continue
+                }
+                itemEvidence.append(ProductionSingleSessionMediaRestorationItemEvidence(
+                    id: item.id,
+                    filename: filename,
+                    status: .skippedExisting,
+                    checksumVerifiedBeforeAcceptance: true,
+                    candidateLocalPathPresent: true,
+                    originalExistedBefore: originalExistedBefore,
+                    originalPreserved: originalPreserved(path: originalURL.path, before: originalFingerprintsBefore),
+                    failureReason: nil
+                ))
+                continue
+            }
+
+            guard let data = item.payloadData else {
+                itemEvidence.append(ProductionSingleSessionMediaRestorationItemEvidence(
+                    id: item.id,
+                    filename: filename,
+                    status: .failed,
+                    checksumVerifiedBeforeAcceptance: false,
+                    candidateLocalPathPresent: false,
+                    originalExistedBefore: originalExistedBefore,
+                    originalPreserved: originalPreserved(path: originalURL.path, before: originalFingerprintsBefore),
+                    failureReason: item.failureReason ?? "media_payload_unavailable"
+                ))
+                continue
+            }
+            guard let expectedChecksum = Self.trimmedNonEmpty(item.expectedChecksumSHA256)?.lowercased() else {
+                itemEvidence.append(ProductionSingleSessionMediaRestorationItemEvidence(
+                    id: item.id,
+                    filename: filename,
+                    status: .skippedChecksumMissing,
+                    checksumVerifiedBeforeAcceptance: false,
+                    candidateLocalPathPresent: false,
+                    originalExistedBefore: originalExistedBefore,
+                    originalPreserved: originalPreserved(path: originalURL.path, before: originalFingerprintsBefore),
+                    failureReason: "checksum_unknown"
+                ))
+                continue
+            }
+            guard sha256Hex(for: data) == expectedChecksum else {
+                itemEvidence.append(ProductionSingleSessionMediaRestorationItemEvidence(
+                    id: item.id,
+                    filename: filename,
+                    status: .rejectedChecksumMismatch,
+                    checksumVerifiedBeforeAcceptance: false,
+                    candidateLocalPathPresent: false,
+                    originalExistedBefore: originalExistedBefore,
+                    originalPreserved: originalPreserved(path: originalURL.path, before: originalFingerprintsBefore),
+                    failureReason: "checksum_mismatch"
+                ))
+                continue
+            }
+
+            do {
+                try FileManager.default.createDirectory(at: candidateDirectory, withIntermediateDirectories: true)
+                createdCandidateDirectoryPaths.formUnion(missingCandidateDirectoryPathsBefore)
+                try data.write(to: targetURL, options: [.atomic])
+                createdCandidateFilePaths.insert(targetURL.path)
+                itemEvidence.append(ProductionSingleSessionMediaRestorationItemEvidence(
+                    id: item.id,
+                    filename: filename,
+                    status: .restored,
+                    checksumVerifiedBeforeAcceptance: true,
+                    candidateLocalPathPresent: FileManager.default.fileExists(atPath: targetURL.path),
+                    originalExistedBefore: originalExistedBefore,
+                    originalPreserved: originalPreserved(path: originalURL.path, before: originalFingerprintsBefore),
+                    failureReason: nil
+                ))
+            } catch {
+                itemEvidence.append(ProductionSingleSessionMediaRestorationItemEvidence(
+                    id: item.id,
+                    filename: filename,
+                    status: .failed,
+                    checksumVerifiedBeforeAcceptance: false,
+                    candidateLocalPathPresent: false,
+                    originalExistedBefore: originalExistedBefore,
+                    originalPreserved: originalPreserved(path: originalURL.path, before: originalFingerprintsBefore),
+                    failureReason: Self.diagnosticsPreviewText(error.localizedDescription, maxLength: 160)
+                ))
+            }
+        }
+
+        let postFingerprint = phase2C27OMediaRestorationFixtureFingerprintForTests(
+            propertyID: propertyID,
+            sessionID: sessionID,
+            candidateID: candidateID
+        )
+        let restoredCount = itemEvidence.filter { $0.status == .restored }.count
+        let skippedExistingCount = itemEvidence.filter { $0.status == .skippedExisting }.count
+        let checksumMismatchCount = itemEvidence.filter { $0.status == .rejectedChecksumMismatch }.count
+        let failedCount = itemEvidence.filter {
+            $0.status == .failed ||
+                $0.status == .rejectedChecksumMismatch ||
+                $0.status == .skippedChecksumMissing
+        }.count
+        let acceptedCandidateMediaCount = itemEvidence.filter {
+            $0.status == .restored || $0.status == .skippedExisting
+        }.count
+        let partialFailureReported = failedCount > 0
+        let state: ProductionSingleSessionMediaRestorationRehearsalState = partialFailureReported
+            ? .testOnlyMediaRestorationPartialFailureReported
+            : .testOnlyMediaRestorationRehearsalPassed
+        let blockedConditions = [
+            "no_production_reads_enabled",
+            "no_production_activation",
+            "no_remote_writes",
+            "no_real_local_user_data_writes",
+            "no_originals_overwritten",
+            "no_export_seal_sync_media_icloud_behavior_changed",
+            "package_candidate_only",
+            "fallback_retained"
+        ]
+
+        return ProductionSingleSessionMediaRestorationRehearsal(
+            checkedAt: checkedAt,
+            state: state,
+            blockers: [],
+            blockedConditions: blockedConditions,
+            targetScope: scope,
+            candidateID: candidateID,
+            candidateDirectoryPath: candidateDirectory.path,
+            hydrationExecutionRehearsalPassed: true,
+            executionTargetIsLocalTestFixture: hydrationRehearsal.executionTargetIsLocalTestFixture,
+            productionTargetBlocked: productionTargetBlocked,
+            productionReadsBlocked: productionReadsBlocked,
+            broadCanonicalReadBlocked: broadCanonicalReadBlocked,
+            remoteStateWritesBlocked: remoteStateWritesBlocked,
+            realLocalUserStateWritesBlocked: realLocalUserStateWritesBlocked,
+            checksumVerificationRequired: true,
+            restoredMediaLandedInPackageCandidate: acceptedCandidateMediaCount > 0,
+            originalsOverwriteBlocked: originalsOverwriteBlocked,
+            existingOriginalsPreserved: itemEvidence.allSatisfy(\.originalPreserved),
+            duplicateRestorationIdempotent: skippedExistingCount > 0,
+            partialFailureReported: partialFailureReported,
+            fallbackRetained: combinedFallbackRetained,
+            exportSealSyncMediaICloudUnchanged: exportSealSyncMediaICloudUnchanged,
+            preRestorationFixtureFingerprint: preFingerprint,
+            postRestorationFixtureFingerprint: postFingerprint,
+            restoredCount: restoredCount,
+            skippedExistingCount: skippedExistingCount,
+            checksumMismatchCount: checksumMismatchCount,
+            failedCount: failedCount,
+            acceptedCandidateMediaCount: acceptedCandidateMediaCount,
+            createdCandidateFilePaths: createdCandidateFilePaths.sorted(),
+            createdCandidateDirectoryPaths: createdCandidateDirectoryPaths.sorted(),
+            existingOriginalPathsBefore: originalPathsBefore.sorted(),
+            itemEvidence: itemEvidence,
+            noProductionBehaviorChangedText: "No production behavior changed: Phase 2C-27O media restoration rehearsal is non-production isolated-fixture package-candidate media only. No production reads were enabled, no production activation occurred, no canonical candidates or overlays were activated, no reads were switched, no remote state was written, no real local user session data was written, no originals were overwritten, no fallback was removed, and export, seal, sync, media, iCloud, RLS, schema, and data behavior is unchanged."
+        )
+    }
+
+    @discardableResult
+    func rollbackProductionSingleSessionMediaRestorationRehearsalForTests(
+        checkedAt: Date = Date(),
+        rehearsal: ProductionSingleSessionMediaRestorationRehearsal
+    ) -> ProductionSingleSessionMediaRestorationRollback {
+        let scope = rehearsal.targetScope
+        var blockers: [String] = []
+        guard let propertyID = scope.propertyID,
+              let sessionID = scope.sessionID,
+              let candidateDirectoryPath = rehearsal.candidateDirectoryPath else {
+            blockers.append("missing_rehearsal_target")
+            return makeBlockedMediaRestorationRollback(
+                checkedAt: checkedAt,
+                blockers: blockers,
+                rehearsal: rehearsal,
+                restoredFixtureFingerprint: nil
+            )
+        }
+
+        let candidateDirectory = productionSingleSessionMediaRestorationCandidateDirectoryURLForTests(
+            propertyID: propertyID,
+            sessionID: sessionID,
+            candidateID: rehearsal.candidateID
+        )
+        guard candidateDirectory.path == candidateDirectoryPath,
+              candidateDirectory.path.contains("/RecoveredMedia/PackageCandidate/Phase2C27O/") else {
+            blockers.append("unsafe_candidate_directory")
+            return makeBlockedMediaRestorationRollback(
+                checkedAt: checkedAt,
+                blockers: blockers,
+                rehearsal: rehearsal,
+                restoredFixtureFingerprint: nil
+            )
+        }
+
+        let phaseDirectory = candidateDirectory.deletingLastPathComponent()
+        let packageDirectory = phaseDirectory.deletingLastPathComponent()
+        let recoveredDirectory = packageDirectory.deletingLastPathComponent()
+        let safeCreatedCandidateDirectoryPaths = Set([
+            recoveredDirectory.path,
+            packageDirectory.path,
+            phaseDirectory.path,
+            candidateDirectory.path
+        ])
+        let candidateDirectoryPathPrefix = candidateDirectory.path + "/"
+        func pathIsInsideCandidateDirectory(_ path: String) -> Bool {
+            path == candidateDirectory.path || path.hasPrefix(candidateDirectoryPathPrefix)
+        }
+
+        var removedCandidateDirectory = false
+        for filePath in rehearsal.createdCandidateFilePaths.sorted(by: { $0.count > $1.count }) {
+            guard pathIsInsideCandidateDirectory(filePath) else {
+                blockers.append("unsafe_created_candidate_file")
+                continue
+            }
+            guard FileManager.default.fileExists(atPath: filePath) else { continue }
+            do {
+                try FileManager.default.removeItem(atPath: filePath)
+            } catch {
+                blockers.append(Self.diagnosticsPreviewText(error.localizedDescription, maxLength: 160) ?? "candidate_file_remove_failed")
+            }
+        }
+
+        for directoryPath in rehearsal.createdCandidateDirectoryPaths.sorted(by: { $0.count > $1.count }) {
+            guard safeCreatedCandidateDirectoryPaths.contains(directoryPath) else {
+                blockers.append("unsafe_created_candidate_directory")
+                continue
+            }
+            guard FileManager.default.fileExists(atPath: directoryPath) else { continue }
+            let contents = (try? FileManager.default.contentsOfDirectory(atPath: directoryPath)) ?? []
+            guard contents.isEmpty else { continue }
+            do {
+                try FileManager.default.removeItem(atPath: directoryPath)
+                if directoryPath == candidateDirectory.path {
+                    removedCandidateDirectory = true
+                }
+            } catch {
+                blockers.append(Self.diagnosticsPreviewText(error.localizedDescription, maxLength: 160) ?? "candidate_directory_remove_failed")
+            }
+        }
+
+        let restoredFingerprint = phase2C27OMediaRestorationFixtureFingerprintForTests(
+            propertyID: propertyID,
+            sessionID: sessionID,
+            candidateID: rehearsal.candidateID
+        )
+        let originalsPreserved = rehearsal.existingOriginalPathsBefore.allSatisfy {
+            FileManager.default.fileExists(atPath: $0)
+        }
+        let restoredPreRestorationFixture = restoredFingerprint == rehearsal.preRestorationFixtureFingerprint &&
+            originalsPreserved
+        if !restoredPreRestorationFixture {
+            blockers.append("rollback_restored_fixture_mismatch")
+        }
+
+        if !blockers.isEmpty {
+            return makeBlockedMediaRestorationRollback(
+                checkedAt: checkedAt,
+                blockers: blockers,
+                rehearsal: rehearsal,
+                restoredFixtureFingerprint: restoredFingerprint,
+                removedCandidateDirectory: removedCandidateDirectory,
+                existingOriginalsPreserved: originalsPreserved
+            )
+        }
+
+        return ProductionSingleSessionMediaRestorationRollback(
+            checkedAt: checkedAt,
+            state: .restoredPreRestorationFixture,
+            blockers: [],
+            targetScope: scope,
+            candidateID: rehearsal.candidateID,
+            candidateDirectoryPath: rehearsal.candidateDirectoryPath,
+            removedCandidateDirectory: removedCandidateDirectory,
+            preRestorationFixtureFingerprint: rehearsal.preRestorationFixtureFingerprint,
+            restoredFixtureFingerprint: restoredFingerprint,
+            restoredPreRestorationFixture: restoredPreRestorationFixture,
+            existingOriginalsPreserved: originalsPreserved,
+            fallbackRetained: rehearsal.fallbackRetained,
+            exportSealSyncMediaICloudUnchanged: rehearsal.exportSealSyncMediaICloudUnchanged,
+            noProductionBehaviorChangedText: "No production behavior changed: Phase 2C-27O rollback removed only isolated rehearsal-created package-candidate media. Existing originals and fallback were preserved, no production reads were enabled, no production activation occurred, no remote state was written, no real local user session data was written, and export, seal, sync, media, iCloud, RLS, schema, and data behavior is unchanged."
+        )
+    }
+
+    nonisolated static func productionSingleSessionMediaRestorationRehearsalReportText(
+        _ rehearsal: ProductionSingleSessionMediaRestorationRehearsal
+    ) -> String {
+        var lines: [String] = []
+        lines.append("Production Single-Session Media Restoration Rehearsal")
+        lines.append("- media_restoration_rehearsal_checked_at: \(rehearsal.checkedAt.formatted(date: .abbreviated, time: .standard))")
+        lines.append("- media_restoration_rehearsal_state: \(rehearsal.state.rawValue)")
+        lines.append("- blockers: \(rehearsal.blockers.isEmpty ? "none" : rehearsal.blockers.joined(separator: ", "))")
+        lines.append("- blocked_conditions: \(rehearsal.blockedConditions.isEmpty ? "none" : rehearsal.blockedConditions.joined(separator: ", "))")
+        lines.append("- target_scope: \(rehearsal.targetScope.description)")
+        lines.append("- candidate_id: \(rehearsal.candidateID.uuidString)")
+        lines.append("- candidate_directory_present: \(rehearsal.candidateDirectoryPath != nil)")
+        lines.append("- hydration_execution_rehearsal_passed: \(rehearsal.hydrationExecutionRehearsalPassed)")
+        lines.append("- execution_target_is_local_test_fixture: \(rehearsal.executionTargetIsLocalTestFixture)")
+        lines.append("- production_reads_blocked: \(rehearsal.productionReadsBlocked)")
+        lines.append("- broad_canonical_read_blocked: \(rehearsal.broadCanonicalReadBlocked)")
+        lines.append("- remote_state_writes_blocked: \(rehearsal.remoteStateWritesBlocked)")
+        lines.append("- real_local_user_state_writes_blocked: \(rehearsal.realLocalUserStateWritesBlocked)")
+        lines.append("- checksum_verification_required: \(rehearsal.checksumVerificationRequired)")
+        lines.append("- restored_media_landed_in_package_candidate: \(rehearsal.restoredMediaLandedInPackageCandidate)")
+        lines.append("- originals_overwrite_blocked: \(rehearsal.originalsOverwriteBlocked)")
+        lines.append("- existing_originals_preserved: \(rehearsal.existingOriginalsPreserved)")
+        lines.append("- duplicate_restoration_idempotent: \(rehearsal.duplicateRestorationIdempotent)")
+        lines.append("- partial_failure_reported: \(rehearsal.partialFailureReported)")
+        lines.append("- fallback_retained: \(rehearsal.fallbackRetained)")
+        lines.append("- export_seal_sync_media_icloud_unchanged: \(rehearsal.exportSealSyncMediaICloudUnchanged)")
+        lines.append("- restored_count: \(rehearsal.restoredCount)")
+        lines.append("- skipped_existing_count: \(rehearsal.skippedExistingCount)")
+        lines.append("- checksum_mismatch_count: \(rehearsal.checksumMismatchCount)")
+        lines.append("- failed_count: \(rehearsal.failedCount)")
+        lines.append("- accepted_candidate_media_count: \(rehearsal.acceptedCandidateMediaCount)")
+        lines.append("- created_candidate_file_count: \(rehearsal.createdCandidateFilePaths.count)")
+        lines.append("- created_candidate_directory_count: \(rehearsal.createdCandidateDirectoryPaths.count)")
+        lines.append(rehearsal.noProductionBehaviorChangedText)
+        return lines.joined(separator: "\n")
+    }
+
+    nonisolated static func productionSingleSessionMediaRestorationRollbackReportText(
+        _ rollback: ProductionSingleSessionMediaRestorationRollback
+    ) -> String {
+        var lines: [String] = []
+        lines.append("Production Single-Session Media Restoration Rollback")
+        lines.append("- media_restoration_rollback_checked_at: \(rollback.checkedAt.formatted(date: .abbreviated, time: .standard))")
+        lines.append("- media_restoration_rollback_state: \(rollback.state.rawValue)")
+        lines.append("- blockers: \(rollback.blockers.isEmpty ? "none" : rollback.blockers.joined(separator: ", "))")
+        lines.append("- target_scope: \(rollback.targetScope.description)")
+        lines.append("- candidate_id: \(rollback.candidateID.uuidString)")
+        lines.append("- candidate_directory_present: \(rollback.candidateDirectoryPath != nil)")
+        lines.append("- removed_candidate_directory: \(rollback.removedCandidateDirectory)")
+        lines.append("- restored_pre_restoration_fixture: \(rollback.restoredPreRestorationFixture)")
+        lines.append("- existing_originals_preserved: \(rollback.existingOriginalsPreserved)")
+        lines.append("- fallback_retained: \(rollback.fallbackRetained)")
+        lines.append("- export_seal_sync_media_icloud_unchanged: \(rollback.exportSealSyncMediaICloudUnchanged)")
+        lines.append(rollback.noProductionBehaviorChangedText)
+        return lines.joined(separator: "\n")
+    }
+
+    private func makeBlockedMediaRestorationRehearsal(
+        checkedAt: Date,
+        blockers: [String],
+        scope: ProductionCohortApprovalScope,
+        candidateID: UUID,
+        hydrationRehearsal: ProductionSingleSessionHydrationExecutionRehearsal,
+        productionTargetBlocked: Bool,
+        productionReadsBlocked: Bool,
+        broadCanonicalReadBlocked: Bool,
+        remoteStateWritesBlocked: Bool,
+        realLocalUserStateWritesBlocked: Bool,
+        originalsOverwriteBlocked: Bool,
+        fallbackRetained: Bool,
+        exportSealSyncMediaICloudUnchanged: Bool,
+        candidateDirectoryPath: String? = nil,
+        preRestorationFixtureFingerprint: String? = nil
+    ) -> ProductionSingleSessionMediaRestorationRehearsal {
+        let dedupedBlockers = Array(Set(blockers)).sorted()
+        return ProductionSingleSessionMediaRestorationRehearsal(
+            checkedAt: checkedAt,
+            state: .blocked,
+            blockers: dedupedBlockers,
+            blockedConditions: [
+                productionTargetBlocked ? "production_activation_blocked" : nil,
+                productionReadsBlocked ? "production_reads_blocked" : nil,
+                broadCanonicalReadBlocked ? "broad_canonical_reads_blocked" : nil,
+                remoteStateWritesBlocked ? "remote_state_writes_blocked" : nil,
+                realLocalUserStateWritesBlocked ? "real_local_user_state_writes_blocked" : nil,
+                originalsOverwriteBlocked ? "original_overwrite_blocked" : nil,
+                fallbackRetained ? "fallback_retained" : nil,
+                exportSealSyncMediaICloudUnchanged ? "export_seal_sync_media_icloud_unchanged" : nil
+            ].compactMap { $0 },
+            targetScope: scope,
+            candidateID: candidateID,
+            candidateDirectoryPath: candidateDirectoryPath,
+            hydrationExecutionRehearsalPassed: hydrationRehearsal.state == .testOnlyHydrationRehearsalPassed,
+            executionTargetIsLocalTestFixture: hydrationRehearsal.executionTargetIsLocalTestFixture,
+            productionTargetBlocked: productionTargetBlocked,
+            productionReadsBlocked: productionReadsBlocked,
+            broadCanonicalReadBlocked: broadCanonicalReadBlocked,
+            remoteStateWritesBlocked: remoteStateWritesBlocked,
+            realLocalUserStateWritesBlocked: realLocalUserStateWritesBlocked,
+            checksumVerificationRequired: true,
+            restoredMediaLandedInPackageCandidate: false,
+            originalsOverwriteBlocked: originalsOverwriteBlocked,
+            existingOriginalsPreserved: true,
+            duplicateRestorationIdempotent: false,
+            partialFailureReported: false,
+            fallbackRetained: fallbackRetained,
+            exportSealSyncMediaICloudUnchanged: exportSealSyncMediaICloudUnchanged,
+            preRestorationFixtureFingerprint: preRestorationFixtureFingerprint,
+            postRestorationFixtureFingerprint: preRestorationFixtureFingerprint,
+            restoredCount: 0,
+            skippedExistingCount: 0,
+            checksumMismatchCount: 0,
+            failedCount: 0,
+            acceptedCandidateMediaCount: 0,
+            createdCandidateFilePaths: [],
+            createdCandidateDirectoryPaths: [],
+            existingOriginalPathsBefore: [],
+            itemEvidence: [],
+            noProductionBehaviorChangedText: "No production behavior changed: Phase 2C-27O media restoration rehearsal remained blocked before writing package-candidate media. No production reads were enabled, no production activation occurred, no canonical candidates or overlays were activated, no reads were switched, no remote state was written, no real local user session data was written, no originals were overwritten, no fallback was removed, and export, seal, sync, media, iCloud, RLS, schema, and data behavior is unchanged."
+        )
+    }
+
+    private func makeBlockedMediaRestorationRollback(
+        checkedAt: Date,
+        blockers: [String],
+        rehearsal: ProductionSingleSessionMediaRestorationRehearsal,
+        restoredFixtureFingerprint: String?,
+        removedCandidateDirectory: Bool = false,
+        existingOriginalsPreserved: Bool = false
+    ) -> ProductionSingleSessionMediaRestorationRollback {
+        ProductionSingleSessionMediaRestorationRollback(
+            checkedAt: checkedAt,
+            state: .blocked,
+            blockers: Array(Set(blockers)).sorted(),
+            targetScope: rehearsal.targetScope,
+            candidateID: rehearsal.candidateID,
+            candidateDirectoryPath: rehearsal.candidateDirectoryPath,
+            removedCandidateDirectory: removedCandidateDirectory,
+            preRestorationFixtureFingerprint: rehearsal.preRestorationFixtureFingerprint,
+            restoredFixtureFingerprint: restoredFixtureFingerprint,
+            restoredPreRestorationFixture: false,
+            existingOriginalsPreserved: existingOriginalsPreserved,
+            fallbackRetained: rehearsal.fallbackRetained,
+            exportSealSyncMediaICloudUnchanged: rehearsal.exportSealSyncMediaICloudUnchanged,
+            noProductionBehaviorChangedText: "No production behavior changed: Phase 2C-27O rollback did not touch production reads, production activation, remote state, real local user session data, export, seal, sync, media, iCloud, RLS, schema, or data behavior."
+        )
+    }
+
+    private func originalPreserved(path: String, before: [String: String]) -> Bool {
+        guard let beforeHash = before[path] else { return true }
+        guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)) else { return false }
+        return sha256Hex(for: data) == beforeHash
     }
 
     private nonisolated static func canonicalCandidateMediaRecoveryConfidence(
