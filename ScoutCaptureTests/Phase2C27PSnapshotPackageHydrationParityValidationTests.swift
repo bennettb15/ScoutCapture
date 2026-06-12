@@ -33,6 +33,16 @@ final class Phase2C27PSnapshotPackageHydrationParityValidationTests: XCTestCase 
         let comparison: AppState.CanonicalCandidateOverlayComparison
     }
 
+    private struct FullyRestoredRollbackEvidence {
+        let package: PackageEvidence
+        let preHydrationFixtureFingerprint: String
+        let restoredFixtureFingerprint: String
+        let recoveredMediaArtifactsRemoved: Bool
+        let packageCandidateArtifactsRemoved: Bool
+        let originalSentinelPreservedDuringRestoration: Bool
+        let validation: AppState.ProductionSingleSessionFullyRestoredPackageRollbackValidation
+    }
+
     private func makeTempStorageRoot() throws -> URL {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("ScoutCapture-2C27P-\(UUID().uuidString)", isDirectory: true)
@@ -355,6 +365,50 @@ final class Phase2C27PSnapshotPackageHydrationParityValidationTests: XCTestCase 
         }
     }
 
+    private func fixtureFingerprint(_ fixture: PackageFixture) throws -> String {
+        let sessions = try fixture.store.fetchSessions(propertyID: fixture.property.id)
+            .sorted { $0.id.uuidString < $1.id.uuidString }
+            .map { session in
+                [
+                    session.id.uuidString,
+                    session.propertyID.uuidString,
+                    session.status.rawValue,
+                    String(session.isSealed)
+                ].joined(separator: ":")
+            }
+        let sessionRoot = fixture.store.sessionFolderURL(
+            propertyID: fixture.property.id,
+            sessionID: fixture.session.id
+        )
+        var lines = ["sessions:\(sessions.joined(separator: ","))"]
+        if FileManager.default.fileExists(atPath: sessionRoot.path) {
+            lines.append("session_root:present")
+            let relativePaths = ((try? FileManager.default.subpathsOfDirectory(atPath: sessionRoot.path)) ?? [])
+                .sorted()
+            for relativePath in relativePaths {
+                let url = sessionRoot.appendingPathComponent(relativePath, isDirectory: false)
+                var isDirectory: ObjCBool = false
+                guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory),
+                      !isDirectory.boolValue,
+                      let data = try? Data(contentsOf: url) else {
+                    continue
+                }
+                lines.append("\(relativePath):\(sha256Hex(data))")
+            }
+        } else {
+            lines.append("session_root:missing")
+        }
+        return sha256Hex(Data(lines.joined(separator: "\n").utf8))
+    }
+
+    private func scope(for fixture: PackageFixture) -> AppState.ProductionCohortApprovalScope {
+        AppState.ProductionCohortApprovalScope(
+            orgID: fixture.orgID,
+            propertyID: fixture.property.id,
+            sessionID: fixture.session.id
+        )
+    }
+
     private func makeCandidateEvidence(
         fixture: PackageFixture,
         hydratedMetadata: SessionMetadata
@@ -473,6 +527,94 @@ final class Phase2C27PSnapshotPackageHydrationParityValidationTests: XCTestCase 
         )
     }
 
+    private func makeFullyRestoredRollbackEvidence() async throws -> FullyRestoredRollbackEvidence {
+        let fixture = try makePackageFixture()
+        let preHydrationFingerprint = try fixtureFingerprint(fixture)
+        let restore = await fixture.appState.validateLatestSessionSnapshotRestoreDiagnostics()
+        let hydration = await fixture.appState.hydrateMetadataFromLatestSessionSnapshot()
+        let hydratedMetadata = try fixture.store.loadSessionMetadata(
+            propertyID: fixture.property.id,
+            sessionID: fixture.session.id
+        )
+        let originalSentinelData = Data("phase-2c-27q-pre-existing-original".utf8)
+        let originalSentinelURL = fixture.store
+            .originalsFolderURL(propertyID: fixture.property.id, sessionID: fixture.session.id)
+            .appendingPathComponent("phase-2c-27q-existing-original.jpg", isDirectory: false)
+        try FileManager.default.createDirectory(
+            at: originalSentinelURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try originalSentinelData.write(to: originalSentinelURL, options: .atomic)
+
+        let mediaRetrieval = await fixture.appState.retrieveSnapshotMediaTestOnly()
+        let mediaItems = try makeMediaRestorationItems(
+            fixture: fixture,
+            hydratedMetadata: hydratedMetadata,
+            snapshotID: fixture.snapshotID
+        )
+        let mediaRestoration = fixture.appState.rehearseProductionSingleSessionMediaRestorationForTests(
+            hydrationRehearsal: makeHydrationRehearsal(
+                scope: scope(for: fixture),
+                restore: restore,
+                hydratedMetadata: hydratedMetadata
+            ),
+            candidateID: UUID(),
+            mediaItems: mediaItems,
+            targetClassification: .localDev
+        )
+        let originalSentinelPreserved = (try? Data(contentsOf: originalSentinelURL)) == originalSentinelData
+        let mediaRollback = fixture.appState.rollbackProductionSingleSessionMediaRestorationRehearsalForTests(
+            rehearsal: mediaRestoration
+        )
+        try fixture.store.deleteSession(id: fixture.session.id, propertyID: fixture.property.id)
+
+        let restoredFingerprint = try fixtureFingerprint(fixture)
+        let recoveredMediaDirectory = fixture.appState.sessionSnapshotRecoveredMediaDirectoryURLForDiagnostics(
+            propertyID: fixture.property.id,
+            sessionID: fixture.session.id,
+            snapshotID: fixture.snapshotID
+        )
+        let recoveredRemoved = !FileManager.default.fileExists(atPath: recoveredMediaDirectory.path)
+        let candidateRemoved = mediaRestoration.candidateDirectoryPath.map {
+            !FileManager.default.fileExists(atPath: $0)
+        } ?? false
+        let candidateEvidence = makeCandidateEvidence(fixture: fixture, hydratedMetadata: hydratedMetadata)
+        let package = PackageEvidence(
+            fixture: fixture,
+            restore: restore,
+            hydration: hydration,
+            hydratedMetadata: hydratedMetadata,
+            mediaRetrieval: mediaRetrieval,
+            mediaRestoration: mediaRestoration,
+            mediaRollback: mediaRollback,
+            candidate: candidateEvidence.candidate,
+            overlay: candidateEvidence.overlay,
+            comparison: candidateEvidence.comparison
+        )
+        let validation = AppState.makeProductionSingleSessionFullyRestoredPackageRollbackValidation(
+            targetScope: scope(for: fixture),
+            restoreDiagnostics: restore,
+            hydration: hydration,
+            mediaRetrieval: mediaRetrieval,
+            mediaRestoration: mediaRestoration,
+            mediaRollback: mediaRollback,
+            preHydrationFixtureFingerprint: preHydrationFingerprint,
+            restoredFixtureFingerprint: restoredFingerprint,
+            generatedRecoveredMediaArtifactsRemoved: recoveredRemoved,
+            generatedPackageCandidateArtifactsRemoved: candidateRemoved,
+            originalsPreserved: originalSentinelPreserved
+        )
+        return FullyRestoredRollbackEvidence(
+            package: package,
+            preHydrationFixtureFingerprint: preHydrationFingerprint,
+            restoredFixtureFingerprint: restoredFingerprint,
+            recoveredMediaArtifactsRemoved: recoveredRemoved,
+            packageCandidateArtifactsRemoved: candidateRemoved,
+            originalSentinelPreservedDuringRestoration: originalSentinelPreserved,
+            validation: validation
+        )
+    }
+
     private func validate(_ evidence: PackageEvidence) -> AppState.ProductionSingleSessionSnapshotPackageParityValidation {
         AppState.makeProductionSingleSessionSnapshotPackageHydrationParityValidation(
             targetScope: AppState.ProductionCohortApprovalScope(
@@ -532,6 +674,110 @@ final class Phase2C27PSnapshotPackageHydrationParityValidationTests: XCTestCase 
         XCTAssertTrue(report.contains("Production Single-Session Snapshot Package Hydration Parity Validation"))
         XCTAssertTrue(report.contains("- package_parity_state: test_only_package_parity_passed"))
         XCTAssertTrue(report.contains("No production behavior changed"))
+    }
+
+    func testFullyRestoredPackageRollbackRestoresPreHydrationFixture() async throws {
+        let evidence = try await makeFullyRestoredRollbackEvidence()
+        defer { tearDownFixture(evidence.package.fixture) }
+
+        let validation = evidence.validation
+
+        XCTAssertEqual(evidence.package.restore.result, .restorableMetadataCandidate)
+        XCTAssertTrue(evidence.package.hydration.allowed)
+        XCTAssertEqual(evidence.package.mediaRestoration.state, .testOnlyMediaRestorationRehearsalPassed)
+        XCTAssertEqual(evidence.package.mediaRollback.state, .restoredPreRestorationFixture)
+        XCTAssertEqual(evidence.preHydrationFixtureFingerprint, evidence.restoredFixtureFingerprint)
+        XCTAssertTrue(evidence.recoveredMediaArtifactsRemoved)
+        XCTAssertTrue(evidence.packageCandidateArtifactsRemoved)
+        XCTAssertTrue(evidence.originalSentinelPreservedDuringRestoration)
+        XCTAssertEqual(validation.state, .testOnlyFullyRestoredPackageRollbackPassed)
+        XCTAssertTrue(validation.blockers.isEmpty)
+        XCTAssertTrue(validation.preHydrationLocalFixtureRestored)
+        XCTAssertTrue(validation.generatedRecoveredMediaArtifactsRemoved)
+        XCTAssertTrue(validation.generatedPackageCandidateArtifactsRemoved)
+        XCTAssertTrue(validation.originalsPreserved)
+        XCTAssertTrue(validation.fallbackRetained)
+        XCTAssertTrue(validation.activeSourceRemainsLocal)
+        XCTAssertTrue(validation.productionReadsBlocked)
+        XCTAssertTrue(validation.broadCanonicalReadsBlocked)
+        XCTAssertTrue(validation.activationBlocked)
+        XCTAssertTrue(validation.remoteStateWritesBlocked)
+        XCTAssertTrue(validation.realLocalUserStateWritesBlocked)
+        XCTAssertTrue(validation.exportSealSyncMediaICloudUnchanged)
+        XCTAssertTrue(validation.schemaRLSDataUnchanged)
+
+        let report = AppState.productionSingleSessionFullyRestoredPackageRollbackValidationReportText(validation)
+        XCTAssertTrue(report.contains("Production Single-Session Fully Restored Package Rollback Validation"))
+        XCTAssertTrue(report.contains("- package_rollback_state: test_only_fully_restored_package_rollback_passed"))
+        XCTAssertTrue(report.contains("No production behavior changed"))
+    }
+
+    func testFullyRestoredPackageRollbackValidationBlocksUnsafeOrIncompleteRollback() async throws {
+        let evidence = try await makeFullyRestoredRollbackEvidence()
+        defer { tearDownFixture(evidence.package.fixture) }
+        var restore = evidence.package.restore
+        restore.result = .parentMismatch
+        restore.parentRemoteVerified = false
+        restore.freshness = "local_newer"
+        restore.checksumVerified = false
+        let failedItem = AppState.SessionSnapshotMediaRetrievalItemResult(
+            id: evidence.package.fixture.sourceMetadata.shots[0].shotID,
+            status: .failed,
+            checksumVerified: false,
+            recoveredLocalPathPresent: false,
+            failureReason: "media_payload_unavailable"
+        )
+        let retrieval = AppState.SessionSnapshotMediaRetrievalResult(
+            retrievedAt: evidence.package.mediaRetrieval.retrievedAt,
+            allowed: true,
+            blockedReason: nil,
+            propertyID: evidence.package.mediaRetrieval.propertyID,
+            sessionID: evidence.package.mediaRetrieval.sessionID,
+            snapshotID: evidence.package.mediaRetrieval.snapshotID,
+            attemptedCount: evidence.package.mediaRetrieval.attemptedCount,
+            downloadedCount: evidence.package.mediaRetrieval.downloadedCount - 1,
+            checksumVerifiedCount: evidence.package.mediaRetrieval.checksumVerifiedCount - 1,
+            skippedExistingCount: evidence.package.mediaRetrieval.skippedExistingCount,
+            failedCount: 1,
+            recoveredLocalPathCount: evidence.package.mediaRetrieval.recoveredLocalPathCount - 1,
+            recoveredMediaDirectoryPathPresent: evidence.package.mediaRetrieval.recoveredMediaDirectoryPathPresent,
+            items: [failedItem]
+        )
+
+        let validation = AppState.makeProductionSingleSessionFullyRestoredPackageRollbackValidation(
+            targetScope: scope(for: evidence.package.fixture),
+            restoreDiagnostics: restore,
+            hydration: evidence.package.hydration,
+            mediaRetrieval: retrieval,
+            mediaRestoration: evidence.package.mediaRestoration,
+            mediaRollback: evidence.package.mediaRollback,
+            preHydrationFixtureFingerprint: evidence.preHydrationFixtureFingerprint,
+            restoredFixtureFingerprint: "wrong-fingerprint",
+            generatedRecoveredMediaArtifactsRemoved: false,
+            generatedPackageCandidateArtifactsRemoved: false,
+            originalsPreserved: false,
+            fallbackRetained: false,
+            activeSource: .canonicalCandidate,
+            productionReadsEnabled: true,
+            broadCanonicalReadRequired: true,
+            activationAttempted: true,
+            remoteStateWriteAttempted: true,
+            realLocalUserStateWriteAttempted: true,
+            exportSealSyncMediaICloudBehaviorChanged: true,
+            schemaRLSDataBehaviorChanged: true
+        )
+
+        XCTAssertEqual(validation.state, .blocked)
+        XCTAssertTrue(validation.blockers.contains("metadata_rollback_mismatch"))
+        XCTAssertTrue(validation.blockers.contains("leftover_recovered_media_artifacts"))
+        XCTAssertTrue(validation.blockers.contains("leftover_candidate_artifacts"))
+        XCTAssertTrue(validation.blockers.contains("original_overwrite"))
+        XCTAssertTrue(validation.blockers.contains("fallback_missing"))
+        XCTAssertTrue(validation.blockers.contains("unsafe_read_write_activation_attempt"))
+        XCTAssertTrue(validation.blockers.contains("parent_mismatch"))
+        XCTAssertTrue(validation.blockers.contains("local_newer_freshness"))
+        XCTAssertTrue(validation.blockers.contains("missing_media"))
+        XCTAssertTrue(validation.blockers.contains("checksum_mismatch"))
     }
 
     func testPackageParityValidationBlocksChecksumMismatch() async throws {

@@ -2450,6 +2450,11 @@ final class AppState: ObservableObject {
         case testOnlyPackageParityPassed = "test_only_package_parity_passed"
     }
 
+    enum ProductionSingleSessionFullyRestoredPackageRollbackValidationState: String, CaseIterable, Equatable {
+        case blocked
+        case testOnlyFullyRestoredPackageRollbackPassed = "test_only_fully_restored_package_rollback_passed"
+    }
+
     enum ProductionSingleSessionMediaRestorationItemStatus: String, Codable, Equatable {
         case restored
         case skippedExisting = "skipped_existing"
@@ -2988,6 +2993,35 @@ final class AppState: ObservableObject {
         let originalsOverwriteBlocked: Bool
         let originalsPreserved: Bool
         let rollbackCleanupVerified: Bool
+        let noProductionBehaviorChangedText: String
+    }
+
+    struct ProductionSingleSessionFullyRestoredPackageRollbackValidation: Equatable {
+        let checkedAt: Date
+        let state: ProductionSingleSessionFullyRestoredPackageRollbackValidationState
+        let blockers: [String]
+        let targetScope: ProductionCohortApprovalScope
+        let snapshotID: UUID?
+        let restoreDiagnosticsPassed: Bool
+        let hydrationSucceeded: Bool
+        let mediaRetrievalSucceeded: Bool
+        let mediaRestorationSucceeded: Bool
+        let mediaRollbackSucceeded: Bool
+        let preHydrationFixtureFingerprint: String
+        let restoredFixtureFingerprint: String
+        let preHydrationLocalFixtureRestored: Bool
+        let generatedRecoveredMediaArtifactsRemoved: Bool
+        let generatedPackageCandidateArtifactsRemoved: Bool
+        let originalsPreserved: Bool
+        let fallbackRetained: Bool
+        let activeSourceRemainsLocal: Bool
+        let productionReadsBlocked: Bool
+        let broadCanonicalReadsBlocked: Bool
+        let activationBlocked: Bool
+        let remoteStateWritesBlocked: Bool
+        let realLocalUserStateWritesBlocked: Bool
+        let exportSealSyncMediaICloudUnchanged: Bool
+        let schemaRLSDataUnchanged: Bool
         let noProductionBehaviorChangedText: String
     }
 
@@ -24099,6 +24133,241 @@ final class AppState: ObservableObject {
         lines.append("- originals_overwrite_blocked: \(validation.originalsOverwriteBlocked)")
         lines.append("- originals_preserved: \(validation.originalsPreserved)")
         lines.append("- rollback_cleanup_verified: \(validation.rollbackCleanupVerified)")
+        lines.append(validation.noProductionBehaviorChangedText)
+        return lines.joined(separator: "\n")
+    }
+
+    nonisolated static func makeProductionSingleSessionFullyRestoredPackageRollbackValidation(
+        checkedAt: Date = Date(),
+        targetScope: ProductionCohortApprovalScope,
+        restoreDiagnostics restore: SessionSnapshotRestoreDiagnosticsResult,
+        hydration: SessionSnapshotHydrationResult,
+        mediaRetrieval: SessionSnapshotMediaRetrievalResult,
+        mediaRestoration: ProductionSingleSessionMediaRestorationRehearsal,
+        mediaRollback: ProductionSingleSessionMediaRestorationRollback,
+        preHydrationFixtureFingerprint: String,
+        restoredFixtureFingerprint: String,
+        generatedRecoveredMediaArtifactsRemoved: Bool,
+        generatedPackageCandidateArtifactsRemoved: Bool,
+        originalsPreserved: Bool,
+        fallbackRetained: Bool = true,
+        activeSource: CanonicalCandidateActivationSource = .local,
+        productionReadsEnabled: Bool = false,
+        broadCanonicalReadRequired: Bool = false,
+        activationAttempted: Bool = false,
+        remoteStateWriteAttempted: Bool = false,
+        realLocalUserStateWriteAttempted: Bool = false,
+        exportSealSyncMediaICloudBehaviorChanged: Bool = false,
+        schemaRLSDataBehaviorChanged: Bool = false
+    ) -> ProductionSingleSessionFullyRestoredPackageRollbackValidation {
+        func scopesAreEqual(
+            _ lhs: ProductionCohortApprovalScope,
+            _ rhs: ProductionCohortApprovalScope
+        ) -> Bool {
+            lhs.orgID == rhs.orgID &&
+                lhs.propertyID == rhs.propertyID &&
+                lhs.sessionID == rhs.sessionID
+        }
+
+        let restoreScope = ProductionCohortApprovalScope(
+            orgID: targetScope.orgID,
+            propertyID: restore.propertyID,
+            sessionID: restore.sessionID
+        )
+        let hydrationScope = ProductionCohortApprovalScope(
+            orgID: targetScope.orgID,
+            propertyID: hydration.propertyID,
+            sessionID: hydration.sessionID
+        )
+        let mediaRetrievalScope = ProductionCohortApprovalScope(
+            orgID: targetScope.orgID,
+            propertyID: mediaRetrieval.propertyID,
+            sessionID: mediaRetrieval.sessionID
+        )
+        let scopeMatched = [
+            restoreScope,
+            hydrationScope,
+            mediaRetrievalScope,
+            mediaRestoration.targetScope,
+            mediaRollback.targetScope
+        ].allSatisfy { scopesAreEqual(targetScope, $0) }
+        let restoreDiagnosticsPassed = restore.result == .restorableMetadataCandidate &&
+            restore.checksumVerified &&
+            restore.rowObjectVerified &&
+            restore.snapshotSchemaVersion == 1 &&
+            restore.parentRemoteVerified &&
+            restore.freshness != "local_newer"
+        let hydrationSucceeded = hydration.allowed &&
+            hydration.blockedReason == nil &&
+            hydration.sourceSnapshotID == restore.snapshotID
+        let mediaManifestCount = restore.snapshotMediaManifestCount ?? restore.mediaRecoveryDiagnostics.manifestCount
+        let mediaRetrievalAcceptedCount = mediaRetrieval.downloadedCount + mediaRetrieval.skippedExistingCount
+        let mediaRetrievalSucceeded = mediaRetrieval.allowed &&
+            mediaRetrieval.failedCount == 0 &&
+            mediaRetrieval.checksumVerifiedCount == mediaRetrieval.downloadedCount &&
+            mediaRetrievalAcceptedCount == mediaManifestCount
+        let mediaRestorationSucceeded = mediaRestoration.state == .testOnlyMediaRestorationRehearsalPassed &&
+            mediaRestoration.blockers.isEmpty &&
+            mediaRestoration.failedCount == 0 &&
+            mediaRestoration.checksumMismatchCount == 0 &&
+            mediaRestoration.acceptedCandidateMediaCount == mediaManifestCount &&
+            mediaRestoration.itemEvidence.allSatisfy(\.checksumVerifiedBeforeAcceptance)
+        let mediaRollbackSucceeded = mediaRollback.state == .restoredPreRestorationFixture &&
+            mediaRollback.blockers.isEmpty &&
+            mediaRollback.restoredPreRestorationFixture
+        let preHydrationLocalFixtureRestored = preHydrationFixtureFingerprint == restoredFixtureFingerprint
+        let combinedOriginalsPreserved = originalsPreserved &&
+            mediaRestoration.existingOriginalsPreserved &&
+            mediaRollback.existingOriginalsPreserved
+        let combinedFallbackRetained = fallbackRetained &&
+            mediaRestoration.fallbackRetained &&
+            mediaRollback.fallbackRetained
+        let activeSourceRemainsLocal = activeSource == .local
+        let productionReadsBlocked = !productionReadsEnabled && mediaRestoration.productionReadsBlocked
+        let broadCanonicalReadsBlocked = !broadCanonicalReadRequired && mediaRestoration.broadCanonicalReadBlocked
+        let activationBlocked = !activationAttempted
+        let remoteStateWritesBlocked = !remoteStateWriteAttempted && mediaRestoration.remoteStateWritesBlocked
+        let realLocalUserStateWritesBlocked = !realLocalUserStateWriteAttempted && mediaRestoration.realLocalUserStateWritesBlocked
+        let exportSealSyncMediaICloudUnchanged = !exportSealSyncMediaICloudBehaviorChanged &&
+            mediaRestoration.exportSealSyncMediaICloudUnchanged &&
+            mediaRollback.exportSealSyncMediaICloudUnchanged
+        let schemaRLSDataUnchanged = !schemaRLSDataBehaviorChanged
+
+        var blockers: [String] = []
+        if !scopeMatched {
+            blockers.append("scope_mismatch")
+        }
+        if !restoreDiagnosticsPassed {
+            blockers.append("restore_diagnostics_not_restorable")
+        }
+        if !restore.checksumVerified ||
+            mediaRetrieval.items.contains(where: { $0.status == .rejectedChecksumMismatch }) ||
+            mediaRestoration.checksumMismatchCount > 0 {
+            blockers.append("checksum_mismatch")
+        }
+        if !restore.parentRemoteVerified {
+            blockers.append("parent_mismatch")
+        }
+        if restore.freshness == "local_newer" {
+            blockers.append("local_newer_freshness")
+        }
+        if !hydrationSucceeded {
+            blockers.append(hydration.blockedReason ?? "metadata_hydration_failed")
+        }
+        if !mediaRetrievalSucceeded ||
+            mediaRetrieval.blockedReason == "media_payload_unavailable" ||
+            mediaRetrieval.items.contains(where: { $0.failureReason == "media_payload_unavailable" }) {
+            blockers.append("missing_media")
+        }
+        if !mediaRestorationSucceeded {
+            blockers.append("media_restoration_not_verified")
+        }
+        if !mediaRollbackSucceeded {
+            blockers.append("media_rollback_not_verified")
+        }
+        if !preHydrationLocalFixtureRestored {
+            blockers.append("metadata_rollback_mismatch")
+        }
+        if !generatedRecoveredMediaArtifactsRemoved {
+            blockers.append("leftover_recovered_media_artifacts")
+        }
+        if !generatedPackageCandidateArtifactsRemoved {
+            blockers.append("leftover_candidate_artifacts")
+        }
+        if !combinedOriginalsPreserved {
+            blockers.append("original_overwrite")
+        }
+        if !combinedFallbackRetained {
+            blockers.append("fallback_missing")
+        }
+        if !activeSourceRemainsLocal {
+            blockers.append("active_source_must_remain_local")
+        }
+        if !productionReadsBlocked || !broadCanonicalReadsBlocked || !activationBlocked ||
+            !remoteStateWritesBlocked || !realLocalUserStateWritesBlocked {
+            blockers.append("unsafe_read_write_activation_attempt")
+        }
+        if !productionReadsBlocked {
+            blockers.append("production_reads_must_remain_disabled")
+        }
+        if !broadCanonicalReadsBlocked {
+            blockers.append("broad_canonical_reads_must_remain_disabled")
+        }
+        if !activationBlocked {
+            blockers.append("activation_attempted")
+        }
+        if !remoteStateWritesBlocked {
+            blockers.append("remote_state_write_attempted")
+        }
+        if !realLocalUserStateWritesBlocked {
+            blockers.append("real_local_user_state_write_attempted")
+        }
+        if !exportSealSyncMediaICloudUnchanged {
+            blockers.append("export_seal_sync_media_icloud_behavior_changed")
+        }
+        if !schemaRLSDataUnchanged {
+            blockers.append("schema_rls_data_behavior_changed")
+        }
+
+        let dedupedBlockers = Array(Set(blockers)).sorted()
+        return ProductionSingleSessionFullyRestoredPackageRollbackValidation(
+            checkedAt: checkedAt,
+            state: dedupedBlockers.isEmpty ? .testOnlyFullyRestoredPackageRollbackPassed : .blocked,
+            blockers: dedupedBlockers,
+            targetScope: targetScope,
+            snapshotID: restore.snapshotID,
+            restoreDiagnosticsPassed: restoreDiagnosticsPassed,
+            hydrationSucceeded: hydrationSucceeded,
+            mediaRetrievalSucceeded: mediaRetrievalSucceeded,
+            mediaRestorationSucceeded: mediaRestorationSucceeded,
+            mediaRollbackSucceeded: mediaRollbackSucceeded,
+            preHydrationFixtureFingerprint: preHydrationFixtureFingerprint,
+            restoredFixtureFingerprint: restoredFixtureFingerprint,
+            preHydrationLocalFixtureRestored: preHydrationLocalFixtureRestored,
+            generatedRecoveredMediaArtifactsRemoved: generatedRecoveredMediaArtifactsRemoved,
+            generatedPackageCandidateArtifactsRemoved: generatedPackageCandidateArtifactsRemoved,
+            originalsPreserved: combinedOriginalsPreserved,
+            fallbackRetained: combinedFallbackRetained,
+            activeSourceRemainsLocal: activeSourceRemainsLocal,
+            productionReadsBlocked: productionReadsBlocked,
+            broadCanonicalReadsBlocked: broadCanonicalReadsBlocked,
+            activationBlocked: activationBlocked,
+            remoteStateWritesBlocked: remoteStateWritesBlocked,
+            realLocalUserStateWritesBlocked: realLocalUserStateWritesBlocked,
+            exportSealSyncMediaICloudUnchanged: exportSealSyncMediaICloudUnchanged,
+            schemaRLSDataUnchanged: schemaRLSDataUnchanged,
+            noProductionBehaviorChangedText: "No production behavior changed: Phase 2C-27Q fully restored package rollback validation is test-only isolated package rollback evidence. No production reads were enabled, no broad canonical reads were enabled, no activation occurred, no production hydration occurred, no reads were switched, no remote state was written, no real local user session state was written, no originals were overwritten, generated package-candidate and recovered media artifacts were removed, fallback remained retained, and export, seal, sync, media, iCloud, RLS, schema, and data behavior is unchanged."
+        )
+    }
+
+    nonisolated static func productionSingleSessionFullyRestoredPackageRollbackValidationReportText(
+        _ validation: ProductionSingleSessionFullyRestoredPackageRollbackValidation
+    ) -> String {
+        var lines: [String] = []
+        lines.append("Production Single-Session Fully Restored Package Rollback Validation")
+        lines.append("- package_rollback_checked_at: \(validation.checkedAt.formatted(date: .abbreviated, time: .standard))")
+        lines.append("- package_rollback_state: \(validation.state.rawValue)")
+        lines.append("- blockers: \(validation.blockers.isEmpty ? "none" : validation.blockers.joined(separator: ", "))")
+        lines.append("- target_scope: \(validation.targetScope.description)")
+        lines.append("- snapshot_id: \(validation.snapshotID?.uuidString ?? "none")")
+        lines.append("- restore_diagnostics_passed: \(validation.restoreDiagnosticsPassed)")
+        lines.append("- hydration_succeeded: \(validation.hydrationSucceeded)")
+        lines.append("- media_retrieval_succeeded: \(validation.mediaRetrievalSucceeded)")
+        lines.append("- media_restoration_succeeded: \(validation.mediaRestorationSucceeded)")
+        lines.append("- media_rollback_succeeded: \(validation.mediaRollbackSucceeded)")
+        lines.append("- pre_hydration_local_fixture_restored: \(validation.preHydrationLocalFixtureRestored)")
+        lines.append("- recovered_media_artifacts_removed: \(validation.generatedRecoveredMediaArtifactsRemoved)")
+        lines.append("- package_candidate_artifacts_removed: \(validation.generatedPackageCandidateArtifactsRemoved)")
+        lines.append("- originals_preserved: \(validation.originalsPreserved)")
+        lines.append("- fallback_retained: \(validation.fallbackRetained)")
+        lines.append("- active_source_remains_local: \(validation.activeSourceRemainsLocal)")
+        lines.append("- production_reads_blocked: \(validation.productionReadsBlocked)")
+        lines.append("- broad_canonical_reads_blocked: \(validation.broadCanonicalReadsBlocked)")
+        lines.append("- activation_blocked: \(validation.activationBlocked)")
+        lines.append("- remote_state_writes_blocked: \(validation.remoteStateWritesBlocked)")
+        lines.append("- real_local_user_state_writes_blocked: \(validation.realLocalUserStateWritesBlocked)")
+        lines.append("- export_seal_sync_media_icloud_unchanged: \(validation.exportSealSyncMediaICloudUnchanged)")
+        lines.append("- schema_rls_data_unchanged: \(validation.schemaRLSDataUnchanged)")
         lines.append(validation.noProductionBehaviorChangedText)
         return lines.joined(separator: "\n")
     }
