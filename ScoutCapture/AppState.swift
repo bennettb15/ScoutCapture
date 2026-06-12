@@ -2445,6 +2445,11 @@ final class AppState: ObservableObject {
         case restoredPreRestorationFixture = "restored_pre_restoration_fixture"
     }
 
+    enum ProductionSingleSessionSnapshotPackageParityValidationState: String, CaseIterable, Equatable {
+        case blocked
+        case testOnlyPackageParityPassed = "test_only_package_parity_passed"
+    }
+
     enum ProductionSingleSessionMediaRestorationItemStatus: String, Codable, Equatable {
         case restored
         case skippedExisting = "skipped_existing"
@@ -2950,6 +2955,39 @@ final class AppState: ObservableObject {
         let existingOriginalsPreserved: Bool
         let fallbackRetained: Bool
         let exportSealSyncMediaICloudUnchanged: Bool
+        let noProductionBehaviorChangedText: String
+    }
+
+    struct ProductionSingleSessionSnapshotPackageParityValidation: Equatable {
+        let checkedAt: Date
+        let state: ProductionSingleSessionSnapshotPackageParityValidationState
+        let blockers: [String]
+        let targetScope: ProductionCohortApprovalScope
+        let snapshotID: UUID?
+        let restoreDiagnosticsPassed: Bool
+        let rowObjectChecksumSchemaParentFreshnessPassed: Bool
+        let scopeMatched: Bool
+        let hydrationSucceeded: Bool
+        let hydratedMetadataMatchesSnapshotEvidence: Bool
+        let hydratedShotIDsMatchSnapshotEvidence: Bool
+        let hydratedIssueIDsMatchSnapshotEvidence: Bool
+        let hydratedGuidedIDsMatchSnapshotEvidence: Bool
+        let mediaManifestCount: Int
+        let mediaRetrievalAcceptedCount: Int
+        let mediaRestorationAcceptedCount: Int
+        let mediaChecksumParityPassed: Bool
+        let candidateEvidenceReady: Bool
+        let overlayEvidenceReady: Bool
+        let overlayComparisonMatchesHydratedPackage: Bool
+        let fallbackRetained: Bool
+        let activeSourceRemainsLocal: Bool
+        let productionReadsBlocked: Bool
+        let broadCanonicalReadsBlocked: Bool
+        let remoteStateWritesBlocked: Bool
+        let realLocalUserStateWritesBlocked: Bool
+        let originalsOverwriteBlocked: Bool
+        let originalsPreserved: Bool
+        let rollbackCleanupVerified: Bool
         let noProductionBehaviorChangedText: String
     }
 
@@ -23732,6 +23770,336 @@ final class AppState: ObservableObject {
         lines.append("- fallback_retained: \(rollback.fallbackRetained)")
         lines.append("- export_seal_sync_media_icloud_unchanged: \(rollback.exportSealSyncMediaICloudUnchanged)")
         lines.append(rollback.noProductionBehaviorChangedText)
+        return lines.joined(separator: "\n")
+    }
+
+    nonisolated static func makeProductionSingleSessionSnapshotPackageHydrationParityValidation(
+        checkedAt: Date = Date(),
+        targetScope: ProductionCohortApprovalScope,
+        restoreDiagnostics restore: SessionSnapshotRestoreDiagnosticsResult,
+        hydration: SessionSnapshotHydrationResult,
+        hydratedMetadata: SessionMetadata?,
+        snapshotShotIDs: Set<UUID>,
+        snapshotIssueIDs: Set<UUID>,
+        snapshotGuidedIDs: Set<UUID>,
+        mediaRetrieval: SessionSnapshotMediaRetrievalResult,
+        mediaRestoration: ProductionSingleSessionMediaRestorationRehearsal,
+        mediaRollback: ProductionSingleSessionMediaRestorationRollback?,
+        candidateDiagnostics: CanonicalReadCandidateDiagnostics,
+        overlayResult: CanonicalCandidateOverlayBuildResult,
+        overlayComparison: CanonicalCandidateOverlayComparison,
+        productionReadsEnabled: Bool = false,
+        broadCanonicalReadRequired: Bool = false,
+        remoteStateWriteAttempted: Bool = false,
+        realLocalUserStateWriteAttempted: Bool = false,
+        originalsOverwriteAttempted: Bool = false,
+        fallbackRetained: Bool = true,
+        exportSealSyncMediaICloudBehaviorChanged: Bool = false
+    ) -> ProductionSingleSessionSnapshotPackageParityValidation {
+        func scopesAreEqual(
+            _ lhs: ProductionCohortApprovalScope,
+            _ rhs: ProductionCohortApprovalScope
+        ) -> Bool {
+            lhs.orgID == rhs.orgID &&
+                lhs.propertyID == rhs.propertyID &&
+                lhs.sessionID == rhs.sessionID
+        }
+
+        let restoreScope = ProductionCohortApprovalScope(
+            orgID: targetScope.orgID,
+            propertyID: restore.propertyID,
+            sessionID: restore.sessionID
+        )
+        let hydrationScope = ProductionCohortApprovalScope(
+            orgID: targetScope.orgID,
+            propertyID: hydration.propertyID,
+            sessionID: hydration.sessionID
+        )
+        let mediaRetrievalScope = ProductionCohortApprovalScope(
+            orgID: targetScope.orgID,
+            propertyID: mediaRetrieval.propertyID,
+            sessionID: mediaRetrieval.sessionID
+        )
+        let mediaRestorationScope = mediaRestoration.targetScope
+        let mediaRollbackScope = mediaRollback?.targetScope ?? targetScope
+        let candidateScope = ProductionCohortApprovalScope(
+            orgID: targetScope.orgID,
+            propertyID: candidateDiagnostics.propertyID,
+            sessionID: candidateDiagnostics.sessionID
+        )
+        let overlayScope = ProductionCohortApprovalScope(
+            orgID: overlayResult.overlay?.organizationID ?? targetScope.orgID,
+            propertyID: overlayResult.overlay?.propertyID,
+            sessionID: overlayResult.overlay?.sessionID
+        )
+        let comparisonScope = ProductionCohortApprovalScope(
+            orgID: targetScope.orgID,
+            propertyID: overlayComparison.propertyID,
+            sessionID: overlayComparison.sessionID
+        )
+        let scopeMatched = [
+            restoreScope,
+            hydrationScope,
+            mediaRetrievalScope,
+            mediaRestorationScope,
+            mediaRollbackScope,
+            candidateScope,
+            overlayScope,
+            comparisonScope
+        ].allSatisfy { scopesAreEqual(targetScope, $0) }
+
+        let restoreDiagnosticsPassed = restore.result == .restorableMetadataCandidate
+        let rowObjectChecksumSchemaParentFreshnessPassed = restore.rowFound &&
+            restore.objectReadable &&
+            restore.checksumVerified &&
+            restore.byteSizeMatches &&
+            restore.rowObjectVerified &&
+            restore.snapshotSchemaVersion == 1 &&
+            restore.parentRemoteVerified &&
+            restore.freshness != "local_newer"
+        let hydrationSucceeded = hydration.allowed &&
+            hydration.blockedReason == nil &&
+            hydration.sourceSnapshotID == restore.snapshotID
+
+        let hydratedShotIDs = Set(hydratedMetadata?.shots.map(\.shotID) ?? [])
+        let hydratedIssueIDs = Set(hydratedMetadata?.issues.map(\.issueID) ?? [])
+        let hydratedGuidedIDs = Set(hydratedMetadata?.guidedShots.map(\.id) ?? [])
+        let hydratedShotCount = hydratedMetadata?.shots.count ?? 0
+        let hydratedIssueCount = hydratedMetadata?.issues.count ?? 0
+        let hydratedGuidedCount = hydratedMetadata?.guidedShots.count ?? 0
+        let snapshotShotCount = restore.snapshotShotCount ?? snapshotShotIDs.count
+        let snapshotIssueCount = restore.snapshotIssueCount ?? snapshotIssueIDs.count
+        let snapshotGuidedCount = restore.snapshotGuidedCount ?? snapshotGuidedIDs.count
+        let hydratedMetadataMatchesSnapshotEvidence = hydration.hydratedShotCount == snapshotShotCount &&
+            hydration.hydratedIssueCount == snapshotIssueCount &&
+            hydration.hydratedGuidedCount == snapshotGuidedCount &&
+            hydratedShotCount == snapshotShotCount &&
+            hydratedIssueCount == snapshotIssueCount &&
+            hydratedGuidedCount == snapshotGuidedCount
+        let hydratedShotIDsMatchSnapshotEvidence = hydratedShotIDs == snapshotShotIDs
+        let hydratedIssueIDsMatchSnapshotEvidence = hydratedIssueIDs == snapshotIssueIDs
+        let hydratedGuidedIDsMatchSnapshotEvidence = hydratedGuidedIDs == snapshotGuidedIDs
+
+        let mediaManifestCount = restore.snapshotMediaManifestCount ?? restore.mediaRecoveryDiagnostics.manifestCount
+        let mediaRetrievalAcceptedCount = mediaRetrieval.downloadedCount + mediaRetrieval.skippedExistingCount
+        let mediaRestorationAcceptedCount = mediaRestoration.acceptedCandidateMediaCount
+        let mediaChecksumParityPassed = mediaRetrieval.allowed &&
+            mediaRetrieval.checksumVerifiedCount == mediaRetrieval.downloadedCount &&
+            mediaRetrieval.failedCount == 0 &&
+            mediaRetrievalAcceptedCount == mediaManifestCount &&
+            mediaRestoration.checksumMismatchCount == 0 &&
+            mediaRestoration.failedCount == 0 &&
+            mediaRestorationAcceptedCount == mediaManifestCount &&
+            mediaRestoration.itemEvidence.allSatisfy(\.checksumVerifiedBeforeAcceptance)
+
+        let candidateEvidenceReady = candidateDiagnostics.allowed &&
+            candidateDiagnostics.localFallbackAvailable &&
+            !candidateDiagnostics.productionWideCanonicalReadsEnabled
+        let overlayEvidenceReady = overlayResult.allowed &&
+            overlayResult.overlay != nil &&
+            overlayResult.localFallbackRetained &&
+            overlayResult.activeSourceRemainsLocal &&
+            overlayResult.rollbackAvailable &&
+            overlayResult.productionBlocked
+        let overlayComparisonMatchesHydratedPackage = overlayComparison.result == .candidateMatchesLocal &&
+            overlayComparison.localShotCount == hydratedShotCount &&
+            overlayComparison.remoteCandidateShotCount == hydratedShotCount &&
+            overlayComparison.localIssueObservationCount == hydratedIssueCount &&
+            overlayComparison.remoteCandidateIssueObservationCount == hydratedIssueCount &&
+            overlayComparison.activeSource == "local" &&
+            overlayComparison.fallbackSource == "local" &&
+            overlayComparison.rollbackAvailable
+
+        let combinedFallbackRetained = fallbackRetained &&
+            candidateDiagnostics.localFallbackAvailable &&
+            overlayResult.localFallbackRetained &&
+            mediaRestoration.fallbackRetained &&
+            (mediaRollback?.fallbackRetained ?? true)
+        let activeSourceRemainsLocal = overlayResult.activeSourceRemainsLocal &&
+            overlayComparison.activeSource == "local"
+        let productionReadsBlocked = !productionReadsEnabled && mediaRestoration.productionReadsBlocked
+        let broadCanonicalReadsBlocked = !broadCanonicalReadRequired && mediaRestoration.broadCanonicalReadBlocked
+        let remoteStateWritesBlocked = !remoteStateWriteAttempted && mediaRestoration.remoteStateWritesBlocked
+        let realLocalUserStateWritesBlocked = !realLocalUserStateWriteAttempted && mediaRestoration.realLocalUserStateWritesBlocked
+        let originalsOverwriteBlocked = !originalsOverwriteAttempted && mediaRestoration.originalsOverwriteBlocked
+        let originalsPreserved = mediaRestoration.existingOriginalsPreserved &&
+            (mediaRollback?.existingOriginalsPreserved ?? true)
+        let rollbackCleanupVerified = mediaRollback?.state == .restoredPreRestorationFixture &&
+            mediaRollback?.restoredPreRestorationFixture == true &&
+            mediaRollback?.blockers.isEmpty == true
+        let exportSealSyncMediaICloudUnchanged = !exportSealSyncMediaICloudBehaviorChanged &&
+            mediaRestoration.exportSealSyncMediaICloudUnchanged &&
+            (mediaRollback?.exportSealSyncMediaICloudUnchanged ?? true)
+
+        var blockers: [String] = []
+        if !scopeMatched {
+            blockers.append("scope_mismatch")
+        }
+        if !restoreDiagnosticsPassed {
+            blockers.append("restore_diagnostics_not_restorable")
+        }
+        if !restore.checksumVerified {
+            blockers.append("checksum_mismatch")
+        }
+        if !restore.rowObjectVerified {
+            blockers.append("row_object_not_verified")
+        }
+        if restore.snapshotSchemaVersion != 1 {
+            blockers.append("unsupported_schema")
+        }
+        if !restore.parentRemoteVerified {
+            blockers.append("parent_mismatch")
+        }
+        if restore.freshness == "local_newer" {
+            blockers.append("local_newer_freshness")
+        }
+        if !rowObjectChecksumSchemaParentFreshnessPassed {
+            blockers.append("snapshot_package_integrity_not_verified")
+        }
+        if !hydrationSucceeded {
+            blockers.append(hydration.blockedReason ?? "metadata_hydration_failed")
+        }
+        if !hydratedMetadataMatchesSnapshotEvidence {
+            blockers.append("hydrated_metadata_counts_mismatch")
+        }
+        if !hydratedShotIDsMatchSnapshotEvidence {
+            blockers.append("hydrated_shot_ids_mismatch")
+        }
+        if !hydratedIssueIDsMatchSnapshotEvidence {
+            blockers.append("hydrated_issue_ids_mismatch")
+        }
+        if !hydratedGuidedIDsMatchSnapshotEvidence {
+            blockers.append("hydrated_guided_ids_mismatch")
+        }
+        if mediaRetrieval.blockedReason == "media_payload_unavailable" ||
+            mediaRestoration.itemEvidence.contains(where: { $0.failureReason == "media_payload_unavailable" }) {
+            blockers.append("missing_media")
+        }
+        if mediaRetrieval.failedCount > 0 ||
+            mediaRetrievalAcceptedCount != mediaManifestCount ||
+            mediaRestorationAcceptedCount != mediaManifestCount {
+            blockers.append("missing_media")
+        }
+        if mediaRestoration.checksumMismatchCount > 0 ||
+            mediaRetrieval.items.contains(where: { $0.status == .rejectedChecksumMismatch }) {
+            blockers.append("checksum_mismatch")
+        }
+        if !mediaChecksumParityPassed {
+            blockers.append("media_checksum_parity_failed")
+        }
+        if !candidateEvidenceReady {
+            blockers.append("candidate_evidence_not_ready")
+        }
+        if !overlayEvidenceReady {
+            blockers.append("overlay_evidence_not_ready")
+        }
+        if !overlayComparisonMatchesHydratedPackage {
+            blockers.append("overlay_comparison_not_matching_hydrated_package")
+        }
+        if !combinedFallbackRetained {
+            blockers.append("fallback_missing")
+        }
+        if !activeSourceRemainsLocal {
+            blockers.append("active_source_must_remain_local")
+        }
+        if !productionReadsBlocked {
+            blockers.append("production_reads_must_remain_disabled")
+        }
+        if !broadCanonicalReadsBlocked {
+            blockers.append("broad_canonical_reads_must_remain_disabled")
+        }
+        if !remoteStateWritesBlocked || !realLocalUserStateWritesBlocked {
+            blockers.append("unsafe_write_attempt")
+        }
+        if !remoteStateWritesBlocked {
+            blockers.append("remote_state_write_attempted")
+        }
+        if !realLocalUserStateWritesBlocked {
+            blockers.append("real_local_user_state_write_attempted")
+        }
+        if !originalsOverwriteBlocked {
+            blockers.append("originals_overwrite_attempt")
+        }
+        if !originalsPreserved {
+            blockers.append("originals_not_preserved")
+        }
+        if !rollbackCleanupVerified {
+            blockers.append("rollback_cleanup_not_verified")
+        }
+        if !exportSealSyncMediaICloudUnchanged {
+            blockers.append("export_seal_sync_media_icloud_behavior_changed")
+        }
+
+        let dedupedBlockers = Array(Set(blockers)).sorted()
+        return ProductionSingleSessionSnapshotPackageParityValidation(
+            checkedAt: checkedAt,
+            state: dedupedBlockers.isEmpty ? .testOnlyPackageParityPassed : .blocked,
+            blockers: dedupedBlockers,
+            targetScope: targetScope,
+            snapshotID: restore.snapshotID,
+            restoreDiagnosticsPassed: restoreDiagnosticsPassed,
+            rowObjectChecksumSchemaParentFreshnessPassed: rowObjectChecksumSchemaParentFreshnessPassed,
+            scopeMatched: scopeMatched,
+            hydrationSucceeded: hydrationSucceeded,
+            hydratedMetadataMatchesSnapshotEvidence: hydratedMetadataMatchesSnapshotEvidence,
+            hydratedShotIDsMatchSnapshotEvidence: hydratedShotIDsMatchSnapshotEvidence,
+            hydratedIssueIDsMatchSnapshotEvidence: hydratedIssueIDsMatchSnapshotEvidence,
+            hydratedGuidedIDsMatchSnapshotEvidence: hydratedGuidedIDsMatchSnapshotEvidence,
+            mediaManifestCount: mediaManifestCount,
+            mediaRetrievalAcceptedCount: mediaRetrievalAcceptedCount,
+            mediaRestorationAcceptedCount: mediaRestorationAcceptedCount,
+            mediaChecksumParityPassed: mediaChecksumParityPassed,
+            candidateEvidenceReady: candidateEvidenceReady,
+            overlayEvidenceReady: overlayEvidenceReady,
+            overlayComparisonMatchesHydratedPackage: overlayComparisonMatchesHydratedPackage,
+            fallbackRetained: combinedFallbackRetained,
+            activeSourceRemainsLocal: activeSourceRemainsLocal,
+            productionReadsBlocked: productionReadsBlocked,
+            broadCanonicalReadsBlocked: broadCanonicalReadsBlocked,
+            remoteStateWritesBlocked: remoteStateWritesBlocked,
+            realLocalUserStateWritesBlocked: realLocalUserStateWritesBlocked,
+            originalsOverwriteBlocked: originalsOverwriteBlocked,
+            originalsPreserved: originalsPreserved,
+            rollbackCleanupVerified: rollbackCleanupVerified,
+            noProductionBehaviorChangedText: "No production behavior changed: Phase 2C-27P real snapshot package hydration parity validation is test-only isolated package evidence validation. No production reads were enabled, no broad canonical reads were enabled, no activation occurred, no reads were switched, no production remote state was written, no real local user session state was written, no originals were overwritten, rollback removed only generated package-candidate artifacts, fallback remained retained, and export, seal, sync, media, iCloud, RLS, schema, and data behavior is unchanged."
+        )
+    }
+
+    nonisolated static func productionSingleSessionSnapshotPackageHydrationParityValidationReportText(
+        _ validation: ProductionSingleSessionSnapshotPackageParityValidation
+    ) -> String {
+        var lines: [String] = []
+        lines.append("Production Single-Session Snapshot Package Hydration Parity Validation")
+        lines.append("- package_parity_checked_at: \(validation.checkedAt.formatted(date: .abbreviated, time: .standard))")
+        lines.append("- package_parity_state: \(validation.state.rawValue)")
+        lines.append("- blockers: \(validation.blockers.isEmpty ? "none" : validation.blockers.joined(separator: ", "))")
+        lines.append("- target_scope: \(validation.targetScope.description)")
+        lines.append("- snapshot_id: \(validation.snapshotID?.uuidString ?? "none")")
+        lines.append("- restore_diagnostics_passed: \(validation.restoreDiagnosticsPassed)")
+        lines.append("- row_object_checksum_schema_parent_freshness_passed: \(validation.rowObjectChecksumSchemaParentFreshnessPassed)")
+        lines.append("- scope_matched: \(validation.scopeMatched)")
+        lines.append("- hydration_succeeded: \(validation.hydrationSucceeded)")
+        lines.append("- hydrated_metadata_matches_snapshot_evidence: \(validation.hydratedMetadataMatchesSnapshotEvidence)")
+        lines.append("- hydrated_shot_ids_match_snapshot_evidence: \(validation.hydratedShotIDsMatchSnapshotEvidence)")
+        lines.append("- hydrated_issue_ids_match_snapshot_evidence: \(validation.hydratedIssueIDsMatchSnapshotEvidence)")
+        lines.append("- hydrated_guided_ids_match_snapshot_evidence: \(validation.hydratedGuidedIDsMatchSnapshotEvidence)")
+        lines.append("- media_manifest_count: \(validation.mediaManifestCount)")
+        lines.append("- media_retrieval_accepted_count: \(validation.mediaRetrievalAcceptedCount)")
+        lines.append("- media_restoration_accepted_count: \(validation.mediaRestorationAcceptedCount)")
+        lines.append("- media_checksum_parity_passed: \(validation.mediaChecksumParityPassed)")
+        lines.append("- candidate_evidence_ready: \(validation.candidateEvidenceReady)")
+        lines.append("- overlay_evidence_ready: \(validation.overlayEvidenceReady)")
+        lines.append("- overlay_comparison_matches_hydrated_package: \(validation.overlayComparisonMatchesHydratedPackage)")
+        lines.append("- fallback_retained: \(validation.fallbackRetained)")
+        lines.append("- active_source_remains_local: \(validation.activeSourceRemainsLocal)")
+        lines.append("- production_reads_blocked: \(validation.productionReadsBlocked)")
+        lines.append("- broad_canonical_reads_blocked: \(validation.broadCanonicalReadsBlocked)")
+        lines.append("- remote_state_writes_blocked: \(validation.remoteStateWritesBlocked)")
+        lines.append("- real_local_user_state_writes_blocked: \(validation.realLocalUserStateWritesBlocked)")
+        lines.append("- originals_overwrite_blocked: \(validation.originalsOverwriteBlocked)")
+        lines.append("- originals_preserved: \(validation.originalsPreserved)")
+        lines.append("- rollback_cleanup_verified: \(validation.rollbackCleanupVerified)")
+        lines.append(validation.noProductionBehaviorChangedText)
         return lines.joined(separator: "\n")
     }
 
