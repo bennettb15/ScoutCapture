@@ -294,17 +294,41 @@ final class Phase2C08CutoverTests: XCTestCase {
 
         actor Capture {
             var propertyIDs: [UUID] = []
+            var statusBootstrapPropertyIDs: [UUID] = []
+            var statusBootstrapReasons: [String] = []
+            var statusBootstrapStatuses: [AppState.PropertyStatusValue] = []
             func append(_ id: UUID) { propertyIDs.append(id) }
+            func appendStatusBootstrap(
+                _ id: UUID,
+                reason: String,
+                status: AppState.PropertyStatusValue
+            ) {
+                statusBootstrapPropertyIDs.append(id)
+                statusBootstrapReasons.append(reason)
+                statusBootstrapStatuses.append(status)
+            }
         }
 
         let localStore = LocalStore(testStorageRootURL: storageRoot)
         let organizationID = UUID()
+        try localStore.createOrganization(Organization(id: organizationID, name: "Test Org"))
         let capture = Capture()
         let appState = AppState(
             localStore: localStore,
             userDefaults: defaults,
             propertyRemoteInsertOverride: { property in
                 await capture.append(property.id)
+            },
+            propertyStatusBootstrapOverride: { property, reason in
+                let record = Self.makeStatusRecord(
+                    propertyID: property.id,
+                    orgID: organizationID,
+                    status: .idle,
+                    heartbeatAt: nil,
+                    statusReason: "\(reason):idle"
+                )
+                await capture.appendStatusBootstrap(property.id, reason: reason, status: record.status)
+                return record
             }
         )
 
@@ -323,7 +347,85 @@ final class Phase2C08CutoverTests: XCTestCase {
 
         let remoteWriteIDs = await capture.propertyIDs
         XCTAssertEqual(remoteWriteIDs, [created.id])
+        let bootstrapIDs = await capture.statusBootstrapPropertyIDs
+        let bootstrapReasons = await capture.statusBootstrapReasons
+        XCTAssertEqual(bootstrapIDs, [created.id])
+        XCTAssertEqual(bootstrapReasons, ["remote_property_create_bootstrap"])
+        let entryDecision = appState.evaluatePropertyStatusEntryPreflight(propertyID: created.id)
+        XCTAssertEqual(entryDecision?.decision, "allow")
+        XCTAssertEqual(entryDecision?.reason, "status_idle")
         XCTAssertTrue(try localStore.fetchProperties().contains(where: { $0.id == created.id }))
+    }
+
+    func testRemoteReadPropertyCreatePreservesReturnedExistingPropertyStatus() async throws {
+        let storageRoot = try makeTempStorageRoot()
+        defer { try? FileManager.default.removeItem(at: storageRoot) }
+
+        let defaults = makeDefaultsSuite()
+        defaults.set(true, forKey: "supabase_enabled")
+        defaults.set(true, forKey: "shadow_write_enabled")
+        defaults.set(false, forKey: "supabase_read_enabled")
+        defaults.set(true, forKey: "supabase_property_read_enabled")
+
+        actor Capture {
+            var propertyIDs: [UUID] = []
+            var statusBootstrapPropertyIDs: [UUID] = []
+            var statusBootstrapReasons: [String] = []
+            var statusBootstrapStatuses: [AppState.PropertyStatusValue] = []
+            func append(_ id: UUID) { propertyIDs.append(id) }
+            func appendStatusBootstrap(
+                _ id: UUID,
+                reason: String,
+                status: AppState.PropertyStatusValue
+            ) {
+                statusBootstrapPropertyIDs.append(id)
+                statusBootstrapReasons.append(reason)
+                statusBootstrapStatuses.append(status)
+            }
+        }
+
+        let localStore = LocalStore(testStorageRootURL: storageRoot)
+        let organizationID = UUID()
+        let pendingExportSessionID = UUID()
+        try localStore.createOrganization(Organization(id: organizationID, name: "Test Org"))
+        let capture = Capture()
+        let appState = AppState(
+            localStore: localStore,
+            userDefaults: defaults,
+            propertyRemoteInsertOverride: { property in
+                await capture.append(property.id)
+            },
+            propertyStatusBootstrapOverride: { property, reason in
+                let record = Self.makeStatusRecord(
+                    propertyID: property.id,
+                    orgID: organizationID,
+                    status: .pendingExport,
+                    pendingExportSessionID: pendingExportSessionID,
+                    heartbeatAt: nil,
+                    statusReason: "\(reason):pending_export",
+                    revision: 7
+                )
+                await capture.appendStatusBootstrap(property.id, reason: reason, status: record.status)
+                return record
+            }
+        )
+
+        await configureRemoteCreateEnvironment(appState, organizationID: organizationID)
+
+        let created = try await appState.createPropertyRemoteAware(
+            organizationID: organizationID,
+            clientName: "Client",
+            propertyName: "Existing Status Property",
+            address: "123 Main Street"
+        )
+
+        let remoteWriteIDs = await capture.propertyIDs
+        XCTAssertEqual(remoteWriteIDs, [created.id])
+        let statusRecord = appState.propertyStatusRecord(for: created.id)
+        XCTAssertEqual(statusRecord?.status, .pendingExport)
+        XCTAssertEqual(statusRecord?.pendingExportSessionID, pendingExportSessionID)
+        XCTAssertEqual(statusRecord?.statusReason, "remote_property_create_bootstrap:pending_export")
+        XCTAssertEqual(statusRecord?.revision, 7)
     }
 
     func testRemoteReadPropertyCreateFailureDoesNotPersistLocalOnlyProperty() async throws {
@@ -418,9 +520,22 @@ final class Phase2C08CutoverTests: XCTestCase {
 
         let localStore = LocalStore(testStorageRootURL: storageRoot)
         let organizationID = UUID()
+        try localStore.createOrganization(Organization(id: organizationID, name: "Test Org"))
         actor Capture {
             var propertyIDs: [UUID] = []
+            var statusBootstrapPropertyIDs: [UUID] = []
+            var statusBootstrapReasons: [String] = []
+            var statusBootstrapStatuses: [AppState.PropertyStatusValue] = []
             func append(_ id: UUID) { propertyIDs.append(id) }
+            func appendStatusBootstrap(
+                _ id: UUID,
+                reason: String,
+                status: AppState.PropertyStatusValue
+            ) {
+                statusBootstrapPropertyIDs.append(id)
+                statusBootstrapReasons.append(reason)
+                statusBootstrapStatuses.append(status)
+            }
         }
         let capture = Capture()
         let appState = AppState(
@@ -428,6 +543,17 @@ final class Phase2C08CutoverTests: XCTestCase {
             userDefaults: defaults,
             propertyRemoteInsertOverride: { property in
                 await capture.append(property.id)
+            },
+            propertyStatusBootstrapOverride: { property, reason in
+                let record = Self.makeStatusRecord(
+                    propertyID: property.id,
+                    orgID: organizationID,
+                    status: .idle,
+                    heartbeatAt: nil,
+                    statusReason: "\(reason):idle"
+                )
+                await capture.appendStatusBootstrap(property.id, reason: reason, status: record.status)
+                return record
             }
         )
 
@@ -442,7 +568,48 @@ final class Phase2C08CutoverTests: XCTestCase {
 
         let remoteWriteIDs = await capture.propertyIDs
         XCTAssertEqual(remoteWriteIDs, [created.id])
+        let bootstrapIDs = await capture.statusBootstrapPropertyIDs
+        let bootstrapReasons = await capture.statusBootstrapReasons
+        let bootstrapStatuses = await capture.statusBootstrapStatuses
+        XCTAssertEqual(bootstrapIDs, [created.id])
+        XCTAssertEqual(bootstrapReasons, ["remote_property_create_bootstrap"])
+        XCTAssertEqual(bootstrapStatuses, [.idle])
+        let entryDecision = appState.evaluatePropertyStatusEntryPreflight(propertyID: created.id)
+        XCTAssertEqual(entryDecision?.decision, "allow")
+        XCTAssertEqual(entryDecision?.reason, "status_idle")
         XCTAssertTrue(try localStore.fetchProperties().contains(where: { $0.id == created.id }))
+    }
+
+    private static func makeStatusRecord(
+        propertyID: UUID,
+        orgID: UUID,
+        status: AppState.PropertyStatusValue,
+        activeSessionID: UUID? = nil,
+        draftSessionID: UUID? = nil,
+        pendingExportSessionID: UUID? = nil,
+        lastExportedSessionID: UUID? = nil,
+        ownerUserID: UUID? = nil,
+        ownerDeviceID: String? = nil,
+        heartbeatAt: Date? = Date(),
+        statusReason: String? = nil,
+        revision: Int64 = 1
+    ) -> AppState.PropertyStatusRecord {
+        AppState.PropertyStatusRecord(
+            propertyID: propertyID,
+            orgID: orgID,
+            status: status,
+            activeSessionID: activeSessionID,
+            draftSessionID: draftSessionID,
+            pendingExportSessionID: pendingExportSessionID,
+            lastExportedSessionID: lastExportedSessionID,
+            ownerUserID: ownerUserID,
+            ownerDeviceID: ownerDeviceID,
+            heartbeatAt: heartbeatAt,
+            updatedAt: Date(),
+            updatedBy: ownerUserID,
+            statusReason: statusReason ?? "test:\(status.rawValue)",
+            revision: revision
+        )
     }
 
     @MainActor
@@ -450,6 +617,7 @@ final class Phase2C08CutoverTests: XCTestCase {
         _ appState: AppState,
         organizationID: UUID
     ) {
+        appState.stopAuthenticationObservation()
         appState._debugSetOrganizationContextForTests(
             memberships: [
                 ActiveOrganizationMembership(

@@ -528,6 +528,7 @@ private enum AppStateTestEnvironment {
 final class AppState: ObservableObject {
     typealias PropertyShadowWriteOverride = (Property) async throws -> Void
     typealias PropertyRemoteInsertOverride = (Property) async throws -> Void
+    typealias PropertyStatusBootstrapOverride = (Property, String) async throws -> PropertyStatusRecord
     typealias SessionShadowWriteOverride = (Property, Session, SessionMetadata) async throws -> Void
     typealias ShotMetadataWriteOverride = (UUID, UUID, SupabaseShotRichMetadataPayload, Bool) async throws -> Void
     typealias SessionSnapshotStorageUploadOverride = (SessionSnapshotStorageObject) async throws -> Void
@@ -5122,6 +5123,16 @@ final class AppState: ObservableObject {
         }
     }
 
+    private struct PropertyStatusRebuildRPCPayload: Encodable {
+        let targetPropertyID: UUID
+        let targetStatusReason: String
+
+        enum CodingKeys: String, CodingKey {
+            case targetPropertyID = "target_property_id"
+            case targetStatusReason = "target_status_reason"
+        }
+    }
+
     private struct SupabaseSessionPayload: Codable {
         let id: UUID
         let orgID: UUID
@@ -6510,6 +6521,7 @@ final class AppState: ObservableObject {
     private let cloudBackupManager: CloudBackupManager?
     private let propertyShadowWriteOverride: PropertyShadowWriteOverride?
     private let propertyRemoteInsertOverride: PropertyRemoteInsertOverride?
+    private let propertyStatusBootstrapOverride: PropertyStatusBootstrapOverride?
     private let sessionShadowWriteOverride: SessionShadowWriteOverride?
     private let shotMetadataWriteOverride: ShotMetadataWriteOverride?
     private let sessionSnapshotStorageUploadOverride: SessionSnapshotStorageUploadOverride?
@@ -6876,6 +6888,7 @@ final class AppState: ObservableObject {
         environment: [String: String] = ProcessInfo.processInfo.environment,
         propertyShadowWriteOverride: PropertyShadowWriteOverride? = nil,
         propertyRemoteInsertOverride: PropertyRemoteInsertOverride? = nil,
+        propertyStatusBootstrapOverride: PropertyStatusBootstrapOverride? = nil,
         sessionShadowWriteOverride: SessionShadowWriteOverride? = nil,
         shotMetadataWriteOverride: ShotMetadataWriteOverride? = nil,
         sessionSnapshotStorageUploadOverride: SessionSnapshotStorageUploadOverride? = nil,
@@ -6906,6 +6919,7 @@ final class AppState: ObservableObject {
         self.cloudBackupStatus = cloudBackupManager?.status ?? Self.unavailableCloudBackupStatus
         self.propertyShadowWriteOverride = propertyShadowWriteOverride
         self.propertyRemoteInsertOverride = propertyRemoteInsertOverride
+        self.propertyStatusBootstrapOverride = propertyStatusBootstrapOverride
         self.sessionShadowWriteOverride = sessionShadowWriteOverride
         self.shotMetadataWriteOverride = shotMetadataWriteOverride
         self.sessionSnapshotStorageUploadOverride = sessionSnapshotStorageUploadOverride
@@ -25215,6 +25229,90 @@ final class AppState: ObservableObject {
         }
     }
 
+    @discardableResult
+    private func bootstrapPropertyStatusAfterRemoteCreate(
+        property: Property,
+        reason: String
+    ) async throws -> PropertyStatusRecord {
+        if let cached = propertyStatusByPropertyID[property.id] {
+            print(
+                "[PropertyStatusBootstrap] event=bootstrap_skipped " +
+                "reason=existing_local_property_status " +
+                "propertyID=\(property.id.uuidString) " +
+                "property_status_status=\(cached.status.rawValue) " +
+                "statusReason=\(cached.statusReason ?? "nil")"
+            )
+            return cached
+        }
+
+        let returnedRecord: PropertyStatusRecord
+        if let propertyStatusBootstrapOverride {
+            returnedRecord = try await propertyStatusBootstrapOverride(property, reason)
+        } else {
+            returnedRecord = try await rebuildPropertyStatusForRemoteCreate(
+                propertyID: property.id,
+                reason: reason
+            )
+        }
+
+        guard returnedRecord.propertyID == property.id else {
+            throw NSError(
+                domain: "ScoutCapture.PropertyStatusBootstrap",
+                code: 1,
+                userInfo: [
+                    NSLocalizedDescriptionKey: "property_status bootstrap returned property_id \(returnedRecord.propertyID.uuidString), expected \(property.id.uuidString)."
+                ]
+            )
+        }
+        if let orgID = property.orgId,
+           returnedRecord.orgID != orgID {
+            throw NSError(
+                domain: "ScoutCapture.PropertyStatusBootstrap",
+                code: 2,
+                userInfo: [
+                    NSLocalizedDescriptionKey: "property_status bootstrap returned org_id \(returnedRecord.orgID.uuidString), expected \(orgID.uuidString)."
+                ]
+            )
+        }
+
+        applyLocalPropertyStatusBootstrapRecord(returnedRecord, propertyID: property.id)
+        return returnedRecord
+    }
+
+    private func applyLocalPropertyStatusBootstrapRecord(
+        _ record: PropertyStatusRecord,
+        propertyID: UUID
+    ) {
+        var nextCache = propertyStatusByPropertyID
+        nextCache[propertyID] = record
+        propertyStatusByPropertyID = nextCache
+        lastPropertyStatusRefreshAt = Date()
+        print(
+            "[PropertyStatusBootstrap] event=bootstrap_applied " +
+            "propertyID=\(propertyID.uuidString) " +
+            "orgID=\(record.orgID.uuidString) " +
+            "property_status_status=\(record.status.rawValue) " +
+            "statusReason=\(record.statusReason ?? "nil") " +
+            "revision=\(record.revision)"
+        )
+    }
+
+    private func rebuildPropertyStatusForRemoteCreate(
+        propertyID: UUID,
+        reason: String
+    ) async throws -> PropertyStatusRecord {
+        guard let client = supabaseClient else {
+            throw RemotePropertyFetchError.missingClient
+        }
+        let params = PropertyStatusRebuildRPCPayload(
+            targetPropertyID: propertyID,
+            targetStatusReason: reason
+        )
+        return try await (try client.rpc("rebuild_property_status", params: params))
+            .execute()
+            .value as PropertyStatusRecord
+    }
+
     private func performQueuedSessionRemoteWrite(
         property: Property,
         session: Session,
@@ -35126,13 +35224,23 @@ final class AppState: ObservableObject {
                     "upsertConflictTarget=id"
                 )
 
+                let bootstrappedPropertyStatus: PropertyStatusRecord
                 do {
                     try await performRemotePropertyInsert(property: property, payload: payload)
+                    bootstrappedPropertyStatus = try await bootstrapPropertyStatusAfterRemoteCreate(
+                        property: property,
+                        reason: "remote_property_create_bootstrap"
+                    )
                 } catch {
                     throw PropertyCreationError.remoteCreateFailed(error.localizedDescription)
                 }
 
-                return try persistCreatedPropertyLocally(property)
+                let created = try persistCreatedPropertyLocally(property)
+                applyLocalPropertyStatusBootstrapRecord(
+                    bootstrappedPropertyStatus,
+                    propertyID: created.id
+                )
+                return created
             }
 
             let created = try persistCreatedPropertyLocally(property)
