@@ -97,12 +97,12 @@
          <EnvironmentVariable
             key = "SCOUTCAPTURE_SESSION_SNAPSHOT_SHADOW_WRITE_ENABLED"
             value = "true"
-            isEnabled = "NO">
+            isEnabled = "YES">
          </EnvironmentVariable>
          <EnvironmentVariable
             key = "SCOUTCAPTURE_PRODUCTION_SNAPSHOT_VALIDATION_ALLOWED"
             value = "true"
-            isEnabled = "NO">
+            isEnabled = "YES">
          </EnvironmentVariable>
          <EnvironmentVariable
             key = "SCOUTCAPTURE_SESSION_SNAPSHOT_AUTO_UPLOAD_ENABLED"
