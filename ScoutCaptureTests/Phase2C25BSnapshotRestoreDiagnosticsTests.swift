@@ -62,6 +62,7 @@ final class Phase2C25BSnapshotRestoreDiagnosticsTests: XCTestCase {
 
     private func makeFixture(
         generatedAt: Date = Date(timeIntervalSinceReferenceDate: 1_000),
+        sessionTransform: (Session) -> Session = { $0 },
         rowTransform: ((AppState.SessionSnapshotUploadRow) -> AppState.SessionSnapshotUploadRow)? = nil,
         objectTransform: ((AppState.SessionSnapshotStorageObject) -> AppState.SessionSnapshotStorageObject)? = nil,
         environment: [String: String]? = nil,
@@ -84,19 +85,18 @@ final class Phase2C25BSnapshotRestoreDiagnosticsTests: XCTestCase {
         let orgID = UUID()
         _ = try store.createOrganization(Organization(id: orgID, name: "Restore Diagnostics Org"))
         let property = try store.createProperty(Property(id: UUID(), orgId: orgID, name: "Restore Diagnostics Property"))
-        let session = try store.upsertSession(
-            Session(
-                id: UUID(),
-                propertyID: property.id,
-                startedAt: Date(timeIntervalSinceReferenceDate: 100),
-                status: .completed,
-                endedAt: Date(timeIntervalSinceReferenceDate: 200),
-                exportedAt: nil,
-                isSealed: true,
-                firstDeliveredAt: nil,
-                reExportExpiresAt: nil
-            )
+        let baseSession = Session(
+            id: UUID(),
+            propertyID: property.id,
+            startedAt: Date(timeIntervalSinceReferenceDate: 100),
+            status: .completed,
+            endedAt: Date(timeIntervalSinceReferenceDate: 200),
+            exportedAt: nil,
+            isSealed: true,
+            firstDeliveredAt: nil,
+            reExportExpiresAt: nil
         )
+        let session = try store.upsertSession(sessionTransform(baseSession))
         let shots = try mediaSetup?(store, property, session) ?? []
         try saveMetadata(store: store, property: property, session: session, orgID: orgID, shots: shots)
 
@@ -574,6 +574,39 @@ final class Phase2C25BSnapshotRestoreDiagnosticsTests: XCTestCase {
 
         XCTAssertEqual(result.result, .localNewerConflict)
         XCTAssertEqual(result.freshness, "local_newer")
+        XCTAssertEqual(result.localKnownStateAt, newerSession.endedAt)
+        XCTAssertTrue(result.localKnownStateSource?.contains("completed_at") == true)
+    }
+
+    func testFutureReExportExpiryDoesNotCreateLocalNewerFreshnessConflict() async throws {
+        let exportedAt = Date(timeIntervalSinceReferenceDate: 1_000)
+        let firstDeliveredAt = Date(timeIntervalSinceReferenceDate: 1_100)
+        let snapshotGeneratedAt = Date(timeIntervalSinceReferenceDate: 1_200)
+        let futureReExportExpiresAt = Date(timeIntervalSinceReferenceDate: 50_000)
+        let fixture = try makeFixture(
+            generatedAt: snapshotGeneratedAt,
+            sessionTransform: { session in
+                Session(
+                    id: session.id,
+                    propertyID: session.propertyID,
+                    startedAt: session.startedAt,
+                    status: .completed,
+                    endedAt: session.endedAt,
+                    exportedAt: exportedAt,
+                    isSealed: true,
+                    firstDeliveredAt: firstDeliveredAt,
+                    reExportExpiresAt: futureReExportExpiresAt
+                )
+            }
+        )
+
+        let result = await fixture.appState.validateLatestSessionSnapshotRestoreDiagnostics()
+
+        XCTAssertEqual(result.result, .restorableMetadataCandidate)
+        XCTAssertEqual(result.freshness, "snapshot_newer")
+        XCTAssertEqual(result.snapshotGeneratedAt, snapshotGeneratedAt)
+        XCTAssertEqual(result.localKnownStateAt, firstDeliveredAt)
+        XCTAssertTrue(result.localKnownStateSource?.contains("first_delivered_at") == true)
     }
 
     func testDiagnosticsReportIsSanitized() async throws {

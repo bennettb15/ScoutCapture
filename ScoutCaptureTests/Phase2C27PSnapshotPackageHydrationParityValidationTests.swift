@@ -976,6 +976,36 @@ final class Phase2C27PSnapshotPackageHydrationParityValidationTests: XCTestCase 
         XCTAssertTrue(validation.blockers.contains("local_newer_freshness"))
     }
 
+    func testPackageParityValidationDoesNotReportIntegrityFailureForFreshnessOnlyBlock() async throws {
+        let evidence = try await makePackageEvidence()
+        defer { tearDownFixture(evidence.fixture) }
+        var restore = evidence.restore
+        restore.result = .localNewerConflict
+        restore.failureReason = "local session state is newer than snapshot"
+        restore.freshness = "local_newer"
+
+        let validation = AppState.makeProductionSingleSessionSnapshotPackageHydrationParityValidation(
+            targetScope: AppState.ProductionCohortApprovalScope(orgID: evidence.fixture.orgID, propertyID: evidence.fixture.property.id, sessionID: evidence.fixture.session.id),
+            restoreDiagnostics: restore,
+            hydration: evidence.hydration,
+            hydratedMetadata: evidence.hydratedMetadata,
+            snapshotShotIDs: Set(evidence.fixture.sourceMetadata.shots.map(\.shotID)),
+            snapshotIssueIDs: Set(evidence.fixture.sourceMetadata.issues.map(\.issueID)),
+            snapshotGuidedIDs: Set(evidence.fixture.sourceMetadata.guidedShots.map(\.id)),
+            mediaRetrieval: evidence.mediaRetrieval,
+            mediaRestoration: evidence.mediaRestoration,
+            mediaRollback: evidence.mediaRollback,
+            candidateDiagnostics: evidence.candidate,
+            overlayResult: evidence.overlay,
+            overlayComparison: evidence.comparison
+        )
+
+        XCTAssertEqual(validation.state, .blocked)
+        XCTAssertTrue(validation.blockers.contains("restore_diagnostics_not_restorable"))
+        XCTAssertTrue(validation.blockers.contains("local_newer_freshness"))
+        XCTAssertFalse(validation.blockers.contains("snapshot_package_integrity_not_verified"))
+    }
+
     func testPackageParityValidationBlocksParentAndScopeMismatch() async throws {
         let evidence = try await makePackageEvidence()
         defer { tearDownFixture(evidence.fixture) }

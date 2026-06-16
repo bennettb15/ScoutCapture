@@ -816,6 +816,8 @@ final class AppState: ObservableObject {
         var snapshotSchemaVersion: Int?
         var snapshotCreatedAt: Date?
         var snapshotGeneratedAt: Date?
+        var localKnownStateAt: Date? = nil
+        var localKnownStateSource: String? = nil
         var localSessionExists: Bool
         var localSessionStatus: String?
         var localShotCount: Int?
@@ -1302,6 +1304,8 @@ final class AppState: ObservableObject {
         var lastRestoreDiagnosticsSnapshotSchemaVersion: Int?
         var lastRestoreDiagnosticsSnapshotCreatedAt: Date?
         var lastRestoreDiagnosticsSnapshotGeneratedAt: Date?
+        var lastRestoreDiagnosticsLocalKnownStateAt: Date?
+        var lastRestoreDiagnosticsLocalKnownStateSource: String?
         var lastRestoreDiagnosticsLocalSessionExists: Bool = false
         var lastRestoreDiagnosticsLocalSessionStatus: String?
         var lastRestoreDiagnosticsLocalShotCount: Int?
@@ -15667,6 +15671,7 @@ final class AppState: ObservableObject {
         let issueCount: Int?
         let guidedCount: Int?
         let knownStateAt: Date?
+        let knownStateSource: String?
     }
 
     private static func decodeSessionSnapshotPayload(_ data: Data?) -> SessionSnapshotPayloadForChecksum? {
@@ -15698,30 +15703,35 @@ final class AppState: ObservableObject {
                 shotCount: nil,
                 issueCount: nil,
                 guidedCount: nil,
-                knownStateAt: nil
+                knownStateAt: nil,
+                knownStateSource: nil
             )
         }
 
         let metadata = try? localStore.loadSessionMetadata(propertyID: propertyID, sessionID: sessionID)
-        let knownDates = [
-            session.startedAt,
-            session.endedAt,
-            session.exportedAt,
-            session.firstDeliveredAt,
-            session.reExportExpiresAt,
-            metadata?.startedAt,
-            metadata?.endedAt,
-            metadata?.exportedAt,
-            metadata?.firstDeliveredAt,
-            metadata?.reExportExpiresAt
-        ].compactMap { $0 }
+        let knownDateCandidates: [(date: Date?, source: String)] = [
+            (session.startedAt, "session.started_at"),
+            (session.endedAt, "session.completed_at"),
+            (session.exportedAt, "session.exported_at"),
+            (session.firstDeliveredAt, "session.first_delivered_at"),
+            (metadata?.startedAt, "metadata.started_at"),
+            (metadata?.endedAt, "metadata.completed_at"),
+            (metadata?.exportedAt, "metadata.exported_at"),
+            (metadata?.firstDeliveredAt, "metadata.first_delivered_at")
+        ]
+        let knownDates = knownDateCandidates.compactMap { candidate -> (date: Date, source: String)? in
+            guard let date = candidate.date else { return nil }
+            return (date, candidate.source)
+        }
+        let knownState = knownDates.max { lhs, rhs in lhs.date < rhs.date }
         return SessionSnapshotRestoreLocalComparison(
             sessionExists: true,
             status: metadata?.status.rawValue ?? session.status.rawValue,
             shotCount: metadata?.shots.count,
             issueCount: metadata?.issues.count,
             guidedCount: metadata?.guidedShots.count,
-            knownStateAt: knownDates.max()
+            knownStateAt: knownState?.date,
+            knownStateSource: knownState?.source
         )
     }
 
@@ -15826,6 +15836,8 @@ final class AppState: ObservableObject {
             snapshotSchemaVersion: decodedPayload?.snapshotSchemaVersion == row.snapshotSchemaVersion ? decodedPayload?.snapshotSchemaVersion : row.snapshotSchemaVersion,
             snapshotCreatedAt: row.createdAt,
             snapshotGeneratedAt: decodedPayload?.generatedAt,
+            localKnownStateAt: localComparison?.knownStateAt,
+            localKnownStateSource: localComparison?.knownStateSource,
             localSessionExists: localComparison?.sessionExists ?? false,
             localSessionStatus: localComparison?.status,
             localShotCount: localComparison?.shotCount,
@@ -16349,6 +16361,8 @@ final class AppState: ObservableObject {
             diagnostics.sessionSnapshotUpload.lastRestoreDiagnosticsSnapshotSchemaVersion = result.snapshotSchemaVersion
             diagnostics.sessionSnapshotUpload.lastRestoreDiagnosticsSnapshotCreatedAt = result.snapshotCreatedAt
             diagnostics.sessionSnapshotUpload.lastRestoreDiagnosticsSnapshotGeneratedAt = result.snapshotGeneratedAt
+            diagnostics.sessionSnapshotUpload.lastRestoreDiagnosticsLocalKnownStateAt = result.localKnownStateAt
+            diagnostics.sessionSnapshotUpload.lastRestoreDiagnosticsLocalKnownStateSource = result.localKnownStateSource
             diagnostics.sessionSnapshotUpload.lastRestoreDiagnosticsLocalSessionExists = result.localSessionExists
             diagnostics.sessionSnapshotUpload.lastRestoreDiagnosticsLocalSessionStatus = result.localSessionStatus
             diagnostics.sessionSnapshotUpload.lastRestoreDiagnosticsLocalShotCount = result.localShotCount
@@ -18043,6 +18057,8 @@ final class AppState: ObservableObject {
         lines.append("- snapshot_schema_version: \(diagnostics.lastRestoreDiagnosticsSnapshotSchemaVersion.map(String.init) ?? "none")")
         lines.append("- snapshot_created_at: \(diagnostics.lastRestoreDiagnosticsSnapshotCreatedAt?.formatted(date: .abbreviated, time: .standard) ?? "none")")
         lines.append("- snapshot_generated_at: \(diagnostics.lastRestoreDiagnosticsSnapshotGeneratedAt?.formatted(date: .abbreviated, time: .standard) ?? "none")")
+        lines.append("- local_known_state_at: \(diagnostics.lastRestoreDiagnosticsLocalKnownStateAt?.formatted(date: .abbreviated, time: .standard) ?? "none")")
+        lines.append("- local_known_state_source: \(diagnosticsPreviewText(diagnostics.lastRestoreDiagnosticsLocalKnownStateSource, maxLength: 80) ?? "none")")
         lines.append("- freshness: \(diagnosticsPreviewText(diagnostics.lastRestoreDiagnosticsFreshness, maxLength: 80) ?? "not_checked")")
         lines.append("- local_session_exists: \(diagnostics.lastRestoreDiagnosticsLocalSessionExists)")
         lines.append("- local_session_status: \(diagnosticsPreviewText(diagnostics.lastRestoreDiagnosticsLocalSessionStatus, maxLength: 60) ?? "none")")
@@ -24580,13 +24596,14 @@ final class AppState: ObservableObject {
         ].allSatisfy { scopesAreEqual(targetScope, $0) }
 
         let restoreDiagnosticsPassed = restore.result == .restorableMetadataCandidate
-        let rowObjectChecksumSchemaParentFreshnessPassed = restore.rowFound &&
+        let rowObjectChecksumSchemaParentPassed = restore.rowFound &&
             restore.objectReadable &&
             restore.checksumVerified &&
             restore.byteSizeMatches &&
             restore.rowObjectVerified &&
             restore.snapshotSchemaVersion == 1 &&
-            restore.parentRemoteVerified &&
+            restore.parentRemoteVerified
+        let rowObjectChecksumSchemaParentFreshnessPassed = rowObjectChecksumSchemaParentPassed &&
             restore.freshness != "local_newer"
         let hydrationSucceeded = hydration.allowed &&
             hydration.blockedReason == nil &&
@@ -24684,7 +24701,7 @@ final class AppState: ObservableObject {
         if restore.freshness == "local_newer" {
             blockers.append("local_newer_freshness")
         }
-        if !rowObjectChecksumSchemaParentFreshnessPassed {
+        if !rowObjectChecksumSchemaParentPassed {
             blockers.append("snapshot_package_integrity_not_verified")
         }
         if !hydrationSucceeded {

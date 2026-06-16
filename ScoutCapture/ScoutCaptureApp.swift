@@ -9021,6 +9021,8 @@ private struct DebugSessionSnapshotUploadDiagnosticsView: View {
                 diagnosticRow("Snapshot Schema", diagnostics.lastRestoreDiagnosticsSnapshotSchemaVersion.map(String.init) ?? "none")
                 diagnosticRow("Snapshot Created", formattedRunDate(diagnostics.lastRestoreDiagnosticsSnapshotCreatedAt))
                 diagnosticRow("Snapshot Generated", formattedRunDate(diagnostics.lastRestoreDiagnosticsSnapshotGeneratedAt))
+                diagnosticRow("Local Known State", formattedRunDate(diagnostics.lastRestoreDiagnosticsLocalKnownStateAt))
+                diagnosticRow("Local Known Source", diagnostics.lastRestoreDiagnosticsLocalKnownStateSource ?? "none")
                 diagnosticRow("Freshness", diagnostics.lastRestoreDiagnosticsFreshness)
                 diagnosticRow("Local Session Exists", diagnostics.lastRestoreDiagnosticsLocalSessionExists ? "true" : "false")
                 diagnosticRow("Local Session Status", diagnostics.lastRestoreDiagnosticsLocalSessionStatus ?? "none")
