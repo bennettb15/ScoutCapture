@@ -8662,6 +8662,8 @@ private struct DebugSessionSnapshotUploadDiagnosticsView: View {
     @State private var isShowingMediaRetrievalConfirmation: Bool = false
     @State private var isCheckingCanonicalReadDiagnostics: Bool = false
     @State private var isBuildingCanonicalCandidateOverlay: Bool = false
+    @State private var isRunningPackageValidation: Bool = false
+    @State private var packageValidationReport: AppState.LocalHealthSessionSnapshotPackageValidationReport?
     @State private var isRefreshingAuthPreflight: Bool = false
     @State private var isRepairingLocalOrgDrift: Bool = false
     @State private var isRunningLocalOrgDriftAudit: Bool = false
@@ -9099,6 +9101,45 @@ private struct DebugSessionSnapshotUploadDiagnosticsView: View {
                     }
                 }
                 .disabled(isCheckingRecoveryCohort)
+                .font(.system(size: 14, weight: .semibold))
+            }
+
+            Section("Snapshot Package Validation") {
+                Text("Selected-session package validation. It keeps canonical reads disabled, does not activate, does not write remote state, and removes package-candidate diagnostic artifacts before a pass.")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(.secondary)
+                if let packageValidationReport {
+                    diagnosticRow("Package Parity", packageValidationReport.packageParity.state.rawValue)
+                    diagnosticRow("Package Blockers", packageValidationReport.packageParity.blockers.isEmpty ? "none" : packageValidationReport.packageParity.blockers.joined(separator: ", "))
+                    diagnosticRow("Rollback", packageValidationReport.fullyRestoredRollback.state.rawValue)
+                    diagnosticRow("Rollback Blockers", packageValidationReport.fullyRestoredRollback.blockers.isEmpty ? "none" : packageValidationReport.fullyRestoredRollback.blockers.joined(separator: ", "))
+                    diagnosticRow("Snapshot ID", packageValidationReport.snapshotID?.uuidString ?? "none")
+                    NavigationLink {
+                        DebugSessionSnapshotUploadTextView(
+                            snapshotText: packageValidationReport.combinedReportText,
+                            title: "Package Validation",
+                            footerText: "Copies the selected-session package validation reports as plain text. It does not include raw session.json, local paths, signed URLs, auth material, storage object paths, or media payloads."
+                        )
+                    } label: {
+                        Text("View Copyable Package Validation Report")
+                            .font(.system(size: 14, weight: .semibold))
+                    }
+                } else {
+                    diagnosticRow("Package Parity", "not run")
+                    diagnosticRow("Rollback", "not run")
+                }
+                Button(isRunningPackageValidation ? "Running..." : AppState.localHealthSessionSnapshotPackageValidationActionTitle) {
+                    guard !isRunningPackageValidation else { return }
+                    isRunningPackageValidation = true
+                    Task {
+                        let report = await appState.runLocalHealthSelectedSessionSnapshotPackageValidation()
+                        await MainActor.run {
+                            packageValidationReport = report
+                            isRunningPackageValidation = false
+                        }
+                    }
+                }
+                .disabled(isRunningPackageValidation)
                 .font(.system(size: 14, weight: .semibold))
             }
 

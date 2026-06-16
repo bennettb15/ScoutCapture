@@ -676,6 +676,97 @@ final class Phase2C27PSnapshotPackageHydrationParityValidationTests: XCTestCase 
         XCTAssertTrue(report.contains("No production behavior changed"))
     }
 
+    func testLocalHealthOperatorPackageValidationProducesCopyableReports() async throws {
+        let fixture = try makePackageFixture()
+        defer { tearDownFixture(fixture) }
+
+        let report = await fixture.appState.runLocalHealthSelectedSessionSnapshotPackageValidation()
+
+        XCTAssertEqual(AppState.localHealthSessionSnapshotPackageValidationActionTitle, "Run Package Parity / Rollback Validation")
+        XCTAssertEqual(report.snapshotID, fixture.snapshotID)
+        XCTAssertEqual(report.packageParity.state, .testOnlyPackageParityPassed)
+        XCTAssertEqual(report.fullyRestoredRollback.state, .testOnlyFullyRestoredPackageRollbackPassed)
+        XCTAssertTrue(report.packageParity.blockers.isEmpty)
+        XCTAssertTrue(report.fullyRestoredRollback.blockers.isEmpty)
+        XCTAssertTrue(report.packageParityReportText.contains("Production Single-Session Snapshot Package Hydration Parity Validation"))
+        XCTAssertTrue(report.fullyRestoredRollbackReportText.contains("Production Single-Session Fully Restored Package Rollback Validation"))
+        XCTAssertTrue(report.combinedReportText.contains("- package_parity_state: test_only_package_parity_passed"))
+        XCTAssertTrue(report.combinedReportText.contains("- package_rollback_state: test_only_fully_restored_package_rollback_passed"))
+        XCTAssertTrue(report.combinedReportText.contains("- supabase_read_enabled: false"))
+        XCTAssertTrue(report.combinedReportText.contains("- activation_performed: false"))
+        XCTAssertTrue(report.combinedReportText.contains("- remote_writes_performed: false"))
+    }
+
+    func testLocalHealthOperatorPackageValidationRequiresSelectedScope() async throws {
+        let fixture = try makePackageFixture()
+        defer { tearDownFixture(fixture) }
+        fixture.appState.selectedPropertyID = nil
+        fixture.appState.currentSession = nil
+
+        let report = await fixture.appState.runLocalHealthSelectedSessionSnapshotPackageValidation()
+
+        XCTAssertEqual(report.packageParity.state, .blocked)
+        XCTAssertEqual(report.fullyRestoredRollback.state, .blocked)
+        XCTAssertFalse(report.packageParity.blockers.isEmpty)
+        XCTAssertFalse(report.fullyRestoredRollback.blockers.isEmpty)
+        XCTAssertTrue(report.combinedReportText.contains("selected_session_snapshot_target_required"))
+        XCTAssertTrue(report.combinedReportText.contains("- activation_performed: false"))
+    }
+
+    func testLocalHealthOperatorPackageValidationBlocksMissingSnapshot() async throws {
+        let fixture = try makePackageFixture()
+        defer { tearDownFixture(fixture) }
+        let appState = AppState(
+            localStore: fixture.store,
+            userDefaults: fixture.defaults,
+            environment: localEnvironment(orgID: fixture.orgID, propertyID: fixture.property.id, sessionID: fixture.session.id),
+            sessionSnapshotStorageUploadOverride: { _ in
+                XCTFail("Local Health package validation must not upload session snapshots")
+            },
+            sessionSnapshotRowInsertOverride: { _ in
+                XCTFail("Local Health package validation must not insert session snapshot rows")
+            },
+            sessionSnapshotRowsFetchOverride: { _, _, _ in [] },
+            sessionSnapshotStorageDownloadOverride: { _, _ in
+                XCTFail("Missing snapshot should not download snapshot payload")
+                return Data()
+            },
+            sessionSnapshotMediaDownloadOverride: { _, _ in
+                XCTFail("Missing snapshot should not download media")
+                return Data()
+            },
+            sessionSnapshotRemoteParentPreflightOverride: { _, _, _ in
+                AppState.SessionSnapshotAuthPreflightRemoteParentStatus(
+                    propertyExists: true,
+                    sessionExists: true,
+                    propertyOrgID: fixture.orgID,
+                    sessionOrgID: fixture.orgID,
+                    sessionPropertyIDMatches: true,
+                    orgIDsMatch: true,
+                    errorMessage: nil
+                )
+            },
+            disableCloudBackupForTests: true
+        )
+        defer { appState.shutdown() }
+        appState._debugSetOrganizationContextForTests(
+            memberships: [ActiveOrganizationMembership(id: fixture.orgID, name: "27P Package Org", role: "owner")],
+            activeOrganizationID: fixture.orgID,
+            ready: true
+        )
+        appState.selectedPropertyID = fixture.property.id
+        appState.currentSession = fixture.session
+
+        let report = await appState.runLocalHealthSelectedSessionSnapshotPackageValidation()
+
+        XCTAssertEqual(report.packageParity.state, .blocked)
+        XCTAssertEqual(report.fullyRestoredRollback.state, .blocked)
+        XCTAssertTrue(report.packageParity.blockers.contains("restore_diagnostics_not_restorable"))
+        XCTAssertTrue(report.fullyRestoredRollback.blockers.contains("restore_diagnostics_not_restorable"))
+        XCTAssertNil(report.snapshotID)
+        XCTAssertTrue(report.combinedReportText.contains("- remote_writes_performed: false"))
+    }
+
     func testFullyRestoredPackageRollbackRestoresPreHydrationFixture() async throws {
         let evidence = try await makeFullyRestoredRollbackEvidence()
         defer { tearDownFixture(evidence.package.fixture) }

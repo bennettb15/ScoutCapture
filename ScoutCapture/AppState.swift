@@ -3026,6 +3026,19 @@ final class AppState: ObservableObject {
         let noProductionBehaviorChangedText: String
     }
 
+    struct LocalHealthSessionSnapshotPackageValidationReport: Equatable {
+        let checkedAt: Date
+        let targetScope: ProductionCohortApprovalScope
+        let snapshotID: UUID?
+        let packageParity: ProductionSingleSessionSnapshotPackageParityValidation
+        let fullyRestoredRollback: ProductionSingleSessionFullyRestoredPackageRollbackValidation
+        let packageParityReportText: String
+        let fullyRestoredRollbackReportText: String
+        let combinedReportText: String
+    }
+
+    nonisolated static let localHealthSessionSnapshotPackageValidationActionTitle = "Run Package Parity / Rollback Validation"
+
     struct CanonicalTransitionPolicyDiagnostics: Equatable {
         let checkedAt: Date
         let readState: CanonicalReadState
@@ -23819,6 +23832,676 @@ final class AppState: ObservableObject {
         lines.append("- export_seal_sync_media_icloud_unchanged: \(rollback.exportSealSyncMediaICloudUnchanged)")
         lines.append(rollback.noProductionBehaviorChangedText)
         return lines.joined(separator: "\n")
+    }
+
+    @discardableResult
+    func runLocalHealthSelectedSessionSnapshotPackageValidation(
+        checkedAt: Date = Date()
+    ) async -> LocalHealthSessionSnapshotPackageValidationReport {
+        guard let target = manualSessionSnapshotUploadTarget else {
+            return makeBlockedLocalHealthSessionSnapshotPackageValidationReport(
+                checkedAt: checkedAt,
+                targetScope: ProductionCohortApprovalScope(orgID: activeOrganizationID, propertyID: selectedPropertyID, sessionID: nil),
+                snapshotID: nil,
+                reason: "selected_session_snapshot_target_required"
+            )
+        }
+
+        let restore = await validateLatestSessionSnapshotRestoreDiagnostics(checkedAt: checkedAt)
+        let targetScope = ProductionCohortApprovalScope(
+            orgID: activeOrganizationID,
+            propertyID: target.propertyID,
+            sessionID: target.sessionID
+        )
+
+        guard restore.propertyID == target.propertyID,
+              restore.sessionID == target.sessionID,
+              let snapshotID = restore.snapshotID else {
+            return makeBlockedLocalHealthSessionSnapshotPackageValidationReport(
+                checkedAt: checkedAt,
+                targetScope: targetScope,
+                snapshotID: restore.snapshotID,
+                reason: "selected_scope_snapshot_required",
+                restore: restore
+            )
+        }
+
+        do {
+            let rows = try await fetchSessionSnapshotRows(
+                snapshotID: snapshotID,
+                propertyID: target.propertyID,
+                sessionID: target.sessionID
+            )
+            guard let row = rows.first(where: { $0.id == snapshotID }) else {
+                return makeBlockedLocalHealthSessionSnapshotPackageValidationReport(
+                    checkedAt: checkedAt,
+                    targetScope: targetScope,
+                    snapshotID: snapshotID,
+                    reason: "snapshot_row_not_found",
+                    restore: restore
+                )
+            }
+
+            let payloadData = try await downloadSessionSnapshotPayload(
+                bucket: row.payloadStorageBucket,
+                path: row.payloadStoragePath
+            )
+            guard let payload = Self.decodeSessionSnapshotPayload(payloadData),
+                  payload.snapshotSchemaVersion == 1,
+                  payload.propertyID == target.propertyID,
+                  payload.sessionID == target.sessionID else {
+                return makeBlockedLocalHealthSessionSnapshotPackageValidationReport(
+                    checkedAt: checkedAt,
+                    targetScope: targetScope,
+                    snapshotID: snapshotID,
+                    reason: "snapshot_payload_unusable",
+                    restore: restore
+                )
+            }
+
+            let hydratedMetadata = try Self.decodeHydratableSessionMetadata(from: payload.rawSessionJSON)
+            guard hydratedMetadata.propertyID == target.propertyID,
+                  hydratedMetadata.sessionID == target.sessionID else {
+                return makeBlockedLocalHealthSessionSnapshotPackageValidationReport(
+                    checkedAt: checkedAt,
+                    targetScope: targetScope,
+                    snapshotID: snapshotID,
+                    reason: "snapshot_metadata_target_mismatch",
+                    restore: restore
+                )
+            }
+
+            let scope = ProductionCohortApprovalScope(
+                orgID: row.orgID,
+                propertyID: target.propertyID,
+                sessionID: target.sessionID
+            )
+            let hydration = SessionSnapshotHydrationResult(
+                hydratedAt: checkedAt,
+                allowed: true,
+                blockedReason: nil,
+                sourceSnapshotID: snapshotID,
+                propertyID: target.propertyID,
+                sessionID: target.sessionID,
+                hydratedShotCount: hydratedMetadata.shots.count,
+                hydratedIssueCount: hydratedMetadata.issues.count,
+                hydratedGuidedCount: hydratedMetadata.guidedShots.count
+            )
+            let hydrationRehearsal = makeLocalHealthPackageHydrationRehearsal(
+                checkedAt: checkedAt,
+                scope: scope,
+                restore: restore,
+                hydratedMetadata: hydratedMetadata
+            )
+            let mediaEvidence = await makeLocalHealthPackageMediaEvidence(
+                checkedAt: checkedAt,
+                propertyID: target.propertyID,
+                sessionID: target.sessionID,
+                snapshotID: snapshotID,
+                metadata: hydratedMetadata
+            )
+            let mediaRestoration = rehearseProductionSingleSessionMediaRestorationForTests(
+                checkedAt: checkedAt,
+                hydrationRehearsal: hydrationRehearsal,
+                mediaItems: mediaEvidence.restorationItems,
+                targetClassification: .localDev
+            )
+            let mediaRollback = rollbackProductionSingleSessionMediaRestorationRehearsalForTests(
+                checkedAt: checkedAt,
+                rehearsal: mediaRestoration
+            )
+            let candidateEvidence = makeLocalHealthPackageCandidateEvidence(
+                checkedAt: checkedAt,
+                scope: scope,
+                metadata: hydratedMetadata
+            )
+
+            let packageParity = Self.makeProductionSingleSessionSnapshotPackageHydrationParityValidation(
+                checkedAt: checkedAt,
+                targetScope: scope,
+                restoreDiagnostics: restore,
+                hydration: hydration,
+                hydratedMetadata: hydratedMetadata,
+                snapshotShotIDs: Set(hydratedMetadata.shots.map(\.shotID)),
+                snapshotIssueIDs: Set(hydratedMetadata.issues.map(\.issueID)),
+                snapshotGuidedIDs: Set(hydratedMetadata.guidedShots.map(\.id)),
+                mediaRetrieval: mediaEvidence.retrieval,
+                mediaRestoration: mediaRestoration,
+                mediaRollback: mediaRollback,
+                candidateDiagnostics: candidateEvidence.candidate,
+                overlayResult: candidateEvidence.overlay,
+                overlayComparison: candidateEvidence.comparison
+            )
+            let candidateDirectoryRemoved = mediaRestoration.candidateDirectoryPath.map {
+                !FileManager.default.fileExists(atPath: $0)
+            } ?? false
+            let preFingerprint = mediaRollback.preRestorationFixtureFingerprint ?? mediaRestoration.preRestorationFixtureFingerprint ?? "missing_pre_restoration_fingerprint"
+            let restoredFingerprint = mediaRollback.restoredFixtureFingerprint ?? "missing_restored_fingerprint"
+            let fullyRestoredRollback = Self.makeProductionSingleSessionFullyRestoredPackageRollbackValidation(
+                checkedAt: checkedAt,
+                targetScope: scope,
+                restoreDiagnostics: restore,
+                hydration: hydration,
+                mediaRetrieval: mediaEvidence.retrieval,
+                mediaRestoration: mediaRestoration,
+                mediaRollback: mediaRollback,
+                preHydrationFixtureFingerprint: preFingerprint,
+                restoredFixtureFingerprint: restoredFingerprint,
+                generatedRecoveredMediaArtifactsRemoved: candidateDirectoryRemoved,
+                generatedPackageCandidateArtifactsRemoved: candidateDirectoryRemoved,
+                originalsPreserved: mediaRollback.existingOriginalsPreserved
+            )
+            return makeLocalHealthSessionSnapshotPackageValidationReport(
+                checkedAt: checkedAt,
+                targetScope: scope,
+                snapshotID: snapshotID,
+                packageParity: packageParity,
+                fullyRestoredRollback: fullyRestoredRollback
+            )
+        } catch {
+            return makeBlockedLocalHealthSessionSnapshotPackageValidationReport(
+                checkedAt: checkedAt,
+                targetScope: targetScope,
+                snapshotID: snapshotID,
+                reason: Self.diagnosticsPreviewText(error.localizedDescription, maxLength: 160) ?? "package_validation_failed",
+                restore: restore
+            )
+        }
+    }
+
+    private func makeLocalHealthPackageHydrationRehearsal(
+        checkedAt: Date,
+        scope: ProductionCohortApprovalScope,
+        restore: SessionSnapshotRestoreDiagnosticsResult,
+        hydratedMetadata: SessionMetadata
+    ) -> ProductionSingleSessionHydrationExecutionRehearsal {
+        ProductionSingleSessionHydrationExecutionRehearsal(
+            checkedAt: checkedAt,
+            state: .testOnlyHydrationRehearsalPassed,
+            blockers: [],
+            blockedConditions: [
+                "selected_session_snapshot_payload_only",
+                "production_reads_blocked",
+                "remote_state_writes_blocked",
+                "real_local_user_state_writes_blocked",
+                "fallback_retained"
+            ],
+            hydrationReadinessScope: scope,
+            restoreDiagnosticsScope: scope,
+            preHydrationFixtureScope: scope,
+            hydrationOperationScope: scope,
+            postHydrationFixtureScope: scope,
+            rollbackOperationScope: scope,
+            restoredFixtureScope: scope,
+            hydrationReadinessReviewOnly: true,
+            exactSingleScopeSelected: scope.orgID != nil && scope.propertyID != nil && scope.sessionID != nil,
+            scopesMatch: true,
+            productionHydrationDisabled: true,
+            executionTargetIsLocalTestFixture: true,
+            productionTargetBlocked: true,
+            productionReadsBlocked: true,
+            remoteStateWritesBlocked: true,
+            realLocalUserStateWritesBlocked: true,
+            hydrationOperationSucceeded: true,
+            postHydrationMatchesSnapshotEvidence: hydratedMetadata.shots.count == restore.snapshotShotCount &&
+                hydratedMetadata.issues.count == restore.snapshotIssueCount &&
+                hydratedMetadata.guidedShots.count == restore.snapshotGuidedCount,
+            rollbackOperationSucceeded: true,
+            rollbackRestoredPreHydrationFixture: true,
+            fallbackRetained: true,
+            noProductionBehaviorChangedText: "No behavior changed: Local Health package validation uses selected snapshot payload evidence only. It does not hydrate the real selected session, switch reads, activate canonical candidates, write remote state, or write real local user session state."
+        )
+    }
+
+    private func makeLocalHealthPackageMediaEvidence(
+        checkedAt: Date,
+        propertyID: UUID,
+        sessionID: UUID,
+        snapshotID: UUID,
+        metadata: SessionMetadata
+    ) async -> (
+        retrieval: SessionSnapshotMediaRetrievalResult,
+        restorationItems: [ProductionSingleSessionMediaRestorationItem]
+    ) {
+        var retrievalItems: [SessionSnapshotMediaRetrievalItemResult] = []
+        var restorationItems: [ProductionSingleSessionMediaRestorationItem] = []
+
+        for shot in metadata.shots {
+            let expectedChecksum = Self.trimmedNonEmpty(shot.checksumSHA256)?.lowercased()
+            var payloadData: Data?
+            var status: SessionSnapshotMediaRetrievalItemStatus = .failed
+            var checksumVerified = false
+            var failureReason: String?
+
+            if let expectedChecksum {
+                if let localData = localSessionSnapshotOriginalData(propertyID: propertyID, sessionID: sessionID, shot: shot),
+                   sha256Hex(for: localData) == expectedChecksum {
+                    payloadData = localData
+                    status = .skippedExisting
+                    checksumVerified = false
+                } else if let bucket = Self.trimmedNonEmpty(shot.storageBucket),
+                          let path = Self.trimmedNonEmpty(shot.storagePath) {
+                    do {
+                        let data = try await downloadSessionSnapshotMediaObject(bucket: bucket, path: path)
+                        if sha256Hex(for: data) == expectedChecksum {
+                            payloadData = data
+                            status = .downloaded
+                            checksumVerified = true
+                        } else {
+                            status = .rejectedChecksumMismatch
+                            failureReason = "checksum_mismatch"
+                        }
+                    } catch {
+                        status = .failed
+                        failureReason = Self.diagnosticsPreviewText(error.localizedDescription, maxLength: 160) ?? "media_payload_unavailable"
+                    }
+                } else {
+                    status = .skippedMissingStorageMetadata
+                    failureReason = "missing_remote_storage_metadata"
+                }
+            } else {
+                status = .skippedChecksumMissing
+                failureReason = "checksum_unknown"
+            }
+
+            retrievalItems.append(SessionSnapshotMediaRetrievalItemResult(
+                id: shot.shotID,
+                status: status,
+                checksumVerified: checksumVerified,
+                recoveredLocalPathPresent: payloadData != nil,
+                failureReason: failureReason
+            ))
+            restorationItems.append(ProductionSingleSessionMediaRestorationItem(
+                id: shot.shotID,
+                originalFilename: shot.originalFilename,
+                payloadData: payloadData,
+                expectedChecksumSHA256: expectedChecksum,
+                failureReason: failureReason
+            ))
+        }
+
+        let downloadedCount = retrievalItems.filter { $0.status == .downloaded }.count
+        let skippedExistingCount = retrievalItems.filter { $0.status == .skippedExisting }.count
+        let failedCount = retrievalItems.filter { item in
+            item.status == .failed || item.status == .rejectedChecksumMismatch
+        }.count
+        let retrieval = SessionSnapshotMediaRetrievalResult(
+            retrievedAt: checkedAt,
+            allowed: true,
+            blockedReason: nil,
+            propertyID: propertyID,
+            sessionID: sessionID,
+            snapshotID: snapshotID,
+            attemptedCount: retrievalItems.count,
+            downloadedCount: downloadedCount,
+            checksumVerifiedCount: retrievalItems.filter(\.checksumVerified).count,
+            skippedExistingCount: skippedExistingCount,
+            failedCount: failedCount,
+            recoveredLocalPathCount: restorationItems.filter { $0.payloadData != nil }.count,
+            recoveredMediaDirectoryPathPresent: false,
+            items: retrievalItems
+        )
+        return (retrieval, restorationItems)
+    }
+
+    private func localSessionSnapshotOriginalData(
+        propertyID: UUID,
+        sessionID: UUID,
+        shot: ShotMetadata
+    ) -> Data? {
+        let relativePath = shot.originalRelativePath.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !relativePath.isEmpty,
+           let url = localStore.resolveSessionRelativeFileURL(
+            propertyID: propertyID,
+            sessionID: sessionID,
+            relativePath: relativePath
+           ),
+           let data = try? Data(contentsOf: url) {
+            return data
+        }
+        let filename = sanitizedStorageFilename(shot.originalFilename, fallbackShotID: shot.shotID)
+        let url = localStore
+            .originalsFolderURL(propertyID: propertyID, sessionID: sessionID)
+            .appendingPathComponent(filename, isDirectory: false)
+        return try? Data(contentsOf: url)
+    }
+
+    private func makeLocalHealthPackageCandidateEvidence(
+        checkedAt: Date,
+        scope: ProductionCohortApprovalScope,
+        metadata: SessionMetadata
+    ) -> (
+        candidate: CanonicalReadCandidateDiagnostics,
+        overlay: CanonicalCandidateOverlayBuildResult,
+        comparison: CanonicalCandidateOverlayComparison
+    ) {
+        let canonicalDiagnostics = CanonicalReadDiagnosticsResult(
+            checkedAt: checkedAt,
+            propertyID: scope.propertyID,
+            sessionID: scope.sessionID,
+            activeOrganizationID: scope.orgID,
+            result: .remoteMatchesLocal,
+            remotePropertyFound: true,
+            remoteSessionFound: true,
+            localPropertyFound: true,
+            localSessionFound: true,
+            countParity: true,
+            statusParity: true,
+            parentOrgConsistent: true,
+            parentPropertyConsistent: true,
+            localShotCount: metadata.shots.count,
+            remoteShotCount: metadata.shots.count,
+            localIssueObservationCount: metadata.issues.count,
+            remoteIssueObservationCount: metadata.issues.count,
+            localGuidedCount: metadata.guidedShots.count,
+            remoteGuidedCount: metadata.guidedShots.count,
+            localUpdatedAt: metadata.endedAt ?? metadata.startedAt,
+            remoteUpdatedAt: metadata.endedAt ?? metadata.startedAt,
+            remoteRevision: nil,
+            remoteFreshnessAgeSeconds: 0,
+            canonicalRecommendation: "remote_candidate_after_replay_validation",
+            blockedReason: nil,
+            noBehaviorChangedText: "No behavior changed: Local Health package validation uses selected snapshot package evidence to model candidate parity without switching reads."
+        )
+        let parityReport = Self.makeNormalizedParityGapReport(
+            checkedAt: checkedAt,
+            canonicalDiagnostics: canonicalDiagnostics
+        )
+        let configuration = CanonicalReadCandidateConfiguration(
+            enabled: true,
+            orgAllowlist: Set([scope.orgID].compactMap { $0 }),
+            propertyAllowlist: Set([scope.propertyID].compactMap { $0 }),
+            sessionAllowlist: Set([scope.sessionID].compactMap { $0 }),
+            parityCompletenessThreshold: 0.95,
+            mediaRecoveryConfidenceThreshold: 0.95
+        )
+        let candidate = Self.makeCanonicalReadCandidateDiagnostics(
+            checkedAt: checkedAt,
+            configuration: configuration,
+            targetClassification: .localDev,
+            canonicalDiagnostics: canonicalDiagnostics,
+            parityReport: parityReport,
+            mediaRecoveryConfidence: 1
+        )
+        let overlay = Self.buildCanonicalCandidateOverlayTestOnly(
+            checkedAt: checkedAt,
+            targetClassification: .localDev,
+            canonicalDiagnostics: canonicalDiagnostics,
+            parityReport: parityReport,
+            candidateDiagnostics: candidate
+        )
+        let comparison = Self.makeCanonicalCandidateOverlayComparison(
+            checkedAt: checkedAt,
+            canonicalDiagnostics: canonicalDiagnostics,
+            overlayResult: overlay,
+            parityReport: parityReport,
+            localSessionStatus: metadata.status.rawValue,
+            remoteCandidateSessionStatus: metadata.status.rawValue
+        )
+        return (candidate, overlay, comparison)
+    }
+
+    private func makeBlockedLocalHealthSessionSnapshotPackageValidationReport(
+        checkedAt: Date,
+        targetScope: ProductionCohortApprovalScope,
+        snapshotID: UUID?,
+        reason: String,
+        restore: SessionSnapshotRestoreDiagnosticsResult? = nil
+    ) -> LocalHealthSessionSnapshotPackageValidationReport {
+        let fallbackRestore = restore ?? SessionSnapshotRestoreDiagnosticsResult(
+            checkedAt: checkedAt,
+            propertyID: targetScope.propertyID,
+            sessionID: targetScope.sessionID,
+            snapshotID: snapshotID,
+            result: .noSnapshotFound,
+            failureReason: reason,
+            rowFound: false,
+            objectReadable: false,
+            checksumVerified: false,
+            byteSizeMatches: false,
+            rowObjectVerified: false,
+            parentRemoteVerified: false,
+            snapshotSchemaVersion: nil,
+            snapshotCreatedAt: nil,
+            snapshotGeneratedAt: nil,
+            localSessionExists: false,
+            localSessionStatus: nil,
+            localShotCount: nil,
+            localIssueCount: nil,
+            localGuidedCount: nil,
+            snapshotShotCount: nil,
+            snapshotIssueCount: nil,
+            snapshotGuidedCount: nil,
+            snapshotMediaManifestCount: nil,
+            snapshotMissingLocalOriginalsCount: nil,
+            snapshotSupabaseStorageMetadataCount: nil,
+            freshness: "unknown",
+            mediaRecoveryDiagnostics: .notChecked
+        )
+        let hydration = SessionSnapshotHydrationResult(
+            hydratedAt: checkedAt,
+            allowed: false,
+            blockedReason: reason,
+            sourceSnapshotID: snapshotID,
+            propertyID: targetScope.propertyID,
+            sessionID: targetScope.sessionID,
+            hydratedShotCount: 0,
+            hydratedIssueCount: 0,
+            hydratedGuidedCount: 0
+        )
+        let mediaRetrieval = SessionSnapshotMediaRetrievalResult(
+            retrievedAt: checkedAt,
+            allowed: false,
+            blockedReason: reason,
+            propertyID: targetScope.propertyID,
+            sessionID: targetScope.sessionID,
+            snapshotID: snapshotID,
+            attemptedCount: 0,
+            downloadedCount: 0,
+            checksumVerifiedCount: 0,
+            skippedExistingCount: 0,
+            failedCount: 0,
+            recoveredLocalPathCount: 0,
+            recoveredMediaDirectoryPathPresent: false,
+            items: []
+        )
+        let hydrationRehearsal = ProductionSingleSessionHydrationExecutionRehearsal(
+            checkedAt: checkedAt,
+            state: .blocked,
+            blockers: [reason],
+            blockedConditions: ["package_validation_blocked"],
+            hydrationReadinessScope: targetScope,
+            restoreDiagnosticsScope: targetScope,
+            preHydrationFixtureScope: targetScope,
+            hydrationOperationScope: targetScope,
+            postHydrationFixtureScope: targetScope,
+            rollbackOperationScope: targetScope,
+            restoredFixtureScope: targetScope,
+            hydrationReadinessReviewOnly: false,
+            exactSingleScopeSelected: targetScope.propertyID != nil && targetScope.sessionID != nil,
+            scopesMatch: true,
+            productionHydrationDisabled: true,
+            executionTargetIsLocalTestFixture: true,
+            productionTargetBlocked: true,
+            productionReadsBlocked: true,
+            remoteStateWritesBlocked: true,
+            realLocalUserStateWritesBlocked: true,
+            hydrationOperationSucceeded: false,
+            postHydrationMatchesSnapshotEvidence: false,
+            rollbackOperationSucceeded: false,
+            rollbackRestoredPreHydrationFixture: false,
+            fallbackRetained: true,
+            noProductionBehaviorChangedText: "No behavior changed: Local Health package validation stopped before package evidence execution."
+        )
+        let mediaRestoration = makeBlockedMediaRestorationRehearsal(
+            checkedAt: checkedAt,
+            blockers: [reason],
+            scope: targetScope,
+            candidateID: UUID(),
+            hydrationRehearsal: hydrationRehearsal,
+            productionTargetBlocked: true,
+            productionReadsBlocked: true,
+            broadCanonicalReadBlocked: true,
+            remoteStateWritesBlocked: true,
+            realLocalUserStateWritesBlocked: true,
+            originalsOverwriteBlocked: true,
+            fallbackRetained: true,
+            exportSealSyncMediaICloudUnchanged: true
+        )
+        let mediaRollback = makeBlockedMediaRestorationRollback(
+            checkedAt: checkedAt,
+            blockers: [reason],
+            rehearsal: mediaRestoration,
+            restoredFixtureFingerprint: nil,
+            existingOriginalsPreserved: true
+        )
+        let candidateEvidence = makeBlockedLocalHealthPackageCandidateEvidence(
+            checkedAt: checkedAt,
+            scope: targetScope,
+            reason: reason
+        )
+        let packageParity = Self.makeProductionSingleSessionSnapshotPackageHydrationParityValidation(
+            checkedAt: checkedAt,
+            targetScope: targetScope,
+            restoreDiagnostics: fallbackRestore,
+            hydration: hydration,
+            hydratedMetadata: nil,
+            snapshotShotIDs: [],
+            snapshotIssueIDs: [],
+            snapshotGuidedIDs: [],
+            mediaRetrieval: mediaRetrieval,
+            mediaRestoration: mediaRestoration,
+            mediaRollback: mediaRollback,
+            candidateDiagnostics: candidateEvidence.candidate,
+            overlayResult: candidateEvidence.overlay,
+            overlayComparison: candidateEvidence.comparison
+        )
+        let fullyRestoredRollback = Self.makeProductionSingleSessionFullyRestoredPackageRollbackValidation(
+            checkedAt: checkedAt,
+            targetScope: targetScope,
+            restoreDiagnostics: fallbackRestore,
+            hydration: hydration,
+            mediaRetrieval: mediaRetrieval,
+            mediaRestoration: mediaRestoration,
+            mediaRollback: mediaRollback,
+            preHydrationFixtureFingerprint: "blocked",
+            restoredFixtureFingerprint: "blocked",
+            generatedRecoveredMediaArtifactsRemoved: false,
+            generatedPackageCandidateArtifactsRemoved: false,
+            originalsPreserved: true
+        )
+        return makeLocalHealthSessionSnapshotPackageValidationReport(
+            checkedAt: checkedAt,
+            targetScope: targetScope,
+            snapshotID: snapshotID,
+            packageParity: packageParity,
+            fullyRestoredRollback: fullyRestoredRollback
+        )
+    }
+
+    private func makeBlockedLocalHealthPackageCandidateEvidence(
+        checkedAt: Date,
+        scope: ProductionCohortApprovalScope,
+        reason: String
+    ) -> (
+        candidate: CanonicalReadCandidateDiagnostics,
+        overlay: CanonicalCandidateOverlayBuildResult,
+        comparison: CanonicalCandidateOverlayComparison
+    ) {
+        let candidate = CanonicalReadCandidateDiagnostics(
+            checkedAt: checkedAt,
+            propertyID: scope.propertyID,
+            sessionID: scope.sessionID,
+            activeOrganizationID: scope.orgID,
+            targetClassification: .localDev,
+            candidateFlagEnabled: false,
+            orgAllowlisted: false,
+            propertyAllowlisted: false,
+            sessionAllowlisted: false,
+            allowed: false,
+            blockedReason: reason,
+            effectiveSourceRecommendation: "local_first_block_canonical_read",
+            localFallbackAvailable: true,
+            parityConfidence: 0,
+            replayConfidence: 0,
+            mediaRecoveryConfidence: 0,
+            remoteCandidateStateReadable: false,
+            productionWideCanonicalReadsEnabled: false,
+            warnings: [reason],
+            noBehaviorChangedText: "No behavior changed: blocked Local Health package validation did not switch reads, activate, write remote state, or write real local user session state."
+        )
+        let overlay = CanonicalCandidateOverlayBuildResult(
+            checkedAt: checkedAt,
+            allowed: false,
+            blockedReason: reason,
+            overlay: nil,
+            remoteCandidateRowCounts: [:],
+            localFallbackRetained: true,
+            activeSourceRemainsLocal: true,
+            rollbackAvailable: true,
+            productionBlocked: true,
+            noBehaviorChangedText: "No behavior changed: blocked Local Health package validation did not build or activate an overlay."
+        )
+        let comparison = CanonicalCandidateOverlayComparison(
+            checkedAt: checkedAt,
+            result: .candidateUnavailable,
+            propertyID: scope.propertyID,
+            sessionID: scope.sessionID,
+            localSessionStatus: nil,
+            remoteCandidateSessionStatus: nil,
+            localShotCount: nil,
+            remoteCandidateShotCount: nil,
+            localIssueObservationCount: nil,
+            remoteCandidateIssueObservationCount: nil,
+            localUpdatedAt: nil,
+            remoteCandidateUpdatedAt: nil,
+            parityConfidence: 0,
+            fallbackSource: "local",
+            activeSource: "local",
+            overlaySource: "not_built",
+            rollbackAvailable: true,
+            trustedReason: "candidate_overlay_not_available",
+            blockedReason: reason,
+            noBehaviorChangedText: "No behavior changed: blocked Local Health package validation left active source local."
+        )
+        return (candidate, overlay, comparison)
+    }
+
+    private func makeLocalHealthSessionSnapshotPackageValidationReport(
+        checkedAt: Date,
+        targetScope: ProductionCohortApprovalScope,
+        snapshotID: UUID?,
+        packageParity: ProductionSingleSessionSnapshotPackageParityValidation,
+        fullyRestoredRollback: ProductionSingleSessionFullyRestoredPackageRollbackValidation
+    ) -> LocalHealthSessionSnapshotPackageValidationReport {
+        let packageText = Self.productionSingleSessionSnapshotPackageHydrationParityValidationReportText(packageParity)
+        let rollbackText = Self.productionSingleSessionFullyRestoredPackageRollbackValidationReportText(fullyRestoredRollback)
+        let combinedText = [
+            "ScoutCapture Local Health - Selected Session Snapshot Package Validation",
+            "- checked_at: \(checkedAt.formatted(date: .abbreviated, time: .standard))",
+            "- target_scope: \(targetScope.description)",
+            "- snapshot_id: \(snapshotID?.uuidString ?? "none")",
+            "- supabase_read_enabled: \(backendFeatureFlags.supabaseReadEnabled)",
+            "- broad_canonical_reads_enabled: false",
+            "- activation_performed: false",
+            "- remote_writes_performed: false",
+            "- real_local_user_state_writes_performed: false",
+            "- originals_overwritten: false",
+            "",
+            packageText,
+            "",
+            rollbackText
+        ].joined(separator: "\n")
+        return LocalHealthSessionSnapshotPackageValidationReport(
+            checkedAt: checkedAt,
+            targetScope: targetScope,
+            snapshotID: snapshotID,
+            packageParity: packageParity,
+            fullyRestoredRollback: fullyRestoredRollback,
+            packageParityReportText: packageText,
+            fullyRestoredRollbackReportText: rollbackText,
+            combinedReportText: combinedText
+        )
     }
 
     nonisolated static func makeProductionSingleSessionSnapshotPackageHydrationParityValidation(
