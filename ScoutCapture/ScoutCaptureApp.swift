@@ -9337,6 +9337,8 @@ private struct DebugSessionSnapshotCanonicalReadDiagnosticsSection: View {
             diagnosticRow("Local Issues/Obs", diagnostics.lastCanonicalReadDiagnosticsLocalIssueObservationCount.map(String.init) ?? "none")
             diagnosticRow("Remote Issues/Obs", diagnostics.lastCanonicalReadDiagnosticsRemoteIssueObservationCount.map(String.init) ?? "none")
             diagnosticRow("Local Guided", diagnostics.lastCanonicalReadDiagnosticsLocalGuidedCount.map(String.init) ?? "none")
+            diagnosticRow("Local Known State", formattedDate(diagnostics.lastCanonicalReadDiagnosticsLocalKnownStateAt))
+            diagnosticRow("Known State Source", diagnostics.lastCanonicalReadDiagnosticsLocalKnownStateSource ?? "none")
             diagnosticRow("Remote Freshness Seconds", diagnostics.lastCanonicalReadDiagnosticsRemoteFreshnessAgeSeconds.map { String(Int($0)) } ?? "unknown")
             diagnosticRow("Remote Revision", diagnostics.lastCanonicalReadDiagnosticsRemoteRevision.map(String.init) ?? "none")
             diagnosticRow("Recommendation", diagnostics.lastCanonicalReadDiagnosticsRecommendation)

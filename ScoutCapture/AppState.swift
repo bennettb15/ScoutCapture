@@ -1403,6 +1403,8 @@ final class AppState: ObservableObject {
         var lastCanonicalReadDiagnosticsRemoteIssueObservationCount: Int?
         var lastCanonicalReadDiagnosticsLocalGuidedCount: Int?
         var lastCanonicalReadDiagnosticsRemoteGuidedCount: Int?
+        var lastCanonicalReadDiagnosticsLocalKnownStateAt: Date?
+        var lastCanonicalReadDiagnosticsLocalKnownStateSource: String?
         var lastCanonicalReadDiagnosticsRemoteFreshnessAgeSeconds: TimeInterval?
         var lastCanonicalReadDiagnosticsRemoteRevision: Int64?
         var lastCanonicalReadDiagnosticsRecommendation: String = "local_first"
@@ -3166,6 +3168,7 @@ final class AppState: ObservableObject {
         let issueObservationCount: Int?
         let guidedCount: Int?
         let updatedAt: Date?
+        var localKnownStateSource: String? = nil
         let localPropertyFound: Bool
         let localSessionFound: Bool
     }
@@ -3235,6 +3238,8 @@ final class AppState: ObservableObject {
         let localGuidedCount: Int?
         let remoteGuidedCount: Int?
         let localUpdatedAt: Date?
+        var localKnownStateAt: Date? = nil
+        var localKnownStateSource: String? = nil
         let remoteUpdatedAt: Date?
         let remoteRevision: Int64?
         let remoteFreshnessAgeSeconds: TimeInterval?
@@ -18166,6 +18171,8 @@ final class AppState: ObservableObject {
         lines.append("- canonical_read_remote_issue_observation_count: \(diagnostics.lastCanonicalReadDiagnosticsRemoteIssueObservationCount.map(String.init) ?? "none")")
         lines.append("- canonical_read_local_guided_count: \(diagnostics.lastCanonicalReadDiagnosticsLocalGuidedCount.map(String.init) ?? "none")")
         lines.append("- canonical_read_remote_guided_count: \(diagnostics.lastCanonicalReadDiagnosticsRemoteGuidedCount.map(String.init) ?? "not_represented")")
+        lines.append("- canonical_read_local_known_state_at: \(diagnostics.lastCanonicalReadDiagnosticsLocalKnownStateAt?.formatted(date: .abbreviated, time: .standard) ?? "none")")
+        lines.append("- canonical_read_local_known_state_source: \(diagnosticsPreviewText(diagnostics.lastCanonicalReadDiagnosticsLocalKnownStateSource, maxLength: 120) ?? "none")")
         lines.append("- canonical_read_remote_freshness_age_seconds: \(diagnostics.lastCanonicalReadDiagnosticsRemoteFreshnessAgeSeconds.map { String(Int($0)) } ?? "unknown")")
         lines.append("- canonical_read_remote_revision: \(diagnostics.lastCanonicalReadDiagnosticsRemoteRevision.map(String.init) ?? "none")")
         lines.append("- canonical_read_recommendation: \(diagnosticsPreviewText(diagnostics.lastCanonicalReadDiagnosticsRecommendation, maxLength: 120) ?? "local_first")")
@@ -18373,6 +18380,8 @@ final class AppState: ObservableObject {
         lines.append("- remote_issue_observation_count: \(diagnostics.lastCanonicalReadDiagnosticsRemoteIssueObservationCount.map(String.init) ?? "none")")
         lines.append("- local_guided_count: \(diagnostics.lastCanonicalReadDiagnosticsLocalGuidedCount.map(String.init) ?? "none")")
         lines.append("- remote_guided_count: \(diagnostics.lastCanonicalReadDiagnosticsRemoteGuidedCount.map(String.init) ?? "not_represented")")
+        lines.append("- local_known_state_at: \(diagnostics.lastCanonicalReadDiagnosticsLocalKnownStateAt?.formatted(date: .abbreviated, time: .standard) ?? "none")")
+        lines.append("- local_known_state_source: \(diagnosticsPreviewText(diagnostics.lastCanonicalReadDiagnosticsLocalKnownStateSource, maxLength: 140) ?? "none")")
         lines.append("- remote_freshness_age_seconds: \(diagnostics.lastCanonicalReadDiagnosticsRemoteFreshnessAgeSeconds.map { String(Int($0)) } ?? "unknown")")
         lines.append("- remote_revision: \(diagnostics.lastCanonicalReadDiagnosticsRemoteRevision.map(String.init) ?? "none")")
         lines.append("- blocked_reason: \(diagnosticsPreviewText(diagnostics.lastCanonicalReadDiagnosticsBlockedReason, maxLength: 220) ?? "none")")
@@ -19494,19 +19503,19 @@ final class AppState: ObservableObject {
         let metadata = session.flatMap {
             try? localStore.loadSessionMetadata(propertyID: $0.propertyID, sessionID: $0.id)
         }
-        let knownDates = [
-            property?.updatedAt,
-            session?.startedAt,
-            session?.endedAt,
-            session?.exportedAt,
-            session?.firstDeliveredAt,
-            session?.reExportExpiresAt,
-            metadata?.startedAt,
-            metadata?.endedAt,
-            metadata?.exportedAt,
-            metadata?.firstDeliveredAt,
-            metadata?.reExportExpiresAt
-        ].compactMap { $0 }
+        let localKnownState = Self.canonicalReadLocalKnownState(
+            propertyUpdatedAt: property?.updatedAt,
+            sessionStartedAt: session?.startedAt,
+            sessionEndedAt: session?.endedAt,
+            sessionExportedAt: session?.exportedAt,
+            sessionFirstDeliveredAt: session?.firstDeliveredAt,
+            sessionReExportExpiresAt: session?.reExportExpiresAt,
+            metadataStartedAt: metadata?.startedAt,
+            metadataEndedAt: metadata?.endedAt,
+            metadataExportedAt: metadata?.exportedAt,
+            metadataFirstDeliveredAt: metadata?.firstDeliveredAt,
+            metadataReExportExpiresAt: metadata?.reExportExpiresAt
+        )
 
         return CanonicalReadLocalSnapshot(
             propertyID: property?.id ?? propertyID,
@@ -19517,10 +19526,41 @@ final class AppState: ObservableObject {
             shotCount: metadata?.shots.count,
             issueObservationCount: metadata?.issues.count,
             guidedCount: metadata?.guidedShots.count,
-            updatedAt: knownDates.max(),
+            updatedAt: localKnownState.at,
+            localKnownStateSource: localKnownState.source,
             localPropertyFound: property != nil,
             localSessionFound: session != nil
         )
+    }
+
+    nonisolated static func canonicalReadLocalKnownState(
+        propertyUpdatedAt: Date?,
+        sessionStartedAt: Date?,
+        sessionEndedAt: Date?,
+        sessionExportedAt: Date?,
+        sessionFirstDeliveredAt: Date?,
+        sessionReExportExpiresAt _: Date?,
+        metadataStartedAt: Date?,
+        metadataEndedAt: Date?,
+        metadataExportedAt: Date?,
+        metadataFirstDeliveredAt: Date?,
+        metadataReExportExpiresAt _: Date?
+    ) -> (at: Date?, source: String?) {
+        let candidates: [(Date, String)] = [
+            propertyUpdatedAt.map { ($0, "property_updated_at") },
+            sessionStartedAt.map { ($0, "session_started_at") },
+            sessionEndedAt.map { ($0, "session_ended_at") },
+            sessionExportedAt.map { ($0, "session_exported_at") },
+            sessionFirstDeliveredAt.map { ($0, "session_first_delivered_at") },
+            metadataStartedAt.map { ($0, "metadata_started_at") },
+            metadataEndedAt.map { ($0, "metadata_ended_at") },
+            metadataExportedAt.map { ($0, "metadata_exported_at") },
+            metadataFirstDeliveredAt.map { ($0, "metadata_first_delivered_at") }
+        ].compactMap { $0 }
+        guard let newest = candidates.max(by: { lhs, rhs in lhs.0 < rhs.0 }) else {
+            return (nil, nil)
+        }
+        return (newest.0, newest.1)
     }
 
     private func recordCanonicalReadDiagnostics(
@@ -19528,6 +19568,13 @@ final class AppState: ObservableObject {
         productionValidationEvidenceReady: Bool = false
     ) {
         var diagnostics = localDiagnostics
+        if canonicalReadDiagnosticsScopeInvalidatesOverlay(
+            diagnostics.sessionSnapshotUpload,
+            propertyID: result.propertyID,
+            sessionID: result.sessionID
+        ) {
+            Self.resetCanonicalCandidateOverlayDiagnostics(&diagnostics.sessionSnapshotUpload)
+        }
         diagnostics.sessionSnapshotUpload.lastCanonicalReadDiagnosticsAt = result.checkedAt
         diagnostics.sessionSnapshotUpload.lastCanonicalReadDiagnosticsPropertyID = result.propertyID
         diagnostics.sessionSnapshotUpload.lastCanonicalReadDiagnosticsSessionID = result.sessionID
@@ -19546,6 +19593,8 @@ final class AppState: ObservableObject {
         diagnostics.sessionSnapshotUpload.lastCanonicalReadDiagnosticsRemoteIssueObservationCount = result.remoteIssueObservationCount
         diagnostics.sessionSnapshotUpload.lastCanonicalReadDiagnosticsLocalGuidedCount = result.localGuidedCount
         diagnostics.sessionSnapshotUpload.lastCanonicalReadDiagnosticsRemoteGuidedCount = result.remoteGuidedCount
+        diagnostics.sessionSnapshotUpload.lastCanonicalReadDiagnosticsLocalKnownStateAt = result.localKnownStateAt
+        diagnostics.sessionSnapshotUpload.lastCanonicalReadDiagnosticsLocalKnownStateSource = result.localKnownStateSource
         diagnostics.sessionSnapshotUpload.lastCanonicalReadDiagnosticsRemoteFreshnessAgeSeconds = result.remoteFreshnessAgeSeconds
         diagnostics.sessionSnapshotUpload.lastCanonicalReadDiagnosticsRemoteRevision = result.remoteRevision
         diagnostics.sessionSnapshotUpload.lastCanonicalReadDiagnosticsRecommendation = result.canonicalRecommendation
@@ -19612,6 +19661,54 @@ final class AppState: ObservableObject {
         diagnostics.sessionSnapshotUpload.lastCanonicalReadCandidateProductionWideEnabled = candidateDiagnostics.productionWideCanonicalReadsEnabled
         diagnostics.sessionSnapshotUpload.lastCanonicalReadCandidateWarnings = candidateDiagnostics.warnings
         localDiagnostics = diagnostics
+    }
+
+    private func canonicalReadDiagnosticsScopeInvalidatesOverlay(
+        _ diagnostics: SessionSnapshotUploadDiagnostics,
+        propertyID: UUID?,
+        sessionID: UUID?
+    ) -> Bool {
+        let previousReadScopeKnown = diagnostics.lastCanonicalReadDiagnosticsPropertyID != nil ||
+            diagnostics.lastCanonicalReadDiagnosticsSessionID != nil
+        let previousReadScopeChanged = previousReadScopeKnown &&
+            (diagnostics.lastCanonicalReadDiagnosticsPropertyID != propertyID ||
+             diagnostics.lastCanonicalReadDiagnosticsSessionID != sessionID)
+        let overlayScopeKnown = diagnostics.lastCanonicalCandidateOverlayPropertyID != nil ||
+            diagnostics.lastCanonicalCandidateOverlaySessionID != nil
+        let overlayScopeChanged = overlayScopeKnown &&
+            (diagnostics.lastCanonicalCandidateOverlayPropertyID != propertyID ||
+             diagnostics.lastCanonicalCandidateOverlaySessionID != sessionID)
+        return previousReadScopeChanged || overlayScopeChanged
+    }
+
+    private nonisolated static func resetCanonicalCandidateOverlayDiagnostics(
+        _ diagnostics: inout SessionSnapshotUploadDiagnostics
+    ) {
+        diagnostics.lastCanonicalCandidateOverlayBuilt = false
+        diagnostics.lastCanonicalCandidateOverlayAllowed = false
+        diagnostics.lastCanonicalCandidateOverlayBlockedReason = "not_checked"
+        diagnostics.lastCanonicalCandidateOverlaySource = "not_built"
+        diagnostics.lastCanonicalCandidateOverlayPropertyID = nil
+        diagnostics.lastCanonicalCandidateOverlaySessionID = nil
+        diagnostics.lastCanonicalCandidateOverlayShotCount = 0
+        diagnostics.lastCanonicalCandidateOverlayIssueObservationCount = 0
+        diagnostics.lastCanonicalCandidateOverlayGuidedCount = nil
+        diagnostics.lastCanonicalCandidateOverlayFallbackSource = "local"
+        diagnostics.lastCanonicalCandidateOverlayActiveSource = "local"
+        diagnostics.lastCanonicalCandidateOverlayRollbackAvailable = true
+        diagnostics.lastCanonicalCandidateOverlayProductionBlocked = true
+        diagnostics.lastCanonicalCandidateOverlayComparisonResult = "candidate_unavailable"
+        diagnostics.lastCanonicalCandidateOverlayComparisonLocalStatus = "unknown"
+        diagnostics.lastCanonicalCandidateOverlayComparisonRemoteStatus = "unknown"
+        diagnostics.lastCanonicalCandidateOverlayComparisonLocalShotCount = nil
+        diagnostics.lastCanonicalCandidateOverlayComparisonRemoteShotCount = nil
+        diagnostics.lastCanonicalCandidateOverlayComparisonLocalIssueObservationCount = nil
+        diagnostics.lastCanonicalCandidateOverlayComparisonRemoteIssueObservationCount = nil
+        diagnostics.lastCanonicalCandidateOverlayComparisonLocalFreshness = "unknown"
+        diagnostics.lastCanonicalCandidateOverlayComparisonRemoteFreshness = "unknown"
+        diagnostics.lastCanonicalCandidateOverlayComparisonParityConfidence = "not_checked"
+        diagnostics.lastCanonicalCandidateOverlayComparisonTrustedReason = "not_checked"
+        diagnostics.lastCanonicalCandidateOverlayComparisonBlockedReason = "not_checked"
     }
 
     @MainActor
@@ -20043,6 +20140,8 @@ final class AppState: ObservableObject {
             localGuidedCount: local.guidedCount,
             remoteGuidedCount: nil,
             localUpdatedAt: local.updatedAt,
+            localKnownStateAt: local.updatedAt,
+            localKnownStateSource: local.localKnownStateSource,
             remoteUpdatedAt: remoteUpdatedAt,
             remoteRevision: remoteSession?.revision ?? remoteProperty?.revision,
             remoteFreshnessAgeSeconds: remoteUpdatedAt.map { max(0, checkedAt.timeIntervalSince($0)) },
@@ -20135,6 +20234,8 @@ final class AppState: ObservableObject {
         lines.append("")
         lines.append("Freshness")
         lines.append("- local_updated_at_present: \(diagnostics.localUpdatedAt != nil)")
+        lines.append("- local_known_state_at: \(diagnostics.localKnownStateAt?.formatted(date: .abbreviated, time: .standard) ?? "none")")
+        lines.append("- local_known_state_source: \(diagnosticsPreviewText(diagnostics.localKnownStateSource, maxLength: 120) ?? "none")")
         lines.append("- remote_updated_at_present: \(diagnostics.remoteUpdatedAt != nil)")
         lines.append("- remote_freshness_age_seconds: \(diagnostics.remoteFreshnessAgeSeconds.map { String(Int($0)) } ?? "unknown")")
         lines.append("- remote_revision: \(diagnostics.remoteRevision.map(String.init) ?? "none")")

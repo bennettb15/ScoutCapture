@@ -16,6 +16,7 @@ final class Phase2C26FCanonicalReadDiagnosticsTests: XCTestCase {
         issueObservationCount: Int? = 1,
         guidedCount: Int? = 0,
         updatedAt: Date? = Date(timeIntervalSinceReferenceDate: 1_000),
+        localKnownStateSource: String? = "metadata_exported_at",
         propertyFound: Bool = true,
         sessionFound: Bool = true
     ) -> AppState.CanonicalReadLocalSnapshot {
@@ -29,6 +30,7 @@ final class Phase2C26FCanonicalReadDiagnosticsTests: XCTestCase {
             issueObservationCount: issueObservationCount,
             guidedCount: guidedCount,
             updatedAt: updatedAt,
+            localKnownStateSource: localKnownStateSource,
             localPropertyFound: propertyFound,
             localSessionFound: sessionFound
         )
@@ -125,12 +127,56 @@ final class Phase2C26FCanonicalReadDiagnosticsTests: XCTestCase {
 
     func testLocalNewerConflict() {
         let result = diagnose(
-            local: local(updatedAt: Date(timeIntervalSinceReferenceDate: 1_200)),
+            local: local(
+                updatedAt: Date(timeIntervalSinceReferenceDate: 1_200),
+                localKnownStateSource: "metadata_ended_at"
+            ),
             remote: remote(updatedAt: Date(timeIntervalSinceReferenceDate: 1_000))
         )
 
         XCTAssertEqual(result.result, .localNewerConflict)
         XCTAssertEqual(result.blockedReason, "local_updated_at_newer_than_remote")
+        XCTAssertEqual(result.localKnownStateAt, Date(timeIntervalSinceReferenceDate: 1_200))
+        XCTAssertEqual(result.localKnownStateSource, "metadata_ended_at")
+    }
+
+    func testFutureReExportExpiresAtDoesNotCreateLocalNewerConflict() {
+        let startedAt = Date(timeIntervalSinceReferenceDate: 1_000)
+        let exportedAt = Date(timeIntervalSinceReferenceDate: 1_100)
+        let firstDeliveredAt = Date(timeIntervalSinceReferenceDate: 1_120)
+        let futureReExportExpiresAt = Date(timeIntervalSinceReferenceDate: 9_000)
+        let knownState = AppState.canonicalReadLocalKnownState(
+            propertyUpdatedAt: Date(timeIntervalSinceReferenceDate: 1_050),
+            sessionStartedAt: startedAt,
+            sessionEndedAt: nil,
+            sessionExportedAt: exportedAt,
+            sessionFirstDeliveredAt: firstDeliveredAt,
+            sessionReExportExpiresAt: futureReExportExpiresAt,
+            metadataStartedAt: startedAt,
+            metadataEndedAt: nil,
+            metadataExportedAt: exportedAt,
+            metadataFirstDeliveredAt: nil,
+            metadataReExportExpiresAt: futureReExportExpiresAt
+        )
+
+        let result = diagnose(
+            local: local(
+                issueObservationCount: 0,
+                updatedAt: knownState.at,
+                localKnownStateSource: knownState.source
+            ),
+            remote: remote(
+                observationCount: 0,
+                updatedAt: firstDeliveredAt
+            )
+        )
+
+        XCTAssertEqual(knownState.at, firstDeliveredAt)
+        XCTAssertEqual(knownState.source, "session_first_delivered_at")
+        XCTAssertEqual(result.result, .remoteMatchesLocal)
+        XCTAssertNotEqual(result.result, .localNewerConflict)
+        XCTAssertEqual(result.localKnownStateAt, firstDeliveredAt)
+        XCTAssertEqual(result.localKnownStateSource, "session_first_delivered_at")
     }
 
     func testRemoteNewerCandidate() {
@@ -183,6 +229,8 @@ final class Phase2C26FCanonicalReadDiagnosticsTests: XCTestCase {
         let report = AppState.canonicalReadDiagnosticsText(result)
 
         XCTAssertTrue(report.contains("Canonical Read Diagnostics"))
+        XCTAssertTrue(report.contains("local_known_state_at"))
+        XCTAssertTrue(report.contains("local_known_state_source"))
         XCTAssertTrue(report.contains("does not switch canonical reads"))
         XCTAssertTrue(report.contains("Report rows intentionally omit"))
         XCTAssertFalse(report.contains("/Users/"))

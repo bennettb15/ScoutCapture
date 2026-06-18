@@ -4560,6 +4560,52 @@ final class Phase2C26OCanonicalCandidateConsumptionTests: XCTestCase {
     }
 
     @MainActor
+    func testReadDiagnosticsForDifferentScopeClearsStaleOverlayComparison() async throws {
+        let fixture = try makeActivationExecutionFixture(
+            environment: productionActivationExecutionEnvironment()
+        )
+        defer { tearDownActivationExecutionFixture(fixture) }
+        let stalePropertyID = UUID(uuidString: "AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA")!
+        let staleSessionID = UUID(uuidString: "BBBBBBBB-BBBB-BBBB-BBBB-BBBBBBBBBBBB")!
+        var diagnostics = fixture.appState._debugLocalDiagnosticsForTests()
+        diagnostics.sessionSnapshotUpload.lastCanonicalReadDiagnosticsPropertyID = stalePropertyID
+        diagnostics.sessionSnapshotUpload.lastCanonicalReadDiagnosticsSessionID = staleSessionID
+        diagnostics.sessionSnapshotUpload.lastCanonicalCandidateOverlayBuilt = true
+        diagnostics.sessionSnapshotUpload.lastCanonicalCandidateOverlayAllowed = true
+        diagnostics.sessionSnapshotUpload.lastCanonicalCandidateOverlayPropertyID = stalePropertyID
+        diagnostics.sessionSnapshotUpload.lastCanonicalCandidateOverlaySessionID = staleSessionID
+        diagnostics.sessionSnapshotUpload.lastCanonicalCandidateOverlayComparisonResult = AppState.CanonicalCandidateOverlayComparisonResult.candidateIncomplete.rawValue
+        diagnostics.sessionSnapshotUpload.lastCanonicalCandidateOverlayComparisonLocalShotCount = 10
+        diagnostics.sessionSnapshotUpload.lastCanonicalCandidateOverlayComparisonRemoteShotCount = 10
+        diagnostics.sessionSnapshotUpload.lastCanonicalCandidateOverlayComparisonLocalIssueObservationCount = 1
+        diagnostics.sessionSnapshotUpload.lastCanonicalCandidateOverlayComparisonRemoteIssueObservationCount = 0
+        diagnostics.sessionSnapshotUpload.lastCanonicalCandidateOverlayComparisonBlockedReason = "missing_remote_children"
+        fixture.appState._debugSetLocalDiagnosticsForTests(diagnostics)
+
+        let report = passingPackageValidationReport()
+        _ = await fixture.appState.runCanonicalReadDiagnosticsForSelectedSession(
+            checkedAt: Date(timeIntervalSinceReferenceDate: 9_765),
+            productionValidationEvidence: report
+        )
+        let refreshed = fixture.appState._debugLocalDiagnosticsForTests().sessionSnapshotUpload
+
+        XCTAssertEqual(refreshed.lastCanonicalReadDiagnosticsPropertyID, propertyID)
+        XCTAssertEqual(refreshed.lastCanonicalReadDiagnosticsSessionID, sessionID)
+        XCTAssertEqual(refreshed.lastCanonicalReadDiagnosticsLocalIssueObservationCount, 0)
+        XCTAssertEqual(refreshed.lastCanonicalReadDiagnosticsRemoteIssueObservationCount, 0)
+        XCTAssertFalse(refreshed.lastCanonicalCandidateOverlayBuilt)
+        XCTAssertFalse(refreshed.lastCanonicalCandidateOverlayAllowed)
+        XCTAssertNil(refreshed.lastCanonicalCandidateOverlayPropertyID)
+        XCTAssertNil(refreshed.lastCanonicalCandidateOverlaySessionID)
+        XCTAssertEqual(refreshed.lastCanonicalCandidateOverlayComparisonResult, AppState.CanonicalCandidateOverlayComparisonResult.candidateUnavailable.rawValue)
+        XCTAssertNil(refreshed.lastCanonicalCandidateOverlayComparisonLocalIssueObservationCount)
+        XCTAssertNil(refreshed.lastCanonicalCandidateOverlayComparisonRemoteIssueObservationCount)
+        XCTAssertEqual(refreshed.lastCanonicalCandidateOverlayComparisonBlockedReason, "not_checked")
+        XCTAssertFalse(fixture.appState.backendFeatureFlags.supabaseReadEnabled)
+        XCTAssertFalse(fixture.appState.backendFeatureFlags.supabasePropertyReadEnabled)
+    }
+
+    @MainActor
     func testProductionValidationWrongScopePackageEvidenceDoesNotUnblockDiagnosticsOrOverlay() async throws {
         let fixture = try makeActivationExecutionFixture(
             environment: productionActivationExecutionEnvironment()
