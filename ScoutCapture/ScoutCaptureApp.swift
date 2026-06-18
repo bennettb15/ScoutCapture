@@ -9259,6 +9259,13 @@ private struct DebugSessionSnapshotCanonicalReadDiagnosticsSection: View {
         appState.productionSingleSessionActivationGateForSelectedSession(approval: operatorApproval)
     }
 
+    private var packageEvidenceReady: Bool {
+        packageValidationReport?.packageParity.state == .testOnlyPackageParityPassed &&
+            packageValidationReport?.packageParity.blockers.isEmpty == true &&
+            packageValidationReport?.fullyRestoredRollback.state == .testOnlyFullyRestoredPackageRollbackPassed &&
+            packageValidationReport?.fullyRestoredRollback.blockers.isEmpty == true
+    }
+
     var body: some View {
         Group {
         Section("Controlled Activation Evaluation") {
@@ -9279,6 +9286,9 @@ private struct DebugSessionSnapshotCanonicalReadDiagnosticsSection: View {
             diagnosticRow("Package Blockers", packageValidationReport.map { $0.packageParity.blockers.isEmpty ? "none" : compactListSummary($0.packageParity.blockers) } ?? "not run")
             diagnosticRow("Rollback Validation", packageValidationReport?.fullyRestoredRollback.state.rawValue ?? "not run")
             diagnosticRow("Rollback Blockers", packageValidationReport.map { $0.fullyRestoredRollback.blockers.isEmpty ? "none" : compactListSummary($0.fullyRestoredRollback.blockers) } ?? "not run")
+            diagnosticRow("Package Evidence Ready", packageEvidenceReady ? "true" : "false")
+            diagnosticRow("Candidate Diagnostics Ready", diagnostics.lastCanonicalReadCandidateAllowed ? "true" : "false")
+            diagnosticRow("Overlay Ready", diagnostics.lastCanonicalCandidateOverlayAllowed ? "true" : "false")
             diagnosticRow("Operator Approval", operatorApproval?.state.rawValue ?? "not recorded")
             diagnosticRow("Approval Scope", operatorApproval?.approvedScope.description ?? "none")
             diagnosticRow("Approval Expires", formattedDate(operatorApproval?.expirationTimestamp))
@@ -9431,7 +9441,9 @@ private struct DebugSessionSnapshotCanonicalReadDiagnosticsSection: View {
                 guard !isCheckingCanonicalReadDiagnostics else { return }
                 isCheckingCanonicalReadDiagnostics = true
                 Task {
-                    _ = await appState.runCanonicalReadDiagnosticsForSelectedSession()
+                    _ = await appState.runCanonicalReadDiagnosticsForSelectedSession(
+                        productionValidationEvidence: packageValidationReport
+                    )
                     await MainActor.run {
                         isCheckingCanonicalReadDiagnostics = false
                     }
@@ -9443,7 +9455,9 @@ private struct DebugSessionSnapshotCanonicalReadDiagnosticsSection: View {
                 guard !isBuildingCanonicalCandidateOverlay else { return }
                 isBuildingCanonicalCandidateOverlay = true
                 Task {
-                    _ = await appState.buildCanonicalCandidateOverlayForSelectedSession()
+                    _ = await appState.buildCanonicalCandidateOverlayForSelectedSession(
+                        productionValidationEvidence: packageValidationReport
+                    )
                     await MainActor.run {
                         isBuildingCanonicalCandidateOverlay = false
                     }

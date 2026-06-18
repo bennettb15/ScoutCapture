@@ -19439,9 +19439,13 @@ final class AppState: ObservableObject {
     }
 
     @MainActor
-    func runCanonicalReadDiagnosticsForSelectedSession(checkedAt: Date = Date()) async -> CanonicalReadDiagnosticsResult {
-        let propertyID = selectedPropertyID ?? currentSession?.propertyID
-        let sessionID = currentSession?.id
+    func runCanonicalReadDiagnosticsForSelectedSession(
+        checkedAt: Date = Date(),
+        productionValidationEvidence: LocalHealthSessionSnapshotPackageValidationReport? = nil
+    ) async -> CanonicalReadDiagnosticsResult {
+        let selectedTarget = manualSessionSnapshotUploadTarget
+        let propertyID = selectedTarget?.propertyID ?? selectedPropertyID ?? currentSession?.propertyID
+        let sessionID = selectedTarget?.sessionID ?? currentSession?.id
         let localSnapshot = makeCanonicalReadLocalSnapshot(
             propertyID: propertyID,
             sessionID: sessionID
@@ -19462,7 +19466,14 @@ final class AppState: ObservableObject {
             local: localSnapshot,
             remote: remoteSnapshot
         )
-        recordCanonicalReadDiagnostics(result)
+        recordCanonicalReadDiagnostics(
+            result,
+            productionValidationEvidenceReady: selectedSessionProductionValidationEvidenceReady(
+                productionValidationEvidence,
+                propertyID: propertyID,
+                sessionID: sessionID
+            )
+        )
         return result
     }
 
@@ -19512,7 +19523,10 @@ final class AppState: ObservableObject {
         )
     }
 
-    private func recordCanonicalReadDiagnostics(_ result: CanonicalReadDiagnosticsResult) {
+    private func recordCanonicalReadDiagnostics(
+        _ result: CanonicalReadDiagnosticsResult,
+        productionValidationEvidenceReady: Bool = false
+    ) {
         var diagnostics = localDiagnostics
         diagnostics.sessionSnapshotUpload.lastCanonicalReadDiagnosticsAt = result.checkedAt
         diagnostics.sessionSnapshotUpload.lastCanonicalReadDiagnosticsPropertyID = result.propertyID
@@ -19580,7 +19594,8 @@ final class AppState: ObservableObject {
             parityReport: parityGapReport,
             mediaRecoveryConfidence: Self.canonicalCandidateMediaRecoveryConfidence(
                 uploadDiagnostics: diagnostics.sessionSnapshotUpload
-            )
+            ),
+            productionValidationEvidenceReady: productionValidationEvidenceReady
         )
         diagnostics.sessionSnapshotUpload.lastCanonicalReadCandidateAllowed = candidateDiagnostics.allowed
         diagnostics.sessionSnapshotUpload.lastCanonicalReadCandidateBlockedReason = candidateDiagnostics.blockedReason ?? "none"
@@ -19600,8 +19615,20 @@ final class AppState: ObservableObject {
     }
 
     @MainActor
-    func buildCanonicalCandidateOverlayForSelectedSession(checkedAt: Date = Date()) async -> CanonicalCandidateOverlayBuildResult {
-        let canonicalDiagnostics = await runCanonicalReadDiagnosticsForSelectedSession(checkedAt: checkedAt)
+    func buildCanonicalCandidateOverlayForSelectedSession(
+        checkedAt: Date = Date(),
+        productionValidationEvidence: LocalHealthSessionSnapshotPackageValidationReport? = nil
+    ) async -> CanonicalCandidateOverlayBuildResult {
+        let selectedTarget = manualSessionSnapshotUploadTarget
+        let evidenceReady = selectedSessionProductionValidationEvidenceReady(
+            productionValidationEvidence,
+            propertyID: selectedTarget?.propertyID ?? selectedPropertyID ?? currentSession?.propertyID,
+            sessionID: selectedTarget?.sessionID ?? currentSession?.id
+        )
+        let canonicalDiagnostics = await runCanonicalReadDiagnosticsForSelectedSession(
+            checkedAt: checkedAt,
+            productionValidationEvidence: productionValidationEvidence
+        )
         let parityReport = Self.makeNormalizedParityGapReport(
             checkedAt: checkedAt,
             canonicalDiagnostics: canonicalDiagnostics,
@@ -19615,14 +19642,16 @@ final class AppState: ObservableObject {
             parityReport: parityReport,
             mediaRecoveryConfidence: Self.canonicalCandidateMediaRecoveryConfidence(
                 uploadDiagnostics: localDiagnostics.sessionSnapshotUpload
-            )
+            ),
+            productionValidationEvidenceReady: evidenceReady
         )
         let result = Self.buildCanonicalCandidateOverlayTestOnly(
             checkedAt: checkedAt,
             targetClassification: supabaseConfiguration.targetClassification,
             canonicalDiagnostics: canonicalDiagnostics,
             parityReport: parityReport,
-            candidateDiagnostics: candidateDiagnostics
+            candidateDiagnostics: candidateDiagnostics,
+            productionValidationEvidenceReady: evidenceReady
         )
         let comparison = Self.makeCanonicalCandidateOverlayComparison(
             checkedAt: checkedAt,
@@ -19665,6 +19694,45 @@ final class AppState: ObservableObject {
         diagnostics.sessionSnapshotUpload.lastCanonicalCandidateOverlayComparisonTrustedReason = comparison.trustedReason
         diagnostics.sessionSnapshotUpload.lastCanonicalCandidateOverlayComparisonBlockedReason = comparison.blockedReason ?? "none"
         localDiagnostics = diagnostics
+    }
+
+    private func selectedSessionProductionValidationEvidenceReady(
+        _ report: LocalHealthSessionSnapshotPackageValidationReport?,
+        propertyID: UUID?,
+        sessionID: UUID?
+    ) -> Bool {
+        guard supabaseConfiguration.targetClassification == .approvedProductionValidation,
+              let report,
+              report.targetScope.orgID == activeOrganizationID,
+              report.targetScope.propertyID == propertyID,
+              report.targetScope.sessionID == sessionID,
+              let snapshotID = report.snapshotID,
+              report.packageParity.targetScope == report.targetScope,
+              report.fullyRestoredRollback.targetScope == report.targetScope,
+              report.packageParity.snapshotID == snapshotID,
+              report.fullyRestoredRollback.snapshotID == snapshotID,
+              report.packageParity.state == .testOnlyPackageParityPassed,
+              report.packageParity.blockers.isEmpty,
+              report.fullyRestoredRollback.state == .testOnlyFullyRestoredPackageRollbackPassed,
+              report.fullyRestoredRollback.blockers.isEmpty,
+              report.packageParity.activeSourceRemainsLocal,
+              report.packageParity.productionReadsBlocked,
+              report.packageParity.broadCanonicalReadsBlocked,
+              report.packageParity.remoteStateWritesBlocked,
+              report.packageParity.realLocalUserStateWritesBlocked,
+              report.packageParity.fallbackRetained,
+              report.fullyRestoredRollback.activeSourceRemainsLocal,
+              report.fullyRestoredRollback.productionReadsBlocked,
+              report.fullyRestoredRollback.broadCanonicalReadsBlocked,
+              report.fullyRestoredRollback.activationBlocked,
+              report.fullyRestoredRollback.remoteStateWritesBlocked,
+              report.fullyRestoredRollback.realLocalUserStateWritesBlocked,
+              report.fullyRestoredRollback.fallbackRetained,
+              report.fullyRestoredRollback.exportSealSyncMediaICloudUnchanged,
+              report.fullyRestoredRollback.schemaRLSDataUnchanged else {
+            return false
+        }
+        return true
     }
 
     @MainActor
@@ -20743,7 +20811,8 @@ final class AppState: ObservableObject {
         parityReport: NormalizedParityGapReport,
         replayValidation: NormalizedBackfillReplayValidationResult? = nil,
         mediaRecoveryConfidence: Double = 1,
-        productionActivationGate: ProductionSingleSessionActivationGateDiagnostics? = nil
+        productionActivationGate: ProductionSingleSessionActivationGateDiagnostics? = nil,
+        productionValidationEvidenceReady: Bool = false
     ) -> CanonicalReadCandidateDiagnostics {
         let orgAllowlisted = canonicalDiagnostics.activeOrganizationID.map { configuration.orgAllowlist.contains($0) } ?? false
         let propertyAllowlisted = canonicalDiagnostics.propertyID.map { configuration.propertyAllowlist.contains($0) } ?? false
@@ -20771,7 +20840,7 @@ final class AppState: ObservableObject {
         case .localDev, .approvedStaging:
             break
         case .approvedProductionValidation:
-            if productionActivationGate?.gateAllowed != true {
+            if productionActivationGate?.gateAllowed != true && !productionValidationEvidenceReady {
                 blockers.append("production_canonical_read_candidate_requires_separate_explicit_approval")
             }
         case .remote:
@@ -20878,14 +20947,15 @@ final class AppState: ObservableObject {
         canonicalDiagnostics: CanonicalReadDiagnosticsResult,
         parityReport: NormalizedParityGapReport,
         candidateDiagnostics: CanonicalReadCandidateDiagnostics,
-        productionActivationGate: ProductionSingleSessionActivationGateDiagnostics? = nil
+        productionActivationGate: ProductionSingleSessionActivationGateDiagnostics? = nil,
+        productionValidationEvidenceReady: Bool = false
     ) -> CanonicalCandidateOverlayBuildResult {
         var blockers: [String] = []
         switch targetClassification {
         case .localDev, .approvedStaging:
             break
         case .approvedProductionValidation:
-            if productionActivationGate?.gateAllowed != true {
+            if productionActivationGate?.gateAllowed != true && !productionValidationEvidenceReady {
                 blockers.append("production_canonical_candidate_overlay_blocked")
             }
         case .remote:

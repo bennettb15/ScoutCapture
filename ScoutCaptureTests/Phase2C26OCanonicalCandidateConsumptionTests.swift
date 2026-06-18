@@ -474,6 +474,89 @@ final class Phase2C26OCanonicalCandidateConsumptionTests: XCTestCase {
         )
     }
 
+    private func passingPackageValidationReport(
+        scope: AppState.ProductionCohortApprovalScope? = nil,
+        packageBlockers: [String] = [],
+        rollbackBlockers: [String] = []
+    ) -> AppState.LocalHealthSessionSnapshotPackageValidationReport {
+        let checkedAt = Date(timeIntervalSinceReferenceDate: 9_500)
+        let targetScope = scope ?? AppState.ProductionCohortApprovalScope(
+            orgID: orgID,
+            propertyID: propertyID,
+            sessionID: sessionID
+        )
+        let packageParity = AppState.ProductionSingleSessionSnapshotPackageParityValidation(
+            checkedAt: checkedAt,
+            state: packageBlockers.isEmpty ? .testOnlyPackageParityPassed : .blocked,
+            blockers: packageBlockers,
+            targetScope: targetScope,
+            snapshotID: snapshotID,
+            restoreDiagnosticsPassed: packageBlockers.isEmpty,
+            rowObjectChecksumSchemaParentFreshnessPassed: packageBlockers.isEmpty,
+            scopeMatched: packageBlockers.isEmpty,
+            hydrationSucceeded: packageBlockers.isEmpty,
+            hydratedMetadataMatchesSnapshotEvidence: packageBlockers.isEmpty,
+            hydratedShotIDsMatchSnapshotEvidence: packageBlockers.isEmpty,
+            hydratedIssueIDsMatchSnapshotEvidence: packageBlockers.isEmpty,
+            hydratedGuidedIDsMatchSnapshotEvidence: packageBlockers.isEmpty,
+            mediaManifestCount: 3,
+            mediaRetrievalAcceptedCount: 3,
+            mediaRestorationAcceptedCount: 3,
+            mediaChecksumParityPassed: packageBlockers.isEmpty,
+            candidateEvidenceReady: packageBlockers.isEmpty,
+            overlayEvidenceReady: packageBlockers.isEmpty,
+            overlayComparisonMatchesHydratedPackage: packageBlockers.isEmpty,
+            fallbackRetained: true,
+            activeSourceRemainsLocal: true,
+            productionReadsBlocked: true,
+            broadCanonicalReadsBlocked: true,
+            remoteStateWritesBlocked: true,
+            realLocalUserStateWritesBlocked: true,
+            originalsOverwriteBlocked: true,
+            originalsPreserved: true,
+            rollbackCleanupVerified: true,
+            noProductionBehaviorChangedText: "test evidence only; no production behavior changed"
+        )
+        let rollback = AppState.ProductionSingleSessionFullyRestoredPackageRollbackValidation(
+            checkedAt: checkedAt,
+            state: rollbackBlockers.isEmpty ? .testOnlyFullyRestoredPackageRollbackPassed : .blocked,
+            blockers: rollbackBlockers,
+            targetScope: targetScope,
+            snapshotID: snapshotID,
+            restoreDiagnosticsPassed: rollbackBlockers.isEmpty,
+            hydrationSucceeded: rollbackBlockers.isEmpty,
+            mediaRetrievalSucceeded: rollbackBlockers.isEmpty,
+            mediaRestorationSucceeded: rollbackBlockers.isEmpty,
+            mediaRollbackSucceeded: rollbackBlockers.isEmpty,
+            preHydrationFixtureFingerprint: "pre-fixture",
+            restoredFixtureFingerprint: "pre-fixture",
+            preHydrationLocalFixtureRestored: rollbackBlockers.isEmpty,
+            generatedRecoveredMediaArtifactsRemoved: true,
+            generatedPackageCandidateArtifactsRemoved: true,
+            originalsPreserved: true,
+            fallbackRetained: true,
+            activeSourceRemainsLocal: true,
+            productionReadsBlocked: true,
+            broadCanonicalReadsBlocked: true,
+            activationBlocked: true,
+            remoteStateWritesBlocked: true,
+            realLocalUserStateWritesBlocked: true,
+            exportSealSyncMediaICloudUnchanged: true,
+            schemaRLSDataUnchanged: true,
+            noProductionBehaviorChangedText: "test evidence only; no production behavior changed"
+        )
+        return AppState.LocalHealthSessionSnapshotPackageValidationReport(
+            checkedAt: checkedAt,
+            targetScope: targetScope,
+            snapshotID: snapshotID,
+            packageParity: packageParity,
+            fullyRestoredRollback: rollback,
+            packageParityReportText: "package parity passed",
+            fullyRestoredRollbackReportText: "fully restored rollback passed",
+            combinedReportText: "package parity passed\nfully restored rollback passed"
+        )
+    }
+
     private func approvedDecisionRecord(
         upload: AppState.SessionSnapshotUploadDiagnostics? = nil,
         checkedAt: Date = Date(timeIntervalSinceReferenceDate: 8_600)
@@ -4422,6 +4505,148 @@ final class Phase2C26OCanonicalCandidateConsumptionTests: XCTestCase {
         XCTAssertEqual(activation.activeSource, .local)
         XCTAssertTrue(activation.blockedReason?.contains("production_canonical_candidate_activation_blocked") == true)
         XCTAssertTrue(activation.blockedReason?.contains("production_wide_canonical_reads_not_disabled") == true)
+    }
+
+    @MainActor
+    func testProductionValidationBlankLocalHealthStateBuildsSelectedScopeDiagnosticsAndOverlayWithPackageEvidence() async throws {
+        let fixture = try makeActivationExecutionFixture(
+            environment: productionActivationExecutionEnvironment()
+        )
+        defer { tearDownActivationExecutionFixture(fixture) }
+        let report = passingPackageValidationReport()
+        let initialDiagnostics = fixture.appState._debugLocalDiagnosticsForTests().sessionSnapshotUpload
+
+        XCTAssertFalse(initialDiagnostics.lastCanonicalReadCandidateAllowed)
+        XCTAssertFalse(initialDiagnostics.lastCanonicalCandidateOverlayAllowed)
+        XCTAssertFalse(initialDiagnostics.lastCanonicalCandidateActivationAllowed)
+
+        let readDiagnostics = await fixture.appState.runCanonicalReadDiagnosticsForSelectedSession(
+            checkedAt: Date(timeIntervalSinceReferenceDate: 9_750),
+            productionValidationEvidence: report
+        )
+        let diagnosticsAfterRead = fixture.appState._debugLocalDiagnosticsForTests().sessionSnapshotUpload
+        let overlay = await fixture.appState.buildCanonicalCandidateOverlayForSelectedSession(
+            checkedAt: Date(timeIntervalSinceReferenceDate: 9_760),
+            productionValidationEvidence: report
+        )
+        let diagnosticsAfterOverlay = fixture.appState._debugLocalDiagnosticsForTests().sessionSnapshotUpload
+
+        XCTAssertEqual(readDiagnostics.activeOrganizationID, orgID)
+        XCTAssertEqual(readDiagnostics.propertyID, propertyID)
+        XCTAssertEqual(readDiagnostics.sessionID, sessionID)
+        XCTAssertTrue(diagnosticsAfterRead.lastCanonicalReadCandidateAllowed)
+        XCTAssertEqual(diagnosticsAfterRead.lastCanonicalReadCandidateBlockedReason, "none")
+        XCTAssertFalse(diagnosticsAfterRead.lastCanonicalReadCandidateProductionWideEnabled)
+        XCTAssertTrue(overlay.allowed)
+        XCTAssertEqual(overlay.overlay?.organizationID, orgID)
+        XCTAssertEqual(overlay.overlay?.propertyID, propertyID)
+        XCTAssertEqual(overlay.overlay?.sessionID, sessionID)
+        XCTAssertEqual(overlay.overlay?.activeSource, "local")
+        XCTAssertEqual(overlay.overlay?.fallbackSource, "local")
+        XCTAssertEqual(diagnosticsAfterOverlay.lastCanonicalCandidateOverlayBlockedReason, "none")
+        XCTAssertTrue(diagnosticsAfterOverlay.lastCanonicalCandidateOverlayAllowed)
+        XCTAssertFalse(diagnosticsAfterOverlay.lastCanonicalCandidateActivationAllowed)
+        XCTAssertEqual(diagnosticsAfterOverlay.lastCanonicalCandidateActivationActiveSource, "local")
+        XCTAssertFalse(fixture.appState.backendFeatureFlags.supabaseReadEnabled)
+        XCTAssertFalse(fixture.appState.backendFeatureFlags.supabasePropertyReadEnabled)
+        XCTAssertFalse(fixture.appState.backendFeatureFlags.mediaSupabaseUploadEnabled)
+        XCTAssertNil(diagnosticsAfterOverlay.lastHydrationAt)
+        XCTAssertFalse(diagnosticsAfterOverlay.lastHydrationAllowed)
+        XCTAssertNil(diagnosticsAfterOverlay.lastMediaRetrievalAt)
+        XCTAssertFalse(diagnosticsAfterOverlay.lastMediaRetrievalAllowed)
+        XCTAssertEqual(diagnosticsAfterOverlay.attemptedCount, 0)
+        XCTAssertFalse(diagnosticsAfterOverlay.lastStorageUploadCompleted)
+        XCTAssertFalse(diagnosticsAfterOverlay.lastRowInsertCompleted)
+    }
+
+    @MainActor
+    func testProductionValidationWrongScopePackageEvidenceDoesNotUnblockDiagnosticsOrOverlay() async throws {
+        let fixture = try makeActivationExecutionFixture(
+            environment: productionActivationExecutionEnvironment()
+        )
+        defer { tearDownActivationExecutionFixture(fixture) }
+        let wrongScope = AppState.ProductionCohortApprovalScope(
+            orgID: orgID,
+            propertyID: propertyID,
+            sessionID: UUID(uuidString: "55555555-5555-5555-5555-555555555555")!
+        )
+        let report = passingPackageValidationReport(scope: wrongScope)
+
+        _ = await fixture.appState.runCanonicalReadDiagnosticsForSelectedSession(
+            checkedAt: Date(timeIntervalSinceReferenceDate: 9_770),
+            productionValidationEvidence: report
+        )
+        let diagnosticsAfterRead = fixture.appState._debugLocalDiagnosticsForTests().sessionSnapshotUpload
+        let overlay = await fixture.appState.buildCanonicalCandidateOverlayForSelectedSession(
+            checkedAt: Date(timeIntervalSinceReferenceDate: 9_780),
+            productionValidationEvidence: report
+        )
+        let diagnosticsAfterOverlay = fixture.appState._debugLocalDiagnosticsForTests().sessionSnapshotUpload
+
+        XCTAssertFalse(diagnosticsAfterRead.lastCanonicalReadCandidateAllowed)
+        XCTAssertTrue(
+            diagnosticsAfterRead.lastCanonicalReadCandidateBlockedReason.contains(
+                "production_canonical_read_candidate_requires_separate_explicit_approval"
+            )
+        )
+        XCTAssertFalse(overlay.allowed)
+        XCTAssertNil(overlay.overlay)
+        XCTAssertTrue(overlay.activeSourceRemainsLocal)
+        XCTAssertTrue(
+            diagnosticsAfterOverlay.lastCanonicalCandidateOverlayBlockedReason.contains(
+                "production_canonical_candidate_overlay_blocked"
+            )
+        )
+        XCTAssertFalse(diagnosticsAfterOverlay.lastCanonicalCandidateActivationAllowed)
+        XCTAssertFalse(fixture.appState.backendFeatureFlags.supabaseReadEnabled)
+        XCTAssertFalse(fixture.appState.backendFeatureFlags.supabasePropertyReadEnabled)
+    }
+
+    @MainActor
+    func testProductionValidationOperatorApprovalRecordsExactScopeAfterEvidenceOverlayReady() async throws {
+        let fixture = try makeActivationExecutionFixture(
+            environment: productionActivationExecutionEnvironment()
+        )
+        defer { tearDownActivationExecutionFixture(fixture) }
+        let report = passingPackageValidationReport()
+
+        _ = await fixture.appState.runCanonicalReadDiagnosticsForSelectedSession(
+            checkedAt: Date(timeIntervalSinceReferenceDate: 9_790),
+            productionValidationEvidence: report
+        )
+        _ = await fixture.appState.buildCanonicalCandidateOverlayForSelectedSession(
+            checkedAt: Date(timeIntervalSinceReferenceDate: 9_800),
+            productionValidationEvidence: report
+        )
+        let approval = fixture.appState.makeProductionSingleSessionOperatorApprovalForSelectedSession(
+            approvedAt: Date(timeIntervalSinceReferenceDate: 9_810),
+            expiresAt: Date(timeIntervalSinceReferenceDate: 9_900)
+        )
+        let gate = fixture.appState.productionSingleSessionActivationGateForSelectedSession(
+            checkedAt: Date(timeIntervalSinceReferenceDate: 9_830),
+            policy: singleSessionGatePolicy(),
+            approval: approval
+        )
+        let diagnostics = fixture.appState._debugLocalDiagnosticsForTests().sessionSnapshotUpload
+
+        XCTAssertEqual(approval.state, .approved)
+        XCTAssertEqual(approval.approvedScope.orgID, orgID)
+        XCTAssertEqual(approval.approvedScope.propertyID, propertyID)
+        XCTAssertEqual(approval.approvedScope.sessionID, sessionID)
+        XCTAssertTrue(gate.gateAllowed)
+        XCTAssertTrue(gate.exactScopeMatch)
+        XCTAssertTrue(gate.operatorApprovalMatch)
+        XCTAssertTrue(gate.productionWideDisabledConfirmed)
+        XCTAssertEqual(gate.selectedScope.orgID, orgID)
+        XCTAssertEqual(gate.selectedScope.propertyID, propertyID)
+        XCTAssertEqual(gate.selectedScope.sessionID, sessionID)
+        XCTAssertEqual(gate.approvedScope.orgID, orgID)
+        XCTAssertEqual(gate.approvedScope.propertyID, propertyID)
+        XCTAssertEqual(gate.approvedScope.sessionID, sessionID)
+        XCTAssertFalse(diagnostics.lastCanonicalCandidateActivationAllowed)
+        XCTAssertEqual(diagnostics.lastCanonicalCandidateActivationActiveSource, "local")
+        XCTAssertFalse(fixture.appState.backendFeatureFlags.supabaseReadEnabled)
+        XCTAssertFalse(fixture.appState.backendFeatureFlags.supabasePropertyReadEnabled)
     }
 
     func testProductionSingleSessionActivationGateDefaultFalseBlocksProduction() {
