@@ -66,7 +66,9 @@ final class Phase2C26OCanonicalCandidateConsumptionTests: XCTestCase {
 
     @MainActor
     private func makeActivationExecutionFixture(
-        environment: [String: String]? = nil
+        environment: [String: String]? = nil,
+        activeOrganizationID: UUID? = UUID(uuidString: "11111111-1111-1111-1111-111111111111")!,
+        remoteOrgID: UUID? = nil
     ) throws -> ActivationExecutionFixture {
         let defaultsFixture = makeDefaults()
         let root = try makeTempStorageRoot()
@@ -94,11 +96,12 @@ final class Phase2C26OCanonicalCandidateConsumptionTests: XCTestCase {
             property.updatedAt,
             session.startedAt
         ].compactMap { $0 }.max() ?? session.startedAt
+        let resolvedRemoteOrgID = remoteOrgID ?? orgID
         let remoteSnapshot = AppState.CanonicalReadRemoteSnapshot(
             properties: [
                 AppState.CanonicalReadRemotePropertyRow(
                     id: property.id,
-                    orgID: orgID,
+                    orgID: resolvedRemoteOrgID,
                     updatedAt: remoteUpdatedAt,
                     revision: 27,
                     deletedAt: nil
@@ -107,7 +110,7 @@ final class Phase2C26OCanonicalCandidateConsumptionTests: XCTestCase {
             sessions: [
                 AppState.CanonicalReadRemoteSessionRow(
                     id: session.id,
-                    orgID: orgID,
+                    orgID: resolvedRemoteOrgID,
                     propertyID: property.id,
                     status: session.status.rawValue,
                     updatedAt: remoteUpdatedAt,
@@ -149,7 +152,7 @@ final class Phase2C26OCanonicalCandidateConsumptionTests: XCTestCase {
                     role: "owner"
                 )
             ],
-            activeOrganizationID: orgID,
+            activeOrganizationID: activeOrganizationID,
             ready: true
         )
         appState._debugRefreshPropertiesLocallyForTests()
@@ -4693,6 +4696,163 @@ final class Phase2C26OCanonicalCandidateConsumptionTests: XCTestCase {
         XCTAssertEqual(diagnostics.lastCanonicalCandidateActivationActiveSource, "local")
         XCTAssertFalse(fixture.appState.backendFeatureFlags.supabaseReadEnabled)
         XCTAssertFalse(fixture.appState.backendFeatureFlags.supabasePropertyReadEnabled)
+    }
+
+    @MainActor
+    func testProductionValidationNilActiveOrgDerivesSelectedScopeFromVerifiedPackageAndReadEvidence() async throws {
+        let fixture = try makeActivationExecutionFixture(
+            environment: productionActivationExecutionEnvironment(),
+            activeOrganizationID: nil
+        )
+        defer { tearDownActivationExecutionFixture(fixture) }
+        let report = passingPackageValidationReport()
+
+        let read = await fixture.appState.runCanonicalReadDiagnosticsForSelectedSession(
+            checkedAt: Date(timeIntervalSinceReferenceDate: 9_840),
+            productionValidationEvidence: report
+        )
+        let overlay = await fixture.appState.buildCanonicalCandidateOverlayForSelectedSession(
+            checkedAt: Date(timeIntervalSinceReferenceDate: 9_850),
+            productionValidationEvidence: report
+        )
+        let approval = fixture.appState.makeProductionSingleSessionOperatorApprovalForSelectedSession(
+            approvedAt: Date(timeIntervalSinceReferenceDate: 9_860),
+            expiresAt: Date(timeIntervalSinceReferenceDate: 9_950)
+        )
+        let gate = fixture.appState.productionSingleSessionActivationGateForSelectedSession(
+            checkedAt: Date(timeIntervalSinceReferenceDate: 9_870),
+            policy: singleSessionGatePolicy(),
+            approval: approval
+        )
+        let diagnostics = fixture.appState._debugLocalDiagnosticsForTests().sessionSnapshotUpload
+
+        XCTAssertNil(fixture.appState.activeOrganizationID)
+        XCTAssertEqual(read.activeOrganizationID, orgID)
+        XCTAssertEqual(read.verifiedOrganizationID, orgID)
+        XCTAssertEqual(diagnostics.lastCanonicalReadDiagnosticsVerifiedOrgID, orgID)
+        XCTAssertTrue(diagnostics.lastCanonicalReadCandidateAllowed)
+        XCTAssertTrue(overlay.allowed)
+        XCTAssertEqual(overlay.overlay?.organizationID, orgID)
+        XCTAssertEqual(approval.state, .approved)
+        XCTAssertEqual(approval.approvedScope.orgID, orgID)
+        XCTAssertEqual(approval.approvedScope.propertyID, propertyID)
+        XCTAssertEqual(approval.approvedScope.sessionID, sessionID)
+        XCTAssertTrue(gate.gateAllowed)
+        XCTAssertEqual(gate.selectedScope.orgID, orgID)
+        XCTAssertEqual(gate.selectedScope.propertyID, propertyID)
+        XCTAssertEqual(gate.selectedScope.sessionID, sessionID)
+        XCTAssertEqual(gate.approvedScope.orgID, orgID)
+        XCTAssertFalse(diagnostics.lastCanonicalCandidateActivationAllowed)
+        XCTAssertEqual(diagnostics.lastCanonicalCandidateActivationActiveSource, "local")
+        XCTAssertFalse(fixture.appState.backendFeatureFlags.supabaseReadEnabled)
+        XCTAssertFalse(fixture.appState.backendFeatureFlags.supabasePropertyReadEnabled)
+        XCTAssertEqual(diagnostics.attemptedCount, 0)
+        XCTAssertFalse(diagnostics.lastStorageUploadCompleted)
+        XCTAssertFalse(diagnostics.lastRowInsertCompleted)
+    }
+
+    @MainActor
+    func testProductionValidationConflictingDerivedOrgEvidenceBlocksApprovalAndGate() async throws {
+        let conflictingRemoteOrgID = UUID(uuidString: "AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA")!
+        let fixture = try makeActivationExecutionFixture(
+            environment: productionActivationExecutionEnvironment(),
+            activeOrganizationID: nil,
+            remoteOrgID: conflictingRemoteOrgID
+        )
+        defer { tearDownActivationExecutionFixture(fixture) }
+        let report = passingPackageValidationReport()
+
+        let read = await fixture.appState.runCanonicalReadDiagnosticsForSelectedSession(
+            checkedAt: Date(timeIntervalSinceReferenceDate: 9_880),
+            productionValidationEvidence: report
+        )
+        let overlay = await fixture.appState.buildCanonicalCandidateOverlayForSelectedSession(
+            checkedAt: Date(timeIntervalSinceReferenceDate: 9_890),
+            productionValidationEvidence: report
+        )
+        let approval = fixture.appState.makeProductionSingleSessionOperatorApprovalForSelectedSession(
+            approvedAt: Date(timeIntervalSinceReferenceDate: 9_900),
+            expiresAt: Date(timeIntervalSinceReferenceDate: 9_980)
+        )
+        let gate = fixture.appState.productionSingleSessionActivationGateForSelectedSession(
+            checkedAt: Date(timeIntervalSinceReferenceDate: 9_910),
+            policy: singleSessionGatePolicy(),
+            approval: approval
+        )
+        let diagnostics = fixture.appState._debugLocalDiagnosticsForTests().sessionSnapshotUpload
+
+        XCTAssertEqual(read.result, .parentMismatch)
+        XCTAssertNil(read.verifiedOrganizationID)
+        XCTAssertNil(diagnostics.lastCanonicalReadDiagnosticsVerifiedOrgID)
+        XCTAssertFalse(overlay.allowed)
+        XCTAssertNil(overlay.overlay)
+        XCTAssertEqual(approval.approvedScope.orgID, nil)
+        XCTAssertTrue(approval.approvalBlockedReason?.contains("org_id_required") == true)
+        XCTAssertFalse(gate.gateAllowed)
+        XCTAssertNil(gate.selectedScope.orgID)
+        XCTAssertTrue(gate.gateBlockedReason?.contains("exact_scope_match_required") == true)
+        XCTAssertFalse(diagnostics.lastCanonicalCandidateActivationAllowed)
+        XCTAssertEqual(diagnostics.lastCanonicalCandidateActivationActiveSource, "local")
+        XCTAssertFalse(fixture.appState.backendFeatureFlags.supabaseReadEnabled)
+    }
+
+    @MainActor
+    func testProductionValidationMissingParentConsistencyDoesNotDeriveApprovalOrg() throws {
+        let fixture = try makeActivationExecutionFixture(
+            environment: productionActivationExecutionEnvironment(),
+            activeOrganizationID: nil
+        )
+        defer { tearDownActivationExecutionFixture(fixture) }
+        var diagnostics = fixture.appState._debugLocalDiagnosticsForTests()
+        var upload = rolloutReadinessDiagnostics()
+        upload.lastCanonicalReadDiagnosticsVerifiedOrgID = orgID
+        upload.lastCanonicalReadDiagnosticsParentOrgConsistent = nil
+        diagnostics.sessionSnapshotUpload = upload
+        fixture.appState._debugSetLocalDiagnosticsForTests(diagnostics)
+
+        let approval = fixture.appState.makeProductionSingleSessionOperatorApprovalForSelectedSession(
+            approvedAt: Date(timeIntervalSinceReferenceDate: 9_920),
+            expiresAt: Date(timeIntervalSinceReferenceDate: 9_990)
+        )
+        let gate = fixture.appState.productionSingleSessionActivationGateForSelectedSession(
+            checkedAt: Date(timeIntervalSinceReferenceDate: 9_930),
+            policy: singleSessionGatePolicy(),
+            approval: approval
+        )
+
+        XCTAssertNil(approval.approvedScope.orgID)
+        XCTAssertTrue(approval.approvalBlockedReason?.contains("org_id_required") == true)
+        XCTAssertFalse(gate.gateAllowed)
+        XCTAssertNil(gate.selectedScope.orgID)
+        XCTAssertTrue(gate.gateBlockedReason?.contains("exact_scope_match_required") == true)
+        XCTAssertFalse(fixture.appState.backendFeatureFlags.supabaseReadEnabled)
+    }
+
+    @MainActor
+    func testProductionValidationNilActiveOrgWrongCandidateAllowlistStillBlocks() async throws {
+        let wrongOrgID = UUID(uuidString: "BBBBBBBB-BBBB-BBBB-BBBB-BBBBBBBBBBBB")!
+        var environment = productionActivationExecutionEnvironment()
+        environment[SupabaseRuntimeConfiguration.canonicalReadCandidateOrgAllowlistEnvKey] = wrongOrgID.uuidString
+        let fixture = try makeActivationExecutionFixture(
+            environment: environment,
+            activeOrganizationID: nil
+        )
+        defer { tearDownActivationExecutionFixture(fixture) }
+        let report = passingPackageValidationReport()
+
+        _ = await fixture.appState.runCanonicalReadDiagnosticsForSelectedSession(
+            checkedAt: Date(timeIntervalSinceReferenceDate: 9_940),
+            productionValidationEvidence: report
+        )
+        let diagnostics = fixture.appState._debugLocalDiagnosticsForTests().sessionSnapshotUpload
+
+        XCTAssertEqual(diagnostics.lastCanonicalReadDiagnosticsVerifiedOrgID, orgID)
+        XCTAssertFalse(diagnostics.lastCanonicalReadCandidateOrgAllowlisted)
+        XCTAssertFalse(diagnostics.lastCanonicalReadCandidateAllowed)
+        XCTAssertTrue(diagnostics.lastCanonicalReadCandidateBlockedReason.contains("org_not_allowlisted"))
+        XCTAssertFalse(diagnostics.lastCanonicalCandidateActivationAllowed)
+        XCTAssertEqual(diagnostics.lastCanonicalCandidateActivationActiveSource, "local")
+        XCTAssertFalse(fixture.appState.backendFeatureFlags.supabaseReadEnabled)
     }
 
     func testProductionSingleSessionActivationGateDefaultFalseBlocksProduction() {

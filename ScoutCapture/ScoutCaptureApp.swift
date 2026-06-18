@@ -9274,10 +9274,12 @@ private struct DebugSessionSnapshotCanonicalReadDiagnosticsSection: View {
                 .foregroundStyle(.secondary)
             if let uploadTarget {
                 diagnosticRow("Selected Property", uploadTarget.propertyName)
+                diagnosticRow("Selected Org", diagnostics.lastCanonicalReadDiagnosticsVerifiedOrgID?.uuidString ?? "none")
                 diagnosticRow("Property ID", uploadTarget.propertyID.uuidString)
                 diagnosticRow("Session ID", uploadTarget.sessionID.uuidString)
                 diagnosticRow("Session Status", uploadTarget.sessionStatus.rawValue)
             } else {
+                diagnosticRow("Selected Org", diagnostics.lastCanonicalReadDiagnosticsVerifiedOrgID?.uuidString ?? "none")
                 diagnosticRow("Selected Property", diagnostics.lastCanonicalReadDiagnosticsPropertyID?.uuidString ?? "none")
                 diagnosticRow("Session ID", diagnostics.lastCanonicalReadDiagnosticsSessionID?.uuidString ?? "none")
             }
@@ -9322,6 +9324,7 @@ private struct DebugSessionSnapshotCanonicalReadDiagnosticsSection: View {
                 .foregroundStyle(.secondary)
             diagnosticRow("Result", diagnostics.lastCanonicalReadDiagnosticsResult)
             diagnosticRow("Checked", formattedDate(diagnostics.lastCanonicalReadDiagnosticsAt))
+            diagnosticRow("Verified Org", diagnostics.lastCanonicalReadDiagnosticsVerifiedOrgID?.uuidString ?? "none")
             diagnosticRow("Property ID", diagnostics.lastCanonicalReadDiagnosticsPropertyID?.uuidString ?? "none")
             diagnosticRow("Session ID", diagnostics.lastCanonicalReadDiagnosticsSessionID?.uuidString ?? "none")
             diagnosticRow("Local Property", diagnostics.lastCanonicalReadDiagnosticsLocalPropertyFound ? "true" : "false")

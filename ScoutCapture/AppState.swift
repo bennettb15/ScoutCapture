@@ -1386,6 +1386,7 @@ final class AppState: ObservableObject {
         var lastRecoveryLatestSnapshotCovered: Bool = false
         var lastRecoveryRestoreDiagnosticsResult: String = "not_checked"
         var lastCanonicalReadDiagnosticsAt: Date?
+        var lastCanonicalReadDiagnosticsVerifiedOrgID: UUID?
         var lastCanonicalReadDiagnosticsPropertyID: UUID?
         var lastCanonicalReadDiagnosticsSessionID: UUID?
         var lastCanonicalReadDiagnosticsResult: String = CanonicalReadDiagnosticResult.localOnly.rawValue
@@ -3222,6 +3223,7 @@ final class AppState: ObservableObject {
         let propertyID: UUID?
         let sessionID: UUID?
         let activeOrganizationID: UUID?
+        var verifiedOrganizationID: UUID? = nil
         let result: CanonicalReadDiagnosticResult
         let remotePropertyFound: Bool
         let remoteSessionFound: Bool
@@ -19455,6 +19457,11 @@ final class AppState: ObservableObject {
         let selectedTarget = manualSessionSnapshotUploadTarget
         let propertyID = selectedTarget?.propertyID ?? selectedPropertyID ?? currentSession?.propertyID
         let sessionID = selectedTarget?.sessionID ?? currentSession?.id
+        let selectedOrganizationID = selectedSessionVerifiedOrganizationID(
+            productionValidationEvidence: productionValidationEvidence,
+            propertyID: propertyID,
+            sessionID: sessionID
+        )
         let localSnapshot = makeCanonicalReadLocalSnapshot(
             propertyID: propertyID,
             sessionID: sessionID
@@ -19462,7 +19469,7 @@ final class AppState: ObservableObject {
         let remoteSnapshot: CanonicalReadRemoteSnapshot?
         if let propertyID {
             remoteSnapshot = await fetchCanonicalReadRemoteSnapshotIfAvailable(
-                activeOrganizationID: activeOrganizationID,
+                activeOrganizationID: selectedOrganizationID,
                 propertyID: propertyID,
                 sessionID: sessionID
             )
@@ -19471,7 +19478,7 @@ final class AppState: ObservableObject {
         }
         let result = Self.makeCanonicalReadDiagnostics(
             checkedAt: checkedAt,
-            activeOrganizationID: activeOrganizationID,
+            activeOrganizationID: selectedOrganizationID,
             local: localSnapshot,
             remote: remoteSnapshot
         )
@@ -19576,6 +19583,7 @@ final class AppState: ObservableObject {
             Self.resetCanonicalCandidateOverlayDiagnostics(&diagnostics.sessionSnapshotUpload)
         }
         diagnostics.sessionSnapshotUpload.lastCanonicalReadDiagnosticsAt = result.checkedAt
+        diagnostics.sessionSnapshotUpload.lastCanonicalReadDiagnosticsVerifiedOrgID = result.verifiedOrganizationID
         diagnostics.sessionSnapshotUpload.lastCanonicalReadDiagnosticsPropertyID = result.propertyID
         diagnostics.sessionSnapshotUpload.lastCanonicalReadDiagnosticsSessionID = result.sessionID
         diagnostics.sessionSnapshotUpload.lastCanonicalReadDiagnosticsResult = result.result.rawValue
@@ -19709,6 +19717,7 @@ final class AppState: ObservableObject {
         diagnostics.lastCanonicalCandidateOverlayComparisonParityConfidence = "not_checked"
         diagnostics.lastCanonicalCandidateOverlayComparisonTrustedReason = "not_checked"
         diagnostics.lastCanonicalCandidateOverlayComparisonBlockedReason = "not_checked"
+        diagnostics.lastCanonicalReadDiagnosticsVerifiedOrgID = nil
     }
 
     @MainActor
@@ -19799,8 +19808,60 @@ final class AppState: ObservableObject {
         sessionID: UUID?
     ) -> Bool {
         guard supabaseConfiguration.targetClassification == .approvedProductionValidation,
-              let report,
-              report.targetScope.orgID == activeOrganizationID,
+              let packageOrgID = selectedSessionPackageEvidenceOrganizationID(
+                report,
+                propertyID: propertyID,
+                sessionID: sessionID
+              ),
+              selectedSessionVerifiedOrganizationID(
+                productionValidationEvidence: report,
+                propertyID: propertyID,
+                sessionID: sessionID
+              ) == packageOrgID else {
+            return false
+        }
+        return true
+    }
+
+    private func selectedSessionVerifiedOrganizationID(
+        productionValidationEvidence report: LocalHealthSessionSnapshotPackageValidationReport? = nil,
+        diagnostics: SessionSnapshotUploadDiagnostics? = nil,
+        propertyID: UUID?,
+        sessionID: UUID?
+    ) -> UUID? {
+        let diagnostics = diagnostics ?? localDiagnostics.sessionSnapshotUpload
+        var candidates: [UUID] = []
+        if let activeOrganizationID {
+            candidates.append(activeOrganizationID)
+        }
+        if let packageOrgID = selectedSessionPackageEvidenceOrganizationID(
+            report,
+            propertyID: propertyID,
+            sessionID: sessionID
+        ) {
+            candidates.append(packageOrgID)
+        }
+        if diagnostics.lastCanonicalReadDiagnosticsPropertyID == propertyID,
+           diagnostics.lastCanonicalReadDiagnosticsSessionID == sessionID,
+           diagnostics.lastCanonicalReadDiagnosticsParentOrgConsistent == true,
+           diagnostics.lastCanonicalReadDiagnosticsParentPropertyConsistent == true,
+           let verifiedOrgID = diagnostics.lastCanonicalReadDiagnosticsVerifiedOrgID {
+            candidates.append(verifiedOrgID)
+        }
+        guard let first = candidates.first,
+              candidates.allSatisfy({ $0 == first }) else {
+            return nil
+        }
+        return first
+    }
+
+    private func selectedSessionPackageEvidenceOrganizationID(
+        _ report: LocalHealthSessionSnapshotPackageValidationReport?,
+        propertyID: UUID?,
+        sessionID: UUID?
+    ) -> UUID? {
+        guard let report,
+              let orgID = report.targetScope.orgID,
               report.targetScope.propertyID == propertyID,
               report.targetScope.sessionID == sessionID,
               let snapshotID = report.snapshotID,
@@ -19827,9 +19888,9 @@ final class AppState: ObservableObject {
               report.fullyRestoredRollback.fallbackRetained,
               report.fullyRestoredRollback.exportSealSyncMediaICloudUnchanged,
               report.fullyRestoredRollback.schemaRLSDataUnchanged else {
-            return false
+            return nil
         }
-        return true
+        return orgID
     }
 
     @MainActor
@@ -19838,12 +19899,19 @@ final class AppState: ObservableObject {
         policy: ProductionSingleSessionActivationGatePolicy? = nil,
         approval: ProductionCohortOperatorApprovalDiagnostics? = nil
     ) -> ProductionSingleSessionActivationGateDiagnostics {
-        Self.makeProductionSingleSessionActivationGateDiagnostics(
+        let diagnostics = localDiagnostics.sessionSnapshotUpload
+        let propertyID = diagnostics.lastCanonicalCandidateOverlayPropertyID ?? diagnostics.lastCanonicalReadDiagnosticsPropertyID
+        let sessionID = diagnostics.lastCanonicalCandidateOverlaySessionID ?? diagnostics.lastCanonicalReadDiagnosticsSessionID
+        return Self.makeProductionSingleSessionActivationGateDiagnostics(
             checkedAt: checkedAt,
             policy: policy ?? Self.loadProductionSingleSessionActivationGatePolicy(),
             approval: approval,
             targetClassification: supabaseConfiguration.targetClassification,
-            diagnostics: localDiagnostics.sessionSnapshotUpload
+            diagnostics: diagnostics,
+            selectedOrganizationID: selectedSessionVerifiedOrganizationID(
+                propertyID: propertyID,
+                sessionID: sessionID
+            )
         )
     }
 
@@ -19852,9 +19920,16 @@ final class AppState: ObservableObject {
         approvedAt: Date = Date(),
         expiresAt: Date? = Date().addingTimeInterval(15 * 60)
     ) -> ProductionCohortOperatorApprovalDiagnostics {
+        let diagnostics = localDiagnostics.sessionSnapshotUpload
+        let propertyID = diagnostics.lastCanonicalCandidateOverlayPropertyID ?? diagnostics.lastCanonicalReadDiagnosticsPropertyID
+        let sessionID = diagnostics.lastCanonicalCandidateOverlaySessionID ?? diagnostics.lastCanonicalReadDiagnosticsSessionID
+        let selectedOrganizationID = selectedSessionVerifiedOrganizationID(
+            propertyID: propertyID,
+            sessionID: sessionID
+        )
         let controlPlane = Self.makeProductionCohortControlPlaneDiagnostics(
-            localDiagnostics.sessionSnapshotUpload,
-            orgID: activeOrganizationID,
+            diagnostics,
+            orgID: selectedOrganizationID,
             policy: ProductionCohortControlPlanePolicy(
                 requestedStage: .singleSessionActivation,
                 operatorApprovalState: .approved,
@@ -20109,6 +20184,12 @@ final class AppState: ObservableObject {
             propertyID: local.propertyID ?? remoteProperty?.id ?? remoteSession?.propertyID,
             sessionID: local.sessionID ?? remoteSession?.id,
             activeOrganizationID: activeOrganizationID,
+            verifiedOrganizationID: canonicalReadVerifiedOrganizationID(
+                activeOrganizationID: activeOrganizationID,
+                localOrgID: local.orgID,
+                remotePropertyOrgID: remoteProperty?.orgID,
+                remoteSessionOrgID: remoteSession?.orgID
+            ),
             result: result,
             remotePropertyFound: remoteProperty != nil,
             remoteSessionFound: remoteSession != nil,
@@ -20200,6 +20281,21 @@ final class AppState: ObservableObject {
         return true
     }
 
+    private nonisolated static func canonicalReadVerifiedOrganizationID(
+        activeOrganizationID: UUID?,
+        localOrgID: UUID?,
+        remotePropertyOrgID: UUID?,
+        remoteSessionOrgID: UUID?
+    ) -> UUID? {
+        let remoteOrgIDs = [remotePropertyOrgID, remoteSessionOrgID].compactMap { $0 }
+        guard let localOrgID, !remoteOrgIDs.isEmpty else { return nil }
+        let activeOrgEvidence = activeOrganizationID.map { [$0] } ?? []
+        let allEvidence = remoteOrgIDs + [localOrgID] + activeOrgEvidence
+        let uniqueOrgIDs = Set(allEvidence)
+        guard uniqueOrgIDs.count == 1 else { return nil }
+        return uniqueOrgIDs.first
+    }
+
     nonisolated static func canonicalReadDiagnosticsText(_ diagnostics: CanonicalReadDiagnosticsResult) -> String {
         var lines: [String] = []
         lines.append("ScoutCapture Local Health - Canonical Read Diagnostics")
@@ -20211,6 +20307,7 @@ final class AppState: ObservableObject {
         lines.append("")
         lines.append("Scope")
         lines.append("- active_org_id: \(diagnostics.activeOrganizationID?.uuidString ?? "none")")
+        lines.append("- verified_selected_org_id: \(diagnostics.verifiedOrganizationID?.uuidString ?? "none")")
         lines.append("- property_id: \(diagnostics.propertyID?.uuidString ?? "none")")
         lines.append("- session_id: \(diagnostics.sessionID?.uuidString ?? "none")")
         lines.append("")
@@ -20755,9 +20852,10 @@ final class AppState: ObservableObject {
         policy: ProductionSingleSessionActivationGatePolicy = .disabled,
         approval: ProductionCohortOperatorApprovalDiagnostics? = nil,
         targetClassification: SupabaseRuntimeConfiguration.TargetClassification,
-        diagnostics: SessionSnapshotUploadDiagnostics
+        diagnostics: SessionSnapshotUploadDiagnostics,
+        selectedOrganizationID: UUID? = nil
     ) -> ProductionSingleSessionActivationGateDiagnostics {
-        let orgID = approval?.approvedScope.orgID
+        let orgID = selectedOrganizationID ?? approval?.approvedScope.orgID
         let propertyID = diagnostics.lastCanonicalCandidateOverlayPropertyID ?? diagnostics.lastCanonicalReadDiagnosticsPropertyID
         let sessionID = diagnostics.lastCanonicalCandidateOverlaySessionID ?? diagnostics.lastCanonicalReadDiagnosticsSessionID
         let selectedScope = ProductionCohortApprovalScope(
@@ -20915,7 +21013,8 @@ final class AppState: ObservableObject {
         productionActivationGate: ProductionSingleSessionActivationGateDiagnostics? = nil,
         productionValidationEvidenceReady: Bool = false
     ) -> CanonicalReadCandidateDiagnostics {
-        let orgAllowlisted = canonicalDiagnostics.activeOrganizationID.map { configuration.orgAllowlist.contains($0) } ?? false
+        let selectedOrganizationID = canonicalDiagnostics.verifiedOrganizationID ?? canonicalDiagnostics.activeOrganizationID
+        let orgAllowlisted = selectedOrganizationID.map { configuration.orgAllowlist.contains($0) } ?? false
         let propertyAllowlisted = canonicalDiagnostics.propertyID.map { configuration.propertyAllowlist.contains($0) } ?? false
         let sessionAllowlisted = canonicalDiagnostics.sessionID.map { configuration.sessionAllowlist.contains($0) } ?? false
         let localFallbackAvailable = canonicalDiagnostics.localPropertyFound || canonicalDiagnostics.localSessionFound
@@ -20988,7 +21087,7 @@ final class AppState: ObservableObject {
             checkedAt: checkedAt,
             propertyID: canonicalDiagnostics.propertyID,
             sessionID: canonicalDiagnostics.sessionID,
-            activeOrganizationID: canonicalDiagnostics.activeOrganizationID,
+            activeOrganizationID: selectedOrganizationID,
             targetClassification: targetClassification,
             candidateFlagEnabled: configuration.enabled,
             orgAllowlisted: orgAllowlisted,
@@ -21096,7 +21195,7 @@ final class AppState: ObservableObject {
             source: "remote_normalized_candidate_with_local_fallback",
             propertyID: canonicalDiagnostics.propertyID,
             sessionID: canonicalDiagnostics.sessionID,
-            organizationID: canonicalDiagnostics.activeOrganizationID,
+            organizationID: canonicalDiagnostics.verifiedOrganizationID ?? canonicalDiagnostics.activeOrganizationID,
             remoteShotCount: canonicalDiagnostics.remoteShotCount ?? 0,
             remoteIssueObservationCount: canonicalDiagnostics.remoteIssueObservationCount ?? 0,
             remoteGuidedCount: canonicalDiagnostics.remoteGuidedCount,

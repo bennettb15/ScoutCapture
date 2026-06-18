@@ -114,6 +114,46 @@
             value = "true"
             isEnabled = "YES">
          </EnvironmentVariable>
+         <EnvironmentVariable
+            key = "SCOUTCAPTURE_CANONICAL_READ_CANDIDATE_ENABLED"
+            value = "true"
+            isEnabled = "YES">
+         </EnvironmentVariable>
+         <EnvironmentVariable
+            key = "SCOUTCAPTURE_CANONICAL_READ_CANDIDATE_ORG_ALLOWLIST"
+            value = "d4ba94ff-25e1-4072-aa79-9a548fcb3008"
+            isEnabled = "YES">
+         </EnvironmentVariable>
+         <EnvironmentVariable
+            key = "SCOUTCAPTURE_CANONICAL_READ_CANDIDATE_PROPERTY_ALLOWLIST"
+            value = "243A9328-066D-442D-A4F5-2ABBD1E2857B"
+            isEnabled = "YES">
+         </EnvironmentVariable>
+         <EnvironmentVariable
+            key = "SCOUTCAPTURE_CANONICAL_READ_CANDIDATE_SESSION_ALLOWLIST"
+            value = "0DD10857-978B-4EC4-B947-227E78F8AFEA"
+            isEnabled = "YES">
+         </EnvironmentVariable>
+         <EnvironmentVariable
+            key = "SCOUTCAPTURE_PRODUCTION_SINGLE_SESSION_CANONICAL_ACTIVATION_ENABLED"
+            value = "true"
+            isEnabled = "YES">
+         </EnvironmentVariable>
+         <EnvironmentVariable
+            key = "SCOUTCAPTURE_PRODUCTION_SINGLE_SESSION_CANONICAL_ACTIVATION_ORG_ALLOWLIST"
+            value = "d4ba94ff-25e1-4072-aa79-9a548fcb3008"
+            isEnabled = "YES">
+         </EnvironmentVariable>
+         <EnvironmentVariable
+            key = "SCOUTCAPTURE_PRODUCTION_SINGLE_SESSION_CANONICAL_ACTIVATION_PROPERTY_ALLOWLIST"
+            value = "243A9328-066D-442D-A4F5-2ABBD1E2857B"
+            isEnabled = "YES">
+         </EnvironmentVariable>
+         <EnvironmentVariable
+            key = "SCOUTCAPTURE_PRODUCTION_SINGLE_SESSION_CANONICAL_ACTIVATION_SESSION_ALLOWLIST"
+            value = "0DD10857-978B-4EC4-B947-227E78F8AFEA"
+            isEnabled = "YES">
+         </EnvironmentVariable>
       </EnvironmentVariables>
    </LaunchAction>
    <ProfileAction
