@@ -9249,18 +9249,14 @@ private struct DebugSessionSnapshotCanonicalReadDiagnosticsSection: View {
     @State private var isShowingCanonicalCandidateActivationConfirmation = false
     @State private var isActivatingCanonicalCandidate = false
     @State private var isRollingBackCanonicalCandidate = false
+    @State private var operatorApproval: AppState.ProductionCohortOperatorApprovalDiagnostics?
 
     private var rolloutReadiness: AppState.CanonicalRolloutReadinessDiagnostics {
         AppState.makeCanonicalRolloutReadinessDiagnostics(diagnostics)
     }
 
     private var activationGate: AppState.ProductionSingleSessionActivationGateDiagnostics {
-        AppState.makeProductionSingleSessionActivationGateDiagnostics(
-            policy: AppState.loadProductionSingleSessionActivationGatePolicy(),
-            approval: nil,
-            targetClassification: appState.supabaseConfiguration.targetClassification,
-            diagnostics: diagnostics
-        )
+        appState.productionSingleSessionActivationGateForSelectedSession(approval: operatorApproval)
     }
 
     var body: some View {
@@ -9283,9 +9279,15 @@ private struct DebugSessionSnapshotCanonicalReadDiagnosticsSection: View {
             diagnosticRow("Package Blockers", packageValidationReport.map { $0.packageParity.blockers.isEmpty ? "none" : compactListSummary($0.packageParity.blockers) } ?? "not run")
             diagnosticRow("Rollback Validation", packageValidationReport?.fullyRestoredRollback.state.rawValue ?? "not run")
             diagnosticRow("Rollback Blockers", packageValidationReport.map { $0.fullyRestoredRollback.blockers.isEmpty ? "none" : compactListSummary($0.fullyRestoredRollback.blockers) } ?? "not run")
+            diagnosticRow("Operator Approval", operatorApproval?.state.rawValue ?? "not recorded")
+            diagnosticRow("Approval Scope", operatorApproval?.approvedScope.description ?? "none")
+            diagnosticRow("Approval Expires", formattedDate(operatorApproval?.expirationTimestamp))
+            diagnosticRow("Approval Blocked", compactValue(operatorApproval?.approvalBlockedReason ?? "none"))
             diagnosticRow("Activation Gate", activationGate.productionSingleSessionActivationGateEnabled ? "enabled" : "disabled")
             diagnosticRow("Gate Allowed", activationGate.gateAllowed ? "true" : "false")
             diagnosticRow("Gate Blocked", compactValue(activationGate.gateBlockedReason ?? "none"))
+            diagnosticRow("Gate Selected Scope", activationGate.selectedScope.description)
+            diagnosticRow("Gate Approved Scope", activationGate.approvedScope.description)
             diagnosticRow("Activation Allowed", diagnostics.lastCanonicalCandidateActivationAllowed ? "true" : "false")
             diagnosticRow("Activation Blocked", compactValue(diagnostics.lastCanonicalCandidateActivationBlockedReason))
             diagnosticRow("Active Source", diagnostics.lastCanonicalCandidateActivationActiveSource)
@@ -9449,6 +9451,15 @@ private struct DebugSessionSnapshotCanonicalReadDiagnosticsSection: View {
             }
             .disabled(isBuildingCanonicalCandidateOverlay)
             .font(.system(size: 14, weight: .semibold))
+            Button("Record Fresh Operator Approval") {
+                operatorApproval = appState.makeProductionSingleSessionOperatorApprovalForSelectedSession()
+            }
+            .font(.system(size: 14, weight: .semibold))
+            Button("Clear Operator Approval") {
+                operatorApproval = nil
+            }
+            .disabled(operatorApproval == nil)
+            .font(.system(size: 14, weight: .semibold))
             Button(isActivatingCanonicalCandidate ? "Activating..." : "Activate Canonical Candidate For Session") {
                 guard !isActivatingCanonicalCandidate else { return }
                 isShowingCanonicalCandidateActivationConfirmation = true
@@ -9462,7 +9473,7 @@ private struct DebugSessionSnapshotCanonicalReadDiagnosticsSection: View {
                     isActivatingCanonicalCandidate = true
                     Task {
                         _ = await MainActor.run {
-                            appState.activateCanonicalCandidateForSelectedSession()
+                            appState.activateCanonicalCandidateForSelectedSession(operatorApproval: operatorApproval)
                         }
                         await MainActor.run {
                             isActivatingCanonicalCandidate = false

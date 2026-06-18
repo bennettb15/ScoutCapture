@@ -53,8 +53,21 @@ final class Phase2C26OCanonicalCandidateConsumptionTests: XCTestCase {
         ]
     }
 
+    private func productionActivationExecutionEnvironment() -> [String: String] {
+        var environment = activationExecutionEnvironment()
+        environment["SCOUTCAPTURE_SUPABASE_URL"] = "https://\(SupabaseRuntimeConfiguration.productionSnapshotValidationProjectRef).supabase.co"
+        environment[SupabaseRuntimeConfiguration.productionSnapshotValidationEnvKey] = "true"
+        environment[SupabaseRuntimeConfiguration.productionSingleSessionCanonicalActivationEnabledEnvKey] = "true"
+        environment[SupabaseRuntimeConfiguration.productionSingleSessionCanonicalActivationOrgAllowlistEnvKey] = orgID.uuidString
+        environment[SupabaseRuntimeConfiguration.productionSingleSessionCanonicalActivationPropertyAllowlistEnvKey] = propertyID.uuidString
+        environment[SupabaseRuntimeConfiguration.productionSingleSessionCanonicalActivationSessionAllowlistEnvKey] = sessionID.uuidString
+        return environment
+    }
+
     @MainActor
-    private func makeActivationExecutionFixture() throws -> ActivationExecutionFixture {
+    private func makeActivationExecutionFixture(
+        environment: [String: String]? = nil
+    ) throws -> ActivationExecutionFixture {
         let defaultsFixture = makeDefaults()
         let root = try makeTempStorageRoot()
         let store = LocalStore(testStorageRootURL: root)
@@ -110,7 +123,7 @@ final class Phase2C26OCanonicalCandidateConsumptionTests: XCTestCase {
         let appState = AppState(
             localStore: store,
             userDefaults: defaultsFixture.defaults,
-            environment: activationExecutionEnvironment(),
+            environment: environment ?? activationExecutionEnvironment(),
             sessionSnapshotStorageUploadOverride: { _ in
                 XCTFail("27N activation rehearsal must not upload session snapshots")
             },
@@ -4260,6 +4273,155 @@ final class Phase2C26OCanonicalCandidateConsumptionTests: XCTestCase {
         XCTAssertFalse(rehearsal.exportSealSyncMediaICloudUnchanged)
         XCTAssertEqual(rehearsal.acceptedCandidateMediaCount, 0)
         XCTAssertFalse(FileManager.default.fileExists(atPath: candidateURL.path))
+    }
+
+    @MainActor
+    func testProductionValidationSelectedSessionActivationWithoutApprovalGateRemainsBlocked() throws {
+        let fixture = try makeActivationExecutionFixture(
+            environment: productionActivationExecutionEnvironment()
+        )
+        defer { tearDownActivationExecutionFixture(fixture) }
+        let upload = rolloutReadinessDiagnostics()
+        var diagnostics = fixture.appState._debugLocalDiagnosticsForTests()
+        diagnostics.sessionSnapshotUpload = upload
+        fixture.appState._debugSetLocalDiagnosticsForTests(diagnostics)
+
+        let activation = fixture.appState.activateCanonicalCandidateForSelectedSession(
+            checkedAt: Date(timeIntervalSinceReferenceDate: 9_700),
+            productionActivationGatePolicy: singleSessionGatePolicy()
+        )
+
+        XCTAssertEqual(fixture.appState.supabaseConfiguration.targetClassification, .approvedProductionValidation)
+        XCTAssertFalse(activation.allowed)
+        XCTAssertEqual(activation.activeSource, .local)
+        XCTAssertEqual(activation.activationScope, "selected_session_only")
+        XCTAssertTrue(activation.blockedReason?.contains("production_canonical_candidate_activation_blocked") == true)
+        XCTAssertTrue(activation.blockedReason?.contains("operator_approval_missing") == true)
+        XCTAssertTrue(activation.productionBlocked)
+    }
+
+    @MainActor
+    func testProductionValidationSelectedSessionActivationWithExactAllowedGateActivatesDiagnosticScopeOnly() throws {
+        let fixture = try makeActivationExecutionFixture(
+            environment: productionActivationExecutionEnvironment()
+        )
+        defer { tearDownActivationExecutionFixture(fixture) }
+        let upload = rolloutReadinessDiagnostics()
+        let approval = approvedSingleSessionApproval(upload: upload)
+        var diagnostics = fixture.appState._debugLocalDiagnosticsForTests()
+        diagnostics.sessionSnapshotUpload = upload
+        fixture.appState._debugSetLocalDiagnosticsForTests(diagnostics)
+
+        let gate = fixture.appState.productionSingleSessionActivationGateForSelectedSession(
+            policy: singleSessionGatePolicy(),
+            approval: approval
+        )
+        let activation = fixture.appState.activateCanonicalCandidateForSelectedSession(
+            checkedAt: Date(timeIntervalSinceReferenceDate: 9_710),
+            operatorApproval: approval,
+            productionActivationGatePolicy: singleSessionGatePolicy()
+        )
+        let activatedDiagnostics = fixture.appState._debugLocalDiagnosticsForTests().sessionSnapshotUpload
+
+        XCTAssertTrue(gate.gateAllowed)
+        XCTAssertTrue(gate.exactScopeMatch)
+        XCTAssertTrue(gate.operatorApprovalMatch)
+        XCTAssertTrue(gate.productionWideDisabledConfirmed)
+        XCTAssertTrue(activation.allowed)
+        XCTAssertEqual(activation.activeSource, .canonicalCandidate)
+        XCTAssertEqual(activation.rollbackSource, .local)
+        XCTAssertEqual(activation.activationScope, "selected_session_only")
+        XCTAssertEqual(activation.propertyID, propertyID)
+        XCTAssertEqual(activation.sessionID, sessionID)
+        XCTAssertTrue(activation.rollbackAvailable)
+        XCTAssertTrue(activation.productionBlocked)
+        XCTAssertFalse(fixture.appState.backendFeatureFlags.supabaseReadEnabled)
+        XCTAssertFalse(fixture.appState.backendFeatureFlags.supabasePropertyReadEnabled)
+        XCTAssertFalse(fixture.appState.backendFeatureFlags.mediaSupabaseUploadEnabled)
+        XCTAssertFalse(activatedDiagnostics.lastCanonicalReadCandidateProductionWideEnabled)
+        XCTAssertEqual(activatedDiagnostics.lastCanonicalCandidateActivationActiveSource, "canonical_candidate")
+        XCTAssertEqual(activatedDiagnostics.lastCanonicalCandidateActivationScope, "selected_session_only")
+        XCTAssertNil(activatedDiagnostics.lastHydrationAt)
+        XCTAssertFalse(activatedDiagnostics.lastHydrationAllowed)
+        XCTAssertNil(activatedDiagnostics.lastMediaRetrievalAt)
+        XCTAssertFalse(activatedDiagnostics.lastMediaRetrievalAllowed)
+        XCTAssertEqual(activatedDiagnostics.lastMediaRetrievalAttemptedCount, 0)
+        XCTAssertEqual(activatedDiagnostics.attemptedCount, 0)
+        XCTAssertFalse(activatedDiagnostics.lastStorageUploadCompleted)
+        XCTAssertFalse(activatedDiagnostics.lastRowInsertCompleted)
+    }
+
+    @MainActor
+    func testProductionValidationSelectedSessionActivationWrongApprovalScopeBlocks() throws {
+        let fixture = try makeActivationExecutionFixture(
+            environment: productionActivationExecutionEnvironment()
+        )
+        defer { tearDownActivationExecutionFixture(fixture) }
+        let upload = rolloutReadinessDiagnostics()
+        let wrongOrgID = UUID(uuidString: "55555555-5555-5555-5555-555555555555")!
+        let approval = approvedSingleSessionApproval(upload: upload, orgID: wrongOrgID)
+        var diagnostics = fixture.appState._debugLocalDiagnosticsForTests()
+        diagnostics.sessionSnapshotUpload = upload
+        fixture.appState._debugSetLocalDiagnosticsForTests(diagnostics)
+
+        let activation = fixture.appState.activateCanonicalCandidateForSelectedSession(
+            checkedAt: Date(timeIntervalSinceReferenceDate: 9_720),
+            operatorApproval: approval,
+            productionActivationGatePolicy: singleSessionGatePolicy()
+        )
+
+        XCTAssertFalse(activation.allowed)
+        XCTAssertEqual(activation.activeSource, .local)
+        XCTAssertTrue(activation.blockedReason?.contains("production_canonical_candidate_activation_blocked") == true)
+        XCTAssertTrue(activation.blockedReason?.contains("exact_scope_match_required") == true)
+    }
+
+    @MainActor
+    func testProductionValidationSelectedSessionActivationDisabledGateBlocks() throws {
+        let fixture = try makeActivationExecutionFixture(
+            environment: productionActivationExecutionEnvironment()
+        )
+        defer { tearDownActivationExecutionFixture(fixture) }
+        let upload = rolloutReadinessDiagnostics()
+        let approval = approvedSingleSessionApproval(upload: upload)
+        var diagnostics = fixture.appState._debugLocalDiagnosticsForTests()
+        diagnostics.sessionSnapshotUpload = upload
+        fixture.appState._debugSetLocalDiagnosticsForTests(diagnostics)
+
+        let activation = fixture.appState.activateCanonicalCandidateForSelectedSession(
+            checkedAt: Date(timeIntervalSinceReferenceDate: 9_730),
+            operatorApproval: approval,
+            productionActivationGatePolicy: singleSessionGatePolicy(enabled: false)
+        )
+
+        XCTAssertFalse(activation.allowed)
+        XCTAssertEqual(activation.activeSource, .local)
+        XCTAssertTrue(activation.blockedReason?.contains("production_canonical_candidate_activation_blocked") == true)
+        XCTAssertTrue(activation.blockedReason?.contains("production_single_session_canonical_activation_disabled") == true)
+    }
+
+    @MainActor
+    func testProductionValidationSelectedSessionActivationProductionWideReadsEnabledBlocks() throws {
+        let fixture = try makeActivationExecutionFixture(
+            environment: productionActivationExecutionEnvironment()
+        )
+        defer { tearDownActivationExecutionFixture(fixture) }
+        let upload = rolloutReadinessDiagnostics(productionWideEnabled: true)
+        let approval = approvedSingleSessionApproval(upload: upload)
+        var diagnostics = fixture.appState._debugLocalDiagnosticsForTests()
+        diagnostics.sessionSnapshotUpload = upload
+        fixture.appState._debugSetLocalDiagnosticsForTests(diagnostics)
+
+        let activation = fixture.appState.activateCanonicalCandidateForSelectedSession(
+            checkedAt: Date(timeIntervalSinceReferenceDate: 9_740),
+            operatorApproval: approval,
+            productionActivationGatePolicy: singleSessionGatePolicy()
+        )
+
+        XCTAssertFalse(activation.allowed)
+        XCTAssertEqual(activation.activeSource, .local)
+        XCTAssertTrue(activation.blockedReason?.contains("production_canonical_candidate_activation_blocked") == true)
+        XCTAssertTrue(activation.blockedReason?.contains("production_wide_canonical_reads_not_disabled") == true)
     }
 
     func testProductionSingleSessionActivationGateDefaultFalseBlocksProduction() {

@@ -19668,11 +19668,61 @@ final class AppState: ObservableObject {
     }
 
     @MainActor
-    func activateCanonicalCandidateForSelectedSession(checkedAt: Date = Date()) -> CanonicalCandidateActivationResult {
+    func productionSingleSessionActivationGateForSelectedSession(
+        checkedAt: Date = Date(),
+        policy: ProductionSingleSessionActivationGatePolicy? = nil,
+        approval: ProductionCohortOperatorApprovalDiagnostics? = nil
+    ) -> ProductionSingleSessionActivationGateDiagnostics {
+        Self.makeProductionSingleSessionActivationGateDiagnostics(
+            checkedAt: checkedAt,
+            policy: policy ?? Self.loadProductionSingleSessionActivationGatePolicy(),
+            approval: approval,
+            targetClassification: supabaseConfiguration.targetClassification,
+            diagnostics: localDiagnostics.sessionSnapshotUpload
+        )
+    }
+
+    @MainActor
+    func makeProductionSingleSessionOperatorApprovalForSelectedSession(
+        approvedAt: Date = Date(),
+        expiresAt: Date? = Date().addingTimeInterval(15 * 60)
+    ) -> ProductionCohortOperatorApprovalDiagnostics {
+        let controlPlane = Self.makeProductionCohortControlPlaneDiagnostics(
+            localDiagnostics.sessionSnapshotUpload,
+            orgID: activeOrganizationID,
+            policy: ProductionCohortControlPlanePolicy(
+                requestedStage: .singleSessionActivation,
+                operatorApprovalState: .approved,
+                productionWideCanonicalReadsEnabled: false,
+                parityConfidenceThreshold: 0.95,
+                replayConfidenceThreshold: 0.95
+            )
+        )
+        return Self.approveProductionCohortReadiness(
+            controlPlane,
+            approvedAt: approvedAt,
+            expiresAt: expiresAt
+        ).diagnostics
+    }
+
+    @MainActor
+    func activateCanonicalCandidateForSelectedSession(
+        checkedAt: Date = Date(),
+        operatorApproval: ProductionCohortOperatorApprovalDiagnostics? = nil,
+        productionActivationGatePolicy: ProductionSingleSessionActivationGatePolicy? = nil
+    ) -> CanonicalCandidateActivationResult {
+        let productionActivationGate = supabaseConfiguration.targetClassification == .approvedProductionValidation
+            ? productionSingleSessionActivationGateForSelectedSession(
+                checkedAt: checkedAt,
+                policy: productionActivationGatePolicy,
+                approval: operatorApproval
+            )
+            : nil
         let result = Self.makeCanonicalCandidateActivationResult(
             checkedAt: checkedAt,
             targetClassification: supabaseConfiguration.targetClassification,
-            diagnostics: localDiagnostics.sessionSnapshotUpload
+            diagnostics: localDiagnostics.sessionSnapshotUpload,
+            productionActivationGate: productionActivationGate
         )
         recordCanonicalCandidateActivation(result, activatedAt: result.allowed ? checkedAt : nil)
         return result
@@ -21057,6 +21107,12 @@ final class AppState: ObservableObject {
         case .approvedProductionValidation:
             if productionActivationGate?.gateAllowed != true {
                 blockers.append("production_canonical_candidate_activation_blocked")
+                if let gateBlockedReason = productionActivationGate?.gateBlockedReason {
+                    blockers.append(contentsOf: gateBlockedReason
+                        .split(separator: ",")
+                        .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                        .filter { !$0.isEmpty })
+                }
             }
         case .remote:
             blockers.append("random_remote_canonical_candidate_activation_blocked")
@@ -40239,6 +40295,10 @@ final class AppState: ObservableObject {
 
     func _debugLocalDiagnosticsForTests() -> LocalDiagnosticsState {
         localDiagnostics
+    }
+
+    func _debugSetLocalDiagnosticsForTests(_ diagnostics: LocalDiagnosticsState) {
+        localDiagnostics = diagnostics
     }
 
     func _debugDivergenceAuditWithEmptyRemoteForTests(
