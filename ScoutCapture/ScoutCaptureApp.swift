@@ -8668,6 +8668,7 @@ private struct DebugSessionSnapshotUploadDiagnosticsView: View {
     @State private var isRepairingLocalOrgDrift: Bool = false
     @State private var isRunningLocalOrgDriftAudit: Bool = false
     @State private var isRepairingConfirmedLocalOrgDrift: Bool = false
+    @State private var isSnapshotUploadDetailsExpanded: Bool = false
     @State private var testSessionCreationMessage: String?
 
     init(appState: AppState, diagnostics: AppState.SessionSnapshotUploadDiagnostics) {
@@ -8760,6 +8761,23 @@ private struct DebugSessionSnapshotUploadDiagnosticsView: View {
                 )
             }
 
+            Section("Snapshot Upload Details") {
+                DisclosureGroup(isExpanded: $isSnapshotUploadDetailsExpanded) {
+                    Text("Upload, preflight, readback, restore, and recovery diagnostics remain available here. Keep this collapsed during controlled activation evaluation unless fresh snapshot evidence needs investigation.")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(.secondary)
+                } label: {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Upload Diagnostics And Repair Tools")
+                            .font(.system(size: 14, weight: .semibold))
+                        Text(isSnapshotUploadDetailsExpanded ? "Hide snapshot upload controls" : "Show snapshot upload controls")
+                            .font(.system(size: 13, weight: .medium))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+
+            if isSnapshotUploadDetailsExpanded {
             Section("Session Snapshot Upload") {
                 Text("Shadow-write only diagnostics. The feature flag defaults off. Upload failures do not block capture, export, sealing, sync, media recovery, or iCloud fallback.")
                     .font(.system(size: 13, weight: .medium))
@@ -9105,6 +9123,7 @@ private struct DebugSessionSnapshotUploadDiagnosticsView: View {
                 .disabled(isCheckingRecoveryCohort)
                 .font(.system(size: 14, weight: .semibold))
             }
+            }
 
             Section("Snapshot Package Validation") {
                 Text("Selected-session package validation. It keeps canonical reads disabled, does not activate, does not write remote state, and removes package-candidate diagnostic artifacts before a pass.")
@@ -9149,7 +9168,9 @@ private struct DebugSessionSnapshotUploadDiagnosticsView: View {
                 appState: appState,
                 diagnostics: diagnostics,
                 isCheckingCanonicalReadDiagnostics: $isCheckingCanonicalReadDiagnostics,
-                isBuildingCanonicalCandidateOverlay: $isBuildingCanonicalCandidateOverlay
+                isBuildingCanonicalCandidateOverlay: $isBuildingCanonicalCandidateOverlay,
+                uploadTarget: uploadTarget,
+                packageValidationReport: packageValidationReport
             )
         }
         .navigationTitle("Snapshot Upload")
@@ -9223,6 +9244,8 @@ private struct DebugSessionSnapshotCanonicalReadDiagnosticsSection: View {
     let diagnostics: AppState.SessionSnapshotUploadDiagnostics
     @Binding var isCheckingCanonicalReadDiagnostics: Bool
     @Binding var isBuildingCanonicalCandidateOverlay: Bool
+    let uploadTarget: AppState.ManualSessionSnapshotUploadTarget?
+    let packageValidationReport: AppState.LocalHealthSessionSnapshotPackageValidationReport?
     @State private var isShowingCanonicalCandidateActivationConfirmation = false
     @State private var isActivatingCanonicalCandidate = false
     @State private var isRollingBackCanonicalCandidate = false
@@ -9231,8 +9254,46 @@ private struct DebugSessionSnapshotCanonicalReadDiagnosticsSection: View {
         AppState.makeCanonicalRolloutReadinessDiagnostics(diagnostics)
     }
 
+    private var activationGate: AppState.ProductionSingleSessionActivationGateDiagnostics {
+        AppState.makeProductionSingleSessionActivationGateDiagnostics(
+            policy: AppState.loadProductionSingleSessionActivationGatePolicy(),
+            approval: nil,
+            targetClassification: appState.supabaseConfiguration.targetClassification,
+            diagnostics: diagnostics
+        )
+    }
+
     var body: some View {
         Group {
+        Section("Controlled Activation Evaluation") {
+            Text("Selected-session diagnostic activation evaluation only. This does not enable broad canonical reads, change supabase_read_enabled, write remote state, or change export, seal, sync, media, or iCloud behavior.")
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(.secondary)
+            if let uploadTarget {
+                diagnosticRow("Selected Property", uploadTarget.propertyName)
+                diagnosticRow("Property ID", uploadTarget.propertyID.uuidString)
+                diagnosticRow("Session ID", uploadTarget.sessionID.uuidString)
+                diagnosticRow("Session Status", uploadTarget.sessionStatus.rawValue)
+            } else {
+                diagnosticRow("Selected Property", diagnostics.lastCanonicalReadDiagnosticsPropertyID?.uuidString ?? "none")
+                diagnosticRow("Session ID", diagnostics.lastCanonicalReadDiagnosticsSessionID?.uuidString ?? "none")
+            }
+            diagnosticRow("Snapshot ID", packageValidationReport?.snapshotID?.uuidString ?? diagnostics.lastRestoreDiagnosticsSnapshotID?.uuidString ?? "none")
+            diagnosticRow("Package Parity", packageValidationReport?.packageParity.state.rawValue ?? "not run")
+            diagnosticRow("Package Blockers", packageValidationReport.map { $0.packageParity.blockers.isEmpty ? "none" : compactListSummary($0.packageParity.blockers) } ?? "not run")
+            diagnosticRow("Rollback Validation", packageValidationReport?.fullyRestoredRollback.state.rawValue ?? "not run")
+            diagnosticRow("Rollback Blockers", packageValidationReport.map { $0.fullyRestoredRollback.blockers.isEmpty ? "none" : compactListSummary($0.fullyRestoredRollback.blockers) } ?? "not run")
+            diagnosticRow("Activation Gate", activationGate.productionSingleSessionActivationGateEnabled ? "enabled" : "disabled")
+            diagnosticRow("Gate Allowed", activationGate.gateAllowed ? "true" : "false")
+            diagnosticRow("Gate Blocked", compactValue(activationGate.gateBlockedReason ?? "none"))
+            diagnosticRow("Activation Allowed", diagnostics.lastCanonicalCandidateActivationAllowed ? "true" : "false")
+            diagnosticRow("Activation Blocked", compactValue(diagnostics.lastCanonicalCandidateActivationBlockedReason))
+            diagnosticRow("Active Source", diagnostics.lastCanonicalCandidateActivationActiveSource)
+            diagnosticRow("Rollback Availability", diagnostics.lastCanonicalCandidateActivationRollbackAvailable ? "available" : "missing")
+            diagnosticRow("supabase_read_enabled", appState.backendFeatureFlags.supabaseReadEnabled ? "true" : "false")
+            diagnosticRow("Broad Canonical Reads", diagnostics.lastCanonicalReadCandidateProductionWideEnabled ? "enabled" : "disabled")
+        }
+
         Section("Canonical Read - Rollout Readiness") {
             diagnosticRow("Readiness State", rolloutReadiness.state.rawValue)
             diagnosticRow("Next Action", rolloutReadiness.nextRecommendedAction)
@@ -9353,7 +9414,7 @@ private struct DebugSessionSnapshotCanonicalReadDiagnosticsSection: View {
             }
         }
 
-        Section("Canonical Read Actions") {
+        Section("Controlled Activation Evaluation Actions") {
             NavigationLink {
                 DebugSessionSnapshotUploadTextView(
                     snapshotText: AppState.canonicalReadRolloutReportText(diagnostics),
