@@ -18273,15 +18273,20 @@ final class AppState: ObservableObject {
     }
 
     nonisolated static func canonicalReadRolloutReportText(_ diagnostics: SessionSnapshotUploadDiagnostics) -> String {
+        let selectedOrgID = selectedSessionReportOrganizationID(diagnostics)
         let readiness = makeCanonicalRolloutReadinessDiagnostics(diagnostics)
         let productionReadiness = makeProductionAllowlistReadinessDiagnostics(diagnostics)
-        let cohortControlPlane = makeProductionCohortControlPlaneDiagnostics(diagnostics)
+        let cohortControlPlane = makeProductionCohortControlPlaneDiagnostics(
+            diagnostics,
+            orgID: selectedOrgID
+        )
         let cohortApproval = makeProductionCohortOperatorApprovalDiagnostics(cohortControlPlane)
         let singleSessionGate = makeProductionSingleSessionActivationGateDiagnostics(
             policy: .disabled,
             approval: nil,
             targetClassification: .approvedProductionValidation,
-            diagnostics: diagnostics
+            diagnostics: diagnostics,
+            selectedOrganizationID: selectedOrgID
         )
         var lines: [String] = []
         lines.append("ScoutCapture Local Health - Canonical Read Rollout Report")
@@ -18346,7 +18351,10 @@ final class AppState: ObservableObject {
         lines.append("")
         lines.append(productionSingleSessionActivationGateReportText(singleSessionGate))
         lines.append("")
-        let dryRun = generateProductionRolloutDryRun(diagnostics)
+        let dryRun = generateProductionRolloutDryRun(
+            diagnostics,
+            orgID: selectedOrgID
+        )
         lines.append("Production Rollout Dry Run Rows")
         lines.append("- local health action: \(dryRun.localHealthAction)")
         lines.append("- dry run state: \(dryRun.state.rawValue)")
@@ -18464,6 +18472,18 @@ final class AppState: ObservableObject {
         lines.append("Redaction Notes")
         lines.append("- Report rows intentionally omit raw session.json text, local paths, storage object paths, signed URLs, auth tokens, and media bytes.")
         return lines.joined(separator: "\n")
+    }
+
+    private nonisolated static func selectedSessionReportOrganizationID(
+        _ diagnostics: SessionSnapshotUploadDiagnostics
+    ) -> UUID? {
+        guard diagnostics.lastCanonicalReadDiagnosticsPropertyID != nil,
+              diagnostics.lastCanonicalReadDiagnosticsSessionID != nil,
+              diagnostics.lastCanonicalReadDiagnosticsParentOrgConsistent == true,
+              diagnostics.lastCanonicalReadDiagnosticsParentPropertyConsistent == true else {
+            return nil
+        }
+        return diagnostics.lastCanonicalReadDiagnosticsVerifiedOrgID
     }
 
     nonisolated static func completenessGatesReportText(_ report: CompletenessGatesReport) -> String {
@@ -22210,6 +22230,7 @@ final class AppState: ObservableObject {
         expirationTimestamp: Date? = nil,
         checkedAt: Date = Date()
     ) -> ProductionRolloutDryRunPackage {
+        let selectedOrgID = orgID ?? selectedSessionReportOrganizationID(diagnostics)
         let rolloutReadiness = makeCanonicalRolloutReadinessDiagnostics(diagnostics)
         let productionReadiness = makeProductionAllowlistReadinessDiagnostics(
             diagnostics,
@@ -22222,7 +22243,7 @@ final class AppState: ObservableObject {
         )
         let controlPlane = makeProductionCohortControlPlaneDiagnostics(
             diagnostics,
-            orgID: orgID,
+            orgID: selectedOrgID,
             policy: policy
         )
         let approval = makeProductionCohortOperatorApprovalDiagnostics(

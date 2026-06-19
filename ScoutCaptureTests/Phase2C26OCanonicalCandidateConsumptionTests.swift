@@ -2240,6 +2240,73 @@ final class Phase2C26OCanonicalCandidateConsumptionTests: XCTestCase {
         XCTAssertTrue(rolloutReport.contains("- local health action: Generate Production Rollout Dry Run"))
     }
 
+    func testProductionRolloutReportAndDryRunDeriveSelectedOrgFromVerifiedDiagnostics() {
+        var upload = rolloutReadinessDiagnostics()
+        upload.lastCanonicalReadDiagnosticsVerifiedOrgID = orgID
+
+        let package = AppState.generateProductionRolloutDryRun(upload)
+        let dryRunReport = AppState.productionRolloutDryRunReportText(package)
+        let rolloutReport = AppState.canonicalReadRolloutReportText(upload)
+
+        XCTAssertEqual(package.cohortControlPlane.cohort.orgID, orgID)
+        XCTAssertFalse(package.blockers.contains("org_id_required"))
+        XCTAssertTrue(dryRunReport.contains("- selected_org_id: \(orgID.uuidString)"))
+        XCTAssertTrue(rolloutReport.contains("- selected_org_id: \(orgID.uuidString)"))
+        XCTAssertTrue(rolloutReport.contains("- approved org/property/session: org=\(orgID.uuidString)"))
+    }
+
+    func testProductionRolloutReportAndDryRunKeepOrgNoneWhenParentConsistencyMissing() {
+        var upload = rolloutReadinessDiagnostics()
+        upload.lastCanonicalReadDiagnosticsVerifiedOrgID = orgID
+        upload.lastCanonicalReadDiagnosticsParentOrgConsistent = nil
+
+        let package = AppState.generateProductionRolloutDryRun(upload)
+        let report = AppState.productionRolloutDryRunReportText(package)
+
+        XCTAssertNil(package.cohortControlPlane.cohort.orgID)
+        XCTAssertTrue(package.blockers.contains("org_id_required"))
+        XCTAssertTrue(report.contains("- selected_org_id: none"))
+    }
+
+    func testProductionRolloutReportAndDryRunKeepOrgNoneWhenParentEvidenceConflicts() {
+        var upload = rolloutReadinessDiagnostics()
+        upload.lastCanonicalReadDiagnosticsVerifiedOrgID = UUID(uuidString: "AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA")!
+        upload.lastCanonicalReadDiagnosticsParentOrgConsistent = false
+
+        let package = AppState.generateProductionRolloutDryRun(upload)
+        let rolloutReport = AppState.canonicalReadRolloutReportText(upload)
+
+        XCTAssertNil(package.cohortControlPlane.cohort.orgID)
+        XCTAssertTrue(package.blockers.contains("org_id_required"))
+        XCTAssertTrue(rolloutReport.contains("- selected_org_id: none"))
+        XCTAssertTrue(rolloutReport.contains("org_id_required"))
+    }
+
+    func testProductionRolloutReportSelectedOrgDerivationDoesNotLoosenActivationGateSafety() {
+        var upload = rolloutReadinessDiagnostics()
+        upload.lastCanonicalReadDiagnosticsVerifiedOrgID = orgID
+
+        let gate = AppState.makeProductionSingleSessionActivationGateDiagnostics(
+            policy: singleSessionGatePolicy(enabled: false),
+            approval: nil,
+            targetClassification: .approvedProductionValidation,
+            diagnostics: upload,
+            selectedOrganizationID: orgID
+        )
+        let activation = AppState.makeCanonicalCandidateActivationResult(
+            targetClassification: .approvedProductionValidation,
+            diagnostics: upload,
+            productionActivationGate: gate
+        )
+
+        XCTAssertFalse(gate.gateAllowed)
+        XCTAssertTrue(gate.gateBlockedReason?.contains("operator_approval_missing") == true)
+        XCTAssertTrue(gate.gateBlockedReason?.contains("production_single_session_canonical_activation_disabled") == true)
+        XCTAssertFalse(activation.allowed)
+        XCTAssertEqual(activation.activeSource, .local)
+        XCTAssertTrue(activation.productionBlocked)
+    }
+
     func testProductionRolloutDryRunNoBehaviorChangesOccur() {
         let directory = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("Phase2C27D-\(UUID().uuidString)", isDirectory: true)
