@@ -1396,6 +1396,63 @@ final class Phase2C26OCanonicalCandidateConsumptionTests: XCTestCase {
         XCTAssertTrue(text.contains("Activation / Rollback"))
     }
 
+    func testCanonicalReadRolloutReportWithNilApprovalKeepsApprovalMissingRows() {
+        let upload = rolloutReadinessDiagnostics()
+
+        let text = AppState.canonicalReadRolloutReportText(
+            upload,
+            operatorApproval: nil,
+            singleSessionActivationGatePolicy: singleSessionGatePolicy()
+        )
+
+        XCTAssertTrue(text.contains("- operator approval state: not_requested"))
+        XCTAssertTrue(text.contains("- approval timestamp: none"))
+        XCTAssertTrue(text.contains("- operator_approval_state: not_requested"))
+        XCTAssertTrue(text.contains("- approval_timestamp: none"))
+        XCTAssertTrue(text.contains("operator_approval_missing"))
+        XCTAssertTrue(text.contains("- operator approval match: false"))
+        XCTAssertTrue(text.contains("- operator_approval_match: false"))
+    }
+
+    func testCanonicalReadRolloutReportUsesLiveOperatorApprovalAndGatePolicy() {
+        let upload = rolloutReadinessDiagnostics()
+        let approval = approvedSingleSessionApproval(upload: upload)
+
+        let text = AppState.canonicalReadRolloutReportText(
+            upload,
+            operatorApproval: approval,
+            singleSessionActivationGatePolicy: singleSessionGatePolicy()
+        )
+        let activationWithoutApproval = AppState.makeCanonicalCandidateActivationResult(
+            targetClassification: .approvedProductionValidation,
+            diagnostics: upload,
+            productionActivationGate: AppState.makeProductionSingleSessionActivationGateDiagnostics(
+                policy: singleSessionGatePolicy(),
+                approval: nil,
+                targetClassification: .approvedProductionValidation,
+                diagnostics: upload,
+                selectedOrganizationID: orgID
+            )
+        )
+
+        XCTAssertTrue(text.contains("- operator approval state: approved"))
+        XCTAssertTrue(text.contains("- approved org/property/session: org=\(orgID.uuidString) property=\(propertyID.uuidString) session=\(sessionID.uuidString)"))
+        XCTAssertTrue(text.contains("- approval freshness: fresh_or_not_started"))
+        XCTAssertFalse(text.contains("- approval timestamp: none"))
+        XCTAssertTrue(text.contains("- production single-session activation gate enabled: true"))
+        XCTAssertTrue(text.contains("- gate blocked reason: none"))
+        XCTAssertTrue(text.contains("- exact scope match: true"))
+        XCTAssertTrue(text.contains("- operator approval match: true"))
+        XCTAssertTrue(text.contains("- preflight passed: true"))
+        XCTAssertTrue(text.contains("- operator_approval_state: approved"))
+        XCTAssertTrue(text.contains("- operator_approval_match: true"))
+        XCTAssertFalse(text.contains("operator_approval_missing"))
+        XCTAssertTrue(text.contains("Operator validation report. This report is diagnostic-only"))
+        XCTAssertFalse(activationWithoutApproval.allowed)
+        XCTAssertEqual(activationWithoutApproval.activeSource, .local)
+        XCTAssertTrue(activationWithoutApproval.blockedReason?.contains("operator_approval_missing") == true)
+    }
+
     func testComparisonCandidateMatchesLocal() {
         let result = comparison()
         let report = AppState.canonicalCandidateOverlayComparisonReportText(result)

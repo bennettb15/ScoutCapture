@@ -9434,7 +9434,11 @@ private struct DebugSessionSnapshotCanonicalReadDiagnosticsSection: View {
         Section("Controlled Activation Evaluation Actions") {
             NavigationLink {
                 DebugSessionSnapshotUploadTextView(
-                    snapshotText: AppState.canonicalReadRolloutReportText(diagnostics),
+                    snapshotText: AppState.canonicalReadRolloutReportText(
+                        diagnostics,
+                        operatorApproval: operatorApproval,
+                        singleSessionActivationGatePolicy: AppState.loadProductionSingleSessionActivationGatePolicy()
+                    ),
                     title: "Canonical Read Report",
                     footerText: "Copies the sanitized canonical-read rollout report as plain text. It keeps full canonical details out of the primary diagnostic rows and does not include raw session.json, local paths, signed URLs, auth material, storage object paths, or media payloads."
                 )

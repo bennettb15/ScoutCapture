@@ -18272,7 +18272,11 @@ final class AppState: ObservableObject {
         return lines.joined(separator: "\n")
     }
 
-    nonisolated static func canonicalReadRolloutReportText(_ diagnostics: SessionSnapshotUploadDiagnostics) -> String {
+    nonisolated static func canonicalReadRolloutReportText(
+        _ diagnostics: SessionSnapshotUploadDiagnostics,
+        operatorApproval: ProductionCohortOperatorApprovalDiagnostics? = nil,
+        singleSessionActivationGatePolicy: ProductionSingleSessionActivationGatePolicy = .disabled
+    ) -> String {
         let selectedOrgID = selectedSessionReportOrganizationID(diagnostics)
         let readiness = makeCanonicalRolloutReadinessDiagnostics(diagnostics)
         let productionReadiness = makeProductionAllowlistReadinessDiagnostics(diagnostics)
@@ -18280,10 +18284,10 @@ final class AppState: ObservableObject {
             diagnostics,
             orgID: selectedOrgID
         )
-        let cohortApproval = makeProductionCohortOperatorApprovalDiagnostics(cohortControlPlane)
+        let cohortApproval = operatorApproval ?? makeProductionCohortOperatorApprovalDiagnostics(cohortControlPlane)
         let singleSessionGate = makeProductionSingleSessionActivationGateDiagnostics(
-            policy: .disabled,
-            approval: nil,
+            policy: singleSessionActivationGatePolicy,
+            approval: operatorApproval,
             targetClassification: .approvedProductionValidation,
             diagnostics: diagnostics,
             selectedOrganizationID: selectedOrgID
@@ -18337,6 +18341,8 @@ final class AppState: ObservableObject {
         lines.append("- approval eligibility: \(cohortApproval.approvalEligible)")
         lines.append("- approval blockers: \(diagnosticsPreviewText(cohortApproval.approvalBlockedReason, maxLength: 220) ?? "none")")
         lines.append("- approved org/property/session: \(cohortApproval.approvedScope.description)")
+        lines.append("- approval timestamp: \(cohortApproval.approvalTimestamp?.formatted(date: .abbreviated, time: .standard) ?? "none")")
+        lines.append("- approval expiration: \(cohortApproval.expirationTimestamp?.formatted(date: .abbreviated, time: .standard) ?? "none")")
         lines.append("- approval freshness: \(cohortApproval.staleApproval ? "stale" : "fresh_or_not_started")")
         lines.append("- next recommended action: \(cohortApproval.nextRecommendedAction)")
         lines.append("")
@@ -18366,7 +18372,7 @@ final class AppState: ObservableObject {
         lines.append("")
         lines.append(productionRolloutDryRunReportText(dryRun))
         lines.append("")
-        lines.append(productionCohortControlPlaneReportText(cohortControlPlane))
+        lines.append(productionCohortControlPlaneReportText(cohortControlPlane, operatorApproval: cohortApproval))
         lines.append("")
         lines.append(limitedProductionRolloutReadinessReportText(productionReadiness))
         lines.append("")
@@ -22085,9 +22091,10 @@ final class AppState: ObservableObject {
     }
 
     nonisolated static func productionCohortControlPlaneReportText(
-        _ diagnostics: ProductionCohortControlPlaneDiagnostics
+        _ diagnostics: ProductionCohortControlPlaneDiagnostics,
+        operatorApproval: ProductionCohortOperatorApprovalDiagnostics? = nil
     ) -> String {
-        let approval = makeProductionCohortOperatorApprovalDiagnostics(diagnostics)
+        let approval = operatorApproval ?? makeProductionCohortOperatorApprovalDiagnostics(diagnostics)
         var lines: [String] = []
         lines.append("Production Cohort Control Plane")
         lines.append("- org_id: \(diagnostics.cohort.orgID?.uuidString ?? "none")")
