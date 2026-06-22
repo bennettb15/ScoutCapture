@@ -53,8 +53,27 @@ final class Phase2C26OCanonicalCandidateConsumptionTests: XCTestCase {
         ]
     }
 
-    private func productionActivationExecutionEnvironment() -> [String: String] {
+    private func productionActivationExecutionEnvironment(
+        candidateOrgAllowlist: [UUID]? = nil,
+        candidatePropertyAllowlist: [UUID]? = nil,
+        candidateSessionAllowlist: [UUID]? = nil
+    ) -> [String: String] {
         var environment = activationExecutionEnvironment()
+        if let candidateOrgAllowlist {
+            environment[SupabaseRuntimeConfiguration.canonicalReadCandidateOrgAllowlistEnvKey] = candidateOrgAllowlist
+                .map(\.uuidString)
+                .joined(separator: ",")
+        }
+        if let candidatePropertyAllowlist {
+            environment[SupabaseRuntimeConfiguration.canonicalReadCandidatePropertyAllowlistEnvKey] = candidatePropertyAllowlist
+                .map(\.uuidString)
+                .joined(separator: ",")
+        }
+        if let candidateSessionAllowlist {
+            environment[SupabaseRuntimeConfiguration.canonicalReadCandidateSessionAllowlistEnvKey] = candidateSessionAllowlist
+                .map(\.uuidString)
+                .joined(separator: ",")
+        }
         environment["SCOUTCAPTURE_SUPABASE_URL"] = "https://\(SupabaseRuntimeConfiguration.productionSnapshotValidationProjectRef).supabase.co"
         environment[SupabaseRuntimeConfiguration.productionSnapshotValidationEnvKey] = "true"
         environment[SupabaseRuntimeConfiguration.productionSingleSessionCanonicalActivationEnabledEnvKey] = "true"
@@ -558,6 +577,51 @@ final class Phase2C26OCanonicalCandidateConsumptionTests: XCTestCase {
             fullyRestoredRollbackReportText: "fully restored rollback passed",
             combinedReportText: "package parity passed\nfully restored rollback passed"
         )
+    }
+
+    @MainActor
+    private func assertPackageReportOverlayBlocksWithExtraCandidateAllowlist(
+        environment: [String: String],
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) async throws {
+        let fixture = try makeActivationExecutionFixture(environment: environment)
+        defer { tearDownActivationExecutionFixture(fixture) }
+        let report = passingPackageValidationReport()
+
+        let overlay = await fixture.appState.buildCanonicalCandidateOverlayForSelectedSession(
+            checkedAt: Date(timeIntervalSinceReferenceDate: 9_762),
+            productionValidationEvidence: report
+        )
+        let diagnostics = fixture.appState._debugLocalDiagnosticsForTests().sessionSnapshotUpload
+
+        XCTAssertFalse(overlay.allowed, file: file, line: line)
+        XCTAssertNil(overlay.overlay, file: file, line: line)
+        XCTAssertTrue(overlay.activeSourceRemainsLocal, file: file, line: line)
+        XCTAssertTrue(overlay.rollbackAvailable, file: file, line: line)
+        XCTAssertTrue(overlay.productionBlocked, file: file, line: line)
+        XCTAssertTrue(
+            diagnostics.lastCanonicalReadCandidateBlockedReason.contains(
+                "production_canonical_read_candidate_requires_separate_explicit_approval"
+            ),
+            file: file,
+            line: line
+        )
+        XCTAssertTrue(
+            diagnostics.lastCanonicalCandidateOverlayBlockedReason.contains(
+                "production_canonical_candidate_overlay_blocked"
+            ),
+            file: file,
+            line: line
+        )
+        XCTAssertFalse(diagnostics.lastCanonicalCandidateOverlayAllowed, file: file, line: line)
+        XCTAssertFalse(diagnostics.lastCanonicalCandidateActivationAllowed, file: file, line: line)
+        XCTAssertEqual(diagnostics.lastCanonicalCandidateActivationActiveSource, "local", file: file, line: line)
+        XCTAssertFalse(fixture.appState.backendFeatureFlags.supabaseReadEnabled, file: file, line: line)
+        XCTAssertFalse(fixture.appState.backendFeatureFlags.supabasePropertyReadEnabled, file: file, line: line)
+        XCTAssertEqual(diagnostics.attemptedCount, 0, file: file, line: line)
+        XCTAssertFalse(diagnostics.lastStorageUploadCompleted, file: file, line: line)
+        XCTAssertFalse(diagnostics.lastRowInsertCompleted, file: file, line: line)
     }
 
     private func approvedDecisionRecord(
@@ -4627,6 +4691,189 @@ final class Phase2C26OCanonicalCandidateConsumptionTests: XCTestCase {
         XCTAssertEqual(diagnosticsAfterOverlay.attemptedCount, 0)
         XCTAssertFalse(diagnosticsAfterOverlay.lastStorageUploadCompleted)
         XCTAssertFalse(diagnosticsAfterOverlay.lastRowInsertCompleted)
+    }
+
+    @MainActor
+    func testProductionValidationPackageReportPathExactSingletonCandidateAllowlistsAllowDiagnosticOverlay() async throws {
+        let fixture = try makeActivationExecutionFixture(
+            environment: productionActivationExecutionEnvironment(
+                candidateOrgAllowlist: [orgID],
+                candidatePropertyAllowlist: [propertyID],
+                candidateSessionAllowlist: [sessionID]
+            )
+        )
+        defer { tearDownActivationExecutionFixture(fixture) }
+        let report = passingPackageValidationReport()
+
+        let overlay = await fixture.appState.buildCanonicalCandidateOverlayForSelectedSession(
+            checkedAt: Date(timeIntervalSinceReferenceDate: 9_761),
+            productionValidationEvidence: report
+        )
+        let diagnostics = fixture.appState._debugLocalDiagnosticsForTests().sessionSnapshotUpload
+
+        XCTAssertTrue(overlay.allowed)
+        XCTAssertEqual(overlay.overlay?.organizationID, orgID)
+        XCTAssertEqual(overlay.overlay?.propertyID, propertyID)
+        XCTAssertEqual(overlay.overlay?.sessionID, sessionID)
+        XCTAssertEqual(overlay.overlay?.activeSource, "local")
+        XCTAssertEqual(overlay.overlay?.fallbackSource, "local")
+        XCTAssertTrue(overlay.rollbackAvailable)
+        XCTAssertTrue(overlay.productionBlocked)
+        XCTAssertEqual(diagnostics.lastCanonicalReadCandidateBlockedReason, "none")
+        XCTAssertEqual(diagnostics.lastCanonicalCandidateOverlayBlockedReason, "none")
+        XCTAssertTrue(diagnostics.lastCanonicalCandidateOverlayAllowed)
+        XCTAssertFalse(diagnostics.lastCanonicalCandidateActivationAllowed)
+        XCTAssertEqual(diagnostics.lastCanonicalCandidateActivationActiveSource, "local")
+        XCTAssertFalse(fixture.appState.backendFeatureFlags.supabaseReadEnabled)
+        XCTAssertFalse(fixture.appState.backendFeatureFlags.supabasePropertyReadEnabled)
+        XCTAssertEqual(diagnostics.attemptedCount, 0)
+        XCTAssertFalse(diagnostics.lastStorageUploadCompleted)
+        XCTAssertFalse(diagnostics.lastRowInsertCompleted)
+    }
+
+    @MainActor
+    func testProductionValidationPackageReportPathExtraOrgAllowlistBlocksDiagnosticOverlay() async throws {
+        let extraOrgID = UUID(uuidString: "AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA")!
+        try await assertPackageReportOverlayBlocksWithExtraCandidateAllowlist(
+            environment: productionActivationExecutionEnvironment(
+                candidateOrgAllowlist: [orgID, extraOrgID],
+                candidatePropertyAllowlist: [propertyID],
+                candidateSessionAllowlist: [sessionID]
+            )
+        )
+    }
+
+    @MainActor
+    func testProductionValidationPackageReportPathExtraPropertyAllowlistBlocksDiagnosticOverlay() async throws {
+        let extraPropertyID = UUID(uuidString: "BBBBBBBB-BBBB-BBBB-BBBB-BBBBBBBBBBBB")!
+        try await assertPackageReportOverlayBlocksWithExtraCandidateAllowlist(
+            environment: productionActivationExecutionEnvironment(
+                candidateOrgAllowlist: [orgID],
+                candidatePropertyAllowlist: [propertyID, extraPropertyID],
+                candidateSessionAllowlist: [sessionID]
+            )
+        )
+    }
+
+    @MainActor
+    func testProductionValidationPackageReportPathExtraSessionAllowlistBlocksDiagnosticOverlay() async throws {
+        let extraSessionID = UUID(uuidString: "CCCCCCCC-CCCC-CCCC-CCCC-CCCCCCCCCCCC")!
+        try await assertPackageReportOverlayBlocksWithExtraCandidateAllowlist(
+            environment: productionActivationExecutionEnvironment(
+                candidateOrgAllowlist: [orgID],
+                candidatePropertyAllowlist: [propertyID],
+                candidateSessionAllowlist: [sessionID, extraSessionID]
+            )
+        )
+    }
+
+    @MainActor
+    func testProductionValidationDiagnosticOverlayBuildsWithoutApprovalWhenVerifiedReadEvidencePasses() async throws {
+        let fixture = try makeActivationExecutionFixture(
+            environment: productionActivationExecutionEnvironment()
+        )
+        defer { tearDownActivationExecutionFixture(fixture) }
+
+        let overlay = await fixture.appState.buildCanonicalCandidateOverlayForSelectedSession(
+            checkedAt: Date(timeIntervalSinceReferenceDate: 9_755),
+            productionValidationEvidence: nil
+        )
+        let diagnostics = fixture.appState._debugLocalDiagnosticsForTests().sessionSnapshotUpload
+        let approval = fixture.appState.makeProductionSingleSessionOperatorApprovalForSelectedSession(
+            approvedAt: Date(timeIntervalSinceReferenceDate: 9_756),
+            expiresAt: Date(timeIntervalSinceReferenceDate: 9_856)
+        )
+        let activation = fixture.appState.activateCanonicalCandidateForSelectedSession(
+            checkedAt: Date(timeIntervalSinceReferenceDate: 9_757),
+            operatorApproval: nil,
+            productionActivationGatePolicy: singleSessionGatePolicy()
+        )
+
+        XCTAssertTrue(overlay.allowed)
+        XCTAssertEqual(overlay.overlay?.organizationID, orgID)
+        XCTAssertEqual(overlay.overlay?.propertyID, propertyID)
+        XCTAssertEqual(overlay.overlay?.sessionID, sessionID)
+        XCTAssertEqual(overlay.overlay?.activeSource, "local")
+        XCTAssertEqual(overlay.overlay?.fallbackSource, "local")
+        XCTAssertTrue(overlay.rollbackAvailable)
+        XCTAssertTrue(overlay.productionBlocked)
+        XCTAssertEqual(diagnostics.lastCanonicalReadDiagnosticsResult, AppState.CanonicalReadDiagnosticResult.remoteMatchesLocal.rawValue)
+        XCTAssertEqual(diagnostics.lastCanonicalReadDiagnosticsVerifiedOrgID, orgID)
+        XCTAssertTrue(diagnostics.lastCanonicalReadDiagnosticsCountParity == true)
+        XCTAssertEqual(diagnostics.lastMissingChildCount, 0)
+        XCTAssertTrue(diagnostics.lastCanonicalCandidateOverlayBuilt)
+        XCTAssertTrue(diagnostics.lastCanonicalCandidateOverlayAllowed)
+        XCTAssertEqual(diagnostics.lastCanonicalCandidateOverlayComparisonResult, AppState.CanonicalCandidateOverlayComparisonResult.candidateMatchesLocal.rawValue)
+        XCTAssertEqual(diagnostics.lastCanonicalCandidateOverlayActiveSource, "local")
+        XCTAssertTrue(diagnostics.lastCanonicalCandidateOverlayRollbackAvailable)
+        XCTAssertEqual(approval.state, .approved)
+        XCTAssertEqual(approval.approvedScope.orgID, orgID)
+        XCTAssertEqual(approval.approvedScope.propertyID, propertyID)
+        XCTAssertEqual(approval.approvedScope.sessionID, sessionID)
+        XCTAssertFalse(activation.allowed)
+        XCTAssertEqual(activation.activeSource, .local)
+        XCTAssertTrue(activation.blockedReason?.contains("operator_approval_missing") == true)
+        XCTAssertFalse(fixture.appState.backendFeatureFlags.supabaseReadEnabled)
+        XCTAssertFalse(fixture.appState.backendFeatureFlags.supabasePropertyReadEnabled)
+        XCTAssertEqual(diagnostics.attemptedCount, 0)
+        XCTAssertFalse(diagnostics.lastStorageUploadCompleted)
+        XCTAssertFalse(diagnostics.lastRowInsertCompleted)
+    }
+
+    @MainActor
+    func testProductionValidationDiagnosticOverlayWithoutPackageBlocksWhenReadEvidenceMissing() async throws {
+        let fixture = try makeActivationExecutionFixture(
+            environment: productionActivationExecutionEnvironment(),
+            remoteOrgID: UUID(uuidString: "AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA")!
+        )
+        defer { tearDownActivationExecutionFixture(fixture) }
+
+        let overlay = await fixture.appState.buildCanonicalCandidateOverlayForSelectedSession(
+            checkedAt: Date(timeIntervalSinceReferenceDate: 9_758),
+            productionValidationEvidence: nil
+        )
+        let diagnostics = fixture.appState._debugLocalDiagnosticsForTests().sessionSnapshotUpload
+
+        XCTAssertFalse(overlay.allowed)
+        XCTAssertNil(overlay.overlay)
+        XCTAssertEqual(diagnostics.lastCanonicalReadDiagnosticsResult, AppState.CanonicalReadDiagnosticResult.parentMismatch.rawValue)
+        XCTAssertNil(diagnostics.lastCanonicalReadDiagnosticsVerifiedOrgID)
+        XCTAssertFalse(diagnostics.lastCanonicalCandidateOverlayBuilt)
+        XCTAssertFalse(diagnostics.lastCanonicalCandidateOverlayAllowed)
+        XCTAssertTrue(diagnostics.lastCanonicalCandidateOverlayBlockedReason.contains("parent_org_or_property_divergence"))
+        XCTAssertTrue(diagnostics.lastCanonicalCandidateOverlayBlockedReason.contains("production_canonical_candidate_overlay_blocked"))
+        XCTAssertFalse(diagnostics.lastCanonicalCandidateActivationAllowed)
+        XCTAssertEqual(diagnostics.lastCanonicalCandidateActivationActiveSource, "local")
+        XCTAssertFalse(fixture.appState.backendFeatureFlags.supabaseReadEnabled)
+        XCTAssertFalse(fixture.appState.backendFeatureFlags.supabasePropertyReadEnabled)
+    }
+
+    @MainActor
+    func testProductionValidationDiagnosticOverlayWithoutPackageBlocksWrongAllowlistScope() async throws {
+        var environment = productionActivationExecutionEnvironment()
+        environment[SupabaseRuntimeConfiguration.canonicalReadCandidateSessionAllowlistEnvKey] = UUID(
+            uuidString: "BBBBBBBB-BBBB-BBBB-BBBB-BBBBBBBBBBBB"
+        )!.uuidString
+        let fixture = try makeActivationExecutionFixture(
+            environment: environment
+        )
+        defer { tearDownActivationExecutionFixture(fixture) }
+
+        let overlay = await fixture.appState.buildCanonicalCandidateOverlayForSelectedSession(
+            checkedAt: Date(timeIntervalSinceReferenceDate: 9_759),
+            productionValidationEvidence: nil
+        )
+        let diagnostics = fixture.appState._debugLocalDiagnosticsForTests().sessionSnapshotUpload
+
+        XCTAssertFalse(overlay.allowed)
+        XCTAssertNil(overlay.overlay)
+        XCTAssertEqual(diagnostics.lastCanonicalReadDiagnosticsVerifiedOrgID, orgID)
+        XCTAssertFalse(diagnostics.lastCanonicalReadCandidateSessionAllowlisted)
+        XCTAssertFalse(diagnostics.lastCanonicalCandidateOverlayAllowed)
+        XCTAssertTrue(diagnostics.lastCanonicalCandidateOverlayBlockedReason.contains("session_not_allowlisted"))
+        XCTAssertFalse(diagnostics.lastCanonicalCandidateActivationAllowed)
+        XCTAssertFalse(fixture.appState.backendFeatureFlags.supabaseReadEnabled)
+        XCTAssertFalse(fixture.appState.backendFeatureFlags.supabasePropertyReadEnabled)
     }
 
     @MainActor

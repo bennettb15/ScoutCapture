@@ -19746,11 +19746,8 @@ final class AppState: ObservableObject {
         productionValidationEvidence: LocalHealthSessionSnapshotPackageValidationReport? = nil
     ) async -> CanonicalCandidateOverlayBuildResult {
         let selectedTarget = manualSessionSnapshotUploadTarget
-        let evidenceReady = selectedSessionProductionValidationEvidenceReady(
-            productionValidationEvidence,
-            propertyID: selectedTarget?.propertyID ?? selectedPropertyID ?? currentSession?.propertyID,
-            sessionID: selectedTarget?.sessionID ?? currentSession?.id
-        )
+        let propertyID = selectedTarget?.propertyID ?? selectedPropertyID ?? currentSession?.propertyID
+        let sessionID = selectedTarget?.sessionID ?? currentSession?.id
         let canonicalDiagnostics = await runCanonicalReadDiagnosticsForSelectedSession(
             checkedAt: checkedAt,
             productionValidationEvidence: productionValidationEvidence
@@ -19759,6 +19756,13 @@ final class AppState: ObservableObject {
             checkedAt: checkedAt,
             canonicalDiagnostics: canonicalDiagnostics,
             uploadDiagnostics: localDiagnostics.sessionSnapshotUpload
+        )
+        let evidenceReady = selectedSessionDiagnosticOverlayPrepEvidenceReady(
+            productionValidationEvidence,
+            canonicalDiagnostics: canonicalDiagnostics,
+            parityReport: parityReport,
+            propertyID: propertyID,
+            sessionID: sessionID
         )
         let candidateDiagnostics = Self.makeCanonicalReadCandidateDiagnostics(
             checkedAt: checkedAt,
@@ -19787,6 +19791,62 @@ final class AppState: ObservableObject {
         )
         recordCanonicalCandidateOverlayBuild(result, comparison: comparison)
         return result
+    }
+
+    private func selectedSessionDiagnosticOverlayPrepEvidenceReady(
+        _ report: LocalHealthSessionSnapshotPackageValidationReport?,
+        canonicalDiagnostics: CanonicalReadDiagnosticsResult,
+        parityReport: NormalizedParityGapReport,
+        propertyID: UUID?,
+        sessionID: UUID?
+    ) -> Bool {
+        guard supabaseConfiguration.targetClassification == .approvedProductionValidation else {
+            return false
+        }
+        if report != nil {
+            return selectedSessionProductionValidationEvidenceReady(
+                report,
+                propertyID: propertyID,
+                sessionID: sessionID
+            )
+        }
+        guard let propertyID,
+              let sessionID,
+              canonicalDiagnostics.propertyID == propertyID,
+              canonicalDiagnostics.sessionID == sessionID,
+              canonicalDiagnostics.result == .remoteMatchesLocal,
+              canonicalDiagnostics.countParity == true,
+              canonicalDiagnostics.statusParity == true,
+              canonicalDiagnostics.parentOrgConsistent == true,
+              canonicalDiagnostics.parentPropertyConsistent == true,
+              parityReport.missingChildCount == 0,
+              !parityReport.taxonomy.contains(.missingRemoteChildren),
+              canonicalDiagnostics.localPropertyFound || canonicalDiagnostics.localSessionFound,
+              let selectedOrgID = canonicalDiagnostics.verifiedOrganizationID,
+              selectedSessionVerifiedOrganizationID(
+                propertyID: propertyID,
+                sessionID: sessionID
+              ) == selectedOrgID,
+              canonicalReadCandidateConfiguration.enabled,
+              selectedSessionCandidateAllowlistsAreExactSingletons(
+                orgID: selectedOrgID,
+                propertyID: propertyID,
+                sessionID: sessionID
+              ),
+              !localDiagnostics.sessionSnapshotUpload.lastCanonicalReadCandidateProductionWideEnabled else {
+            return false
+        }
+        return true
+    }
+
+    private func selectedSessionCandidateAllowlistsAreExactSingletons(
+        orgID: UUID,
+        propertyID: UUID,
+        sessionID: UUID
+    ) -> Bool {
+        canonicalReadCandidateConfiguration.orgAllowlist == Set([orgID]) &&
+            canonicalReadCandidateConfiguration.propertyAllowlist == Set([propertyID]) &&
+            canonicalReadCandidateConfiguration.sessionAllowlist == Set([sessionID])
     }
 
     private func recordCanonicalCandidateOverlayBuild(
@@ -19828,6 +19888,8 @@ final class AppState: ObservableObject {
         sessionID: UUID?
     ) -> Bool {
         guard supabaseConfiguration.targetClassification == .approvedProductionValidation,
+              let propertyID,
+              let sessionID,
               let packageOrgID = selectedSessionPackageEvidenceOrganizationID(
                 report,
                 propertyID: propertyID,
@@ -19837,7 +19899,13 @@ final class AppState: ObservableObject {
                 productionValidationEvidence: report,
                 propertyID: propertyID,
                 sessionID: sessionID
-              ) == packageOrgID else {
+              ) == packageOrgID,
+              canonicalReadCandidateConfiguration.enabled,
+              selectedSessionCandidateAllowlistsAreExactSingletons(
+                orgID: packageOrgID,
+                propertyID: propertyID,
+                sessionID: sessionID
+              ) else {
             return false
         }
         return true
