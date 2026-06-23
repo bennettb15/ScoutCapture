@@ -3268,6 +3268,7 @@ final class AppState: ObservableObject {
         let exportedAt: Date?
         let firstDeliveredAt: Date?
         let localEvidenceUpdatedAt: Date?
+        let pinnedRemoteStatusEvidence: String?
     }
 
     struct NormalizedSessionLifecycleReplayWriteSummary: Equatable {
@@ -3419,6 +3420,8 @@ final class AppState: ObservableObject {
         let canonicalRecommendation: String
         let blockedReason: String?
         let noBehaviorChangedText: String
+        var localSessionStatus: String? = nil
+        var remoteSessionStatus: String? = nil
     }
 
     struct NormalizedParityGapReport: Equatable {
@@ -20643,7 +20646,8 @@ final class AppState: ObservableObject {
             replayResult = await replaySelectedSessionLifecycleShadowWriteForCanonicalCandidate(
                 orgID: orgID,
                 propertyID: propertyID,
-                sessionID: sessionID
+                sessionID: sessionID,
+                pinnedDiagnostics: preflightDiagnostics
             )
         }
         recordSelectedSessionLifecycleReplayResult(
@@ -20945,7 +20949,7 @@ final class AppState: ObservableObject {
         case .localNewerConflict, .divergentConflict, .parentMismatch, .unableToVerify:
             recommendation = "local_first_block_canonical_read"
         }
-        return CanonicalReadDiagnosticsResult(
+        var result = CanonicalReadDiagnosticsResult(
             checkedAt: checkedAt,
             propertyID: local.propertyID ?? remoteProperty?.id ?? remoteSession?.propertyID,
             sessionID: local.sessionID ?? remoteSession?.id,
@@ -20996,6 +21000,9 @@ final class AppState: ObservableObject {
             blockedReason: blockedReason,
             noBehaviorChangedText: "No behavior changed: this canonical-read diagnostic compares local state with remote normalized rows read-only and does not switch canonical reads, hydrate data, restore files, download media, change export, change seal, change sync, change iCloud behavior, loosen RLS, or mutate local/remote data."
         )
+        result.localSessionStatus = local.sessionStatus
+        result.remoteSessionStatus = remoteSession?.status
+        return result
     }
 
     private nonisolated static func canonicalReadCountParity(
@@ -21509,13 +21516,36 @@ final class AppState: ObservableObject {
             normalizedReplayDatesEqual(desired.firstDeliveredAt, remote.firstDeliveredAt)
     }
 
+    private nonisolated static func selectedSessionLifecyclePinnedStatusEvidence(
+        _ diagnostics: CanonicalReadDiagnosticsResult?,
+        orgID: UUID,
+        propertyID: UUID,
+        sessionID: UUID
+    ) -> (localStatus: String?, remoteStatus: String?)? {
+        guard let diagnostics,
+              diagnostics.propertyID == propertyID,
+              diagnostics.sessionID == sessionID,
+              diagnostics.verifiedOrganizationID == orgID,
+              diagnostics.localSessionFound,
+              diagnostics.remoteSessionFound,
+              diagnostics.parentOrgConsistent == true,
+              diagnostics.parentPropertyConsistent == true else {
+            return nil
+        }
+        return (
+            localStatus: normalizedReplayStatus(diagnostics.localSessionStatus),
+            remoteStatus: normalizedReplayStatus(diagnostics.remoteSessionStatus)
+        )
+    }
+
     nonisolated static func makeNormalizedSessionLifecycleReplayPlan(
         orgID: UUID,
         propertyID: UUID,
         sessionID: UUID,
         metadata: SessionMetadata?,
         localSession: Session?,
-        remoteSession: NormalizedSessionLifecycleRemoteRow?
+        remoteSession: NormalizedSessionLifecycleRemoteRow?,
+        pinnedDiagnostics: CanonicalReadDiagnosticsResult? = nil
     ) -> NormalizedSessionLifecycleReplayPlan {
         let noBehaviorChangedText = "No behavior changed: selected-session lifecycle replay updates only normalized session lifecycle/status fields for one verified session row. It does not activate, switch reads, enable broad reads, write child rows, media, or local user state, or change export, seal, sync, media, iCloud, schema, or RLS behavior."
 
@@ -21579,17 +21609,39 @@ final class AppState: ObservableObject {
             return blocked("local_lifecycle_evidence_timestamp_missing", attemptedCount: 1)
         }
 
+        let pinnedStatusEvidence = selectedSessionLifecyclePinnedStatusEvidence(
+            pinnedDiagnostics,
+            orgID: orgID,
+            propertyID: propertyID,
+            sessionID: sessionID
+        )
+        let desiredStatus = pinnedStatusEvidence?.localStatus ?? metadata.status.rawValue
+        let effectiveRemoteSession = NormalizedSessionLifecycleRemoteRow(
+            id: remoteSession.id,
+            orgID: remoteSession.orgID,
+            propertyID: remoteSession.propertyID,
+            status: pinnedStatusEvidence?.remoteStatus ?? remoteSession.status,
+            completedAt: remoteSession.completedAt,
+            exportedAt: remoteSession.exportedAt,
+            isSealed: remoteSession.isSealed,
+            firstDeliveredAt: remoteSession.firstDeliveredAt,
+            reExportExpiresAt: remoteSession.reExportExpiresAt,
+            updatedAt: remoteSession.updatedAt,
+            deletedAt: remoteSession.deletedAt
+        )
+
         let row = NormalizedSessionLifecycleReplayRow(
             orgID: orgID,
             propertyID: propertyID,
             sessionID: sessionID,
-            status: metadata.status.rawValue,
+            status: desiredStatus,
             completedAt: metadata.endedAt,
             exportedAt: metadata.exportedAt,
             firstDeliveredAt: metadata.firstDeliveredAt,
-            localEvidenceUpdatedAt: localEvidenceUpdatedAt
+            localEvidenceUpdatedAt: localEvidenceUpdatedAt,
+            pinnedRemoteStatusEvidence: pinnedStatusEvidence?.remoteStatus
         )
-        if sessionLifecycleReplayRowsMatch(desired: row, remote: remoteSession) {
+        if sessionLifecycleReplayRowsMatch(desired: row, remote: effectiveRemoteSession) {
             return NormalizedSessionLifecycleReplayPlan(
                 allowed: true,
                 blockedReason: nil,
@@ -21671,7 +21723,20 @@ final class AppState: ObservableObject {
                 message: "newer_remote_session_lifecycle_preserved"
             )
         }
-        if sessionLifecycleReplayRowsMatch(desired: row, remote: latestRemoteSession) {
+        let effectiveLatestRemoteSession = NormalizedSessionLifecycleRemoteRow(
+            id: latestRemoteSession.id,
+            orgID: latestRemoteSession.orgID,
+            propertyID: latestRemoteSession.propertyID,
+            status: row.pinnedRemoteStatusEvidence ?? latestRemoteSession.status,
+            completedAt: latestRemoteSession.completedAt,
+            exportedAt: latestRemoteSession.exportedAt,
+            isSealed: latestRemoteSession.isSealed,
+            firstDeliveredAt: latestRemoteSession.firstDeliveredAt,
+            reExportExpiresAt: latestRemoteSession.reExportExpiresAt,
+            updatedAt: latestRemoteSession.updatedAt,
+            deletedAt: latestRemoteSession.deletedAt
+        )
+        if sessionLifecycleReplayRowsMatch(desired: row, remote: effectiveLatestRemoteSession) {
             return NormalizedSessionLifecycleReplayWriteSummary(
                 updatedCount: 0,
                 skippedCount: 1,
@@ -29494,7 +29559,8 @@ final class AppState: ObservableObject {
     func replaySelectedSessionLifecycleShadowWriteForCanonicalCandidate(
         orgID: UUID,
         propertyID: UUID,
-        sessionID: UUID
+        sessionID: UUID,
+        pinnedDiagnostics: CanonicalReadDiagnosticsResult? = nil
     ) async -> NormalizedBackfillEntityResult {
         guard backendFeatureFlags.supabaseEnabled,
               backendFeatureFlags.shadowWriteEnabled else {
@@ -29552,7 +29618,8 @@ final class AppState: ObservableObject {
             sessionID: sessionID,
             metadata: metadata,
             localSession: localSession,
-            remoteSession: remoteSession
+            remoteSession: remoteSession,
+            pinnedDiagnostics: pinnedDiagnostics
         )
         return await Self.executeNormalizedSessionLifecycleReplayTestOnly(
             plan: plan,

@@ -340,6 +340,7 @@ final class Phase2C26PFlaggedObservationReplayTests: XCTestCase {
         orgID: UUID? = nil,
         propertyID: UUID? = nil,
         sessionID: UUID? = nil,
+        status: Session.Status = .completed,
         issueStatus: String = "active",
         includeShot: Bool = true
     ) -> SessionMetadata {
@@ -398,7 +399,7 @@ final class Phase2C26PFlaggedObservationReplayTests: XCTestCase {
             propertyNameAtExport: "Replay Property",
             startedAt: Date(timeIntervalSinceReferenceDate: 10_000),
             endedAt: Date(timeIntervalSinceReferenceDate: 10_600),
-            status: .completed,
+            status: status,
             isBaselineSession: false,
             exportedAt: nil,
             isSealed: true,
@@ -912,6 +913,55 @@ final class Phase2C26PFlaggedObservationReplayTests: XCTestCase {
         XCTAssertEqual(updatedRow?.sessionID, sessionID)
     }
 
+    func testSelectedSessionLifecycleReplayPinnedDiagnosticsCompletedVsDraftForcesUpdate() async {
+        let staleDraftMetadata = metadata(status: .draft)
+        let pinnedDiagnostics = canonicalDiagnostics(
+            remoteObservationCount: 1,
+            result: .divergentConflict,
+            recommendation: "local_first_block_canonical_read",
+            countParity: true,
+            statusParity: false,
+            localStatus: Session.Status.completed.rawValue,
+            remoteStatus: Session.Status.draft.rawValue
+        )
+        let plan = AppState.makeNormalizedSessionLifecycleReplayPlan(
+            orgID: orgID,
+            propertyID: propertyID,
+            sessionID: sessionID,
+            metadata: staleDraftMetadata,
+            localSession: completedLocalSession(),
+            remoteSession: remoteLifecycleSession(
+                status: Session.Status.draft.rawValue,
+                completedAt: staleDraftMetadata.endedAt,
+                exportedAt: staleDraftMetadata.exportedAt,
+                firstDeliveredAt: staleDraftMetadata.firstDeliveredAt
+            ),
+            pinnedDiagnostics: pinnedDiagnostics
+        )
+        var updatedRow: AppState.NormalizedSessionLifecycleReplayRow?
+
+        let result = await AppState.executeNormalizedSessionLifecycleReplayTestOnly(
+            plan: plan,
+            targetClassification: .approvedProductionValidation
+        ) { row in
+            updatedRow = row
+            return AppState.NormalizedSessionLifecycleReplayWriteSummary(
+                updatedCount: 1,
+                message: "session_lifecycle_replayed"
+            )
+        }
+
+        XCTAssertTrue(plan.allowed)
+        XCTAssertNotNil(plan.rowToUpdate)
+        XCTAssertEqual(plan.idempotentSkippedCount, 0)
+        XCTAssertEqual(plan.rowToUpdate?.status, Session.Status.completed.rawValue)
+        XCTAssertEqual(plan.rowToUpdate?.pinnedRemoteStatusEvidence, Session.Status.draft.rawValue)
+        XCTAssertEqual(result.upsertedCount, 1)
+        XCTAssertEqual(result.skippedCount, 0)
+        XCTAssertEqual(updatedRow?.propertyID, propertyID)
+        XCTAssertEqual(updatedRow?.sessionID, sessionID)
+    }
+
     func testSelectedSessionLifecycleReplayWrongOrgPropertyOrSessionBlocks() {
         let wrongOrgPlan = AppState.makeNormalizedSessionLifecycleReplayPlan(
             orgID: orgID,
@@ -947,6 +997,15 @@ final class Phase2C26PFlaggedObservationReplayTests: XCTestCase {
     }
 
     func testSelectedSessionLifecycleReplayPreservesNewerRemoteSessionRow() async {
+        let pinnedDiagnostics = canonicalDiagnostics(
+            remoteObservationCount: 1,
+            result: .divergentConflict,
+            recommendation: "local_first_block_canonical_read",
+            countParity: true,
+            statusParity: false,
+            localStatus: Session.Status.completed.rawValue,
+            remoteStatus: Session.Status.draft.rawValue
+        )
         let plan = AppState.makeNormalizedSessionLifecycleReplayPlan(
             orgID: orgID,
             propertyID: propertyID,
@@ -956,7 +1015,8 @@ final class Phase2C26PFlaggedObservationReplayTests: XCTestCase {
             remoteSession: remoteLifecycleSession(
                 status: "draft",
                 updatedAt: Date(timeIntervalSinceReferenceDate: 11_000)
-            )
+            ),
+            pinnedDiagnostics: pinnedDiagnostics
         )
         var updateCalled = false
 
@@ -983,6 +1043,15 @@ final class Phase2C26PFlaggedObservationReplayTests: XCTestCase {
 
     func testSelectedSessionLifecycleReplayIsIdempotentWhenRemoteAlreadyMatches() async {
         let completedAt = Date(timeIntervalSinceReferenceDate: 10_600)
+        let pinnedDiagnostics = canonicalDiagnostics(
+            remoteObservationCount: 1,
+            result: .remoteMatchesLocal,
+            recommendation: "local_preferred_remote_verified",
+            countParity: true,
+            statusParity: true,
+            localStatus: Session.Status.completed.rawValue,
+            remoteStatus: Session.Status.completed.rawValue
+        )
         let plan = AppState.makeNormalizedSessionLifecycleReplayPlan(
             orgID: orgID,
             propertyID: propertyID,
@@ -993,7 +1062,8 @@ final class Phase2C26PFlaggedObservationReplayTests: XCTestCase {
                 status: "completed",
                 completedAt: completedAt,
                 isSealed: true
-            )
+            ),
+            pinnedDiagnostics: pinnedDiagnostics
         )
         var updateCalled = false
 
@@ -1169,10 +1239,16 @@ final class Phase2C26PFlaggedObservationReplayTests: XCTestCase {
         )
         defer { tearDownAppFixture(fixture) }
         configureSelectedSessionReplayFixture(fixture)
+        var replayedOrgID: UUID?
+        var replayedPropertyID: UUID?
+        var replayedSessionID: UUID?
 
         let result = await fixture.appState.replaySelectedSessionLifecycleShadowWriteForSelectedSession(
             productionValidationEvidence: passingPackageValidationReport(),
-            replayOperation: { _, _, _ in
+            replayOperation: { orgID, propertyID, sessionID in
+                replayedOrgID = orgID
+                replayedPropertyID = propertyID
+                replayedSessionID = sessionID
                 remoteStatus = "completed"
                 return AppState.NormalizedBackfillEntityResult(
                     kind: .session,
@@ -1187,6 +1263,9 @@ final class Phase2C26PFlaggedObservationReplayTests: XCTestCase {
 
         let diagnostics = fixture.appState._debugLocalDiagnosticsForTests().sessionSnapshotUpload
         XCTAssertTrue(result.allowed)
+        XCTAssertEqual(replayedOrgID, orgID)
+        XCTAssertEqual(replayedPropertyID, propertyID)
+        XCTAssertEqual(replayedSessionID, sessionID)
         XCTAssertEqual(result.replayResult?.upsertedCount, 1)
         XCTAssertEqual(result.diagnosticsAfterReplay?.statusParity, true)
         XCTAssertEqual(diagnostics.lastCanonicalReadDiagnosticsStatusParity, true)
@@ -1759,13 +1838,16 @@ final class Phase2C26PFlaggedObservationReplayTests: XCTestCase {
         result: AppState.CanonicalReadDiagnosticResult,
         recommendation: String,
         countParity: Bool,
-        statusParity: Bool = true
+        statusParity: Bool = true,
+        localStatus: String = Session.Status.completed.rawValue,
+        remoteStatus: String = Session.Status.completed.rawValue
     ) -> AppState.CanonicalReadDiagnosticsResult {
-        AppState.CanonicalReadDiagnosticsResult(
+        var diagnostics = AppState.CanonicalReadDiagnosticsResult(
             checkedAt: Date(timeIntervalSinceReferenceDate: 12_000),
             propertyID: propertyID,
             sessionID: sessionID,
             activeOrganizationID: orgID,
+            verifiedOrganizationID: orgID,
             result: result,
             remotePropertyFound: true,
             remoteSessionFound: true,
@@ -1789,5 +1871,8 @@ final class Phase2C26PFlaggedObservationReplayTests: XCTestCase {
             blockedReason: result == .divergentConflict ? "remote_rows_diverge_from_local_counts_or_status" : nil,
             noBehaviorChangedText: "read only"
         )
+        diagnostics.localSessionStatus = localStatus
+        diagnostics.remoteSessionStatus = remoteStatus
+        return diagnostics
     }
 }
