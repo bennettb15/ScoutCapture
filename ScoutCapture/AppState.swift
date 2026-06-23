@@ -2891,7 +2891,7 @@ final class AppState: ObservableObject {
         let expectedChecksumSHA256: String?
         let failureReason: String?
 
-        init(
+        nonisolated init(
             id: UUID,
             originalFilename: String,
             payloadData: Data?,
@@ -3044,7 +3044,20 @@ final class AppState: ObservableObject {
         let combinedReportText: String
     }
 
+    struct SelectedSessionFlaggedObservationReplayActionResult: Equatable {
+        let checkedAt: Date
+        let allowed: Bool
+        let blockedReason: String?
+        let orgID: UUID?
+        let propertyID: UUID?
+        let sessionID: UUID?
+        let replayResult: NormalizedBackfillEntityResult?
+        let diagnosticsAfterReplay: CanonicalReadDiagnosticsResult?
+        let noBehaviorChangedText: String
+    }
+
     nonisolated static let localHealthSessionSnapshotPackageValidationActionTitle = "Run Package Parity / Rollback Validation"
+    nonisolated static let localHealthFlaggedObservationReplayActionTitle = "Replay Flagged Observation Shadow Writes"
 
     struct CanonicalTransitionPolicyDiagnostics: Equatable {
         let checkedAt: Date
@@ -3124,7 +3137,26 @@ final class AppState: ObservableObject {
         let upsertedCount: Int
         let skippedCount: Int
         let failedCount: Int
+        let remoteNewerConflictCount: Int
         let message: String
+
+        nonisolated init(
+            kind: NormalizedBackfillEntityKind,
+            attemptedCount: Int,
+            upsertedCount: Int,
+            skippedCount: Int,
+            failedCount: Int,
+            remoteNewerConflictCount: Int = 0,
+            message: String
+        ) {
+            self.kind = kind
+            self.attemptedCount = attemptedCount
+            self.upsertedCount = upsertedCount
+            self.skippedCount = skippedCount
+            self.failedCount = failedCount
+            self.remoteNewerConflictCount = remoteNewerConflictCount
+            self.message = message
+        }
     }
 
     struct NormalizedBackfillReplayExecutionResult: Equatable {
@@ -3181,8 +3213,23 @@ final class AppState: ObservableObject {
     struct NormalizedObservationReplayWriteSummary: Equatable {
         let insertedCount: Int
         let duplicateSkippedCount: Int
+        let remoteNewerConflictCount: Int
         let failedCount: Int
         let message: String
+
+        init(
+            insertedCount: Int,
+            duplicateSkippedCount: Int,
+            remoteNewerConflictCount: Int = 0,
+            failedCount: Int,
+            message: String
+        ) {
+            self.insertedCount = insertedCount
+            self.duplicateSkippedCount = duplicateSkippedCount
+            self.remoteNewerConflictCount = remoteNewerConflictCount
+            self.failedCount = failedCount
+            self.message = message
+        }
     }
 
     struct NormalizedBackfillReplayValidationResult: Equatable {
@@ -19606,6 +19653,39 @@ final class AppState: ObservableObject {
         return result
     }
 
+    private func runCanonicalReadDiagnosticsForPinnedSession(
+        checkedAt: Date,
+        productionValidationEvidence: LocalHealthSessionSnapshotPackageValidationReport?,
+        orgID: UUID,
+        propertyID: UUID,
+        sessionID: UUID
+    ) async -> CanonicalReadDiagnosticsResult {
+        let localSnapshot = makeCanonicalReadLocalSnapshot(
+            propertyID: propertyID,
+            sessionID: sessionID
+        )
+        let remoteSnapshot = await fetchCanonicalReadRemoteSnapshotIfAvailable(
+            activeOrganizationID: orgID,
+            propertyID: propertyID,
+            sessionID: sessionID
+        )
+        let result = Self.makeCanonicalReadDiagnostics(
+            checkedAt: checkedAt,
+            activeOrganizationID: orgID,
+            local: localSnapshot,
+            remote: remoteSnapshot
+        )
+        recordCanonicalReadDiagnostics(
+            result,
+            productionValidationEvidenceReady: selectedSessionProductionValidationEvidenceReady(
+                productionValidationEvidence,
+                propertyID: propertyID,
+                sessionID: sessionID
+            )
+        )
+        return result
+    }
+
     private func makeCanonicalReadLocalSnapshot(
         propertyID: UUID?,
         sessionID: UUID?
@@ -20157,6 +20237,179 @@ final class AppState: ObservableObject {
         )
         recordCanonicalCandidateActivation(result, rolledBackAt: checkedAt)
         return result
+    }
+
+    @MainActor
+    func replayFlaggedObservationShadowWritesForSelectedSession(
+        checkedAt: Date = Date(),
+        productionValidationEvidence: LocalHealthSessionSnapshotPackageValidationReport?,
+        replayOperation: ((UUID, UUID) async -> NormalizedBackfillEntityResult)? = nil,
+        diagnosticsAfterReplayOperation: (() async -> CanonicalReadDiagnosticsResult)? = nil
+    ) async -> SelectedSessionFlaggedObservationReplayActionResult {
+        let noBehaviorChangedText = "No behavior changed: selected-session flagged observation replay writes only scoped observation shadow rows for the exact verified org/property/session. It does not activate candidates, switch reads, enable supabase_read_enabled, enable production-wide canonical reads, write shots or media, hydrate local state, change export, seal, sync, media, iCloud, schema, or RLS behavior, delete data, or mutate unrelated properties/sessions."
+        let selectedTarget = manualSessionSnapshotUploadTarget
+        let propertyID = selectedTarget?.propertyID
+        let sessionID = selectedTarget?.sessionID
+
+        func blocked(
+            _ reason: String,
+            orgID: UUID? = nil
+        ) -> SelectedSessionFlaggedObservationReplayActionResult {
+            recordSelectedSessionFlaggedObservationReplayBlock(
+                reason: reason,
+                propertyID: propertyID,
+                sessionID: sessionID
+            )
+            return SelectedSessionFlaggedObservationReplayActionResult(
+                checkedAt: checkedAt,
+                allowed: false,
+                blockedReason: reason,
+                orgID: orgID,
+                propertyID: propertyID,
+                sessionID: sessionID,
+                replayResult: nil,
+                diagnosticsAfterReplay: nil,
+                noBehaviorChangedText: noBehaviorChangedText
+            )
+        }
+
+        guard let selectedTarget,
+              let propertyID,
+              let sessionID else {
+            return blocked("selected_session_snapshot_target_required")
+        }
+        guard let productionValidationEvidence else {
+            return blocked("package_validation_evidence_required")
+        }
+        guard productionValidationEvidence.targetScope.propertyID == propertyID,
+              productionValidationEvidence.targetScope.sessionID == sessionID else {
+            return blocked("package_validation_selected_scope_mismatch")
+        }
+        guard let orgID = selectedSessionPackageEvidenceOrganizationID(
+            productionValidationEvidence,
+            propertyID: propertyID,
+            sessionID: sessionID
+        ) else {
+            return blocked("package_validation_evidence_not_ready")
+        }
+        guard activeOrganizationID == orgID,
+              isOrganizationContextReady,
+              canAccessOrganization(orgID) else {
+            return blocked("selected_session_org_scope_not_verified", orgID: orgID)
+        }
+        guard selectedTarget.propertyID == propertyID,
+              selectedTarget.sessionID == sessionID else {
+            return blocked("selected_session_scope_not_exact", orgID: orgID)
+        }
+        guard selectedSessionCandidateAllowlistsAreExactSingletons(
+            orgID: orgID,
+            propertyID: propertyID,
+            sessionID: sessionID
+        ) else {
+            return blocked("exact_singleton_candidate_allowlist_required", orgID: orgID)
+        }
+        guard !backendFeatureFlags.supabaseReadEnabled,
+              !localDiagnostics.sessionSnapshotUpload.lastCanonicalReadCandidateProductionWideEnabled else {
+            return blocked("production_wide_canonical_reads_must_be_disabled", orgID: orgID)
+        }
+
+        let replayResult: NormalizedBackfillEntityResult
+        if let replayOperation {
+            replayResult = await replayOperation(propertyID, sessionID)
+        } else {
+            replayResult = await replayFlaggedObservationShadowWritesForCanonicalCandidate(
+                propertyID: propertyID,
+                sessionID: sessionID
+            )
+        }
+        recordSelectedSessionFlaggedObservationReplayResult(
+            replayResult,
+            propertyID: propertyID,
+            sessionID: sessionID
+        )
+
+        let diagnosticsAfterReplay: CanonicalReadDiagnosticsResult?
+        if replayResult.failedCount == 0,
+           replayResult.upsertedCount > 0 {
+            if let diagnosticsAfterReplayOperation {
+                let refreshedDiagnostics = await diagnosticsAfterReplayOperation()
+                recordCanonicalReadDiagnostics(
+                    refreshedDiagnostics,
+                    productionValidationEvidenceReady: true
+                )
+                diagnosticsAfterReplay = refreshedDiagnostics
+            } else {
+                diagnosticsAfterReplay = await runCanonicalReadDiagnosticsForPinnedSession(
+                    checkedAt: checkedAt,
+                    productionValidationEvidence: productionValidationEvidence,
+                    orgID: orgID,
+                    propertyID: propertyID,
+                    sessionID: sessionID
+                )
+            }
+        } else {
+            diagnosticsAfterReplay = nil
+        }
+        recordSelectedSessionFlaggedObservationReplayResult(
+            replayResult,
+            propertyID: propertyID,
+            sessionID: sessionID
+        )
+
+        return SelectedSessionFlaggedObservationReplayActionResult(
+            checkedAt: checkedAt,
+            allowed: true,
+            blockedReason: nil,
+            orgID: orgID,
+            propertyID: propertyID,
+            sessionID: sessionID,
+            replayResult: replayResult,
+            diagnosticsAfterReplay: diagnosticsAfterReplay,
+            noBehaviorChangedText: noBehaviorChangedText
+        )
+    }
+
+    private func recordSelectedSessionFlaggedObservationReplayBlock(
+        reason: String,
+        propertyID: UUID?,
+        sessionID: UUID?
+    ) {
+        var diagnostics = localDiagnostics
+        diagnostics.sessionSnapshotUpload.lastNormalizedBackfillEligible = false
+        diagnostics.sessionSnapshotUpload.lastNormalizedBackfillBlockedReason = reason
+        diagnostics.sessionSnapshotUpload.lastNormalizedBackfillExecutedEntityCount = 0
+        diagnostics.sessionSnapshotUpload.lastNormalizedBackfillSkippedEntityCount = 0
+        diagnostics.sessionSnapshotUpload.lastNormalizedBackfillProductionBlocked = true
+        if let propertyID {
+            diagnostics.sessionSnapshotUpload.lastCanonicalReadDiagnosticsPropertyID = propertyID
+        }
+        if let sessionID {
+            diagnostics.sessionSnapshotUpload.lastCanonicalReadDiagnosticsSessionID = sessionID
+        }
+        localDiagnostics = diagnostics
+    }
+
+    private func recordSelectedSessionFlaggedObservationReplayResult(
+        _ result: NormalizedBackfillEntityResult,
+        propertyID: UUID,
+        sessionID: UUID
+    ) {
+        var diagnostics = localDiagnostics
+        diagnostics.sessionSnapshotUpload.lastCanonicalReadDiagnosticsPropertyID = propertyID
+        diagnostics.sessionSnapshotUpload.lastCanonicalReadDiagnosticsSessionID = sessionID
+        diagnostics.sessionSnapshotUpload.lastNormalizedBackfillEligible = result.failedCount == 0
+        diagnostics.sessionSnapshotUpload.lastNormalizedBackfillBlockedReason = result.failedCount == 0 ? "none" : result.message
+        if diagnostics.sessionSnapshotUpload.lastNormalizedBackfillPlannedObservationUpserts == 0 {
+            diagnostics.sessionSnapshotUpload.lastNormalizedBackfillPlannedObservationUpserts = result.attemptedCount
+        }
+        diagnostics.sessionSnapshotUpload.lastNormalizedBackfillExecutedEntityCount = result.upsertedCount
+        diagnostics.sessionSnapshotUpload.lastNormalizedBackfillSkippedEntityCount = result.skippedCount
+        diagnostics.sessionSnapshotUpload.lastNormalizedBackfillRemoteNewerConflictCount = result.remoteNewerConflictCount
+        diagnostics.sessionSnapshotUpload.lastNormalizedBackfillProductionBlocked = true
+        diagnostics.sessionSnapshotUpload.lastCanonicalReadsRemainBlocked = true
+        diagnostics.sessionSnapshotUpload.lastCanonicalReadCandidateRemoteStateReadable = false
+        diagnostics.sessionSnapshotUpload.lastCanonicalReadCandidateProductionWideEnabled = false
+        localDiagnostics = diagnostics
     }
 
     private func recordCanonicalCandidateActivation(
@@ -21124,6 +21377,7 @@ final class AppState: ObservableObject {
                 upsertedCount: 0,
                 skippedCount: max(0, plan.attemptedCount - plan.failedCount),
                 failedCount: plan.failedCount,
+                remoteNewerConflictCount: plan.newerRemoteSkippedCount,
                 message: plan.blockedReason ?? "observation_replay_plan_not_allowed"
             )
         }
@@ -21145,6 +21399,7 @@ final class AppState: ObservableObject {
                 upsertedCount: 0,
                 skippedCount: skippedCount,
                 failedCount: 0,
+                remoteNewerConflictCount: plan.newerRemoteSkippedCount,
                 message: message
             )
         }
@@ -21159,6 +21414,7 @@ final class AppState: ObservableObject {
                     plan.newerRemoteSkippedCount +
                     plan.softDeletedSkippedCount,
                 failedCount: max(0, plan.rowsToUpsert.count - upserted),
+                remoteNewerConflictCount: plan.newerRemoteSkippedCount,
                 message: "observation_rows_replayed"
             )
         } catch {
@@ -21170,6 +21426,7 @@ final class AppState: ObservableObject {
                     plan.newerRemoteSkippedCount +
                     plan.softDeletedSkippedCount,
                 failedCount: plan.rowsToUpsert.count,
+                remoteNewerConflictCount: plan.newerRemoteSkippedCount,
                 message: sanitizedDiagnosticsErrorMessage(error.localizedDescription)
             )
         }
@@ -21199,6 +21456,7 @@ final class AppState: ObservableObject {
                 upsertedCount: 0,
                 skippedCount: max(0, plan.attemptedCount - plan.failedCount),
                 failedCount: plan.failedCount,
+                remoteNewerConflictCount: plan.newerRemoteSkippedCount,
                 message: plan.blockedReason ?? "observation_replay_plan_not_allowed"
             )
         }
@@ -21220,6 +21478,7 @@ final class AppState: ObservableObject {
                 upsertedCount: 0,
                 skippedCount: planSkippedCount,
                 failedCount: 0,
+                remoteNewerConflictCount: plan.newerRemoteSkippedCount,
                 message: message
             )
         }
@@ -21232,6 +21491,7 @@ final class AppState: ObservableObject {
                 upsertedCount: summary.insertedCount,
                 skippedCount: planSkippedCount + summary.duplicateSkippedCount,
                 failedCount: summary.failedCount,
+                remoteNewerConflictCount: plan.newerRemoteSkippedCount + summary.remoteNewerConflictCount,
                 message: summary.message
             )
         } catch {
@@ -21241,6 +21501,7 @@ final class AppState: ObservableObject {
                 upsertedCount: 0,
                 skippedCount: planSkippedCount,
                 failedCount: plan.rowsToUpsert.count,
+                remoteNewerConflictCount: plan.newerRemoteSkippedCount,
                 message: sanitizedDiagnosticsErrorMessage(error.localizedDescription)
             )
         }
@@ -28674,6 +28935,7 @@ final class AppState: ObservableObject {
     ) async throws -> NormalizedObservationReplayWriteSummary {
         var insertedCount = 0
         var duplicateSkippedCount = 0
+        var remoteNewerConflictCount = 0
         var failedCount = 0
         var lastMessage = "observation_rows_inserted"
 
@@ -28702,6 +28964,7 @@ final class AppState: ObservableObject {
                     lastMessage = "observation_duplicate_exact_scope_idempotent"
                 case .newerRemotePreserved:
                     duplicateSkippedCount += 1
+                    remoteNewerConflictCount += 1
                     lastMessage = "newer_remote_observations_preserved"
                 case .softDeletedPreserved:
                     duplicateSkippedCount += 1
@@ -28719,6 +28982,7 @@ final class AppState: ObservableObject {
         return NormalizedObservationReplayWriteSummary(
             insertedCount: insertedCount,
             duplicateSkippedCount: duplicateSkippedCount,
+            remoteNewerConflictCount: remoteNewerConflictCount,
             failedCount: failedCount,
             message: failedCount > 0 ? lastMessage : lastMessage
         )

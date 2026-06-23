@@ -9249,6 +9249,8 @@ private struct DebugSessionSnapshotCanonicalReadDiagnosticsSection: View {
     @State private var isShowingCanonicalCandidateActivationConfirmation = false
     @State private var isActivatingCanonicalCandidate = false
     @State private var isRollingBackCanonicalCandidate = false
+    @State private var isReplayingFlaggedObservationShadowWrites = false
+    @State private var flaggedObservationReplayActionResult: AppState.SelectedSessionFlaggedObservationReplayActionResult?
     @State private var operatorApproval: AppState.ProductionCohortOperatorApprovalDiagnostics?
 
     private var rolloutReadiness: AppState.CanonicalRolloutReadinessDiagnostics {
@@ -9474,6 +9476,34 @@ private struct DebugSessionSnapshotCanonicalReadDiagnosticsSection: View {
             }
             .disabled(isBuildingCanonicalCandidateOverlay)
             .font(.system(size: 14, weight: .semibold))
+            Button(isReplayingFlaggedObservationShadowWrites ? "Replaying..." : AppState.localHealthFlaggedObservationReplayActionTitle) {
+                guard !isReplayingFlaggedObservationShadowWrites else { return }
+                isReplayingFlaggedObservationShadowWrites = true
+                Task {
+                    let result = await appState.replayFlaggedObservationShadowWritesForSelectedSession(
+                        productionValidationEvidence: packageValidationReport
+                    )
+                    await MainActor.run {
+                        flaggedObservationReplayActionResult = result
+                        isReplayingFlaggedObservationShadowWrites = false
+                    }
+                }
+            }
+            .disabled(isReplayingFlaggedObservationShadowWrites)
+            .font(.system(size: 14, weight: .semibold))
+            if let flaggedObservationReplayActionResult {
+                diagnosticRow("Replay Action", flaggedObservationReplayActionResult.allowed ? "allowed" : "blocked")
+                diagnosticRow("Replay Blocked", compactValue(flaggedObservationReplayActionResult.blockedReason ?? "none"))
+                diagnosticRow("Replay Scope", "property \(flaggedObservationReplayActionResult.propertyID?.uuidString ?? "none"), session \(flaggedObservationReplayActionResult.sessionID?.uuidString ?? "none")")
+                if let replay = flaggedObservationReplayActionResult.replayResult {
+                    diagnosticRow("Replay Result", replay.message)
+                    diagnosticRow("Replay Executed", "\(replay.upsertedCount)")
+                    diagnosticRow("Replay Skipped", "\(replay.skippedCount)")
+                    diagnosticRow("Replay Remote Newer", "\(replay.remoteNewerConflictCount)")
+                    diagnosticRow("Replay Failed", "\(replay.failedCount)")
+                }
+                diagnosticRow("Post-Replay Diagnostics", flaggedObservationReplayActionResult.diagnosticsAfterReplay == nil ? "not run" : "refreshed")
+            }
             Button("Record Fresh Operator Approval") {
                 operatorApproval = appState.makeProductionSingleSessionOperatorApprovalForSelectedSession()
             }
