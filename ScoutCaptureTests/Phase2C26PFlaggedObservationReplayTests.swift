@@ -169,6 +169,8 @@ final class Phase2C26PFlaggedObservationReplayTests: XCTestCase {
     private func canonicalRemoteSnapshot(
         propertyID: UUID,
         sessionID: UUID,
+        status: String = "completed",
+        shotCount: Int = 10,
         observationCount: Int = 1
     ) -> AppState.CanonicalReadRemoteSnapshot {
         AppState.CanonicalReadRemoteSnapshot(
@@ -186,13 +188,13 @@ final class Phase2C26PFlaggedObservationReplayTests: XCTestCase {
                     id: sessionID,
                     orgID: orgID,
                     propertyID: propertyID,
-                    status: "completed",
+                    status: status,
                     updatedAt: Date(timeIntervalSinceReferenceDate: 11_900),
                     revision: 1,
                     deletedAt: nil
                 )
             ],
-            shots: (0..<10).map { _ in
+            shots: (0..<shotCount).map { _ in
                 AppState.CanonicalReadRemoteShotRow(id: UUID(), sessionID: sessionID, deletedAt: nil)
             },
             observations: (0..<observationCount).map { index in
@@ -205,6 +207,48 @@ final class Phase2C26PFlaggedObservationReplayTests: XCTestCase {
                     deletedAt: nil
                 )
             }
+        )
+    }
+
+    private func completedLocalSession(
+        propertyID: UUID? = nil,
+        sessionID: UUID? = nil
+    ) -> Session {
+        Session(
+            id: sessionID ?? self.sessionID,
+            propertyID: propertyID ?? self.propertyID,
+            startedAt: Date(timeIntervalSinceReferenceDate: 10_000),
+            status: .completed,
+            endedAt: Date(timeIntervalSinceReferenceDate: 10_600),
+            isSealed: true
+        )
+    }
+
+    private func remoteLifecycleSession(
+        orgID: UUID? = nil,
+        propertyID: UUID? = nil,
+        sessionID: UUID? = nil,
+        status: String = "draft",
+        completedAt: Date? = nil,
+        exportedAt: Date? = nil,
+        isSealed: Bool? = false,
+        firstDeliveredAt: Date? = nil,
+        reExportExpiresAt: Date? = nil,
+        updatedAt: Date? = Date(timeIntervalSinceReferenceDate: 10_100),
+        deletedAt: Date? = nil
+    ) -> AppState.NormalizedSessionLifecycleRemoteRow {
+        AppState.NormalizedSessionLifecycleRemoteRow(
+            id: sessionID ?? self.sessionID,
+            orgID: orgID ?? self.orgID,
+            propertyID: propertyID ?? self.propertyID,
+            status: status,
+            completedAt: completedAt,
+            exportedAt: exportedAt,
+            isSealed: isSealed,
+            firstDeliveredAt: firstDeliveredAt,
+            reExportExpiresAt: reExportExpiresAt,
+            updatedAt: updatedAt,
+            deletedAt: deletedAt
         )
     }
 
@@ -773,6 +817,425 @@ final class Phase2C26PFlaggedObservationReplayTests: XCTestCase {
         XCTAssertTrue(diagnostics.lastCanonicalCandidateActivationProductionBlocked)
     }
 
+    @MainActor
+    func testSelectedSessionLifecycleReplayWithoutPackageValidationEvidenceBlocks() async throws {
+        let fixture = try makeAppFixture(environment: selectedSessionReplayEnvironment)
+        defer { tearDownAppFixture(fixture) }
+        configureSelectedSessionReplayFixture(fixture)
+        var replayCalled = false
+
+        let result = await fixture.appState.replaySelectedSessionLifecycleShadowWriteForSelectedSession(
+            productionValidationEvidence: nil,
+            replayOperation: { _, _, _ in
+                replayCalled = true
+                return AppState.NormalizedBackfillEntityResult(
+                    kind: .session,
+                    attemptedCount: 1,
+                    upsertedCount: 1,
+                    skippedCount: 0,
+                    failedCount: 0,
+                    message: "unexpected"
+                )
+            }
+        )
+
+        let diagnostics = fixture.appState._debugLocalDiagnosticsForTests().sessionSnapshotUpload
+        XCTAssertFalse(result.allowed)
+        XCTAssertEqual(result.blockedReason, "package_validation_evidence_required")
+        XCTAssertFalse(replayCalled)
+        XCTAssertEqual(diagnostics.lastNormalizedBackfillPlannedSessionUpserts, 0)
+        XCTAssertEqual(diagnostics.lastNormalizedBackfillExecutedEntityCount, 0)
+    }
+
+    @MainActor
+    func testSelectedSessionLifecycleReplayWrongSelectedScopeBlocks() async throws {
+        let fixture = try makeAppFixture(environment: selectedSessionReplayEnvironment)
+        defer { tearDownAppFixture(fixture) }
+        configureSelectedSessionReplayFixture(fixture)
+        let wrongScope = AppState.ProductionCohortApprovalScope(
+            orgID: orgID,
+            propertyID: propertyID,
+            sessionID: UUID(uuidString: "99999999-9999-9999-9999-999999999999")!
+        )
+        var replayCalled = false
+
+        let result = await fixture.appState.replaySelectedSessionLifecycleShadowWriteForSelectedSession(
+            productionValidationEvidence: passingPackageValidationReport(scope: wrongScope),
+            replayOperation: { _, _, _ in
+                replayCalled = true
+                return AppState.NormalizedBackfillEntityResult(
+                    kind: .session,
+                    attemptedCount: 1,
+                    upsertedCount: 1,
+                    skippedCount: 0,
+                    failedCount: 0,
+                    message: "unexpected"
+                )
+            }
+        )
+
+        XCTAssertFalse(result.allowed)
+        XCTAssertEqual(result.blockedReason, "package_validation_selected_scope_mismatch")
+        XCTAssertFalse(replayCalled)
+    }
+
+    func testSelectedSessionLifecycleReplayUpdatesDraftToCompletedForExactSession() async {
+        let plan = AppState.makeNormalizedSessionLifecycleReplayPlan(
+            orgID: orgID,
+            propertyID: propertyID,
+            sessionID: sessionID,
+            metadata: metadata(),
+            localSession: completedLocalSession(),
+            remoteSession: remoteLifecycleSession(status: "draft")
+        )
+        var updatedRow: AppState.NormalizedSessionLifecycleReplayRow?
+
+        let result = await AppState.executeNormalizedSessionLifecycleReplayTestOnly(
+            plan: plan,
+            targetClassification: .approvedProductionValidation
+        ) { row in
+            updatedRow = row
+            return AppState.NormalizedSessionLifecycleReplayWriteSummary(
+                updatedCount: 1,
+                message: "session_lifecycle_replayed"
+            )
+        }
+
+        XCTAssertTrue(plan.allowed)
+        XCTAssertEqual(plan.rowToUpdate?.orgID, orgID)
+        XCTAssertEqual(plan.rowToUpdate?.propertyID, propertyID)
+        XCTAssertEqual(plan.rowToUpdate?.sessionID, sessionID)
+        XCTAssertEqual(plan.rowToUpdate?.status, Session.Status.completed.rawValue)
+        XCTAssertEqual(result.upsertedCount, 1)
+        XCTAssertEqual(result.skippedCount, 0)
+        XCTAssertEqual(result.remoteNewerConflictCount, 0)
+        XCTAssertEqual(updatedRow?.sessionID, sessionID)
+    }
+
+    func testSelectedSessionLifecycleReplayWrongOrgPropertyOrSessionBlocks() {
+        let wrongOrgPlan = AppState.makeNormalizedSessionLifecycleReplayPlan(
+            orgID: orgID,
+            propertyID: propertyID,
+            sessionID: sessionID,
+            metadata: metadata(),
+            localSession: completedLocalSession(),
+            remoteSession: remoteLifecycleSession(orgID: UUID())
+        )
+        let wrongPropertyPlan = AppState.makeNormalizedSessionLifecycleReplayPlan(
+            orgID: orgID,
+            propertyID: propertyID,
+            sessionID: sessionID,
+            metadata: metadata(),
+            localSession: completedLocalSession(),
+            remoteSession: remoteLifecycleSession(propertyID: UUID())
+        )
+        let wrongSessionPlan = AppState.makeNormalizedSessionLifecycleReplayPlan(
+            orgID: orgID,
+            propertyID: propertyID,
+            sessionID: sessionID,
+            metadata: metadata(),
+            localSession: completedLocalSession(),
+            remoteSession: remoteLifecycleSession(sessionID: UUID())
+        )
+
+        XCTAssertFalse(wrongOrgPlan.allowed)
+        XCTAssertFalse(wrongPropertyPlan.allowed)
+        XCTAssertFalse(wrongSessionPlan.allowed)
+        XCTAssertEqual(wrongOrgPlan.blockedReason, "remote_session_scope_mismatch")
+        XCTAssertEqual(wrongPropertyPlan.blockedReason, "remote_session_scope_mismatch")
+        XCTAssertEqual(wrongSessionPlan.blockedReason, "remote_session_scope_mismatch")
+    }
+
+    func testSelectedSessionLifecycleReplayPreservesNewerRemoteSessionRow() async {
+        let plan = AppState.makeNormalizedSessionLifecycleReplayPlan(
+            orgID: orgID,
+            propertyID: propertyID,
+            sessionID: sessionID,
+            metadata: metadata(),
+            localSession: completedLocalSession(),
+            remoteSession: remoteLifecycleSession(
+                status: "draft",
+                updatedAt: Date(timeIntervalSinceReferenceDate: 11_000)
+            )
+        )
+        var updateCalled = false
+
+        let result = await AppState.executeNormalizedSessionLifecycleReplayTestOnly(
+            plan: plan,
+            targetClassification: .approvedProductionValidation
+        ) { _ in
+            updateCalled = true
+            return AppState.NormalizedSessionLifecycleReplayWriteSummary(
+                updatedCount: 1,
+                message: "session_lifecycle_replayed"
+            )
+        }
+
+        XCTAssertTrue(plan.allowed)
+        XCTAssertNil(plan.rowToUpdate)
+        XCTAssertEqual(plan.remoteNewerSkippedCount, 1)
+        XCTAssertFalse(updateCalled)
+        XCTAssertEqual(result.upsertedCount, 0)
+        XCTAssertEqual(result.skippedCount, 1)
+        XCTAssertEqual(result.remoteNewerConflictCount, 1)
+        XCTAssertEqual(result.message, "newer_remote_session_lifecycle_preserved")
+    }
+
+    func testSelectedSessionLifecycleReplayIsIdempotentWhenRemoteAlreadyMatches() async {
+        let completedAt = Date(timeIntervalSinceReferenceDate: 10_600)
+        let plan = AppState.makeNormalizedSessionLifecycleReplayPlan(
+            orgID: orgID,
+            propertyID: propertyID,
+            sessionID: sessionID,
+            metadata: metadata(),
+            localSession: completedLocalSession(),
+            remoteSession: remoteLifecycleSession(
+                status: "completed",
+                completedAt: completedAt,
+                isSealed: true
+            )
+        )
+        var updateCalled = false
+
+        let result = await AppState.executeNormalizedSessionLifecycleReplayTestOnly(
+            plan: plan,
+            targetClassification: .approvedProductionValidation
+        ) { _ in
+            updateCalled = true
+            return AppState.NormalizedSessionLifecycleReplayWriteSummary(
+                updatedCount: 1,
+                message: "session_lifecycle_replayed"
+            )
+        }
+
+        XCTAssertTrue(plan.allowed)
+        XCTAssertNil(plan.rowToUpdate)
+        XCTAssertFalse(updateCalled)
+        XCTAssertEqual(result.upsertedCount, 0)
+        XCTAssertEqual(result.skippedCount, 1)
+        XCTAssertEqual(result.message, "session_lifecycle_already_current")
+    }
+
+    func testSelectedSessionLifecycleReplayWriteTimeNewerRemoteIsPreservedAndCounted() async {
+        let plan = AppState.makeNormalizedSessionLifecycleReplayPlan(
+            orgID: orgID,
+            propertyID: propertyID,
+            sessionID: sessionID,
+            metadata: metadata(),
+            localSession: completedLocalSession(),
+            remoteSession: remoteLifecycleSession(
+                status: "draft",
+                updatedAt: Date(timeIntervalSinceReferenceDate: 10_100)
+            )
+        )
+        guard let row = plan.rowToUpdate else {
+            XCTFail("Expected lifecycle replay row to be planned")
+            return
+        }
+        var supabaseUpdateCalled = false
+
+        let result = await AppState.executeNormalizedSessionLifecycleReplayTestOnly(
+            plan: plan,
+            targetClassification: .approvedProductionValidation
+        ) { row in
+            if let writePreflight = AppState.makeNormalizedSessionLifecycleReplayWritePreflightResult(
+                row: row,
+                latestRemoteSession: self.remoteLifecycleSession(
+                    status: "draft",
+                    updatedAt: Date(timeIntervalSinceReferenceDate: 11_000)
+                )
+            ) {
+                return writePreflight
+            }
+            supabaseUpdateCalled = true
+            return AppState.NormalizedSessionLifecycleReplayWriteSummary(
+                updatedCount: 1,
+                message: "session_lifecycle_replayed"
+            )
+        }
+
+        XCTAssertEqual(row.sessionID, sessionID)
+        XCTAssertFalse(supabaseUpdateCalled)
+        XCTAssertEqual(result.upsertedCount, 0)
+        XCTAssertEqual(result.skippedCount, 1)
+        XCTAssertEqual(result.remoteNewerConflictCount, 1)
+        XCTAssertEqual(result.failedCount, 0)
+        XCTAssertEqual(result.message, "newer_remote_session_lifecycle_preserved")
+    }
+
+    @MainActor
+    func testSelectedSessionLifecycleReplayPayloadExcludesSealAndAuditFields() throws {
+        let plan = AppState.makeNormalizedSessionLifecycleReplayPlan(
+            orgID: orgID,
+            propertyID: propertyID,
+            sessionID: sessionID,
+            metadata: metadata(),
+            localSession: completedLocalSession(),
+            remoteSession: remoteLifecycleSession(
+                status: "draft",
+                updatedAt: Date(timeIntervalSinceReferenceDate: 10_100)
+            )
+        )
+        guard let row = plan.rowToUpdate else {
+            XCTFail("Expected lifecycle replay row to be planned")
+            return
+        }
+
+        let keys = try AppState.normalizedSessionLifecycleReplayPayloadKeysTestOnly(row: row)
+
+        XCTAssertTrue(keys.contains("status"))
+        XCTAssertTrue(keys.contains("completed_at"))
+        XCTAssertFalse(keys.contains("is_sealed"))
+        XCTAssertFalse(keys.contains("updated_by"))
+        XCTAssertFalse(keys.contains("re_export_expires_at"))
+        XCTAssertFalse(keys.contains("title"))
+        XCTAssertFalse(keys.contains("capture_profile"))
+    }
+
+    @MainActor
+    func testSelectedSessionLifecycleReplayPostReplayDiagnosticsStayPinnedAfterSelectionChanges() async throws {
+        let fixture = try makeAppFixture(
+            environment: selectedSessionReplayEnvironment,
+            canonicalReadRemoteSnapshotFetchOverride: { _, propertyID, sessionID in
+                self.canonicalRemoteSnapshot(
+                    propertyID: propertyID ?? self.propertyID,
+                    sessionID: sessionID ?? self.sessionID,
+                    status: "draft",
+                    shotCount: 1,
+                    observationCount: 1
+                )
+            }
+        )
+        defer { tearDownAppFixture(fixture) }
+        configureSelectedSessionReplayFixture(fixture)
+        var diagnosticsOrgID: UUID?
+        var diagnosticsPropertyID: UUID?
+        var diagnosticsSessionID: UUID?
+
+        let result = await fixture.appState.replaySelectedSessionLifecycleShadowWriteForSelectedSession(
+            productionValidationEvidence: passingPackageValidationReport(),
+            replayOperation: { _, _, _ in
+                await MainActor.run {
+                    _ = self.selectDifferentSessionDuringReplay(fixture)
+                }
+                return AppState.NormalizedBackfillEntityResult(
+                    kind: .session,
+                    attemptedCount: 1,
+                    upsertedCount: 1,
+                    skippedCount: 0,
+                    failedCount: 0,
+                    message: "session_lifecycle_replayed"
+                )
+            },
+            diagnosticsAfterReplayOperation: { orgID, propertyID, sessionID in
+                diagnosticsOrgID = orgID
+                diagnosticsPropertyID = propertyID
+                diagnosticsSessionID = sessionID
+                return self.canonicalDiagnostics(
+                    remoteObservationCount: 1,
+                    result: .remoteMatchesLocal,
+                    recommendation: "remote_candidate_after_session_lifecycle_replay",
+                    countParity: true,
+                    statusParity: true
+                )
+            }
+        )
+
+        let diagnostics = fixture.appState._debugLocalDiagnosticsForTests().sessionSnapshotUpload
+        XCTAssertTrue(result.allowed)
+        XCTAssertEqual(diagnosticsOrgID, orgID)
+        XCTAssertEqual(diagnosticsPropertyID, propertyID)
+        XCTAssertEqual(diagnosticsSessionID, sessionID)
+        XCTAssertEqual(result.diagnosticsAfterReplay?.propertyID, propertyID)
+        XCTAssertEqual(result.diagnosticsAfterReplay?.sessionID, sessionID)
+        XCTAssertEqual(diagnostics.lastCanonicalReadDiagnosticsPropertyID, propertyID)
+        XCTAssertEqual(diagnostics.lastCanonicalReadDiagnosticsSessionID, sessionID)
+    }
+
+    @MainActor
+    func testSelectedSessionLifecycleReplayRefreshesStatusParityAfterReplay() async throws {
+        var remoteStatus = "draft"
+        let fixture = try makeAppFixture(
+            environment: selectedSessionReplayEnvironment,
+            canonicalReadRemoteSnapshotFetchOverride: { _, propertyID, sessionID in
+                self.canonicalRemoteSnapshot(
+                    propertyID: propertyID ?? self.propertyID,
+                    sessionID: sessionID ?? self.sessionID,
+                    status: remoteStatus,
+                    shotCount: 1,
+                    observationCount: 1
+                )
+            }
+        )
+        defer { tearDownAppFixture(fixture) }
+        configureSelectedSessionReplayFixture(fixture)
+
+        let result = await fixture.appState.replaySelectedSessionLifecycleShadowWriteForSelectedSession(
+            productionValidationEvidence: passingPackageValidationReport(),
+            replayOperation: { _, _, _ in
+                remoteStatus = "completed"
+                return AppState.NormalizedBackfillEntityResult(
+                    kind: .session,
+                    attemptedCount: 1,
+                    upsertedCount: 1,
+                    skippedCount: 0,
+                    failedCount: 0,
+                    message: "session_lifecycle_replayed"
+                )
+            }
+        )
+
+        let diagnostics = fixture.appState._debugLocalDiagnosticsForTests().sessionSnapshotUpload
+        XCTAssertTrue(result.allowed)
+        XCTAssertEqual(result.replayResult?.upsertedCount, 1)
+        XCTAssertEqual(result.diagnosticsAfterReplay?.statusParity, true)
+        XCTAssertEqual(diagnostics.lastCanonicalReadDiagnosticsStatusParity, true)
+        XCTAssertEqual(diagnostics.lastNormalizedBackfillPlannedSessionUpserts, 1)
+        XCTAssertEqual(diagnostics.lastNormalizedBackfillExecutedEntityCount, 1)
+    }
+
+    @MainActor
+    func testSelectedSessionLifecycleReplayDoesNotActivateSwitchReadsOrEnableBroadReads() async throws {
+        let fixture = try makeAppFixture(
+            environment: selectedSessionReplayEnvironment,
+            canonicalReadRemoteSnapshotFetchOverride: { _, propertyID, sessionID in
+                self.canonicalRemoteSnapshot(
+                    propertyID: propertyID ?? self.propertyID,
+                    sessionID: sessionID ?? self.sessionID,
+                    status: "draft",
+                    shotCount: 1,
+                    observationCount: 1
+                )
+            }
+        )
+        defer { tearDownAppFixture(fixture) }
+        configureSelectedSessionReplayFixture(fixture)
+
+        let result = await fixture.appState.replaySelectedSessionLifecycleShadowWriteForSelectedSession(
+            productionValidationEvidence: passingPackageValidationReport(),
+            replayOperation: { _, _, _ in
+                AppState.NormalizedBackfillEntityResult(
+                    kind: .session,
+                    attemptedCount: 1,
+                    upsertedCount: 1,
+                    skippedCount: 0,
+                    failedCount: 0,
+                    message: "session_lifecycle_replayed"
+                )
+            }
+        )
+
+        let diagnostics = fixture.appState._debugLocalDiagnosticsForTests().sessionSnapshotUpload
+        XCTAssertTrue(result.allowed)
+        XCTAssertFalse(fixture.appState.backendFeatureFlags.supabaseReadEnabled)
+        XCTAssertFalse(diagnostics.lastCanonicalReadCandidateProductionWideEnabled)
+        XCTAssertEqual(diagnostics.lastCanonicalCandidateActivationActiveSource, "local")
+        XCTAssertNotEqual(diagnostics.lastCanonicalCandidateActivationActiveSource, "canonical_candidate")
+        XCTAssertTrue(diagnostics.lastCanonicalReadsRemainBlocked)
+        XCTAssertTrue(diagnostics.lastNormalizedBackfillProductionBlocked)
+        XCTAssertTrue(diagnostics.lastCanonicalCandidateActivationProductionBlocked)
+    }
+
     func testFlaggedLocalObservationReplaysExactlyOneRemoteObservation() async {
         let plan = replayPlan()
         var remoteRows: [AppState.NormalizedObservationReplayRow] = []
@@ -1295,7 +1758,8 @@ final class Phase2C26PFlaggedObservationReplayTests: XCTestCase {
         remoteObservationCount: Int,
         result: AppState.CanonicalReadDiagnosticResult,
         recommendation: String,
-        countParity: Bool
+        countParity: Bool,
+        statusParity: Bool = true
     ) -> AppState.CanonicalReadDiagnosticsResult {
         AppState.CanonicalReadDiagnosticsResult(
             checkedAt: Date(timeIntervalSinceReferenceDate: 12_000),
@@ -1308,7 +1772,7 @@ final class Phase2C26PFlaggedObservationReplayTests: XCTestCase {
             localPropertyFound: true,
             localSessionFound: true,
             countParity: countParity,
-            statusParity: true,
+            statusParity: statusParity,
             parentOrgConsistent: true,
             parentPropertyConsistent: true,
             localShotCount: 10,

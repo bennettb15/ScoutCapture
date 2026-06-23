@@ -3056,8 +3056,21 @@ final class AppState: ObservableObject {
         let noBehaviorChangedText: String
     }
 
+    struct SelectedSessionLifecycleReplayActionResult: Equatable {
+        let checkedAt: Date
+        let allowed: Bool
+        let blockedReason: String?
+        let orgID: UUID?
+        let propertyID: UUID?
+        let sessionID: UUID?
+        let replayResult: NormalizedBackfillEntityResult?
+        let diagnosticsAfterReplay: CanonicalReadDiagnosticsResult?
+        let noBehaviorChangedText: String
+    }
+
     nonisolated static let localHealthSessionSnapshotPackageValidationActionTitle = "Run Package Parity / Rollback Validation"
     nonisolated static let localHealthFlaggedObservationReplayActionTitle = "Replay Flagged Observation Shadow Writes"
+    nonisolated static let localHealthSelectedSessionLifecycleReplayActionTitle = "Replay Selected Session Lifecycle Shadow Write"
 
     struct CanonicalTransitionPolicyDiagnostics: Equatable {
         let checkedAt: Date
@@ -3230,6 +3243,69 @@ final class AppState: ObservableObject {
             self.failedCount = failedCount
             self.message = message
         }
+    }
+
+    struct NormalizedSessionLifecycleRemoteRow: Equatable {
+        let id: UUID
+        let orgID: UUID
+        let propertyID: UUID
+        let status: String?
+        let completedAt: Date?
+        let exportedAt: Date?
+        let isSealed: Bool?
+        let firstDeliveredAt: Date?
+        let reExportExpiresAt: Date?
+        let updatedAt: Date?
+        let deletedAt: Date?
+    }
+
+    struct NormalizedSessionLifecycleReplayRow: Equatable {
+        let orgID: UUID
+        let propertyID: UUID
+        let sessionID: UUID
+        let status: String
+        let completedAt: Date?
+        let exportedAt: Date?
+        let firstDeliveredAt: Date?
+        let localEvidenceUpdatedAt: Date?
+    }
+
+    struct NormalizedSessionLifecycleReplayWriteSummary: Equatable {
+        let updatedCount: Int
+        let skippedCount: Int
+        let remoteNewerConflictCount: Int
+        let failedCount: Int
+        let message: String
+
+        nonisolated init(
+            updatedCount: Int,
+            skippedCount: Int = 0,
+            remoteNewerConflictCount: Int = 0,
+            failedCount: Int = 0,
+            message: String
+        ) {
+            self.updatedCount = updatedCount
+            self.skippedCount = skippedCount
+            self.remoteNewerConflictCount = remoteNewerConflictCount
+            self.failedCount = failedCount
+            self.message = message
+        }
+    }
+
+    struct NormalizedSessionLifecycleReplayPlan: Equatable {
+        let allowed: Bool
+        let blockedReason: String?
+        let orgID: UUID
+        let propertyID: UUID
+        let sessionID: UUID
+        let attemptedCount: Int
+        let rowToUpdate: NormalizedSessionLifecycleReplayRow?
+        let idempotentSkippedCount: Int
+        let remoteNewerSkippedCount: Int
+        let failedCount: Int
+        let localEvidenceUpdatedAt: Date?
+        let remoteUpdatedAt: Date?
+        let noBehaviorChangedText: String
     }
 
     struct NormalizedBackfillReplayValidationResult: Equatable {
@@ -5289,6 +5365,64 @@ final class AppState: ObservableObject {
             case lockedByDeviceID = "locked_by_device_id"
             case lockedAt = "locked_at"
             case coordinationTier1Snapshot = "coordination_tier1_snapshot"
+        }
+    }
+
+    private struct SupabaseSessionLifecycleReplayPayload: Encodable {
+        let status: String
+        let completedAt: String?
+        let exportedAt: String?
+        let firstDeliveredAt: String?
+
+        enum CodingKeys: String, CodingKey {
+            case status
+            case completedAt = "completed_at"
+            case exportedAt = "exported_at"
+            case firstDeliveredAt = "first_delivered_at"
+        }
+    }
+
+    private struct SupabaseSessionLifecycleReplayUpdateResult: Decodable {
+        let id: UUID
+        let orgID: UUID
+        let propertyID: UUID
+        let status: String?
+        let updatedAt: Date?
+
+        enum CodingKeys: String, CodingKey {
+            case id
+            case orgID = "org_id"
+            case propertyID = "property_id"
+            case status
+            case updatedAt = "updated_at"
+        }
+    }
+
+    private struct RemoteSessionLifecycleReplayRecord: Decodable {
+        let id: UUID
+        let orgID: UUID
+        let propertyID: UUID
+        let status: String?
+        let completedAt: Date?
+        let exportedAt: Date?
+        let isSealed: Bool?
+        let firstDeliveredAt: Date?
+        let reExportExpiresAt: Date?
+        let updatedAt: Date?
+        let deletedAt: Date?
+
+        enum CodingKeys: String, CodingKey {
+            case id
+            case orgID = "org_id"
+            case propertyID = "property_id"
+            case status
+            case completedAt = "completed_at"
+            case exportedAt = "exported_at"
+            case isSealed = "is_sealed"
+            case firstDeliveredAt = "first_delivered_at"
+            case reExportExpiresAt = "re_export_expires_at"
+            case updatedAt = "updated_at"
+            case deletedAt = "deleted_at"
         }
     }
 
@@ -20412,6 +20546,204 @@ final class AppState: ObservableObject {
         localDiagnostics = diagnostics
     }
 
+    @MainActor
+    func replaySelectedSessionLifecycleShadowWriteForSelectedSession(
+        checkedAt: Date = Date(),
+        productionValidationEvidence: LocalHealthSessionSnapshotPackageValidationReport?,
+        replayOperation: ((UUID, UUID, UUID) async -> NormalizedBackfillEntityResult)? = nil,
+        diagnosticsAfterReplayOperation: ((UUID, UUID, UUID) async -> CanonicalReadDiagnosticsResult)? = nil
+    ) async -> SelectedSessionLifecycleReplayActionResult {
+        let noBehaviorChangedText = "No behavior changed: selected-session lifecycle replay writes only scoped normalized session lifecycle/status fields for the exact verified org/property/session. It does not activate candidates, switch reads, enable supabase_read_enabled, enable production-wide canonical reads, write shots, observations, media, or local user state, change export, seal, sync, media, iCloud, schema, or RLS behavior, delete data, or mutate unrelated properties/sessions."
+        let selectedTarget = manualSessionSnapshotUploadTarget
+        let propertyID = selectedTarget?.propertyID
+        let sessionID = selectedTarget?.sessionID
+
+        func blocked(
+            _ reason: String,
+            orgID: UUID? = nil
+        ) -> SelectedSessionLifecycleReplayActionResult {
+            recordSelectedSessionLifecycleReplayBlock(
+                reason: reason,
+                propertyID: propertyID,
+                sessionID: sessionID
+            )
+            return SelectedSessionLifecycleReplayActionResult(
+                checkedAt: checkedAt,
+                allowed: false,
+                blockedReason: reason,
+                orgID: orgID,
+                propertyID: propertyID,
+                sessionID: sessionID,
+                replayResult: nil,
+                diagnosticsAfterReplay: nil,
+                noBehaviorChangedText: noBehaviorChangedText
+            )
+        }
+
+        guard let selectedTarget,
+              let propertyID,
+              let sessionID else {
+            return blocked("selected_session_snapshot_target_required")
+        }
+        guard let productionValidationEvidence else {
+            return blocked("package_validation_evidence_required")
+        }
+        guard productionValidationEvidence.targetScope.propertyID == propertyID,
+              productionValidationEvidence.targetScope.sessionID == sessionID else {
+            return blocked("package_validation_selected_scope_mismatch")
+        }
+        guard let orgID = selectedSessionPackageEvidenceOrganizationID(
+            productionValidationEvidence,
+            propertyID: propertyID,
+            sessionID: sessionID
+        ) else {
+            return blocked("package_validation_evidence_not_ready")
+        }
+        guard activeOrganizationID == orgID,
+              isOrganizationContextReady,
+              canAccessOrganization(orgID) else {
+            return blocked("selected_session_org_scope_not_verified", orgID: orgID)
+        }
+        guard selectedTarget.propertyID == propertyID,
+              selectedTarget.sessionID == sessionID else {
+            return blocked("selected_session_scope_not_exact", orgID: orgID)
+        }
+        guard selectedSessionCandidateAllowlistsAreExactSingletons(
+            orgID: orgID,
+            propertyID: propertyID,
+            sessionID: sessionID
+        ) else {
+            return blocked("exact_singleton_candidate_allowlist_required", orgID: orgID)
+        }
+        guard !backendFeatureFlags.supabaseReadEnabled,
+              !localDiagnostics.sessionSnapshotUpload.lastCanonicalReadCandidateProductionWideEnabled else {
+            return blocked("production_wide_canonical_reads_must_be_disabled", orgID: orgID)
+        }
+
+        let preflightDiagnostics = await runCanonicalReadDiagnosticsForPinnedSession(
+            checkedAt: checkedAt,
+            productionValidationEvidence: productionValidationEvidence,
+            orgID: orgID,
+            propertyID: propertyID,
+            sessionID: sessionID
+        )
+        guard preflightDiagnostics.propertyID == propertyID,
+              preflightDiagnostics.sessionID == sessionID,
+              preflightDiagnostics.verifiedOrganizationID == orgID,
+              preflightDiagnostics.remoteSessionFound,
+              preflightDiagnostics.parentOrgConsistent == true,
+              preflightDiagnostics.parentPropertyConsistent == true else {
+            return blocked("parent_org_property_session_consistency_required", orgID: orgID)
+        }
+
+        let replayResult: NormalizedBackfillEntityResult
+        if let replayOperation {
+            replayResult = await replayOperation(orgID, propertyID, sessionID)
+        } else {
+            replayResult = await replaySelectedSessionLifecycleShadowWriteForCanonicalCandidate(
+                orgID: orgID,
+                propertyID: propertyID,
+                sessionID: sessionID
+            )
+        }
+        recordSelectedSessionLifecycleReplayResult(
+            replayResult,
+            propertyID: propertyID,
+            sessionID: sessionID
+        )
+
+        let diagnosticsAfterReplay: CanonicalReadDiagnosticsResult?
+        if selectedSessionLifecycleReplaySucceeded(replayResult) {
+            if let diagnosticsAfterReplayOperation {
+                let refreshedDiagnostics = await diagnosticsAfterReplayOperation(orgID, propertyID, sessionID)
+                recordCanonicalReadDiagnostics(
+                    refreshedDiagnostics,
+                    productionValidationEvidenceReady: true
+                )
+                diagnosticsAfterReplay = refreshedDiagnostics
+            } else {
+                diagnosticsAfterReplay = await runCanonicalReadDiagnosticsForPinnedSession(
+                    checkedAt: checkedAt,
+                    productionValidationEvidence: productionValidationEvidence,
+                    orgID: orgID,
+                    propertyID: propertyID,
+                    sessionID: sessionID
+                )
+            }
+        } else {
+            diagnosticsAfterReplay = nil
+        }
+        recordSelectedSessionLifecycleReplayResult(
+            replayResult,
+            propertyID: propertyID,
+            sessionID: sessionID
+        )
+
+        return SelectedSessionLifecycleReplayActionResult(
+            checkedAt: checkedAt,
+            allowed: true,
+            blockedReason: nil,
+            orgID: orgID,
+            propertyID: propertyID,
+            sessionID: sessionID,
+            replayResult: replayResult,
+            diagnosticsAfterReplay: diagnosticsAfterReplay,
+            noBehaviorChangedText: noBehaviorChangedText
+        )
+    }
+
+    private func recordSelectedSessionLifecycleReplayBlock(
+        reason: String,
+        propertyID: UUID?,
+        sessionID: UUID?
+    ) {
+        var diagnostics = localDiagnostics
+        diagnostics.sessionSnapshotUpload.lastNormalizedBackfillEligible = false
+        diagnostics.sessionSnapshotUpload.lastNormalizedBackfillBlockedReason = reason
+        diagnostics.sessionSnapshotUpload.lastNormalizedBackfillPlannedSessionUpserts = 0
+        diagnostics.sessionSnapshotUpload.lastNormalizedBackfillExecutedEntityCount = 0
+        diagnostics.sessionSnapshotUpload.lastNormalizedBackfillSkippedEntityCount = 0
+        diagnostics.sessionSnapshotUpload.lastNormalizedBackfillRemoteNewerConflictCount = 0
+        diagnostics.sessionSnapshotUpload.lastNormalizedBackfillProductionBlocked = true
+        if let propertyID {
+            diagnostics.sessionSnapshotUpload.lastCanonicalReadDiagnosticsPropertyID = propertyID
+        }
+        if let sessionID {
+            diagnostics.sessionSnapshotUpload.lastCanonicalReadDiagnosticsSessionID = sessionID
+        }
+        localDiagnostics = diagnostics
+    }
+
+    private func selectedSessionLifecycleReplaySucceeded(
+        _ result: NormalizedBackfillEntityResult
+    ) -> Bool {
+        result.failedCount == 0 &&
+            result.remoteNewerConflictCount == 0 &&
+            (result.upsertedCount > 0 || result.message == "session_lifecycle_already_current")
+    }
+
+    private func recordSelectedSessionLifecycleReplayResult(
+        _ result: NormalizedBackfillEntityResult,
+        propertyID: UUID,
+        sessionID: UUID
+    ) {
+        var diagnostics = localDiagnostics
+        diagnostics.sessionSnapshotUpload.lastCanonicalReadDiagnosticsPropertyID = propertyID
+        diagnostics.sessionSnapshotUpload.lastCanonicalReadDiagnosticsSessionID = sessionID
+        let succeeded = selectedSessionLifecycleReplaySucceeded(result)
+        diagnostics.sessionSnapshotUpload.lastNormalizedBackfillEligible = succeeded
+        diagnostics.sessionSnapshotUpload.lastNormalizedBackfillBlockedReason = succeeded ? "none" : result.message
+        diagnostics.sessionSnapshotUpload.lastNormalizedBackfillPlannedSessionUpserts = result.attemptedCount
+        diagnostics.sessionSnapshotUpload.lastNormalizedBackfillExecutedEntityCount = result.upsertedCount
+        diagnostics.sessionSnapshotUpload.lastNormalizedBackfillSkippedEntityCount = result.skippedCount
+        diagnostics.sessionSnapshotUpload.lastNormalizedBackfillRemoteNewerConflictCount = result.remoteNewerConflictCount
+        diagnostics.sessionSnapshotUpload.lastNormalizedBackfillProductionBlocked = true
+        diagnostics.sessionSnapshotUpload.lastCanonicalReadsRemainBlocked = true
+        diagnostics.sessionSnapshotUpload.lastCanonicalReadCandidateRemoteStateReadable = false
+        diagnostics.sessionSnapshotUpload.lastCanonicalReadCandidateProductionWideEnabled = false
+        localDiagnostics = diagnostics
+    }
+
     private func recordCanonicalCandidateActivation(
         _ result: CanonicalCandidateActivationResult,
         activatedAt: Date? = nil,
@@ -21150,6 +21482,286 @@ final class AppState: ObservableObject {
             canonicalReadsRemainBlocked: true,
             noBehaviorChangedText: "No behavior changed: this test-only normalized backfill/replay plan is read-only by default and does not switch canonical reads, hydrate data, restore local state, run bulk backfill, change export, change seal, change sync, change media, change iCloud behavior, loosen RLS, delete data, or mutate production data."
         )
+    }
+
+    private nonisolated static func normalizedReplayStatus(_ value: String?) -> String? {
+        normalizedReplayText(value)?.lowercased()
+    }
+
+    private nonisolated static func normalizedReplayDatesEqual(_ lhs: Date?, _ rhs: Date?) -> Bool {
+        switch (lhs, rhs) {
+        case (.none, .none):
+            return true
+        case let (.some(lhs), .some(rhs)):
+            return abs(lhs.timeIntervalSince(rhs)) < 0.001
+        default:
+            return false
+        }
+    }
+
+    private nonisolated static func sessionLifecycleReplayRowsMatch(
+        desired: NormalizedSessionLifecycleReplayRow,
+        remote: NormalizedSessionLifecycleRemoteRow
+    ) -> Bool {
+        normalizedReplayStatus(desired.status) == normalizedReplayStatus(remote.status) &&
+            normalizedReplayDatesEqual(desired.completedAt, remote.completedAt) &&
+            normalizedReplayDatesEqual(desired.exportedAt, remote.exportedAt) &&
+            normalizedReplayDatesEqual(desired.firstDeliveredAt, remote.firstDeliveredAt)
+    }
+
+    nonisolated static func makeNormalizedSessionLifecycleReplayPlan(
+        orgID: UUID,
+        propertyID: UUID,
+        sessionID: UUID,
+        metadata: SessionMetadata?,
+        localSession: Session?,
+        remoteSession: NormalizedSessionLifecycleRemoteRow?
+    ) -> NormalizedSessionLifecycleReplayPlan {
+        let noBehaviorChangedText = "No behavior changed: selected-session lifecycle replay updates only normalized session lifecycle/status fields for one verified session row. It does not activate, switch reads, enable broad reads, write child rows, media, or local user state, or change export, seal, sync, media, iCloud, schema, or RLS behavior."
+
+        func blocked(_ reason: String, attemptedCount: Int = 0) -> NormalizedSessionLifecycleReplayPlan {
+            NormalizedSessionLifecycleReplayPlan(
+                allowed: false,
+                blockedReason: reason,
+                orgID: orgID,
+                propertyID: propertyID,
+                sessionID: sessionID,
+                attemptedCount: attemptedCount,
+                rowToUpdate: nil,
+                idempotentSkippedCount: 0,
+                remoteNewerSkippedCount: 0,
+                failedCount: attemptedCount,
+                localEvidenceUpdatedAt: nil,
+                remoteUpdatedAt: remoteSession?.updatedAt,
+                noBehaviorChangedText: noBehaviorChangedText
+            )
+        }
+
+        guard let metadata else {
+            return blocked("local_session_metadata_missing")
+        }
+        guard metadata.orgID == orgID,
+              metadata.propertyID == propertyID,
+              metadata.sessionID == sessionID else {
+            return blocked("local_session_metadata_scope_mismatch")
+        }
+        guard let localSession,
+              localSession.propertyID == propertyID,
+              localSession.id == sessionID else {
+            return blocked("local_session_scope_mismatch")
+        }
+        guard let remoteSession else {
+            return blocked("remote_session_missing", attemptedCount: 1)
+        }
+        guard remoteSession.deletedAt == nil else {
+            return blocked("remote_session_soft_deleted", attemptedCount: 1)
+        }
+        guard remoteSession.orgID == orgID,
+              remoteSession.propertyID == propertyID,
+              remoteSession.id == sessionID else {
+            return blocked("remote_session_scope_mismatch", attemptedCount: 1)
+        }
+
+        let localEvidence = canonicalReadLocalKnownState(
+            propertyUpdatedAt: nil,
+            sessionStartedAt: localSession.startedAt,
+            sessionEndedAt: localSession.endedAt,
+            sessionExportedAt: localSession.exportedAt,
+            sessionFirstDeliveredAt: localSession.firstDeliveredAt,
+            sessionReExportExpiresAt: localSession.reExportExpiresAt,
+            metadataStartedAt: metadata.startedAt,
+            metadataEndedAt: metadata.endedAt,
+            metadataExportedAt: metadata.exportedAt,
+            metadataFirstDeliveredAt: metadata.firstDeliveredAt,
+            metadataReExportExpiresAt: metadata.reExportExpiresAt
+        )
+        guard let localEvidenceUpdatedAt = localEvidence.at else {
+            return blocked("local_lifecycle_evidence_timestamp_missing", attemptedCount: 1)
+        }
+
+        let row = NormalizedSessionLifecycleReplayRow(
+            orgID: orgID,
+            propertyID: propertyID,
+            sessionID: sessionID,
+            status: metadata.status.rawValue,
+            completedAt: metadata.endedAt,
+            exportedAt: metadata.exportedAt,
+            firstDeliveredAt: metadata.firstDeliveredAt,
+            localEvidenceUpdatedAt: localEvidenceUpdatedAt
+        )
+        if sessionLifecycleReplayRowsMatch(desired: row, remote: remoteSession) {
+            return NormalizedSessionLifecycleReplayPlan(
+                allowed: true,
+                blockedReason: nil,
+                orgID: orgID,
+                propertyID: propertyID,
+                sessionID: sessionID,
+                attemptedCount: 1,
+                rowToUpdate: nil,
+                idempotentSkippedCount: 1,
+                remoteNewerSkippedCount: 0,
+                failedCount: 0,
+                localEvidenceUpdatedAt: localEvidenceUpdatedAt,
+                remoteUpdatedAt: remoteSession.updatedAt,
+                noBehaviorChangedText: noBehaviorChangedText
+            )
+        }
+        if let remoteUpdatedAt = remoteSession.updatedAt,
+           remoteUpdatedAt > localEvidenceUpdatedAt {
+            return NormalizedSessionLifecycleReplayPlan(
+                allowed: true,
+                blockedReason: nil,
+                orgID: orgID,
+                propertyID: propertyID,
+                sessionID: sessionID,
+                attemptedCount: 1,
+                rowToUpdate: nil,
+                idempotentSkippedCount: 0,
+                remoteNewerSkippedCount: 1,
+                failedCount: 0,
+                localEvidenceUpdatedAt: localEvidenceUpdatedAt,
+                remoteUpdatedAt: remoteUpdatedAt,
+                noBehaviorChangedText: noBehaviorChangedText
+            )
+        }
+        return NormalizedSessionLifecycleReplayPlan(
+            allowed: true,
+            blockedReason: nil,
+            orgID: orgID,
+            propertyID: propertyID,
+            sessionID: sessionID,
+            attemptedCount: 1,
+            rowToUpdate: row,
+            idempotentSkippedCount: 0,
+            remoteNewerSkippedCount: 0,
+            failedCount: 0,
+            localEvidenceUpdatedAt: localEvidenceUpdatedAt,
+            remoteUpdatedAt: remoteSession.updatedAt,
+            noBehaviorChangedText: noBehaviorChangedText
+        )
+    }
+
+    nonisolated static func makeNormalizedSessionLifecycleReplayWritePreflightResult(
+        row: NormalizedSessionLifecycleReplayRow,
+        latestRemoteSession: NormalizedSessionLifecycleRemoteRow
+    ) -> NormalizedSessionLifecycleReplayWriteSummary? {
+        guard latestRemoteSession.deletedAt == nil else {
+            return NormalizedSessionLifecycleReplayWriteSummary(
+                updatedCount: 0,
+                failedCount: 1,
+                message: "remote_session_soft_deleted"
+            )
+        }
+        guard latestRemoteSession.orgID == row.orgID,
+              latestRemoteSession.propertyID == row.propertyID,
+              latestRemoteSession.id == row.sessionID else {
+            return NormalizedSessionLifecycleReplayWriteSummary(
+                updatedCount: 0,
+                failedCount: 1,
+                message: "remote_session_scope_mismatch"
+            )
+        }
+        if let remoteUpdatedAt = latestRemoteSession.updatedAt,
+           let localEvidenceUpdatedAt = row.localEvidenceUpdatedAt,
+           remoteUpdatedAt > localEvidenceUpdatedAt {
+            return NormalizedSessionLifecycleReplayWriteSummary(
+                updatedCount: 0,
+                skippedCount: 1,
+                remoteNewerConflictCount: 1,
+                message: "newer_remote_session_lifecycle_preserved"
+            )
+        }
+        if sessionLifecycleReplayRowsMatch(desired: row, remote: latestRemoteSession) {
+            return NormalizedSessionLifecycleReplayWriteSummary(
+                updatedCount: 0,
+                skippedCount: 1,
+                message: "session_lifecycle_already_current"
+            )
+        }
+        return nil
+    }
+
+    @MainActor
+    static func normalizedSessionLifecycleReplayPayloadKeysTestOnly(
+        row: NormalizedSessionLifecycleReplayRow
+    ) throws -> Set<String> {
+        let payload = SupabaseSessionLifecycleReplayPayload(
+            status: row.status,
+            completedAt: row.completedAt?.ISO8601Format(),
+            exportedAt: row.exportedAt?.ISO8601Format(),
+            firstDeliveredAt: row.firstDeliveredAt?.ISO8601Format()
+        )
+        let data = try JSONEncoder().encode(payload)
+        let object = try JSONSerialization.jsonObject(with: data)
+        guard let dictionary = object as? [String: Any] else { return [] }
+        return Set(dictionary.keys)
+    }
+
+    nonisolated static func executeNormalizedSessionLifecycleReplayTestOnly(
+        plan: NormalizedSessionLifecycleReplayPlan,
+        targetClassification: SupabaseRuntimeConfiguration.TargetClassification,
+        operation: (NormalizedSessionLifecycleReplayRow) async throws -> NormalizedSessionLifecycleReplayWriteSummary
+    ) async -> NormalizedBackfillEntityResult {
+        guard targetClassification == .localDev ||
+                targetClassification == .approvedStaging ||
+                targetClassification == .approvedProductionValidation else {
+            return NormalizedBackfillEntityResult(
+                kind: .session,
+                attemptedCount: plan.attemptedCount,
+                upsertedCount: 0,
+                skippedCount: plan.attemptedCount,
+                failedCount: 0,
+                message: "target_environment_session_lifecycle_replay_blocked"
+            )
+        }
+        guard plan.allowed else {
+            return NormalizedBackfillEntityResult(
+                kind: .session,
+                attemptedCount: plan.attemptedCount,
+                upsertedCount: 0,
+                skippedCount: max(0, plan.attemptedCount - plan.failedCount),
+                failedCount: plan.failedCount,
+                message: plan.blockedReason ?? "session_lifecycle_replay_plan_not_allowed"
+            )
+        }
+        guard let row = plan.rowToUpdate else {
+            let skippedCount = plan.idempotentSkippedCount + plan.remoteNewerSkippedCount
+            let message = plan.remoteNewerSkippedCount > 0
+                ? "newer_remote_session_lifecycle_preserved"
+                : "session_lifecycle_already_current"
+            return NormalizedBackfillEntityResult(
+                kind: .session,
+                attemptedCount: plan.attemptedCount,
+                upsertedCount: 0,
+                skippedCount: skippedCount,
+                failedCount: 0,
+                remoteNewerConflictCount: plan.remoteNewerSkippedCount,
+                message: message
+            )
+        }
+
+        do {
+            let summary = try await operation(row)
+            return NormalizedBackfillEntityResult(
+                kind: .session,
+                attemptedCount: plan.attemptedCount,
+                upsertedCount: summary.updatedCount,
+                skippedCount: plan.idempotentSkippedCount + plan.remoteNewerSkippedCount + summary.skippedCount,
+                failedCount: summary.failedCount,
+                remoteNewerConflictCount: plan.remoteNewerSkippedCount + summary.remoteNewerConflictCount,
+                message: summary.message
+            )
+        } catch {
+            return NormalizedBackfillEntityResult(
+                kind: .session,
+                attemptedCount: plan.attemptedCount,
+                upsertedCount: 0,
+                skippedCount: plan.idempotentSkippedCount + plan.remoteNewerSkippedCount,
+                failedCount: 1,
+                remoteNewerConflictCount: plan.remoteNewerSkippedCount,
+                message: sanitizedDiagnosticsErrorMessage(error.localizedDescription)
+            )
+        }
     }
 
     nonisolated static func makeNormalizedObservationReplayPlan(
@@ -28876,6 +29488,173 @@ final class AppState: ObservableObject {
         ) { rows in
             try await self.insertObservationRowsToSupabaseFailClosed(rows)
         }
+    }
+
+    @MainActor
+    func replaySelectedSessionLifecycleShadowWriteForCanonicalCandidate(
+        orgID: UUID,
+        propertyID: UUID,
+        sessionID: UUID
+    ) async -> NormalizedBackfillEntityResult {
+        guard backendFeatureFlags.supabaseEnabled,
+              backendFeatureFlags.shadowWriteEnabled else {
+            return NormalizedBackfillEntityResult(
+                kind: .session,
+                attemptedCount: 0,
+                upsertedCount: 0,
+                skippedCount: 0,
+                failedCount: 0,
+                message: "shadow_write_disabled"
+            )
+        }
+        guard isOrganizationContextReady,
+              activeOrganizationID == orgID,
+              canAccessOrganization(orgID) else {
+            return NormalizedBackfillEntityResult(
+                kind: .session,
+                attemptedCount: 0,
+                upsertedCount: 0,
+                skippedCount: 0,
+                failedCount: 0,
+                message: "organization_context_not_verified"
+            )
+        }
+        let localSession = ((try? localStore.fetchSessionsForCacheBuild(propertyID: propertyID)) ?? sessionIndexByProperty[propertyID] ?? [])
+            .first { $0.id == sessionID }
+        guard let metadata = try? localStore.loadSessionMetadata(propertyID: propertyID, sessionID: sessionID) else {
+            return NormalizedBackfillEntityResult(
+                kind: .session,
+                attemptedCount: 0,
+                upsertedCount: 0,
+                skippedCount: 0,
+                failedCount: 0,
+                message: "local_session_metadata_missing"
+            )
+        }
+        guard let remoteSession = await fetchRemoteSessionLifecycleReplayRowIfAvailable(
+            orgID: orgID,
+            propertyID: propertyID,
+            sessionID: sessionID
+        ) else {
+            return NormalizedBackfillEntityResult(
+                kind: .session,
+                attemptedCount: 1,
+                upsertedCount: 0,
+                skippedCount: 0,
+                failedCount: 1,
+                message: "remote_session_lifecycle_unavailable"
+            )
+        }
+
+        let plan = Self.makeNormalizedSessionLifecycleReplayPlan(
+            orgID: orgID,
+            propertyID: propertyID,
+            sessionID: sessionID,
+            metadata: metadata,
+            localSession: localSession,
+            remoteSession: remoteSession
+        )
+        return await Self.executeNormalizedSessionLifecycleReplayTestOnly(
+            plan: plan,
+            targetClassification: supabaseConfiguration.targetClassification
+        ) { row in
+            try await self.updateSessionLifecycleRowToSupabaseFailClosed(row)
+        }
+    }
+
+    private func fetchRemoteSessionLifecycleReplayRowIfAvailable(
+        orgID: UUID,
+        propertyID: UUID,
+        sessionID: UUID
+    ) async -> NormalizedSessionLifecycleRemoteRow? {
+        guard backendFeatureFlags.supabaseEnabled,
+              isOrganizationContextReady,
+              let client = supabaseClient else {
+            return nil
+        }
+        do {
+            let rows = try await client
+                .from("sessions")
+                .select("id, org_id, property_id, status, completed_at, exported_at, is_sealed, first_delivered_at, re_export_expires_at, updated_at, deleted_at")
+                .eq("org_id", value: orgID.uuidString.lowercased())
+                .eq("property_id", value: propertyID.uuidString.lowercased())
+                .eq("id", value: sessionID.uuidString.lowercased())
+                .limit(1)
+                .execute()
+                .value as [RemoteSessionLifecycleReplayRecord]
+            guard let row = rows.first else { return nil }
+            return NormalizedSessionLifecycleRemoteRow(
+                id: row.id,
+                orgID: row.orgID,
+                propertyID: row.propertyID,
+                status: row.status,
+                completedAt: row.completedAt,
+                exportedAt: row.exportedAt,
+                isSealed: row.isSealed,
+                firstDeliveredAt: row.firstDeliveredAt,
+                reExportExpiresAt: row.reExportExpiresAt,
+                updatedAt: row.updatedAt,
+                deletedAt: row.deletedAt
+            )
+        } catch {
+            recordDiagnosticsError(error)
+            return nil
+        }
+    }
+
+    private func updateSessionLifecycleRowToSupabaseFailClosed(
+        _ row: NormalizedSessionLifecycleReplayRow
+    ) async throws -> NormalizedSessionLifecycleReplayWriteSummary {
+        guard let client = supabaseClient else {
+            throw NSError(domain: "ScoutCapture.SessionLifecycleReplay", code: 0, userInfo: [
+                NSLocalizedDescriptionKey: "Missing Supabase client for session lifecycle replay."
+            ])
+        }
+        guard let latestRemoteSession = await fetchRemoteSessionLifecycleReplayRowIfAvailable(
+            orgID: row.orgID,
+            propertyID: row.propertyID,
+            sessionID: row.sessionID
+        ) else {
+            return NormalizedSessionLifecycleReplayWriteSummary(
+                updatedCount: 0,
+                failedCount: 1,
+                message: "remote_session_lifecycle_unavailable"
+            )
+        }
+        if let preflightResult = Self.makeNormalizedSessionLifecycleReplayWritePreflightResult(
+            row: row,
+            latestRemoteSession: latestRemoteSession
+        ) {
+            return preflightResult
+        }
+        let payload = SupabaseSessionLifecycleReplayPayload(
+            status: row.status,
+            completedAt: row.completedAt?.ISO8601Format(),
+            exportedAt: row.exportedAt?.ISO8601Format(),
+            firstDeliveredAt: row.firstDeliveredAt?.ISO8601Format()
+        )
+        let rows = try await client
+            .from("sessions")
+            .update(payload, returning: .representation)
+            .eq("id", value: row.sessionID.uuidString.lowercased())
+            .eq("org_id", value: row.orgID.uuidString.lowercased())
+            .eq("property_id", value: row.propertyID.uuidString.lowercased())
+            .is("deleted_at", value: nil)
+            .execute()
+            .value as [SupabaseSessionLifecycleReplayUpdateResult]
+        guard rows.count == 1,
+              rows[0].id == row.sessionID,
+              rows[0].orgID == row.orgID,
+              rows[0].propertyID == row.propertyID,
+              Self.normalizedReplayStatus(rows[0].status) == Self.normalizedReplayStatus(row.status) else {
+            throw NSError(domain: "ScoutCapture.SessionLifecycleReplay", code: 1, userInfo: [
+                NSLocalizedDescriptionKey: "Session lifecycle replay update was not confirmed for the exact selected scope."
+            ])
+        }
+        return NormalizedSessionLifecycleReplayWriteSummary(
+            updatedCount: 1,
+            message: "session_lifecycle_replayed"
+        )
     }
 
     private func fetchObservationIDPreflightRowsIfAvailable(

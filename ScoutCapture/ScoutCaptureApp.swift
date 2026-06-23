@@ -9251,6 +9251,8 @@ private struct DebugSessionSnapshotCanonicalReadDiagnosticsSection: View {
     @State private var isRollingBackCanonicalCandidate = false
     @State private var isReplayingFlaggedObservationShadowWrites = false
     @State private var flaggedObservationReplayActionResult: AppState.SelectedSessionFlaggedObservationReplayActionResult?
+    @State private var isReplayingSelectedSessionLifecycleShadowWrite = false
+    @State private var selectedSessionLifecycleReplayActionResult: AppState.SelectedSessionLifecycleReplayActionResult?
     @State private var operatorApproval: AppState.ProductionCohortOperatorApprovalDiagnostics?
 
     private var rolloutReadiness: AppState.CanonicalRolloutReadinessDiagnostics {
@@ -9503,6 +9505,35 @@ private struct DebugSessionSnapshotCanonicalReadDiagnosticsSection: View {
                     diagnosticRow("Replay Failed", "\(replay.failedCount)")
                 }
                 diagnosticRow("Post-Replay Diagnostics", flaggedObservationReplayActionResult.diagnosticsAfterReplay == nil ? "not run" : "refreshed")
+            }
+            Button(isReplayingSelectedSessionLifecycleShadowWrite ? "Replaying..." : AppState.localHealthSelectedSessionLifecycleReplayActionTitle) {
+                guard !isReplayingSelectedSessionLifecycleShadowWrite else { return }
+                isReplayingSelectedSessionLifecycleShadowWrite = true
+                Task {
+                    let result = await appState.replaySelectedSessionLifecycleShadowWriteForSelectedSession(
+                        productionValidationEvidence: packageValidationReport
+                    )
+                    await MainActor.run {
+                        selectedSessionLifecycleReplayActionResult = result
+                        isReplayingSelectedSessionLifecycleShadowWrite = false
+                    }
+                }
+            }
+            .disabled(isReplayingSelectedSessionLifecycleShadowWrite)
+            .font(.system(size: 14, weight: .semibold))
+            if let selectedSessionLifecycleReplayActionResult {
+                diagnosticRow("Lifecycle Replay Action", selectedSessionLifecycleReplayActionResult.allowed ? "allowed" : "blocked")
+                diagnosticRow("Lifecycle Replay Blocked", compactValue(selectedSessionLifecycleReplayActionResult.blockedReason ?? "none"))
+                diagnosticRow("Lifecycle Replay Scope", "property \(selectedSessionLifecycleReplayActionResult.propertyID?.uuidString ?? "none"), session \(selectedSessionLifecycleReplayActionResult.sessionID?.uuidString ?? "none")")
+                if let replay = selectedSessionLifecycleReplayActionResult.replayResult {
+                    diagnosticRow("Lifecycle Planned", "\(replay.attemptedCount)")
+                    diagnosticRow("Lifecycle Executed", "\(replay.upsertedCount)")
+                    diagnosticRow("Lifecycle Skipped", "\(replay.skippedCount)")
+                    diagnosticRow("Lifecycle Remote Newer", "\(replay.remoteNewerConflictCount)")
+                    diagnosticRow("Lifecycle Failed", "\(replay.failedCount)")
+                    diagnosticRow("Lifecycle Result", replay.message)
+                }
+                diagnosticRow("Lifecycle Post-Replay Diagnostics", selectedSessionLifecycleReplayActionResult.diagnosticsAfterReplay == nil ? "not run" : "refreshed")
             }
             Button("Record Fresh Operator Approval") {
                 operatorApproval = appState.makeProductionSingleSessionOperatorApprovalForSelectedSession()
