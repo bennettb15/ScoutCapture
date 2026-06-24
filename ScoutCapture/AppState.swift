@@ -19859,7 +19859,7 @@ final class AppState: ObservableObject {
             orgID: metadata?.orgID ?? property?.orgId,
             sessionID: session?.id ?? sessionID,
             sessionPropertyID: session?.propertyID,
-            sessionStatus: metadata?.status.rawValue ?? session?.status.rawValue,
+            sessionStatus: session?.status.rawValue ?? metadata?.status.rawValue,
             shotCount: metadata?.shots.count,
             issueObservationCount: metadata?.issues.count,
             guidedCount: metadata?.guidedShots.count,
@@ -21615,7 +21615,7 @@ final class AppState: ObservableObject {
             propertyID: propertyID,
             sessionID: sessionID
         )
-        let desiredStatus = pinnedStatusEvidence?.localStatus ?? metadata.status.rawValue
+        let desiredStatus = pinnedStatusEvidence?.localStatus ?? localSession.status.rawValue
         let effectiveRemoteSession = NormalizedSessionLifecycleRemoteRow(
             id: remoteSession.id,
             orgID: remoteSession.orgID,

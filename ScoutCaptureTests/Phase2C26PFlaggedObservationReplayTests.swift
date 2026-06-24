@@ -427,6 +427,7 @@ final class Phase2C26PFlaggedObservationReplayTests: XCTestCase {
         orgID: UUID? = nil,
         propertyID: UUID? = nil,
         sessionID: UUID? = nil,
+        status: String = "completed",
         updatedAt: Date? = Date(timeIntervalSinceReferenceDate: 10_600)
     ) -> [AppState.CanonicalReadRemoteSessionRow] {
         [
@@ -434,7 +435,7 @@ final class Phase2C26PFlaggedObservationReplayTests: XCTestCase {
                 id: sessionID ?? self.sessionID,
                 orgID: orgID ?? self.orgID,
                 propertyID: propertyID ?? self.propertyID,
-                status: "completed",
+                status: status,
                 updatedAt: updatedAt,
                 revision: 1,
                 deletedAt: nil
@@ -960,6 +961,85 @@ final class Phase2C26PFlaggedObservationReplayTests: XCTestCase {
         XCTAssertEqual(result.skippedCount, 0)
         XCTAssertEqual(updatedRow?.propertyID, propertyID)
         XCTAssertEqual(updatedRow?.sessionID, sessionID)
+    }
+
+    func testSelectedSessionLifecycleReplayPrefersLiveCompletedStatusOverStaleDraftMetadata() async {
+        let staleDraftMetadata = metadata(status: .draft)
+        let liveCompletedSession = completedLocalSession()
+        let local = AppState.CanonicalReadLocalSnapshot(
+            propertyID: propertyID,
+            orgID: orgID,
+            sessionID: sessionID,
+            sessionPropertyID: propertyID,
+            sessionStatus: liveCompletedSession.status.rawValue,
+            shotCount: staleDraftMetadata.shots.count,
+            issueObservationCount: staleDraftMetadata.issues.count,
+            guidedCount: staleDraftMetadata.guidedShots.count,
+            updatedAt: staleDraftMetadata.endedAt,
+            localKnownStateSource: "session.completed_at",
+            localPropertyFound: true,
+            localSessionFound: true
+        )
+        let remote = AppState.CanonicalReadRemoteSnapshot(
+            properties: remoteProperties(),
+            sessions: remoteSessions(status: Session.Status.draft.rawValue),
+            shots: [AppState.CanonicalReadRemoteShotRow(id: shotID, sessionID: sessionID, deletedAt: nil)],
+            observations: [
+                AppState.CanonicalReadRemoteObservationRow(
+                    id: issueID,
+                    orgID: orgID,
+                    propertyID: propertyID,
+                    sessionID: sessionID,
+                    updatedAt: Date(timeIntervalSinceReferenceDate: 10_250),
+                    deletedAt: nil
+                )
+            ]
+        )
+        let diagnostics = AppState.makeCanonicalReadDiagnostics(
+            checkedAt: Date(timeIntervalSinceReferenceDate: 10_700),
+            activeOrganizationID: orgID,
+            local: local,
+            remote: remote
+        )
+        let plan = AppState.makeNormalizedSessionLifecycleReplayPlan(
+            orgID: orgID,
+            propertyID: propertyID,
+            sessionID: sessionID,
+            metadata: staleDraftMetadata,
+            localSession: liveCompletedSession,
+            remoteSession: remoteLifecycleSession(
+                status: Session.Status.draft.rawValue,
+                completedAt: staleDraftMetadata.endedAt,
+                exportedAt: staleDraftMetadata.exportedAt,
+                firstDeliveredAt: staleDraftMetadata.firstDeliveredAt
+            ),
+            pinnedDiagnostics: diagnostics
+        )
+        var updatedRow: AppState.NormalizedSessionLifecycleReplayRow?
+
+        let result = await AppState.executeNormalizedSessionLifecycleReplayTestOnly(
+            plan: plan,
+            targetClassification: .approvedProductionValidation
+        ) { row in
+            updatedRow = row
+            return AppState.NormalizedSessionLifecycleReplayWriteSummary(
+                updatedCount: 1,
+                message: "session_lifecycle_replayed"
+            )
+        }
+
+        XCTAssertEqual(diagnostics.localSessionStatus, Session.Status.completed.rawValue)
+        XCTAssertEqual(diagnostics.remoteSessionStatus, Session.Status.draft.rawValue)
+        XCTAssertEqual(diagnostics.statusParity, false)
+        XCTAssertTrue(plan.allowed)
+        XCTAssertNotNil(plan.rowToUpdate)
+        XCTAssertEqual(plan.idempotentSkippedCount, 0)
+        XCTAssertEqual(plan.rowToUpdate?.status, Session.Status.completed.rawValue)
+        XCTAssertEqual(result.upsertedCount, 1)
+        XCTAssertEqual(result.skippedCount, 0)
+        XCTAssertEqual(updatedRow?.propertyID, propertyID)
+        XCTAssertEqual(updatedRow?.sessionID, sessionID)
+        XCTAssertEqual(updatedRow?.status, Session.Status.completed.rawValue)
     }
 
     func testSelectedSessionLifecycleReplayWrongOrgPropertyOrSessionBlocks() {
