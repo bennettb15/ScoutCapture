@@ -1076,7 +1076,7 @@ final class Phase2C26PFlaggedObservationReplayTests: XCTestCase {
         XCTAssertEqual(wrongSessionPlan.blockedReason, "remote_session_scope_mismatch")
     }
 
-    func testSelectedSessionLifecycleReplayPreservesNewerRemoteSessionRow() async {
+    func testSelectedSessionLifecycleReplayAllowsStaleRemoteDraftCorrectionWhenDiagnosticsAreClean() async {
         let pinnedDiagnostics = canonicalDiagnostics(
             remoteObservationCount: 1,
             result: .divergentConflict,
@@ -1093,7 +1093,57 @@ final class Phase2C26PFlaggedObservationReplayTests: XCTestCase {
             metadata: metadata(),
             localSession: completedLocalSession(),
             remoteSession: remoteLifecycleSession(
-                status: "draft",
+                status: Session.Status.draft.rawValue,
+                updatedAt: Date(timeIntervalSinceReferenceDate: 11_000)
+            ),
+            pinnedDiagnostics: pinnedDiagnostics
+        )
+        var updatedRow: AppState.NormalizedSessionLifecycleReplayRow?
+
+        let result = await AppState.executeNormalizedSessionLifecycleReplayTestOnly(
+            plan: plan,
+            targetClassification: .approvedProductionValidation
+        ) { row in
+            updatedRow = row
+            return AppState.NormalizedSessionLifecycleReplayWriteSummary(
+                updatedCount: 1,
+                message: row.allowsStaleRemoteDraftLifecycleCorrection
+                    ? "stale_remote_draft_lifecycle_corrected"
+                    : "session_lifecycle_replayed"
+            )
+        }
+
+        XCTAssertTrue(plan.allowed)
+        XCTAssertNotNil(plan.rowToUpdate)
+        XCTAssertEqual(plan.remoteNewerSkippedCount, 0)
+        XCTAssertEqual(plan.rowToUpdate?.status, Session.Status.completed.rawValue)
+        XCTAssertEqual(plan.rowToUpdate?.pinnedRemoteStatusEvidence, Session.Status.draft.rawValue)
+        XCTAssertEqual(plan.rowToUpdate?.allowsStaleRemoteDraftLifecycleCorrection, true)
+        XCTAssertEqual(updatedRow?.sessionID, sessionID)
+        XCTAssertEqual(result.upsertedCount, 1)
+        XCTAssertEqual(result.skippedCount, 0)
+        XCTAssertEqual(result.remoteNewerConflictCount, 0)
+        XCTAssertEqual(result.message, "stale_remote_draft_lifecycle_corrected")
+    }
+
+    func testSelectedSessionLifecycleReplayPreservesOtherNewerRemoteStatuses() async {
+        let pinnedDiagnostics = canonicalDiagnostics(
+            remoteObservationCount: 1,
+            result: .divergentConflict,
+            recommendation: "local_first_block_canonical_read",
+            countParity: true,
+            statusParity: false,
+            localStatus: Session.Status.completed.rawValue,
+            remoteStatus: "in_progress"
+        )
+        let plan = AppState.makeNormalizedSessionLifecycleReplayPlan(
+            orgID: orgID,
+            propertyID: propertyID,
+            sessionID: sessionID,
+            metadata: metadata(),
+            localSession: completedLocalSession(),
+            remoteSession: remoteLifecycleSession(
+                status: "in_progress",
                 updatedAt: Date(timeIntervalSinceReferenceDate: 11_000)
             ),
             pinnedDiagnostics: pinnedDiagnostics
@@ -1211,6 +1261,166 @@ final class Phase2C26PFlaggedObservationReplayTests: XCTestCase {
         XCTAssertEqual(result.remoteNewerConflictCount, 1)
         XCTAssertEqual(result.failedCount, 0)
         XCTAssertEqual(result.message, "newer_remote_session_lifecycle_preserved")
+    }
+
+    func testSelectedSessionLifecycleReplayWriteTimeStillDraftAllowsStaleDraftCorrection() async {
+        let pinnedDiagnostics = canonicalDiagnostics(
+            remoteObservationCount: 1,
+            result: .divergentConflict,
+            recommendation: "local_first_block_canonical_read",
+            countParity: true,
+            statusParity: false,
+            localStatus: Session.Status.completed.rawValue,
+            remoteStatus: Session.Status.draft.rawValue
+        )
+        let plan = AppState.makeNormalizedSessionLifecycleReplayPlan(
+            orgID: orgID,
+            propertyID: propertyID,
+            sessionID: sessionID,
+            metadata: metadata(),
+            localSession: completedLocalSession(),
+            remoteSession: remoteLifecycleSession(
+                status: Session.Status.draft.rawValue,
+                updatedAt: Date(timeIntervalSinceReferenceDate: 11_000)
+            ),
+            pinnedDiagnostics: pinnedDiagnostics
+        )
+        guard let row = plan.rowToUpdate else {
+            XCTFail("Expected stale draft correction row to be planned")
+            return
+        }
+        var supabaseUpdateCalled = false
+
+        let result = await AppState.executeNormalizedSessionLifecycleReplayTestOnly(
+            plan: plan,
+            targetClassification: .approvedProductionValidation
+        ) { row in
+            if let writePreflight = AppState.makeNormalizedSessionLifecycleReplayWritePreflightResult(
+                row: row,
+                latestRemoteSession: self.remoteLifecycleSession(
+                    status: Session.Status.draft.rawValue,
+                    updatedAt: Date(timeIntervalSinceReferenceDate: 12_000)
+                )
+            ) {
+                return writePreflight
+            }
+            supabaseUpdateCalled = true
+            return AppState.NormalizedSessionLifecycleReplayWriteSummary(
+                updatedCount: 1,
+                message: "stale_remote_draft_lifecycle_corrected"
+            )
+        }
+
+        XCTAssertTrue(row.allowsStaleRemoteDraftLifecycleCorrection)
+        XCTAssertTrue(supabaseUpdateCalled)
+        XCTAssertEqual(result.upsertedCount, 1)
+        XCTAssertEqual(result.skippedCount, 0)
+        XCTAssertEqual(result.remoteNewerConflictCount, 0)
+        XCTAssertEqual(result.message, "stale_remote_draft_lifecycle_corrected")
+    }
+
+    func testSelectedSessionLifecycleReplayWriteTimeChangedFromDraftSkipsSafely() async {
+        let pinnedDiagnostics = canonicalDiagnostics(
+            remoteObservationCount: 1,
+            result: .divergentConflict,
+            recommendation: "local_first_block_canonical_read",
+            countParity: true,
+            statusParity: false,
+            localStatus: Session.Status.completed.rawValue,
+            remoteStatus: Session.Status.draft.rawValue
+        )
+        let plan = AppState.makeNormalizedSessionLifecycleReplayPlan(
+            orgID: orgID,
+            propertyID: propertyID,
+            sessionID: sessionID,
+            metadata: metadata(),
+            localSession: completedLocalSession(),
+            remoteSession: remoteLifecycleSession(
+                status: Session.Status.draft.rawValue,
+                updatedAt: Date(timeIntervalSinceReferenceDate: 11_000)
+            ),
+            pinnedDiagnostics: pinnedDiagnostics
+        )
+        var supabaseUpdateCalled = false
+
+        let result = await AppState.executeNormalizedSessionLifecycleReplayTestOnly(
+            plan: plan,
+            targetClassification: .approvedProductionValidation
+        ) { row in
+            if let writePreflight = AppState.makeNormalizedSessionLifecycleReplayWritePreflightResult(
+                row: row,
+                latestRemoteSession: self.remoteLifecycleSession(
+                    status: Session.Status.completed.rawValue,
+                    updatedAt: Date(timeIntervalSinceReferenceDate: 12_000)
+                )
+            ) {
+                return writePreflight
+            }
+            supabaseUpdateCalled = true
+            return AppState.NormalizedSessionLifecycleReplayWriteSummary(
+                updatedCount: 1,
+                message: "unexpected"
+            )
+        }
+
+        XCTAssertEqual(plan.rowToUpdate?.allowsStaleRemoteDraftLifecycleCorrection, true)
+        XCTAssertFalse(supabaseUpdateCalled)
+        XCTAssertEqual(result.upsertedCount, 0)
+        XCTAssertEqual(result.skippedCount, 1)
+        XCTAssertEqual(result.remoteNewerConflictCount, 1)
+        XCTAssertEqual(result.message, "remote_session_lifecycle_changed_before_replay")
+    }
+
+    func testSelectedSessionLifecycleReplayBlocksStaleDraftCorrectionWhenChildrenOrParentsAreUnclean() async {
+        let childMismatchDiagnostics = canonicalDiagnostics(
+            remoteObservationCount: 0,
+            result: .divergentConflict,
+            recommendation: "local_first_block_canonical_read",
+            countParity: false,
+            statusParity: false,
+            localStatus: Session.Status.completed.rawValue,
+            remoteStatus: Session.Status.draft.rawValue
+        )
+        let childMismatchPlan = AppState.makeNormalizedSessionLifecycleReplayPlan(
+            orgID: orgID,
+            propertyID: propertyID,
+            sessionID: sessionID,
+            metadata: metadata(),
+            localSession: completedLocalSession(),
+            remoteSession: remoteLifecycleSession(
+                status: Session.Status.draft.rawValue,
+                updatedAt: Date(timeIntervalSinceReferenceDate: 11_000)
+            ),
+            pinnedDiagnostics: childMismatchDiagnostics
+        )
+
+        let parentMismatchDiagnostics = canonicalDiagnostics(
+            remoteObservationCount: 1,
+            result: .divergentConflict,
+            recommendation: "local_first_block_canonical_read",
+            countParity: true,
+            statusParity: false,
+            parentOrgConsistent: false,
+            localStatus: Session.Status.completed.rawValue,
+            remoteStatus: Session.Status.draft.rawValue
+        )
+        let parentMismatchPlan = AppState.makeNormalizedSessionLifecycleReplayPlan(
+            orgID: orgID,
+            propertyID: propertyID,
+            sessionID: sessionID,
+            metadata: metadata(),
+            localSession: completedLocalSession(),
+            remoteSession: remoteLifecycleSession(
+                status: Session.Status.draft.rawValue,
+                updatedAt: Date(timeIntervalSinceReferenceDate: 11_000)
+            ),
+            pinnedDiagnostics: parentMismatchDiagnostics
+        )
+
+        XCTAssertNil(childMismatchPlan.rowToUpdate)
+        XCTAssertEqual(childMismatchPlan.remoteNewerSkippedCount, 1)
+        XCTAssertNil(parentMismatchPlan.rowToUpdate)
+        XCTAssertEqual(parentMismatchPlan.remoteNewerSkippedCount, 1)
     }
 
     @MainActor
@@ -1919,6 +2129,8 @@ final class Phase2C26PFlaggedObservationReplayTests: XCTestCase {
         recommendation: String,
         countParity: Bool,
         statusParity: Bool = true,
+        parentOrgConsistent: Bool = true,
+        parentPropertyConsistent: Bool = true,
         localStatus: String = Session.Status.completed.rawValue,
         remoteStatus: String = Session.Status.completed.rawValue
     ) -> AppState.CanonicalReadDiagnosticsResult {
@@ -1935,8 +2147,8 @@ final class Phase2C26PFlaggedObservationReplayTests: XCTestCase {
             localSessionFound: true,
             countParity: countParity,
             statusParity: statusParity,
-            parentOrgConsistent: true,
-            parentPropertyConsistent: true,
+            parentOrgConsistent: parentOrgConsistent,
+            parentPropertyConsistent: parentPropertyConsistent,
             localShotCount: 10,
             remoteShotCount: 10,
             localIssueObservationCount: 1,

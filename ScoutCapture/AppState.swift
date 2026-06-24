@@ -3269,6 +3269,7 @@ final class AppState: ObservableObject {
         let firstDeliveredAt: Date?
         let localEvidenceUpdatedAt: Date?
         let pinnedRemoteStatusEvidence: String?
+        let allowsStaleRemoteDraftLifecycleCorrection: Bool
     }
 
     struct NormalizedSessionLifecycleReplayWriteSummary: Equatable {
@@ -21538,6 +21539,35 @@ final class AppState: ObservableObject {
         )
     }
 
+    private nonisolated static func selectedSessionAllowsStaleRemoteDraftLifecycleCorrection(
+        _ diagnostics: CanonicalReadDiagnosticsResult?,
+        orgID: UUID,
+        propertyID: UUID,
+        sessionID: UUID,
+        desiredStatus: String,
+        remoteStatus: String?
+    ) -> Bool {
+        guard let diagnostics,
+              diagnostics.propertyID == propertyID,
+              diagnostics.sessionID == sessionID,
+              diagnostics.verifiedOrganizationID == orgID,
+              diagnostics.localSessionFound,
+              diagnostics.remoteSessionFound,
+              diagnostics.parentOrgConsistent == true,
+              diagnostics.parentPropertyConsistent == true,
+              diagnostics.countParity == true,
+              normalizedReplayStatus(desiredStatus) == Session.Status.completed.rawValue,
+              normalizedReplayStatus(remoteStatus) == Session.Status.draft.rawValue else {
+            return false
+        }
+        let parityReport = makeNormalizedParityGapReport(
+            checkedAt: diagnostics.checkedAt,
+            canonicalDiagnostics: diagnostics
+        )
+        return parityReport.missingChildCount == 0 &&
+            !parityReport.taxonomy.contains(.missingRemoteChildren)
+    }
+
     nonisolated static func makeNormalizedSessionLifecycleReplayPlan(
         orgID: UUID,
         propertyID: UUID,
@@ -21616,6 +21646,14 @@ final class AppState: ObservableObject {
             sessionID: sessionID
         )
         let desiredStatus = pinnedStatusEvidence?.localStatus ?? localSession.status.rawValue
+        let allowsStaleRemoteDraftLifecycleCorrection = selectedSessionAllowsStaleRemoteDraftLifecycleCorrection(
+            pinnedDiagnostics,
+            orgID: orgID,
+            propertyID: propertyID,
+            sessionID: sessionID,
+            desiredStatus: desiredStatus,
+            remoteStatus: pinnedStatusEvidence?.remoteStatus ?? remoteSession.status
+        )
         let effectiveRemoteSession = NormalizedSessionLifecycleRemoteRow(
             id: remoteSession.id,
             orgID: remoteSession.orgID,
@@ -21639,7 +21677,8 @@ final class AppState: ObservableObject {
             exportedAt: metadata.exportedAt,
             firstDeliveredAt: metadata.firstDeliveredAt,
             localEvidenceUpdatedAt: localEvidenceUpdatedAt,
-            pinnedRemoteStatusEvidence: pinnedStatusEvidence?.remoteStatus
+            pinnedRemoteStatusEvidence: pinnedStatusEvidence?.remoteStatus,
+            allowsStaleRemoteDraftLifecycleCorrection: allowsStaleRemoteDraftLifecycleCorrection
         )
         if sessionLifecycleReplayRowsMatch(desired: row, remote: effectiveRemoteSession) {
             return NormalizedSessionLifecycleReplayPlan(
@@ -21659,6 +21698,7 @@ final class AppState: ObservableObject {
             )
         }
         if let remoteUpdatedAt = remoteSession.updatedAt,
+           !allowsStaleRemoteDraftLifecycleCorrection,
            remoteUpdatedAt > localEvidenceUpdatedAt {
             return NormalizedSessionLifecycleReplayPlan(
                 allowed: true,
@@ -21713,9 +21753,18 @@ final class AppState: ObservableObject {
                 message: "remote_session_scope_mismatch"
             )
         }
-        if let remoteUpdatedAt = latestRemoteSession.updatedAt,
-           let localEvidenceUpdatedAt = row.localEvidenceUpdatedAt,
-           remoteUpdatedAt > localEvidenceUpdatedAt {
+        if row.allowsStaleRemoteDraftLifecycleCorrection {
+            guard normalizedReplayStatus(latestRemoteSession.status) == Session.Status.draft.rawValue else {
+                return NormalizedSessionLifecycleReplayWriteSummary(
+                    updatedCount: 0,
+                    skippedCount: 1,
+                    remoteNewerConflictCount: 1,
+                    message: "remote_session_lifecycle_changed_before_replay"
+                )
+            }
+        } else if let remoteUpdatedAt = latestRemoteSession.updatedAt,
+                  let localEvidenceUpdatedAt = row.localEvidenceUpdatedAt,
+                  remoteUpdatedAt > localEvidenceUpdatedAt {
             return NormalizedSessionLifecycleReplayWriteSummary(
                 updatedCount: 0,
                 skippedCount: 1,
@@ -29720,7 +29769,9 @@ final class AppState: ObservableObject {
         }
         return NormalizedSessionLifecycleReplayWriteSummary(
             updatedCount: 1,
-            message: "session_lifecycle_replayed"
+            message: row.allowsStaleRemoteDraftLifecycleCorrection
+                ? "stale_remote_draft_lifecycle_corrected"
+                : "session_lifecycle_replayed"
         )
     }
 
