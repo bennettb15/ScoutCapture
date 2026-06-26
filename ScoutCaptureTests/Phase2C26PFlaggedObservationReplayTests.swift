@@ -64,6 +64,14 @@ final class Phase2C26PFlaggedObservationReplayTests: XCTestCase {
         ]
     }
 
+    private var selectedSessionReplayProductionValidationEnvironment: [String: String] {
+        var environment = selectedSessionReplayEnvironment
+        environment["SCOUTCAPTURE_SUPABASE_URL"] = "https://\(SupabaseRuntimeConfiguration.productionSnapshotValidationProjectRef).supabase.co"
+        environment["SCOUTCAPTURE_SUPABASE_ANON_KEY"] = "production-validation-anon-key"
+        environment[SupabaseRuntimeConfiguration.productionSnapshotValidationEnvKey] = "true"
+        return environment
+    }
+
     @MainActor
     private func configureSelectedSessionReplayFixture(_ fixture: AppFixture) {
         _ = try? fixture.appState.sharedLocalStore.createOrganization(
@@ -1564,6 +1572,59 @@ final class Phase2C26PFlaggedObservationReplayTests: XCTestCase {
     }
 
     @MainActor
+    func testSelectedSessionLifecycleReplayNormalizesPostReplayRemoteNewerWhenSemanticParityIsClean() async throws {
+        let fixture = try makeAppFixture(
+            environment: selectedSessionReplayProductionValidationEnvironment,
+            canonicalReadRemoteSnapshotFetchOverride: { _, propertyID, sessionID in
+                self.canonicalRemoteSnapshot(
+                    propertyID: propertyID ?? self.propertyID,
+                    sessionID: sessionID ?? self.sessionID,
+                    status: "completed",
+                    shotCount: 1,
+                    observationCount: 1
+                )
+            }
+        )
+        defer { tearDownAppFixture(fixture) }
+        configureSelectedSessionReplayFixture(fixture)
+
+        let result = await fixture.appState.replaySelectedSessionLifecycleShadowWriteForSelectedSession(
+            productionValidationEvidence: passingPackageValidationReport(),
+            replayOperation: { _, _, _ in
+                AppState.NormalizedBackfillEntityResult(
+                    kind: .session,
+                    attemptedCount: 1,
+                    upsertedCount: 1,
+                    skippedCount: 0,
+                    failedCount: 0,
+                    message: "session_lifecycle_replayed"
+                )
+            },
+            diagnosticsAfterReplayOperation: { _, _, _ in
+                self.canonicalDiagnostics(
+                    remoteObservationCount: 1,
+                    result: .remoteNewerCandidate,
+                    recommendation: "manual_review_remote_candidate",
+                    countParity: true,
+                    statusParity: true,
+                    localUpdatedAt: Date(timeIntervalSinceReferenceDate: 10_600),
+                    remoteUpdatedAt: Date(timeIntervalSinceReferenceDate: 12_000)
+                )
+            }
+        )
+
+        let diagnostics = fixture.appState._debugLocalDiagnosticsForTests().sessionSnapshotUpload
+        XCTAssertTrue(result.allowed)
+        XCTAssertEqual(result.diagnosticsAfterReplay?.result, .remoteMatchesLocal)
+        XCTAssertEqual(result.diagnosticsAfterReplay?.canonicalRecommendation, "remote_candidate_after_replay_validation")
+        XCTAssertEqual(diagnostics.lastCanonicalReadDiagnosticsResult, AppState.CanonicalReadDiagnosticResult.remoteMatchesLocal.rawValue)
+        XCTAssertEqual(diagnostics.lastCanonicalReadDiagnosticsRecommendation, "remote_candidate_after_replay_validation")
+        XCTAssertEqual(diagnostics.lastNormalizedBackfillRemoteNewerConflictCount, 0)
+        XCTAssertTrue(diagnostics.lastCanonicalReadCandidateAllowed)
+        XCTAssertEqual(diagnostics.lastCanonicalReadCandidateBlockedReason, "none")
+    }
+
+    @MainActor
     func testSelectedSessionLifecycleReplayDoesNotActivateSwitchReadsOrEnableBroadReads() async throws {
         let fixture = try makeAppFixture(
             environment: selectedSessionReplayEnvironment,
@@ -2086,6 +2147,212 @@ final class Phase2C26PFlaggedObservationReplayTests: XCTestCase {
         XCTAssertFalse(candidate.productionWideCanonicalReadsEnabled)
     }
 
+    func testLifecycleReplayRemoteNewerWithCleanSemanticParityNormalizesCandidateReady() {
+        let remoteNewer = canonicalDiagnostics(
+            remoteObservationCount: 1,
+            result: .remoteNewerCandidate,
+            recommendation: "manual_review_remote_candidate",
+            countParity: true,
+            statusParity: true,
+            localUpdatedAt: Date(timeIntervalSinceReferenceDate: 10_600),
+            remoteUpdatedAt: Date(timeIntervalSinceReferenceDate: 12_000)
+        )
+
+        let normalized = AppState.normalizeSelectedSessionLifecyclePostReplayRemoteNewerDiagnostics(
+            remoteNewer,
+            orgID: orgID,
+            propertyID: propertyID,
+            sessionID: sessionID,
+            lifecycleReplayExecutedEntityCount: 1,
+            lifecycleReplayFailedEntityCount: 0,
+            lifecycleReplayRemoteNewerConflictCount: 0
+        )
+        let report = AppState.makeNormalizedParityGapReport(canonicalDiagnostics: normalized)
+        let backfillPlan = AppState.makeNormalizedBackfillReplayPlan(
+            canonicalDiagnostics: normalized,
+            parityReport: report
+        )
+        let candidate = AppState.makeCanonicalReadCandidateDiagnostics(
+            configuration: AppState.CanonicalReadCandidateConfiguration(
+                enabled: true,
+                orgAllowlist: [orgID],
+                propertyAllowlist: [propertyID],
+                sessionAllowlist: [sessionID],
+                parityCompletenessThreshold: 0.95,
+                mediaRecoveryConfidenceThreshold: 0.95
+            ),
+            targetClassification: .approvedProductionValidation,
+            canonicalDiagnostics: normalized,
+            parityReport: report,
+            productionValidationEvidenceReady: true
+        )
+        let overlay = AppState.buildCanonicalCandidateOverlayTestOnly(
+            targetClassification: .approvedProductionValidation,
+            canonicalDiagnostics: normalized,
+            parityReport: report,
+            candidateDiagnostics: candidate,
+            productionValidationEvidenceReady: true
+        )
+        let comparison = AppState.makeCanonicalCandidateOverlayComparison(
+            canonicalDiagnostics: normalized,
+            overlayResult: overlay,
+            parityReport: report
+        )
+
+        XCTAssertEqual(normalized.result, .remoteMatchesLocal)
+        XCTAssertEqual(normalized.canonicalRecommendation, "remote_candidate_after_replay_validation")
+        XCTAssertNil(normalized.blockedReason)
+        XCTAssertEqual(backfillPlan.remoteNewerConflictCount, 0)
+        XCTAssertTrue(candidate.allowed)
+        XCTAssertNil(candidate.blockedReason)
+        XCTAssertTrue(overlay.allowed)
+        XCTAssertEqual(comparison.result, .candidateMatchesLocal)
+    }
+
+    func testRemoteNewerWithoutVerifiedLifecycleReplayRemainsBlocked() {
+        let remoteNewer = canonicalDiagnostics(
+            remoteObservationCount: 1,
+            result: .remoteNewerCandidate,
+            recommendation: "manual_review_remote_candidate",
+            countParity: true,
+            localUpdatedAt: Date(timeIntervalSinceReferenceDate: 10_600),
+            remoteUpdatedAt: Date(timeIntervalSinceReferenceDate: 12_000)
+        )
+
+        let normalized = AppState.normalizeSelectedSessionLifecyclePostReplayRemoteNewerDiagnostics(
+            remoteNewer,
+            orgID: orgID,
+            propertyID: propertyID,
+            sessionID: sessionID,
+            lifecycleReplayExecutedEntityCount: 0,
+            lifecycleReplayFailedEntityCount: 0,
+            lifecycleReplayRemoteNewerConflictCount: 0
+        )
+        let report = AppState.makeNormalizedParityGapReport(canonicalDiagnostics: normalized)
+        let candidate = AppState.makeCanonicalReadCandidateDiagnostics(
+            configuration: AppState.CanonicalReadCandidateConfiguration(
+                enabled: true,
+                orgAllowlist: [orgID],
+                propertyAllowlist: [propertyID],
+                sessionAllowlist: [sessionID],
+                parityCompletenessThreshold: 0.95,
+                mediaRecoveryConfidenceThreshold: 0.95
+            ),
+            targetClassification: .approvedProductionValidation,
+            canonicalDiagnostics: normalized,
+            parityReport: report,
+            productionValidationEvidenceReady: true
+        )
+
+        XCTAssertEqual(normalized.result, .remoteNewerCandidate)
+        XCTAssertFalse(candidate.allowed)
+        XCTAssertTrue(candidate.blockedReason?.contains("remote_newer_conflict") == true)
+    }
+
+    func testLifecycleReplayRemoteNewerWithStatusMismatchRemainsBlocked() {
+        let remoteNewer = canonicalDiagnostics(
+            remoteObservationCount: 1,
+            result: .remoteNewerCandidate,
+            recommendation: "manual_review_remote_candidate",
+            countParity: true,
+            statusParity: false,
+            localStatus: Session.Status.completed.rawValue,
+            remoteStatus: Session.Status.draft.rawValue,
+            localUpdatedAt: Date(timeIntervalSinceReferenceDate: 10_600),
+            remoteUpdatedAt: Date(timeIntervalSinceReferenceDate: 12_000)
+        )
+
+        let normalized = AppState.normalizeSelectedSessionLifecyclePostReplayRemoteNewerDiagnostics(
+            remoteNewer,
+            orgID: orgID,
+            propertyID: propertyID,
+            sessionID: sessionID,
+            lifecycleReplayExecutedEntityCount: 1,
+            lifecycleReplayFailedEntityCount: 0,
+            lifecycleReplayRemoteNewerConflictCount: 0
+        )
+
+        XCTAssertEqual(normalized.result, .remoteNewerCandidate)
+        XCTAssertEqual(normalized.statusParity, false)
+    }
+
+    func testLifecycleReplayRemoteNewerWithCountMismatchRemainsBlocked() {
+        let remoteNewer = canonicalDiagnostics(
+            remoteObservationCount: 2,
+            result: .remoteNewerCandidate,
+            recommendation: "manual_review_remote_candidate",
+            countParity: false,
+            localIssueObservationCount: 1,
+            localUpdatedAt: Date(timeIntervalSinceReferenceDate: 10_600),
+            remoteUpdatedAt: Date(timeIntervalSinceReferenceDate: 12_000)
+        )
+
+        let normalized = AppState.normalizeSelectedSessionLifecyclePostReplayRemoteNewerDiagnostics(
+            remoteNewer,
+            orgID: orgID,
+            propertyID: propertyID,
+            sessionID: sessionID,
+            lifecycleReplayExecutedEntityCount: 1,
+            lifecycleReplayFailedEntityCount: 0,
+            lifecycleReplayRemoteNewerConflictCount: 0
+        )
+
+        XCTAssertEqual(normalized.result, .remoteNewerCandidate)
+        XCTAssertEqual(normalized.countParity, false)
+    }
+
+    func testLifecycleReplayRemoteNewerWithMissingChildRemainsBlocked() {
+        let remoteNewer = canonicalDiagnostics(
+            remoteObservationCount: 0,
+            result: .remoteNewerCandidate,
+            recommendation: "manual_review_remote_candidate",
+            countParity: false,
+            localIssueObservationCount: 1,
+            localUpdatedAt: Date(timeIntervalSinceReferenceDate: 10_600),
+            remoteUpdatedAt: Date(timeIntervalSinceReferenceDate: 12_000)
+        )
+
+        let normalized = AppState.normalizeSelectedSessionLifecyclePostReplayRemoteNewerDiagnostics(
+            remoteNewer,
+            orgID: orgID,
+            propertyID: propertyID,
+            sessionID: sessionID,
+            lifecycleReplayExecutedEntityCount: 1,
+            lifecycleReplayFailedEntityCount: 0,
+            lifecycleReplayRemoteNewerConflictCount: 0
+        )
+        let report = AppState.makeNormalizedParityGapReport(canonicalDiagnostics: normalized)
+
+        XCTAssertEqual(normalized.result, .remoteNewerCandidate)
+        XCTAssertEqual(report.missingChildCount, 1)
+    }
+
+    func testLifecycleReplayRemoteNewerWithWrongScopeRemainsBlocked() {
+        let wrongPropertyID = UUID(uuidString: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")!
+        let remoteNewer = canonicalDiagnostics(
+            remoteObservationCount: 1,
+            result: .remoteNewerCandidate,
+            recommendation: "manual_review_remote_candidate",
+            countParity: true,
+            propertyID: wrongPropertyID,
+            localUpdatedAt: Date(timeIntervalSinceReferenceDate: 10_600),
+            remoteUpdatedAt: Date(timeIntervalSinceReferenceDate: 12_000)
+        )
+
+        let normalized = AppState.normalizeSelectedSessionLifecyclePostReplayRemoteNewerDiagnostics(
+            remoteNewer,
+            orgID: orgID,
+            propertyID: propertyID,
+            sessionID: sessionID,
+            lifecycleReplayExecutedEntityCount: 1,
+            lifecycleReplayFailedEntityCount: 0,
+            lifecycleReplayRemoteNewerConflictCount: 0
+        )
+
+        XCTAssertEqual(normalized.result, .remoteNewerCandidate)
+        XCTAssertEqual(normalized.propertyID, wrongPropertyID)
+    }
+
     func testObservationReplayHasNoActivationReadSwitchOrUnrelatedMutationSideEffects() async {
         var unrelatedRows = [
             AppState.CanonicalReadRemoteObservationRow(
@@ -2132,14 +2399,26 @@ final class Phase2C26PFlaggedObservationReplayTests: XCTestCase {
         parentOrgConsistent: Bool = true,
         parentPropertyConsistent: Bool = true,
         localStatus: String = Session.Status.completed.rawValue,
-        remoteStatus: String = Session.Status.completed.rawValue
+        remoteStatus: String = Session.Status.completed.rawValue,
+        propertyID: UUID? = nil,
+        sessionID: UUID? = nil,
+        orgID: UUID? = nil,
+        localShotCount: Int = 10,
+        remoteShotCount: Int = 10,
+        localIssueObservationCount: Int = 1,
+        localUpdatedAt: Date = Date(timeIntervalSinceReferenceDate: 11_900),
+        remoteUpdatedAt: Date = Date(timeIntervalSinceReferenceDate: 11_900),
+        blockedReason: String? = nil
     ) -> AppState.CanonicalReadDiagnosticsResult {
+        let effectivePropertyID = propertyID ?? self.propertyID
+        let effectiveSessionID = sessionID ?? self.sessionID
+        let effectiveOrgID = orgID ?? self.orgID
         var diagnostics = AppState.CanonicalReadDiagnosticsResult(
             checkedAt: Date(timeIntervalSinceReferenceDate: 12_000),
-            propertyID: propertyID,
-            sessionID: sessionID,
-            activeOrganizationID: orgID,
-            verifiedOrganizationID: orgID,
+            propertyID: effectivePropertyID,
+            sessionID: effectiveSessionID,
+            activeOrganizationID: effectiveOrgID,
+            verifiedOrganizationID: effectiveOrgID,
             result: result,
             remotePropertyFound: true,
             remoteSessionFound: true,
@@ -2149,18 +2428,18 @@ final class Phase2C26PFlaggedObservationReplayTests: XCTestCase {
             statusParity: statusParity,
             parentOrgConsistent: parentOrgConsistent,
             parentPropertyConsistent: parentPropertyConsistent,
-            localShotCount: 10,
-            remoteShotCount: 10,
-            localIssueObservationCount: 1,
+            localShotCount: localShotCount,
+            remoteShotCount: remoteShotCount,
+            localIssueObservationCount: localIssueObservationCount,
             remoteIssueObservationCount: remoteObservationCount,
             localGuidedCount: 0,
             remoteGuidedCount: nil,
-            localUpdatedAt: Date(timeIntervalSinceReferenceDate: 11_900),
-            remoteUpdatedAt: Date(timeIntervalSinceReferenceDate: 11_900),
+            localUpdatedAt: localUpdatedAt,
+            remoteUpdatedAt: remoteUpdatedAt,
             remoteRevision: 1,
             remoteFreshnessAgeSeconds: 100,
             canonicalRecommendation: recommendation,
-            blockedReason: result == .divergentConflict ? "remote_rows_diverge_from_local_counts_or_status" : nil,
+            blockedReason: blockedReason ?? (result == .divergentConflict ? "remote_rows_diverge_from_local_counts_or_status" : nil),
             noBehaviorChangedText: "read only"
         )
         diagnostics.localSessionStatus = localStatus
