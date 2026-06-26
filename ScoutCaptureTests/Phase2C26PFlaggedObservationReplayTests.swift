@@ -179,14 +179,15 @@ final class Phase2C26PFlaggedObservationReplayTests: XCTestCase {
         sessionID: UUID,
         status: String = "completed",
         shotCount: Int = 10,
-        observationCount: Int = 1
+        observationCount: Int = 1,
+        updatedAt: Date = Date(timeIntervalSinceReferenceDate: 11_900)
     ) -> AppState.CanonicalReadRemoteSnapshot {
         AppState.CanonicalReadRemoteSnapshot(
             properties: [
                 AppState.CanonicalReadRemotePropertyRow(
                     id: propertyID,
                     orgID: orgID,
-                    updatedAt: Date(timeIntervalSinceReferenceDate: 11_900),
+                    updatedAt: updatedAt,
                     revision: 1,
                     deletedAt: nil
                 )
@@ -197,7 +198,7 @@ final class Phase2C26PFlaggedObservationReplayTests: XCTestCase {
                     orgID: orgID,
                     propertyID: propertyID,
                     status: status,
-                    updatedAt: Date(timeIntervalSinceReferenceDate: 11_900),
+                    updatedAt: updatedAt,
                     revision: 1,
                     deletedAt: nil
                 )
@@ -1622,6 +1623,237 @@ final class Phase2C26PFlaggedObservationReplayTests: XCTestCase {
         XCTAssertEqual(diagnostics.lastNormalizedBackfillRemoteNewerConflictCount, 0)
         XCTAssertTrue(diagnostics.lastCanonicalReadCandidateAllowed)
         XCTAssertEqual(diagnostics.lastCanonicalReadCandidateBlockedReason, "none")
+    }
+
+    @MainActor
+    func testSelectedSessionDiagnosticsRunnerReturnsNormalizedDiagnosticsAfterLifecycleReplay() async throws {
+        let remoteUpdatedAt = Date().addingTimeInterval(120)
+        let fixture = try makeAppFixture(
+            environment: selectedSessionReplayProductionValidationEnvironment,
+            canonicalReadRemoteSnapshotFetchOverride: { _, propertyID, sessionID in
+                self.canonicalRemoteSnapshot(
+                    propertyID: propertyID ?? self.propertyID,
+                    sessionID: sessionID ?? self.sessionID,
+                    status: "completed",
+                    shotCount: 1,
+                    observationCount: 1,
+                    updatedAt: remoteUpdatedAt
+                )
+            }
+        )
+        defer { tearDownAppFixture(fixture) }
+        configureSelectedSessionReplayFixture(fixture)
+        try fixture.appState.sharedLocalStore.saveSessionMetadataAtomically(
+            propertyID: propertyID,
+            sessionID: sessionID,
+            metadata: metadata()
+        )
+
+        let replay = await fixture.appState.replaySelectedSessionLifecycleShadowWriteForSelectedSession(
+            productionValidationEvidence: passingPackageValidationReport(),
+            replayOperation: { _, _, _ in
+                AppState.NormalizedBackfillEntityResult(
+                    kind: .session,
+                    attemptedCount: 1,
+                    upsertedCount: 1,
+                    skippedCount: 0,
+                    failedCount: 0,
+                    message: "session_lifecycle_replayed"
+                )
+            }
+        )
+        let diagnosticsResult = await fixture.appState.runCanonicalReadDiagnosticsForSelectedSession(
+            productionValidationEvidence: passingPackageValidationReport()
+        )
+
+        XCTAssertTrue(replay.allowed)
+        XCTAssertEqual(replay.diagnosticsAfterReplay?.result, .remoteMatchesLocal)
+        XCTAssertEqual(diagnosticsResult.result, .remoteMatchesLocal)
+        XCTAssertEqual(diagnosticsResult.canonicalRecommendation, "remote_candidate_after_replay_validation")
+        XCTAssertNil(diagnosticsResult.blockedReason)
+        let diagnostics = fixture.appState._debugLocalDiagnosticsForTests().sessionSnapshotUpload
+        XCTAssertEqual(diagnostics.lastCanonicalReadDiagnosticsResult, AppState.CanonicalReadDiagnosticResult.remoteMatchesLocal.rawValue)
+        XCTAssertEqual(diagnostics.lastNormalizedBackfillRemoteNewerConflictCount, 0)
+        XCTAssertTrue(diagnostics.lastCanonicalReadCandidateAllowed)
+    }
+
+    @MainActor
+    func testCanonicalCandidateOverlayConsumesNormalizedDiagnosticsAfterLifecycleReplay() async throws {
+        let remoteUpdatedAt = Date().addingTimeInterval(120)
+        let fixture = try makeAppFixture(
+            environment: selectedSessionReplayProductionValidationEnvironment,
+            canonicalReadRemoteSnapshotFetchOverride: { _, propertyID, sessionID in
+                self.canonicalRemoteSnapshot(
+                    propertyID: propertyID ?? self.propertyID,
+                    sessionID: sessionID ?? self.sessionID,
+                    status: "completed",
+                    shotCount: 1,
+                    observationCount: 1,
+                    updatedAt: remoteUpdatedAt
+                )
+            }
+        )
+        defer { tearDownAppFixture(fixture) }
+        configureSelectedSessionReplayFixture(fixture)
+        try fixture.appState.sharedLocalStore.saveSessionMetadataAtomically(
+            propertyID: propertyID,
+            sessionID: sessionID,
+            metadata: metadata()
+        )
+
+        let replay = await fixture.appState.replaySelectedSessionLifecycleShadowWriteForSelectedSession(
+            productionValidationEvidence: passingPackageValidationReport(),
+            replayOperation: { _, _, _ in
+                AppState.NormalizedBackfillEntityResult(
+                    kind: .session,
+                    attemptedCount: 1,
+                    upsertedCount: 1,
+                    skippedCount: 0,
+                    failedCount: 0,
+                    message: "session_lifecycle_replayed"
+                )
+            }
+        )
+        let overlay = await fixture.appState.buildCanonicalCandidateOverlayForSelectedSession(
+            productionValidationEvidence: passingPackageValidationReport()
+        )
+
+        let diagnostics = fixture.appState._debugLocalDiagnosticsForTests().sessionSnapshotUpload
+        let reportText = AppState.canonicalReadRolloutReportText(diagnostics)
+        XCTAssertTrue(replay.allowed)
+        XCTAssertTrue(overlay.allowed)
+        XCTAssertEqual(diagnostics.lastCanonicalReadDiagnosticsResult, AppState.CanonicalReadDiagnosticResult.remoteMatchesLocal.rawValue)
+        XCTAssertEqual(diagnostics.lastNormalizedBackfillRemoteNewerConflictCount, 0)
+        XCTAssertTrue(diagnostics.lastCanonicalReadCandidateAllowed)
+        XCTAssertEqual(diagnostics.lastCanonicalReadCandidateBlockedReason, "none")
+        XCTAssertTrue(diagnostics.lastCanonicalCandidateOverlayAllowed)
+        XCTAssertEqual(diagnostics.lastCanonicalCandidateOverlayComparisonResult, AppState.CanonicalCandidateOverlayComparisonResult.candidateMatchesLocal.rawValue)
+        XCTAssertTrue(reportText.contains("- canonical_read_result: remote_matches_local"))
+        XCTAssertTrue(reportText.contains("- remote_newer_conflicts: 0"))
+        XCTAssertTrue(reportText.contains("- candidate_allowed: true"))
+        XCTAssertTrue(reportText.contains("- overlay_comparison_result: candidate_matches_local"))
+    }
+
+    @MainActor
+    func testIdempotentCurrentLifecycleReplayAfterPriorExactScopeReplayPreservesNormalizationMarker() async throws {
+        let remoteUpdatedAt = Date().addingTimeInterval(120)
+        let fixture = try makeAppFixture(
+            environment: selectedSessionReplayProductionValidationEnvironment,
+            canonicalReadRemoteSnapshotFetchOverride: { _, propertyID, sessionID in
+                self.canonicalRemoteSnapshot(
+                    propertyID: propertyID ?? self.propertyID,
+                    sessionID: sessionID ?? self.sessionID,
+                    status: "completed",
+                    shotCount: 1,
+                    observationCount: 1,
+                    updatedAt: remoteUpdatedAt
+                )
+            }
+        )
+        defer { tearDownAppFixture(fixture) }
+        configureSelectedSessionReplayFixture(fixture)
+        try fixture.appState.sharedLocalStore.saveSessionMetadataAtomically(
+            propertyID: propertyID,
+            sessionID: sessionID,
+            metadata: metadata()
+        )
+
+        let firstReplay = await fixture.appState.replaySelectedSessionLifecycleShadowWriteForSelectedSession(
+            productionValidationEvidence: passingPackageValidationReport(),
+            replayOperation: { _, _, _ in
+                AppState.NormalizedBackfillEntityResult(
+                    kind: .session,
+                    attemptedCount: 1,
+                    upsertedCount: 1,
+                    skippedCount: 0,
+                    failedCount: 0,
+                    message: "session_lifecycle_replayed"
+                )
+            }
+        )
+        let secondReplay = await fixture.appState.replaySelectedSessionLifecycleShadowWriteForSelectedSession(
+            productionValidationEvidence: passingPackageValidationReport(),
+            replayOperation: { _, _, _ in
+                AppState.NormalizedBackfillEntityResult(
+                    kind: .session,
+                    attemptedCount: 1,
+                    upsertedCount: 0,
+                    skippedCount: 1,
+                    failedCount: 0,
+                    message: "session_lifecycle_already_current"
+                )
+            }
+        )
+        let diagnosticsResult = await fixture.appState.runCanonicalReadDiagnosticsForSelectedSession(
+            productionValidationEvidence: passingPackageValidationReport()
+        )
+
+        let diagnostics = fixture.appState._debugLocalDiagnosticsForTests().sessionSnapshotUpload
+        XCTAssertTrue(firstReplay.allowed)
+        XCTAssertTrue(secondReplay.allowed)
+        XCTAssertEqual(secondReplay.replayResult?.upsertedCount, 0)
+        XCTAssertEqual(secondReplay.replayResult?.skippedCount, 1)
+        XCTAssertTrue(diagnostics.lastSelectedSessionLifecycleReplaySucceeded)
+        XCTAssertEqual(diagnostics.lastSelectedSessionLifecycleReplayOrgID, orgID)
+        XCTAssertEqual(diagnostics.lastSelectedSessionLifecycleReplayPropertyID, propertyID)
+        XCTAssertEqual(diagnostics.lastSelectedSessionLifecycleReplaySessionID, sessionID)
+        XCTAssertGreaterThan(diagnostics.lastSelectedSessionLifecycleReplayExecutedEntityCount, 0)
+        XCTAssertEqual(secondReplay.diagnosticsAfterReplay?.result, .remoteMatchesLocal)
+        XCTAssertEqual(diagnosticsResult.result, .remoteMatchesLocal)
+        XCTAssertEqual(diagnostics.lastNormalizedBackfillRemoteNewerConflictCount, 0)
+    }
+
+    @MainActor
+    func testIdempotentCurrentLifecycleReplayWithCleanExactScopeDiagnosticsEstablishesNormalizationMarker() async throws {
+        let remoteUpdatedAt = Date().addingTimeInterval(120)
+        let fixture = try makeAppFixture(
+            environment: selectedSessionReplayProductionValidationEnvironment,
+            canonicalReadRemoteSnapshotFetchOverride: { _, propertyID, sessionID in
+                self.canonicalRemoteSnapshot(
+                    propertyID: propertyID ?? self.propertyID,
+                    sessionID: sessionID ?? self.sessionID,
+                    status: "completed",
+                    shotCount: 1,
+                    observationCount: 1,
+                    updatedAt: remoteUpdatedAt
+                )
+            }
+        )
+        defer { tearDownAppFixture(fixture) }
+        configureSelectedSessionReplayFixture(fixture)
+        try fixture.appState.sharedLocalStore.saveSessionMetadataAtomically(
+            propertyID: propertyID,
+            sessionID: sessionID,
+            metadata: metadata()
+        )
+
+        let replay = await fixture.appState.replaySelectedSessionLifecycleShadowWriteForSelectedSession(
+            productionValidationEvidence: passingPackageValidationReport(),
+            replayOperation: { _, _, _ in
+                AppState.NormalizedBackfillEntityResult(
+                    kind: .session,
+                    attemptedCount: 1,
+                    upsertedCount: 0,
+                    skippedCount: 1,
+                    failedCount: 0,
+                    message: "session_lifecycle_already_current"
+                )
+            }
+        )
+
+        let diagnostics = fixture.appState._debugLocalDiagnosticsForTests().sessionSnapshotUpload
+        XCTAssertTrue(replay.allowed)
+        XCTAssertEqual(replay.replayResult?.upsertedCount, 0)
+        XCTAssertEqual(replay.replayResult?.skippedCount, 1)
+        XCTAssertEqual(replay.diagnosticsAfterReplay?.result, .remoteMatchesLocal)
+        XCTAssertTrue(diagnostics.lastSelectedSessionLifecycleReplaySucceeded)
+        XCTAssertEqual(diagnostics.lastSelectedSessionLifecycleReplayOrgID, orgID)
+        XCTAssertEqual(diagnostics.lastSelectedSessionLifecycleReplayPropertyID, propertyID)
+        XCTAssertEqual(diagnostics.lastSelectedSessionLifecycleReplaySessionID, sessionID)
+        XCTAssertGreaterThan(diagnostics.lastSelectedSessionLifecycleReplayExecutedEntityCount, 0)
+        XCTAssertEqual(diagnostics.lastCanonicalReadDiagnosticsResult, AppState.CanonicalReadDiagnosticResult.remoteMatchesLocal.rawValue)
+        XCTAssertEqual(diagnostics.lastNormalizedBackfillRemoteNewerConflictCount, 0)
+        XCTAssertTrue(diagnostics.lastCanonicalReadCandidateAllowed)
     }
 
     @MainActor

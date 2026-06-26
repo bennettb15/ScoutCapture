@@ -19787,15 +19787,21 @@ final class AppState: ObservableObject {
             local: localSnapshot,
             remote: remoteSnapshot
         )
-        recordCanonicalReadDiagnostics(
-            result,
-            productionValidationEvidenceReady: selectedSessionProductionValidationEvidenceReady(
-                productionValidationEvidence,
-                propertyID: propertyID,
-                sessionID: sessionID
-            )
+        let productionValidationEvidenceReady = selectedSessionProductionValidationEvidenceReady(
+            productionValidationEvidence,
+            propertyID: propertyID,
+            sessionID: sessionID
         )
-        return result
+        let normalizedResult = normalizeCanonicalReadDiagnosticsForSelectedSessionLifecycleReplayIfSafe(
+            result,
+            diagnostics: localDiagnostics,
+            productionValidationEvidenceReady: productionValidationEvidenceReady
+        )
+        recordCanonicalReadDiagnostics(
+            normalizedResult,
+            productionValidationEvidenceReady: productionValidationEvidenceReady
+        )
+        return normalizedResult
     }
 
     private func runCanonicalReadDiagnosticsForPinnedSession(
@@ -19820,15 +19826,21 @@ final class AppState: ObservableObject {
             local: localSnapshot,
             remote: remoteSnapshot
         )
-        recordCanonicalReadDiagnostics(
-            result,
-            productionValidationEvidenceReady: selectedSessionProductionValidationEvidenceReady(
-                productionValidationEvidence,
-                propertyID: propertyID,
-                sessionID: sessionID
-            )
+        let productionValidationEvidenceReady = selectedSessionProductionValidationEvidenceReady(
+            productionValidationEvidence,
+            propertyID: propertyID,
+            sessionID: sessionID
         )
-        return result
+        let normalizedResult = normalizeCanonicalReadDiagnosticsForSelectedSessionLifecycleReplayIfSafe(
+            result,
+            diagnostics: localDiagnostics,
+            productionValidationEvidenceReady: productionValidationEvidenceReady
+        )
+        recordCanonicalReadDiagnostics(
+            normalizedResult,
+            productionValidationEvidenceReady: productionValidationEvidenceReady
+        )
+        return normalizedResult
     }
 
     private func makeCanonicalReadLocalSnapshot(
@@ -20509,7 +20521,7 @@ final class AppState: ObservableObject {
             sessionID: sessionID
         )
 
-        let diagnosticsAfterReplay: CanonicalReadDiagnosticsResult?
+        var diagnosticsAfterReplay: CanonicalReadDiagnosticsResult?
         if replayResult.failedCount == 0,
            replayResult.upsertedCount > 0 {
             if let diagnosticsAfterReplayOperation {
@@ -20701,7 +20713,7 @@ final class AppState: ObservableObject {
             sessionID: sessionID
         )
 
-        let diagnosticsAfterReplay: CanonicalReadDiagnosticsResult?
+        var diagnosticsAfterReplay: CanonicalReadDiagnosticsResult?
         if selectedSessionLifecycleReplaySucceeded(replayResult) {
             if let diagnosticsAfterReplayOperation {
                 let refreshedDiagnostics = await diagnosticsAfterReplayOperation(orgID, propertyID, sessionID)
@@ -20745,6 +20757,20 @@ final class AppState: ObservableObject {
             propertyID: propertyID,
             sessionID: sessionID
         )
+        if let refreshedDiagnostics = diagnosticsAfterReplay {
+            let normalizedDiagnostics = normalizeCanonicalReadDiagnosticsForSelectedSessionLifecycleReplayIfSafe(
+                refreshedDiagnostics,
+                diagnostics: localDiagnostics,
+                productionValidationEvidenceReady: true
+            )
+            if normalizedDiagnostics != refreshedDiagnostics {
+                recordCanonicalReadDiagnostics(
+                    normalizedDiagnostics,
+                    productionValidationEvidenceReady: true
+                )
+                diagnosticsAfterReplay = normalizedDiagnostics
+            }
+        }
 
         return SelectedSessionLifecycleReplayActionResult(
             checkedAt: checkedAt,
@@ -20796,6 +20822,38 @@ final class AppState: ObservableObject {
             (result.upsertedCount > 0 || result.message == "session_lifecycle_already_current")
     }
 
+    private func selectedSessionLifecycleReplaySemanticParityCleanForScope(
+        _ diagnostics: SessionSnapshotUploadDiagnostics,
+        orgID: UUID,
+        propertyID: UUID,
+        sessionID: UUID
+    ) -> Bool {
+        let result = diagnostics.lastCanonicalReadDiagnosticsResult
+        let resultCanBeValidated = result == CanonicalReadDiagnosticResult.remoteMatchesLocal.rawValue ||
+            result == CanonicalReadDiagnosticResult.remoteNewerCandidate.rawValue ||
+            diagnostics.lastCanonicalReadDiagnosticsRecommendation == "remote_candidate_after_replay_validation"
+        guard resultCanBeValidated,
+              diagnostics.lastCanonicalReadDiagnosticsVerifiedOrgID == orgID,
+              diagnostics.lastCanonicalReadDiagnosticsPropertyID == propertyID,
+              diagnostics.lastCanonicalReadDiagnosticsSessionID == sessionID,
+              diagnostics.lastCanonicalReadDiagnosticsBlockedReason == nil,
+              diagnostics.lastCanonicalReadDiagnosticsParentOrgConsistent == true,
+              diagnostics.lastCanonicalReadDiagnosticsParentPropertyConsistent == true,
+              diagnostics.lastCanonicalReadDiagnosticsCountParity == true,
+              diagnostics.lastCanonicalReadDiagnosticsStatusParity == true,
+              diagnostics.lastMissingChildCount == 0,
+              !diagnostics.lastNormalizedParityGapTaxonomy.contains(NormalizedParityGap.missingRemoteChildren.rawValue),
+              let localShotCount = diagnostics.lastCanonicalReadDiagnosticsLocalShotCount,
+              let remoteShotCount = diagnostics.lastCanonicalReadDiagnosticsRemoteShotCount,
+              localShotCount == remoteShotCount,
+              let localIssueObservationCount = diagnostics.lastCanonicalReadDiagnosticsLocalIssueObservationCount,
+              let remoteIssueObservationCount = diagnostics.lastCanonicalReadDiagnosticsRemoteIssueObservationCount,
+              localIssueObservationCount == remoteIssueObservationCount else {
+            return false
+        }
+        return true
+    }
+
     private func recordSelectedSessionLifecycleReplayResult(
         _ result: NormalizedBackfillEntityResult,
         orgID: UUID,
@@ -20813,13 +20871,31 @@ final class AppState: ObservableObject {
         diagnostics.sessionSnapshotUpload.lastNormalizedBackfillSkippedEntityCount = result.skippedCount
         diagnostics.sessionSnapshotUpload.lastNormalizedBackfillRemoteNewerConflictCount = result.remoteNewerConflictCount
         diagnostics.sessionSnapshotUpload.lastNormalizedBackfillProductionBlocked = true
+        let previousExactScopeReplaySucceeded = diagnostics.sessionSnapshotUpload.lastSelectedSessionLifecycleReplaySucceeded &&
+            diagnostics.sessionSnapshotUpload.lastSelectedSessionLifecycleReplayOrgID == orgID &&
+            diagnostics.sessionSnapshotUpload.lastSelectedSessionLifecycleReplayPropertyID == propertyID &&
+            diagnostics.sessionSnapshotUpload.lastSelectedSessionLifecycleReplaySessionID == sessionID
+        let replayExecuted = result.kind == .session && result.upsertedCount > 0
+        let replayValidatedCurrent = result.kind == .session &&
+            result.message == "session_lifecycle_already_current" &&
+            (
+                previousExactScopeReplaySucceeded ||
+                selectedSessionLifecycleReplaySemanticParityCleanForScope(
+                    diagnostics.sessionSnapshotUpload,
+                    orgID: orgID,
+                    propertyID: propertyID,
+                    sessionID: sessionID
+                )
+            )
         diagnostics.sessionSnapshotUpload.lastSelectedSessionLifecycleReplaySucceeded = succeeded &&
-            result.kind == .session &&
-            result.upsertedCount > 0
+            (replayExecuted || replayValidatedCurrent)
         diagnostics.sessionSnapshotUpload.lastSelectedSessionLifecycleReplayOrgID = orgID
         diagnostics.sessionSnapshotUpload.lastSelectedSessionLifecycleReplayPropertyID = propertyID
         diagnostics.sessionSnapshotUpload.lastSelectedSessionLifecycleReplaySessionID = sessionID
-        diagnostics.sessionSnapshotUpload.lastSelectedSessionLifecycleReplayExecutedEntityCount = result.upsertedCount
+        diagnostics.sessionSnapshotUpload.lastSelectedSessionLifecycleReplayExecutedEntityCount = max(
+            result.upsertedCount,
+            replayValidatedCurrent ? max(diagnostics.sessionSnapshotUpload.lastSelectedSessionLifecycleReplayExecutedEntityCount, 1) : 0
+        )
         diagnostics.sessionSnapshotUpload.lastSelectedSessionLifecycleReplayFailedEntityCount = result.failedCount
         diagnostics.sessionSnapshotUpload.lastSelectedSessionLifecycleReplayRemoteNewerConflictCount = result.remoteNewerConflictCount
         diagnostics.sessionSnapshotUpload.lastCanonicalReadsRemainBlocked = true
