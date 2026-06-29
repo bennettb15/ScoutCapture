@@ -468,6 +468,63 @@ final class Phase2C26PFlaggedObservationReplayTests: XCTestCase {
         )
     }
 
+    private func lineagePlan(
+        metadata: SessionMetadata? = nil,
+        remoteObservations: [AppState.CanonicalReadRemoteObservationRow] = [],
+        remoteObservationUpdates: [AppState.CanonicalReadRemoteObservationUpdateRow] = []
+    ) -> AppState.NormalizedObservationLineageReplayPlan {
+        AppState.makeNormalizedObservationLineageReplayPlan(
+            orgID: orgID,
+            propertyID: propertyID,
+            sessionID: sessionID,
+            metadata: metadata ?? self.metadata(),
+            remoteProperties: remoteProperties(),
+            remoteSessions: remoteSessions(),
+            remoteObservations: remoteObservations,
+            remoteObservationUpdates: remoteObservationUpdates,
+            updatedBy: UUID(uuidString: "66666666-6666-6666-6666-666666666666")!
+        )
+    }
+
+    private func lineageRows(
+        metadata: SessionMetadata? = nil
+    ) -> (observations: [AppState.NormalizedObservationReplayRow], updates: [AppState.NormalizedObservationUpdateReplayRow]) {
+        AppState.normalizedObservationLineageReplayRows(
+            orgID: orgID,
+            propertyID: propertyID,
+            sessionID: sessionID,
+            metadata: metadata ?? self.metadata(),
+            updatedBy: UUID(uuidString: "66666666-6666-6666-6666-666666666666")!
+        )
+    }
+
+    private func remoteObservationUpdate(
+        from row: AppState.NormalizedObservationUpdateReplayRow,
+        id: UUID? = nil,
+        orgID: UUID? = nil,
+        propertyID: UUID? = nil,
+        observationID: UUID? = nil,
+        sessionID: UUID? = nil,
+        shotID: UUID?? = nil,
+        updateType: String? = nil,
+        status: String? = nil,
+        updatedAt: Date? = nil,
+        deletedAt: Date? = nil
+    ) -> AppState.CanonicalReadRemoteObservationUpdateRow {
+        AppState.CanonicalReadRemoteObservationUpdateRow(
+            id: id ?? row.id,
+            orgID: orgID ?? row.orgID,
+            propertyID: propertyID ?? row.propertyID,
+            observationID: observationID ?? row.observationID,
+            sessionID: sessionID ?? row.sessionID,
+            shotID: shotID ?? row.shotID,
+            updateType: updateType ?? row.updateType,
+            status: status ?? row.status,
+            updatedAt: updatedAt ?? row.updatedAt,
+            deletedAt: deletedAt
+        )
+    }
+
     private func executeInsertOnlyReplay(
         plan: AppState.NormalizedObservationReplayPlan,
         startingRows: [AppState.CanonicalReadRemoteObservationRow]
@@ -2583,6 +2640,384 @@ final class Phase2C26PFlaggedObservationReplayTests: XCTestCase {
 
         XCTAssertEqual(normalized.result, .remoteNewerCandidate)
         XCTAssertEqual(normalized.propertyID, wrongPropertyID)
+    }
+
+    func testObservationLineageReplaySingleSessionIssuePlansObservationAndUpdate() async {
+        let plan = lineagePlan()
+
+        XCTAssertTrue(plan.allowed)
+        XCTAssertEqual(plan.attemptedObservationCount, 1)
+        XCTAssertEqual(plan.observationRowsToInsert.count, 1)
+        XCTAssertEqual(plan.updateRowsToInsert.count, 1)
+        XCTAssertEqual(plan.observationRowsToInsert.first?.id, issueID)
+        XCTAssertEqual(plan.updateRowsToInsert.first?.observationID, issueID)
+        XCTAssertEqual(plan.updateRowsToInsert.first?.sessionID, sessionID)
+
+        let result = await AppState.executeNormalizedObservationLineageReplayTestOnly(
+            plan: plan,
+            targetClassification: .approvedStaging
+        ) { plan in
+            AppState.NormalizedObservationLineageReplayWriteSummary(
+                insertedObservationCount: plan.observationRowsToInsert.count,
+                insertedUpdateCount: plan.updateRowsToInsert.count,
+                message: "observation_lineage_replayed"
+            )
+        }
+
+        XCTAssertEqual(result.upsertedCount, 2)
+        XCTAssertEqual(result.failedCount, 0)
+        XCTAssertTrue(result.message.contains("planned_observations=1"))
+        XCTAssertTrue(result.message.contains("planned_updates=1"))
+        XCTAssertTrue(result.message.contains("executed_observations=1"))
+        XCTAssertTrue(result.message.contains("executed_updates=1"))
+    }
+
+    func testObservationLineageReplayCarriedForwardIssueReusesPersistentObservationAndInsertsSessionUpdate() {
+        let session1ID = UUID(uuidString: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")!
+        var carriedForwardMetadata = metadata()
+        carriedForwardMetadata.shots[0].captureKind = "reference"
+        carriedForwardMetadata.issues[0].firstSeenAt = Date(timeIntervalSinceReferenceDate: 9_000)
+        let existingSession1Observation = AppState.CanonicalReadRemoteObservationRow(
+            id: issueID,
+            orgID: orgID,
+            propertyID: propertyID,
+            sessionID: session1ID,
+            status: "active",
+            updatedAt: Date(timeIntervalSinceReferenceDate: 9_500),
+            deletedAt: nil
+        )
+
+        let plan = lineagePlan(
+            metadata: carriedForwardMetadata,
+            remoteObservations: [existingSession1Observation]
+        )
+
+        XCTAssertTrue(plan.allowed)
+        XCTAssertNil(plan.blockedReason)
+        XCTAssertEqual(plan.observationRowsToInsert.count, 0)
+        XCTAssertEqual(plan.observationRowsToUpdate.count, 0)
+        XCTAssertEqual(plan.updateRowsToInsert.count, 1)
+        XCTAssertEqual(plan.updateRowsToInsert.first?.updateType, "carried_forward")
+        XCTAssertEqual(plan.updateRowsToInsert.first?.sessionID, sessionID)
+        XCTAssertEqual(plan.existingObservationSkippedCount, 1)
+    }
+
+    func testObservationLineageDuplicateSamePropertyDifferentSessionIsIdempotent() {
+        let rows = lineageRows()
+        let session1ID = UUID(uuidString: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")!
+        let existingSession1Observation = AppState.CanonicalReadRemoteObservationRow(
+            id: issueID,
+            orgID: orgID,
+            propertyID: propertyID,
+            sessionID: session1ID,
+            status: "active",
+            updatedAt: rows.observations[0].updatedAt,
+            deletedAt: nil
+        )
+
+        let resolution = AppState.normalizedObservationLineageInsertDuplicateResolution(
+            row: rows.observations[0],
+            remoteObservations: [existingSession1Observation]
+        )
+
+        XCTAssertEqual(resolution, .idempotentExisting)
+    }
+
+    func testObservationLineageReplayNewSessionIssueInsertsObservationAndUpdate() {
+        let newIssueID = UUID(uuidString: "77777777-7777-7777-7777-777777777777")!
+        let newShotID = UUID(uuidString: "88888888-8888-8888-8888-888888888888")!
+        var session2Metadata = metadata()
+        session2Metadata.issues[0] = IssueMetadata(
+            issueID: newIssueID,
+            issueStatus: "active",
+            currentReason: "New Session 2 issue",
+            firstSeenAt: Date(timeIntervalSinceReferenceDate: 10_150),
+            lastSeenAt: Date(timeIntervalSinceReferenceDate: 10_300),
+            lastCaptureSessionId: sessionID,
+            detailNote: "New issue should create lineage",
+            shotKey: "a|north|window|1"
+        )
+        session2Metadata.shots[0] = ShotMetadata(
+            shotID: newShotID,
+            propertyID: propertyID,
+            sessionID: sessionID,
+            createdAt: Date(timeIntervalSinceReferenceDate: 10_150),
+            updatedAt: Date(timeIntervalSinceReferenceDate: 10_300),
+            building: "A",
+            elevation: "North",
+            detailType: "Window",
+            angleIndex: 1,
+            priority: "Medium",
+            shotKey: "a|north|window|1",
+            isGuided: false,
+            isFlagged: true,
+            issueID: newIssueID,
+            issueStatus: "active",
+            captureKind: "captured",
+            firstCaptureKind: "captured",
+            noteText: "Window issue",
+            noteCategory: nil,
+            originalFilename: "window.jpg",
+            originalRelativePath: "Originals/window.jpg",
+            originalByteSize: 12,
+            stampedFilename: nil,
+            stampedRelativePath: nil,
+            captureMode: nil,
+            lens: nil,
+            exifOrientation: nil,
+            latitude: nil,
+            longitude: nil,
+            accuracyMeters: nil,
+            imageWidth: nil,
+            imageHeight: nil
+        )
+
+        let plan = lineagePlan(metadata: session2Metadata)
+
+        XCTAssertTrue(plan.allowed)
+        XCTAssertEqual(plan.observationRowsToInsert.map(\.id), [newIssueID])
+        XCTAssertEqual(plan.updateRowsToInsert.count, 1)
+        XCTAssertEqual(plan.updateRowsToInsert.first?.observationID, newIssueID)
+        XCTAssertEqual(plan.updateRowsToInsert.first?.shotID, newShotID)
+    }
+
+    func testObservationLineageReplayRerunIsIdempotent() {
+        let rows = lineageRows()
+        let existingObservation = AppState.CanonicalReadRemoteObservationRow(
+            id: issueID,
+            orgID: orgID,
+            propertyID: propertyID,
+            sessionID: sessionID,
+            status: "active",
+            updatedAt: rows.observations[0].updatedAt,
+            deletedAt: nil
+        )
+        let existingUpdate = remoteObservationUpdate(from: rows.updates[0])
+
+        let plan = lineagePlan(
+            remoteObservations: [existingObservation],
+            remoteObservationUpdates: [existingUpdate]
+        )
+
+        XCTAssertTrue(plan.allowed)
+        XCTAssertEqual(plan.observationRowsToInsert.count, 0)
+        XCTAssertEqual(plan.observationRowsToUpdate.count, 0)
+        XCTAssertEqual(plan.updateRowsToInsert.count, 0)
+        XCTAssertEqual(plan.existingObservationSkippedCount, 1)
+        XCTAssertEqual(plan.existingUpdateSkippedCount, 1)
+    }
+
+    func testObservationLineageReplayNaturalKeyUpdateWithNonDeterministicIDIsIdempotent() {
+        let rows = lineageRows()
+        let existingObservation = AppState.CanonicalReadRemoteObservationRow(
+            id: issueID,
+            orgID: orgID,
+            propertyID: propertyID,
+            sessionID: sessionID,
+            status: "active",
+            updatedAt: rows.observations[0].updatedAt,
+            deletedAt: nil
+        )
+        let backfilledUpdateID = UUID(uuidString: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")!
+        let existingUpdate = remoteObservationUpdate(
+            from: rows.updates[0],
+            id: backfilledUpdateID
+        )
+
+        let plan = lineagePlan(
+            remoteObservations: [existingObservation],
+            remoteObservationUpdates: [existingUpdate]
+        )
+
+        XCTAssertTrue(plan.allowed)
+        XCTAssertEqual(plan.updateRowsToInsert.count, 0)
+        XCTAssertEqual(plan.existingUpdateSkippedCount, 1)
+        XCTAssertEqual(
+            AppState.normalizedObservationUpdateReplayDuplicateResolution(
+                row: rows.updates[0],
+                remoteObservationUpdates: [existingUpdate]
+            ),
+            .idempotentExisting
+        )
+    }
+
+    func testObservationLineageReplayNaturalKeyNewerRemoteUpdateIsPreserved() {
+        let rows = lineageRows()
+        let existingObservation = AppState.CanonicalReadRemoteObservationRow(
+            id: issueID,
+            orgID: orgID,
+            propertyID: propertyID,
+            sessionID: sessionID,
+            status: "active",
+            updatedAt: rows.observations[0].updatedAt,
+            deletedAt: nil
+        )
+        let existingUpdate = remoteObservationUpdate(
+            from: rows.updates[0],
+            id: UUID(uuidString: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")!,
+            updatedAt: Date(timeIntervalSinceReferenceDate: 12_000)
+        )
+
+        let plan = lineagePlan(
+            remoteObservations: [existingObservation],
+            remoteObservationUpdates: [existingUpdate]
+        )
+
+        XCTAssertTrue(plan.allowed)
+        XCTAssertEqual(plan.updateRowsToInsert.count, 0)
+        XCTAssertEqual(plan.newerRemoteSkippedCount, 1)
+        XCTAssertEqual(
+            AppState.normalizedObservationUpdateReplayDuplicateResolution(
+                row: rows.updates[0],
+                remoteObservationUpdates: [existingUpdate]
+            ),
+            .newerRemotePreserved
+        )
+    }
+
+    func testObservationLineageReplayNaturalKeyWrongParentUpdateBlocks() {
+        let rows = lineageRows()
+        let existingObservation = AppState.CanonicalReadRemoteObservationRow(
+            id: issueID,
+            orgID: orgID,
+            propertyID: propertyID,
+            sessionID: sessionID,
+            status: "active",
+            updatedAt: rows.observations[0].updatedAt,
+            deletedAt: nil
+        )
+        let wrongPropertyID = UUID(uuidString: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")!
+        let existingUpdate = remoteObservationUpdate(
+            from: rows.updates[0],
+            id: UUID(uuidString: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")!,
+            propertyID: wrongPropertyID
+        )
+
+        let plan = lineagePlan(
+            remoteObservations: [existingObservation],
+            remoteObservationUpdates: [existingUpdate]
+        )
+
+        XCTAssertFalse(plan.allowed)
+        XCTAssertEqual(plan.blockedReason, "remote_observation_update_parent_mismatch")
+        XCTAssertEqual(plan.failedCount, 1)
+        XCTAssertEqual(
+            AppState.normalizedObservationUpdateReplayDuplicateResolution(
+                row: rows.updates[0],
+                remoteObservationUpdates: [existingUpdate]
+            ),
+            .conflict("remote_observation_update_parent_mismatch")
+        )
+    }
+
+    func testObservationLineageDuplicateRecoveryResolvesNaturalKeyUpdate() {
+        let rows = lineageRows()
+        let backfilledUpdate = remoteObservationUpdate(
+            from: rows.updates[0],
+            id: UUID(uuidString: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")!
+        )
+
+        let match = AppState.matchingObservationUpdateReplayRow(
+            for: rows.updates[0],
+            remoteObservationUpdates: [backfilledUpdate]
+        )
+
+        XCTAssertEqual(match?.id, backfilledUpdate.id)
+        XCTAssertNotEqual(match?.id, rows.updates[0].id)
+        XCTAssertEqual(
+            AppState.normalizedObservationUpdateReplayDuplicateResolution(
+                row: rows.updates[0],
+                remoteObservationUpdates: [backfilledUpdate]
+            ),
+            .idempotentExisting
+        )
+    }
+
+    func testObservationLineageReplayWrongOrgOrPropertyExistingObservationBlocks() {
+        let wrongPropertyID = UUID(uuidString: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")!
+        let wrongObservation = AppState.CanonicalReadRemoteObservationRow(
+            id: issueID,
+            orgID: orgID,
+            propertyID: wrongPropertyID,
+            sessionID: sessionID,
+            status: "active",
+            updatedAt: Date(timeIntervalSinceReferenceDate: 10_200),
+            deletedAt: nil
+        )
+
+        let plan = lineagePlan(remoteObservations: [wrongObservation])
+
+        XCTAssertFalse(plan.allowed)
+        XCTAssertEqual(plan.blockedReason, "remote_observation_parent_mismatch")
+        XCTAssertEqual(plan.failedCount, 1)
+        XCTAssertEqual(plan.observationRowsToInsert.count, 0)
+    }
+
+    func testObservationLineageReplayWrongParentExistingUpdateBlocks() {
+        let rows = lineageRows()
+        let existingObservation = AppState.CanonicalReadRemoteObservationRow(
+            id: issueID,
+            orgID: orgID,
+            propertyID: propertyID,
+            sessionID: sessionID,
+            status: "active",
+            updatedAt: rows.observations[0].updatedAt,
+            deletedAt: nil
+        )
+        let wrongSessionID = UUID(uuidString: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")!
+        let wrongUpdate = remoteObservationUpdate(
+            from: rows.updates[0],
+            sessionID: wrongSessionID
+        )
+
+        let plan = lineagePlan(
+            remoteObservations: [existingObservation],
+            remoteObservationUpdates: [wrongUpdate]
+        )
+
+        XCTAssertFalse(plan.allowed)
+        XCTAssertEqual(plan.blockedReason, "remote_observation_update_parent_mismatch")
+        XCTAssertEqual(plan.failedCount, 1)
+    }
+
+    func testObservationLineageReplayNewerRemoteObservationAndUpdateArePreserved() {
+        let rows = lineageRows()
+        let newerObservation = AppState.CanonicalReadRemoteObservationRow(
+            id: issueID,
+            orgID: orgID,
+            propertyID: propertyID,
+            sessionID: sessionID,
+            status: "active",
+            updatedAt: Date(timeIntervalSinceReferenceDate: 12_000),
+            deletedAt: nil
+        )
+        let observationNewerPlan = lineagePlan(remoteObservations: [newerObservation])
+
+        XCTAssertTrue(observationNewerPlan.allowed)
+        XCTAssertEqual(observationNewerPlan.newerRemoteSkippedCount, 1)
+        XCTAssertEqual(observationNewerPlan.observationRowsToInsert.count, 0)
+
+        let existingObservation = AppState.CanonicalReadRemoteObservationRow(
+            id: issueID,
+            orgID: orgID,
+            propertyID: propertyID,
+            sessionID: sessionID,
+            status: "active",
+            updatedAt: rows.observations[0].updatedAt,
+            deletedAt: nil
+        )
+        let newerUpdate = remoteObservationUpdate(
+            from: rows.updates[0],
+            updatedAt: Date(timeIntervalSinceReferenceDate: 12_000)
+        )
+        let updateNewerPlan = lineagePlan(
+            remoteObservations: [existingObservation],
+            remoteObservationUpdates: [newerUpdate]
+        )
+
+        XCTAssertTrue(updateNewerPlan.allowed)
+        XCTAssertEqual(updateNewerPlan.newerRemoteSkippedCount, 1)
+        XCTAssertEqual(updateNewerPlan.updateRowsToInsert.count, 0)
     }
 
     func testObservationReplayHasNoActivationReadSwitchOrUnrelatedMutationSideEffects() async {

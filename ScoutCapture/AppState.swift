@@ -3207,6 +3207,38 @@ final class AppState: ObservableObject {
         let updatedBy: UUID?
     }
 
+    struct NormalizedObservationUpdateReplayRow: Equatable {
+        let id: UUID
+        let orgID: UUID
+        let propertyID: UUID
+        let observationID: UUID
+        let sessionID: UUID
+        let shotID: UUID?
+        let updateType: String
+        let status: String
+        let message: String?
+        let note: String?
+        let priority: String?
+        let trade: String?
+        let capturedAt: Date?
+        let createdAt: Date
+        let updatedAt: Date
+        let updatedBy: UUID?
+    }
+
+    struct CanonicalReadRemoteObservationUpdateRow: Equatable {
+        let id: UUID
+        let orgID: UUID?
+        let propertyID: UUID?
+        let observationID: UUID?
+        let sessionID: UUID?
+        let shotID: UUID?
+        let updateType: String?
+        let status: String?
+        let updatedAt: Date?
+        let deletedAt: Date?
+    }
+
     struct NormalizedObservationReplayPlan: Equatable {
         let allowed: Bool
         let blockedReason: String?
@@ -3220,6 +3252,36 @@ final class AppState: ObservableObject {
         let softDeletedSkippedCount: Int
         let failedCount: Int
         let noBehaviorChangedText: String
+    }
+
+    struct NormalizedObservationLineageReplayPlan: Equatable {
+        let allowed: Bool
+        let blockedReason: String?
+        let propertyID: UUID
+        let sessionID: UUID
+        let orgID: UUID
+        let attemptedObservationCount: Int
+        let observationRowsToInsert: [NormalizedObservationReplayRow]
+        let observationRowsToUpdate: [NormalizedObservationReplayRow]
+        let updateRowsToInsert: [NormalizedObservationUpdateReplayRow]
+        let existingObservationSkippedCount: Int
+        let existingUpdateSkippedCount: Int
+        let newerRemoteSkippedCount: Int
+        let softDeletedSkippedCount: Int
+        let failedCount: Int
+        let noBehaviorChangedText: String
+
+        nonisolated var attemptedWriteCount: Int {
+            attemptedObservationCount + updateRowsToInsert.count + existingUpdateSkippedCount
+        }
+
+        nonisolated var plannedObservationWriteCount: Int {
+            observationRowsToInsert.count + observationRowsToUpdate.count
+        }
+
+        nonisolated var plannedUpdateWriteCount: Int {
+            updateRowsToInsert.count
+        }
     }
 
     enum NormalizedObservationInsertDuplicateResolution: Equatable {
@@ -3250,6 +3312,46 @@ final class AppState: ObservableObject {
             self.failedCount = failedCount
             self.message = message
         }
+    }
+
+    struct NormalizedObservationLineageReplayWriteSummary: Equatable {
+        let insertedObservationCount: Int
+        let updatedObservationCount: Int
+        let insertedUpdateCount: Int
+        let duplicateSkippedCount: Int
+        let remoteNewerConflictCount: Int
+        let failedCount: Int
+        let message: String
+
+        nonisolated var executedCount: Int {
+            insertedObservationCount + updatedObservationCount + insertedUpdateCount
+        }
+
+        nonisolated init(
+            insertedObservationCount: Int = 0,
+            updatedObservationCount: Int = 0,
+            insertedUpdateCount: Int = 0,
+            duplicateSkippedCount: Int = 0,
+            remoteNewerConflictCount: Int = 0,
+            failedCount: Int = 0,
+            message: String
+        ) {
+            self.insertedObservationCount = insertedObservationCount
+            self.updatedObservationCount = updatedObservationCount
+            self.insertedUpdateCount = insertedUpdateCount
+            self.duplicateSkippedCount = duplicateSkippedCount
+            self.remoteNewerConflictCount = remoteNewerConflictCount
+            self.failedCount = failedCount
+            self.message = message
+        }
+    }
+
+    enum NormalizedObservationUpdateReplayDuplicateResolution: Equatable {
+        case idempotentExisting
+        case newerRemotePreserved
+        case softDeletedPreserved
+        case conflict(String)
+        case unavailable
     }
 
     struct NormalizedSessionLifecycleRemoteRow: Equatable {
@@ -3380,6 +3482,7 @@ final class AppState: ObservableObject {
         var orgID: UUID? = nil
         var propertyID: UUID? = nil
         let sessionID: UUID?
+        var status: String? = nil
         var updatedAt: Date? = nil
         let deletedAt: Date?
     }
@@ -5462,6 +5565,7 @@ final class AppState: ObservableObject {
     private struct SupabaseObservationPayload: Encodable {
         let id: UUID
         let orgID: UUID
+        let propertyID: UUID
         let sessionID: UUID
         let shotID: UUID?
         let category: String
@@ -5475,12 +5579,93 @@ final class AppState: ObservableObject {
         enum CodingKeys: String, CodingKey {
             case id
             case orgID = "org_id"
+            case propertyID = "property_id"
             case sessionID = "session_id"
             case shotID = "shot_id"
             case category
             case status
             case title
             case detail
+            case createdAt = "created_at"
+            case updatedAt = "updated_at"
+            case updatedBy = "updated_by"
+        }
+    }
+
+    private struct SupabaseObservationLineageUpdatePayload: Encodable {
+        let status: String
+        let title: String?
+        let detail: String?
+        let updatedAt: String
+        let updatedBy: UUID?
+        let priority: String?
+        let trade: String?
+        let lastUpdateSessionID: UUID
+        let lastSeenAt: String?
+        let resolvedSessionID: UUID?
+        let resolvedAt: String?
+
+        enum CodingKeys: String, CodingKey {
+            case status
+            case title
+            case detail
+            case updatedAt = "updated_at"
+            case updatedBy = "updated_by"
+            case priority
+            case trade
+            case lastUpdateSessionID = "last_update_session_id"
+            case lastSeenAt = "last_seen_at"
+            case resolvedSessionID = "resolved_session_id"
+            case resolvedAt = "resolved_at"
+        }
+    }
+
+    private struct SupabaseObservationLineageReplayUpdateResult: Decodable {
+        let id: UUID
+        let orgID: UUID?
+        let propertyID: UUID?
+        let status: String?
+
+        enum CodingKeys: String, CodingKey {
+            case id
+            case orgID = "org_id"
+            case propertyID = "property_id"
+            case status
+        }
+    }
+
+    private struct SupabaseObservationUpdatePayload: Encodable {
+        let id: UUID
+        let orgID: UUID
+        let propertyID: UUID
+        let observationID: UUID
+        let sessionID: UUID
+        let shotID: UUID?
+        let updateType: String
+        let status: String
+        let message: String?
+        let note: String?
+        let priority: String?
+        let trade: String?
+        let capturedAt: String?
+        let createdAt: String
+        let updatedAt: String
+        let updatedBy: UUID?
+
+        enum CodingKeys: String, CodingKey {
+            case id
+            case orgID = "org_id"
+            case propertyID = "property_id"
+            case observationID = "observation_id"
+            case sessionID = "session_id"
+            case shotID = "shot_id"
+            case updateType = "update_type"
+            case status
+            case message
+            case note
+            case priority
+            case trade
+            case capturedAt = "captured_at"
             case createdAt = "created_at"
             case updatedAt = "updated_at"
             case updatedBy = "updated_by"
@@ -6149,14 +6334,44 @@ final class AppState: ObservableObject {
     private struct CanonicalReadRemoteObservationRecord: Decodable {
         let id: UUID
         let orgID: UUID?
+        let propertyID: UUID?
         let sessionID: UUID?
+        let status: String?
         let updatedAt: Date?
         let deletedAt: Date?
 
         enum CodingKeys: String, CodingKey {
             case id
             case orgID = "org_id"
+            case propertyID = "property_id"
             case sessionID = "session_id"
+            case status
+            case updatedAt = "updated_at"
+            case deletedAt = "deleted_at"
+        }
+    }
+
+    private struct RemoteObservationUpdateReplayRecord: Decodable {
+        let id: UUID
+        let orgID: UUID?
+        let propertyID: UUID?
+        let observationID: UUID?
+        let sessionID: UUID?
+        let shotID: UUID?
+        let updateType: String?
+        let status: String?
+        let updatedAt: Date?
+        let deletedAt: Date?
+
+        enum CodingKeys: String, CodingKey {
+            case id
+            case orgID = "org_id"
+            case propertyID = "property_id"
+            case observationID = "observation_id"
+            case sessionID = "session_id"
+            case shotID = "shot_id"
+            case updateType = "update_type"
+            case status
             case updatedAt = "updated_at"
             case deletedAt = "deleted_at"
         }
@@ -11490,7 +11705,7 @@ final class AppState: ObservableObject {
             do {
                 return try await client
                     .from("observations")
-                    .select("id, org_id, session_id, updated_at, deleted_at")
+                    .select("id, org_id, property_id, session_id, status, updated_at, deleted_at")
                     .eq("org_id", value: orgValue)
                     .limit(5_000)
                     .execute()
@@ -11646,8 +11861,9 @@ final class AppState: ObservableObject {
                     CanonicalReadRemoteObservationRow(
                         id: $0.id,
                         orgID: $0.orgID,
-                        propertyID: propertyID,
+                        propertyID: $0.propertyID ?? propertyID,
                         sessionID: $0.sessionID,
+                        status: $0.status,
                         updatedAt: $0.updatedAt,
                         deletedAt: $0.deletedAt
                     )
@@ -22275,6 +22491,411 @@ final class AppState: ObservableObject {
         }
     }
 
+    nonisolated static func normalizedObservationLineageReplayRows(
+        orgID: UUID,
+        propertyID: UUID,
+        sessionID: UUID,
+        metadata: SessionMetadata,
+        updatedBy: UUID? = nil
+    ) -> (observations: [NormalizedObservationReplayRow], updates: [NormalizedObservationUpdateReplayRow]) {
+        let shotsByIssueID = metadata.shots.reduce(into: [UUID: ShotMetadata]()) { partial, shot in
+            guard let issueID = shot.issueID,
+                  !partial.keys.contains(issueID) else { return }
+            partial[issueID] = shot
+        }
+        let shotsByKey = metadata.shots.reduce(into: [String: ShotMetadata]()) { partial, shot in
+            guard let key = normalizedReplayText(shot.shotKey)?.lowercased(),
+                  !partial.keys.contains(key) else { return }
+            partial[key] = shot
+        }
+        var seen = Set<UUID>()
+        var observationRows: [NormalizedObservationReplayRow] = []
+        var updateRows: [NormalizedObservationUpdateReplayRow] = []
+
+        for issue in metadata.issues {
+            guard seen.insert(issue.issueID).inserted else { continue }
+            let linkedShot = shotsByIssueID[issue.issueID] ??
+                normalizedReplayText(issue.shotKey).flatMap { shotsByKey[$0.lowercased()] }
+            let status = normalizedObservationStatus(issue.issueStatus)
+            let title = normalizedReplayText(issue.currentReason) ??
+                normalizedReplayText(issue.detailNote) ??
+                "Flagged observation"
+            let detail = normalizedReplayText(issue.detailNote) ??
+                normalizedReplayText(issue.currentReason)
+            let createdAt = issue.firstSeenAt ?? linkedShot?.createdAt ?? metadata.startedAt
+            let updatedAt = issue.resolvedAt ??
+                issue.lastSeenAt ??
+                linkedShot?.updatedAt ??
+                issue.firstSeenAt ??
+                metadata.endedAt ??
+                metadata.startedAt
+            let observationRow = NormalizedObservationReplayRow(
+                id: issue.issueID,
+                orgID: orgID,
+                propertyID: propertyID,
+                sessionID: sessionID,
+                shotID: linkedShot?.shotID,
+                category: "flagged_issue",
+                status: status,
+                title: title,
+                detail: detail,
+                createdAt: createdAt,
+                updatedAt: updatedAt,
+                updatedBy: updatedBy
+            )
+            observationRows.append(observationRow)
+
+            let updateType: String
+            if status == "resolved" {
+                updateType = "resolved"
+            } else if normalizedReplayText(linkedShot?.captureKind)?.lowercased() == "reference" ||
+                        (issue.firstSeenAt.map { $0 < metadata.startedAt } ?? false) {
+                updateType = "carried_forward"
+            } else {
+                updateType = "created"
+            }
+            let updateCreatedAt = linkedShot?.createdAt ?? issue.firstSeenAt ?? metadata.startedAt
+            let updateUpdatedAt = issue.resolvedAt ??
+                issue.lastSeenAt ??
+                linkedShot?.updatedAt ??
+                updateCreatedAt
+            let updateID = deterministicObservationUpdateID(
+                orgID: orgID,
+                propertyID: propertyID,
+                observationID: issue.issueID,
+                sessionID: sessionID,
+                shotID: linkedShot?.shotID,
+                updateType: updateType
+            )
+            updateRows.append(
+                NormalizedObservationUpdateReplayRow(
+                    id: updateID,
+                    orgID: orgID,
+                    propertyID: propertyID,
+                    observationID: issue.issueID,
+                    sessionID: sessionID,
+                    shotID: linkedShot?.shotID,
+                    updateType: updateType,
+                    status: status,
+                    message: normalizedReplayText(issue.currentReason) ?? normalizedReplayText(issue.detailNote),
+                    note: normalizedReplayText(issue.detailNote),
+                    priority: normalizedReplayText(linkedShot?.priority),
+                    trade: normalizedReplayText(linkedShot?.trade),
+                    capturedAt: linkedShot?.createdAt ?? issue.lastSeenAt ?? issue.firstSeenAt,
+                    createdAt: updateCreatedAt,
+                    updatedAt: updateUpdatedAt,
+                    updatedBy: updatedBy
+                )
+            )
+        }
+
+        return (observationRows, updateRows)
+    }
+
+    private nonisolated static func deterministicObservationUpdateID(
+        orgID: UUID,
+        propertyID: UUID,
+        observationID: UUID,
+        sessionID: UUID,
+        shotID: UUID?,
+        updateType: String
+    ) -> UUID {
+        let seed = [
+            "observation_update:v1",
+            orgID.uuidString.lowercased(),
+            propertyID.uuidString.lowercased(),
+            observationID.uuidString.lowercased(),
+            sessionID.uuidString.lowercased(),
+            shotID?.uuidString.lowercased() ?? "no-shot",
+            updateType
+        ].joined(separator: "|")
+        let digest = SHA256.hash(data: Data(seed.utf8))
+        var bytes = Array(digest.prefix(16))
+        bytes[6] = (bytes[6] & 0x0f) | 0x50
+        bytes[8] = (bytes[8] & 0x3f) | 0x80
+        return UUID(uuid: (
+            bytes[0], bytes[1], bytes[2], bytes[3],
+            bytes[4], bytes[5], bytes[6], bytes[7],
+            bytes[8], bytes[9], bytes[10], bytes[11],
+            bytes[12], bytes[13], bytes[14], bytes[15]
+        ))
+    }
+
+    nonisolated static func makeNormalizedObservationLineageReplayPlan(
+        orgID: UUID,
+        propertyID: UUID,
+        sessionID: UUID,
+        metadata: SessionMetadata,
+        remoteProperties: [CanonicalReadRemotePropertyRow],
+        remoteSessions: [CanonicalReadRemoteSessionRow],
+        remoteObservations: [CanonicalReadRemoteObservationRow],
+        remoteObservationUpdates: [CanonicalReadRemoteObservationUpdateRow],
+        updatedBy: UUID? = nil
+    ) -> NormalizedObservationLineageReplayPlan {
+        let noBehaviorChangedText = "No behavior changed: selected-session observation lineage replay only writes persistent observations and session-scoped observation_updates for the exact verified org/property/session. It does not move existing observations, write shots or media, switch canonical reads, activate candidates, hydrate local state, change export, seal, sync, media, iCloud behavior, loosen RLS, delete data, or mutate unrelated properties/sessions."
+
+        func blocked(_ reason: String) -> NormalizedObservationLineageReplayPlan {
+            NormalizedObservationLineageReplayPlan(
+                allowed: false,
+                blockedReason: reason,
+                propertyID: propertyID,
+                sessionID: sessionID,
+                orgID: orgID,
+                attemptedObservationCount: 0,
+                observationRowsToInsert: [],
+                observationRowsToUpdate: [],
+                updateRowsToInsert: [],
+                existingObservationSkippedCount: 0,
+                existingUpdateSkippedCount: 0,
+                newerRemoteSkippedCount: 0,
+                softDeletedSkippedCount: 0,
+                failedCount: 0,
+                noBehaviorChangedText: noBehaviorChangedText
+            )
+        }
+
+        guard metadata.propertyID == propertyID,
+              metadata.sessionID == sessionID,
+              metadata.orgID == orgID else {
+            return blocked("local_snapshot_parent_scope_mismatch")
+        }
+        guard remoteProperties.contains(where: {
+            $0.id == propertyID &&
+                $0.orgID == orgID &&
+                $0.deletedAt == nil
+        }) else {
+            return blocked("remote_property_parent_not_verified")
+        }
+        guard remoteSessions.contains(where: {
+            $0.id == sessionID &&
+                $0.orgID == orgID &&
+                $0.propertyID == propertyID &&
+                $0.deletedAt == nil
+        }) else {
+            return blocked("remote_session_parent_not_verified")
+        }
+
+        let localRows = normalizedObservationLineageReplayRows(
+            orgID: orgID,
+            propertyID: propertyID,
+            sessionID: sessionID,
+            metadata: metadata,
+            updatedBy: updatedBy
+        )
+        let remoteObservationByID = remoteObservations.reduce(into: [UUID: CanonicalReadRemoteObservationRow]()) { partial, row in
+            guard !partial.keys.contains(row.id) else { return }
+            partial[row.id] = row
+        }
+        var observationRowsToInsert: [NormalizedObservationReplayRow] = []
+        var observationRowsToUpdate: [NormalizedObservationReplayRow] = []
+        var updateRowsToInsert: [NormalizedObservationUpdateReplayRow] = []
+        var existingObservationSkippedCount = 0
+        var existingUpdateSkippedCount = 0
+        var newerRemoteSkippedCount = 0
+        var softDeletedSkippedCount = 0
+        var failedCount = 0
+        var blockedReason: String?
+
+        for row in localRows.observations {
+            if let remote = remoteObservationByID[row.id] {
+                guard remote.orgID == orgID,
+                      remote.propertyID == propertyID else {
+                    failedCount += 1
+                    blockedReason = blockedReason ?? "remote_observation_parent_mismatch"
+                    continue
+                }
+                if remote.deletedAt != nil {
+                    softDeletedSkippedCount += 1
+                    continue
+                }
+                if let remoteUpdatedAt = remote.updatedAt,
+                   remoteUpdatedAt > row.updatedAt {
+                    newerRemoteSkippedCount += 1
+                    continue
+                }
+                if normalizedReplayStatus(remote.status) != normalizedReplayStatus(row.status),
+                   row.status == "resolved" {
+                    observationRowsToUpdate.append(row)
+                } else {
+                    existingObservationSkippedCount += 1
+                }
+                continue
+            }
+            observationRowsToInsert.append(row)
+        }
+
+        for row in localRows.updates {
+            switch normalizedObservationUpdateReplayDuplicateResolution(
+                row: row,
+                remoteObservationUpdates: remoteObservationUpdates
+            ) {
+            case .unavailable:
+                updateRowsToInsert.append(row)
+            case .idempotentExisting:
+                existingUpdateSkippedCount += 1
+            case .newerRemotePreserved:
+                newerRemoteSkippedCount += 1
+            case .softDeletedPreserved:
+                softDeletedSkippedCount += 1
+            case .conflict(let reason):
+                failedCount += 1
+                blockedReason = blockedReason ?? reason
+            }
+        }
+
+        return NormalizedObservationLineageReplayPlan(
+            allowed: failedCount == 0,
+            blockedReason: failedCount == 0 ? nil : (blockedReason ?? "observation_lineage_parent_mismatch"),
+            propertyID: propertyID,
+            sessionID: sessionID,
+            orgID: orgID,
+            attemptedObservationCount: localRows.observations.count,
+            observationRowsToInsert: observationRowsToInsert,
+            observationRowsToUpdate: observationRowsToUpdate,
+            updateRowsToInsert: updateRowsToInsert,
+            existingObservationSkippedCount: existingObservationSkippedCount,
+            existingUpdateSkippedCount: existingUpdateSkippedCount,
+            newerRemoteSkippedCount: newerRemoteSkippedCount,
+            softDeletedSkippedCount: softDeletedSkippedCount,
+            failedCount: failedCount,
+            noBehaviorChangedText: noBehaviorChangedText
+        )
+    }
+
+    nonisolated static func matchingObservationUpdateReplayRow(
+        for row: NormalizedObservationUpdateReplayRow,
+        remoteObservationUpdates: [CanonicalReadRemoteObservationUpdateRow]
+    ) -> CanonicalReadRemoteObservationUpdateRow? {
+        if let idMatch = remoteObservationUpdates.first(where: { $0.id == row.id }) {
+            return idMatch
+        }
+        return remoteObservationUpdates.first {
+            $0.deletedAt == nil &&
+                $0.observationID == row.observationID &&
+                $0.sessionID == row.sessionID &&
+                $0.shotID == row.shotID &&
+                $0.updateType == row.updateType
+        }
+    }
+
+    nonisolated static func normalizedObservationUpdateReplayDuplicateResolution(
+        row: NormalizedObservationUpdateReplayRow,
+        remoteObservationUpdates: [CanonicalReadRemoteObservationUpdateRow]
+    ) -> NormalizedObservationUpdateReplayDuplicateResolution {
+        guard let remote = matchingObservationUpdateReplayRow(
+            for: row,
+            remoteObservationUpdates: remoteObservationUpdates
+        ) else {
+            return .unavailable
+        }
+        guard remote.orgID == row.orgID,
+              remote.propertyID == row.propertyID,
+              remote.observationID == row.observationID,
+              remote.sessionID == row.sessionID,
+              remote.shotID == row.shotID,
+              remote.updateType == row.updateType else {
+            return .conflict("remote_observation_update_parent_mismatch")
+        }
+        if remote.deletedAt != nil {
+            return .softDeletedPreserved
+        }
+        if let remoteUpdatedAt = remote.updatedAt,
+           remoteUpdatedAt > row.updatedAt {
+            return .newerRemotePreserved
+        }
+        guard normalizedReplayStatus(remote.status) == normalizedReplayStatus(row.status) else {
+            return .conflict("remote_observation_update_conflict")
+        }
+        return .idempotentExisting
+    }
+
+    nonisolated static func executeNormalizedObservationLineageReplayTestOnly(
+        plan: NormalizedObservationLineageReplayPlan,
+        targetClassification: SupabaseRuntimeConfiguration.TargetClassification,
+        operation: (NormalizedObservationLineageReplayPlan) async throws -> NormalizedObservationLineageReplayWriteSummary
+    ) async -> NormalizedBackfillEntityResult {
+        guard targetClassification == .localDev ||
+                targetClassification == .approvedStaging ||
+                targetClassification == .approvedProductionValidation else {
+            return NormalizedBackfillEntityResult(
+                kind: .observation,
+                attemptedCount: plan.attemptedObservationCount,
+                upsertedCount: 0,
+                skippedCount: plan.attemptedObservationCount,
+                failedCount: 0,
+                message: "target_environment_observation_replay_blocked"
+            )
+        }
+        guard plan.allowed else {
+            return NormalizedBackfillEntityResult(
+                kind: .observation,
+                attemptedCount: plan.attemptedObservationCount,
+                upsertedCount: 0,
+                skippedCount: max(0, plan.attemptedObservationCount - plan.failedCount),
+                failedCount: plan.failedCount,
+                remoteNewerConflictCount: plan.newerRemoteSkippedCount,
+                message: plan.blockedReason ?? "observation_lineage_replay_plan_not_allowed"
+            )
+        }
+
+        let planSkippedCount = plan.existingObservationSkippedCount +
+            plan.existingUpdateSkippedCount +
+            plan.newerRemoteSkippedCount +
+            plan.softDeletedSkippedCount
+        guard plan.plannedObservationWriteCount > 0 || plan.plannedUpdateWriteCount > 0 else {
+            let message: String
+            if plan.softDeletedSkippedCount > 0 {
+                message = "soft_deleted_remote_observation_lineage_preserved"
+            } else if plan.newerRemoteSkippedCount > 0 {
+                message = "newer_remote_observation_lineage_preserved"
+            } else {
+                message = "observation_lineage_already_current"
+            }
+            return NormalizedBackfillEntityResult(
+                kind: .observation,
+                attemptedCount: plan.attemptedObservationCount,
+                upsertedCount: 0,
+                skippedCount: planSkippedCount,
+                failedCount: 0,
+                remoteNewerConflictCount: plan.newerRemoteSkippedCount,
+                message: message
+            )
+        }
+
+        do {
+            let summary = try await operation(plan)
+            let message = [
+                summary.message,
+                "planned_observations=\(plan.plannedObservationWriteCount)",
+                "planned_updates=\(plan.plannedUpdateWriteCount)",
+                "executed_observations=\(summary.insertedObservationCount + summary.updatedObservationCount)",
+                "executed_updates=\(summary.insertedUpdateCount)",
+                "skipped=\(planSkippedCount + summary.duplicateSkippedCount)",
+                "remote_newer_conflicts=\(plan.newerRemoteSkippedCount + summary.remoteNewerConflictCount)",
+                "failed=\(summary.failedCount)"
+            ].joined(separator: " ")
+            return NormalizedBackfillEntityResult(
+                kind: .observation,
+                attemptedCount: plan.attemptedObservationCount,
+                upsertedCount: summary.executedCount,
+                skippedCount: planSkippedCount + summary.duplicateSkippedCount,
+                failedCount: summary.failedCount,
+                remoteNewerConflictCount: plan.newerRemoteSkippedCount + summary.remoteNewerConflictCount,
+                message: message
+            )
+        } catch {
+            return NormalizedBackfillEntityResult(
+                kind: .observation,
+                attemptedCount: plan.attemptedObservationCount,
+                upsertedCount: 0,
+                skippedCount: planSkippedCount,
+                failedCount: plan.plannedObservationWriteCount + plan.plannedUpdateWriteCount,
+                remoteNewerConflictCount: plan.newerRemoteSkippedCount,
+                message: sanitizedDiagnosticsErrorMessage(error.localizedDescription)
+            )
+        }
+    }
+
     nonisolated static func mergedObservationReplayPreflightRows(
         scopedSessionRows: [CanonicalReadRemoteObservationRow],
         idPreflightRows: [CanonicalReadRemoteObservationRow]
@@ -22299,6 +22920,27 @@ final class AppState: ObservableObject {
         guard remote.orgID == row.orgID,
               remote.propertyID == row.propertyID,
               remote.sessionID == row.sessionID else {
+            return .conflict("remote_observation_parent_mismatch")
+        }
+        if remote.deletedAt != nil {
+            return .softDeletedPreserved
+        }
+        if let remoteUpdatedAt = remote.updatedAt,
+           remoteUpdatedAt > row.updatedAt {
+            return .newerRemotePreserved
+        }
+        return .idempotentExisting
+    }
+
+    nonisolated static func normalizedObservationLineageInsertDuplicateResolution(
+        row: NormalizedObservationReplayRow,
+        remoteObservations: [CanonicalReadRemoteObservationRow]
+    ) -> NormalizedObservationInsertDuplicateResolution {
+        guard let remote = remoteObservations.first(where: { $0.id == row.id }) else {
+            return .unavailable
+        }
+        guard remote.orgID == row.orgID,
+              remote.propertyID == row.propertyID else {
             return .conflict("remote_observation_parent_mismatch")
         }
         if remote.deletedAt != nil {
@@ -29786,53 +30428,57 @@ final class AppState: ObservableObject {
             )
         }
 
-        let plan = Self.makeNormalizedObservationReplayPlan(
+        let localLineageRows = Self.normalizedObservationLineageReplayRows(
+            orgID: orgID,
+            propertyID: propertyID,
+            sessionID: sessionID,
+            metadata: metadata,
+            updatedBy: authenticatedSupabaseUser?.id
+        )
+        guard let idPreflightRows = await fetchObservationIDPreflightRowsIfAvailable(
+            observationIDs: localLineageRows.observations.map(\.id)
+        ) else {
+            return NormalizedBackfillEntityResult(
+                kind: .observation,
+                attemptedCount: localLineageRows.observations.count,
+                upsertedCount: 0,
+                skippedCount: 0,
+                failedCount: localLineageRows.observations.count,
+                message: "remote_observation_id_preflight_unavailable"
+            )
+        }
+        guard let remoteObservationUpdates = await fetchObservationUpdateRowsIfAvailable(
+            updateIDs: localLineageRows.updates.map(\.id),
+            naturalRows: localLineageRows.updates
+        ) else {
+            return NormalizedBackfillEntityResult(
+                kind: .observation,
+                attemptedCount: localLineageRows.observations.count,
+                upsertedCount: 0,
+                skippedCount: 0,
+                failedCount: localLineageRows.observations.count,
+                message: "remote_observation_update_preflight_unavailable"
+            )
+        }
+        let executionPlan = Self.makeNormalizedObservationLineageReplayPlan(
             orgID: orgID,
             propertyID: propertyID,
             sessionID: sessionID,
             metadata: metadata,
             remoteProperties: remote.properties,
             remoteSessions: remote.sessions,
-            remoteObservations: remoteObservations,
+            remoteObservations: Self.mergedObservationReplayPreflightRows(
+                scopedSessionRows: remoteObservations,
+                idPreflightRows: idPreflightRows
+            ),
+            remoteObservationUpdates: remoteObservationUpdates,
             updatedBy: authenticatedSupabaseUser?.id
         )
-        let executionPlan: NormalizedObservationReplayPlan
-        if plan.allowed && !plan.rowsToUpsert.isEmpty {
-            guard let idPreflightRows = await fetchObservationIDPreflightRowsIfAvailable(
-                observationIDs: plan.rowsToUpsert.map(\.id)
-            ) else {
-                return NormalizedBackfillEntityResult(
-                    kind: .observation,
-                    attemptedCount: plan.attemptedCount,
-                    upsertedCount: 0,
-                    skippedCount: plan.existingSkippedCount +
-                        plan.newerRemoteSkippedCount +
-                        plan.softDeletedSkippedCount,
-                    failedCount: plan.rowsToUpsert.count,
-                    message: "remote_observation_id_preflight_unavailable"
-                )
-            }
-            executionPlan = Self.makeNormalizedObservationReplayPlan(
-                orgID: orgID,
-                propertyID: propertyID,
-                sessionID: sessionID,
-                metadata: metadata,
-                remoteProperties: remote.properties,
-                remoteSessions: remote.sessions,
-                remoteObservations: Self.mergedObservationReplayPreflightRows(
-                    scopedSessionRows: remoteObservations,
-                    idPreflightRows: idPreflightRows
-                ),
-                updatedBy: authenticatedSupabaseUser?.id
-            )
-        } else {
-            executionPlan = plan
-        }
-        return await Self.executeNormalizedObservationReplayInsertOnlyTestOnly(
+        return await Self.executeNormalizedObservationLineageReplayTestOnly(
             plan: executionPlan,
             targetClassification: supabaseConfiguration.targetClassification
-        ) { rows in
-            try await self.insertObservationRowsToSupabaseFailClosed(rows)
+        ) { plan in
+            try await self.executeObservationLineageReplayToSupabaseFailClosed(plan)
         }
     }
 
@@ -30021,7 +30667,7 @@ final class AppState: ObservableObject {
         do {
             let observationRecords: [CanonicalReadRemoteObservationRecord] = try await client
                 .from("observations")
-                .select("id, org_id, session_id, updated_at, deleted_at")
+                .select("id, org_id, property_id, session_id, status, updated_at, deleted_at")
                 .in("id", values: idValues)
                 .limit(idValues.count)
                 .execute()
@@ -30047,8 +30693,9 @@ final class AppState: ObservableObject {
                 CanonicalReadRemoteObservationRow(
                     id: record.id,
                     orgID: record.orgID,
-                    propertyID: record.sessionID.flatMap { sessionsByID[$0]?.propertyID },
+                    propertyID: record.propertyID ?? record.sessionID.flatMap { sessionsByID[$0]?.propertyID },
                     sessionID: record.sessionID,
+                    status: record.status,
                     updatedAt: record.updatedAt,
                     deletedAt: record.deletedAt
                 )
@@ -30057,6 +30704,125 @@ final class AppState: ObservableObject {
             recordDiagnosticsError(error)
             return nil
         }
+    }
+
+    private func fetchObservationUpdateRowsIfAvailable(
+        updateIDs: [UUID],
+        naturalRows: [NormalizedObservationUpdateReplayRow] = []
+    ) async -> [CanonicalReadRemoteObservationUpdateRow]? {
+        guard backendFeatureFlags.supabaseEnabled,
+              isOrganizationContextReady,
+              let client = supabaseClient else {
+            return nil
+        }
+        let idValues = Array(Set(updateIDs)).map { $0.uuidString.lowercased() }.sorted()
+        let sessionValues = Array(Set(naturalRows.map(\.sessionID)))
+            .map { $0.uuidString.lowercased() }
+            .sorted()
+        let observationValues = Array(Set(naturalRows.map(\.observationID)))
+            .map { $0.uuidString.lowercased() }
+            .sorted()
+        let updateTypeValues = Array(Set(naturalRows.map(\.updateType))).sorted()
+        guard !idValues.isEmpty || !naturalRows.isEmpty else { return [] }
+
+        do {
+            var recordsByID: [UUID: RemoteObservationUpdateReplayRecord] = [:]
+            if !idValues.isEmpty {
+                let records: [RemoteObservationUpdateReplayRecord] = try await client
+                    .from("observation_updates")
+                    .select("id, org_id, property_id, observation_id, session_id, shot_id, update_type, status, updated_at, deleted_at")
+                    .in("id", values: idValues)
+                    .limit(idValues.count)
+                    .execute()
+                    .value as [RemoteObservationUpdateReplayRecord]
+                for record in records {
+                    recordsByID[record.id] = record
+                }
+            }
+            if !sessionValues.isEmpty,
+               !observationValues.isEmpty,
+               !updateTypeValues.isEmpty {
+                let records: [RemoteObservationUpdateReplayRecord] = try await client
+                    .from("observation_updates")
+                    .select("id, org_id, property_id, observation_id, session_id, shot_id, update_type, status, updated_at, deleted_at")
+                    .in("session_id", values: sessionValues)
+                    .in("observation_id", values: observationValues)
+                    .in("update_type", values: updateTypeValues)
+                    .is("deleted_at", value: nil)
+                    .limit(5_000)
+                    .execute()
+                    .value as [RemoteObservationUpdateReplayRecord]
+                for record in records {
+                    recordsByID[record.id] = record
+                }
+            }
+            return recordsByID.values.map {
+                CanonicalReadRemoteObservationUpdateRow(
+                    id: $0.id,
+                    orgID: $0.orgID,
+                    propertyID: $0.propertyID,
+                    observationID: $0.observationID,
+                    sessionID: $0.sessionID,
+                    shotID: $0.shotID,
+                    updateType: $0.updateType,
+                    status: $0.status,
+                    updatedAt: $0.updatedAt,
+                    deletedAt: $0.deletedAt
+                )
+            }
+        } catch {
+            recordDiagnosticsError(error)
+            return nil
+        }
+    }
+
+    private func executeObservationLineageReplayToSupabaseFailClosed(
+        _ plan: NormalizedObservationLineageReplayPlan
+    ) async throws -> NormalizedObservationLineageReplayWriteSummary {
+        var insertedObservationCount = 0
+        var updatedObservationCount = 0
+        var insertedUpdateCount = 0
+        var duplicateSkippedCount = 0
+        var remoteNewerConflictCount = 0
+        var failedCount = 0
+        var lastMessage = "observation_lineage_replayed"
+
+        if !plan.observationRowsToInsert.isEmpty {
+            let summary = try await insertObservationLineageRowsToSupabaseFailClosed(plan.observationRowsToInsert)
+            insertedObservationCount += summary.insertedObservationCount
+            duplicateSkippedCount += summary.duplicateSkippedCount
+            remoteNewerConflictCount += summary.remoteNewerConflictCount
+            failedCount += summary.failedCount
+            lastMessage = summary.message
+        }
+
+        if !plan.observationRowsToUpdate.isEmpty {
+            let summary = try await updateObservationLineageRowsToSupabaseFailClosed(plan.observationRowsToUpdate)
+            updatedObservationCount += summary.updatedObservationCount
+            duplicateSkippedCount += summary.duplicateSkippedCount
+            remoteNewerConflictCount += summary.remoteNewerConflictCount
+            failedCount += summary.failedCount
+            lastMessage = summary.message
+        }
+
+        if !plan.updateRowsToInsert.isEmpty {
+            let summary = try await insertObservationUpdateRowsToSupabaseFailClosed(plan.updateRowsToInsert)
+            insertedUpdateCount += summary.insertedUpdateCount
+            duplicateSkippedCount += summary.duplicateSkippedCount
+            remoteNewerConflictCount += summary.remoteNewerConflictCount
+            failedCount += summary.failedCount
+            lastMessage = summary.message
+        }
+
+        return NormalizedObservationLineageReplayWriteSummary(
+            insertedObservationCount: insertedObservationCount,
+            updatedObservationCount: updatedObservationCount,
+            insertedUpdateCount: insertedUpdateCount,
+            duplicateSkippedCount: duplicateSkippedCount,
+            remoteNewerConflictCount: remoteNewerConflictCount,
+            failedCount: failedCount,
+            message: failedCount > 0 ? lastMessage : "observation_lineage_replayed"
+        )
     }
 
     private func insertObservationRowsToSupabaseFailClosed(
@@ -30131,6 +30897,7 @@ final class AppState: ObservableObject {
         let payload = SupabaseObservationPayload(
             id: row.id,
             orgID: row.orgID,
+            propertyID: row.propertyID,
             sessionID: row.sessionID,
             shotID: row.shotID,
             category: row.category,
@@ -30143,6 +30910,249 @@ final class AppState: ObservableObject {
         )
         try await client
             .from("observations")
+            .insert(payload, returning: .minimal)
+            .execute()
+    }
+
+    private func insertObservationLineageRowsToSupabaseFailClosed(
+        _ rows: [NormalizedObservationReplayRow]
+    ) async throws -> NormalizedObservationLineageReplayWriteSummary {
+        var insertedCount = 0
+        var duplicateSkippedCount = 0
+        var remoteNewerConflictCount = 0
+        var failedCount = 0
+        var lastMessage = "observation_lineage_rows_inserted"
+
+        for row in rows {
+            do {
+                try await insertObservationRowToSupabase(row)
+                insertedCount += 1
+                lastMessage = "observation_lineage_rows_inserted"
+            } catch {
+                guard isDuplicateKeyError(error) else {
+                    throw error
+                }
+                guard let existingRows = await fetchObservationIDPreflightRowsIfAvailable(
+                    observationIDs: [row.id]
+                ) else {
+                    failedCount += 1
+                    lastMessage = "remote_observation_duplicate_confirmation_unavailable"
+                    continue
+                }
+
+                switch Self.normalizedObservationLineageInsertDuplicateResolution(
+                    row: row,
+                    remoteObservations: existingRows
+                ) {
+                case .idempotentExisting:
+                    duplicateSkippedCount += 1
+                    lastMessage = "observation_lineage_duplicate_property_scope_idempotent"
+                case .newerRemotePreserved:
+                    duplicateSkippedCount += 1
+                    remoteNewerConflictCount += 1
+                    lastMessage = "newer_remote_observation_lineage_preserved"
+                case .softDeletedPreserved:
+                    duplicateSkippedCount += 1
+                    lastMessage = "soft_deleted_remote_observation_lineage_preserved"
+                case .conflict(let reason):
+                    failedCount += 1
+                    lastMessage = reason
+                case .unavailable:
+                    failedCount += 1
+                    lastMessage = "remote_observation_duplicate_confirmation_missing"
+                }
+            }
+        }
+
+        return NormalizedObservationLineageReplayWriteSummary(
+            insertedObservationCount: insertedCount,
+            duplicateSkippedCount: duplicateSkippedCount,
+            remoteNewerConflictCount: remoteNewerConflictCount,
+            failedCount: failedCount,
+            message: lastMessage
+        )
+    }
+
+    private func updateObservationLineageRowsToSupabaseFailClosed(
+        _ rows: [NormalizedObservationReplayRow]
+    ) async throws -> NormalizedObservationLineageReplayWriteSummary {
+        guard let client = supabaseClient else {
+            throw NSError(domain: "ScoutCapture.ObservationReplay", code: 3, userInfo: [
+                NSLocalizedDescriptionKey: "Missing Supabase client for observation lineage replay update."
+            ])
+        }
+        var updatedCount = 0
+        var skippedCount = 0
+        var remoteNewerConflictCount = 0
+        var failedCount = 0
+        var lastMessage = "observation_lifecycle_replayed"
+
+        for row in rows {
+            guard let latestRows = await fetchObservationIDPreflightRowsIfAvailable(observationIDs: [row.id]),
+                  let latest = latestRows.first(where: { $0.id == row.id }) else {
+                failedCount += 1
+                lastMessage = "remote_observation_lifecycle_preflight_unavailable"
+                continue
+            }
+            guard latest.orgID == row.orgID,
+                  latest.propertyID == row.propertyID else {
+                failedCount += 1
+                lastMessage = "remote_observation_parent_mismatch"
+                continue
+            }
+            if latest.deletedAt != nil {
+                skippedCount += 1
+                lastMessage = "soft_deleted_remote_observation_preserved"
+                continue
+            }
+            if let latestUpdatedAt = latest.updatedAt,
+               latestUpdatedAt > row.updatedAt {
+                skippedCount += 1
+                remoteNewerConflictCount += 1
+                lastMessage = "newer_remote_observation_lifecycle_preserved"
+                continue
+            }
+            if Self.normalizedReplayStatus(latest.status) == Self.normalizedReplayStatus(row.status) {
+                skippedCount += 1
+                lastMessage = "observation_lifecycle_already_current"
+                continue
+            }
+
+            let resolvedAt = row.status == "resolved" ? row.updatedAt.ISO8601Format() : nil
+            let payload = SupabaseObservationLineageUpdatePayload(
+                status: row.status,
+                title: nil,
+                detail: nil,
+                updatedAt: row.updatedAt.ISO8601Format(),
+                updatedBy: nil,
+                priority: nil,
+                trade: nil,
+                lastUpdateSessionID: row.sessionID,
+                lastSeenAt: row.updatedAt.ISO8601Format(),
+                resolvedSessionID: row.status == "resolved" ? row.sessionID : nil,
+                resolvedAt: resolvedAt
+            )
+            let updatedRows = try await client
+                .from("observations")
+                .update(payload, returning: .representation)
+                .eq("id", value: row.id.uuidString.lowercased())
+                .eq("org_id", value: row.orgID.uuidString.lowercased())
+                .eq("property_id", value: row.propertyID.uuidString.lowercased())
+                .is("deleted_at", value: nil)
+                .execute()
+                .value as [SupabaseObservationLineageReplayUpdateResult]
+            guard updatedRows.count == 1,
+                  updatedRows[0].id == row.id,
+                  updatedRows[0].orgID == row.orgID,
+                  updatedRows[0].propertyID == row.propertyID,
+                  Self.normalizedReplayStatus(updatedRows[0].status) == Self.normalizedReplayStatus(row.status) else {
+                failedCount += 1
+                lastMessage = "remote_observation_lifecycle_update_not_confirmed"
+                continue
+            }
+            updatedCount += 1
+            lastMessage = "observation_lifecycle_replayed"
+        }
+
+        return NormalizedObservationLineageReplayWriteSummary(
+            updatedObservationCount: updatedCount,
+            duplicateSkippedCount: skippedCount,
+            remoteNewerConflictCount: remoteNewerConflictCount,
+            failedCount: failedCount,
+            message: lastMessage
+        )
+    }
+
+    private func insertObservationUpdateRowsToSupabaseFailClosed(
+        _ rows: [NormalizedObservationUpdateReplayRow]
+    ) async throws -> NormalizedObservationLineageReplayWriteSummary {
+        var insertedCount = 0
+        var skippedCount = 0
+        var remoteNewerConflictCount = 0
+        var failedCount = 0
+        var lastMessage = "observation_updates_inserted"
+
+        for row in rows {
+            do {
+                try await insertObservationUpdateRowToSupabase(row)
+                insertedCount += 1
+                lastMessage = "observation_updates_inserted"
+            } catch {
+                guard isDuplicateKeyError(error) else {
+                    throw error
+                }
+                guard let existingRows = await fetchObservationUpdateRowsIfAvailable(
+                    updateIDs: [row.id],
+                    naturalRows: [row]
+                ) else {
+                    failedCount += 1
+                    lastMessage = "remote_observation_update_duplicate_confirmation_missing"
+                    continue
+                }
+                switch Self.normalizedObservationUpdateReplayDuplicateResolution(
+                    row: row,
+                    remoteObservationUpdates: existingRows
+                ) {
+                case .unavailable:
+                    failedCount += 1
+                    lastMessage = "remote_observation_update_duplicate_confirmation_missing"
+                case .conflict(let reason):
+                    failedCount += 1
+                    lastMessage = reason
+                case .softDeletedPreserved:
+                    skippedCount += 1
+                    lastMessage = "soft_deleted_remote_observation_update_preserved"
+                case .newerRemotePreserved:
+                    skippedCount += 1
+                    remoteNewerConflictCount += 1
+                    lastMessage = "newer_remote_observation_update_preserved"
+                case .idempotentExisting:
+                    skippedCount += 1
+                    lastMessage = "observation_update_duplicate_exact_scope_idempotent"
+                }
+            }
+        }
+
+        return NormalizedObservationLineageReplayWriteSummary(
+            insertedUpdateCount: insertedCount,
+            duplicateSkippedCount: skippedCount,
+            remoteNewerConflictCount: remoteNewerConflictCount,
+            failedCount: failedCount,
+            message: lastMessage
+        )
+    }
+
+    private func insertObservationUpdateRowToSupabase(_ row: NormalizedObservationUpdateReplayRow) async throws {
+        guard let client = supabaseClient else {
+            throw NSError(domain: "ScoutCapture.ObservationReplay", code: 4, userInfo: [
+                NSLocalizedDescriptionKey: "Missing Supabase client for observation update replay insert."
+            ])
+        }
+        guard canAccessOrganization(row.orgID) else {
+            throw NSError(domain: "ScoutCapture.ObservationReplay", code: 5, userInfo: [
+                NSLocalizedDescriptionKey: "Blocked observation update replay outside the active organization."
+            ])
+        }
+        let payload = SupabaseObservationUpdatePayload(
+            id: row.id,
+            orgID: row.orgID,
+            propertyID: row.propertyID,
+            observationID: row.observationID,
+            sessionID: row.sessionID,
+            shotID: row.shotID,
+            updateType: row.updateType,
+            status: row.status,
+            message: row.message,
+            note: row.note,
+            priority: row.priority,
+            trade: row.trade,
+            capturedAt: row.capturedAt?.ISO8601Format(),
+            createdAt: row.createdAt.ISO8601Format(),
+            updatedAt: row.updatedAt.ISO8601Format(),
+            updatedBy: row.updatedBy
+        )
+        try await client
+            .from("observation_updates")
             .insert(payload, returning: .minimal)
             .execute()
     }
