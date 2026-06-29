@@ -2622,6 +2622,51 @@ final class Phase2C26PFlaggedObservationReplayTests: XCTestCase {
         XCTAssertTrue(plan.noBehaviorChangedText.contains("activate candidates"))
     }
 
+    func testPhase2C28ObservationLineageMigrationIsAdditiveSchemaOnlySlice() throws {
+        let testFileURL = URL(fileURLWithPath: #filePath)
+        let repoRoot = testFileURL
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let migrationURL = repoRoot
+            .appendingPathComponent("supabase/migrations/202606290001_phase_2c_28_observation_lineage_schema.sql")
+        let sql = try String(contentsOf: migrationURL, encoding: .utf8)
+        let lowercased = sql.lowercased()
+
+        XCTAssertTrue(sql.contains("add column if not exists property_id uuid references public.properties(id)"))
+        XCTAssertTrue(sql.contains("first_seen_session_id uuid references public.sessions(id)"))
+        XCTAssertTrue(sql.contains("last_update_session_id uuid references public.sessions(id)"))
+        XCTAssertTrue(sql.contains("resolved_session_id uuid references public.sessions(id)"))
+        XCTAssertTrue(sql.contains("create table if not exists public.observation_updates"))
+        XCTAssertTrue(sql.contains("insert into public.observation_updates"))
+        XCTAssertTrue(sql.contains("from public.observations observation_row"))
+        XCTAssertTrue(sql.contains("hydrate_observation_lineage_defaults"))
+        XCTAssertTrue(sql.contains("observation_lineage_scope_valid"))
+        XCTAssertTrue(sql.contains("observation_update_scope_valid"))
+        XCTAssertTrue(sql.contains("observation_updates_select_member"))
+        XCTAssertTrue(sql.contains("observation_updates_insert_owner_manager_field"))
+        XCTAssertTrue(sql.contains("observation_updates_update_owner_manager_field"))
+        XCTAssertTrue(sql.contains("idx_observation_updates_session_active"))
+        XCTAssertTrue(sql.contains("idx_observation_updates_observation_created"))
+        XCTAssertTrue(sql.contains("idx_observation_updates_property_session_active"))
+        XCTAssertTrue(sql.contains("join public.sessions session_row\n          on session_row.id = observation_row.session_id"))
+        XCTAssertTrue(sql.contains("and session_row.deleted_at is null"))
+        XCTAssertTrue(sql.contains("and session_row.property_id = observation_row.property_id"))
+        XCTAssertFalse(sql.contains("and public.has_property_access(target_org_id, observation_row.property_id)"))
+        XCTAssertTrue(sql.contains("target_shot_id uuid"))
+        XCTAssertTrue(sql.contains("public.has_observation_update_access(org_id, property_id, session_id, observation_id, shot_id)"))
+        XCTAssertFalse(sql.contains("target_session_id,\n            null"))
+        let updatePreflight = try XCTUnwrap(sql.range(
+            of: "legacy observation would produce an invalid observation_update parent scope"
+        ))
+        let updateBackfill = try XCTUnwrap(sql.range(of: "insert into public.observation_updates"))
+        let updateValidation = try XCTUnwrap(sql.range(of: "validate constraint observation_updates_scope_check"))
+        XCTAssertLessThan(updatePreflight.lowerBound, updateBackfill.lowerBound)
+        XCTAssertLessThan(updateBackfill.lowerBound, updateValidation.lowerBound)
+        XCTAssertFalse(lowercased.contains("alter column session_id drop not null"))
+        XCTAssertFalse(lowercased.contains("drop column session_id"))
+        XCTAssertFalse(lowercased.contains("drop table public.observations"))
+    }
+
     private func canonicalDiagnostics(
         remoteObservationCount: Int,
         result: AppState.CanonicalReadDiagnosticResult,
