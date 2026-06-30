@@ -525,6 +525,84 @@ final class Phase2C26PFlaggedObservationReplayTests: XCTestCase {
         )
     }
 
+    private func canonicalLocalSnapshot(
+        shotCount: Int = 1,
+        issueObservationCount: Int = 1,
+        updatedAt: Date? = Date(timeIntervalSinceReferenceDate: 10_600)
+    ) -> AppState.CanonicalReadLocalSnapshot {
+        AppState.CanonicalReadLocalSnapshot(
+            propertyID: propertyID,
+            orgID: orgID,
+            sessionID: sessionID,
+            sessionPropertyID: propertyID,
+            sessionStatus: "completed",
+            shotCount: shotCount,
+            issueObservationCount: issueObservationCount,
+            guidedCount: 0,
+            updatedAt: updatedAt,
+            localKnownStateSource: "verified_snapshot_payload",
+            localPropertyFound: true,
+            localSessionFound: true
+        )
+    }
+
+    private func canonicalRemoteObservation(
+        id: UUID? = nil,
+        orgID: UUID? = nil,
+        propertyID: UUID? = nil,
+        sessionID: UUID? = nil
+    ) -> AppState.CanonicalReadRemoteObservationRow {
+        AppState.CanonicalReadRemoteObservationRow(
+            id: id ?? issueID,
+            orgID: orgID ?? self.orgID,
+            propertyID: propertyID ?? self.propertyID,
+            sessionID: sessionID ?? self.sessionID,
+            status: "active",
+            updatedAt: Date(timeIntervalSinceReferenceDate: 10_250),
+            deletedAt: nil
+        )
+    }
+
+    private func canonicalRemoteObservationUpdate(
+        id: UUID? = nil,
+        orgID: UUID? = nil,
+        propertyID: UUID? = nil,
+        observationID: UUID? = nil,
+        sessionID: UUID? = nil,
+        shotID: UUID?? = nil,
+        updateType: String = "created",
+        status: String = "active",
+        updatedAt: Date? = Date(timeIntervalSinceReferenceDate: 10_250)
+    ) -> AppState.CanonicalReadRemoteObservationUpdateRow {
+        AppState.CanonicalReadRemoteObservationUpdateRow(
+            id: id ?? UUID(),
+            orgID: orgID ?? self.orgID,
+            propertyID: propertyID ?? self.propertyID,
+            observationID: observationID ?? issueID,
+            sessionID: sessionID ?? self.sessionID,
+            shotID: shotID ?? self.shotID,
+            updateType: updateType,
+            status: status,
+            updatedAt: updatedAt,
+            deletedAt: nil
+        )
+    }
+
+    private func canonicalRemoteSnapshotWithObservationUpdates(
+        observations: [AppState.CanonicalReadRemoteObservationRow],
+        updates: [AppState.CanonicalReadRemoteObservationUpdateRow],
+        shots: [AppState.CanonicalReadRemoteShotRow]? = nil,
+        sessionStatus: String = "completed"
+    ) -> AppState.CanonicalReadRemoteSnapshot {
+        AppState.CanonicalReadRemoteSnapshot(
+            properties: remoteProperties(),
+            sessions: remoteSessions(status: sessionStatus),
+            shots: shots ?? [AppState.CanonicalReadRemoteShotRow(id: shotID, sessionID: sessionID, deletedAt: nil)],
+            observations: observations,
+            observationUpdates: updates
+        )
+    }
+
     private func executeInsertOnlyReplay(
         plan: AppState.NormalizedObservationReplayPlan,
         startingRows: [AppState.CanonicalReadRemoteObservationRow]
@@ -2362,6 +2440,215 @@ final class Phase2C26PFlaggedObservationReplayTests: XCTestCase {
         XCTAssertEqual(result.remoteIssueObservationCount, 1)
         XCTAssertEqual(result.countParity, true)
         XCTAssertEqual(result.result, .remoteMatchesLocal)
+    }
+
+    func testCanonicalDiagnosticsCountsObservationUpdatesForSingleSessionIssue() {
+        let local = canonicalLocalSnapshot()
+        let remote = canonicalRemoteSnapshotWithObservationUpdates(
+            observations: [canonicalRemoteObservation()],
+            updates: [canonicalRemoteObservationUpdate()]
+        )
+
+        let result = AppState.makeCanonicalReadDiagnostics(
+            checkedAt: Date(timeIntervalSinceReferenceDate: 10_700),
+            activeOrganizationID: orgID,
+            local: local,
+            remote: remote
+        )
+
+        XCTAssertEqual(result.localIssueObservationCount, 1)
+        XCTAssertEqual(result.remoteIssueObservationCount, 1)
+        XCTAssertEqual(result.countParity, true)
+        XCTAssertEqual(result.result, .remoteMatchesLocal)
+        XCTAssertEqual(result.blockedReason, nil)
+    }
+
+    func testCanonicalDiagnosticsCountsCarriedForwardObservationUpdateForSelectedSession() {
+        let session1ID = UUID(uuidString: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")!
+        let local = canonicalLocalSnapshot()
+        let remote = canonicalRemoteSnapshotWithObservationUpdates(
+            observations: [canonicalRemoteObservation(sessionID: session1ID)],
+            updates: [
+                canonicalRemoteObservationUpdate(
+                    updateType: "carried_forward"
+                )
+            ]
+        )
+
+        let result = AppState.makeCanonicalReadDiagnostics(
+            checkedAt: Date(timeIntervalSinceReferenceDate: 10_700),
+            activeOrganizationID: orgID,
+            local: local,
+            remote: remote
+        )
+
+        XCTAssertEqual(result.remoteIssueObservationCount, 1)
+        XCTAssertEqual(result.countParity, true)
+        XCTAssertEqual(result.result, .remoteMatchesLocal)
+        XCTAssertEqual(result.parentOrgConsistent, true)
+        XCTAssertEqual(result.parentPropertyConsistent, true)
+    }
+
+    func testCanonicalDiagnosticsCountsCarriedForwardAndNewSessionObservationUpdates() {
+        let carriedIssueID = issueID
+        let newIssueID = UUID(uuidString: "77777777-7777-7777-7777-777777777777")!
+        let newShotID = UUID(uuidString: "88888888-8888-8888-8888-888888888888")!
+        let local = canonicalLocalSnapshot(shotCount: 2, issueObservationCount: 2)
+        let remote = canonicalRemoteSnapshotWithObservationUpdates(
+            observations: [
+                canonicalRemoteObservation(id: carriedIssueID, sessionID: UUID(uuidString: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")!),
+                canonicalRemoteObservation(id: newIssueID)
+            ],
+            updates: [
+                canonicalRemoteObservationUpdate(observationID: carriedIssueID, updateType: "carried_forward"),
+                canonicalRemoteObservationUpdate(observationID: newIssueID, shotID: .some(newShotID), updateType: "created")
+            ],
+            shots: [
+                AppState.CanonicalReadRemoteShotRow(id: shotID, sessionID: sessionID, deletedAt: nil),
+                AppState.CanonicalReadRemoteShotRow(id: newShotID, sessionID: sessionID, deletedAt: nil)
+            ]
+        )
+
+        let result = AppState.makeCanonicalReadDiagnostics(
+            checkedAt: Date(timeIntervalSinceReferenceDate: 10_700),
+            activeOrganizationID: orgID,
+            local: local,
+            remote: remote
+        )
+
+        XCTAssertEqual(result.localIssueObservationCount, 2)
+        XCTAssertEqual(result.remoteIssueObservationCount, 2)
+        XCTAssertEqual(result.countParity, true)
+        XCTAssertEqual(result.result, .remoteMatchesLocal)
+    }
+
+    func testCanonicalDiagnosticsMissingObservationUpdateProducesMissingRemoteChildren() {
+        let local = canonicalLocalSnapshot()
+        let remote = canonicalRemoteSnapshotWithObservationUpdates(
+            observations: [canonicalRemoteObservation()],
+            updates: []
+        )
+
+        let result = AppState.makeCanonicalReadDiagnostics(
+            checkedAt: Date(timeIntervalSinceReferenceDate: 10_700),
+            activeOrganizationID: orgID,
+            local: local,
+            remote: remote
+        )
+        let report = AppState.makeNormalizedParityGapReport(canonicalDiagnostics: result)
+
+        XCTAssertEqual(result.remoteIssueObservationCount, 0)
+        XCTAssertEqual(result.result, .divergentConflict)
+        XCTAssertTrue(report.taxonomy.contains(.missingRemoteChildren))
+        XCTAssertEqual(report.missingChildCount, 1)
+    }
+
+    func testCanonicalDiagnosticsWrongObservationUpdateScopeBlocks() {
+        let wrongSessionID = UUID(uuidString: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")!
+        let local = canonicalLocalSnapshot()
+        let remote = canonicalRemoteSnapshotWithObservationUpdates(
+            observations: [canonicalRemoteObservation()],
+            updates: [
+                canonicalRemoteObservationUpdate(sessionID: wrongSessionID)
+            ]
+        )
+
+        let result = AppState.makeCanonicalReadDiagnostics(
+            checkedAt: Date(timeIntervalSinceReferenceDate: 10_700),
+            activeOrganizationID: orgID,
+            local: local,
+            remote: remote
+        )
+
+        XCTAssertEqual(result.result, .parentMismatch)
+        XCTAssertEqual(result.blockedReason, "remote_observation_update_session_mismatch")
+        XCTAssertEqual(result.parentPropertyConsistent, false)
+    }
+
+    func testCanonicalDiagnosticsObservationUpdateParentMismatchBlocks() {
+        let wrongPropertyID = UUID(uuidString: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")!
+        let local = canonicalLocalSnapshot()
+        let remote = canonicalRemoteSnapshotWithObservationUpdates(
+            observations: [canonicalRemoteObservation(propertyID: wrongPropertyID)],
+            updates: [canonicalRemoteObservationUpdate()]
+        )
+
+        let result = AppState.makeCanonicalReadDiagnostics(
+            checkedAt: Date(timeIntervalSinceReferenceDate: 10_700),
+            activeOrganizationID: orgID,
+            local: local,
+            remote: remote
+        )
+
+        XCTAssertEqual(result.result, .parentMismatch)
+        XCTAssertEqual(result.blockedReason, "remote_observation_update_observation_property_mismatch")
+        XCTAssertEqual(result.parentPropertyConsistent, false)
+    }
+
+    func testCanonicalDiagnosticsObservationUpdateShotParentMismatchBlocks() {
+        let wrongSessionID = UUID(uuidString: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")!
+        let local = canonicalLocalSnapshot()
+        let remote = canonicalRemoteSnapshotWithObservationUpdates(
+            observations: [canonicalRemoteObservation()],
+            updates: [canonicalRemoteObservationUpdate()],
+            shots: [AppState.CanonicalReadRemoteShotRow(id: shotID, sessionID: wrongSessionID, deletedAt: nil)]
+        )
+
+        let result = AppState.makeCanonicalReadDiagnostics(
+            checkedAt: Date(timeIntervalSinceReferenceDate: 10_700),
+            activeOrganizationID: orgID,
+            local: local,
+            remote: remote
+        )
+
+        XCTAssertEqual(result.result, .parentMismatch)
+        XCTAssertEqual(result.blockedReason, "remote_observation_update_shot_parent_mismatch")
+        XCTAssertEqual(result.parentPropertyConsistent, false)
+    }
+
+    func testCanonicalOverlayComparisonUsesObservationUpdateCounts() {
+        let local = canonicalLocalSnapshot()
+        let remote = canonicalRemoteSnapshotWithObservationUpdates(
+            observations: [canonicalRemoteObservation()],
+            updates: [canonicalRemoteObservationUpdate()]
+        )
+        let diagnostics = AppState.makeCanonicalReadDiagnostics(
+            checkedAt: Date(timeIntervalSinceReferenceDate: 10_700),
+            activeOrganizationID: orgID,
+            local: local,
+            remote: remote
+        )
+        let report = AppState.makeNormalizedParityGapReport(canonicalDiagnostics: diagnostics)
+        let candidate = AppState.makeCanonicalReadCandidateDiagnostics(
+            configuration: AppState.CanonicalReadCandidateConfiguration(
+                enabled: true,
+                orgAllowlist: [orgID],
+                propertyAllowlist: [propertyID],
+                sessionAllowlist: [sessionID],
+                parityCompletenessThreshold: 0.95,
+                mediaRecoveryConfidenceThreshold: 0.95
+            ),
+            targetClassification: .approvedStaging,
+            canonicalDiagnostics: diagnostics,
+            parityReport: report
+        )
+        let overlay = AppState.buildCanonicalCandidateOverlayTestOnly(
+            targetClassification: .approvedStaging,
+            canonicalDiagnostics: diagnostics,
+            parityReport: report,
+            candidateDiagnostics: candidate
+        )
+        let comparison = AppState.makeCanonicalCandidateOverlayComparison(
+            canonicalDiagnostics: diagnostics,
+            overlayResult: overlay,
+            parityReport: report
+        )
+
+        XCTAssertTrue(candidate.allowed)
+        XCTAssertTrue(overlay.allowed)
+        XCTAssertEqual(overlay.overlay?.remoteIssueObservationCount, 1)
+        XCTAssertEqual(comparison.remoteCandidateIssueObservationCount, 1)
+        XCTAssertEqual(comparison.result, .candidateMatchesLocal)
     }
 
     func testCandidateCanProceedPastMissingRemoteChildrenAfterObservationReplay() async {

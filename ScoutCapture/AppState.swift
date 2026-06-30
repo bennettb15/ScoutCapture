@@ -3492,12 +3492,14 @@ final class AppState: ObservableObject {
         let sessions: [CanonicalReadRemoteSessionRow]
         let shots: [CanonicalReadRemoteShotRow]
         let observations: [CanonicalReadRemoteObservationRow]?
+        var observationUpdates: [CanonicalReadRemoteObservationUpdateRow]? = nil
 
         static let unavailable = CanonicalReadRemoteSnapshot(
             properties: [],
             sessions: [],
             shots: [],
-            observations: nil
+            observations: nil,
+            observationUpdates: nil
         )
     }
 
@@ -11776,22 +11778,6 @@ final class AppState: ObservableObject {
         let propertyValue = propertyID.uuidString.lowercased()
         let sessionValue = sessionID?.uuidString.lowercased()
 
-        async let observations: [CanonicalReadRemoteObservationRecord]? = {
-            guard let sessionValue else { return [] }
-            do {
-                return try await client
-                    .from("observations")
-                    .select("id, org_id, session_id, updated_at, deleted_at")
-                    .eq("org_id", value: orgValue)
-                    .eq("session_id", value: sessionValue)
-                    .limit(5_000)
-                    .execute()
-                    .value as [CanonicalReadRemoteObservationRecord]
-            } catch {
-                return nil
-            }
-        }()
-
         do {
             async let properties: [CanonicalReadRemotePropertyRecord] = client
                 .from("properties")
@@ -11829,8 +11815,72 @@ final class AppState: ObservableObject {
                     .value as [CanonicalReadRemoteShotRecord]
             }()
 
-            return try await CanonicalReadRemoteSnapshot(
-                properties: properties.map {
+            async let legacyObservations: [CanonicalReadRemoteObservationRecord]? = {
+                guard let sessionValue else { return [] }
+                do {
+                    return try await client
+                        .from("observations")
+                        .select("id, org_id, property_id, session_id, status, updated_at, deleted_at")
+                        .eq("org_id", value: orgValue)
+                        .eq("session_id", value: sessionValue)
+                        .limit(5_000)
+                        .execute()
+                        .value as [CanonicalReadRemoteObservationRecord]
+                } catch {
+                    return nil
+                }
+            }()
+
+            async let observationUpdates: [RemoteObservationUpdateReplayRecord]? = {
+                guard let sessionValue else { return [] }
+                do {
+                    return try await client
+                        .from("observation_updates")
+                        .select("id, org_id, property_id, observation_id, session_id, shot_id, update_type, status, updated_at, deleted_at")
+                        .eq("org_id", value: orgValue)
+                        .eq("property_id", value: propertyValue)
+                        .eq("session_id", value: sessionValue)
+                        .is("deleted_at", value: nil)
+                        .limit(5_000)
+                        .execute()
+                        .value as [RemoteObservationUpdateReplayRecord]
+                } catch {
+                    return nil
+                }
+            }()
+
+            let propertyRows = try await properties
+            let sessionRows = try await sessions
+            let shotRows = try await shots
+            let updateRecords = await observationUpdates
+            let legacyObservationRecords = await legacyObservations
+            let updateObservationIDValues = Array(Set((updateRecords ?? []).compactMap(\.observationID)))
+                .map { $0.uuidString.lowercased() }
+                .sorted()
+            let updateObservationRecords: [CanonicalReadRemoteObservationRecord]?
+            if updateObservationIDValues.isEmpty {
+                updateObservationRecords = []
+            } else {
+                do {
+                    updateObservationRecords = try await client
+                        .from("observations")
+                        .select("id, org_id, property_id, session_id, status, updated_at, deleted_at")
+                        .eq("org_id", value: orgValue)
+                        .in("id", values: updateObservationIDValues)
+                        .limit(updateObservationIDValues.count)
+                        .execute()
+                        .value as [CanonicalReadRemoteObservationRecord]
+                } catch {
+                    updateObservationRecords = nil
+                }
+            }
+            let observationRecords = Self.mergedCanonicalReadRemoteObservationRecords(
+                legacyObservationRecords,
+                updateObservationRecords
+            )
+
+            return CanonicalReadRemoteSnapshot(
+                properties: propertyRows.map {
                     CanonicalReadRemotePropertyRow(
                         id: $0.id,
                         orgID: $0.orgID,
@@ -11839,7 +11889,7 @@ final class AppState: ObservableObject {
                         deletedAt: $0.deletedAt
                     )
                 },
-                sessions: sessions.map {
+                sessions: sessionRows.map {
                     CanonicalReadRemoteSessionRow(
                         id: $0.id,
                         orgID: $0.orgID,
@@ -11850,19 +11900,33 @@ final class AppState: ObservableObject {
                         deletedAt: $0.deletedAt
                     )
                 },
-                shots: shots.map {
+                shots: shotRows.map {
                     CanonicalReadRemoteShotRow(
                         id: $0.id,
                         sessionID: $0.sessionID,
                         deletedAt: $0.deletedAt
                     )
                 },
-                observations: observations?.map {
+                observations: observationRecords?.map {
                     CanonicalReadRemoteObservationRow(
                         id: $0.id,
                         orgID: $0.orgID,
                         propertyID: $0.propertyID ?? propertyID,
                         sessionID: $0.sessionID,
+                        status: $0.status,
+                        updatedAt: $0.updatedAt,
+                        deletedAt: $0.deletedAt
+                    )
+                },
+                observationUpdates: updateRecords?.map {
+                    CanonicalReadRemoteObservationUpdateRow(
+                        id: $0.id,
+                        orgID: $0.orgID,
+                        propertyID: $0.propertyID,
+                        observationID: $0.observationID,
+                        sessionID: $0.sessionID,
+                        shotID: $0.shotID,
+                        updateType: $0.updateType,
                         status: $0.status,
                         updatedAt: $0.updatedAt,
                         deletedAt: $0.deletedAt
@@ -11873,6 +11937,21 @@ final class AppState: ObservableObject {
             recordDiagnosticsError(error)
             return nil
         }
+    }
+
+    private nonisolated static func mergedCanonicalReadRemoteObservationRecords(
+        _ lhs: [CanonicalReadRemoteObservationRecord]?,
+        _ rhs: [CanonicalReadRemoteObservationRecord]?
+    ) -> [CanonicalReadRemoteObservationRecord]? {
+        guard lhs != nil || rhs != nil else { return nil }
+        var rowsByID: [UUID: CanonicalReadRemoteObservationRecord] = [:]
+        for row in lhs ?? [] {
+            rowsByID[row.id] = row
+        }
+        for row in rhs ?? [] {
+            rowsByID[row.id] = row
+        }
+        return rowsByID.values.sorted { $0.id.uuidString < $1.id.uuidString }
     }
 
     private func makeMediaRecoveryInspectionSummary(
@@ -21174,11 +21253,13 @@ final class AppState: ObservableObject {
         let remoteShotCount = sessionID.map { targetSessionID in
             remote.shots.filter { $0.sessionID == targetSessionID && $0.deletedAt == nil }.count
         }
-        let remoteObservationCount = sessionID.flatMap { targetSessionID in
-            remote.observations.map { observations in
-                observations.filter { $0.sessionID == targetSessionID && $0.deletedAt == nil }.count
-            }
-        }
+        let remoteObservationEvidence = canonicalReadRemoteObservationEvidence(
+            activeOrganizationID: activeOrganizationID,
+            propertyID: propertyID,
+            sessionID: sessionID,
+            remote: remote
+        )
+        let remoteObservationCount = remoteObservationEvidence.count
 
         guard local.localPropertyFound || local.localSessionFound else {
             return canonicalReadDiagnosticsResult(
@@ -21207,16 +21288,22 @@ final class AppState: ObservableObject {
             )
         }
 
-        let parentOrgConsistent = canonicalReadParentOrgConsistent(
+        let baseParentOrgConsistent = canonicalReadParentOrgConsistent(
             activeOrganizationID: activeOrganizationID,
             localOrgID: local.orgID,
             remotePropertyOrgID: remoteProperty?.orgID,
             remoteSessionOrgID: remoteSession?.orgID
         )
-        let parentPropertyConsistent = remoteSession.map { remoteSession in
+        let parentOrgConsistent = baseParentOrgConsistent.map {
+            $0 && remoteObservationEvidence.parentOrgConsistent
+        } ?? (remoteObservationEvidence.parentOrgConsistent ? nil : false)
+        let baseParentPropertyConsistent = remoteSession.map { remoteSession in
             guard let propertyID else { return false }
             return remoteSession.propertyID == propertyID
         }
+        let parentPropertyConsistent = baseParentPropertyConsistent.map {
+            $0 && remoteObservationEvidence.parentPropertyConsistent
+        } ?? (remoteObservationEvidence.parentPropertyConsistent ? nil : false)
         if parentOrgConsistent == false || parentPropertyConsistent == false {
             return canonicalReadDiagnosticsResult(
                 checkedAt: checkedAt,
@@ -21227,7 +21314,9 @@ final class AppState: ObservableObject {
                 remoteShotCount: remoteShotCount,
                 remoteObservationCount: remoteObservationCount,
                 result: .parentMismatch,
-                blockedReason: "parent_org_or_property_mismatch"
+                blockedReason: remoteObservationEvidence.blockedReason ?? "parent_org_or_property_mismatch",
+                parentOrgConsistentOverride: parentOrgConsistent,
+                parentPropertyConsistentOverride: parentPropertyConsistent
             )
         }
 
@@ -21298,6 +21387,126 @@ final class AppState: ObservableObject {
         )
     }
 
+    private struct CanonicalReadRemoteObservationEvidence: Equatable {
+        let count: Int?
+        let parentOrgConsistent: Bool
+        let parentPropertyConsistent: Bool
+        let blockedReason: String?
+    }
+
+    private nonisolated static func canonicalReadRemoteObservationEvidence(
+        activeOrganizationID: UUID?,
+        propertyID: UUID?,
+        sessionID: UUID?,
+        remote: CanonicalReadRemoteSnapshot
+    ) -> CanonicalReadRemoteObservationEvidence {
+        guard let sessionID else {
+            return CanonicalReadRemoteObservationEvidence(
+                count: nil,
+                parentOrgConsistent: true,
+                parentPropertyConsistent: true,
+                blockedReason: nil
+            )
+        }
+
+        guard let observationUpdates = remote.observationUpdates else {
+            return CanonicalReadRemoteObservationEvidence(
+                count: remote.observations.map { observations in
+                    observations.filter { $0.sessionID == sessionID && $0.deletedAt == nil }.count
+                },
+                parentOrgConsistent: true,
+                parentPropertyConsistent: true,
+                blockedReason: nil
+            )
+        }
+
+        let activeUpdates = observationUpdates.filter { $0.deletedAt == nil }
+        let activeObservationsByID = (remote.observations ?? []).reduce(into: [UUID: CanonicalReadRemoteObservationRow]()) { partial, row in
+            guard row.deletedAt == nil,
+                  !partial.keys.contains(row.id) else { return }
+            partial[row.id] = row
+        }
+        let activeShotsByID = remote.shots.reduce(into: [UUID: CanonicalReadRemoteShotRow]()) { partial, row in
+            guard row.deletedAt == nil,
+                  !partial.keys.contains(row.id) else { return }
+            partial[row.id] = row
+        }
+
+        for update in activeUpdates {
+            if let activeOrganizationID,
+               update.orgID != activeOrganizationID {
+                return CanonicalReadRemoteObservationEvidence(
+                    count: activeUpdates.count,
+                    parentOrgConsistent: false,
+                    parentPropertyConsistent: true,
+                    blockedReason: "remote_observation_update_org_mismatch"
+                )
+            }
+            if let propertyID,
+               update.propertyID != propertyID {
+                return CanonicalReadRemoteObservationEvidence(
+                    count: activeUpdates.count,
+                    parentOrgConsistent: true,
+                    parentPropertyConsistent: false,
+                    blockedReason: "remote_observation_update_property_mismatch"
+                )
+            }
+            if update.sessionID != sessionID {
+                return CanonicalReadRemoteObservationEvidence(
+                    count: activeUpdates.count,
+                    parentOrgConsistent: true,
+                    parentPropertyConsistent: false,
+                    blockedReason: "remote_observation_update_session_mismatch"
+                )
+            }
+            guard let observationID = update.observationID,
+                  let observation = activeObservationsByID[observationID] else {
+                return CanonicalReadRemoteObservationEvidence(
+                    count: activeUpdates.count,
+                    parentOrgConsistent: true,
+                    parentPropertyConsistent: false,
+                    blockedReason: "remote_observation_update_observation_parent_missing"
+                )
+            }
+            if let activeOrganizationID,
+               observation.orgID != activeOrganizationID {
+                return CanonicalReadRemoteObservationEvidence(
+                    count: activeUpdates.count,
+                    parentOrgConsistent: false,
+                    parentPropertyConsistent: true,
+                    blockedReason: "remote_observation_update_observation_org_mismatch"
+                )
+            }
+            if let propertyID,
+               observation.propertyID != propertyID {
+                return CanonicalReadRemoteObservationEvidence(
+                    count: activeUpdates.count,
+                    parentOrgConsistent: true,
+                    parentPropertyConsistent: false,
+                    blockedReason: "remote_observation_update_observation_property_mismatch"
+                )
+            }
+            if let shotID = update.shotID {
+                guard let shot = activeShotsByID[shotID],
+                      shot.sessionID == sessionID else {
+                    return CanonicalReadRemoteObservationEvidence(
+                        count: activeUpdates.count,
+                        parentOrgConsistent: true,
+                        parentPropertyConsistent: false,
+                        blockedReason: "remote_observation_update_shot_parent_mismatch"
+                    )
+                }
+            }
+        }
+
+        return CanonicalReadRemoteObservationEvidence(
+            count: activeUpdates.count,
+            parentOrgConsistent: true,
+            parentPropertyConsistent: true,
+            blockedReason: nil
+        )
+    }
+
     private nonisolated static func canonicalReadDiagnosticsResult(
         checkedAt: Date,
         activeOrganizationID: UUID?,
@@ -21307,7 +21516,9 @@ final class AppState: ObservableObject {
         remoteShotCount: Int?,
         remoteObservationCount: Int?,
         result: CanonicalReadDiagnosticResult,
-        blockedReason: String?
+        blockedReason: String?,
+        parentOrgConsistentOverride: Bool? = nil,
+        parentPropertyConsistentOverride: Bool? = nil
     ) -> CanonicalReadDiagnosticsResult {
         let remoteUpdatedAt = [remoteSession?.updatedAt, remoteProperty?.updatedAt].compactMap { $0 }.max()
         let recommendation: String
@@ -21346,13 +21557,13 @@ final class AppState: ObservableObject {
                 remoteGuidedCount: nil
             ),
             statusParity: canonicalReadStatusParity(local.sessionStatus, remoteSession?.status),
-            parentOrgConsistent: canonicalReadParentOrgConsistent(
+            parentOrgConsistent: parentOrgConsistentOverride ?? canonicalReadParentOrgConsistent(
                 activeOrganizationID: activeOrganizationID,
                 localOrgID: local.orgID,
                 remotePropertyOrgID: remoteProperty?.orgID,
                 remoteSessionOrgID: remoteSession?.orgID
             ),
-            parentPropertyConsistent: remoteSession.map { remoteSession in
+            parentPropertyConsistent: parentPropertyConsistentOverride ?? remoteSession.map { remoteSession in
                 guard let propertyID = local.propertyID else { return false }
                 return remoteSession.propertyID == propertyID
             },
