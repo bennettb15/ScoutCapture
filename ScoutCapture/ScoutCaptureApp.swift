@@ -9254,6 +9254,9 @@ private struct DebugSessionSnapshotCanonicalReadDiagnosticsSection: View {
     @State private var isReplayingSelectedSessionLifecycleShadowWrite = false
     @State private var selectedSessionLifecycleReplayActionResult: AppState.SelectedSessionLifecycleReplayActionResult?
     @State private var operatorApproval: AppState.ProductionCohortOperatorApprovalDiagnostics?
+    @State private var isAuthorizingSelectedSessionQA = false
+    @State private var isRunningSelectedSessionValidationPipeline = false
+    @State private var selectedSessionValidationPipelineReport: AppState.LocalHealthSelectedSessionValidationPipelineReport?
 
     private var rolloutReadiness: AppState.CanonicalRolloutReadinessDiagnostics {
         AppState.makeCanonicalRolloutReadinessDiagnostics(diagnostics)
@@ -9310,6 +9313,17 @@ private struct DebugSessionSnapshotCanonicalReadDiagnosticsSection: View {
             diagnosticRow("Rollback Availability", diagnostics.lastCanonicalCandidateActivationRollbackAvailable ? "available" : "missing")
             diagnosticRow("supabase_read_enabled", appState.backendFeatureFlags.supabaseReadEnabled ? "true" : "false")
             diagnosticRow("Broad Canonical Reads", diagnostics.lastCanonicalReadCandidateProductionWideEnabled ? "enabled" : "disabled")
+            diagnosticRow("QA Authorization", diagnostics.runtimeSelectedSessionQAAuthAuthorized ? "authorized" : "not authorized")
+            diagnosticRow("QA Authorized Org", diagnostics.runtimeSelectedSessionQAAuthOrgID?.uuidString ?? "none")
+            diagnosticRow("QA Authorized Property", diagnostics.runtimeSelectedSessionQAAuthPropertyID?.uuidString ?? "none")
+            diagnosticRow("QA Authorized Session", diagnostics.runtimeSelectedSessionQAAuthSessionID?.uuidString ?? "none")
+            diagnosticRow("QA Authorized At", formattedDate(diagnostics.runtimeSelectedSessionQAAuthAuthorizedAt))
+            diagnosticRow("QA Expires", formattedDate(diagnostics.runtimeSelectedSessionQAAuthExpiresAt))
+            diagnosticRow("QA Freshness", diagnostics.runtimeSelectedSessionQAAuthFreshness)
+            diagnosticRow("QA Scope Match", diagnostics.runtimeSelectedSessionQAAuthScopeMatches ? "true" : "false")
+            diagnosticRow("QA Clear Reason", compactValue(diagnostics.runtimeSelectedSessionQAAuthClearReason ?? "none"))
+            diagnosticRow("Pipeline State", diagnostics.lastSelectedSessionValidationPipelineState)
+            diagnosticRow("Pipeline Blocker", compactValue(diagnostics.lastSelectedSessionValidationPipelineBlocker ?? "none"))
         }
 
         Section("Canonical Read - Rollout Readiness") {
@@ -9478,6 +9492,53 @@ private struct DebugSessionSnapshotCanonicalReadDiagnosticsSection: View {
             }
             .disabled(isBuildingCanonicalCandidateOverlay)
             .font(.system(size: 14, weight: .semibold))
+            Button(isAuthorizingSelectedSessionQA ? "Authorizing..." : AppState.localHealthAuthorizeSelectedSessionQAActionTitle) {
+                guard !isAuthorizingSelectedSessionQA else { return }
+                isAuthorizingSelectedSessionQA = true
+                Task {
+                    _ = await MainActor.run {
+                        appState.authorizeSelectedSessionForQAValidation()
+                    }
+                    await MainActor.run {
+                        isAuthorizingSelectedSessionQA = false
+                    }
+                }
+            }
+            .disabled(isAuthorizingSelectedSessionQA)
+            .font(.system(size: 14, weight: .semibold))
+            Button(AppState.localHealthClearSelectedSessionQAActionTitle) {
+                _ = appState.clearSelectedSessionQAValidationAuthorization()
+            }
+            .disabled(!diagnostics.runtimeSelectedSessionQAAuthAuthorized)
+            .font(.system(size: 14, weight: .semibold))
+            Button(isRunningSelectedSessionValidationPipeline ? "Running..." : AppState.localHealthSelectedSessionValidationPipelineActionTitle) {
+                guard !isRunningSelectedSessionValidationPipeline else { return }
+                isRunningSelectedSessionValidationPipeline = true
+                Task {
+                    let report = await appState.runSelectedSessionValidationPipeline()
+                    await MainActor.run {
+                        selectedSessionValidationPipelineReport = report
+                        isRunningSelectedSessionValidationPipeline = false
+                    }
+                }
+            }
+            .disabled(isRunningSelectedSessionValidationPipeline)
+            .font(.system(size: 14, weight: .semibold))
+            if let selectedSessionValidationPipelineReport {
+                diagnosticRow("Pipeline Result", selectedSessionValidationPipelineReport.state.rawValue)
+                diagnosticRow("Pipeline Final Blocker", compactValue(selectedSessionValidationPipelineReport.finalBlocker ?? "none"))
+                diagnosticRow("Pipeline Next Action", selectedSessionValidationPipelineReport.recommendedNextAction)
+                NavigationLink {
+                    DebugSessionSnapshotUploadTextView(
+                        snapshotText: selectedSessionValidationPipelineReport.reportText,
+                        title: "Validation Pipeline",
+                        footerText: "Copies the selected-session validation pipeline report as plain text. It is diagnostic-only and does not include raw session.json, local paths, signed URLs, auth material, storage object paths, or media payloads."
+                    )
+                } label: {
+                    Text("View Copyable Validation Pipeline Report")
+                        .font(.system(size: 14, weight: .semibold))
+                }
+            }
             Button(isReplayingFlaggedObservationShadowWrites ? "Replaying..." : AppState.localHealthFlaggedObservationReplayActionTitle) {
                 guard !isReplayingFlaggedObservationShadowWrites else { return }
                 isReplayingFlaggedObservationShadowWrites = true

@@ -66,23 +66,27 @@ final class Phase2C27PSnapshotPackageHydrationParityValidationTests: XCTestCase 
     private func localEnvironment(
         orgID: UUID,
         propertyID: UUID,
-        sessionID: UUID
+        sessionID: UUID,
+        includeCandidateAllowlist: Bool = true
     ) -> [String: String] {
-        [
+        var environment = [
             "SCOUTCAPTURE_SUPABASE_URL": "http://127.0.0.1:54321",
             "SCOUTCAPTURE_SUPABASE_ANON_KEY": "local-anon-key",
-            SupabaseRuntimeConfiguration.canonicalReadCandidateEnabledEnvKey: "true",
-            SupabaseRuntimeConfiguration.canonicalReadCandidateOrgAllowlistEnvKey: orgID.uuidString,
-            SupabaseRuntimeConfiguration.canonicalReadCandidatePropertyAllowlistEnvKey: propertyID.uuidString,
-            SupabaseRuntimeConfiguration.canonicalReadCandidateSessionAllowlistEnvKey: sessionID.uuidString
+            SupabaseRuntimeConfiguration.canonicalReadCandidateEnabledEnvKey: "true"
         ]
+        if includeCandidateAllowlist {
+            environment[SupabaseRuntimeConfiguration.canonicalReadCandidateOrgAllowlistEnvKey] = orgID.uuidString
+            environment[SupabaseRuntimeConfiguration.canonicalReadCandidatePropertyAllowlistEnvKey] = propertyID.uuidString
+            environment[SupabaseRuntimeConfiguration.canonicalReadCandidateSessionAllowlistEnvKey] = sessionID.uuidString
+        }
+        return environment
     }
 
     private func sha256Hex(_ data: Data) -> String {
         SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
     }
 
-    private func makePackageFixture() throws -> PackageFixture {
+    private func makePackageFixture(includeCandidateAllowlist: Bool = true) throws -> PackageFixture {
         let defaultsFixture = makeDefaults()
         let root = try makeTempStorageRoot()
         let store = LocalStore(testStorageRootURL: root)
@@ -169,7 +173,12 @@ final class Phase2C27PSnapshotPackageHydrationParityValidationTests: XCTestCase 
         )
         try store.saveSessionMetadataAtomically(propertyID: property.id, sessionID: session.id, metadata: sourceMetadata)
 
-        let environment = localEnvironment(orgID: orgID, propertyID: property.id, sessionID: session.id)
+        let environment = localEnvironment(
+            orgID: orgID,
+            propertyID: property.id,
+            sessionID: session.id,
+            includeCandidateAllowlist: includeCandidateAllowlist
+        )
         let artifactAppState = AppState(
             localStore: store,
             userDefaults: makeDefaults().defaults,
@@ -210,6 +219,49 @@ final class Phase2C27PSnapshotPackageHydrationParityValidationTests: XCTestCase 
                 }
                 return data
             },
+            canonicalReadRemoteSnapshotFetchOverride: { _, requestedPropertyID, requestedSessionID in
+                guard requestedPropertyID == nil || requestedPropertyID == property.id,
+                      requestedSessionID == nil || requestedSessionID == session.id else {
+                    return .unavailable
+                }
+                return AppState.CanonicalReadRemoteSnapshot(
+                    properties: [
+                        AppState.CanonicalReadRemotePropertyRow(
+                            id: property.id,
+                            orgID: orgID,
+                            updatedAt: session.endedAt ?? session.startedAt,
+                            revision: 1,
+                            deletedAt: nil
+                        )
+                    ],
+                    sessions: [
+                        AppState.CanonicalReadRemoteSessionRow(
+                            id: session.id,
+                            orgID: orgID,
+                            propertyID: property.id,
+                            status: session.status.rawValue,
+                            updatedAt: session.endedAt ?? session.startedAt,
+                            revision: 1,
+                            deletedAt: nil
+                        )
+                    ],
+                    shots: sourceMetadata.shots.map {
+                        AppState.CanonicalReadRemoteShotRow(id: $0.shotID, sessionID: session.id, deletedAt: nil)
+                    },
+                    observations: sourceMetadata.issues.map {
+                        AppState.CanonicalReadRemoteObservationRow(
+                            id: $0.issueID,
+                            orgID: orgID,
+                            propertyID: property.id,
+                            sessionID: session.id,
+                            status: $0.issueStatus,
+                            updatedAt: $0.lastSeenAt,
+                            deletedAt: nil
+                        )
+                    },
+                    observationUpdates: []
+                )
+            },
             sessionSnapshotRemoteParentPreflightOverride: { _, _, _ in
                 AppState.SessionSnapshotAuthPreflightRemoteParentStatus(
                     propertyExists: true,
@@ -228,6 +280,7 @@ final class Phase2C27PSnapshotPackageHydrationParityValidationTests: XCTestCase 
             activeOrganizationID: orgID,
             ready: true
         )
+        appState._debugRefreshPropertiesLocallyForTests()
         appState.selectedPropertyID = property.id
         appState.currentSession = session
 
@@ -480,8 +533,8 @@ final class Phase2C27PSnapshotPackageHydrationParityValidationTests: XCTestCase 
         return (candidate, overlay, comparison)
     }
 
-    private func makePackageEvidence() async throws -> PackageEvidence {
-        let fixture = try makePackageFixture()
+    private func makePackageEvidence(includeCandidateAllowlist: Bool = true) async throws -> PackageEvidence {
+        let fixture = try makePackageFixture(includeCandidateAllowlist: includeCandidateAllowlist)
         let restore = await fixture.appState.validateLatestSessionSnapshotRestoreDiagnostics()
         let hydration = await fixture.appState.hydrateMetadataFromLatestSessionSnapshot()
         let hydratedMetadata = try fixture.store.loadSessionMetadata(
@@ -524,6 +577,35 @@ final class Phase2C27PSnapshotPackageHydrationParityValidationTests: XCTestCase 
             candidate: candidateEvidence.candidate,
             overlay: candidateEvidence.overlay,
             comparison: candidateEvidence.comparison
+        )
+    }
+
+    private func packageReport(
+        from evidence: PackageEvidence
+    ) -> AppState.LocalHealthSessionSnapshotPackageValidationReport {
+        let packageParity = validate(evidence)
+        let rollback = AppState.makeProductionSingleSessionFullyRestoredPackageRollbackValidation(
+            targetScope: scope(for: evidence.fixture),
+            restoreDiagnostics: evidence.restore,
+            hydration: evidence.hydration,
+            mediaRetrieval: evidence.mediaRetrieval,
+            mediaRestoration: evidence.mediaRestoration,
+            mediaRollback: evidence.mediaRollback,
+            preHydrationFixtureFingerprint: "same",
+            restoredFixtureFingerprint: "same",
+            generatedRecoveredMediaArtifactsRemoved: true,
+            generatedPackageCandidateArtifactsRemoved: true,
+            originalsPreserved: true
+        )
+        return AppState.LocalHealthSessionSnapshotPackageValidationReport(
+            checkedAt: Date(timeIntervalSinceReferenceDate: 41_600),
+            targetScope: scope(for: evidence.fixture),
+            snapshotID: evidence.fixture.snapshotID,
+            packageParity: packageParity,
+            fullyRestoredRollback: rollback,
+            packageParityReportText: AppState.productionSingleSessionSnapshotPackageHydrationParityValidationReportText(packageParity),
+            fullyRestoredRollbackReportText: AppState.productionSingleSessionFullyRestoredPackageRollbackValidationReportText(rollback),
+            combinedReportText: "test package report"
         )
     }
 
@@ -634,6 +716,225 @@ final class Phase2C27PSnapshotPackageHydrationParityValidationTests: XCTestCase 
             candidateDiagnostics: evidence.candidate,
             overlayResult: evidence.overlay,
             overlayComparison: evidence.comparison
+        )
+    }
+
+    private func canonicalDiagnostics(
+        fixture: PackageFixture,
+        result: AppState.CanonicalReadDiagnosticResult = .remoteMatchesLocal,
+        localObservations: Int? = nil,
+        remoteObservations: Int? = nil,
+        localStatus: String? = nil,
+        remoteStatus: String? = nil,
+        parentOrgConsistent: Bool? = true,
+        parentPropertyConsistent: Bool? = true
+    ) -> AppState.CanonicalReadDiagnosticsResult {
+        let localObservationCount = localObservations ?? fixture.sourceMetadata.issues.count
+        let remoteObservationCount = remoteObservations ?? fixture.sourceMetadata.issues.count
+        var diagnostics = AppState.CanonicalReadDiagnosticsResult(
+            checkedAt: Date(timeIntervalSinceReferenceDate: 40_000),
+            propertyID: fixture.property.id,
+            sessionID: fixture.session.id,
+            activeOrganizationID: fixture.orgID,
+            verifiedOrganizationID: fixture.orgID,
+            result: result,
+            remotePropertyFound: true,
+            remoteSessionFound: true,
+            localPropertyFound: true,
+            localSessionFound: true,
+            countParity: fixture.sourceMetadata.shots.count == fixture.sourceMetadata.shots.count && localObservationCount == remoteObservationCount,
+            statusParity: (localStatus ?? fixture.session.status.rawValue) == (remoteStatus ?? fixture.session.status.rawValue),
+            parentOrgConsistent: parentOrgConsistent,
+            parentPropertyConsistent: parentPropertyConsistent,
+            localShotCount: fixture.sourceMetadata.shots.count,
+            remoteShotCount: fixture.sourceMetadata.shots.count,
+            localIssueObservationCount: localObservationCount,
+            remoteIssueObservationCount: remoteObservationCount,
+            localGuidedCount: fixture.sourceMetadata.guidedShots.count,
+            remoteGuidedCount: fixture.sourceMetadata.guidedShots.count,
+            localUpdatedAt: fixture.session.endedAt ?? fixture.session.startedAt,
+            localKnownStateAt: fixture.session.endedAt ?? fixture.session.startedAt,
+            localKnownStateSource: "test",
+            remoteUpdatedAt: fixture.session.endedAt ?? fixture.session.startedAt,
+            remoteRevision: 1,
+            remoteFreshnessAgeSeconds: 0,
+            canonicalRecommendation: result == .remoteMatchesLocal ? "local_preferred_remote_verified" : "local_first_block_canonical_read",
+            blockedReason: nil,
+            noBehaviorChangedText: "test diagnostics"
+        )
+        diagnostics.localSessionStatus = localStatus ?? fixture.session.status.rawValue
+        diagnostics.remoteSessionStatus = remoteStatus ?? fixture.session.status.rawValue
+        return diagnostics
+    }
+
+    private func replayAction(
+        fixture: PackageFixture,
+        diagnosticsAfterReplay: AppState.CanonicalReadDiagnosticsResult?,
+        failedCount: Int = 0,
+        remoteNewerConflictCount: Int = 0,
+        attemptedCount: Int = 2,
+        upsertedCount: Int? = nil
+    ) -> AppState.SelectedSessionFlaggedObservationReplayActionResult {
+        AppState.SelectedSessionFlaggedObservationReplayActionResult(
+            checkedAt: Date(timeIntervalSinceReferenceDate: 40_100),
+            allowed: true,
+            blockedReason: nil,
+            orgID: fixture.orgID,
+            propertyID: fixture.property.id,
+            sessionID: fixture.session.id,
+            replayResult: AppState.NormalizedBackfillEntityResult(
+                kind: .observation,
+                attemptedCount: attemptedCount,
+                upsertedCount: upsertedCount ?? (failedCount == 0 ? attemptedCount : max(attemptedCount - 1, 0)),
+                skippedCount: 0,
+                failedCount: failedCount,
+                remoteNewerConflictCount: remoteNewerConflictCount,
+                message: failedCount == 0 ? "observation_updates_inserted" : "observation_replay_failed"
+            ),
+            diagnosticsAfterReplay: diagnosticsAfterReplay,
+            noBehaviorChangedText: "test observation replay"
+        )
+    }
+
+    private func lifecycleAction(
+        fixture: PackageFixture,
+        diagnosticsAfterReplay: AppState.CanonicalReadDiagnosticsResult?,
+        failedCount: Int = 0,
+        remoteNewerConflictCount: Int = 0
+    ) -> AppState.SelectedSessionLifecycleReplayActionResult {
+        AppState.SelectedSessionLifecycleReplayActionResult(
+            checkedAt: Date(timeIntervalSinceReferenceDate: 40_200),
+            allowed: true,
+            blockedReason: nil,
+            orgID: fixture.orgID,
+            propertyID: fixture.property.id,
+            sessionID: fixture.session.id,
+            replayResult: AppState.NormalizedBackfillEntityResult(
+                kind: .session,
+                attemptedCount: 1,
+                upsertedCount: failedCount == 0 ? 1 : 0,
+                skippedCount: 0,
+                failedCount: failedCount,
+                remoteNewerConflictCount: remoteNewerConflictCount,
+                message: failedCount == 0 ? "session_lifecycle_updated" : "lifecycle_replay_failed"
+            ),
+            diagnosticsAfterReplay: diagnosticsAfterReplay,
+            noBehaviorChangedText: "test lifecycle replay"
+        )
+    }
+
+    private func normalizedResult(
+        kind: AppState.NormalizedBackfillEntityKind,
+        attemptedCount: Int,
+        upsertedCount: Int,
+        failedCount: Int = 0,
+        remoteNewerConflictCount: Int = 0
+    ) -> AppState.NormalizedBackfillEntityResult {
+        AppState.NormalizedBackfillEntityResult(
+            kind: kind,
+            attemptedCount: attemptedCount,
+            upsertedCount: upsertedCount,
+            skippedCount: 0,
+            failedCount: failedCount,
+            remoteNewerConflictCount: remoteNewerConflictCount,
+            message: failedCount == 0 ? "ok" : "failed"
+        )
+    }
+
+    private func runtimePipelineContext(
+        fixture: PackageFixture,
+        authorization: AppState.RuntimeSelectedSessionQAAuthorizationStatus
+    ) throws -> AppState.SelectedSessionValidationPipelineAuthorizationContext {
+        AppState.SelectedSessionValidationPipelineAuthorizationContext(
+            orgID: try XCTUnwrap(authorization.authorizedScope.orgID),
+            propertyID: try XCTUnwrap(authorization.authorizedScope.propertyID),
+            sessionID: try XCTUnwrap(authorization.authorizedScope.sessionID),
+            authorizedAt: try XCTUnwrap(authorization.authorizedAt),
+            expiresAt: try XCTUnwrap(authorization.expiresAt)
+        )
+    }
+
+    private func overlayEvidence(
+        fixture: PackageFixture,
+        diagnostics: AppState.CanonicalReadDiagnosticsResult,
+        comparisonResult: AppState.CanonicalCandidateOverlayComparisonResult = .candidateMatchesLocal,
+        comparisonBlockedReason: String? = nil
+    ) -> (
+        candidate: AppState.CanonicalReadCandidateDiagnostics,
+        overlay: AppState.CanonicalCandidateOverlayBuildResult,
+        comparison: AppState.CanonicalCandidateOverlayComparison
+    ) {
+        let parityReport = AppState.makeNormalizedParityGapReport(canonicalDiagnostics: diagnostics)
+        let candidate = AppState.makeCanonicalReadCandidateDiagnostics(
+            checkedAt: Date(timeIntervalSinceReferenceDate: 40_300),
+            configuration: AppState.CanonicalReadCandidateConfiguration(
+                enabled: true,
+                orgAllowlist: [fixture.orgID],
+                propertyAllowlist: [fixture.property.id],
+                sessionAllowlist: [fixture.session.id],
+                parityCompletenessThreshold: 0.95,
+                mediaRecoveryConfidenceThreshold: 0.95
+            ),
+            targetClassification: .localDev,
+            canonicalDiagnostics: diagnostics,
+            parityReport: parityReport,
+            mediaRecoveryConfidence: 1,
+            productionValidationEvidenceReady: true
+        )
+        let overlay = AppState.buildCanonicalCandidateOverlayTestOnly(
+            checkedAt: Date(timeIntervalSinceReferenceDate: 40_400),
+            targetClassification: .localDev,
+            canonicalDiagnostics: diagnostics,
+            parityReport: parityReport,
+            candidateDiagnostics: candidate,
+            productionValidationEvidenceReady: true
+        )
+        let comparison = AppState.CanonicalCandidateOverlayComparison(
+            checkedAt: Date(timeIntervalSinceReferenceDate: 40_500),
+            result: comparisonResult,
+            propertyID: fixture.property.id,
+            sessionID: fixture.session.id,
+            localSessionStatus: diagnostics.localSessionStatus,
+            remoteCandidateSessionStatus: diagnostics.remoteSessionStatus,
+            localShotCount: diagnostics.localShotCount,
+            remoteCandidateShotCount: diagnostics.remoteShotCount,
+            localIssueObservationCount: diagnostics.localIssueObservationCount,
+            remoteCandidateIssueObservationCount: diagnostics.remoteIssueObservationCount,
+            localUpdatedAt: diagnostics.localUpdatedAt,
+            remoteCandidateUpdatedAt: diagnostics.remoteUpdatedAt,
+            parityConfidence: comparisonResult == .candidateMatchesLocal ? 1 : 0.5,
+            fallbackSource: "local",
+            activeSource: "local",
+            overlaySource: "remote_normalized_candidate_with_local_fallback",
+            rollbackAvailable: true,
+            trustedReason: comparisonResult == .candidateMatchesLocal ? "test_match" : "test_mismatch",
+            blockedReason: comparisonBlockedReason,
+            noBehaviorChangedText: "test overlay comparison"
+        )
+        return (candidate, overlay, comparison)
+    }
+
+    private func assertPipelineDidNotEnableProductionBehavior(
+        _ fixture: PackageFixture,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        XCTAssertFalse(fixture.appState.backendFeatureFlags.supabaseReadEnabled, file: file, line: line)
+        XCTAssertFalse(
+            fixture.appState.localDiagnostics.sessionSnapshotUpload.lastCanonicalReadCandidateProductionWideEnabled,
+            file: file,
+            line: line
+        )
+        XCTAssertFalse(
+            fixture.appState.localDiagnostics.sessionSnapshotUpload.lastCanonicalCandidateActivationAllowed,
+            file: file,
+            line: line
+        )
+        XCTAssertEqual(
+            fixture.appState.localDiagnostics.sessionSnapshotUpload.lastCanonicalCandidateActivationActiveSource,
+            "local",
+            file: file,
+            line: line
         )
     }
 
@@ -1087,5 +1388,700 @@ final class Phase2C27PSnapshotPackageHydrationParityValidationTests: XCTestCase 
 
         XCTAssertEqual(validation.state, .blocked)
         XCTAssertTrue(validation.blockers.contains("originals_overwrite_attempt"))
+    }
+
+    func testRuntimeSelectedSessionQAAuthorizationRecordsExactScopeAndDoesNotEnableReads() throws {
+        let fixture = try makePackageFixture()
+        defer { tearDownFixture(fixture) }
+
+        let status = fixture.appState.authorizeSelectedSessionForQAValidation(
+            checkedAt: Date(timeIntervalSinceReferenceDate: 41_000)
+        )
+
+        XCTAssertEqual(status.state, .authorized)
+        XCTAssertEqual(status.authorizedScope.orgID, fixture.orgID)
+        XCTAssertEqual(status.authorizedScope.propertyID, fixture.property.id)
+        XCTAssertEqual(status.authorizedScope.sessionID, fixture.session.id)
+        XCTAssertTrue(status.scopeMatches)
+        XCTAssertFalse(status.supabaseReadEnabled)
+        XCTAssertFalse(status.productionWideCanonicalReadsEnabled)
+        XCTAssertFalse(fixture.appState.backendFeatureFlags.supabaseReadEnabled)
+        let diagnostics = fixture.appState.localDiagnostics.sessionSnapshotUpload
+        XCTAssertTrue(diagnostics.runtimeSelectedSessionQAAuthAuthorized)
+        XCTAssertEqual(diagnostics.runtimeSelectedSessionQAAuthOrgID, fixture.orgID)
+        XCTAssertEqual(diagnostics.runtimeSelectedSessionQAAuthPropertyID, fixture.property.id)
+        XCTAssertEqual(diagnostics.runtimeSelectedSessionQAAuthSessionID, fixture.session.id)
+    }
+
+    func testRuntimeSelectedSessionQAAuthorizationRejectsMissingScopeExpiresAndInvalidatesOnSelectionChange() throws {
+        let fixture = try makePackageFixture()
+        defer { tearDownFixture(fixture) }
+        fixture.appState.selectedPropertyID = nil
+
+        let missing = fixture.appState.authorizeSelectedSessionForQAValidation(
+            checkedAt: Date(timeIntervalSinceReferenceDate: 41_100)
+        )
+        XCTAssertEqual(missing.state, .blocked)
+        XCTAssertEqual(missing.clearReason, "selected_session_snapshot_target_required")
+
+        fixture.appState.selectedPropertyID = fixture.property.id
+        let authorized = fixture.appState.authorizeSelectedSessionForQAValidation(
+            checkedAt: Date(timeIntervalSinceReferenceDate: 41_200),
+            expiresAt: Date(timeIntervalSinceReferenceDate: 41_230)
+        )
+        XCTAssertEqual(authorized.state, .authorized)
+
+        let expired = fixture.appState.selectedSessionQAValidationAuthorizationStatus(
+            checkedAt: Date(timeIntervalSinceReferenceDate: 41_260)
+        )
+        XCTAssertEqual(expired.state, .expired)
+        XCTAssertEqual(expired.clearReason, "authorization_expired")
+
+        _ = fixture.appState.authorizeSelectedSessionForQAValidation(
+            checkedAt: Date(timeIntervalSinceReferenceDate: 41_300)
+        )
+        fixture.appState.selectedPropertyID = UUID()
+        let invalidated = fixture.appState.selectedSessionQAValidationAuthorizationStatus(
+            checkedAt: Date(timeIntervalSinceReferenceDate: 41_310)
+        )
+        XCTAssertEqual(invalidated.state, .notAuthorized)
+        XCTAssertEqual(invalidated.clearReason, "selected_scope_changed")
+    }
+
+    func testRuntimeSelectedSessionQAAuthorizationInvalidatesOnActiveOrgChange() throws {
+        let fixture = try makePackageFixture()
+        defer { tearDownFixture(fixture) }
+
+        _ = fixture.appState.authorizeSelectedSessionForQAValidation()
+        fixture.appState._debugSetOrganizationContextForTests(
+            memberships: [ActiveOrganizationMembership(id: UUID(), name: "Other Org", role: "owner")],
+            activeOrganizationID: UUID(),
+            ready: true
+        )
+
+        let status = fixture.appState.selectedSessionQAValidationAuthorizationStatus()
+        XCTAssertEqual(status.state, .notAuthorized)
+        XCTAssertEqual(status.clearReason, "active_org_changed")
+    }
+
+    func testSelectedSessionValidationPipelineBlocksWithoutValidAuthorization() async throws {
+        let fixture = try makePackageFixture()
+        defer { tearDownFixture(fixture) }
+
+        let report = await fixture.appState.runSelectedSessionValidationPipeline()
+
+        XCTAssertEqual(report.state, .blocked)
+        XCTAssertEqual(report.finalBlocker, "valid_runtime_qa_authorization_required")
+        XCTAssertEqual(fixture.appState.localDiagnostics.sessionSnapshotUpload.lastSelectedSessionValidationPipelineState, "blocked")
+        XCTAssertNotEqual(
+            fixture.appState.localDiagnostics.sessionSnapshotUpload.runtimeSelectedSessionQAAuthClearReason,
+            "pipeline_completed"
+        )
+        assertPipelineDidNotEnableProductionBehavior(fixture)
+    }
+
+    func testSelectedSessionValidationPipelineStopsOnPackageValidationFailure() async throws {
+        let evidence = try await makePackageEvidence()
+        let fixture = evidence.fixture
+        defer { tearDownFixture(fixture) }
+        _ = fixture.appState.authorizeSelectedSessionForQAValidation()
+        let badParity = AppState.makeProductionSingleSessionSnapshotPackageHydrationParityValidation(
+            targetScope: scope(for: fixture),
+            restoreDiagnostics: evidence.restore,
+            hydration: evidence.hydration,
+            hydratedMetadata: evidence.hydratedMetadata,
+            snapshotShotIDs: Set(fixture.sourceMetadata.shots.map(\.shotID)),
+            snapshotIssueIDs: Set(fixture.sourceMetadata.issues.map(\.issueID)),
+            snapshotGuidedIDs: Set(fixture.sourceMetadata.guidedShots.map(\.id)),
+            mediaRetrieval: evidence.mediaRetrieval,
+            mediaRestoration: evidence.mediaRestoration,
+            mediaRollback: evidence.mediaRollback,
+            candidateDiagnostics: evidence.candidate,
+            overlayResult: evidence.overlay,
+            overlayComparison: evidence.comparison,
+            remoteStateWriteAttempted: true
+        )
+        let rollback = AppState.makeProductionSingleSessionFullyRestoredPackageRollbackValidation(
+            targetScope: scope(for: fixture),
+            restoreDiagnostics: evidence.restore,
+            hydration: evidence.hydration,
+            mediaRetrieval: evidence.mediaRetrieval,
+            mediaRestoration: evidence.mediaRestoration,
+            mediaRollback: evidence.mediaRollback,
+            preHydrationFixtureFingerprint: "same",
+            restoredFixtureFingerprint: "same",
+            generatedRecoveredMediaArtifactsRemoved: true,
+            generatedPackageCandidateArtifactsRemoved: true,
+            originalsPreserved: true
+        )
+        let blockedPackage = AppState.LocalHealthSessionSnapshotPackageValidationReport(
+            checkedAt: Date(timeIntervalSinceReferenceDate: 41_500),
+            targetScope: scope(for: fixture),
+            snapshotID: fixture.snapshotID,
+            packageParity: badParity,
+            fullyRestoredRollback: rollback,
+            packageParityReportText: "blocked package parity",
+            fullyRestoredRollbackReportText: "rollback passed",
+            combinedReportText: "blocked package parity"
+        )
+
+        let report = await fixture.appState.runSelectedSessionValidationPipeline(
+            packageValidationOperation: { blockedPackage },
+            diagnosticsOperation: { _ in
+                XCTFail("Pipeline must stop before diagnostics when package validation fails")
+                return self.canonicalDiagnostics(fixture: fixture)
+            }
+        )
+
+        XCTAssertEqual(report.state, .blocked)
+        XCTAssertEqual(report.finalBlocker, "remote_state_write_attempted")
+        XCTAssertNotEqual(
+            fixture.appState.localDiagnostics.sessionSnapshotUpload.runtimeSelectedSessionQAAuthClearReason,
+            "pipeline_completed"
+        )
+        assertPipelineDidNotEnableProductionBehavior(fixture)
+    }
+
+    func testSelectedSessionValidationPipelineRunsObservationLifecycleAndOverlayToPass() async throws {
+        let fixture = try makePackageFixture()
+        defer { tearDownFixture(fixture) }
+        let package = await fixture.appState.runLocalHealthSelectedSessionSnapshotPackageValidation()
+        fixture.appState._debugSetOrganizationContextForTests(
+            memberships: [ActiveOrganizationMembership(id: fixture.orgID, name: "27P Package Org", role: "owner")],
+            activeOrganizationID: fixture.orgID,
+            ready: true
+        )
+        fixture.appState.selectedPropertyID = fixture.property.id
+        fixture.appState.currentSession = fixture.session
+        let authorization = fixture.appState.authorizeSelectedSessionForQAValidation()
+        XCTAssertEqual(authorization.state, .authorized)
+        let initial = canonicalDiagnostics(
+            fixture: fixture,
+            result: .divergentConflict,
+            localObservations: 1,
+            remoteObservations: 0
+        )
+        let postObservation = canonicalDiagnostics(
+            fixture: fixture,
+            result: .divergentConflict,
+            localObservations: 1,
+            remoteObservations: 1,
+            localStatus: "completed",
+            remoteStatus: "in_progress"
+        )
+        let final = canonicalDiagnostics(fixture: fixture)
+
+        let report = await fixture.appState.runSelectedSessionValidationPipeline(
+            packageValidationOperation: { package },
+            diagnosticsOperation: { _ in initial },
+            observationReplayOperation: { _ in
+                self.replayAction(fixture: fixture, diagnosticsAfterReplay: postObservation)
+            },
+            lifecycleReplayOperation: { _ in
+                self.lifecycleAction(fixture: fixture, diagnosticsAfterReplay: final)
+            }
+        )
+        XCTAssertEqual(report.state, .passed)
+        XCTAssertTrue(report.observationReplayRequired)
+        XCTAssertTrue(report.lifecycleReplayRequired)
+        XCTAssertEqual(report.observationReplay?.replayResult?.upsertedCount, 2)
+        XCTAssertEqual(report.lifecycleReplay?.replayResult?.upsertedCount, 1)
+        XCTAssertTrue(report.candidateAllowed)
+        XCTAssertNotNil(report.overlayBuild?.overlay)
+        XCTAssertEqual(report.overlayComparison?.result, .candidateMatchesLocal)
+        XCTAssertEqual(report.activeSource, "local")
+        XCTAssertFalse(fixture.appState.backendFeatureFlags.supabaseReadEnabled)
+        XCTAssertFalse(fixture.appState.localDiagnostics.sessionSnapshotUpload.lastCanonicalReadCandidateProductionWideEnabled)
+        XCTAssertFalse(fixture.appState.localDiagnostics.sessionSnapshotUpload.lastCanonicalCandidateActivationAllowed)
+        XCTAssertEqual(fixture.appState.localDiagnostics.sessionSnapshotUpload.lastCanonicalCandidateActivationActiveSource, "local")
+        XCTAssertFalse(fixture.appState.localDiagnostics.sessionSnapshotUpload.runtimeSelectedSessionQAAuthAuthorized)
+        XCTAssertEqual(fixture.appState.localDiagnostics.sessionSnapshotUpload.runtimeSelectedSessionQAAuthClearReason, "pipeline_completed")
+        XCTAssertTrue(report.reportText.contains("- overlay_comparison_result: candidate_matches_local"))
+        XCTAssertTrue(report.reportText.contains("- automatic_activation_performed: false"))
+    }
+
+    func testRuntimeAuthorizationAloneDoesNotEnableManualReplayActivationOrApprovalGates() async throws {
+        let evidence = try await makePackageEvidence(includeCandidateAllowlist: false)
+        let fixture = evidence.fixture
+        defer { tearDownFixture(fixture) }
+        let package = packageReport(from: evidence)
+        let authorization = fixture.appState.authorizeSelectedSessionForQAValidation()
+        XCTAssertEqual(authorization.state, .authorized)
+
+        let manualObservation = await fixture.appState.replayFlaggedObservationShadowWritesForSelectedSession(
+            productionValidationEvidence: package,
+            replayOperation: { _, _ in
+                XCTFail("Manual observation replay must not run under runtime-only QA authorization")
+                return self.normalizedResult(kind: .observation, attemptedCount: 1, upsertedCount: 1)
+            }
+        )
+        XCTAssertFalse(manualObservation.allowed)
+        XCTAssertEqual(manualObservation.blockedReason, "exact_singleton_candidate_allowlist_required")
+
+        let manualLifecycle = await fixture.appState.replaySelectedSessionLifecycleShadowWriteForSelectedSession(
+            productionValidationEvidence: package,
+            replayOperation: { _, _, _ in
+                XCTFail("Manual lifecycle replay must not run under runtime-only QA authorization")
+                return self.normalizedResult(kind: .session, attemptedCount: 1, upsertedCount: 1)
+            }
+        )
+        XCTAssertFalse(manualLifecycle.allowed)
+        XCTAssertEqual(manualLifecycle.blockedReason, "exact_singleton_candidate_allowlist_required")
+
+        let activation = fixture.appState.activateCanonicalCandidateForSelectedSession()
+        XCTAssertFalse(activation.allowed)
+        XCTAssertEqual(activation.activeSource, .local)
+        XCTAssertTrue(activation.blockedReason?.contains("org_not_allowlisted") ?? false)
+        let gate = fixture.appState.productionSingleSessionActivationGateForSelectedSession()
+        XCTAssertFalse(gate.gateAllowed)
+        XCTAssertFalse(gate.operatorApprovalMatch)
+    }
+
+    func testPipelineOwnedReplayContextAllowsRuntimeAuthorizedReplayWithoutStaticAllowlists() async throws {
+        let evidence = try await makePackageEvidence(includeCandidateAllowlist: false)
+        let fixture = evidence.fixture
+        defer { tearDownFixture(fixture) }
+        let package = packageReport(from: evidence)
+        let authorization = fixture.appState.authorizeSelectedSessionForQAValidation()
+        let context = try runtimePipelineContext(fixture: fixture, authorization: authorization)
+
+        let observation = await fixture.appState.replayFlaggedObservationShadowWritesForSelectedSession(
+            productionValidationEvidence: package,
+            pipelineAuthorizationContext: context,
+            replayOperation: { _, _ in
+                self.normalizedResult(kind: .observation, attemptedCount: 2, upsertedCount: 2)
+            },
+            diagnosticsAfterReplayOperation: {
+                self.canonicalDiagnostics(fixture: fixture)
+            }
+        )
+        XCTAssertTrue(observation.allowed)
+        XCTAssertEqual(observation.replayResult?.upsertedCount, 2)
+
+        let lifecycle = await fixture.appState.replaySelectedSessionLifecycleShadowWriteForSelectedSession(
+            productionValidationEvidence: package,
+            pipelineAuthorizationContext: context,
+            replayOperation: { _, _, _ in
+                self.normalizedResult(kind: .session, attemptedCount: 1, upsertedCount: 1)
+            },
+            diagnosticsAfterReplayOperation: { _, _, _ in
+                self.canonicalDiagnostics(fixture: fixture)
+            }
+        )
+        XCTAssertTrue(lifecycle.allowed)
+        XCTAssertEqual(lifecycle.replayResult?.upsertedCount, 1)
+    }
+
+    func testStaticSchemeAllowlistsRemainBackwardCompatibleForManualReplayActions() async throws {
+        let evidence = try await makePackageEvidence()
+        let fixture = evidence.fixture
+        defer { tearDownFixture(fixture) }
+        let package = packageReport(from: evidence)
+
+        let observation = await fixture.appState.replayFlaggedObservationShadowWritesForSelectedSession(
+            productionValidationEvidence: package,
+            replayOperation: { _, _ in
+                self.normalizedResult(kind: .observation, attemptedCount: 1, upsertedCount: 1)
+            },
+            diagnosticsAfterReplayOperation: {
+                self.canonicalDiagnostics(fixture: fixture)
+            }
+        )
+        XCTAssertTrue(observation.allowed)
+
+        let lifecycle = await fixture.appState.replaySelectedSessionLifecycleShadowWriteForSelectedSession(
+            productionValidationEvidence: package,
+            replayOperation: { _, _, _ in
+                self.normalizedResult(kind: .session, attemptedCount: 1, upsertedCount: 1)
+            },
+            diagnosticsAfterReplayOperation: { _, _, _ in
+                self.canonicalDiagnostics(fixture: fixture)
+            }
+        )
+        XCTAssertTrue(lifecycle.allowed)
+    }
+
+    func testSelectedSessionValidationPipelinePreservesExpiryReasonWhenAuthExpiresDuringPipeline() async throws {
+        let fixture = try makePackageFixture()
+        defer { tearDownFixture(fixture) }
+        let package = await fixture.appState.runLocalHealthSelectedSessionSnapshotPackageValidation()
+        let now = Date()
+        _ = fixture.appState.authorizeSelectedSessionForQAValidation(
+            checkedAt: now,
+            expiresAt: now.addingTimeInterval(60)
+        )
+
+        let report = await fixture.appState.runSelectedSessionValidationPipeline(
+            packageValidationOperation: {
+                _ = fixture.appState.selectedSessionQAValidationAuthorizationStatus(
+                    checkedAt: now.addingTimeInterval(120)
+                )
+                return package
+            }
+        )
+
+        XCTAssertEqual(report.state, .blocked)
+        XCTAssertEqual(report.finalBlocker, "authorization_invalidated")
+        XCTAssertEqual(fixture.appState.localDiagnostics.sessionSnapshotUpload.runtimeSelectedSessionQAAuthClearReason, "authorization_expired")
+    }
+
+    func testSelectedSessionValidationPipelinePreservesActiveOrgReasonWhenInvalidatedDuringPipeline() async throws {
+        let fixture = try makePackageFixture()
+        defer { tearDownFixture(fixture) }
+        let package = await fixture.appState.runLocalHealthSelectedSessionSnapshotPackageValidation()
+        _ = fixture.appState.authorizeSelectedSessionForQAValidation()
+
+        let report = await fixture.appState.runSelectedSessionValidationPipeline(
+            packageValidationOperation: {
+                fixture.appState._debugSetOrganizationContextForTests(
+                    memberships: [ActiveOrganizationMembership(id: UUID(), name: "Other Org", role: "owner")],
+                    activeOrganizationID: UUID(),
+                    ready: true
+                )
+                return package
+            }
+        )
+
+        XCTAssertEqual(report.state, .blocked)
+        XCTAssertEqual(report.finalBlocker, "authorization_invalidated")
+        XCTAssertEqual(fixture.appState.localDiagnostics.sessionSnapshotUpload.runtimeSelectedSessionQAAuthClearReason, "active_org_changed")
+    }
+
+    func testSelectedSessionValidationPipelinePreservesSelectionReasonWhenInvalidatedDuringPipeline() async throws {
+        let fixture = try makePackageFixture()
+        defer { tearDownFixture(fixture) }
+        let package = await fixture.appState.runLocalHealthSelectedSessionSnapshotPackageValidation()
+        _ = fixture.appState.authorizeSelectedSessionForQAValidation()
+
+        let report = await fixture.appState.runSelectedSessionValidationPipeline(
+            packageValidationOperation: {
+                fixture.appState.selectedPropertyID = UUID()
+                return package
+            }
+        )
+
+        XCTAssertEqual(report.state, .blocked)
+        XCTAssertEqual(report.finalBlocker, "authorization_invalidated")
+        XCTAssertEqual(fixture.appState.localDiagnostics.sessionSnapshotUpload.runtimeSelectedSessionQAAuthClearReason, "selected_scope_changed")
+    }
+
+    func testQA9CarriedForwardSelectedSessionPipelineHappyPathKeepsLocalActive() async throws {
+        let fixture = try makePackageFixture(includeCandidateAllowlist: false)
+        defer { tearDownFixture(fixture) }
+        let package = await fixture.appState.runLocalHealthSelectedSessionSnapshotPackageValidation()
+        _ = fixture.appState.authorizeSelectedSessionForQAValidation()
+        let initial = canonicalDiagnostics(
+            fixture: fixture,
+            result: .divergentConflict,
+            localObservations: 3,
+            remoteObservations: 1
+        )
+        let postObservation = canonicalDiagnostics(
+            fixture: fixture,
+            result: .divergentConflict,
+            localObservations: 3,
+            remoteObservations: 3,
+            localStatus: "completed",
+            remoteStatus: "in_progress"
+        )
+        let final = canonicalDiagnostics(fixture: fixture, localObservations: 3, remoteObservations: 3)
+
+        let report = await fixture.appState.runSelectedSessionValidationPipeline(
+            packageValidationOperation: { package },
+            diagnosticsOperation: { _ in initial },
+            observationReplayOperation: { _ in
+                self.replayAction(
+                    fixture: fixture,
+                    diagnosticsAfterReplay: postObservation,
+                    attemptedCount: 3,
+                    upsertedCount: 3
+                )
+            },
+            lifecycleReplayOperation: { _ in
+                self.lifecycleAction(fixture: fixture, diagnosticsAfterReplay: final)
+            }
+        )
+
+        XCTAssertEqual(report.state, .passed)
+        XCTAssertEqual(report.observationReplay?.replayResult?.attemptedCount, 3)
+        XCTAssertEqual(report.observationReplay?.replayResult?.upsertedCount, 3)
+        XCTAssertEqual(report.lifecycleReplay?.replayResult?.upsertedCount, 1)
+        XCTAssertEqual(report.overlayComparison?.result, .candidateMatchesLocal)
+        XCTAssertEqual(report.activeSource, "local")
+        XCTAssertFalse(fixture.appState.backendFeatureFlags.supabaseReadEnabled)
+        XCTAssertFalse(fixture.appState.localDiagnostics.sessionSnapshotUpload.lastCanonicalReadCandidateProductionWideEnabled)
+        XCTAssertFalse(fixture.appState.localDiagnostics.sessionSnapshotUpload.lastCanonicalCandidateActivationAllowed)
+    }
+
+    func testSelectedSessionValidationPipelineStopsOnObservationReplayFailure() async throws {
+        let fixture = try makePackageFixture()
+        defer { tearDownFixture(fixture) }
+        let package = await fixture.appState.runLocalHealthSelectedSessionSnapshotPackageValidation()
+        _ = fixture.appState.authorizeSelectedSessionForQAValidation()
+        let initial = canonicalDiagnostics(
+            fixture: fixture,
+            result: .divergentConflict,
+            localObservations: 2,
+            remoteObservations: 1
+        )
+
+        let report = await fixture.appState.runSelectedSessionValidationPipeline(
+            packageValidationOperation: { package },
+            diagnosticsOperation: { _ in initial },
+            observationReplayOperation: { _ in
+                self.replayAction(fixture: fixture, diagnosticsAfterReplay: nil, failedCount: 1)
+            }
+        )
+
+        XCTAssertEqual(report.state, .failed)
+        XCTAssertEqual(report.finalBlocker, "observation_replay_failed")
+        XCTAssertNotEqual(
+            fixture.appState.localDiagnostics.sessionSnapshotUpload.runtimeSelectedSessionQAAuthClearReason,
+            "pipeline_completed"
+        )
+        assertPipelineDidNotEnableProductionBehavior(fixture)
+    }
+
+    func testSelectedSessionValidationPipelineStopsOnLifecycleReplayFailure() async throws {
+        let fixture = try makePackageFixture()
+        defer { tearDownFixture(fixture) }
+        let package = await fixture.appState.runLocalHealthSelectedSessionSnapshotPackageValidation()
+        _ = fixture.appState.authorizeSelectedSessionForQAValidation()
+        let initial = canonicalDiagnostics(
+            fixture: fixture,
+            result: .divergentConflict,
+            localStatus: "completed",
+            remoteStatus: "in_progress"
+        )
+
+        let report = await fixture.appState.runSelectedSessionValidationPipeline(
+            packageValidationOperation: { package },
+            diagnosticsOperation: { _ in initial },
+            lifecycleReplayOperation: { _ in
+                self.lifecycleAction(fixture: fixture, diagnosticsAfterReplay: nil, failedCount: 1)
+            }
+        )
+
+        XCTAssertEqual(report.state, .failed)
+        XCTAssertEqual(report.finalBlocker, "lifecycle_replay_failed")
+        XCTAssertNotEqual(
+            fixture.appState.localDiagnostics.sessionSnapshotUpload.runtimeSelectedSessionQAAuthClearReason,
+            "pipeline_completed"
+        )
+        assertPipelineDidNotEnableProductionBehavior(fixture)
+    }
+
+    func testSelectedSessionValidationPipelineStopsOnRemoteNewerAndParentMismatch() async throws {
+        let fixture = try makePackageFixture()
+        defer { tearDownFixture(fixture) }
+        let package = await fixture.appState.runLocalHealthSelectedSessionSnapshotPackageValidation()
+        _ = fixture.appState.authorizeSelectedSessionForQAValidation()
+
+        let remoteNewer = await fixture.appState.runSelectedSessionValidationPipeline(
+            packageValidationOperation: { package },
+            diagnosticsOperation: { _ in
+                self.canonicalDiagnostics(fixture: fixture, result: .remoteNewerCandidate)
+            }
+        )
+        XCTAssertEqual(remoteNewer.state, .blocked)
+        XCTAssertEqual(remoteNewer.finalBlocker, "remote_newer_conflict")
+        XCTAssertNil(remoteNewer.observationReplay)
+        XCTAssertNil(remoteNewer.lifecycleReplay)
+        assertPipelineDidNotEnableProductionBehavior(fixture)
+
+        _ = fixture.appState.authorizeSelectedSessionForQAValidation()
+        let parentMismatch = await fixture.appState.runSelectedSessionValidationPipeline(
+            packageValidationOperation: { package },
+            diagnosticsOperation: { _ in
+                self.canonicalDiagnostics(fixture: fixture, parentOrgConsistent: false)
+            }
+        )
+        XCTAssertEqual(parentMismatch.state, .blocked)
+        XCTAssertEqual(parentMismatch.finalBlocker, "parent_mismatch")
+    }
+
+    func testSelectedSessionValidationPipelineStopsOnResidualCountAndStatusMismatch() async throws {
+        let fixture = try makePackageFixture()
+        defer { tearDownFixture(fixture) }
+        let package = await fixture.appState.runLocalHealthSelectedSessionSnapshotPackageValidation()
+        _ = fixture.appState.authorizeSelectedSessionForQAValidation()
+        let initialCountGap = canonicalDiagnostics(
+            fixture: fixture,
+            result: .divergentConflict,
+            localObservations: 2,
+            remoteObservations: 1
+        )
+        let residualCountGap = canonicalDiagnostics(
+            fixture: fixture,
+            result: .divergentConflict,
+            localObservations: 2,
+            remoteObservations: 1
+        )
+
+        let countReport = await fixture.appState.runSelectedSessionValidationPipeline(
+            packageValidationOperation: { package },
+            diagnosticsOperation: { _ in initialCountGap },
+            observationReplayOperation: { _ in
+                self.replayAction(fixture: fixture, diagnosticsAfterReplay: residualCountGap)
+            }
+        )
+        XCTAssertEqual(countReport.state, .blocked)
+        XCTAssertEqual(countReport.finalBlocker, "count_mismatch_after_replay")
+
+        _ = fixture.appState.authorizeSelectedSessionForQAValidation()
+        let initialStatusGap = canonicalDiagnostics(
+            fixture: fixture,
+            result: .divergentConflict,
+            localStatus: "completed",
+            remoteStatus: "in_progress"
+        )
+        let residualStatusGap = canonicalDiagnostics(
+            fixture: fixture,
+            result: .divergentConflict,
+            localStatus: "completed",
+            remoteStatus: "in_progress"
+        )
+        let statusReport = await fixture.appState.runSelectedSessionValidationPipeline(
+            packageValidationOperation: { package },
+            diagnosticsOperation: { _ in initialStatusGap },
+            lifecycleReplayOperation: { _ in
+                self.lifecycleAction(fixture: fixture, diagnosticsAfterReplay: residualStatusGap)
+            }
+        )
+        XCTAssertEqual(statusReport.state, .blocked)
+        XCTAssertEqual(statusReport.finalBlocker, "status_mismatch_after_lifecycle_replay")
+    }
+
+    func testSelectedSessionValidationPipelineStopsOnFreshnessConflictAfterObservationBeforeLifecycle() async throws {
+        let fixture = try makePackageFixture()
+        defer { tearDownFixture(fixture) }
+        let package = await fixture.appState.runLocalHealthSelectedSessionSnapshotPackageValidation()
+        _ = fixture.appState.authorizeSelectedSessionForQAValidation()
+        let initial = canonicalDiagnostics(
+            fixture: fixture,
+            result: .divergentConflict,
+            localObservations: 2,
+            remoteObservations: 1
+        )
+        let remoteNewerAfterObservation = canonicalDiagnostics(
+            fixture: fixture,
+            result: .remoteNewerCandidate,
+            localObservations: 2,
+            remoteObservations: 2,
+            localStatus: "completed",
+            remoteStatus: "in_progress"
+        )
+
+        let remoteNewerReport = await fixture.appState.runSelectedSessionValidationPipeline(
+            packageValidationOperation: { package },
+            diagnosticsOperation: { _ in initial },
+            observationReplayOperation: { _ in
+                self.replayAction(fixture: fixture, diagnosticsAfterReplay: remoteNewerAfterObservation)
+            },
+            lifecycleReplayOperation: { _ in
+                XCTFail("Lifecycle replay must not run after remote-newer diagnostics")
+                return self.lifecycleAction(fixture: fixture, diagnosticsAfterReplay: nil)
+            }
+        )
+        XCTAssertEqual(remoteNewerReport.state, .blocked)
+        XCTAssertEqual(remoteNewerReport.finalBlocker, "remote_newer_conflict")
+        XCTAssertTrue(remoteNewerReport.observationReplayRequired)
+        XCTAssertFalse(remoteNewerReport.lifecycleReplayRequired)
+        XCTAssertNil(remoteNewerReport.lifecycleReplay)
+        assertPipelineDidNotEnableProductionBehavior(fixture)
+
+        _ = fixture.appState.authorizeSelectedSessionForQAValidation()
+        let localNewerAfterObservation = canonicalDiagnostics(
+            fixture: fixture,
+            result: .localNewerConflict,
+            localObservations: 2,
+            remoteObservations: 2,
+            localStatus: "completed",
+            remoteStatus: "in_progress"
+        )
+        let localNewerReport = await fixture.appState.runSelectedSessionValidationPipeline(
+            packageValidationOperation: { package },
+            diagnosticsOperation: { _ in initial },
+            observationReplayOperation: { _ in
+                self.replayAction(fixture: fixture, diagnosticsAfterReplay: localNewerAfterObservation)
+            },
+            lifecycleReplayOperation: { _ in
+                XCTFail("Lifecycle replay must not run after local-newer diagnostics")
+                return self.lifecycleAction(fixture: fixture, diagnosticsAfterReplay: nil)
+            }
+        )
+        XCTAssertEqual(localNewerReport.state, .blocked)
+        XCTAssertEqual(localNewerReport.finalBlocker, "local_newer_conflict")
+        XCTAssertTrue(localNewerReport.observationReplayRequired)
+        XCTAssertFalse(localNewerReport.lifecycleReplayRequired)
+        XCTAssertNil(localNewerReport.lifecycleReplay)
+        assertPipelineDidNotEnableProductionBehavior(fixture)
+    }
+
+    func testSelectedSessionValidationPipelineBlocksFreshnessConflictAfterLifecycleBeforeOverlay() async throws {
+        let fixture = try makePackageFixture()
+        defer { tearDownFixture(fixture) }
+        let package = await fixture.appState.runLocalHealthSelectedSessionSnapshotPackageValidation()
+        _ = fixture.appState.authorizeSelectedSessionForQAValidation()
+        let initialStatusGap = canonicalDiagnostics(
+            fixture: fixture,
+            result: .divergentConflict,
+            localStatus: "completed",
+            remoteStatus: "in_progress"
+        )
+        let remoteNewerAfterLifecycle = canonicalDiagnostics(
+            fixture: fixture,
+            result: .remoteNewerCandidate,
+            localStatus: "completed",
+            remoteStatus: "completed"
+        )
+
+        let report = await fixture.appState.runSelectedSessionValidationPipeline(
+            packageValidationOperation: { package },
+            diagnosticsOperation: { _ in initialStatusGap },
+            lifecycleReplayOperation: { _ in
+                self.lifecycleAction(fixture: fixture, diagnosticsAfterReplay: remoteNewerAfterLifecycle)
+            },
+            overlayEvidenceOperation: { diagnostics, _ in
+                XCTFail("Overlay must not build after remote-newer lifecycle diagnostics")
+                return self.overlayEvidence(fixture: fixture, diagnostics: diagnostics)
+            }
+        )
+
+        XCTAssertEqual(report.state, .blocked)
+        XCTAssertEqual(report.finalBlocker, "remote_newer_conflict")
+        XCTAssertTrue(report.lifecycleReplayRequired)
+        XCTAssertNotNil(report.lifecycleReplay)
+        XCTAssertNil(report.overlayBuild)
+        assertPipelineDidNotEnableProductionBehavior(fixture)
+    }
+
+    func testSelectedSessionValidationPipelineStopsOnOverlayMismatch() async throws {
+        let fixture = try makePackageFixture()
+        defer { tearDownFixture(fixture) }
+        let package = await fixture.appState.runLocalHealthSelectedSessionSnapshotPackageValidation()
+        _ = fixture.appState.authorizeSelectedSessionForQAValidation()
+        let final = canonicalDiagnostics(fixture: fixture)
+
+        let report = await fixture.appState.runSelectedSessionValidationPipeline(
+            packageValidationOperation: { package },
+            diagnosticsOperation: { _ in final },
+            overlayEvidenceOperation: { diagnostics, _ in
+                self.overlayEvidence(
+                    fixture: fixture,
+                    diagnostics: diagnostics,
+                    comparisonResult: .candidateDivergent,
+                    comparisonBlockedReason: "overlay_forced_mismatch"
+                )
+            }
+        )
+
+        XCTAssertEqual(report.state, .blocked)
+        XCTAssertEqual(report.finalBlocker, "overlay_forced_mismatch")
+        XCTAssertNotEqual(
+            fixture.appState.localDiagnostics.sessionSnapshotUpload.runtimeSelectedSessionQAAuthClearReason,
+            "pipeline_completed"
+        )
+        assertPipelineDidNotEnableProductionBehavior(fixture)
     }
 }

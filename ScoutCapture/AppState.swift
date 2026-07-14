@@ -1495,6 +1495,19 @@ final class AppState: ObservableObject {
         var lastCanonicalCandidateActivationLastActivatedAt: Date?
         var lastCanonicalCandidateActivationLastRolledBackAt: Date?
         var lastCanonicalCandidateActivationProductionBlocked: Bool = true
+        var runtimeSelectedSessionQAAuthAuthorized: Bool = false
+        var runtimeSelectedSessionQAAuthOrgID: UUID?
+        var runtimeSelectedSessionQAAuthPropertyID: UUID?
+        var runtimeSelectedSessionQAAuthSessionID: UUID?
+        var runtimeSelectedSessionQAAuthAuthorizedAt: Date?
+        var runtimeSelectedSessionQAAuthExpiresAt: Date?
+        var runtimeSelectedSessionQAAuthFreshness: String = "not_authorized"
+        var runtimeSelectedSessionQAAuthScopeMatches: Bool = false
+        var runtimeSelectedSessionQAAuthClearReason: String?
+        var lastSelectedSessionValidationPipelineState: String = "not_started"
+        var lastSelectedSessionValidationPipelineCheckedAt: Date?
+        var lastSelectedSessionValidationPipelineBlocker: String?
+        var lastSelectedSessionValidationPipelineReportText: String = ""
     }
 
     struct LocalDiagnosticsState: Equatable {
@@ -3075,9 +3088,78 @@ final class AppState: ObservableObject {
         let noBehaviorChangedText: String
     }
 
+    enum RuntimeSelectedSessionQAAuthorizationState: String, Codable, Equatable {
+        case notAuthorized = "not_authorized"
+        case authorized = "authorized"
+        case invalidated = "invalidated"
+        case expired = "expired"
+        case blocked = "blocked"
+    }
+
+    struct RuntimeSelectedSessionQAAuthorizationStatus: Equatable {
+        let checkedAt: Date
+        let state: RuntimeSelectedSessionQAAuthorizationState
+        let selectedScope: ProductionCohortApprovalScope
+        let authorizedScope: ProductionCohortApprovalScope
+        let authorizedAt: Date?
+        let expiresAt: Date?
+        let freshness: String
+        let scopeMatches: Bool
+        let clearReason: String?
+        let supabaseReadEnabled: Bool
+        let productionWideCanonicalReadsEnabled: Bool
+        let localFallbackAvailable: Bool
+        let rollbackAvailable: Bool
+        let noBehaviorChangedText: String
+    }
+
+    struct SelectedSessionValidationPipelineAuthorizationContext: Equatable {
+        let orgID: UUID
+        let propertyID: UUID
+        let sessionID: UUID
+        let authorizedAt: Date
+        let expiresAt: Date
+    }
+
+    enum LocalHealthSelectedSessionValidationPipelineState: String, Codable, Equatable {
+        case notStarted = "not_started"
+        case running
+        case passed
+        case blocked
+        case failed
+    }
+
+    struct LocalHealthSelectedSessionValidationPipelineReport: Equatable {
+        let checkedAt: Date
+        let state: LocalHealthSelectedSessionValidationPipelineState
+        let selectedScope: ProductionCohortApprovalScope
+        let authorizedScope: ProductionCohortApprovalScope
+        let authorization: RuntimeSelectedSessionQAAuthorizationStatus
+        let packageValidation: LocalHealthSessionSnapshotPackageValidationReport?
+        let initialDiagnostics: CanonicalReadDiagnosticsResult?
+        let observationReplayRequired: Bool
+        let observationReplay: SelectedSessionFlaggedObservationReplayActionResult?
+        let postObservationDiagnostics: CanonicalReadDiagnosticsResult?
+        let lifecycleReplayRequired: Bool
+        let lifecycleReplay: SelectedSessionLifecycleReplayActionResult?
+        let finalDiagnostics: CanonicalReadDiagnosticsResult?
+        let candidateAllowed: Bool
+        let overlayBuild: CanonicalCandidateOverlayBuildResult?
+        let overlayComparison: CanonicalCandidateOverlayComparison?
+        let activeSource: String
+        let fallbackAvailable: Bool
+        let rollbackAvailable: Bool
+        let finalBlocker: String?
+        let recommendedNextAction: String
+        let reportText: String
+    }
+
     nonisolated static let localHealthSessionSnapshotPackageValidationActionTitle = "Run Package Parity / Rollback Validation"
     nonisolated static let localHealthFlaggedObservationReplayActionTitle = "Replay Flagged Observation Shadow Writes"
     nonisolated static let localHealthSelectedSessionLifecycleReplayActionTitle = "Replay Selected Session Lifecycle Shadow Write"
+    nonisolated static let localHealthAuthorizeSelectedSessionQAActionTitle = "Authorize Selected Session for QA Validation"
+    nonisolated static let localHealthClearSelectedSessionQAActionTitle = "Clear Selected Session QA Authorization"
+    nonisolated static let localHealthSelectedSessionValidationPipelineActionTitle = "Run Selected Session Validation Pipeline"
 
     struct CanonicalTransitionPolicyDiagnostics: Equatable {
         let checkedAt: Date
@@ -6514,12 +6596,14 @@ final class AppState: ObservableObject {
     @Published var selectedPropertyID: UUID? {
         didSet {
             persistSelectedPropertyID()
+            clearRuntimeSelectedSessionQAAuthorizationForSelectedScopeChange()
         }
     }
 
     @Published var currentSession: Session? {
         didSet {
             logActiveSession(currentSession)
+            clearRuntimeSelectedSessionQAAuthorizationForSelectedScopeChange()
         }
     }
 
@@ -7832,6 +7916,7 @@ final class AppState: ObservableObject {
         }
         if previousUserID != incomingUserID {
             lastEnsuredUserProfileID = nil
+            clearRuntimeSelectedSessionQAAuthorization(reason: "account_changed")
             hardResetAuthenticatedAccessContext(
                 ready: user == nil ? !requiresAuthentication : false,
                 persistActiveSelection: false
@@ -7893,6 +7978,7 @@ final class AppState: ObservableObject {
             if persistActiveSelection {
                 persistActiveOrganizationID()
             }
+            clearRuntimeSelectedSessionQAAuthorization(reason: "active_org_changed")
         }
         if isOrganizationContextReady != ready {
             isOrganizationContextReady = ready
@@ -7951,6 +8037,7 @@ final class AppState: ObservableObject {
         if self.activeOrganizationID != activeOrganizationID {
             self.activeOrganizationID = activeOrganizationID
             persistActiveOrganizationID()
+            clearRuntimeSelectedSessionQAAuthorization(reason: "active_org_changed")
         }
         if isOrganizationContextReady != ready {
             isOrganizationContextReady = ready
@@ -20510,6 +20597,115 @@ final class AppState: ObservableObject {
             canonicalReadCandidateConfiguration.sessionAllowlist == Set([sessionID])
     }
 
+    private func runtimeSelectedSessionQAAuthorizationMatches(
+        orgID: UUID,
+        propertyID: UUID,
+        sessionID: UUID,
+        checkedAt: Date = Date()
+    ) -> Bool {
+        let diagnostics = localDiagnostics.sessionSnapshotUpload
+        guard diagnostics.runtimeSelectedSessionQAAuthAuthorized,
+              diagnostics.runtimeSelectedSessionQAAuthOrgID == orgID,
+              diagnostics.runtimeSelectedSessionQAAuthPropertyID == propertyID,
+              diagnostics.runtimeSelectedSessionQAAuthSessionID == sessionID,
+              diagnostics.runtimeSelectedSessionQAAuthExpiresAt.map({ checkedAt < $0 }) ?? false,
+              activeOrganizationID == orgID,
+              isOrganizationContextReady,
+              !backendFeatureFlags.supabaseReadEnabled,
+              !diagnostics.lastCanonicalReadCandidateProductionWideEnabled,
+              diagnostics.lastCanonicalCandidateOverlayRollbackAvailable,
+              diagnostics.lastCanonicalCandidateActivationRollbackAvailable else {
+            return false
+        }
+        let localSnapshot = makeCanonicalReadLocalSnapshot(propertyID: propertyID, sessionID: sessionID)
+        guard runtimeSelectedSessionQAOrganizationAccessAllowed(orgID, localSnapshot: localSnapshot) else {
+            return false
+        }
+        return localSnapshot.localPropertyFound || localSnapshot.localSessionFound
+    }
+
+    private func runtimeSelectedSessionQAAuthorizationContext(
+        orgID: UUID,
+        propertyID: UUID,
+        sessionID: UUID,
+        checkedAt: Date = Date()
+    ) -> SelectedSessionValidationPipelineAuthorizationContext? {
+        let diagnostics = localDiagnostics.sessionSnapshotUpload
+        guard runtimeSelectedSessionQAAuthorizationMatches(
+            orgID: orgID,
+            propertyID: propertyID,
+            sessionID: sessionID,
+            checkedAt: checkedAt
+        ),
+              let authorizedAt = diagnostics.runtimeSelectedSessionQAAuthAuthorizedAt,
+              let expiresAt = diagnostics.runtimeSelectedSessionQAAuthExpiresAt else {
+            return nil
+        }
+        return SelectedSessionValidationPipelineAuthorizationContext(
+            orgID: orgID,
+            propertyID: propertyID,
+            sessionID: sessionID,
+            authorizedAt: authorizedAt,
+            expiresAt: expiresAt
+        )
+    }
+
+    private func selectedSessionValidationPipelineAuthorizationContextMatches(
+        _ context: SelectedSessionValidationPipelineAuthorizationContext?,
+        orgID: UUID,
+        propertyID: UUID,
+        sessionID: UUID,
+        checkedAt: Date = Date()
+    ) -> Bool {
+        guard let context,
+              context.orgID == orgID,
+              context.propertyID == propertyID,
+              context.sessionID == sessionID,
+              checkedAt < context.expiresAt else {
+            return false
+        }
+        return runtimeSelectedSessionQAAuthorizationMatches(
+            orgID: orgID,
+            propertyID: propertyID,
+            sessionID: sessionID,
+            checkedAt: checkedAt
+        )
+    }
+
+    private func runtimeSelectedSessionQAOrganizationAccessAllowed(
+        _ orgID: UUID,
+        localSnapshot: CanonicalReadLocalSnapshot
+    ) -> Bool {
+        if requiresAuthentication {
+            return isAuthenticated && canAccessOrganization(orgID)
+        }
+        return canAccessOrganization(orgID) || localSnapshot.orgID == orgID
+    }
+
+    private func selectedSessionRuntimeQACandidateConfiguration(
+        orgID: UUID,
+        propertyID: UUID,
+        sessionID: UUID,
+        checkedAt: Date = Date()
+    ) -> CanonicalReadCandidateConfiguration {
+        guard runtimeSelectedSessionQAAuthorizationMatches(
+            orgID: orgID,
+            propertyID: propertyID,
+            sessionID: sessionID,
+            checkedAt: checkedAt
+        ) else {
+            return canonicalReadCandidateConfiguration
+        }
+        return CanonicalReadCandidateConfiguration(
+            enabled: canonicalReadCandidateConfiguration.enabled,
+            orgAllowlist: [orgID],
+            propertyAllowlist: [propertyID],
+            sessionAllowlist: [sessionID],
+            parityCompletenessThreshold: canonicalReadCandidateConfiguration.parityCompletenessThreshold,
+            mediaRecoveryConfidenceThreshold: canonicalReadCandidateConfiguration.mediaRecoveryConfidenceThreshold
+        )
+    }
+
     private func recordCanonicalCandidateOverlayBuild(
         _ result: CanonicalCandidateOverlayBuildResult,
         comparison: CanonicalCandidateOverlayComparison
@@ -20541,6 +20737,600 @@ final class AppState: ObservableObject {
         diagnostics.sessionSnapshotUpload.lastCanonicalCandidateOverlayComparisonTrustedReason = comparison.trustedReason
         diagnostics.sessionSnapshotUpload.lastCanonicalCandidateOverlayComparisonBlockedReason = comparison.blockedReason ?? "none"
         localDiagnostics = diagnostics
+    }
+
+    @MainActor
+    func runSelectedSessionValidationPipeline(
+        checkedAt: Date = Date(),
+        packageValidationOperation: (() async -> LocalHealthSessionSnapshotPackageValidationReport)? = nil,
+        diagnosticsOperation: ((LocalHealthSessionSnapshotPackageValidationReport) async -> CanonicalReadDiagnosticsResult)? = nil,
+        observationReplayOperation: ((LocalHealthSessionSnapshotPackageValidationReport) async -> SelectedSessionFlaggedObservationReplayActionResult)? = nil,
+        lifecycleReplayOperation: ((LocalHealthSessionSnapshotPackageValidationReport) async -> SelectedSessionLifecycleReplayActionResult)? = nil,
+        overlayEvidenceOperation: ((CanonicalReadDiagnosticsResult, LocalHealthSessionSnapshotPackageValidationReport) -> (
+            candidate: CanonicalReadCandidateDiagnostics,
+            overlay: CanonicalCandidateOverlayBuildResult,
+            comparison: CanonicalCandidateOverlayComparison
+        ))? = nil
+    ) async -> LocalHealthSelectedSessionValidationPipelineReport {
+        recordSelectedSessionValidationPipelineState(.running, checkedAt: checkedAt, blocker: nil, reportText: "")
+        let initialAuthorization = selectedSessionQAValidationAuthorizationStatus(checkedAt: checkedAt)
+        let selectedScope = initialAuthorization.selectedScope
+        let authorizedScope = initialAuthorization.authorizedScope
+
+        func finish(
+            _ state: LocalHealthSelectedSessionValidationPipelineState,
+            blocker: String?,
+            package: LocalHealthSessionSnapshotPackageValidationReport? = nil,
+            initialDiagnostics: CanonicalReadDiagnosticsResult? = nil,
+            observationReplayRequired: Bool = false,
+            observationReplay: SelectedSessionFlaggedObservationReplayActionResult? = nil,
+            postObservationDiagnostics: CanonicalReadDiagnosticsResult? = nil,
+            lifecycleReplayRequired: Bool = false,
+            lifecycleReplay: SelectedSessionLifecycleReplayActionResult? = nil,
+            finalDiagnostics: CanonicalReadDiagnosticsResult? = nil,
+            candidateAllowed: Bool = false,
+            overlayBuild: CanonicalCandidateOverlayBuildResult? = nil,
+            overlayComparison: CanonicalCandidateOverlayComparison? = nil
+        ) -> LocalHealthSelectedSessionValidationPipelineReport {
+            let fallbackAvailable = overlayBuild?.localFallbackRetained ??
+                initialAuthorization.localFallbackAvailable
+            let rollbackAvailable = overlayBuild?.rollbackAvailable ??
+                initialAuthorization.rollbackAvailable
+            let activeSource = overlayComparison?.activeSource ??
+                overlayBuild?.overlay?.activeSource ??
+                localDiagnostics.sessionSnapshotUpload.lastCanonicalCandidateOverlayActiveSource
+            let nextAction = Self.selectedSessionValidationPipelineNextAction(for: blocker, state: state)
+            let report = LocalHealthSelectedSessionValidationPipelineReport(
+                checkedAt: checkedAt,
+                state: state,
+                selectedScope: selectedScope,
+                authorizedScope: authorizedScope,
+                authorization: initialAuthorization,
+                packageValidation: package,
+                initialDiagnostics: initialDiagnostics,
+                observationReplayRequired: observationReplayRequired,
+                observationReplay: observationReplay,
+                postObservationDiagnostics: postObservationDiagnostics,
+                lifecycleReplayRequired: lifecycleReplayRequired,
+                lifecycleReplay: lifecycleReplay,
+                finalDiagnostics: finalDiagnostics,
+                candidateAllowed: candidateAllowed,
+                overlayBuild: overlayBuild,
+                overlayComparison: overlayComparison,
+                activeSource: activeSource,
+                fallbackAvailable: fallbackAvailable,
+                rollbackAvailable: rollbackAvailable,
+                finalBlocker: blocker,
+                recommendedNextAction: nextAction,
+                reportText: ""
+            )
+            let reportText = Self.selectedSessionValidationPipelineReportText(report)
+            let finalReport = LocalHealthSelectedSessionValidationPipelineReport(
+                checkedAt: report.checkedAt,
+                state: report.state,
+                selectedScope: report.selectedScope,
+                authorizedScope: report.authorizedScope,
+                authorization: report.authorization,
+                packageValidation: report.packageValidation,
+                initialDiagnostics: report.initialDiagnostics,
+                observationReplayRequired: report.observationReplayRequired,
+                observationReplay: report.observationReplay,
+                postObservationDiagnostics: report.postObservationDiagnostics,
+                lifecycleReplayRequired: report.lifecycleReplayRequired,
+                lifecycleReplay: report.lifecycleReplay,
+                finalDiagnostics: report.finalDiagnostics,
+                candidateAllowed: report.candidateAllowed,
+                overlayBuild: report.overlayBuild,
+                overlayComparison: report.overlayComparison,
+                activeSource: report.activeSource,
+                fallbackAvailable: report.fallbackAvailable,
+                rollbackAvailable: report.rollbackAvailable,
+                finalBlocker: report.finalBlocker,
+                recommendedNextAction: report.recommendedNextAction,
+                reportText: reportText
+            )
+            recordSelectedSessionValidationPipelineState(state, checkedAt: checkedAt, blocker: blocker, reportText: reportText)
+            if state == .passed,
+               blocker == nil,
+               let orgID = authorizedScope.orgID,
+               let propertyID = authorizedScope.propertyID,
+               let sessionID = authorizedScope.sessionID,
+               pipelineAuthorizationStillValid(orgID: orgID, propertyID: propertyID, sessionID: sessionID),
+               selectedScope.orgID == orgID,
+               selectedScope.propertyID == propertyID,
+               selectedScope.sessionID == sessionID,
+               overlayComparison?.result == .candidateMatchesLocal,
+               activeSource == "local" {
+                clearRuntimeSelectedSessionQAAuthorization(reason: "pipeline_completed")
+            }
+            return finalReport
+        }
+
+        guard initialAuthorization.state == .authorized,
+              let orgID = authorizedScope.orgID,
+              let propertyID = authorizedScope.propertyID,
+              let sessionID = authorizedScope.sessionID else {
+            return finish(.blocked, blocker: initialAuthorization.clearReason ?? "valid_runtime_qa_authorization_required")
+        }
+        guard let pipelineAuthorizationContext = runtimeSelectedSessionQAAuthorizationContext(
+            orgID: orgID,
+            propertyID: propertyID,
+            sessionID: sessionID,
+            checkedAt: checkedAt
+        ) else {
+            return finish(.blocked, blocker: "valid_runtime_qa_authorization_required")
+        }
+
+        let package: LocalHealthSessionSnapshotPackageValidationReport
+        if let packageValidationOperation {
+            package = await packageValidationOperation()
+        } else {
+            package = await runLocalHealthSelectedSessionSnapshotPackageValidation(checkedAt: checkedAt)
+        }
+        guard pipelineAuthorizationStillValid(orgID: orgID, propertyID: propertyID, sessionID: sessionID) else {
+            return finish(.blocked, blocker: "authorization_invalidated", package: package)
+        }
+        guard package.targetScope.orgID == orgID,
+              package.targetScope.propertyID == propertyID,
+              package.targetScope.sessionID == sessionID else {
+            return finish(.blocked, blocker: "package_validation_selected_scope_mismatch", package: package)
+        }
+        guard package.packageParity.state == .testOnlyPackageParityPassed,
+              package.packageParity.blockers.isEmpty,
+              package.fullyRestoredRollback.state == .testOnlyFullyRestoredPackageRollbackPassed,
+              package.fullyRestoredRollback.blockers.isEmpty else {
+            let blocker = (package.packageParity.blockers + package.fullyRestoredRollback.blockers).first ?? "package_validation_failed"
+            return finish(.blocked, blocker: blocker, package: package)
+        }
+
+        let initialDiagnostics: CanonicalReadDiagnosticsResult
+        if let diagnosticsOperation {
+            initialDiagnostics = await diagnosticsOperation(package)
+        } else {
+            initialDiagnostics = await runCanonicalReadDiagnosticsForPinnedSession(
+                checkedAt: checkedAt,
+                productionValidationEvidence: package,
+                orgID: orgID,
+                propertyID: propertyID,
+                sessionID: sessionID
+            )
+        }
+        guard pipelineAuthorizationStillValid(orgID: orgID, propertyID: propertyID, sessionID: sessionID) else {
+            return finish(.blocked, blocker: "authorization_invalidated", package: package, initialDiagnostics: initialDiagnostics)
+        }
+        guard selectedSessionPipelineDiagnosticsScopeMatches(initialDiagnostics, orgID: orgID, propertyID: propertyID, sessionID: sessionID) else {
+            return finish(.blocked, blocker: "scope_mismatch", package: package, initialDiagnostics: initialDiagnostics)
+        }
+        if initialDiagnostics.parentOrgConsistent == false || initialDiagnostics.parentPropertyConsistent == false {
+            return finish(.blocked, blocker: "parent_mismatch", package: package, initialDiagnostics: initialDiagnostics)
+        }
+        if let freshnessBlocker = selectedSessionPipelineFreshnessConflictBlocker(initialDiagnostics) {
+            return finish(.blocked, blocker: freshnessBlocker, package: package, initialDiagnostics: initialDiagnostics)
+        }
+
+        var workingDiagnostics = initialDiagnostics
+        let observationReplayRequired = selectedSessionPipelineObservationReplayRequired(initialDiagnostics)
+        var observationReplay: SelectedSessionFlaggedObservationReplayActionResult?
+        var postObservationDiagnostics: CanonicalReadDiagnosticsResult?
+        if observationReplayRequired {
+            guard selectedSessionPipelineObservationReplayEligible(initialDiagnostics) ||
+                    localDiagnostics.sessionSnapshotUpload.lastNormalizedBackfillEligible ||
+                    localDiagnostics.sessionSnapshotUpload.lastReplayEligibility == "candidate_for_test_only_shadow_write_replay_after_snapshot_verification" else {
+                return finish(.blocked, blocker: "observation_replay_not_eligible", package: package, initialDiagnostics: initialDiagnostics, observationReplayRequired: true)
+            }
+            let replay: SelectedSessionFlaggedObservationReplayActionResult
+            if let observationReplayOperation {
+                replay = await observationReplayOperation(package)
+            } else {
+                replay = await replayFlaggedObservationShadowWritesForSelectedSession(
+                    checkedAt: checkedAt,
+                    productionValidationEvidence: package,
+                    pipelineAuthorizationContext: pipelineAuthorizationContext
+                )
+            }
+            observationReplay = replay
+            guard pipelineAuthorizationStillValid(orgID: orgID, propertyID: propertyID, sessionID: sessionID) else {
+                return finish(.blocked, blocker: "authorization_invalidated", package: package, initialDiagnostics: initialDiagnostics, observationReplayRequired: true, observationReplay: replay)
+            }
+            guard replay.allowed, replay.blockedReason == nil else {
+                return finish(.blocked, blocker: replay.blockedReason ?? "observation_replay_blocked", package: package, initialDiagnostics: initialDiagnostics, observationReplayRequired: true, observationReplay: replay)
+            }
+            if let result = replay.replayResult {
+                if result.remoteNewerConflictCount > 0 {
+                    return finish(.blocked, blocker: "remote_newer_conflict", package: package, initialDiagnostics: initialDiagnostics, observationReplayRequired: true, observationReplay: replay)
+                }
+                if result.failedCount > 0 {
+                    return finish(.failed, blocker: "observation_replay_failed", package: package, initialDiagnostics: initialDiagnostics, observationReplayRequired: true, observationReplay: replay)
+                }
+            }
+            let refreshedDiagnostics: CanonicalReadDiagnosticsResult
+            if let diagnosticsAfterReplay = replay.diagnosticsAfterReplay {
+                refreshedDiagnostics = diagnosticsAfterReplay
+            } else if let diagnosticsOperation {
+                refreshedDiagnostics = await diagnosticsOperation(package)
+            } else {
+                refreshedDiagnostics = await runCanonicalReadDiagnosticsForPinnedSession(
+                    checkedAt: checkedAt,
+                    productionValidationEvidence: package,
+                    orgID: orgID,
+                    propertyID: propertyID,
+                    sessionID: sessionID
+                )
+            }
+            postObservationDiagnostics = refreshedDiagnostics
+            workingDiagnostics = refreshedDiagnostics
+            guard selectedSessionPipelineDiagnosticsScopeMatches(refreshedDiagnostics, orgID: orgID, propertyID: propertyID, sessionID: sessionID) else {
+                return finish(.blocked, blocker: "scope_mismatch", package: package, initialDiagnostics: initialDiagnostics, observationReplayRequired: true, observationReplay: replay, postObservationDiagnostics: refreshedDiagnostics)
+            }
+            if refreshedDiagnostics.parentOrgConsistent == false || refreshedDiagnostics.parentPropertyConsistent == false {
+                return finish(.blocked, blocker: "parent_mismatch", package: package, initialDiagnostics: initialDiagnostics, observationReplayRequired: true, observationReplay: replay, postObservationDiagnostics: refreshedDiagnostics)
+            }
+            if let freshnessBlocker = selectedSessionPipelineFreshnessConflictBlocker(refreshedDiagnostics) {
+                return finish(.blocked, blocker: freshnessBlocker, package: package, initialDiagnostics: initialDiagnostics, observationReplayRequired: true, observationReplay: replay, postObservationDiagnostics: refreshedDiagnostics)
+            }
+            if refreshedDiagnostics.countParity != true || selectedSessionPipelineMissingChildCount(refreshedDiagnostics) > 0 {
+                return finish(.blocked, blocker: "count_mismatch_after_replay", package: package, initialDiagnostics: initialDiagnostics, observationReplayRequired: true, observationReplay: replay, postObservationDiagnostics: refreshedDiagnostics)
+            }
+        }
+
+        let lifecycleReplayRequired = selectedSessionPipelineLifecycleReplayRequired(workingDiagnostics)
+        var lifecycleReplay: SelectedSessionLifecycleReplayActionResult?
+        if lifecycleReplayRequired {
+            let replay: SelectedSessionLifecycleReplayActionResult
+            if let lifecycleReplayOperation {
+                replay = await lifecycleReplayOperation(package)
+            } else {
+                replay = await replaySelectedSessionLifecycleShadowWriteForSelectedSession(
+                    checkedAt: checkedAt,
+                    productionValidationEvidence: package,
+                    pipelineAuthorizationContext: pipelineAuthorizationContext
+                )
+            }
+            lifecycleReplay = replay
+            guard pipelineAuthorizationStillValid(orgID: orgID, propertyID: propertyID, sessionID: sessionID) else {
+                return finish(.blocked, blocker: "authorization_invalidated", package: package, initialDiagnostics: initialDiagnostics, observationReplayRequired: observationReplayRequired, observationReplay: observationReplay, postObservationDiagnostics: postObservationDiagnostics, lifecycleReplayRequired: true, lifecycleReplay: replay)
+            }
+            guard replay.allowed, replay.blockedReason == nil else {
+                return finish(.blocked, blocker: replay.blockedReason ?? "lifecycle_replay_blocked", package: package, initialDiagnostics: initialDiagnostics, observationReplayRequired: observationReplayRequired, observationReplay: observationReplay, postObservationDiagnostics: postObservationDiagnostics, lifecycleReplayRequired: true, lifecycleReplay: replay)
+            }
+            if let result = replay.replayResult {
+                if result.remoteNewerConflictCount > 0 {
+                    return finish(.blocked, blocker: "remote_newer_conflict", package: package, initialDiagnostics: initialDiagnostics, observationReplayRequired: observationReplayRequired, observationReplay: observationReplay, postObservationDiagnostics: postObservationDiagnostics, lifecycleReplayRequired: true, lifecycleReplay: replay)
+                }
+                if result.failedCount > 0 {
+                    return finish(.failed, blocker: "lifecycle_replay_failed", package: package, initialDiagnostics: initialDiagnostics, observationReplayRequired: observationReplayRequired, observationReplay: observationReplay, postObservationDiagnostics: postObservationDiagnostics, lifecycleReplayRequired: true, lifecycleReplay: replay)
+                }
+            }
+            if let diagnosticsAfterReplay = replay.diagnosticsAfterReplay {
+                workingDiagnostics = diagnosticsAfterReplay
+            } else if let diagnosticsOperation {
+                workingDiagnostics = await diagnosticsOperation(package)
+            } else {
+                workingDiagnostics = await runCanonicalReadDiagnosticsForPinnedSession(
+                    checkedAt: checkedAt,
+                    productionValidationEvidence: package,
+                    orgID: orgID,
+                    propertyID: propertyID,
+                    sessionID: sessionID
+                )
+            }
+            guard selectedSessionPipelineDiagnosticsScopeMatches(workingDiagnostics, orgID: orgID, propertyID: propertyID, sessionID: sessionID) else {
+                return finish(.blocked, blocker: "scope_mismatch", package: package, initialDiagnostics: initialDiagnostics, observationReplayRequired: observationReplayRequired, observationReplay: observationReplay, postObservationDiagnostics: postObservationDiagnostics, lifecycleReplayRequired: true, lifecycleReplay: replay, finalDiagnostics: workingDiagnostics)
+            }
+            if workingDiagnostics.parentOrgConsistent == false || workingDiagnostics.parentPropertyConsistent == false {
+                return finish(.blocked, blocker: "parent_mismatch", package: package, initialDiagnostics: initialDiagnostics, observationReplayRequired: observationReplayRequired, observationReplay: observationReplay, postObservationDiagnostics: postObservationDiagnostics, lifecycleReplayRequired: true, lifecycleReplay: replay, finalDiagnostics: workingDiagnostics)
+            }
+            if let freshnessBlocker = selectedSessionPipelineFreshnessConflictBlocker(workingDiagnostics) {
+                return finish(.blocked, blocker: freshnessBlocker, package: package, initialDiagnostics: initialDiagnostics, observationReplayRequired: observationReplayRequired, observationReplay: observationReplay, postObservationDiagnostics: postObservationDiagnostics, lifecycleReplayRequired: true, lifecycleReplay: replay, finalDiagnostics: workingDiagnostics)
+            }
+            if workingDiagnostics.countParity != true || selectedSessionPipelineMissingChildCount(workingDiagnostics) > 0 {
+                return finish(.blocked, blocker: "count_mismatch_after_replay", package: package, initialDiagnostics: initialDiagnostics, observationReplayRequired: observationReplayRequired, observationReplay: observationReplay, postObservationDiagnostics: postObservationDiagnostics, lifecycleReplayRequired: true, lifecycleReplay: replay, finalDiagnostics: workingDiagnostics)
+            }
+            if workingDiagnostics.statusParity != true {
+                return finish(.blocked, blocker: "status_mismatch_after_lifecycle_replay", package: package, initialDiagnostics: initialDiagnostics, observationReplayRequired: observationReplayRequired, observationReplay: observationReplay, postObservationDiagnostics: postObservationDiagnostics, lifecycleReplayRequired: true, lifecycleReplay: replay, finalDiagnostics: workingDiagnostics)
+            }
+        }
+
+        let finalDiagnostics = workingDiagnostics
+        guard selectedSessionPipelineDiagnosticsScopeMatches(finalDiagnostics, orgID: orgID, propertyID: propertyID, sessionID: sessionID) else {
+            return finish(.blocked, blocker: "scope_mismatch", package: package, initialDiagnostics: initialDiagnostics, observationReplayRequired: observationReplayRequired, observationReplay: observationReplay, postObservationDiagnostics: postObservationDiagnostics, lifecycleReplayRequired: lifecycleReplayRequired, lifecycleReplay: lifecycleReplay, finalDiagnostics: finalDiagnostics)
+        }
+        guard selectedSessionPipelinePassDiagnostics(finalDiagnostics) else {
+            return finish(.blocked, blocker: selectedSessionPipelineDiagnosticsBlocker(finalDiagnostics), package: package, initialDiagnostics: initialDiagnostics, observationReplayRequired: observationReplayRequired, observationReplay: observationReplay, postObservationDiagnostics: postObservationDiagnostics, lifecycleReplayRequired: lifecycleReplayRequired, lifecycleReplay: lifecycleReplay, finalDiagnostics: finalDiagnostics)
+        }
+
+        let overlayEvidence: (
+            candidate: CanonicalReadCandidateDiagnostics,
+            overlay: CanonicalCandidateOverlayBuildResult,
+            comparison: CanonicalCandidateOverlayComparison
+        )
+        if let overlayEvidenceOperation {
+            overlayEvidence = overlayEvidenceOperation(finalDiagnostics, package)
+        } else {
+            overlayEvidence = buildRuntimeAuthorizedCanonicalCandidateOverlay(
+                checkedAt: checkedAt,
+                canonicalDiagnostics: finalDiagnostics,
+                productionValidationEvidence: package,
+                orgID: orgID,
+                propertyID: propertyID,
+                sessionID: sessionID
+            )
+        }
+        guard overlayEvidence.candidate.allowed else {
+            return finish(.blocked, blocker: overlayEvidence.candidate.blockedReason ?? "candidate_not_allowed", package: package, initialDiagnostics: initialDiagnostics, observationReplayRequired: observationReplayRequired, observationReplay: observationReplay, postObservationDiagnostics: postObservationDiagnostics, lifecycleReplayRequired: lifecycleReplayRequired, lifecycleReplay: lifecycleReplay, finalDiagnostics: finalDiagnostics, candidateAllowed: false, overlayBuild: overlayEvidence.overlay, overlayComparison: overlayEvidence.comparison)
+        }
+        guard overlayEvidence.overlay.overlay != nil,
+              overlayEvidence.overlay.allowed else {
+            return finish(.blocked, blocker: overlayEvidence.overlay.blockedReason ?? "overlay_not_built", package: package, initialDiagnostics: initialDiagnostics, observationReplayRequired: observationReplayRequired, observationReplay: observationReplay, postObservationDiagnostics: postObservationDiagnostics, lifecycleReplayRequired: lifecycleReplayRequired, lifecycleReplay: lifecycleReplay, finalDiagnostics: finalDiagnostics, candidateAllowed: true, overlayBuild: overlayEvidence.overlay, overlayComparison: overlayEvidence.comparison)
+        }
+        guard overlayEvidence.comparison.result == .candidateMatchesLocal,
+              overlayEvidence.comparison.activeSource == "local" else {
+            return finish(.blocked, blocker: overlayEvidence.comparison.blockedReason ?? "overlay_mismatch", package: package, initialDiagnostics: initialDiagnostics, observationReplayRequired: observationReplayRequired, observationReplay: observationReplay, postObservationDiagnostics: postObservationDiagnostics, lifecycleReplayRequired: lifecycleReplayRequired, lifecycleReplay: lifecycleReplay, finalDiagnostics: finalDiagnostics, candidateAllowed: true, overlayBuild: overlayEvidence.overlay, overlayComparison: overlayEvidence.comparison)
+        }
+
+        return finish(.passed, blocker: nil, package: package, initialDiagnostics: initialDiagnostics, observationReplayRequired: observationReplayRequired, observationReplay: observationReplay, postObservationDiagnostics: postObservationDiagnostics, lifecycleReplayRequired: lifecycleReplayRequired, lifecycleReplay: lifecycleReplay, finalDiagnostics: finalDiagnostics, candidateAllowed: true, overlayBuild: overlayEvidence.overlay, overlayComparison: overlayEvidence.comparison)
+    }
+
+    private func pipelineAuthorizationStillValid(
+        orgID: UUID,
+        propertyID: UUID,
+        sessionID: UUID
+    ) -> Bool {
+        runtimeSelectedSessionQAAuthorizationMatches(orgID: orgID, propertyID: propertyID, sessionID: sessionID)
+    }
+
+    private func selectedSessionPipelineDiagnosticsScopeMatches(
+        _ diagnostics: CanonicalReadDiagnosticsResult,
+        orgID: UUID,
+        propertyID: UUID,
+        sessionID: UUID
+    ) -> Bool {
+        diagnostics.verifiedOrganizationID == orgID &&
+            diagnostics.propertyID == propertyID &&
+            diagnostics.sessionID == sessionID
+    }
+
+    private func selectedSessionPipelineObservationReplayRequired(_ diagnostics: CanonicalReadDiagnosticsResult) -> Bool {
+        let localObservationCount = diagnostics.localIssueObservationCount ?? 0
+        let remoteObservationCount = diagnostics.remoteIssueObservationCount ?? 0
+        return localObservationCount > remoteObservationCount ||
+            localDiagnostics.sessionSnapshotUpload.lastMissingRemoteEntityClassification == "remote_observations_incomplete" ||
+            localDiagnostics.sessionSnapshotUpload.lastMissingRemoteEntityClassification == "remote_shots_and_observations_missing"
+    }
+
+    private func selectedSessionPipelineLifecycleReplayRequired(_ diagnostics: CanonicalReadDiagnosticsResult) -> Bool {
+        diagnostics.countParity == true &&
+            selectedSessionPipelineMissingChildCount(diagnostics) == 0 &&
+            diagnostics.parentOrgConsistent == true &&
+            diagnostics.parentPropertyConsistent == true &&
+            selectedSessionPipelineFreshnessConflictBlocker(diagnostics) == nil &&
+            diagnostics.statusParity == false
+    }
+
+    private func selectedSessionPipelineObservationReplayEligible(_ diagnostics: CanonicalReadDiagnosticsResult) -> Bool {
+        selectedSessionPipelineObservationReplayRequired(diagnostics) &&
+            diagnostics.parentOrgConsistent != false &&
+            diagnostics.parentPropertyConsistent != false &&
+            diagnostics.result != .remoteNewerCandidate &&
+            diagnostics.result != .localNewerConflict
+    }
+
+    private func selectedSessionPipelineMissingChildCount(_ diagnostics: CanonicalReadDiagnosticsResult) -> Int {
+        max((diagnostics.localShotCount ?? 0) - (diagnostics.remoteShotCount ?? 0), 0) +
+            max((diagnostics.localIssueObservationCount ?? 0) - (diagnostics.remoteIssueObservationCount ?? 0), 0)
+    }
+
+    private func selectedSessionPipelinePassDiagnostics(_ diagnostics: CanonicalReadDiagnosticsResult) -> Bool {
+        diagnostics.result == .remoteMatchesLocal &&
+            diagnostics.countParity == true &&
+            diagnostics.statusParity == true &&
+            diagnostics.parentOrgConsistent == true &&
+            diagnostics.parentPropertyConsistent == true &&
+            selectedSessionPipelineMissingChildCount(diagnostics) == 0
+    }
+
+    private func selectedSessionPipelineDiagnosticsBlocker(_ diagnostics: CanonicalReadDiagnosticsResult) -> String {
+        if diagnostics.parentOrgConsistent == false || diagnostics.parentPropertyConsistent == false { return "parent_mismatch" }
+        if let freshnessBlocker = selectedSessionPipelineFreshnessConflictBlocker(diagnostics) { return freshnessBlocker }
+        if diagnostics.countParity != true || selectedSessionPipelineMissingChildCount(diagnostics) > 0 { return "count_mismatch_after_replay" }
+        if diagnostics.statusParity != true { return "status_mismatch_after_lifecycle_replay" }
+        return diagnostics.blockedReason ?? "canonical_diagnostics_not_candidate_ready"
+    }
+
+    private func selectedSessionPipelineFreshnessConflictBlocker(_ diagnostics: CanonicalReadDiagnosticsResult) -> String? {
+        switch diagnostics.result {
+        case .remoteNewerCandidate:
+            return "remote_newer_conflict"
+        case .localNewerConflict:
+            return "local_newer_conflict"
+        default:
+            return nil
+        }
+    }
+
+    private func buildRuntimeAuthorizedCanonicalCandidateOverlay(
+        checkedAt: Date,
+        canonicalDiagnostics: CanonicalReadDiagnosticsResult,
+        productionValidationEvidence: LocalHealthSessionSnapshotPackageValidationReport,
+        orgID: UUID,
+        propertyID: UUID,
+        sessionID: UUID
+    ) -> (
+        candidate: CanonicalReadCandidateDiagnostics,
+        overlay: CanonicalCandidateOverlayBuildResult,
+        comparison: CanonicalCandidateOverlayComparison
+    ) {
+        let parityReport = Self.makeNormalizedParityGapReport(
+            checkedAt: checkedAt,
+            canonicalDiagnostics: canonicalDiagnostics,
+            uploadDiagnostics: localDiagnostics.sessionSnapshotUpload
+        )
+        let candidate = Self.makeCanonicalReadCandidateDiagnostics(
+            checkedAt: checkedAt,
+            configuration: selectedSessionRuntimeQACandidateConfiguration(
+                orgID: orgID,
+                propertyID: propertyID,
+                sessionID: sessionID,
+                checkedAt: checkedAt
+            ),
+            targetClassification: supabaseConfiguration.targetClassification,
+            canonicalDiagnostics: canonicalDiagnostics,
+            parityReport: parityReport,
+            mediaRecoveryConfidence: Self.canonicalCandidateMediaRecoveryConfidence(
+                uploadDiagnostics: localDiagnostics.sessionSnapshotUpload
+            ),
+            productionValidationEvidenceReady: selectedSessionProductionValidationEvidenceReady(
+                productionValidationEvidence,
+                propertyID: propertyID,
+                sessionID: sessionID
+            )
+        )
+        let overlay = Self.buildCanonicalCandidateOverlayTestOnly(
+            checkedAt: checkedAt,
+            targetClassification: supabaseConfiguration.targetClassification,
+            canonicalDiagnostics: canonicalDiagnostics,
+            parityReport: parityReport,
+            candidateDiagnostics: candidate,
+            productionValidationEvidenceReady: true
+        )
+        let comparison = Self.makeCanonicalCandidateOverlayComparison(
+            checkedAt: checkedAt,
+            canonicalDiagnostics: canonicalDiagnostics,
+            overlayResult: overlay,
+            parityReport: parityReport
+        )
+        recordCanonicalCandidateOverlayBuild(overlay, comparison: comparison)
+        return (candidate, overlay, comparison)
+    }
+
+    private func recordSelectedSessionValidationPipelineState(
+        _ state: LocalHealthSelectedSessionValidationPipelineState,
+        checkedAt: Date,
+        blocker: String?,
+        reportText: String
+    ) {
+        var diagnostics = localDiagnostics
+        diagnostics.sessionSnapshotUpload.lastSelectedSessionValidationPipelineState = state.rawValue
+        diagnostics.sessionSnapshotUpload.lastSelectedSessionValidationPipelineCheckedAt = checkedAt
+        diagnostics.sessionSnapshotUpload.lastSelectedSessionValidationPipelineBlocker = blocker
+        diagnostics.sessionSnapshotUpload.lastSelectedSessionValidationPipelineReportText = reportText
+        localDiagnostics = diagnostics
+    }
+
+    nonisolated static func selectedSessionValidationPipelineReportText(
+        _ report: LocalHealthSelectedSessionValidationPipelineReport
+    ) -> String {
+        var lines: [String] = []
+        lines.append("ScoutCapture Local Health - Selected Session Validation Pipeline")
+        lines.append("Checked: \(report.checkedAt.formatted(date: .abbreviated, time: .standard))")
+        lines.append("- pipeline_state: \(report.state.rawValue)")
+        lines.append("- final_blocker: \(diagnosticsPreviewText(report.finalBlocker, maxLength: 220) ?? "none")")
+        lines.append("- recommended_next_action: \(report.recommendedNextAction)")
+        lines.append("")
+        lines.append("Scope")
+        lines.append("- selected_scope: \(report.selectedScope.description)")
+        lines.append("- authorized_scope: \(report.authorizedScope.description)")
+        lines.append("- authorization_state: \(report.authorization.state.rawValue)")
+        lines.append("- authorization_authorized_at: \(report.authorization.authorizedAt?.formatted(date: .abbreviated, time: .standard) ?? "none")")
+        lines.append("- authorization_expires_at: \(report.authorization.expiresAt?.formatted(date: .abbreviated, time: .standard) ?? "none")")
+        lines.append("- authorization_freshness: \(report.authorization.freshness)")
+        lines.append("- authorization_scope_match: \(report.authorization.scopeMatches)")
+        lines.append("- authorization_clear_reason: \(diagnosticsPreviewText(report.authorization.clearReason, maxLength: 180) ?? "none")")
+        lines.append("")
+        lines.append("Guardrails")
+        lines.append("- supabase_read_enabled: \(report.authorization.supabaseReadEnabled)")
+        lines.append("- production_wide_canonical_reads_enabled: \(report.authorization.productionWideCanonicalReadsEnabled)")
+        lines.append("- active_source: \(report.activeSource)")
+        lines.append("- fallback_available: \(report.fallbackAvailable)")
+        lines.append("- rollback_available: \(report.rollbackAvailable)")
+        lines.append("- automatic_operator_approval_performed: false")
+        lines.append("- automatic_activation_performed: false")
+        lines.append("")
+        lines.append("Package Validation")
+        lines.append("- package_parity_result: \(report.packageValidation?.packageParity.state.rawValue ?? "not_run")")
+        lines.append("- package_parity_blockers: \(report.packageValidation.map { $0.packageParity.blockers.isEmpty ? "none" : $0.packageParity.blockers.joined(separator: ", ") } ?? "not_run")")
+        lines.append("- rollback_validation_result: \(report.packageValidation?.fullyRestoredRollback.state.rawValue ?? "not_run")")
+        lines.append("- rollback_validation_blockers: \(report.packageValidation.map { $0.fullyRestoredRollback.blockers.isEmpty ? "none" : $0.fullyRestoredRollback.blockers.joined(separator: ", ") } ?? "not_run")")
+        lines.append("")
+        lines.append("Diagnostics")
+        lines.append("- initial_diagnostics_result: \(report.initialDiagnostics?.result.rawValue ?? "not_run")")
+        lines.append("- post_observation_diagnostics_result: \(report.postObservationDiagnostics?.result.rawValue ?? "not_run")")
+        lines.append("- final_diagnostics_result: \(report.finalDiagnostics?.result.rawValue ?? "not_run")")
+        lines.append("- count_parity: \(report.finalDiagnostics?.countParity.map(String.init) ?? "not_checked")")
+        lines.append("- status_parity: \(report.finalDiagnostics?.statusParity.map(String.init) ?? "not_checked")")
+        lines.append("- parent_org_consistency: \(report.finalDiagnostics?.parentOrgConsistent.map(String.init) ?? "not_checked")")
+        lines.append("- parent_property_consistency: \(report.finalDiagnostics?.parentPropertyConsistent.map(String.init) ?? "not_checked")")
+        let missingChildCountText: String
+        if let finalDiagnostics = report.finalDiagnostics {
+            let missingShots = max((finalDiagnostics.localShotCount ?? 0) - (finalDiagnostics.remoteShotCount ?? 0), 0)
+            let missingObservations = max((finalDiagnostics.localIssueObservationCount ?? 0) - (finalDiagnostics.remoteIssueObservationCount ?? 0), 0)
+            missingChildCountText = String(missingShots + missingObservations)
+        } else {
+            missingChildCountText = "not_checked"
+        }
+        lines.append("- missing_child_count: \(missingChildCountText)")
+        lines.append("")
+        lines.append("Observation Replay")
+        lines.append("- required: \(report.observationReplayRequired)")
+        lines.append("- planned_observations: \(report.observationReplay?.replayResult?.attemptedCount ?? 0)")
+        lines.append("- planned_updates: \(report.observationReplay?.replayResult?.attemptedCount ?? 0)")
+        lines.append("- executed_observations: \(report.observationReplay?.replayResult?.upsertedCount ?? 0)")
+        lines.append("- executed_updates: \(report.observationReplay?.replayResult?.upsertedCount ?? 0)")
+        lines.append("- skipped: \(report.observationReplay?.replayResult?.skippedCount ?? 0)")
+        lines.append("- remote_newer_conflicts: \(report.observationReplay?.replayResult?.remoteNewerConflictCount ?? 0)")
+        lines.append("- failures: \(report.observationReplay?.replayResult?.failedCount ?? 0)")
+        lines.append("")
+        lines.append("Lifecycle Replay")
+        lines.append("- required: \(report.lifecycleReplayRequired)")
+        lines.append("- planned: \(report.lifecycleReplay?.replayResult?.attemptedCount ?? 0)")
+        lines.append("- executed: \(report.lifecycleReplay?.replayResult?.upsertedCount ?? 0)")
+        lines.append("- skipped: \(report.lifecycleReplay?.replayResult?.skippedCount ?? 0)")
+        lines.append("- remote_newer_conflicts: \(report.lifecycleReplay?.replayResult?.remoteNewerConflictCount ?? 0)")
+        lines.append("- failures: \(report.lifecycleReplay?.replayResult?.failedCount ?? 0)")
+        lines.append("")
+        lines.append("Candidate Overlay")
+        lines.append("- candidate_allowed: \(report.candidateAllowed)")
+        lines.append("- overlay_built: \(report.overlayBuild?.overlay != nil)")
+        lines.append("- overlay_comparison_result: \(report.overlayComparison?.result.rawValue ?? "not_run")")
+        lines.append("- overlay_blocked_reason: \(diagnosticsPreviewText(report.overlayBuild?.blockedReason, maxLength: 220) ?? "none")")
+        lines.append("- comparison_blocked_reason: \(diagnosticsPreviewText(report.overlayComparison?.blockedReason, maxLength: 220) ?? "none")")
+        lines.append("")
+        lines.append("Safety")
+        lines.append("No behavior changed: this guarded pipeline validates the exact selected org/property/session only. It does not edit the shared scheme, enable supabase_read_enabled, enable production-wide canonical reads, approve operators, activate candidates, switch global reads, mutate unrelated remote data, remove local/iCloud fallback, change export, seal, sync, media, or iCloud behavior, loosen RLS, change schema, or delete data.")
+        return lines.joined(separator: "\n")
+    }
+
+    private nonisolated static func selectedSessionValidationPipelineNextAction(
+        for blocker: String?,
+        state: LocalHealthSelectedSessionValidationPipelineState
+    ) -> String {
+        guard let blocker else {
+            return state == .passed ? "review_report_no_activation_performed" : "run_selected_session_validation_pipeline"
+        }
+        switch blocker {
+        case "valid_runtime_qa_authorization_required", "authorization_invalidated":
+            return "authorize_selected_session_for_qa_validation"
+        case "package_validation_failed", "selected_scope_snapshot_required":
+            return "resolve_package_validation_blocker"
+        case "parent_mismatch", "scope_mismatch":
+            return "resolve_parent_scope_mismatch"
+        case "remote_newer_conflict":
+            return "manual_review_remote_newer_conflict"
+        case "local_newer_conflict":
+            return "manual_review_local_newer_conflict"
+        case "observation_replay_failed", "observation_replay_blocked", "observation_replay_not_eligible":
+            return "review_observation_replay_failure"
+        case "lifecycle_replay_failed", "lifecycle_replay_blocked":
+            return "review_lifecycle_replay_failure"
+        case "count_mismatch_after_replay":
+            return "review_count_parity_after_observation_replay"
+        case "status_mismatch_after_lifecycle_replay":
+            return "review_session_lifecycle_status_parity"
+        case "overlay_mismatch", "overlay_not_built":
+            return "review_candidate_overlay_comparison"
+        default:
+            return "review_pipeline_blocker"
+        }
     }
 
     private func selectedSessionProductionValidationEvidenceReady(
@@ -20643,6 +21433,275 @@ final class AppState: ObservableObject {
     }
 
     @MainActor
+    @discardableResult
+    func authorizeSelectedSessionForQAValidation(
+        checkedAt: Date = Date(),
+        expiresAt: Date? = nil
+    ) -> RuntimeSelectedSessionQAAuthorizationStatus {
+        let noBehaviorChangedText = "No behavior changed: selected-session QA authorization is local diagnostic/runtime state only. It does not write Supabase, edit schemes, enable supabase_read_enabled, enable production-wide reads, activate candidates, switch global reads, remove fallback, change export, seal, sync, media, iCloud, schema, or RLS behavior, or delete data."
+        let selectedTarget = manualSessionSnapshotUploadTarget
+        let propertyID = selectedTarget?.propertyID
+        let sessionID = selectedTarget?.sessionID
+        let selectedOrgID = selectedSessionVerifiedOrganizationID(
+            propertyID: propertyID,
+            sessionID: sessionID
+        )
+        let selectedScope = ProductionCohortApprovalScope(
+            orgID: selectedOrgID,
+            propertyID: propertyID,
+            sessionID: sessionID
+        )
+        let localSnapshot = makeCanonicalReadLocalSnapshot(
+            propertyID: propertyID,
+            sessionID: sessionID
+        )
+        let localFallbackAvailable = localSnapshot.localPropertyFound || localSnapshot.localSessionFound
+        let rollbackAvailable = localDiagnostics.sessionSnapshotUpload.lastCanonicalCandidateOverlayRollbackAvailable &&
+            localDiagnostics.sessionSnapshotUpload.lastCanonicalCandidateActivationRollbackAvailable
+
+        func blocked(_ reason: String) -> RuntimeSelectedSessionQAAuthorizationStatus {
+            clearRuntimeSelectedSessionQAAuthorization(reason: reason)
+            return RuntimeSelectedSessionQAAuthorizationStatus(
+                checkedAt: checkedAt,
+                state: .blocked,
+                selectedScope: selectedScope,
+                authorizedScope: ProductionCohortApprovalScope(orgID: nil, propertyID: nil, sessionID: nil),
+                authorizedAt: nil,
+                expiresAt: nil,
+                freshness: "blocked",
+                scopeMatches: false,
+                clearReason: reason,
+                supabaseReadEnabled: backendFeatureFlags.supabaseReadEnabled,
+                productionWideCanonicalReadsEnabled: localDiagnostics.sessionSnapshotUpload.lastCanonicalReadCandidateProductionWideEnabled,
+                localFallbackAvailable: localFallbackAvailable,
+                rollbackAvailable: rollbackAvailable,
+                noBehaviorChangedText: noBehaviorChangedText
+            )
+        }
+
+        guard let selectedTarget,
+              let propertyID,
+              let sessionID else {
+            return blocked("selected_session_snapshot_target_required")
+        }
+        guard let orgID = selectedOrgID,
+              activeOrganizationID == orgID,
+              isOrganizationContextReady,
+              runtimeSelectedSessionQAOrganizationAccessAllowed(orgID, localSnapshot: localSnapshot) else {
+            return blocked("authenticated_user_org_context_required")
+        }
+        guard selectedTarget.propertyID == propertyID,
+              selectedTarget.sessionID == sessionID,
+              selectedPropertyID == propertyID,
+              currentSession == nil || currentSession?.id == sessionID else {
+            return blocked("selected_scope_inconsistent")
+        }
+        guard localSnapshot.orgID == nil || localSnapshot.orgID == orgID,
+              localSnapshot.sessionPropertyID == nil || localSnapshot.sessionPropertyID == propertyID else {
+            return blocked("selected_scope_parent_mismatch")
+        }
+        guard !backendFeatureFlags.supabaseReadEnabled,
+              !localDiagnostics.sessionSnapshotUpload.lastCanonicalReadCandidateProductionWideEnabled else {
+            return blocked("production_wide_canonical_reads_must_be_disabled")
+        }
+        guard localFallbackAvailable else {
+            return blocked("local_fallback_unavailable")
+        }
+        guard rollbackAvailable else {
+            return blocked("rollback_unavailable")
+        }
+        if localDiagnostics.sessionSnapshotUpload.lastAuthPreflightReady == false {
+            return blocked(localDiagnostics.sessionSnapshotUpload.lastAuthPreflightFailureMessage ?? "auth_preflight_not_ready")
+        }
+
+        let expiration = expiresAt ?? checkedAt.addingTimeInterval(30 * 60)
+        var diagnostics = localDiagnostics
+        diagnostics.sessionSnapshotUpload.runtimeSelectedSessionQAAuthAuthorized = true
+        diagnostics.sessionSnapshotUpload.runtimeSelectedSessionQAAuthOrgID = orgID
+        diagnostics.sessionSnapshotUpload.runtimeSelectedSessionQAAuthPropertyID = propertyID
+        diagnostics.sessionSnapshotUpload.runtimeSelectedSessionQAAuthSessionID = sessionID
+        diagnostics.sessionSnapshotUpload.runtimeSelectedSessionQAAuthAuthorizedAt = checkedAt
+        diagnostics.sessionSnapshotUpload.runtimeSelectedSessionQAAuthExpiresAt = expiration
+        diagnostics.sessionSnapshotUpload.runtimeSelectedSessionQAAuthFreshness = "fresh"
+        diagnostics.sessionSnapshotUpload.runtimeSelectedSessionQAAuthScopeMatches = true
+        diagnostics.sessionSnapshotUpload.runtimeSelectedSessionQAAuthClearReason = nil
+        localDiagnostics = diagnostics
+
+        return RuntimeSelectedSessionQAAuthorizationStatus(
+            checkedAt: checkedAt,
+            state: .authorized,
+            selectedScope: selectedScope,
+            authorizedScope: ProductionCohortApprovalScope(orgID: orgID, propertyID: propertyID, sessionID: sessionID),
+            authorizedAt: checkedAt,
+            expiresAt: expiration,
+            freshness: "fresh",
+            scopeMatches: true,
+            clearReason: nil,
+            supabaseReadEnabled: backendFeatureFlags.supabaseReadEnabled,
+            productionWideCanonicalReadsEnabled: false,
+            localFallbackAvailable: localFallbackAvailable,
+            rollbackAvailable: rollbackAvailable,
+            noBehaviorChangedText: noBehaviorChangedText
+        )
+    }
+
+    @MainActor
+    func clearSelectedSessionQAValidationAuthorization(reason: String = "manual_clear") -> RuntimeSelectedSessionQAAuthorizationStatus {
+        clearRuntimeSelectedSessionQAAuthorization(reason: reason)
+        return selectedSessionQAValidationAuthorizationStatus()
+    }
+
+    @MainActor
+    func selectedSessionQAValidationAuthorizationStatus(
+        checkedAt: Date = Date()
+    ) -> RuntimeSelectedSessionQAAuthorizationStatus {
+        validateRuntimeSelectedSessionQAAuthorization(checkedAt: checkedAt)
+    }
+
+    private func clearRuntimeSelectedSessionQAAuthorization(reason: String) {
+        let current = localDiagnostics.sessionSnapshotUpload
+        let hasStoredAuthorizationScope = current.runtimeSelectedSessionQAAuthOrgID != nil ||
+            current.runtimeSelectedSessionQAAuthPropertyID != nil ||
+            current.runtimeSelectedSessionQAAuthSessionID != nil
+        let invalidationReasonRequiresExistingAuthorization = [
+            "account_changed",
+            "active_org_changed",
+            "selected_scope_changed",
+            "required_safety_guardrails_false",
+            "fallback_or_rollback_unavailable"
+        ].contains(reason)
+        if !current.runtimeSelectedSessionQAAuthAuthorized,
+           !hasStoredAuthorizationScope,
+           current.runtimeSelectedSessionQAAuthClearReason == nil,
+           invalidationReasonRequiresExistingAuthorization {
+            return
+        }
+        if !current.runtimeSelectedSessionQAAuthAuthorized,
+           !hasStoredAuthorizationScope,
+           current.runtimeSelectedSessionQAAuthClearReason != nil {
+            return
+        }
+        guard localDiagnostics.sessionSnapshotUpload.runtimeSelectedSessionQAAuthAuthorized ||
+            localDiagnostics.sessionSnapshotUpload.runtimeSelectedSessionQAAuthOrgID != nil ||
+            localDiagnostics.sessionSnapshotUpload.runtimeSelectedSessionQAAuthPropertyID != nil ||
+            localDiagnostics.sessionSnapshotUpload.runtimeSelectedSessionQAAuthSessionID != nil ||
+            localDiagnostics.sessionSnapshotUpload.runtimeSelectedSessionQAAuthClearReason != reason else {
+            return
+        }
+        var diagnostics = localDiagnostics
+        diagnostics.sessionSnapshotUpload.runtimeSelectedSessionQAAuthAuthorized = false
+        diagnostics.sessionSnapshotUpload.runtimeSelectedSessionQAAuthOrgID = nil
+        diagnostics.sessionSnapshotUpload.runtimeSelectedSessionQAAuthPropertyID = nil
+        diagnostics.sessionSnapshotUpload.runtimeSelectedSessionQAAuthSessionID = nil
+        diagnostics.sessionSnapshotUpload.runtimeSelectedSessionQAAuthAuthorizedAt = nil
+        diagnostics.sessionSnapshotUpload.runtimeSelectedSessionQAAuthExpiresAt = nil
+        diagnostics.sessionSnapshotUpload.runtimeSelectedSessionQAAuthFreshness = "not_authorized"
+        diagnostics.sessionSnapshotUpload.runtimeSelectedSessionQAAuthScopeMatches = false
+        diagnostics.sessionSnapshotUpload.runtimeSelectedSessionQAAuthClearReason = reason
+        localDiagnostics = diagnostics
+    }
+
+    private func clearRuntimeSelectedSessionQAAuthorizationForSelectedScopeChange() {
+        guard localDiagnostics.sessionSnapshotUpload.runtimeSelectedSessionQAAuthAuthorized ||
+            localDiagnostics.sessionSnapshotUpload.runtimeSelectedSessionQAAuthOrgID != nil ||
+            localDiagnostics.sessionSnapshotUpload.runtimeSelectedSessionQAAuthPropertyID != nil ||
+            localDiagnostics.sessionSnapshotUpload.runtimeSelectedSessionQAAuthSessionID != nil else {
+            return
+        }
+        clearRuntimeSelectedSessionQAAuthorization(reason: "selected_scope_changed")
+    }
+
+    private func validateRuntimeSelectedSessionQAAuthorization(
+        checkedAt: Date = Date()
+    ) -> RuntimeSelectedSessionQAAuthorizationStatus {
+        let diagnostics = localDiagnostics.sessionSnapshotUpload
+        let selectedTarget = manualSessionSnapshotUploadTarget
+        let selectedScope = ProductionCohortApprovalScope(
+            orgID: selectedSessionVerifiedOrganizationID(
+                propertyID: selectedTarget?.propertyID,
+                sessionID: selectedTarget?.sessionID
+            ),
+            propertyID: selectedTarget?.propertyID,
+            sessionID: selectedTarget?.sessionID
+        )
+        let authorizedScope = ProductionCohortApprovalScope(
+            orgID: diagnostics.runtimeSelectedSessionQAAuthOrgID,
+            propertyID: diagnostics.runtimeSelectedSessionQAAuthPropertyID,
+            sessionID: diagnostics.runtimeSelectedSessionQAAuthSessionID
+        )
+        let scopeMatches = selectedScope.orgID != nil &&
+            selectedScope.orgID == authorizedScope.orgID &&
+            selectedScope.propertyID == authorizedScope.propertyID &&
+            selectedScope.sessionID == authorizedScope.sessionID
+        let localSnapshot = makeCanonicalReadLocalSnapshot(
+            propertyID: selectedScope.propertyID,
+            sessionID: selectedScope.sessionID
+        )
+        let localFallbackAvailable = localSnapshot.localPropertyFound || localSnapshot.localSessionFound
+        let rollbackAvailable = diagnostics.lastCanonicalCandidateOverlayRollbackAvailable &&
+            diagnostics.lastCanonicalCandidateActivationRollbackAvailable
+        let productionWideEnabled = diagnostics.lastCanonicalReadCandidateProductionWideEnabled
+
+        var state: RuntimeSelectedSessionQAAuthorizationState = diagnostics.runtimeSelectedSessionQAAuthAuthorized ? .authorized : .notAuthorized
+        var clearReason = diagnostics.runtimeSelectedSessionQAAuthClearReason
+        if diagnostics.runtimeSelectedSessionQAAuthAuthorized {
+            if let expiresAt = diagnostics.runtimeSelectedSessionQAAuthExpiresAt,
+               checkedAt >= expiresAt {
+                state = .expired
+                clearReason = "authorization_expired"
+                clearRuntimeSelectedSessionQAAuthorization(reason: "authorization_expired")
+            } else if !scopeMatches {
+                state = .invalidated
+                clearReason = "selected_scope_changed"
+                clearRuntimeSelectedSessionQAAuthorization(reason: "selected_scope_changed")
+            } else if activeOrganizationID != authorizedScope.orgID ||
+                        !isOrganizationContextReady ||
+                        (authorizedScope.orgID.map { !runtimeSelectedSessionQAOrganizationAccessAllowed($0, localSnapshot: localSnapshot) } ?? true) {
+                state = .invalidated
+                clearReason = "account_or_active_org_changed"
+                clearRuntimeSelectedSessionQAAuthorization(reason: "account_or_active_org_changed")
+            } else if backendFeatureFlags.supabaseReadEnabled || productionWideEnabled {
+                state = .invalidated
+                clearReason = "required_safety_guardrails_false"
+                clearRuntimeSelectedSessionQAAuthorization(reason: "required_safety_guardrails_false")
+            } else if !localFallbackAvailable || !rollbackAvailable {
+                state = .invalidated
+                clearReason = "fallback_or_rollback_unavailable"
+                clearRuntimeSelectedSessionQAAuthorization(reason: "fallback_or_rollback_unavailable")
+            }
+        }
+
+        let freshSeconds = diagnostics.runtimeSelectedSessionQAAuthAuthorized
+            ? diagnostics.runtimeSelectedSessionQAAuthAuthorizedAt.map { max(0, Int(checkedAt.timeIntervalSince($0))) }
+            : nil
+        let freshness: String
+        if state == .authorized, let freshSeconds {
+            freshness = "\(freshSeconds)s_old"
+        } else if state == .expired {
+            freshness = "expired"
+        } else {
+            freshness = diagnostics.runtimeSelectedSessionQAAuthFreshness
+        }
+
+        return RuntimeSelectedSessionQAAuthorizationStatus(
+            checkedAt: checkedAt,
+            state: state,
+            selectedScope: selectedScope,
+            authorizedScope: authorizedScope,
+            authorizedAt: diagnostics.runtimeSelectedSessionQAAuthAuthorizedAt,
+            expiresAt: diagnostics.runtimeSelectedSessionQAAuthExpiresAt,
+            freshness: freshness,
+            scopeMatches: scopeMatches,
+            clearReason: clearReason,
+            supabaseReadEnabled: backendFeatureFlags.supabaseReadEnabled,
+            productionWideCanonicalReadsEnabled: productionWideEnabled,
+            localFallbackAvailable: localFallbackAvailable,
+            rollbackAvailable: rollbackAvailable,
+            noBehaviorChangedText: "No behavior changed: runtime QA authorization is local-only, exact-scope, temporary diagnostic state and does not enable reads, activate, write remote state, or change local/iCloud fallback."
+        )
+    }
+
+    @MainActor
     func productionSingleSessionActivationGateForSelectedSession(
         checkedAt: Date = Date(),
         policy: ProductionSingleSessionActivationGatePolicy? = nil,
@@ -20731,6 +21790,7 @@ final class AppState: ObservableObject {
     func replayFlaggedObservationShadowWritesForSelectedSession(
         checkedAt: Date = Date(),
         productionValidationEvidence: LocalHealthSessionSnapshotPackageValidationReport?,
+        pipelineAuthorizationContext: SelectedSessionValidationPipelineAuthorizationContext? = nil,
         replayOperation: ((UUID, UUID) async -> NormalizedBackfillEntityResult)? = nil,
         diagnosticsAfterReplayOperation: (() async -> CanonicalReadDiagnosticsResult)? = nil
     ) async -> SelectedSessionFlaggedObservationReplayActionResult {
@@ -20789,11 +21849,19 @@ final class AppState: ObservableObject {
               selectedTarget.sessionID == sessionID else {
             return blocked("selected_session_scope_not_exact", orgID: orgID)
         }
-        guard selectedSessionCandidateAllowlistsAreExactSingletons(
+        let staticAllowlistMatches = selectedSessionCandidateAllowlistsAreExactSingletons(
             orgID: orgID,
             propertyID: propertyID,
             sessionID: sessionID
-        ) else {
+        )
+        let pipelineAuthorizationMatches = selectedSessionValidationPipelineAuthorizationContextMatches(
+            pipelineAuthorizationContext,
+            orgID: orgID,
+            propertyID: propertyID,
+            sessionID: sessionID,
+            checkedAt: checkedAt
+        )
+        guard staticAllowlistMatches || pipelineAuthorizationMatches else {
             return blocked("exact_singleton_candidate_allowlist_required", orgID: orgID)
         }
         guard !backendFeatureFlags.supabaseReadEnabled,
@@ -20904,6 +21972,7 @@ final class AppState: ObservableObject {
     func replaySelectedSessionLifecycleShadowWriteForSelectedSession(
         checkedAt: Date = Date(),
         productionValidationEvidence: LocalHealthSessionSnapshotPackageValidationReport?,
+        pipelineAuthorizationContext: SelectedSessionValidationPipelineAuthorizationContext? = nil,
         replayOperation: ((UUID, UUID, UUID) async -> NormalizedBackfillEntityResult)? = nil,
         diagnosticsAfterReplayOperation: ((UUID, UUID, UUID) async -> CanonicalReadDiagnosticsResult)? = nil
     ) async -> SelectedSessionLifecycleReplayActionResult {
@@ -20962,11 +22031,19 @@ final class AppState: ObservableObject {
               selectedTarget.sessionID == sessionID else {
             return blocked("selected_session_scope_not_exact", orgID: orgID)
         }
-        guard selectedSessionCandidateAllowlistsAreExactSingletons(
+        let staticAllowlistMatches = selectedSessionCandidateAllowlistsAreExactSingletons(
             orgID: orgID,
             propertyID: propertyID,
             sessionID: sessionID
-        ) else {
+        )
+        let pipelineAuthorizationMatches = selectedSessionValidationPipelineAuthorizationContextMatches(
+            pipelineAuthorizationContext,
+            orgID: orgID,
+            propertyID: propertyID,
+            sessionID: sessionID,
+            checkedAt: checkedAt
+        )
+        guard staticAllowlistMatches || pipelineAuthorizationMatches else {
             return blocked("exact_singleton_candidate_allowlist_required", orgID: orgID)
         }
         guard !backendFeatureFlags.supabaseReadEnabled,
