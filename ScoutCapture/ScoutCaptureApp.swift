@@ -9273,6 +9273,10 @@ private struct DebugSessionSnapshotCanonicalReadDiagnosticsSection: View {
             packageValidationReport?.fullyRestoredRollback.blockers.isEmpty == true
     }
 
+    private var qaControlsPresentation: AppState.LocalHealthSelectedSessionQAControlsPresentationState {
+        appState.localHealthSelectedSessionQAControlsPresentationState
+    }
+
     var body: some View {
         Group {
         Section("Controlled Activation Evaluation") {
@@ -9324,6 +9328,11 @@ private struct DebugSessionSnapshotCanonicalReadDiagnosticsSection: View {
             diagnosticRow("QA Clear Reason", compactValue(diagnostics.runtimeSelectedSessionQAAuthClearReason ?? "none"))
             diagnosticRow("Pipeline State", diagnostics.lastSelectedSessionValidationPipelineState)
             diagnosticRow("Pipeline Blocker", compactValue(diagnostics.lastSelectedSessionValidationPipelineBlocker ?? "none"))
+            diagnosticRow("QA Controls", qaControlsPresentation.controlsMounted ? "available" : "blocked")
+            if let blocker = qaControlsPresentation.blocker {
+                diagnosticRow("QA Controls Blocker", blocker)
+                diagnosticRow("QA Target Reason", compactValue(qaControlsPresentation.targetResolutionReason))
+            }
         }
 
         Section("Canonical Read - Rollout Readiness") {
@@ -9492,51 +9501,60 @@ private struct DebugSessionSnapshotCanonicalReadDiagnosticsSection: View {
             }
             .disabled(isBuildingCanonicalCandidateOverlay)
             .font(.system(size: 14, weight: .semibold))
-            Button(isAuthorizingSelectedSessionQA ? "Authorizing..." : AppState.localHealthAuthorizeSelectedSessionQAActionTitle) {
-                guard !isAuthorizingSelectedSessionQA else { return }
-                isAuthorizingSelectedSessionQA = true
-                Task {
-                    _ = await MainActor.run {
-                        appState.authorizeSelectedSessionForQAValidation()
-                    }
-                    await MainActor.run {
-                        isAuthorizingSelectedSessionQA = false
-                    }
-                }
-            }
-            .disabled(isAuthorizingSelectedSessionQA)
-            .font(.system(size: 14, weight: .semibold))
-            Button(AppState.localHealthClearSelectedSessionQAActionTitle) {
-                _ = appState.clearSelectedSessionQAValidationAuthorization()
-            }
-            .disabled(!diagnostics.runtimeSelectedSessionQAAuthAuthorized)
-            .font(.system(size: 14, weight: .semibold))
-            Button(isRunningSelectedSessionValidationPipeline ? "Running..." : AppState.localHealthSelectedSessionValidationPipelineActionTitle) {
-                guard !isRunningSelectedSessionValidationPipeline else { return }
-                isRunningSelectedSessionValidationPipeline = true
-                Task {
-                    let report = await appState.runSelectedSessionValidationPipeline()
-                    await MainActor.run {
-                        selectedSessionValidationPipelineReport = report
-                        isRunningSelectedSessionValidationPipeline = false
+            if qaControlsPresentation.controlsMounted {
+                Button(isAuthorizingSelectedSessionQA ? "Authorizing..." : AppState.localHealthAuthorizeSelectedSessionQAActionTitle) {
+                    guard !isAuthorizingSelectedSessionQA else { return }
+                    isAuthorizingSelectedSessionQA = true
+                    Task {
+                        _ = await MainActor.run {
+                            appState.authorizeSelectedSessionForQAValidation()
+                        }
+                        await MainActor.run {
+                            isAuthorizingSelectedSessionQA = false
+                        }
                     }
                 }
-            }
-            .disabled(isRunningSelectedSessionValidationPipeline)
-            .font(.system(size: 14, weight: .semibold))
-            if let selectedSessionValidationPipelineReport {
-                diagnosticRow("Pipeline Result", selectedSessionValidationPipelineReport.state.rawValue)
-                diagnosticRow("Pipeline Final Blocker", compactValue(selectedSessionValidationPipelineReport.finalBlocker ?? "none"))
-                diagnosticRow("Pipeline Next Action", selectedSessionValidationPipelineReport.recommendedNextAction)
-                NavigationLink {
-                    DebugSessionSnapshotUploadTextView(
-                        snapshotText: selectedSessionValidationPipelineReport.reportText,
-                        title: "Validation Pipeline",
-                        footerText: "Copies the selected-session validation pipeline report as plain text. It is diagnostic-only and does not include raw session.json, local paths, signed URLs, auth material, storage object paths, or media payloads."
-                    )
-                } label: {
-                    Text("View Copyable Validation Pipeline Report")
-                        .font(.system(size: 14, weight: .semibold))
+                .disabled(isAuthorizingSelectedSessionQA)
+                .font(.system(size: 14, weight: .semibold))
+                Button(AppState.localHealthClearSelectedSessionQAActionTitle) {
+                    _ = appState.clearSelectedSessionQAValidationAuthorization()
+                }
+                .disabled(!diagnostics.runtimeSelectedSessionQAAuthAuthorized)
+                .font(.system(size: 14, weight: .semibold))
+                Button(isRunningSelectedSessionValidationPipeline ? "Running..." : AppState.localHealthSelectedSessionValidationPipelineActionTitle) {
+                    guard !isRunningSelectedSessionValidationPipeline else { return }
+                    isRunningSelectedSessionValidationPipeline = true
+                    Task {
+                        let report = await appState.runSelectedSessionValidationPipeline()
+                        await MainActor.run {
+                            selectedSessionValidationPipelineReport = report
+                            isRunningSelectedSessionValidationPipeline = false
+                        }
+                    }
+                }
+                .disabled(isRunningSelectedSessionValidationPipeline)
+                .font(.system(size: 14, weight: .semibold))
+                if let selectedSessionValidationPipelineReport {
+                    diagnosticRow("Pipeline Result", selectedSessionValidationPipelineReport.state.rawValue)
+                    diagnosticRow("Pipeline Final Blocker", compactValue(selectedSessionValidationPipelineReport.finalBlocker ?? "none"))
+                    diagnosticRow("Pipeline Next Action", selectedSessionValidationPipelineReport.recommendedNextAction)
+                    NavigationLink {
+                        DebugSessionSnapshotUploadTextView(
+                            snapshotText: selectedSessionValidationPipelineReport.reportText,
+                            title: "Validation Pipeline",
+                            footerText: "Copies the selected-session validation pipeline report as plain text. It is diagnostic-only and does not include raw session.json, local paths, signed URLs, auth material, storage object paths, or media payloads."
+                        )
+                    } label: {
+                        Text("View Copyable Validation Pipeline Report")
+                            .font(.system(size: 14, weight: .semibold))
+                    }
+                }
+            } else {
+                diagnosticRow("QA Controls", "blocked")
+                diagnosticRow("QA Controls Blocker", qaControlsPresentation.blocker ?? "selected_session_required")
+                diagnosticRow("QA Target Reason", compactValue(qaControlsPresentation.targetResolutionReason))
+                if let selectedPropertyID = qaControlsPresentation.selectedPropertyID {
+                    diagnosticRow("QA Selected Property", selectedPropertyID.uuidString)
                 }
             }
             Button(isReplayingFlaggedObservationShadowWrites ? "Replaying..." : AppState.localHealthFlaggedObservationReplayActionTitle) {

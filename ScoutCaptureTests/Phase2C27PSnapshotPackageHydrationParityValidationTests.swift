@@ -1413,6 +1413,49 @@ final class Phase2C27PSnapshotPackageHydrationParityValidationTests: XCTestCase 
         XCTAssertEqual(diagnostics.runtimeSelectedSessionQAAuthSessionID, fixture.session.id)
     }
 
+    func testSelectedSessionQAPresentationStateBlocksWhenNoSelectedPropertyOrSession() throws {
+        let fixture = try makePackageFixture()
+        defer { tearDownFixture(fixture) }
+        fixture.appState.selectedPropertyID = nil
+        fixture.appState.currentSession = nil
+
+        let presentation = fixture.appState.localHealthSelectedSessionQAControlsPresentationState
+
+        XCTAssertFalse(presentation.controlsMounted)
+        XCTAssertEqual(presentation.blocker, "selected_session_required")
+        XCTAssertNil(presentation.selectedPropertyID)
+        XCTAssertNil(presentation.selectedSessionID)
+        XCTAssertEqual(presentation.targetResolutionReason, "no property context")
+    }
+
+    func testSelectedSessionQAPresentationStateBlocksWhenSelectedPropertyHasNoSession() throws {
+        let fixture = try makePackageFixture()
+        defer { tearDownFixture(fixture) }
+        fixture.appState.selectedPropertyID = fixture.property.id
+        fixture.appState.currentSession = nil
+
+        let presentation = fixture.appState.localHealthSelectedSessionQAControlsPresentationState
+
+        XCTAssertFalse(presentation.controlsMounted)
+        XCTAssertEqual(presentation.blocker, "selected_session_required")
+        XCTAssertEqual(presentation.selectedPropertyID, fixture.property.id)
+        XCTAssertNil(presentation.selectedSessionID)
+        XCTAssertTrue(presentation.targetResolutionReason.contains("no local session"))
+    }
+
+    func testSelectedSessionQAPresentationStateAllowsControlsForValidSelectedSession() throws {
+        let fixture = try makePackageFixture()
+        defer { tearDownFixture(fixture) }
+
+        let presentation = fixture.appState.localHealthSelectedSessionQAControlsPresentationState
+
+        XCTAssertTrue(presentation.controlsMounted)
+        XCTAssertNil(presentation.blocker)
+        XCTAssertEqual(presentation.selectedPropertyID, fixture.property.id)
+        XCTAssertEqual(presentation.selectedSessionID, fixture.session.id)
+        XCTAssertEqual(presentation.targetResolutionReason, "active session selected")
+    }
+
     func testRuntimeSelectedSessionQAAuthorizationRejectsMissingScopeExpiresAndInvalidatesOnSelectionChange() throws {
         let fixture = try makePackageFixture()
         defer { tearDownFixture(fixture) }

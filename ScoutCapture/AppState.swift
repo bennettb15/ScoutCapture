@@ -3113,6 +3113,14 @@ final class AppState: ObservableObject {
         let noBehaviorChangedText: String
     }
 
+    struct LocalHealthSelectedSessionQAControlsPresentationState: Equatable {
+        let controlsMounted: Bool
+        let blocker: String?
+        let selectedPropertyID: UUID?
+        let selectedSessionID: UUID?
+        let targetResolutionReason: String
+    }
+
     struct SelectedSessionValidationPipelineAuthorizationContext: Equatable {
         let orgID: UUID
         let propertyID: UUID
@@ -6646,6 +6654,26 @@ final class AppState: ObservableObject {
 
     var manualSessionSnapshotUploadTarget: ManualSessionSnapshotUploadTarget? {
         manualSessionSnapshotUploadTargetResolution.target
+    }
+
+    var localHealthSelectedSessionQAControlsPresentationState: LocalHealthSelectedSessionQAControlsPresentationState {
+        let resolution = manualSessionSnapshotUploadTargetResolution
+        guard let target = resolution.target else {
+            return LocalHealthSelectedSessionQAControlsPresentationState(
+                controlsMounted: false,
+                blocker: "selected_session_required",
+                selectedPropertyID: resolution.selectedPropertyID,
+                selectedSessionID: nil,
+                targetResolutionReason: resolution.reason
+            )
+        }
+        return LocalHealthSelectedSessionQAControlsPresentationState(
+            controlsMounted: true,
+            blocker: nil,
+            selectedPropertyID: target.propertyID,
+            selectedSessionID: target.sessionID,
+            targetResolutionReason: resolution.reason
+        )
     }
 
     var manualSessionSnapshotUploadTargetResolution: ManualSessionSnapshotUploadTargetResolution {
