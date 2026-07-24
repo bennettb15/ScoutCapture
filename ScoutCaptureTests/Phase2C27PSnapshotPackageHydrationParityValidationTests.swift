@@ -43,6 +43,14 @@ final class Phase2C27PSnapshotPackageHydrationParityValidationTests: XCTestCase 
         let validation: AppState.ProductionSingleSessionFullyRestoredPackageRollbackValidation
     }
 
+    func testLocalDiagnosticsSessionSnapshotUploadPresentationRouteIsStableHashable() {
+        let route = DebugLocalDiagnosticsPresentationRoute.sessionSnapshotUpload
+
+        XCTAssertEqual(route, .sessionSnapshotUpload)
+        XCTAssertEqual(route.id, .sessionSnapshotUpload)
+        XCTAssertEqual(Set([route, .sessionSnapshotUpload]).count, 1)
+    }
+
     private func makeTempStorageRoot() throws -> URL {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("ScoutCapture-2C27P-\(UUID().uuidString)", isDirectory: true)

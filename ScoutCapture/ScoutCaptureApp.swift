@@ -6799,6 +6799,12 @@ private enum DebugDivergenceAuditFilter: String, CaseIterable, Identifiable {
     var id: String { rawValue }
 }
 
+enum DebugLocalDiagnosticsPresentationRoute: Hashable, Identifiable {
+    case sessionSnapshotUpload
+
+    var id: Self { self }
+}
+
 private struct DebugLocalDiagnosticsView: View {
     @EnvironmentObject private var appState: AppState
     @Environment(\.dismiss) private var dismiss
@@ -6824,9 +6830,53 @@ private struct DebugLocalDiagnosticsView: View {
     @State private var sessionSnapshotPreviewSnapshot: DebugSessionSnapshotPreviewSnapshot?
     @State private var exportSealPreflightSnapshot: DebugExportSealPreflightSnapshot?
     @State private var enforcementPolicyMatrixSnapshot: DebugEnforcementPolicyMatrixSnapshot?
+    @State private var presentedRoute: DebugLocalDiagnosticsPresentationRoute?
+    @State private var isStageSnapshotUploadDetailsExpanded: Bool = false
+    @State private var isStageUploadingSessionSnapshot: Bool = false
+    @State private var isStageRunningPackageValidation: Bool = false
+    @State private var stagePackageValidationReport: AppState.LocalHealthSessionSnapshotPackageValidationReport?
+    @State private var isStageAuthorizingSelectedSessionQA: Bool = false
+    @State private var isStageClearingSelectedSessionQA: Bool = false
+    @State private var stageSelectedSessionQAAuthorizationResult: AppState.RuntimeSelectedSessionQAAuthorizationStatus?
+    @State private var isStageBuildingCanonicalCandidateOverlay: Bool = false
+    @State private var stageCanonicalCandidateOverlayBuildResult: AppState.CanonicalCandidateOverlayBuildResult?
+    @State private var isStageShowingCanonicalCandidateActivationConfirmation: Bool = false
+    @State private var isStageActivatingCanonicalCandidate: Bool = false
+    @State private var isStageRollingBackCanonicalCandidate: Bool = false
+    @State private var stageCanonicalCandidateActivationResult: AppState.CanonicalCandidateActivationResult?
+    @State private var stageCanonicalCandidateRollbackResult: AppState.CanonicalCandidateActivationResult?
+    @State private var isStageRunningSelectedSessionValidationPipeline: Bool = false
+    @State private var stageSelectedSessionValidationPipelineReport: AppState.LocalHealthSelectedSessionValidationPipelineReport?
+    @State private var isStageReplayingSelectedSessionLifecycleShadowWrite: Bool = false
+    @State private var stageSelectedSessionLifecycleReplayResult: AppState.SelectedSessionLifecycleReplayActionResult?
+    @State private var isStageCheckingCanonicalReadDiagnostics: Bool = false
+    @State private var isStageReplayingFlaggedObservationShadowWrites: Bool = false
+    @State private var stageFlaggedObservationReplayActionResult: AppState.SelectedSessionFlaggedObservationReplayActionResult?
+    @State private var isStageRecordingOperatorApproval: Bool = false
+    @State private var isStageClearingOperatorApproval: Bool = false
+    @State private var stageOperatorApproval: AppState.ProductionCohortOperatorApprovalDiagnostics?
+    @State private var stageOperatorApprovalCheckedAt: Date?
+    @State private var stageOperatorApprovalClearReason: String?
+    @State private var stageTestSessionCreationMessage: String?
+    @State private var isStageRefreshingAuthPreflight: Bool = false
+    @State private var isStageRepairingLocalOrgDrift: Bool = false
+    @State private var isStageRunningLocalOrgDriftAudit: Bool = false
+    @State private var isStageRepairingConfirmedLocalOrgDrift: Bool = false
+    @State private var isStageCheckingSnapshotReadback: Bool = false
+    @State private var isStageCheckingSnapshotRestoreDiagnostics: Bool = false
+    @State private var isStageHydratingSnapshotMetadata: Bool = false
+    @State private var isStageShowingHydrationConfirmation: Bool = false
+    @State private var isStageRetrievingSnapshotMedia: Bool = false
+    @State private var isStageShowingMediaRetrievalConfirmation: Bool = false
+    @State private var isStageCheckingRecoveryCohort: Bool = false
 
     private var diagnostics: AppState.LocalDiagnosticsState {
         appState.localDiagnostics
+    }
+
+    private var stageSessionSnapshotEnvironmentFlagDetected: Bool {
+        ProcessInfo.processInfo.environment["session_snapshot_shadow_write_enabled"] != nil ||
+            ProcessInfo.processInfo.environment["SCOUTCAPTURE_SESSION_SNAPSHOT_SHADOW_WRITE_ENABLED"] != nil
     }
 
     var body: some View {
@@ -6883,15 +6933,21 @@ private struct DebugLocalDiagnosticsView: View {
                             value: sessionSnapshotPreviewSnapshot.map { "\($0.previewableSessions) previewable" } ?? "not inspected"
                         )
                     }
-                    NavigationLink {
-                        DebugSessionSnapshotUploadDiagnosticsView(appState: appState, diagnostics: diagnostics.sessionSnapshotUpload)
+                    Button {
+                        presentedRoute = .sessionSnapshotUpload
                     } label: {
-                        localHealthAreaLabel(
-                            "Session Snapshot Upload",
-                            subtitle: "Default-off shadow-write upload diagnostics",
-                            value: diagnostics.sessionSnapshotUpload.remoteAvailability
-                        )
+                        HStack(alignment: .center, spacing: 8) {
+                            localHealthAreaLabel(
+                                "Session Snapshot Upload",
+                                subtitle: "Default-off shadow-write upload diagnostics",
+                                value: diagnostics.sessionSnapshotUpload.remoteAvailability
+                            )
+                            Image(systemName: "chevron.right")
+                                .font(.system(size: 13, weight: .semibold))
+                                .foregroundStyle(.tertiary)
+                        }
                     }
+                    .buttonStyle(.plain)
                     NavigationLink {
                         exportSealPreflightPage
                     } label: {
@@ -6993,6 +7049,971 @@ private struct DebugLocalDiagnosticsView: View {
             Button("Cancel", role: .cancel) { }
         } message: {
             Text("Only local diagnostic counters and the last sanitized error will be reset. Queues, files, Supabase data, exports, and app records are not changed.")
+        }
+        .sheet(item: $presentedRoute) { route in
+            NavigationStack {
+                switch route {
+                case .sessionSnapshotUpload:
+                    sessionSnapshotUploadTargetSummaryStageView
+                        .toolbar {
+                            ToolbarItem(placement: .topBarTrailing) {
+                                Button("Done") {
+                                    presentedRoute = nil
+                                }
+                            }
+                        }
+                    }
+            }
+        }
+    }
+
+    private var sessionSnapshotUploadTargetSummaryStageView: some View {
+        let uploadTarget = appState.manualSessionSnapshotUploadTarget
+        let uploadTargetResolution = appState.manualSessionSnapshotUploadTargetResolution
+        let uploadAvailability = appState.manualSessionSnapshotUploadAvailability
+        let snapshotDiagnostics = appState.localDiagnostics.sessionSnapshotUpload
+        let qaControlsPresentation = appState.localHealthSelectedSessionQAControlsPresentationState
+        let testSessionCreationAvailability = appState.manualSessionSnapshotTestSessionCreationAvailability
+        let stagePackageEvidenceReady = stagePackageValidationReport?.packageParity.state == .testOnlyPackageParityPassed &&
+            stagePackageValidationReport?.packageParity.blockers.isEmpty == true &&
+            stagePackageValidationReport?.fullyRestoredRollback.state == .testOnlyFullyRestoredPackageRollbackPassed &&
+            stagePackageValidationReport?.fullyRestoredRollback.blockers.isEmpty == true
+        let pipelineControlsAvailable = qaControlsPresentation.controlsMounted
+        let lifecycleReplayTargetAvailable = uploadTarget != nil
+        let lifecycleReplayButtonDisabled = !lifecycleReplayTargetAvailable || isStageReplayingSelectedSessionLifecycleShadowWrite
+        let lifecycleReplayGuardPreview = lifecycleReplayTargetAvailable ? "package_validation_evidence_required_until_validated" : "selected_session_snapshot_target_required"
+        let storedPipelineReportText = snapshotDiagnostics.lastSelectedSessionValidationPipelineReportText
+        let actionPipelineReportText = stageSelectedSessionValidationPipelineReport?.reportText
+        let authPreflightCheckedDisplay = formattedRunDate(snapshotDiagnostics.lastAuthPreflightAt)
+        let authPreflightAppUserDisplay = snapshotDiagnostics.lastAuthPreflightAppUserID ?? "none"
+        let authPreflightClientUserDisplay = snapshotDiagnostics.lastAuthPreflightClientUserID ?? "none"
+        let authPreflightUsersMatchDisplay = optionalBoolText(snapshotDiagnostics.lastAuthPreflightUsersMatch)
+        let authPreflightPayloadOrgDisplay = snapshotDiagnostics.lastAuthPreflightPayloadOrgID?.uuidString ?? "none"
+        let authPreflightPayloadPropertyDisplay = snapshotDiagnostics.lastAuthPreflightPayloadPropertyID?.uuidString ?? "none"
+        let authPreflightPayloadSessionDisplay = snapshotDiagnostics.lastAuthPreflightPayloadSessionID?.uuidString ?? "none"
+        let authPreflightRows = [
+            StageDiagnosticDisplayRow("Remote Property", optionalBoolText(snapshotDiagnostics.lastAuthPreflightRemotePropertyExists)),
+            StageDiagnosticDisplayRow("Remote Session", optionalBoolText(snapshotDiagnostics.lastAuthPreflightRemoteSessionExists)),
+            StageDiagnosticDisplayRow("Remote Property Org", snapshotDiagnostics.lastAuthPreflightRemotePropertyOrgID?.uuidString ?? "none"),
+            StageDiagnosticDisplayRow("Remote Session Org", snapshotDiagnostics.lastAuthPreflightRemoteSessionOrgID?.uuidString ?? "none"),
+            StageDiagnosticDisplayRow("Remote Session Property", optionalBoolText(snapshotDiagnostics.lastAuthPreflightRemoteSessionPropertyMatches)),
+            StageDiagnosticDisplayRow("Remote Org Match", optionalBoolText(snapshotDiagnostics.lastAuthPreflightRemoteOrgIDsMatch)),
+            StageDiagnosticDisplayRow("Preflight Ready", optionalBoolText(snapshotDiagnostics.lastAuthPreflightReady))
+        ]
+        let authPreflightFailure = AppState.diagnosticsPreviewText(snapshotDiagnostics.lastAuthPreflightFailureMessage, maxLength: 160)
+        let hydrationPolicy = appState.sessionSnapshotHydrationPolicyDiagnostics
+        let hydrationConfirmation = AppState.makeSessionSnapshotHydrationConfirmation(
+            diagnostics: snapshotDiagnostics,
+            policy: hydrationPolicy
+        )
+        let mediaRetrievalConfirmation = AppState.makeSessionSnapshotMediaRetrievalConfirmation(
+            diagnostics: snapshotDiagnostics,
+            targetClassification: appState.supabaseConfiguration.targetClassification
+        )
+        let sessionSnapshotUploadRows = [
+            StageDiagnosticDisplayRow("Flag Enabled", appState.backendFeatureFlags.sessionSnapshotShadowWriteEnabled ? "true" : "false"),
+            StageDiagnosticDisplayRow("Remote Availability", snapshotDiagnostics.remoteAvailability),
+            StageDiagnosticDisplayRow("Attempts", String(snapshotDiagnostics.attemptedCount)),
+            StageDiagnosticDisplayRow("Successes", String(snapshotDiagnostics.successCount)),
+            StageDiagnosticDisplayRow("Failures", String(snapshotDiagnostics.failureCount)),
+            StageDiagnosticDisplayRow("Orphan Risk", String(snapshotDiagnostics.orphanRiskCount)),
+            StageDiagnosticDisplayRow("Final Upload Outcome", snapshotDiagnostics.lastUploadOutcome),
+            StageDiagnosticDisplayRow("Last Attempt", formattedRunDate(snapshotDiagnostics.lastAttemptAt)),
+            StageDiagnosticDisplayRow("Last Success", formattedRunDate(snapshotDiagnostics.lastSuccessAt)),
+            StageDiagnosticDisplayRow("Last Failure", formattedRunDate(snapshotDiagnostics.lastFailureAt))
+        ]
+        let sessionSnapshotUploadError = AppState.diagnosticsPreviewText(snapshotDiagnostics.lastUploadErrorMessage, maxLength: 160)
+        let lastSanitizedAttemptRows = [
+            StageDiagnosticDisplayRow("Snapshot ID", snapshotDiagnostics.lastSnapshotID?.uuidString ?? "none"),
+            StageDiagnosticDisplayRow("Property ID", snapshotDiagnostics.lastPropertyID?.uuidString ?? "none"),
+            StageDiagnosticDisplayRow("Session ID", snapshotDiagnostics.lastSessionID?.uuidString ?? "none"),
+            StageDiagnosticDisplayRow("Snapshot Kind", snapshotDiagnostics.lastKind ?? "none"),
+            StageDiagnosticDisplayRow("Trigger", snapshotDiagnostics.lastTrigger ?? "none"),
+            StageDiagnosticDisplayRow("Generated Payload Path", AppState.diagnosticsPreviewText(snapshotDiagnostics.lastUploadPath) == nil ? "false" : "true"),
+            StageDiagnosticDisplayRow("Storage Upload Completed", snapshotDiagnostics.lastStorageUploadCompleted ? "true" : "false"),
+            StageDiagnosticDisplayRow("Row Insert Completed", snapshotDiagnostics.lastRowInsertCompleted ? "true" : "false")
+        ]
+        let authRepairRows = [
+            StageDiagnosticDisplayRow("Repair Outcome", snapshotDiagnostics.lastLocalOrgRepairOutcome),
+            StageDiagnosticDisplayRow("Repair Previous Org", snapshotDiagnostics.lastLocalOrgRepairPreviousOrgID?.uuidString ?? "none"),
+            StageDiagnosticDisplayRow("Repair Canonical Org", snapshotDiagnostics.lastLocalOrgRepairCanonicalOrgID?.uuidString ?? "none")
+        ]
+        let authRepairMessage = AppState.diagnosticsPreviewText(snapshotDiagnostics.lastLocalOrgRepairMessage, maxLength: 160)
+        let localOrgDriftAuditRows = [
+            StageDiagnosticDisplayRow("Checked", formattedRunDate(snapshotDiagnostics.lastLocalOrgDriftAuditAt)),
+            StageDiagnosticDisplayRow("Properties Checked", String(snapshotDiagnostics.lastLocalOrgDriftAuditPropertiesChecked)),
+            StageDiagnosticDisplayRow("Sessions Checked", String(snapshotDiagnostics.lastLocalOrgDriftAuditSessionsChecked)),
+            StageDiagnosticDisplayRow("Property Mismatches", String(snapshotDiagnostics.lastLocalOrgDriftAuditPropertyMismatchCount)),
+            StageDiagnosticDisplayRow("Session Mismatches", String(snapshotDiagnostics.lastLocalOrgDriftAuditSessionMismatchCount)),
+            StageDiagnosticDisplayRow("Unable To Confirm", String(snapshotDiagnostics.lastLocalOrgDriftAuditUnableToConfirmCount))
+        ]
+        let localOrgDriftAuditSamples = snapshotDiagnostics.lastLocalOrgDriftAuditSamples.map {
+            AppState.diagnosticsPreviewText($0, maxLength: 180) ?? "sample_unavailable"
+        }
+        let localOrgDriftRepairRows = [
+            StageDiagnosticDisplayRow("Repair Checked", formattedRunDate(snapshotDiagnostics.lastLocalOrgDriftRepairAt)),
+            StageDiagnosticDisplayRow("Repair Attempts", String(snapshotDiagnostics.lastLocalOrgDriftRepairAttemptedCount)),
+            StageDiagnosticDisplayRow("Repaired Properties", String(snapshotDiagnostics.lastLocalOrgDriftRepairPropertyCount)),
+            StageDiagnosticDisplayRow("Repaired Sessions", String(snapshotDiagnostics.lastLocalOrgDriftRepairSessionCount)),
+            StageDiagnosticDisplayRow("Repair Skipped", String(snapshotDiagnostics.lastLocalOrgDriftRepairSkippedCount)),
+            StageDiagnosticDisplayRow("Repair Failures", String(snapshotDiagnostics.lastLocalOrgDriftRepairFailureCount))
+        ]
+        let localOrgDriftRepairSamples = snapshotDiagnostics.lastLocalOrgDriftRepairSamples.map {
+            AppState.diagnosticsPreviewText($0, maxLength: 180) ?? "sample_unavailable"
+        }
+        let remoteReadbackRows = [
+            StageDiagnosticDisplayRow("Status", snapshotDiagnostics.lastReadbackStatus),
+            StageDiagnosticDisplayRow("Last Checked", formattedRunDate(snapshotDiagnostics.lastReadbackAt)),
+            StageDiagnosticDisplayRow("Snapshot ID", snapshotDiagnostics.lastReadbackSnapshotID?.uuidString ?? "none"),
+            StageDiagnosticDisplayRow("Row Found", snapshotDiagnostics.lastReadbackRowFound ? "true" : "false"),
+            StageDiagnosticDisplayRow("Payload Readable", snapshotDiagnostics.lastReadbackPayloadReadable ? "true" : "false"),
+            StageDiagnosticDisplayRow("Checksum Verified", snapshotDiagnostics.lastReadbackChecksumVerified ? "true" : "false"),
+            StageDiagnosticDisplayRow("Row/Object Consistent", snapshotDiagnostics.lastReadbackRowObjectConsistent ? "true" : "false"),
+            StageDiagnosticDisplayRow("Payload Byte Size", snapshotDiagnostics.lastReadbackPayloadByteSize.map(String.init) ?? "none"),
+            StageDiagnosticDisplayRow("Snapshot Created", formattedRunDate(snapshotDiagnostics.lastReadbackSnapshotCreatedAt))
+        ]
+        let remoteReadbackFailure = AppState.diagnosticsPreviewText(snapshotDiagnostics.lastReadbackFailureMessage, maxLength: 160)
+        let restoreDiagnosticsRows = [
+            StageDiagnosticDisplayRow("Result", snapshotDiagnostics.lastRestoreDiagnosticsResult),
+            StageDiagnosticDisplayRow("Last Checked", formattedRunDate(snapshotDiagnostics.lastRestoreDiagnosticsAt)),
+            StageDiagnosticDisplayRow("Property ID", snapshotDiagnostics.lastRestoreDiagnosticsPropertyID?.uuidString ?? "none"),
+            StageDiagnosticDisplayRow("Session ID", snapshotDiagnostics.lastRestoreDiagnosticsSessionID?.uuidString ?? "none"),
+            StageDiagnosticDisplayRow("Snapshot ID", snapshotDiagnostics.lastRestoreDiagnosticsSnapshotID?.uuidString ?? "none"),
+            StageDiagnosticDisplayRow("Row Found", snapshotDiagnostics.lastRestoreDiagnosticsRowFound ? "true" : "false"),
+            StageDiagnosticDisplayRow("Object Readable", snapshotDiagnostics.lastRestoreDiagnosticsObjectReadable ? "true" : "false"),
+            StageDiagnosticDisplayRow("Checksum Verified", snapshotDiagnostics.lastRestoreDiagnosticsChecksumVerified ? "true" : "false"),
+            StageDiagnosticDisplayRow("Byte Size Matches", snapshotDiagnostics.lastRestoreDiagnosticsByteSizeMatches ? "true" : "false"),
+            StageDiagnosticDisplayRow("Row/Object Verified", snapshotDiagnostics.lastRestoreDiagnosticsRowObjectVerified ? "true" : "false"),
+            StageDiagnosticDisplayRow("Parent Remote Verified", snapshotDiagnostics.lastRestoreDiagnosticsParentRemoteVerified ? "true" : "false"),
+            StageDiagnosticDisplayRow("Snapshot Schema", snapshotDiagnostics.lastRestoreDiagnosticsSnapshotSchemaVersion.map(String.init) ?? "none"),
+            StageDiagnosticDisplayRow("Snapshot Created", formattedRunDate(snapshotDiagnostics.lastRestoreDiagnosticsSnapshotCreatedAt)),
+            StageDiagnosticDisplayRow("Snapshot Generated", formattedRunDate(snapshotDiagnostics.lastRestoreDiagnosticsSnapshotGeneratedAt)),
+            StageDiagnosticDisplayRow("Local Known State", formattedRunDate(snapshotDiagnostics.lastRestoreDiagnosticsLocalKnownStateAt)),
+            StageDiagnosticDisplayRow("Local Known Source", snapshotDiagnostics.lastRestoreDiagnosticsLocalKnownStateSource ?? "none"),
+            StageDiagnosticDisplayRow("Freshness", snapshotDiagnostics.lastRestoreDiagnosticsFreshness),
+            StageDiagnosticDisplayRow("Local Session Exists", snapshotDiagnostics.lastRestoreDiagnosticsLocalSessionExists ? "true" : "false"),
+            StageDiagnosticDisplayRow("Local Session Status", snapshotDiagnostics.lastRestoreDiagnosticsLocalSessionStatus ?? "none"),
+            StageDiagnosticDisplayRow("Local Shots", snapshotDiagnostics.lastRestoreDiagnosticsLocalShotCount.map(String.init) ?? "none"),
+            StageDiagnosticDisplayRow("Local Issues", snapshotDiagnostics.lastRestoreDiagnosticsLocalIssueCount.map(String.init) ?? "none"),
+            StageDiagnosticDisplayRow("Local Guided", snapshotDiagnostics.lastRestoreDiagnosticsLocalGuidedCount.map(String.init) ?? "none"),
+            StageDiagnosticDisplayRow("Snapshot Shots", snapshotDiagnostics.lastRestoreDiagnosticsSnapshotShotCount.map(String.init) ?? "none"),
+            StageDiagnosticDisplayRow("Snapshot Issues", snapshotDiagnostics.lastRestoreDiagnosticsSnapshotIssueCount.map(String.init) ?? "none"),
+            StageDiagnosticDisplayRow("Snapshot Guided", snapshotDiagnostics.lastRestoreDiagnosticsSnapshotGuidedCount.map(String.init) ?? "none"),
+            StageDiagnosticDisplayRow("Media Manifest Count", snapshotDiagnostics.lastRestoreDiagnosticsSnapshotMediaManifestCount.map(String.init) ?? "none")
+        ]
+        let restoreDiagnosticsFailure = AppState.diagnosticsPreviewText(snapshotDiagnostics.lastRestoreDiagnosticsFailureReason, maxLength: 160)
+        let metadataHydrationRows = [
+            StageDiagnosticDisplayRow("Hydration Allowed", snapshotDiagnostics.lastHydrationAllowed ? "true" : "false"),
+            StageDiagnosticDisplayRow("Hydration Blocked", snapshotDiagnostics.lastHydrationBlockedReason ?? "none"),
+            StageDiagnosticDisplayRow("Hydration Source", snapshotDiagnostics.lastHydrationSourceSnapshotID?.uuidString ?? "none"),
+            StageDiagnosticDisplayRow("Hydrated At", formattedRunDate(snapshotDiagnostics.lastHydrationAt)),
+            StageDiagnosticDisplayRow("Hydrated Session", snapshotDiagnostics.lastHydrationSessionID?.uuidString ?? "none"),
+            StageDiagnosticDisplayRow("Hydrated Shots", String(snapshotDiagnostics.lastHydrationShotCount)),
+            StageDiagnosticDisplayRow("Hydrated Issues", String(snapshotDiagnostics.lastHydrationIssueCount)),
+            StageDiagnosticDisplayRow("Hydrated Guided", String(snapshotDiagnostics.lastHydrationGuidedCount)),
+            StageDiagnosticDisplayRow("Production Hydration Allowed", hydrationPolicy.productionHydrationAllowed ? "true" : "false"),
+            StageDiagnosticDisplayRow("Hydration Mode", hydrationPolicy.hydrationMode),
+            StageDiagnosticDisplayRow("Hydration Scope", hydrationPolicy.hydrationScope),
+            StageDiagnosticDisplayRow("Production Hydration Blocked Reason", hydrationPolicy.productionHydrationBlockedReason ?? "none"),
+            StageDiagnosticDisplayRow("Hydration Confirmation Required", hydrationConfirmation.confirmationRequired ? "true" : "false"),
+            StageDiagnosticDisplayRow("Hydration Action Available", hydrationConfirmation.canHydrate ? "true" : "false"),
+            StageDiagnosticDisplayRow("Hydration Action Blocked Reason", hydrationConfirmation.blockedReason ?? "none")
+        ]
+        let mediaRetrievalRows = [
+            StageDiagnosticDisplayRow("Media Retrieval Allowed", mediaRetrievalConfirmation.canRetrieve ? "true" : "false"),
+            StageDiagnosticDisplayRow("Media Retrieval Blocked", mediaRetrievalConfirmation.blockedReason ?? "none"),
+            StageDiagnosticDisplayRow("Media Retrieval Attempted", String(snapshotDiagnostics.lastMediaRetrievalAttemptedCount)),
+            StageDiagnosticDisplayRow("Media Retrieval Downloaded", String(snapshotDiagnostics.lastMediaRetrievalDownloadedCount)),
+            StageDiagnosticDisplayRow("Media Retrieval Checksums", String(snapshotDiagnostics.lastMediaRetrievalChecksumVerifiedCount)),
+            StageDiagnosticDisplayRow("Media Retrieval Existing", String(snapshotDiagnostics.lastMediaRetrievalSkippedExistingCount)),
+            StageDiagnosticDisplayRow("Media Retrieval Failed", String(snapshotDiagnostics.lastMediaRetrievalFailedCount)),
+            StageDiagnosticDisplayRow("Recovered Local Paths", String(snapshotDiagnostics.lastMediaRetrievalRecoveredLocalPathCount))
+        ]
+        let recoveryCohortRows = [
+            StageDiagnosticDisplayRow("Cohort", snapshotDiagnostics.lastRecoveryCohortCategory),
+            StageDiagnosticDisplayRow("Readiness", snapshotDiagnostics.lastRecoveryReadiness),
+            StageDiagnosticDisplayRow("Risk", snapshotDiagnostics.lastRecoveryRiskLevel),
+            StageDiagnosticDisplayRow("Snapshot Age Seconds", snapshotDiagnostics.lastRecoverySnapshotFreshnessAgeSeconds.map { String(Int($0)) } ?? "none"),
+            StageDiagnosticDisplayRow("Hydration Eligibility", snapshotDiagnostics.lastRecoveryHydrationEligibilityReason),
+            StageDiagnosticDisplayRow("Latest Snapshot Covered", snapshotDiagnostics.lastRecoveryLatestSnapshotCovered ? "true" : "false"),
+            StageDiagnosticDisplayRow("Restore Result", snapshotDiagnostics.lastRecoveryRestoreDiagnosticsResult)
+        ]
+        let canonicalReadDiagnosticsActionRows = [
+            StageDiagnosticDisplayRow("Diagnostics Result", snapshotDiagnostics.lastCanonicalReadDiagnosticsResult),
+            StageDiagnosticDisplayRow("Diagnostics Checked", formattedDate(snapshotDiagnostics.lastCanonicalReadDiagnosticsAt)),
+            StageDiagnosticDisplayRow("Diagnostics Blocker", snapshotDiagnostics.lastCanonicalReadDiagnosticsBlockedReason ?? "none")
+        ]
+        let flaggedObservationReplayRows: [StageDiagnosticDisplayRow]
+        if let stageFlaggedObservationReplayActionResult {
+            let replay = stageFlaggedObservationReplayActionResult.replayResult
+            flaggedObservationReplayRows = [
+                StageDiagnosticDisplayRow("Replay Action", stageFlaggedObservationReplayActionResult.allowed ? "allowed" : "blocked"),
+                StageDiagnosticDisplayRow("Replay Checked", formattedDate(stageFlaggedObservationReplayActionResult.checkedAt)),
+                StageDiagnosticDisplayRow("Replay Blocked", stageFlaggedObservationReplayActionResult.blockedReason ?? "none"),
+                StageDiagnosticDisplayRow("Replay Scope", "property \(stageFlaggedObservationReplayActionResult.propertyID?.uuidString ?? "none"), session \(stageFlaggedObservationReplayActionResult.sessionID?.uuidString ?? "none")"),
+                StageDiagnosticDisplayRow("Replay Planned", replay.map { String($0.attemptedCount) } ?? "not run"),
+                StageDiagnosticDisplayRow("Replay Executed", replay.map { String($0.upsertedCount) } ?? "not run"),
+                StageDiagnosticDisplayRow("Replay Skipped", replay.map { String($0.skippedCount) } ?? "not run"),
+                StageDiagnosticDisplayRow("Replay Remote Newer", replay.map { String($0.remoteNewerConflictCount) } ?? "not run"),
+                StageDiagnosticDisplayRow("Replay Failed", replay.map { String($0.failedCount) } ?? "not run"),
+                StageDiagnosticDisplayRow("Replay Result", AppState.diagnosticsPreviewText(replay?.message, maxLength: 160) ?? "not run"),
+                StageDiagnosticDisplayRow("Post-Replay Diagnostics", stageFlaggedObservationReplayActionResult.diagnosticsAfterReplay == nil ? "not run" : "refreshed"),
+                StageDiagnosticDisplayRow("Post-Replay Result", stageFlaggedObservationReplayActionResult.diagnosticsAfterReplay?.result.rawValue ?? "not run")
+            ]
+        } else {
+            flaggedObservationReplayRows = [
+                StageDiagnosticDisplayRow("Replay Action", "not run"),
+                StageDiagnosticDisplayRow("Replay Blocked", "none"),
+                StageDiagnosticDisplayRow("Replay Planned", "not run"),
+                StageDiagnosticDisplayRow("Replay Executed", "not run"),
+                StageDiagnosticDisplayRow("Replay Skipped", "not run"),
+                StageDiagnosticDisplayRow("Replay Remote Newer", "not run"),
+                StageDiagnosticDisplayRow("Post-Replay Diagnostics", "not run")
+            ]
+        }
+        let operatorApprovalRows = [
+            StageDiagnosticDisplayRow("Approval Result", stageOperatorApproval?.state.rawValue ?? "not recorded"),
+            StageDiagnosticDisplayRow("Approval Eligible", stageOperatorApproval.map { $0.approvalEligible ? "true" : "false" } ?? "not recorded"),
+            StageDiagnosticDisplayRow("Approval Checked", formattedDate(stageOperatorApprovalCheckedAt)),
+            StageDiagnosticDisplayRow("Approved Scope", stageOperatorApproval?.approvedScope.description ?? "none"),
+            StageDiagnosticDisplayRow("Approved At", formattedDate(stageOperatorApproval?.approvalTimestamp)),
+            StageDiagnosticDisplayRow("Approval Expires", formattedDate(stageOperatorApproval?.expirationTimestamp)),
+            StageDiagnosticDisplayRow("Approval Freshness", stageOperatorApproval.map { $0.staleApproval ? "stale" : "fresh" } ?? "not recorded"),
+            StageDiagnosticDisplayRow("Approval Blocker", stageOperatorApproval?.approvalBlockedReason ?? "none"),
+            StageDiagnosticDisplayRow("Next Action", stageOperatorApproval?.nextRecommendedAction ?? "none"),
+            StageDiagnosticDisplayRow("Clear Result", stageOperatorApprovalClearReason ?? "not run")
+        ]
+        let packageValidationReportAvailable = stagePackageValidationReport?.combinedReportText.isEmpty == false
+        let reportDisplaySource: String
+        let reportDisplayText: String?
+        if let actionPipelineReportText, !actionPipelineReportText.isEmpty {
+            reportDisplaySource = "action_result"
+            reportDisplayText = actionPipelineReportText
+        } else if !storedPipelineReportText.isEmpty {
+            reportDisplaySource = "stored_diagnostics"
+            reportDisplayText = storedPipelineReportText
+        } else {
+            reportDisplaySource = "none"
+            reportDisplayText = nil
+        }
+
+        return List {
+            Section("Supabase Target") {
+                diagnosticRow("URL", appState.supabaseConfiguration.sanitizedURLDisplay)
+                diagnosticRow("Target", appState.supabaseConfiguration.targetClassification.rawValue)
+                diagnosticRow("Override Active", appState.supabaseConfiguration.isOverrideActive ? "true" : "false")
+                diagnosticRow("Config Source", appState.supabaseConfiguration.source.rawValue)
+                diagnosticRow("Anon Key", appState.supabaseConfiguration.redactedAnonKeyDisplay)
+                diagnosticRow("Snapshot Flag Env", stageSessionSnapshotEnvironmentFlagDetected ? "detected" : "not detected")
+                diagnosticRow("Production Validation Allowed", appState.supabaseConfiguration.productionSnapshotValidationAllowed ? "true" : "false")
+                diagnosticRow("Manual Only", appState.supabaseConfiguration.isProductionSnapshotValidationManualOnly ? "true" : "false")
+                diagnosticRow("Snapshot Override Allowed", appState.supabaseConfiguration.isSessionSnapshotShadowWriteOverrideAllowed ? "true" : "false")
+                diagnosticRow("Production Hydration Gate", appState.supabaseConfiguration.productionSnapshotHydrationAllowed ? "true" : "false")
+            }
+
+            StageSessionSnapshotUploadSummarySection(
+                rows: sessionSnapshotUploadRows,
+                uploadError: sessionSnapshotUploadError,
+                reportText: {
+                    AppState.sessionSnapshotUploadReportText(snapshotDiagnostics)
+                }
+            )
+
+            Section("Snapshot Upload Details") {
+                DisclosureGroup(isExpanded: $isStageSnapshotUploadDetailsExpanded) {
+                    Text("Automatic upload guard display only. Expanding this disclosure does not upload, validate, query Supabase, load packages, repair local state, hydrate metadata, retrieve media, or run recovery checks.")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(.secondary)
+                    diagnosticRow("Auto Flag Enabled", appState.backendFeatureFlags.sessionSnapshotAutoUploadEnabled ? "true" : "false")
+                    diagnosticRow("Kill Switch Active", appState.backendFeatureFlags.sessionSnapshotAutoUploadKillSwitch ? "true" : "false")
+                    diagnosticRow("Allowlist Match", snapshotDiagnostics.autoUploadAllowlistMatch ? "true" : "false")
+                    diagnosticRow("Skipped Reason", snapshotDiagnostics.autoUploadSkippedReason ?? "none")
+                    diagnosticRow("Trigger Source", snapshotDiagnostics.autoUploadTriggerSource ?? "none")
+                    diagnosticRow("Last Auto Attempt", formattedRunDate(snapshotDiagnostics.lastAutoAttemptAt))
+                    diagnosticRow("Last Auto Success", formattedRunDate(snapshotDiagnostics.lastAutoSuccessAt))
+                    diagnosticRow("Last Auto Failure", formattedRunDate(snapshotDiagnostics.lastAutoFailureAt))
+                    diagnosticRow("Last Auto Outcome", snapshotDiagnostics.lastAutoUploadOutcome)
+
+                    StageTestSessionCreationSummaryView(
+                        isAvailable: testSessionCreationAvailability.isAvailable,
+                        reason: testSessionCreationAvailability.reason,
+                        message: stageTestSessionCreationMessage,
+                        onCreate: {
+                            let result = appState.createManualSessionSnapshotTestSessionForLocalDev()
+                            if let sessionID = result.sessionID {
+                                stageTestSessionCreationMessage = "\(result.message): \(sessionID.uuidString)"
+                            } else {
+                                stageTestSessionCreationMessage = result.message
+                            }
+                        }
+                    )
+
+                    StageAuthPreflightSummaryView(
+                        checked: authPreflightCheckedDisplay,
+                        appUser: authPreflightAppUserDisplay,
+                        clientUser: authPreflightClientUserDisplay,
+                        usersMatch: authPreflightUsersMatchDisplay,
+                        payloadOrg: authPreflightPayloadOrgDisplay,
+                        payloadProperty: authPreflightPayloadPropertyDisplay,
+                        payloadSession: authPreflightPayloadSessionDisplay,
+                        rows: authPreflightRows,
+                        failure: authPreflightFailure,
+                        buttonTitle: isStageRefreshingAuthPreflight ? "Checking..." : "Refresh Auth Preflight",
+                        isButtonDisabled: isStageRefreshingAuthPreflight || uploadTarget == nil,
+                        onRefresh: {
+                            guard !isStageRefreshingAuthPreflight else { return }
+                            isStageRefreshingAuthPreflight = true
+                            Task {
+                                _ = await appState.refreshManualSessionSnapshotAuthPreflight()
+                                await MainActor.run {
+                                    isStageRefreshingAuthPreflight = false
+                                }
+                            }
+                        }
+                    )
+                    StageAuthRepairSummaryView(
+                        rows: authRepairRows,
+                        repairMessage: authRepairMessage,
+                        buttonTitle: isStageRepairingLocalOrgDrift ? "Repairing..." : "Repair Selected Local Org Drift",
+                        isButtonDisabled: isStageRepairingLocalOrgDrift || uploadTarget == nil,
+                        onRepair: {
+                            guard !isStageRepairingLocalOrgDrift else { return }
+                            isStageRepairingLocalOrgDrift = true
+                            Task {
+                                _ = await appState.repairSelectedManualSessionSnapshotLocalOrgDrift()
+                                await MainActor.run {
+                                    isStageRepairingLocalOrgDrift = false
+                                }
+                            }
+                        }
+                    )
+                    StageLocalOrgDriftAuditSummaryView(
+                        rows: localOrgDriftAuditRows,
+                        samples: localOrgDriftAuditSamples,
+                        buttonTitle: isStageRunningLocalOrgDriftAudit ? "Auditing..." : "Run Local Org Drift Audit",
+                        isButtonDisabled: isStageRunningLocalOrgDriftAudit,
+                        onRun: {
+                            guard !isStageRunningLocalOrgDriftAudit else { return }
+                            isStageRunningLocalOrgDriftAudit = true
+                            Task {
+                                _ = await appState.runLocalOrgDriftAudit()
+                                await MainActor.run {
+                                    isStageRunningLocalOrgDriftAudit = false
+                                }
+                            }
+                        }
+                    )
+                    StageLocalOrgDriftRepairSummaryView(
+                        rows: localOrgDriftRepairRows,
+                        samples: localOrgDriftRepairSamples,
+                        buttonTitle: isStageRepairingConfirmedLocalOrgDrift ? "Repairing..." : "Repair Confirmed Local Org Drift",
+                        isButtonDisabled: isStageRepairingConfirmedLocalOrgDrift,
+                        onRepair: {
+                            guard !isStageRepairingConfirmedLocalOrgDrift else { return }
+                            isStageRepairingConfirmedLocalOrgDrift = true
+                            Task {
+                                _ = await appState.repairConfirmedLocalOrgDrift()
+                                await MainActor.run {
+                                    isStageRepairingConfirmedLocalOrgDrift = false
+                                }
+                            }
+                        }
+                    )
+                    StageRemoteReadbackSummaryView(
+                        rows: remoteReadbackRows,
+                        failure: remoteReadbackFailure,
+                        buttonTitle: isStageCheckingSnapshotReadback ? "Checking..." : "Check Remote Readback",
+                        isButtonDisabled: isStageCheckingSnapshotReadback,
+                        onCheck: {
+                            guard !isStageCheckingSnapshotReadback else { return }
+                            isStageCheckingSnapshotReadback = true
+                            Task {
+                                _ = await appState.validateLatestSessionSnapshotRemoteReadback()
+                                await MainActor.run {
+                                    isStageCheckingSnapshotReadback = false
+                                }
+                            }
+                        }
+                    )
+                    StageRestoreDiagnosticsSummaryView(
+                        rows: restoreDiagnosticsRows,
+                        failure: restoreDiagnosticsFailure,
+                        buttonTitle: isStageCheckingSnapshotRestoreDiagnostics ? "Checking..." : "Check Restore Diagnostics",
+                        isButtonDisabled: isStageCheckingSnapshotRestoreDiagnostics,
+                        onCheck: {
+                            guard !isStageCheckingSnapshotRestoreDiagnostics else { return }
+                            isStageCheckingSnapshotRestoreDiagnostics = true
+                            Task {
+                                _ = await appState.validateLatestSessionSnapshotRestoreDiagnostics()
+                                await MainActor.run {
+                                    isStageCheckingSnapshotRestoreDiagnostics = false
+                                }
+                            }
+                        }
+                    )
+                    StageMetadataHydrationSummaryView(
+                        rows: metadataHydrationRows,
+                        buttonTitle: isStageHydratingSnapshotMetadata ? "Hydrating..." : "Review Metadata Hydration...",
+                        isButtonDisabled: isStageHydratingSnapshotMetadata,
+                        onReview: {
+                            isStageShowingHydrationConfirmation = true
+                        }
+                    )
+                    StageMediaRetrievalSummaryView(
+                        rows: mediaRetrievalRows,
+                        buttonTitle: isStageRetrievingSnapshotMedia ? "Retrieving..." : "Retrieve Snapshot Media Test-Only",
+                        isButtonDisabled: isStageRetrievingSnapshotMedia,
+                        onRetrieve: {
+                            isStageShowingMediaRetrievalConfirmation = true
+                        }
+                    )
+                    StageRecoveryCohortSummaryView(
+                        rows: recoveryCohortRows,
+                        buttonTitle: isStageCheckingRecoveryCohort ? "Checking..." : "Check Recovery Cohort",
+                        isButtonDisabled: isStageCheckingRecoveryCohort,
+                        onCheck: {
+                            guard !isStageCheckingRecoveryCohort else { return }
+                            isStageCheckingRecoveryCohort = true
+                            Task {
+                                _ = await appState.validateSnapshotRecoveryCohort()
+                                await MainActor.run {
+                                    isStageCheckingRecoveryCohort = false
+                                }
+                            }
+                        }
+                    )
+                } label: {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Upload Diagnostics And Repair Tools")
+                            .font(.system(size: 14, weight: .semibold))
+                        Text(isStageSnapshotUploadDetailsExpanded ? "Hide snapshot upload controls" : "Show snapshot upload controls")
+                            .font(.system(size: 13, weight: .medium))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+
+            Section("Selected Upload Target") {
+                if let uploadTarget {
+                    diagnosticRow("Source", uploadTarget.source.rawValue)
+                    diagnosticRow("Property Name", uploadTarget.propertyName)
+                    diagnosticRow("Property ID", uploadTarget.propertyID.uuidString)
+                    diagnosticRow("Session ID", uploadTarget.sessionID.uuidString)
+                    diagnosticRow("Session Status", uploadTarget.sessionStatus.rawValue)
+                    diagnosticRow("Session Started", formattedRunDate(uploadTarget.sessionStartedAt))
+                } else {
+                    diagnosticRow("Target", "none")
+                    diagnosticRow("Selected Property ID", uploadTargetResolution.selectedPropertyID?.uuidString ?? "none")
+                    diagnosticRow("Sessions Found", uploadTargetResolution.sessionsFoundForPropertyCount)
+                    diagnosticRow("Session Index Available", uploadTargetResolution.localSessionIndexAvailable ? "true" : "false")
+                    diagnosticRow("Reason", uploadTargetResolution.reason)
+                }
+            }
+
+            Section("Snapshot Package Validation") {
+                Text("Selected-session package validation. Opening this sheet does not load, validate, inspect, or scan packages; validation runs only after the explicit button tap.")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(.secondary)
+                diagnosticRow("Package Checked", formattedDate(stagePackageValidationReport?.checkedAt))
+                diagnosticRow("Package Scope", "property \(stagePackageValidationReport?.targetScope.propertyID?.uuidString ?? "none"), session \(stagePackageValidationReport?.targetScope.sessionID?.uuidString ?? "none")")
+                diagnosticRow("Package Parity", stagePackageValidationReport?.packageParity.state.rawValue ?? "not run")
+                diagnosticRow("Package Blockers", stagePackageValidationReport.map { $0.packageParity.blockers.isEmpty ? "none" : $0.packageParity.blockers.joined(separator: ", ") } ?? "not run")
+                diagnosticRow("Rollback", stagePackageValidationReport?.fullyRestoredRollback.state.rawValue ?? "not run")
+                diagnosticRow("Rollback Blockers", stagePackageValidationReport.map { $0.fullyRestoredRollback.blockers.isEmpty ? "none" : $0.fullyRestoredRollback.blockers.joined(separator: ", ") } ?? "not run")
+                diagnosticRow("Snapshot ID", stagePackageValidationReport?.snapshotID?.uuidString ?? "none")
+                diagnosticRow("Package Evidence", stagePackageValidationReport == nil ? "not generated" : "available_in_view_state")
+                diagnosticRow("Package Report Text", stagePackageValidationReport?.combinedReportText.isEmpty == false ? "available" : "none")
+                StagePackageValidationReportNavigationView(
+                    isReportAvailable: packageValidationReportAvailable,
+                    reportText: {
+                        stagePackageValidationReport?.combinedReportText ?? ""
+                    }
+                )
+                Button(isStageRunningPackageValidation ? "Running..." : AppState.localHealthSessionSnapshotPackageValidationActionTitle) {
+                    guard !isStageRunningPackageValidation else { return }
+                    isStageRunningPackageValidation = true
+                    Task {
+                        let report = await appState.runLocalHealthSelectedSessionSnapshotPackageValidation()
+                        await MainActor.run {
+                            stagePackageValidationReport = report
+                            isStageRunningPackageValidation = false
+                        }
+                    }
+                }
+                .disabled(isStageRunningPackageValidation)
+                .font(.system(size: 14, weight: .semibold))
+            }
+
+            Section("Manual Diagnostic Trigger") {
+                Button(isStageUploadingSessionSnapshot ? "Uploading..." : "Upload Selected Session Snapshot") {
+                    guard uploadAvailability.isAvailable else { return }
+                    isStageUploadingSessionSnapshot = true
+                    Task {
+                        _ = await appState.uploadCurrentSessionSnapshotShadowWrite(
+                            kind: .manual,
+                            trigger: "manual_diagnostic"
+                        )
+                        await MainActor.run {
+                            isStageUploadingSessionSnapshot = false
+                        }
+                    }
+                }
+                .disabled(!uploadAvailability.isAvailable || isStageUploadingSessionSnapshot)
+                .font(.system(size: 14, weight: .semibold))
+                Text(uploadAvailability.reason)
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(.secondary)
+            }
+
+            StageLastSanitizedAttemptSection(rows: lastSanitizedAttemptRows)
+
+            Section("Canonical Read Diagnostics") {
+                Text("Display-only canonical diagnostics summary. Opening this sheet does not run diagnostics, switch reads, hydrate data, restore files, download media, or change local or remote state.")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(.secondary)
+                diagnosticRow("Result", snapshotDiagnostics.lastCanonicalReadDiagnosticsResult)
+                diagnosticRow("Checked", formattedDate(snapshotDiagnostics.lastCanonicalReadDiagnosticsAt))
+                diagnosticRow("Verified Org", snapshotDiagnostics.lastCanonicalReadDiagnosticsVerifiedOrgID?.uuidString ?? "none")
+                diagnosticRow("Property ID", snapshotDiagnostics.lastCanonicalReadDiagnosticsPropertyID?.uuidString ?? "none")
+                diagnosticRow("Session ID", snapshotDiagnostics.lastCanonicalReadDiagnosticsSessionID?.uuidString ?? "none")
+                diagnosticRow("Local Property", snapshotDiagnostics.lastCanonicalReadDiagnosticsLocalPropertyFound ? "true" : "false")
+                diagnosticRow("Local Session", snapshotDiagnostics.lastCanonicalReadDiagnosticsLocalSessionFound ? "true" : "false")
+                diagnosticRow("Remote Property", snapshotDiagnostics.lastCanonicalReadDiagnosticsRemotePropertyFound ? "true" : "false")
+                diagnosticRow("Remote Session", snapshotDiagnostics.lastCanonicalReadDiagnosticsRemoteSessionFound ? "true" : "false")
+                diagnosticRow("Count Parity", snapshotDiagnostics.lastCanonicalReadDiagnosticsCountParity.map { $0 ? "true" : "false" } ?? "not checked")
+                diagnosticRow("Status Parity", snapshotDiagnostics.lastCanonicalReadDiagnosticsStatusParity.map { $0 ? "true" : "false" } ?? "not checked")
+                diagnosticRow("Parent Org", snapshotDiagnostics.lastCanonicalReadDiagnosticsParentOrgConsistent.map { $0 ? "true" : "false" } ?? "not checked")
+                diagnosticRow("Parent Property", snapshotDiagnostics.lastCanonicalReadDiagnosticsParentPropertyConsistent.map { $0 ? "true" : "false" } ?? "not checked")
+                diagnosticRow("Local Shots", snapshotDiagnostics.lastCanonicalReadDiagnosticsLocalShotCount.map(String.init) ?? "none")
+                diagnosticRow("Remote Shots", snapshotDiagnostics.lastCanonicalReadDiagnosticsRemoteShotCount.map(String.init) ?? "none")
+                diagnosticRow("Local Issues/Obs", snapshotDiagnostics.lastCanonicalReadDiagnosticsLocalIssueObservationCount.map(String.init) ?? "none")
+                diagnosticRow("Remote Issues/Obs", snapshotDiagnostics.lastCanonicalReadDiagnosticsRemoteIssueObservationCount.map(String.init) ?? "none")
+                diagnosticRow("Local Guided", snapshotDiagnostics.lastCanonicalReadDiagnosticsLocalGuidedCount.map(String.init) ?? "none")
+                diagnosticRow("Local Known State", formattedDate(snapshotDiagnostics.lastCanonicalReadDiagnosticsLocalKnownStateAt))
+                diagnosticRow("Known State Source", snapshotDiagnostics.lastCanonicalReadDiagnosticsLocalKnownStateSource ?? "none")
+                diagnosticRow("Remote Freshness Seconds", snapshotDiagnostics.lastCanonicalReadDiagnosticsRemoteFreshnessAgeSeconds.map { String(Int($0)) } ?? "unknown")
+                diagnosticRow("Remote Revision", snapshotDiagnostics.lastCanonicalReadDiagnosticsRemoteRevision.map(String.init) ?? "none")
+                diagnosticRow("Recommendation", snapshotDiagnostics.lastCanonicalReadDiagnosticsRecommendation)
+                diagnosticRow("Blocked Reason", snapshotDiagnostics.lastCanonicalReadDiagnosticsBlockedReason ?? "none")
+            }
+
+            Section("Canonical Parity Summary") {
+                diagnosticRow("Parity Gaps", snapshotDiagnostics.lastNormalizedParityGapTaxonomy.isEmpty ? "none" : snapshotDiagnostics.lastNormalizedParityGapTaxonomy.joined(separator: ", "))
+                diagnosticRow("Completeness", snapshotDiagnostics.lastNormalizedParityCompleteness)
+                diagnosticRow("Shadow Coverage", snapshotDiagnostics.lastRemoteShadowWriteCoverage)
+                diagnosticRow("Missing Remote", snapshotDiagnostics.lastMissingRemoteEntityClassification)
+                diagnosticRow("Canonical Blocked", snapshotDiagnostics.lastCanonicalReadsRemainBlocked ? "true" : "false")
+                diagnosticRow("Completeness Score", String(format: "%.2f", snapshotDiagnostics.lastParityCompletenessScore))
+                diagnosticRow("Shadow Score", String(format: "%.2f", snapshotDiagnostics.lastShadowWriteCoverageScore))
+                diagnosticRow("Missing Child Count", "\(snapshotDiagnostics.lastMissingChildCount)")
+                diagnosticRow("Replay Eligibility", snapshotDiagnostics.lastReplayEligibility)
+                diagnosticRow("Backfill Eligible", snapshotDiagnostics.lastNormalizedBackfillEligible ? "true" : "false")
+                diagnosticRow("Backfill Blocked", snapshotDiagnostics.lastNormalizedBackfillBlockedReason)
+                diagnosticRow("Remote Newer Conflicts", "\(snapshotDiagnostics.lastNormalizedBackfillRemoteNewerConflictCount)")
+                diagnosticRow("Production Backfill", snapshotDiagnostics.lastNormalizedBackfillProductionBlocked ? "blocked" : "not blocked")
+            }
+
+            StageCanonicalReadDiagnosticsActionView(
+                buttonTitle: isStageCheckingCanonicalReadDiagnostics ? "Checking..." : "Check Canonical Read Diagnostics",
+                isButtonDisabled: isStageCheckingCanonicalReadDiagnostics,
+                rows: canonicalReadDiagnosticsActionRows,
+                onCheck: {
+                    guard !isStageCheckingCanonicalReadDiagnostics else { return }
+                    isStageCheckingCanonicalReadDiagnostics = true
+                    Task {
+                        _ = await appState.runCanonicalReadDiagnosticsForSelectedSession(
+                            productionValidationEvidence: stagePackageValidationReport
+                        )
+                        await MainActor.run {
+                            isStageCheckingCanonicalReadDiagnostics = false
+                        }
+                    }
+                }
+            )
+
+            StageFlaggedObservationReplayActionView(
+                buttonTitle: isStageReplayingFlaggedObservationShadowWrites ? "Replaying..." : AppState.localHealthFlaggedObservationReplayActionTitle,
+                isButtonDisabled: isStageReplayingFlaggedObservationShadowWrites,
+                rows: flaggedObservationReplayRows,
+                onReplay: {
+                    guard !isStageReplayingFlaggedObservationShadowWrites else { return }
+                    isStageReplayingFlaggedObservationShadowWrites = true
+                    Task {
+                        let result = await appState.replayFlaggedObservationShadowWritesForSelectedSession(
+                            productionValidationEvidence: stagePackageValidationReport
+                        )
+                        await MainActor.run {
+                            stageFlaggedObservationReplayActionResult = result
+                            isStageReplayingFlaggedObservationShadowWrites = false
+                        }
+                    }
+                }
+            )
+
+            StageOperatorApprovalActionView(
+                recordButtonTitle: isStageRecordingOperatorApproval ? "Recording..." : "Record Fresh Operator Approval",
+                clearButtonTitle: isStageClearingOperatorApproval ? "Clearing..." : "Clear Operator Approval",
+                isRecordDisabled: isStageRecordingOperatorApproval,
+                isClearDisabled: isStageClearingOperatorApproval || stageOperatorApproval == nil,
+                rows: operatorApprovalRows,
+                onRecord: {
+                    guard !isStageRecordingOperatorApproval else { return }
+                    isStageRecordingOperatorApproval = true
+                    Task {
+                        let checkedAt = Date()
+                        let approval = await MainActor.run {
+                            appState.makeProductionSingleSessionOperatorApprovalForSelectedSession(approvedAt: checkedAt)
+                        }
+                        await MainActor.run {
+                            stageOperatorApproval = approval
+                            stageOperatorApprovalCheckedAt = checkedAt
+                            stageOperatorApprovalClearReason = nil
+                            isStageRecordingOperatorApproval = false
+                        }
+                    }
+                },
+                onClear: {
+                    guard !isStageClearingOperatorApproval, stageOperatorApproval != nil else { return }
+                    isStageClearingOperatorApproval = true
+                    stageOperatorApproval = nil
+                    stageOperatorApprovalCheckedAt = nil
+                    stageOperatorApprovalClearReason = "operator_approval_cleared"
+                    isStageClearingOperatorApproval = false
+                }
+            )
+
+            StageCanonicalRolloutReportNavigationView {
+                AppState.canonicalReadRolloutReportText(
+                    snapshotDiagnostics,
+                    operatorApproval: stageOperatorApproval,
+                    singleSessionActivationGatePolicy: AppState.loadProductionSingleSessionActivationGatePolicy()
+                )
+            }
+
+            Section("Selected Session Overlay") {
+                Text("Selected-session overlay controls. Opening this sheet does not build overlays, activate overlays, switch reads, enable broad reads, authorize QA, validate packages, run the pipeline, replay lifecycle data, or mutate hosted data; overlay building runs only after the explicit button tap.")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(.secondary)
+                diagnosticRow("Stage Package Evidence", stagePackageEvidenceReady ? "ready" : "not ready")
+                diagnosticRow("Stage QA Authorization", snapshotDiagnostics.runtimeSelectedSessionQAAuthAuthorized ? "authorized" : "not authorized")
+                diagnosticRow("Overlay Built", snapshotDiagnostics.lastCanonicalCandidateOverlayBuilt ? "true" : "false")
+                diagnosticRow("Overlay Allowed", snapshotDiagnostics.lastCanonicalCandidateOverlayAllowed ? "true" : "false")
+                diagnosticRow("Overlay Blocked", snapshotDiagnostics.lastCanonicalCandidateOverlayBlockedReason)
+                diagnosticRow("Overlay Source", snapshotDiagnostics.lastCanonicalCandidateOverlaySource)
+                diagnosticRow("Overlay Property", snapshotDiagnostics.lastCanonicalCandidateOverlayPropertyID?.uuidString ?? "none")
+                diagnosticRow("Overlay Session", snapshotDiagnostics.lastCanonicalCandidateOverlaySessionID?.uuidString ?? "none")
+                diagnosticRow("Overlay Shots", "\(snapshotDiagnostics.lastCanonicalCandidateOverlayShotCount)")
+                diagnosticRow("Overlay Issues", "\(snapshotDiagnostics.lastCanonicalCandidateOverlayIssueObservationCount)")
+                diagnosticRow("Overlay Guided", snapshotDiagnostics.lastCanonicalCandidateOverlayGuidedCount.map(String.init) ?? "not represented")
+                diagnosticRow("Overlay Fallback", snapshotDiagnostics.lastCanonicalCandidateOverlayFallbackSource)
+                diagnosticRow("Overlay Active Source", snapshotDiagnostics.lastCanonicalCandidateOverlayActiveSource)
+                diagnosticRow("Overlay Rollback", snapshotDiagnostics.lastCanonicalCandidateOverlayRollbackAvailable ? "available" : "missing")
+                diagnosticRow("Overlay Production", snapshotDiagnostics.lastCanonicalCandidateOverlayProductionBlocked ? "blocked" : "not blocked")
+                diagnosticRow("Candidate Match", snapshotDiagnostics.lastCanonicalCandidateOverlayComparisonResult)
+                diagnosticRow("Comparison Local Status", snapshotDiagnostics.lastCanonicalCandidateOverlayComparisonLocalStatus)
+                diagnosticRow("Comparison Candidate Status", snapshotDiagnostics.lastCanonicalCandidateOverlayComparisonRemoteStatus)
+                diagnosticRow("Comparison Local Counts", "shots \(snapshotDiagnostics.lastCanonicalCandidateOverlayComparisonLocalShotCount.map(String.init) ?? "none"), issues \(snapshotDiagnostics.lastCanonicalCandidateOverlayComparisonLocalIssueObservationCount.map(String.init) ?? "none")")
+                diagnosticRow("Comparison Candidate Counts", "shots \(snapshotDiagnostics.lastCanonicalCandidateOverlayComparisonRemoteShotCount.map(String.init) ?? "none"), issues \(snapshotDiagnostics.lastCanonicalCandidateOverlayComparisonRemoteIssueObservationCount.map(String.init) ?? "none")")
+                diagnosticRow("Comparison Freshness", "local \(snapshotDiagnostics.lastCanonicalCandidateOverlayComparisonLocalFreshness), candidate \(snapshotDiagnostics.lastCanonicalCandidateOverlayComparisonRemoteFreshness)")
+                diagnosticRow("Comparison Trusted", snapshotDiagnostics.lastCanonicalCandidateOverlayComparisonTrustedReason)
+                diagnosticRow("Comparison Blocked", snapshotDiagnostics.lastCanonicalCandidateOverlayComparisonBlockedReason)
+                diagnosticRow("Overlay Action Result", stageCanonicalCandidateOverlayBuildResult.map { $0.allowed ? "allowed" : "blocked" } ?? "not run")
+                diagnosticRow("Overlay Action Checked", formattedDate(stageCanonicalCandidateOverlayBuildResult?.checkedAt))
+                diagnosticRow("Overlay Action Blocker", stageCanonicalCandidateOverlayBuildResult?.blockedReason ?? "none")
+                diagnosticRow("Overlay Action Source", stageCanonicalCandidateOverlayBuildResult?.overlay?.source ?? "none")
+                diagnosticRow("Overlay Action Scope", "property \(stageCanonicalCandidateOverlayBuildResult?.overlay?.propertyID?.uuidString ?? "none"), session \(stageCanonicalCandidateOverlayBuildResult?.overlay?.sessionID?.uuidString ?? "none")")
+                diagnosticRow("Overlay Action Fallback", stageCanonicalCandidateOverlayBuildResult.map { $0.localFallbackRetained ? "retained" : "missing" } ?? "not run")
+                diagnosticRow("Overlay Action Active Source", stageCanonicalCandidateOverlayBuildResult.map { $0.activeSourceRemainsLocal ? "local" : "not local" } ?? "not run")
+                diagnosticRow("Overlay Action Rollback", stageCanonicalCandidateOverlayBuildResult.map { $0.rollbackAvailable ? "available" : "missing" } ?? "not run")
+                diagnosticRow("Overlay Action Production", stageCanonicalCandidateOverlayBuildResult.map { $0.productionBlocked ? "blocked" : "not blocked" } ?? "not run")
+                Button(isStageBuildingCanonicalCandidateOverlay ? "Building..." : "Build Canonical Candidate Overlay") {
+                    guard !isStageBuildingCanonicalCandidateOverlay else { return }
+                    isStageBuildingCanonicalCandidateOverlay = true
+                    Task {
+                        let result = await appState.buildCanonicalCandidateOverlayForSelectedSession(
+                            productionValidationEvidence: stagePackageValidationReport
+                        )
+                        await MainActor.run {
+                            stageCanonicalCandidateOverlayBuildResult = result
+                            isStageBuildingCanonicalCandidateOverlay = false
+                        }
+                    }
+                }
+                .disabled(isStageBuildingCanonicalCandidateOverlay)
+                .font(.system(size: 14, weight: .semibold))
+            }
+
+            Section("Selected Session Activation") {
+                Text("Selected-session activation controls. Opening this sheet does not activate candidates, switch reads, enable broad reads, build overlays, authorize QA, validate packages, run the pipeline, replay lifecycle data, or mutate hosted production data; activation or rollback runs only after an explicit button tap.")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(.secondary)
+                diagnosticRow("Activation Package Evidence", stagePackageEvidenceReady ? "ready" : "not ready")
+                diagnosticRow("Activation QA Authorization", snapshotDiagnostics.runtimeSelectedSessionQAAuthAuthorized ? "authorized" : "not authorized")
+                diagnosticRow("Activation Pipeline State", snapshotDiagnostics.lastSelectedSessionValidationPipelineState)
+                diagnosticRow("Activation Overlay Built", snapshotDiagnostics.lastCanonicalCandidateOverlayBuilt ? "true" : "false")
+                diagnosticRow("Activation Overlay Allowed", snapshotDiagnostics.lastCanonicalCandidateOverlayAllowed ? "true" : "false")
+                diagnosticRow("Activation Candidate Match", snapshotDiagnostics.lastCanonicalCandidateOverlayComparisonResult)
+                diagnosticRow("Activation Allowed", snapshotDiagnostics.lastCanonicalCandidateActivationAllowed ? "true" : "false")
+                diagnosticRow("Activation Blocked", snapshotDiagnostics.lastCanonicalCandidateActivationBlockedReason)
+                diagnosticRow("Activation Active Source", snapshotDiagnostics.lastCanonicalCandidateActivationActiveSource)
+                diagnosticRow("Activation Rollback Source", snapshotDiagnostics.lastCanonicalCandidateActivationRollbackSource)
+                diagnosticRow("Activation Scope", snapshotDiagnostics.lastCanonicalCandidateActivationScope)
+                diagnosticRow("Activation Property", snapshotDiagnostics.lastCanonicalCandidateActivationPropertyID?.uuidString ?? "none")
+                diagnosticRow("Activation Session", snapshotDiagnostics.lastCanonicalCandidateActivationSessionID?.uuidString ?? "none")
+                diagnosticRow("Activation Rollback", snapshotDiagnostics.lastCanonicalCandidateActivationRollbackAvailable ? "available" : "missing")
+                diagnosticRow("Activation Last Activated", formattedDate(snapshotDiagnostics.lastCanonicalCandidateActivationLastActivatedAt))
+                diagnosticRow("Activation Last Rolled Back", formattedDate(snapshotDiagnostics.lastCanonicalCandidateActivationLastRolledBackAt))
+                diagnosticRow("Activation Production", snapshotDiagnostics.lastCanonicalCandidateActivationProductionBlocked ? "blocked" : "not blocked")
+                diagnosticRow("Activation Result", stageCanonicalCandidateActivationResult.map { $0.allowed ? "allowed" : "blocked" } ?? "not run")
+                diagnosticRow("Activation Result Checked", formattedDate(stageCanonicalCandidateActivationResult?.checkedAt))
+                diagnosticRow("Activation Result Blocker", stageCanonicalCandidateActivationResult?.blockedReason ?? "none")
+                diagnosticRow("Activation Result Source", stageCanonicalCandidateActivationResult?.activeSource.rawValue ?? "not run")
+                diagnosticRow("Activation Result Rollback Source", stageCanonicalCandidateActivationResult?.rollbackSource.rawValue ?? "not run")
+                diagnosticRow("Activation Result Scope", stageCanonicalCandidateActivationResult?.activationScope ?? "not run")
+                diagnosticRow("Activation Result Property", stageCanonicalCandidateActivationResult?.propertyID?.uuidString ?? "none")
+                diagnosticRow("Activation Result Session", stageCanonicalCandidateActivationResult?.sessionID?.uuidString ?? "none")
+                diagnosticRow("Activation Result Fallback", stageCanonicalCandidateActivationResult.map { $0.rollbackAvailable ? "available" : "missing" } ?? "not run")
+                diagnosticRow("Activation Result Production", stageCanonicalCandidateActivationResult.map { $0.productionBlocked ? "blocked" : "not blocked" } ?? "not run")
+                diagnosticRow("Rollback Result", stageCanonicalCandidateRollbackResult.map { $0.allowed ? "allowed" : "blocked" } ?? "not run")
+                diagnosticRow("Rollback Result Checked", formattedDate(stageCanonicalCandidateRollbackResult?.checkedAt))
+                diagnosticRow("Rollback Result Blocker", stageCanonicalCandidateRollbackResult?.blockedReason ?? "none")
+                diagnosticRow("Rollback Result Source", stageCanonicalCandidateRollbackResult?.activeSource.rawValue ?? "not run")
+                diagnosticRow("Rollback Result Fallback", stageCanonicalCandidateRollbackResult.map { $0.rollbackAvailable ? "available" : "missing" } ?? "not run")
+                Button(isStageActivatingCanonicalCandidate ? "Activating..." : "Activate Canonical Candidate For Session") {
+                    guard !isStageActivatingCanonicalCandidate else { return }
+                    isStageShowingCanonicalCandidateActivationConfirmation = true
+                }
+                .disabled(isStageActivatingCanonicalCandidate)
+                .font(.system(size: 14, weight: .semibold))
+                .alert("Activate Canonical Candidate?", isPresented: $isStageShowingCanonicalCandidateActivationConfirmation) {
+                    Button("Cancel", role: .cancel) {}
+                    Button("Activate") {
+                        guard !isStageActivatingCanonicalCandidate else { return }
+                        isStageActivatingCanonicalCandidate = true
+                        Task {
+                            let result = await MainActor.run {
+                                appState.activateCanonicalCandidateForSelectedSession(operatorApproval: nil)
+                            }
+                            await MainActor.run {
+                                stageCanonicalCandidateActivationResult = result
+                                isStageActivatingCanonicalCandidate = false
+                            }
+                        }
+                    }
+                } message: {
+                    Text("Selected session only. Active read source changes to the candidate overlay for this diagnostic scope, local fallback stays retained, export/seal/sync/media/iCloud behavior is unchanged, and production remains blocked.")
+                }
+                Button(isStageRollingBackCanonicalCandidate ? "Rolling Back..." : "Rollback To Local Source") {
+                    guard !isStageRollingBackCanonicalCandidate else { return }
+                    isStageRollingBackCanonicalCandidate = true
+                    Task {
+                        let result = await MainActor.run {
+                            appState.rollbackCanonicalCandidateToLocalSource()
+                        }
+                        await MainActor.run {
+                            stageCanonicalCandidateRollbackResult = result
+                            isStageRollingBackCanonicalCandidate = false
+                        }
+                    }
+                }
+                .disabled(isStageRollingBackCanonicalCandidate)
+                .font(.system(size: 14, weight: .semibold))
+            }
+
+            Section("Runtime QA Authorization") {
+                Text("Display-only selected-session QA authorization summary. Opening this sheet does not authorize, clear, refresh, run validation, switch reads, approve, or activate anything.")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(.secondary)
+                diagnosticRow("QA Authorization", snapshotDiagnostics.runtimeSelectedSessionQAAuthAuthorized ? "authorized" : "not authorized")
+                diagnosticRow("QA Authorized Org", snapshotDiagnostics.runtimeSelectedSessionQAAuthOrgID?.uuidString ?? "none")
+                diagnosticRow("QA Authorized Property", snapshotDiagnostics.runtimeSelectedSessionQAAuthPropertyID?.uuidString ?? "none")
+                diagnosticRow("QA Authorized Session", snapshotDiagnostics.runtimeSelectedSessionQAAuthSessionID?.uuidString ?? "none")
+                diagnosticRow("QA Authorized At", formattedDate(snapshotDiagnostics.runtimeSelectedSessionQAAuthAuthorizedAt))
+                diagnosticRow("QA Expires", formattedDate(snapshotDiagnostics.runtimeSelectedSessionQAAuthExpiresAt))
+                diagnosticRow("QA Freshness", snapshotDiagnostics.runtimeSelectedSessionQAAuthFreshness)
+                diagnosticRow("QA Scope Match", snapshotDiagnostics.runtimeSelectedSessionQAAuthScopeMatches ? "true" : "false")
+                diagnosticRow("QA Clear Reason", snapshotDiagnostics.runtimeSelectedSessionQAAuthClearReason ?? "none")
+                diagnosticRow("QA Controls", qaControlsPresentation.controlsMounted ? "available" : "blocked")
+                diagnosticRow("QA Controls Blocker", qaControlsPresentation.blocker ?? "none")
+                diagnosticRow("QA Selected Property", qaControlsPresentation.selectedPropertyID?.uuidString ?? "none")
+                diagnosticRow("QA Selected Session", qaControlsPresentation.selectedSessionID?.uuidString ?? "none")
+                diagnosticRow("QA Target Reason", qaControlsPresentation.targetResolutionReason)
+                diagnosticRow("Package Evidence Ready", stagePackageEvidenceReady ? "true" : "false")
+                diagnosticRow("QA Action Result", stageSelectedSessionQAAuthorizationResult?.state.rawValue ?? "not run")
+                diagnosticRow("QA Action Checked", formattedDate(stageSelectedSessionQAAuthorizationResult?.checkedAt))
+                diagnosticRow("QA Action Selected Scope", stageSelectedSessionQAAuthorizationResult?.selectedScope.description ?? "none")
+                diagnosticRow("QA Action Authorized Scope", stageSelectedSessionQAAuthorizationResult?.authorizedScope.description ?? "none")
+                diagnosticRow("QA Action Authorized At", formattedDate(stageSelectedSessionQAAuthorizationResult?.authorizedAt))
+                diagnosticRow("QA Action Expires", formattedDate(stageSelectedSessionQAAuthorizationResult?.expiresAt))
+                diagnosticRow("QA Action Freshness", stageSelectedSessionQAAuthorizationResult?.freshness ?? "not run")
+                diagnosticRow("QA Action Scope Match", stageSelectedSessionQAAuthorizationResult.map { $0.scopeMatches ? "true" : "false" } ?? "not run")
+                diagnosticRow("QA Action Clear Reason", stageSelectedSessionQAAuthorizationResult?.clearReason ?? "none")
+                diagnosticRow("QA Action Supabase Reads", stageSelectedSessionQAAuthorizationResult.map { $0.supabaseReadEnabled ? "enabled" : "disabled" } ?? "not run")
+                diagnosticRow("QA Action Broad Reads", stageSelectedSessionQAAuthorizationResult.map { $0.productionWideCanonicalReadsEnabled ? "enabled" : "disabled" } ?? "not run")
+                diagnosticRow("QA Action Local Fallback", stageSelectedSessionQAAuthorizationResult.map { $0.localFallbackAvailable ? "available" : "missing" } ?? "not run")
+                diagnosticRow("QA Action Rollback", stageSelectedSessionQAAuthorizationResult.map { $0.rollbackAvailable ? "available" : "missing" } ?? "not run")
+                Button(isStageAuthorizingSelectedSessionQA ? "Authorizing..." : AppState.localHealthAuthorizeSelectedSessionQAActionTitle) {
+                    guard qaControlsPresentation.controlsMounted, !isStageAuthorizingSelectedSessionQA else { return }
+                    isStageAuthorizingSelectedSessionQA = true
+                    Task {
+                        let result = await MainActor.run {
+                            appState.authorizeSelectedSessionForQAValidation()
+                        }
+                        await MainActor.run {
+                            stageSelectedSessionQAAuthorizationResult = result
+                            isStageAuthorizingSelectedSessionQA = false
+                        }
+                    }
+                }
+                .disabled(!qaControlsPresentation.controlsMounted || isStageAuthorizingSelectedSessionQA)
+                .font(.system(size: 14, weight: .semibold))
+                Button(isStageClearingSelectedSessionQA ? "Clearing..." : AppState.localHealthClearSelectedSessionQAActionTitle) {
+                    guard snapshotDiagnostics.runtimeSelectedSessionQAAuthAuthorized, !isStageClearingSelectedSessionQA else { return }
+                    isStageClearingSelectedSessionQA = true
+                    Task {
+                        let result = await MainActor.run {
+                            appState.clearSelectedSessionQAValidationAuthorization()
+                        }
+                        await MainActor.run {
+                            stageSelectedSessionQAAuthorizationResult = result
+                            isStageClearingSelectedSessionQA = false
+                        }
+                    }
+                }
+                .disabled(!snapshotDiagnostics.runtimeSelectedSessionQAAuthAuthorized || isStageClearingSelectedSessionQA)
+                .font(.system(size: 14, weight: .semibold))
+            }
+
+            Section("Selected Session Validation Pipeline") {
+                Text("Selected-session validation pipeline controls. Opening this sheet does not start, resume, retry, cancel, reset, or report on the pipeline; the pipeline runs only after the explicit button tap.")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(.secondary)
+                diagnosticRow("Pipeline State", snapshotDiagnostics.lastSelectedSessionValidationPipelineState)
+                diagnosticRow("Pipeline Checked", formattedDate(snapshotDiagnostics.lastSelectedSessionValidationPipelineCheckedAt))
+                diagnosticRow("Pipeline Blocker", snapshotDiagnostics.lastSelectedSessionValidationPipelineBlocker ?? "none")
+                diagnosticRow("Pipeline Report", snapshotDiagnostics.lastSelectedSessionValidationPipelineReportText.isEmpty ? "none" : "available")
+                diagnosticRow("Pipeline Result", stageSelectedSessionValidationPipelineReport?.state.rawValue ?? "not run")
+                diagnosticRow("Pipeline Final Blocker", stageSelectedSessionValidationPipelineReport?.finalBlocker ?? "none")
+                diagnosticRow("Pipeline Next Action", stageSelectedSessionValidationPipelineReport?.recommendedNextAction ?? "unknown")
+                diagnosticRow("Pipeline Button Availability", pipelineControlsAvailable ? "available" : "blocked")
+                diagnosticRow("Pipeline Button Blocker", pipelineControlsAvailable ? "none" : (qaControlsPresentation.blocker ?? "selected_session_required"))
+                StageValidationPipelineReportNavigationView(
+                    isReportAvailable: reportDisplayText?.isEmpty == false,
+                    reportText: {
+                        reportDisplayText ?? ""
+                    }
+                )
+                Button(isStageRunningSelectedSessionValidationPipeline ? "Running..." : AppState.localHealthSelectedSessionValidationPipelineActionTitle) {
+                    guard pipelineControlsAvailable, !isStageRunningSelectedSessionValidationPipeline else { return }
+                    isStageRunningSelectedSessionValidationPipeline = true
+                    Task {
+                        let report = await appState.runSelectedSessionValidationPipeline()
+                        await MainActor.run {
+                            stageSelectedSessionValidationPipelineReport = report
+                            isStageRunningSelectedSessionValidationPipeline = false
+                        }
+                    }
+                }
+                .disabled(!pipelineControlsAvailable || isStageRunningSelectedSessionValidationPipeline)
+                .font(.system(size: 14, weight: .semibold))
+            }
+
+            Section("Selected Session Lifecycle Replay") {
+                Text("Selected-session lifecycle replay controls. Opening this sheet does not run replay, validate packages, authorize QA, start the pipeline, switch reads, activate overlays, or mutate hosted data; replay runs only after the explicit button tap.")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(.secondary)
+                diagnosticRow("Lifecycle Button Availability", lifecycleReplayTargetAvailable ? "available_for_guarded_action" : "blocked")
+                diagnosticRow("Lifecycle Guard Preview", lifecycleReplayGuardPreview)
+                diagnosticRow("Lifecycle Package Evidence", "not available in isolated stage")
+                diagnosticRow("Lifecycle Stored Planned", "\(snapshotDiagnostics.lastNormalizedBackfillPlannedSessionUpserts)")
+                diagnosticRow("Lifecycle Stored Executed", "\(snapshotDiagnostics.lastNormalizedBackfillExecutedEntityCount)")
+                diagnosticRow("Lifecycle Stored Skipped", "\(snapshotDiagnostics.lastNormalizedBackfillSkippedEntityCount)")
+                diagnosticRow("Lifecycle Stored Remote Newer", "\(snapshotDiagnostics.lastNormalizedBackfillRemoteNewerConflictCount)")
+                diagnosticRow("Lifecycle Stored Production", snapshotDiagnostics.lastNormalizedBackfillProductionBlocked ? "blocked" : "not blocked")
+                Button(isStageReplayingSelectedSessionLifecycleShadowWrite ? "Replaying..." : AppState.localHealthSelectedSessionLifecycleReplayActionTitle) {
+                    guard !lifecycleReplayButtonDisabled else { return }
+                    isStageReplayingSelectedSessionLifecycleShadowWrite = true
+                    Task {
+                        let result = await appState.replaySelectedSessionLifecycleShadowWriteForSelectedSession(
+                            productionValidationEvidence: nil
+                        )
+                        await MainActor.run {
+                            stageSelectedSessionLifecycleReplayResult = result
+                            isStageReplayingSelectedSessionLifecycleShadowWrite = false
+                        }
+                    }
+                }
+                .disabled(lifecycleReplayButtonDisabled)
+                .font(.system(size: 14, weight: .semibold))
+                diagnosticRow("Lifecycle Replay Action", stageSelectedSessionLifecycleReplayResult.map { $0.allowed ? "allowed" : "blocked" } ?? "not run")
+                diagnosticRow("Lifecycle Replay Blocked", stageSelectedSessionLifecycleReplayResult?.blockedReason ?? "none")
+                diagnosticRow("Lifecycle Replay Scope", "property \(stageSelectedSessionLifecycleReplayResult?.propertyID?.uuidString ?? "none"), session \(stageSelectedSessionLifecycleReplayResult?.sessionID?.uuidString ?? "none")")
+                diagnosticRow("Lifecycle Checked", formattedDate(stageSelectedSessionLifecycleReplayResult?.checkedAt))
+                diagnosticRow("Lifecycle Planned", stageSelectedSessionLifecycleReplayResult?.replayResult.map { "\($0.attemptedCount)" } ?? "not run")
+                diagnosticRow("Lifecycle Executed", stageSelectedSessionLifecycleReplayResult?.replayResult.map { "\($0.upsertedCount)" } ?? "not run")
+                diagnosticRow("Lifecycle Skipped", stageSelectedSessionLifecycleReplayResult?.replayResult.map { "\($0.skippedCount)" } ?? "not run")
+                diagnosticRow("Lifecycle Remote Newer", stageSelectedSessionLifecycleReplayResult?.replayResult.map { "\($0.remoteNewerConflictCount)" } ?? "not run")
+                diagnosticRow("Lifecycle Failed", stageSelectedSessionLifecycleReplayResult?.replayResult.map { "\($0.failedCount)" } ?? "not run")
+                diagnosticRow("Lifecycle Result", stageSelectedSessionLifecycleReplayResult?.replayResult?.message ?? "not run")
+                diagnosticRow("Lifecycle Post-Replay Diagnostics", stageSelectedSessionLifecycleReplayResult?.diagnosticsAfterReplay == nil ? "not run" : "refreshed")
+            }
+
+            Section("Validation Pipeline Report Display") {
+                Text("Display-only selected-session validation pipeline report summary and plain text. Opening this sheet does not generate, refresh, copy, export, share, render, preview, load, or save reports.")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(.secondary)
+                diagnosticRow("Stored Report", storedPipelineReportText.isEmpty ? "none" : "available")
+                diagnosticRow("Stored Report State", snapshotDiagnostics.lastSelectedSessionValidationPipelineState)
+                diagnosticRow("Stored Report Checked", formattedDate(snapshotDiagnostics.lastSelectedSessionValidationPipelineCheckedAt))
+                diagnosticRow("Stored Report Blocker", snapshotDiagnostics.lastSelectedSessionValidationPipelineBlocker ?? "none")
+                diagnosticRow("Action Report", actionPipelineReportText?.isEmpty == false ? "available" : "none")
+                diagnosticRow("Action Report State", stageSelectedSessionValidationPipelineReport?.state.rawValue ?? "not run")
+                diagnosticRow("Action Report Checked", formattedDate(stageSelectedSessionValidationPipelineReport?.checkedAt))
+                diagnosticRow("Action Report Blocker", stageSelectedSessionValidationPipelineReport?.finalBlocker ?? "none")
+                diagnosticRow("Report Text Source", reportDisplaySource)
+                diagnosticRow("Report Text Characters", reportDisplayText.map { "\($0.count)" } ?? "0")
+                Text(reportDisplayText ?? "none")
+                    .font(.system(size: 12, weight: .regular, design: .monospaced))
+                    .foregroundStyle(reportDisplayText == nil ? .secondary : .primary)
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .navigationTitle("Snapshot Upload")
+        .navigationBarTitleDisplayMode(.inline)
+        .alert("Hydrate Metadata From Snapshot?", isPresented: $isStageShowingHydrationConfirmation) {
+            Button("Cancel", role: .cancel) {}
+            if hydrationConfirmation.canHydrate {
+                Button("Hydrate Local Metadata Only", role: .destructive) {
+                    guard !isStageHydratingSnapshotMetadata else { return }
+                    isStageHydratingSnapshotMetadata = true
+                    Task {
+                        _ = await appState.hydrateMetadataFromLatestSessionSnapshot()
+                        await MainActor.run {
+                            isStageHydratingSnapshotMetadata = false
+                        }
+                    }
+                }
+            }
+        } message: {
+            Text(hydrationConfirmation.messageText)
+        }
+        .alert("Retrieve Snapshot Media Test-Only?", isPresented: $isStageShowingMediaRetrievalConfirmation) {
+            Button("Cancel", role: .cancel) {}
+            if mediaRetrievalConfirmation.canRetrieve {
+                Button("Retrieve Test Media", role: .destructive) {
+                    guard !isStageRetrievingSnapshotMedia else { return }
+                    isStageRetrievingSnapshotMedia = true
+                    Task {
+                        _ = await appState.retrieveSnapshotMediaTestOnly()
+                        await MainActor.run {
+                            isStageRetrievingSnapshotMedia = false
+                        }
+                    }
+                }
+            }
+        } message: {
+            Text(mediaRetrievalConfirmation.messageText)
         }
     }
 
@@ -7817,6 +8838,10 @@ private struct DebugLocalDiagnosticsView: View {
         diagnosticRow(label, String(value))
     }
 
+    private func optionalBoolText(_ value: Bool?) -> String {
+        value.map { $0 ? "true" : "false" } ?? "not checked"
+    }
+
     @ViewBuilder
     private func diagnosticRow(_ label: String, _ value: String) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: 12) {
@@ -7943,6 +8968,486 @@ private struct DebugLocalDiagnosticsView: View {
         if hours > 0 { return "\(hours)h \(minutes)m" }
         if minutes > 0 { return "\(minutes)m \(remainingSeconds)s" }
         return "\(remainingSeconds)s"
+    }
+}
+
+private struct StageSnapshotDetailsHeadingView: View {
+    let title: String
+
+    init(_ title: String) {
+        self.title = title
+    }
+
+    var body: some View {
+        Text(title)
+            .font(.headline.weight(.semibold))
+            .padding(.top, 8)
+            .accessibilityAddTraits(.isHeader)
+    }
+}
+
+private struct StageSessionSnapshotUploadSummarySection: View {
+    let rows: [StageDiagnosticDisplayRow]
+    let uploadError: String?
+    let reportText: () -> String
+
+    var body: some View {
+        Section("Session Snapshot Upload") {
+            Text("Shadow-write only diagnostics. The feature flag defaults off. Upload failures do not block capture, export, sealing, sync, media recovery, or iCloud fallback.")
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(.secondary)
+            StageDiagnosticRowsView(rows: rows)
+            if let uploadError {
+                StageDiagnosticRowView(label: "Last Upload Error", value: uploadError)
+            }
+            StageUploadReportNavigationView(reportText: reportText)
+        }
+    }
+}
+
+private struct StageLastSanitizedAttemptSection: View {
+    let rows: [StageDiagnosticDisplayRow]
+
+    var body: some View {
+        Section("Last Sanitized Attempt") {
+            StageDiagnosticRowsView(rows: rows)
+        }
+    }
+}
+
+private struct StageAuthPreflightSummaryView: View {
+    let checked: String
+    let appUser: String
+    let clientUser: String
+    let usersMatch: String
+    let payloadOrg: String
+    let payloadProperty: String
+    let payloadSession: String
+    let rows: [StageDiagnosticDisplayRow]
+    let failure: String?
+    let buttonTitle: String
+    let isButtonDisabled: Bool
+    let onRefresh: () -> Void
+
+    var body: some View {
+        StageSnapshotDetailsHeadingView("Auth Preflight")
+        diagnosticRow("Checked", checked)
+        diagnosticRow("App Auth User", appUser)
+        diagnosticRow("Client Session User", clientUser)
+        diagnosticRow("Users Match", usersMatch)
+        diagnosticRow("Payload Org ID", payloadOrg)
+        diagnosticRow("Payload Property ID", payloadProperty)
+        diagnosticRow("Payload Session ID", payloadSession)
+        StageDiagnosticRowsView(rows: rows)
+        if let failure {
+            StageDiagnosticRowView(label: "Preflight Failure", value: failure)
+        }
+        Button(buttonTitle) {
+            onRefresh()
+        }
+        .disabled(isButtonDisabled)
+        .font(.system(size: 14, weight: .semibold))
+    }
+
+    @ViewBuilder
+    private func diagnosticRow(_ label: String, _ value: String) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 12) {
+            Text(label)
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundStyle(.primary)
+            Spacer(minLength: 12)
+            Text(value)
+                .font(.system(size: 14, weight: .medium, design: .monospaced))
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.trailing)
+                .textSelection(.enabled)
+        }
+        .padding(.vertical, 2)
+    }
+}
+
+private struct StageTestSessionCreationSummaryView: View {
+    let isAvailable: Bool
+    let reason: String
+    let message: String?
+    let onCreate: () -> Void
+
+    var body: some View {
+        StageSnapshotDetailsHeadingView("Test Session Creation")
+        StageDiagnosticRowView(label: "Creation Available", value: isAvailable ? "true" : "false")
+        StageDiagnosticRowView(label: "Creation Reason", value: reason)
+        Button("Create Local Snapshot Test Session") {
+            onCreate()
+        }
+        .disabled(!isAvailable)
+        .font(.system(size: 14, weight: .semibold))
+        Text(message ?? reason)
+            .font(.system(size: 13, weight: .medium))
+            .foregroundStyle(.secondary)
+    }
+}
+
+private struct StageDiagnosticDisplayRow: Identifiable {
+    let id: String
+    let label: String
+    let value: String
+
+    init(_ label: String, _ value: String) {
+        self.id = label
+        self.label = label
+        self.value = value
+    }
+}
+
+private struct StageAuthRepairSummaryView: View {
+    let rows: [StageDiagnosticDisplayRow]
+    let repairMessage: String?
+    let buttonTitle: String
+    let isButtonDisabled: Bool
+    let onRepair: () -> Void
+
+    var body: some View {
+        StageSnapshotDetailsHeadingView("Auth Repair")
+        StageDiagnosticRowsView(rows: rows)
+        if let repairMessage {
+            StageDiagnosticRowView(label: "Repair Message", value: repairMessage)
+        }
+        Button(buttonTitle) {
+            onRepair()
+        }
+        .disabled(isButtonDisabled)
+        .font(.system(size: 14, weight: .semibold))
+    }
+}
+
+private struct StageLocalOrgDriftAuditSummaryView: View {
+    let rows: [StageDiagnosticDisplayRow]
+    let samples: [String]
+    let buttonTitle: String
+    let isButtonDisabled: Bool
+    let onRun: () -> Void
+
+    var body: some View {
+        StageSnapshotDetailsHeadingView("Local Org Drift Audit")
+        Text("Read-only manual audit. Confirms canonical org only when active remote property/session rows exist, agree, and the remote session belongs to the local property.")
+            .font(.system(size: 13, weight: .medium))
+            .foregroundStyle(.secondary)
+        StageDiagnosticRowsView(rows: rows)
+        if samples.isEmpty {
+            StageDiagnosticRowView(label: "Samples", value: "none")
+        } else {
+            ForEach(Array(samples.enumerated()), id: \.offset) { index, sample in
+                StageDiagnosticRowView(label: "Sample \(index + 1)", value: sample)
+            }
+        }
+        Button(buttonTitle) {
+            onRun()
+        }
+        .disabled(isButtonDisabled)
+        .font(.system(size: 14, weight: .semibold))
+    }
+}
+
+private struct StageLocalOrgDriftRepairSummaryView: View {
+    let rows: [StageDiagnosticDisplayRow]
+    let samples: [String]
+    let buttonTitle: String
+    let isButtonDisabled: Bool
+    let onRepair: () -> Void
+
+    var body: some View {
+        StageSnapshotDetailsHeadingView("Local Org Drift Repair")
+        StageDiagnosticRowsView(rows: rows)
+        if samples.isEmpty {
+            StageDiagnosticRowView(label: "Repair Samples", value: "none")
+        } else {
+            ForEach(Array(samples.enumerated()), id: \.offset) { index, sample in
+                StageDiagnosticRowView(label: "Repair \(index + 1)", value: sample)
+            }
+        }
+        Button(buttonTitle) {
+            onRepair()
+        }
+        .disabled(isButtonDisabled)
+        .font(.system(size: 14, weight: .semibold))
+    }
+}
+
+private struct StageRemoteReadbackSummaryView: View {
+    let rows: [StageDiagnosticDisplayRow]
+    let failure: String?
+    let buttonTitle: String
+    let isButtonDisabled: Bool
+    let onCheck: () -> Void
+
+    var body: some View {
+        StageSnapshotDetailsHeadingView("Remote Readback")
+        Text("Read-only row and payload consistency check. It does not hydrate sessions, restore data, switch reads, download media, or change local session state.")
+            .font(.system(size: 13, weight: .medium))
+            .foregroundStyle(.secondary)
+        StageDiagnosticRowsView(rows: rows)
+        if let failure {
+            StageDiagnosticRowView(label: "Readback Failure", value: failure)
+        }
+        Button(buttonTitle) {
+            onCheck()
+        }
+        .disabled(isButtonDisabled)
+        .font(.system(size: 14, weight: .semibold))
+    }
+}
+
+private struct StageRestoreDiagnosticsSummaryView: View {
+    let rows: [StageDiagnosticDisplayRow]
+    let failure: String?
+    let buttonTitle: String
+    let isButtonDisabled: Bool
+    let onCheck: () -> Void
+
+    var body: some View {
+        StageSnapshotDetailsHeadingView("Restore Diagnostics")
+        Text("Diagnostics are read-only. Opening this disclosure does not hydrate metadata, restore media, download originals, switch canonical reads, or bypass freshness or production policy blocks.")
+            .font(.system(size: 13, weight: .medium))
+            .foregroundStyle(.secondary)
+        StageDiagnosticRowsView(rows: rows)
+        if let failure {
+            StageDiagnosticRowView(label: "Failure Reason", value: failure)
+        }
+        Button(buttonTitle) {
+            onCheck()
+        }
+        .disabled(isButtonDisabled)
+        .font(.system(size: 14, weight: .semibold))
+    }
+}
+
+private struct StageMetadataHydrationSummaryView: View {
+    let rows: [StageDiagnosticDisplayRow]
+    let buttonTitle: String
+    let isButtonDisabled: Bool
+    let onReview: () -> Void
+
+    var body: some View {
+        StageSnapshotDetailsHeadingView("Metadata Hydration")
+        StageDiagnosticRowsView(rows: rows)
+        Button(buttonTitle) {
+            onReview()
+        }
+        .disabled(isButtonDisabled)
+        .font(.system(size: 14, weight: .semibold))
+    }
+}
+
+private struct StageMediaRetrievalSummaryView: View {
+    let rows: [StageDiagnosticDisplayRow]
+    let buttonTitle: String
+    let isButtonDisabled: Bool
+    let onRetrieve: () -> Void
+
+    var body: some View {
+        StageSnapshotDetailsHeadingView("Media Retrieval")
+        StageDiagnosticRowsView(rows: rows)
+        Button(buttonTitle) {
+            onRetrieve()
+        }
+        .disabled(isButtonDisabled)
+        .font(.system(size: 14, weight: .semibold))
+    }
+}
+
+private struct StageRecoveryCohortSummaryView: View {
+    let rows: [StageDiagnosticDisplayRow]
+    let buttonTitle: String
+    let isButtonDisabled: Bool
+    let onCheck: () -> Void
+
+    var body: some View {
+        StageSnapshotDetailsHeadingView("Recovery Cohort")
+        Text("Read-only recovery cohort and readiness summary. It does not hydrate metadata, download media, switch canonical reads, or change local or remote state.")
+            .font(.system(size: 13, weight: .medium))
+            .foregroundStyle(.secondary)
+        StageDiagnosticRowsView(rows: rows)
+        Button(buttonTitle) {
+            onCheck()
+        }
+        .disabled(isButtonDisabled)
+        .font(.system(size: 14, weight: .semibold))
+    }
+}
+
+private struct StageCanonicalReadDiagnosticsActionView: View {
+    let buttonTitle: String
+    let isButtonDisabled: Bool
+    let rows: [StageDiagnosticDisplayRow]
+    let onCheck: () -> Void
+
+    var body: some View {
+        Section("Canonical Read Diagnostics Action") {
+            Text("Runs only after tapping the button. It preserves selected-session scope, package evidence checks, read-switch blocks, and local fallback behavior.")
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(.secondary)
+            Button(buttonTitle) {
+                onCheck()
+            }
+            .disabled(isButtonDisabled)
+            .font(.system(size: 14, weight: .semibold))
+            StageDiagnosticRowsView(rows: rows)
+        }
+    }
+}
+
+private struct StageFlaggedObservationReplayActionView: View {
+    let buttonTitle: String
+    let isButtonDisabled: Bool
+    let rows: [StageDiagnosticDisplayRow]
+    let onReplay: () -> Void
+
+    var body: some View {
+        Section("Flagged Observation Replay Action") {
+            Text("Runs only after tapping the button. Package evidence, runtime QA authorization, exact selected scope, local active source, fallback, production, broad-read, and supabase_read_enabled guards remain enforced.")
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(.secondary)
+            Button(buttonTitle) {
+                onReplay()
+            }
+            .disabled(isButtonDisabled)
+            .font(.system(size: 14, weight: .semibold))
+            StageDiagnosticRowsView(rows: rows)
+        }
+    }
+}
+
+private struct StageOperatorApprovalActionView: View {
+    let recordButtonTitle: String
+    let clearButtonTitle: String
+    let isRecordDisabled: Bool
+    let isClearDisabled: Bool
+    let rows: [StageDiagnosticDisplayRow]
+    let onRecord: () -> Void
+    let onClear: () -> Void
+
+    var body: some View {
+        Section("Operator Approval Actions") {
+            Text("Diagnostic approval state only. These controls do not activate candidates, enable Supabase reads, enable broad canonical reads, mutate hosted data, or bypass exact selected-session scope requirements.")
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(.secondary)
+            Button(recordButtonTitle) {
+                onRecord()
+            }
+            .disabled(isRecordDisabled)
+            .font(.system(size: 14, weight: .semibold))
+            Button(clearButtonTitle) {
+                onClear()
+            }
+            .disabled(isClearDisabled)
+            .font(.system(size: 14, weight: .semibold))
+            StageDiagnosticRowsView(rows: rows)
+        }
+    }
+}
+
+private struct StageUploadReportNavigationView: View {
+    let reportText: () -> String
+
+    var body: some View {
+        NavigationLink {
+            StageLazySessionSnapshotUploadTextView(reportText: reportText)
+        } label: {
+            Text("View Copyable Upload Report")
+                .font(.system(size: 14, weight: .semibold))
+        }
+    }
+}
+
+private struct StagePackageValidationReportNavigationView: View {
+    let isReportAvailable: Bool
+    let reportText: () -> String
+
+    var body: some View {
+        if isReportAvailable {
+            NavigationLink {
+                StageLazySessionSnapshotUploadTextView(
+                    title: "Package Validation",
+                    footerText: "Copies the selected-session package validation reports as plain text. It does not include raw session.json, local paths, signed URLs, auth material, storage object paths, or media payloads.",
+                    reportText: reportText
+                )
+            } label: {
+                Text("View Copyable Package Validation Report")
+                    .font(.system(size: 14, weight: .semibold))
+            }
+        }
+    }
+}
+
+private struct StageCanonicalRolloutReportNavigationView: View {
+    let reportText: () -> String
+
+    var body: some View {
+        Section("Canonical Rollout Report") {
+            Text("Display-only report navigation. Opening this link copies or displays existing sanitized report text only after explicit navigation; it does not rerun diagnostics, upload data, switch reads, activate, or mutate hosted data.")
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(.secondary)
+            NavigationLink {
+                StageLazySessionSnapshotUploadTextView(
+                    title: "Canonical Read Report",
+                    footerText: "Copies the sanitized canonical-read rollout report as plain text. It keeps full canonical details out of the primary diagnostic rows and does not include raw session.json, local paths, signed URLs, auth material, storage object paths, or media payloads.",
+                    reportText: reportText
+                )
+            } label: {
+                Text("View Canonical Read Rollout Report")
+                    .font(.system(size: 14, weight: .semibold))
+            }
+        }
+    }
+}
+
+private struct StageValidationPipelineReportNavigationView: View {
+    let isReportAvailable: Bool
+    let reportText: () -> String
+
+    var body: some View {
+        if isReportAvailable {
+            NavigationLink {
+                StageLazySessionSnapshotUploadTextView(
+                    title: "Validation Pipeline",
+                    footerText: "Copies the selected-session validation pipeline report as plain text. It is diagnostic-only and does not include raw session.json, local paths, signed URLs, auth material, storage object paths, or media payloads.",
+                    reportText: reportText
+                )
+            } label: {
+                Text("View Copyable Validation Pipeline Report")
+                    .font(.system(size: 14, weight: .semibold))
+            }
+        }
+    }
+}
+
+private struct StageDiagnosticRowsView: View {
+    let rows: [StageDiagnosticDisplayRow]
+
+    var body: some View {
+        ForEach(rows) { row in
+            StageDiagnosticRowView(label: row.label, value: row.value)
+        }
+    }
+}
+
+private struct StageDiagnosticRowView: View {
+    let label: String
+    let value: String
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 12) {
+            Text(label)
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundStyle(.primary)
+            Spacer(minLength: 12)
+            Text(value)
+                .font(.system(size: 14, weight: .medium, design: .monospaced))
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.trailing)
+                .textSelection(.enabled)
+        }
+        .padding(.vertical, 2)
     }
 }
 
@@ -9707,6 +11212,20 @@ private struct DebugSessionSnapshotUploadTextView: View {
         }
         .navigationTitle(title)
         .navigationBarTitleDisplayMode(.inline)
+    }
+}
+
+private struct StageLazySessionSnapshotUploadTextView: View {
+    var title: String = "Snapshot Upload Report"
+    var footerText: String = "Copies the sanitized shadow-write upload report as plain text. It does not include raw session.json, local paths, signed URLs, auth material, storage object paths, or media payloads."
+    let reportText: () -> String
+
+    var body: some View {
+        DebugSessionSnapshotUploadTextView(
+            snapshotText: reportText(),
+            title: title,
+            footerText: footerText
+        )
     }
 }
 
