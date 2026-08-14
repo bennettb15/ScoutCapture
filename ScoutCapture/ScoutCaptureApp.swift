@@ -1083,6 +1083,8 @@ struct SessionHubView: View {
         let sessionsForProperty = appState.sessions(for: property.id).sorted { $0.startedAt > $1.startedAt }
         let badgeModel = appState.propertyCardBadgeModel(for: property.id)
         let pendingSession = sessionsForProperty.first(where: { appState.isPendingDeliveryLocallyAvailable($0) })
+        let sessionUploadStatus = pendingSession.flatMap { appState.sessionSnapshotCloudStatus(for: $0) } ??
+            sessionsForProperty.compactMap { appState.sessionSnapshotCloudStatus(for: $0) }.first
         let hasDraft = badgeModel.showDraft
         let hasPendingExport = badgeModel.showPendingExport
         let latestReExportSession = reExportCandidateSession(for: property.id)
@@ -1110,6 +1112,9 @@ struct SessionHubView: View {
                         .font(.system(size: 18, weight: .semibold))
                         .foregroundColor(.primary)
                         .lineLimit(1)
+                    if let sessionUploadStatus {
+                        sessionSnapshotCloudIcon(sessionUploadStatus)
+                    }
                 }
 
                 if let clientLine {
@@ -1380,6 +1385,28 @@ struct SessionHubView: View {
             Capsule()
                 .stroke(tint.opacity(0.35), lineWidth: 1)
         )
+    }
+
+    private func sessionSnapshotCloudTint(_ tint: AppState.SessionSnapshotCloudStatus.Tint) -> Color {
+        switch tint {
+        case .neutral:
+            return .secondary
+        case .blue:
+            return .blue
+        case .orange:
+            return .orange
+        case .red:
+            return .red
+        }
+    }
+
+    @ViewBuilder
+    private func sessionSnapshotCloudIcon(_ status: AppState.SessionSnapshotCloudStatus) -> some View {
+        Image(systemName: status.symbolName)
+            .font(.system(size: 15, weight: .semibold))
+            .foregroundColor(sessionSnapshotCloudTint(status.tint))
+            .accessibilityLabel(Text(status.accessibilityLabel))
+            .help(status.helpText)
     }
 
     private var countersHeader: some View {
@@ -5980,9 +6007,14 @@ private struct PropertySessionsManagerView: View {
                 List(sessions) { session in
                     HStack(spacing: 10) {
                         VStack(alignment: .leading, spacing: 3) {
-                            Text(session.status == .draft ? "Draft Session" : "Completed Session")
-                                .font(.system(size: 16, weight: .semibold))
-                                .foregroundColor(.primary)
+                            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                                Text(session.status == .draft ? "Draft Session" : "Completed Session")
+                                    .font(.system(size: 16, weight: .semibold))
+                                    .foregroundColor(.primary)
+                                if let cloudStatus = appState.sessionSnapshotCloudStatus(for: session) {
+                                    sessionSnapshotCloudIcon(cloudStatus)
+                                }
+                            }
                             Text("Started \(session.startedAt.formatted(date: .abbreviated, time: .shortened))")
                                 .font(.system(size: 13, weight: .medium))
                                 .foregroundColor(.secondary)
@@ -6067,6 +6099,28 @@ private struct PropertySessionsManagerView: View {
         sessions = appState.sessions(for: property.id)
             .filter { appState.shouldDisplaySessionInSessionList($0) }
             .sorted { $0.startedAt > $1.startedAt }
+    }
+
+    @ViewBuilder
+    private func sessionSnapshotCloudIcon(_ status: AppState.SessionSnapshotCloudStatus) -> some View {
+        Image(systemName: status.symbolName)
+            .font(.system(size: 14, weight: .semibold))
+            .foregroundColor(sessionSnapshotCloudTint(status.tint))
+            .accessibilityLabel(Text(status.accessibilityLabel))
+            .help(status.helpText)
+    }
+
+    private func sessionSnapshotCloudTint(_ tint: AppState.SessionSnapshotCloudStatus.Tint) -> Color {
+        switch tint {
+        case .neutral:
+            return .secondary
+        case .blue:
+            return .blue
+        case .orange:
+            return .orange
+        case .red:
+            return .red
+        }
     }
 
     private func handleDeleteTap(_ session: Session) {

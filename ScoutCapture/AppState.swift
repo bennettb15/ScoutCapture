@@ -563,6 +563,143 @@ final class AppState: ObservableObject {
         let message: String?
     }
 
+    struct SessionSnapshotAutoUploadEligibility: Equatable {
+        let allowed: Bool
+        let reason: String
+    }
+
+    struct SessionSnapshotUploadRetryRunSummary: Equatable {
+        let didStart: Bool
+        let source: String
+        let discoveredCount: Int
+        let normalizedInFlightCount: Int
+        let skippedBackoffCount: Int
+        let attemptedCount: Int
+        let succeededCount: Int
+        let failedCount: Int
+        let terminalFailedCount: Int
+        let skippedIneligibleCount: Int
+    }
+
+    enum SessionSnapshotCloudState: String, Equatable {
+        case queued
+        case uploading
+        case retryScheduled = "retry_scheduled"
+        case failed
+        case uploaded
+    }
+
+    struct SessionSnapshotCloudStatus: Equatable {
+        enum Tint: String, Equatable {
+            case neutral
+            case blue
+            case orange
+            case red
+        }
+
+        let state: SessionSnapshotCloudState
+        let snapshotID: UUID
+        let organizationID: UUID
+        let propertyID: UUID
+        let sessionID: UUID
+        let triggerSource: String
+        let reason: String?
+        let generatedAt: Date
+        let updatedAt: Date
+
+        var accessibilityLabel: String {
+            if isConfigurationBlocked {
+                return "Session snapshot upload disabled"
+            }
+            switch state {
+            case .queued:
+                return "Session snapshot queued"
+            case .uploading:
+                return "Session snapshot uploading"
+            case .retryScheduled:
+                return "Session snapshot upload retry scheduled"
+            case .failed:
+                return "Session snapshot upload failed"
+            case .uploaded:
+                return "Session snapshot uploaded"
+            }
+        }
+
+        var helpText: String {
+            if isConfigurationBlocked {
+                return "Automatic session snapshot upload is disabled or blocked by configuration."
+            }
+            switch state {
+            case .queued:
+                return "Automatic session snapshot upload is queued."
+            case .uploading:
+                return "Automatic session snapshot upload is in progress."
+            case .retryScheduled:
+                return "Automatic session snapshot upload will retry automatically."
+            case .failed:
+                return "Automatic session snapshot upload reached a terminal failure."
+            case .uploaded:
+                return "Automatic session snapshot upload completed."
+            }
+        }
+
+        var symbolName: String {
+            if isConfigurationBlocked {
+                return "icloud.slash"
+            }
+            switch state {
+            case .queued:
+                return "icloud"
+            case .uploading:
+                return "icloud.and.arrow.up"
+            case .retryScheduled:
+                return "arrow.clockwise.icloud"
+            case .failed:
+                return "exclamationmark.icloud"
+            case .uploaded:
+                return "checkmark.icloud.fill"
+            }
+        }
+
+        var tint: Tint {
+            if isConfigurationBlocked {
+                return .orange
+            }
+            switch state {
+            case .queued:
+                return .neutral
+            case .uploading:
+                return .blue
+            case .retryScheduled:
+                return .orange
+            case .failed:
+                return .red
+            case .uploaded:
+                return .blue
+            }
+        }
+
+        var isConfigurationBlocked: Bool {
+            guard state == .failed else { return false }
+            switch reason {
+            case "auto_upload_disabled",
+                "kill_switch_active",
+                "allowlist_empty",
+                "snapshot_shadow_write_disabled",
+                "supabase_config_invalid",
+                "snapshot_target_not_approved",
+                "production_validation_manual_only",
+                "missing_org_id",
+                "allowlist_no_match",
+                "authentication_not_ready",
+                "active_org_required":
+                return true
+            default:
+                return false
+            }
+        }
+    }
+
     struct SessionSnapshotAuthPreflightRemoteParentStatus: Equatable {
         var propertyExists: Bool = false
         var sessionExists: Bool = false
@@ -4476,6 +4613,38 @@ final class AppState: ObservableObject {
             case revision
         }
 
+        init(
+            propertyID: UUID,
+            orgID: UUID,
+            status: PropertyStatusValue,
+            activeSessionID: UUID?,
+            draftSessionID: UUID?,
+            pendingExportSessionID: UUID?,
+            lastExportedSessionID: UUID?,
+            ownerUserID: UUID?,
+            ownerDeviceID: String?,
+            heartbeatAt: Date?,
+            updatedAt: Date,
+            updatedBy: UUID?,
+            statusReason: String?,
+            revision: Int64
+        ) {
+            self.propertyID = propertyID
+            self.orgID = orgID
+            self.status = status
+            self.activeSessionID = activeSessionID
+            self.draftSessionID = draftSessionID
+            self.pendingExportSessionID = pendingExportSessionID
+            self.lastExportedSessionID = lastExportedSessionID
+            self.ownerUserID = ownerUserID
+            self.ownerDeviceID = ownerDeviceID
+            self.heartbeatAt = heartbeatAt
+            self.updatedAt = updatedAt
+            self.updatedBy = updatedBy
+            self.statusReason = statusReason
+            self.revision = revision
+        }
+
         var ownerDiagnosticSummary: String {
             "user=\(ownerUserID?.uuidString ?? "nil"),device=\(ownerDeviceID ?? "nil")"
         }
@@ -6574,6 +6743,7 @@ final class AppState: ObservableObject {
     @Published private(set) var pendingExportSessionByProperty: [UUID: Session] = [:]
     @Published private(set) var hubMetaByProperty: [UUID: HubPropertyMeta] = [:]
     @Published private(set) var hubRowRefreshToken: UUID = UUID()
+    @Published private(set) var sessionSnapshotCloudStatusBySessionID: [UUID: SessionSnapshotCloudStatus] = [:]
     @Published private(set) var cloudBackupStatus: CloudBackupStatus
     @Published private(set) var supabaseConfiguration: SupabaseRuntimeConfiguration
     @Published private(set) var backendFeatureFlags: BackendFeatureFlags
@@ -7181,6 +7351,7 @@ final class AppState: ObservableObject {
     private let logThrottleQueue = DispatchQueue(label: "ScoutCapture.AppState.logThrottle")
     private let supabaseMediaOperationQueue = DispatchQueue(label: "ScoutCapture.AppState.supabaseMediaOperations")
     private let offlineReplayStateQueue = DispatchQueue(label: "ScoutCapture.AppState.offlineReplay")
+    private let sessionSnapshotUploadRetryStateQueue = DispatchQueue(label: "ScoutCapture.AppState.sessionSnapshotUploadRetry")
     private var cloudBackupLogRunOpen: Bool = false
     private var cloudBackupLogHasPrintedStart: Bool = false
     private var cloudBackupLogHasPrintedTerminal: Bool = false
@@ -7210,7 +7381,6 @@ final class AppState: ObservableObject {
     private let startupFallbackGraceWindow: TimeInterval = 25.0
     private let supabaseOperationalMediaBucket = "scoutcapture-originals"
     private let sessionSnapshotStorageBucket = "scoutcapture-session-snapshots"
-    private var sessionSnapshotAutoUploadCheckpointKeys: Set<String> = []
     private let maximumSupabaseMediaUploadAttempts = 5
     private let failedSupabaseMediaRetryCooldown: TimeInterval = 30
     private var inFlightSupabaseMediaOperations: Set<String> = []
@@ -7219,6 +7389,8 @@ final class AppState: ObservableObject {
     private var lastSupabaseMediaBackfillTriggerReason: String?
     private var isSyncDeltaPullInFlight: Bool = false
     private var isOfflineReplayInFlight: Bool = false
+    private var isSessionSnapshotUploadRetryInFlight: Bool = false
+    private var sessionArchiveSnapshotSchedulingKeys: Set<String> = []
     private var sessionCoordinationStateBySessionID: [UUID: SessionCoordinationState] = [:]
     private var sessionCoordinationEntrySnapshotBySessionID: [UUID: String] = [:]
     private var occupancyOnlyClaimedSessionIDs: Set<UUID> = []
@@ -7582,6 +7754,10 @@ final class AppState: ObservableObject {
         }
 
         self.currentSession = nil
+        self.sessionSnapshotCloudStatusBySessionID = Self.makeSessionSnapshotCloudStatusBySessionID(
+            records: (try? self.localStore.fetchSessionSnapshotUploadStatusRecords()) ?? [],
+            retryItems: (try? self.localStore.fetchSessionSnapshotUploadRetryWorkItems()) ?? []
+        )
 
         if let cloudBackupManager {
             cloudBackupManager.$status
@@ -9668,7 +9844,7 @@ final class AppState: ObservableObject {
         let scopedPropertyIDs = Set(scopedProperties.map(\.id))
         let scopedSessionIndex = allSessionIndexByProperty
             .filter { scopedPropertyIDs.contains($0.key) }
-            .mapValues { sessions in sessions.filter { $0.deletedAt == nil } }
+            .mapValues { sessions in Self.uniqueSessionsByID(sessions).filter { $0.deletedAt == nil } }
         let scopedDrafts = allDraftSessionByProperty.filter { scopedPropertyIDs.contains($0.key) && $0.value.deletedAt == nil }
         let scopedPending = allPendingExportSessionByProperty.filter { scopedPropertyIDs.contains($0.key) && $0.value.deletedAt == nil }
         let scopedMeta = allHubMetaByProperty.filter { scopedPropertyIDs.contains($0.key) }
@@ -9746,9 +9922,10 @@ final class AppState: ObservableObject {
     }
 
     private func scopedProperties(from properties: [Property]) -> [Property] {
-        guard requiresAuthentication else { return properties.filter { $0.deletedAt == nil } }
+        let uniqueProperties = Self.uniquePropertiesByID(properties)
+        guard requiresAuthentication else { return uniqueProperties.filter { $0.deletedAt == nil } }
         guard let activeOrganizationID else { return [] }
-        let orgScoped = properties.filter { $0.orgId == activeOrganizationID && $0.deletedAt == nil }
+        let orgScoped = uniqueProperties.filter { $0.orgId == activeOrganizationID && $0.deletedAt == nil }
         guard isPropertyScopedOrganization(activeOrganizationID) else {
             return orgScoped
         }
@@ -10946,6 +11123,7 @@ final class AppState: ObservableObject {
     @MainActor
     private func performRemoteConvergenceCycle(source: String) async {
         _ = await performOfflineReplay(source: source)
+        _ = await performSessionSnapshotUploadRetry(source: source)
         await performSyncDeltaPull(source: source)
         queuePropertyStatusDiagnosticsRefresh(
             trigger: "convergence_\(source)",
@@ -14344,6 +14522,149 @@ final class AppState: ObservableObject {
         return SessionSnapshotBuildResult(envelope: envelope, payloadData: payloadData)
     }
 
+    private func makeSessionSnapshotBuildResult(
+        archivePath: String,
+        propertyID: UUID,
+        sessionID: UUID,
+        generatedAt: Date,
+        trigger: String,
+        sourceDeviceID: String?
+    ) throws -> SessionSnapshotBuildResult {
+        let archiveRoot = URL(fileURLWithPath: archivePath, isDirectory: true)
+        let payloadRoot = archiveRoot.appendingPathComponent("Payload", isDirectory: true)
+        let sessionJSONURL = payloadRoot.appendingPathComponent("session.json", isDirectory: false)
+        guard FileManager.default.fileExists(atPath: sessionJSONURL.path),
+              let rawData = try? Data(contentsOf: sessionJSONURL) else {
+            throw SessionSnapshotPreviewError.sessionJSONMissingOrUnreadable
+        }
+
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        guard let metadata = try? decoder.decode(SessionMetadata.self, from: rawData) else {
+            throw SessionSnapshotPreviewError.sessionJSONMissingOrUnreadable
+        }
+        guard metadata.propertyID == propertyID, metadata.sessionID == sessionID else {
+            throw SessionSnapshotPreviewError.sessionJSONIDMismatch
+        }
+
+        let rawSessionJSON = String(data: rawData, encoding: .utf8) ?? rawData.base64EncodedString()
+        let rawChecksum = Self.sessionSnapshotSHA256Hex(for: rawData)
+        let manifest = metadata.shots.map { shot in
+            Self.makeSessionSnapshotMediaManifestItem(
+                forArchivedShot: shot,
+                payloadRoot: payloadRoot
+            )
+        }
+        let missingOriginals = manifest.filter { !$0.localOriginalExists }.count
+        let storageMetadataCount = manifest.filter { $0.storageBucketPresent && $0.storagePathPresent }.count
+        let payload = SessionSnapshotPayloadForChecksum(
+            snapshotSchemaVersion: 1,
+            sessionMetadataSchemaVersion: metadata.schemaVersion,
+            trigger: trigger,
+            generatedAt: generatedAt,
+            appVersion: Self.trimmedNonEmpty(metadata.appVersion),
+            sourceDeviceID: sourceDeviceID,
+            orgID: metadata.orgID,
+            propertyID: propertyID,
+            sessionID: sessionID,
+            status: metadata.status,
+            isSealed: metadata.isSealed,
+            exportedAt: metadata.exportedAt,
+            firstDeliveredAt: metadata.firstDeliveredAt,
+            reExportExpiresAt: metadata.reExportExpiresAt,
+            shotCount: metadata.shots.count,
+            issueCount: metadata.issues.count,
+            guidedCount: metadata.guidedShots.count,
+            mediaManifestCount: manifest.count,
+            missingLocalOriginalsCount: missingOriginals,
+            supabaseStorageMetadataCount: storageMetadataCount,
+            rawSessionJSON: rawSessionJSON,
+            rawSessionJSONSHA256: rawChecksum,
+            rawSessionJSONByteCount: rawData.count,
+            mediaManifest: manifest
+        )
+
+        let payloadData: Data
+        do {
+            let encoder = JSONEncoder()
+            encoder.dateEncodingStrategy = .iso8601
+            encoder.outputFormatting = [.sortedKeys]
+            payloadData = try encoder.encode(payload)
+        } catch {
+            throw SessionSnapshotPreviewError.checksumGenerationFailed
+        }
+
+        let envelope = SessionSnapshotEnvelope(
+            id: sessionID,
+            snapshotSchemaVersion: payload.snapshotSchemaVersion,
+            sessionMetadataSchemaVersion: payload.sessionMetadataSchemaVersion,
+            trigger: trigger,
+            generatedAt: generatedAt,
+            appVersion: payload.appVersion,
+            sourceDeviceID: payload.sourceDeviceID,
+            orgID: payload.orgID,
+            propertyID: payload.propertyID,
+            sessionID: payload.sessionID,
+            status: payload.status,
+            isSealed: payload.isSealed,
+            exportedAt: payload.exportedAt,
+            firstDeliveredAt: payload.firstDeliveredAt,
+            reExportExpiresAt: payload.reExportExpiresAt,
+            shotCount: payload.shotCount,
+            issueCount: payload.issueCount,
+            guidedCount: payload.guidedCount,
+            mediaManifestCount: payload.mediaManifestCount,
+            missingLocalOriginalsCount: payload.missingLocalOriginalsCount,
+            supabaseStorageMetadataCount: payload.supabaseStorageMetadataCount,
+            rawSessionJSON: rawSessionJSON,
+            rawSessionJSONSHA256: rawChecksum,
+            snapshotPayloadSHA256: Self.sessionSnapshotSHA256Hex(for: payloadData),
+            rawSessionJSONByteCount: rawData.count,
+            snapshotPayloadByteCount: payloadData.count,
+            mediaManifest: manifest
+        )
+        return SessionSnapshotBuildResult(envelope: envelope, payloadData: payloadData)
+    }
+
+    private func makeSessionSnapshotUploadArtifacts(
+        fromRetryItem item: LocalStore.SessionSnapshotUploadRetryWorkItem
+    ) throws -> (row: SessionSnapshotUploadRow, object: SessionSnapshotStorageObject) {
+        guard FileManager.default.fileExists(atPath: item.archivePath) else {
+            throw NSError(
+                domain: "ScoutCapture.SessionSnapshotUploadRetry",
+                code: 1,
+                userInfo: [NSLocalizedDescriptionKey: "archive_snapshot_missing_or_invalid"]
+            )
+        }
+        let kind = SessionSnapshotKind(rawValue: item.snapshotKind) ?? .completed
+        let buildResult = try makeSessionSnapshotBuildResult(
+            archivePath: item.archivePath,
+            propertyID: item.propertyID,
+            sessionID: item.sessionID,
+            generatedAt: item.generatedAt,
+            trigger: item.trigger,
+            sourceDeviceID: item.sourceDeviceID
+        )
+        guard buildResult.envelope.orgID == item.organizationID else {
+            throw SessionSnapshotPreviewError.sessionJSONIDMismatch
+        }
+        let object = SessionSnapshotStorageObject(
+            bucket: item.storageBucket,
+            path: item.storagePath,
+            payloadData: buildResult.payloadData,
+            contentType: "application/json",
+            payloadSHA256: buildResult.envelope.snapshotPayloadSHA256
+        )
+        let row = makeSessionSnapshotUploadRow(
+            snapshotID: item.snapshotID,
+            kind: kind,
+            orgID: item.organizationID,
+            envelope: buildResult.envelope,
+            storagePath: item.storagePath
+        )
+        return (row, object)
+    }
+
     nonisolated static func sessionSnapshotStoragePath(
         orgID: UUID,
         propertyID: UUID,
@@ -15142,123 +15463,163 @@ final class AppState: ObservableObject {
     }
 
     @discardableResult
+    @MainActor
     func attemptAutomaticSessionSnapshotUploadForCompletedSealedCheckpoint(
         session: Session,
         triggerSource: String,
+        archivePath: String? = nil,
         attemptedAt: Date = Date()
     ) async -> SessionSnapshotUploadResult? {
         let propertyID = session.propertyID
         let sessionID = session.id
-        let checkpointKey = Self.sessionSnapshotAutoUploadCheckpointKey(session: session, triggerSource: triggerSource)
-
-        guard backendFeatureFlags.sessionSnapshotAutoUploadEnabled else {
+        let orgID = sessionSnapshotAutoUploadOrgID(for: session)
+        let eligibility = evaluateSessionSnapshotAutoUploadEligibility(
+            session: session,
+            orgID: orgID
+        )
+        guard eligibility.allowed else {
+            if let orgID {
+                persistSessionSnapshotCloudStatus(
+                    session: session,
+                    orgID: orgID,
+                    triggerSource: triggerSource,
+                    status: .failed,
+                    reason: eligibility.reason,
+                    generatedAt: attemptedAt
+                )
+            }
             recordSessionSnapshotAutoUploadSkipped(
                 propertyID: propertyID,
                 sessionID: sessionID,
                 triggerSource: triggerSource,
-                reason: "auto_upload_disabled"
+                reason: eligibility.reason
             )
             return nil
+        }
+        guard let orgID else { return nil }
+        let resolvedArchivePath: String
+        if let archivePath {
+            resolvedArchivePath = archivePath
+        } else {
+            do {
+                guard let archiveURL = try localStore.createSessionArchiveSnapshot(
+                    session: session,
+                    trigger: triggerSource,
+                    deviceID: currentDeviceIdentifier()
+                ) else {
+                    recordSessionSnapshotAutoUploadSkipped(
+                        propertyID: propertyID,
+                        sessionID: sessionID,
+                        triggerSource: triggerSource,
+                        reason: "archive_snapshot_creation_failed"
+                    )
+                    return nil
+                }
+                resolvedArchivePath = archiveURL.path
+            } catch {
+                recordDiagnosticsError(error)
+                recordSessionSnapshotAutoUploadSkipped(
+                    propertyID: propertyID,
+                    sessionID: sessionID,
+                    triggerSource: triggerSource,
+                    reason: "archive_snapshot_creation_failed"
+                )
+                return nil
+            }
+        }
+
+        let snapshotID = UUID()
+        let storagePath = Self.sessionSnapshotStoragePath(
+            orgID: orgID,
+            propertyID: propertyID,
+            sessionID: sessionID,
+            snapshotKind: .completed,
+            snapshotID: snapshotID
+        )
+        let item = LocalStore.SessionSnapshotUploadRetryWorkItem(
+            snapshotID: snapshotID,
+            organizationID: orgID,
+            propertyID: propertyID,
+            sessionID: sessionID,
+            snapshotKind: SessionSnapshotKind.completed.rawValue,
+            trigger: "auto_completed_sealed_archive:\(triggerSource)",
+            triggerSource: triggerSource,
+            archivePath: resolvedArchivePath,
+            storageBucket: sessionSnapshotStorageBucket,
+            storagePath: storagePath,
+            generatedAt: attemptedAt,
+            sourceDeviceID: currentDeviceIdentifier(),
+            idempotencyKey: Self.sessionSnapshotAutoUploadCheckpointKey(session: session, triggerSource: triggerSource)
+        )
+        let queuedItem: LocalStore.SessionSnapshotUploadRetryWorkItem
+        do {
+            queuedItem = try localStore.upsertSessionSnapshotUploadRetryWorkItem(item)
+            persistSessionSnapshotCloudStatus(
+                for: queuedItem,
+                status: Self.statusRecordStatus(for: queuedItem.status),
+                updatedAt: attemptedAt
+            )
+        } catch {
+            recordDiagnosticsError(error)
+            recordSessionSnapshotAutoUploadSkipped(
+                propertyID: propertyID,
+                sessionID: sessionID,
+                triggerSource: triggerSource,
+                reason: "retry_queue_persist_failed"
+            )
+            return nil
+        }
+
+        return await performSessionSnapshotUploadRetryForItem(
+            itemID: queuedItem.id,
+            source: "auto_completed_sealed_archive",
+            now: attemptedAt
+        )
+    }
+
+    private func evaluateSessionSnapshotAutoUploadEligibility(
+        session: Session,
+        orgID: UUID?
+    ) -> SessionSnapshotAutoUploadEligibility {
+        guard backendFeatureFlags.sessionSnapshotAutoUploadEnabled else {
+            return SessionSnapshotAutoUploadEligibility(allowed: false, reason: "auto_upload_disabled")
         }
         guard !backendFeatureFlags.sessionSnapshotAutoUploadKillSwitch else {
-            recordSessionSnapshotAutoUploadSkipped(
-                propertyID: propertyID,
-                sessionID: sessionID,
-                triggerSource: triggerSource,
-                reason: "kill_switch_active"
-            )
-            return nil
+            return SessionSnapshotAutoUploadEligibility(allowed: false, reason: "kill_switch_active")
         }
         guard backendFeatureFlags.sessionSnapshotAutoUploadHasAllowlist else {
-            recordSessionSnapshotAutoUploadSkipped(
-                propertyID: propertyID,
-                sessionID: sessionID,
-                triggerSource: triggerSource,
-                reason: "allowlist_empty"
-            )
-            return nil
+            return SessionSnapshotAutoUploadEligibility(allowed: false, reason: "allowlist_empty")
         }
         guard session.status == .completed, session.isSealed, session.deletedAt == nil else {
-            recordSessionSnapshotAutoUploadSkipped(
-                propertyID: propertyID,
-                sessionID: sessionID,
-                triggerSource: triggerSource,
-                reason: "session_not_completed_sealed"
-            )
-            return nil
+            return SessionSnapshotAutoUploadEligibility(allowed: false, reason: "session_not_completed_sealed")
         }
         guard backendFeatureFlags.sessionSnapshotShadowWriteEnabled else {
-            recordSessionSnapshotAutoUploadSkipped(
-                propertyID: propertyID,
-                sessionID: sessionID,
-                triggerSource: triggerSource,
-                reason: "snapshot_shadow_write_disabled"
-            )
-            return nil
+            return SessionSnapshotAutoUploadEligibility(allowed: false, reason: "snapshot_shadow_write_disabled")
         }
         guard supabaseConfiguration.isConfigured else {
-            recordSessionSnapshotAutoUploadSkipped(
-                propertyID: propertyID,
-                sessionID: sessionID,
-                triggerSource: triggerSource,
-                reason: "supabase_config_invalid"
-            )
-            return nil
+            return SessionSnapshotAutoUploadEligibility(allowed: false, reason: "supabase_config_invalid")
         }
         guard supabaseConfiguration.isSessionSnapshotShadowWriteOverrideAllowed else {
-            recordSessionSnapshotAutoUploadSkipped(
-                propertyID: propertyID,
-                sessionID: sessionID,
-                triggerSource: triggerSource,
-                reason: "snapshot_target_not_approved"
-            )
-            return nil
+            return SessionSnapshotAutoUploadEligibility(allowed: false, reason: "snapshot_target_not_approved")
         }
         guard !supabaseConfiguration.isProductionSnapshotValidationManualOnly else {
-            recordSessionSnapshotAutoUploadSkipped(
-                propertyID: propertyID,
-                sessionID: sessionID,
-                triggerSource: triggerSource,
-                reason: "production_validation_manual_only"
-            )
-            return nil
+            return SessionSnapshotAutoUploadEligibility(allowed: false, reason: "production_validation_manual_only")
         }
-
-        let orgID = sessionSnapshotAutoUploadOrgID(for: session)
-        guard sessionSnapshotAutoUploadAllowlistMatches(propertyID: propertyID, orgID: orgID) else {
-            recordSessionSnapshotAutoUploadSkipped(
-                propertyID: propertyID,
-                sessionID: sessionID,
-                triggerSource: triggerSource,
-                reason: "allowlist_no_match"
-            )
-            return nil
+        guard let orgID else {
+            return SessionSnapshotAutoUploadEligibility(allowed: false, reason: "missing_org_id")
         }
-        guard reserveSessionSnapshotAutoUploadCheckpointKey(checkpointKey) else {
-            recordSessionSnapshotAutoUploadSkipped(
-                propertyID: propertyID,
-                sessionID: sessionID,
-                triggerSource: triggerSource,
-                reason: "duplicate_checkpoint"
-            )
-            return nil
+        guard sessionSnapshotAutoUploadAllowlistMatches(propertyID: session.propertyID, orgID: orgID) else {
+            return SessionSnapshotAutoUploadEligibility(allowed: false, reason: "allowlist_no_match")
         }
-
-        recordSessionSnapshotAutoUploadAttempt(
-            propertyID: propertyID,
-            sessionID: sessionID,
-            triggerSource: triggerSource,
-            attemptedAt: attemptedAt
-        )
-        let result = await uploadSessionSnapshotShadowWrite(
-            propertyID: propertyID,
-            sessionID: sessionID,
-            kind: .completed,
-            trigger: "auto_completed_sealed_archive:\(triggerSource)",
-            generatedAt: attemptedAt
-        )
-        recordSessionSnapshotAutoUploadResult(result, triggerSource: triggerSource)
-        return result
+        if requiresAuthentication {
+            guard isAuthenticationReady, authenticatedSupabaseUser != nil else {
+                return SessionSnapshotAutoUploadEligibility(allowed: false, reason: "authentication_not_ready")
+            }
+            guard isOrganizationContextReady, activeOrganizationID == orgID else {
+                return SessionSnapshotAutoUploadEligibility(allowed: false, reason: "active_org_required")
+            }
+        }
+        return SessionSnapshotAutoUploadEligibility(allowed: true, reason: "eligible")
     }
 
     private func sessionSnapshotAutoUploadOrgID(for session: Session) -> UUID? {
@@ -15282,12 +15643,177 @@ final class AppState: ObservableObject {
         return false
     }
 
-    private func reserveSessionSnapshotAutoUploadCheckpointKey(_ key: String) -> Bool {
-        if sessionSnapshotAutoUploadCheckpointKeys.contains(key) {
-            return false
+    func sessionSnapshotCloudStatus(for session: Session) -> SessionSnapshotCloudStatus? {
+        sessionSnapshotCloudStatusBySessionID[session.id]
+    }
+
+    private static func makeSessionSnapshotCloudStatusBySessionID(
+        records: [LocalStore.SessionSnapshotUploadStatusRecord],
+        retryItems: [LocalStore.SessionSnapshotUploadRetryWorkItem]
+    ) -> [UUID: SessionSnapshotCloudStatus] {
+        let recordStatuses = records.map { record in
+            SessionSnapshotCloudStatus(
+                state: Self.cloudState(for: record.status),
+                snapshotID: record.snapshotID,
+                organizationID: record.organizationID,
+                propertyID: record.propertyID,
+                sessionID: record.sessionID,
+                triggerSource: record.triggerSource,
+                reason: record.reason,
+                generatedAt: record.generatedAt,
+                updatedAt: record.updatedAt
+            )
         }
-        sessionSnapshotAutoUploadCheckpointKeys.insert(key)
-        return true
+        let retryStatuses = retryItems.map { item in
+            SessionSnapshotCloudStatus(
+                state: Self.cloudState(for: item.status),
+                snapshotID: item.snapshotID,
+                organizationID: item.organizationID,
+                propertyID: item.propertyID,
+                sessionID: item.sessionID,
+                triggerSource: item.triggerSource,
+                reason: nil,
+                generatedAt: item.generatedAt,
+                updatedAt: item.updatedAt
+            )
+        }
+        return (recordStatuses + retryStatuses).reduce(into: [:]) { partial, status in
+            guard let existing = partial[status.sessionID] else {
+                partial[status.sessionID] = status
+                return
+            }
+            if status.generatedAt > existing.generatedAt ||
+                (status.generatedAt == existing.generatedAt && status.updatedAt > existing.updatedAt) {
+                partial[status.sessionID] = status
+            }
+        }
+    }
+
+    private static func cloudState(
+        for status: LocalStore.SessionSnapshotUploadRetryWorkItem.Status
+    ) -> SessionSnapshotCloudState {
+        switch status {
+        case .pending:
+            return .queued
+        case .inFlight:
+            return .uploading
+        case .failed:
+            return .retryScheduled
+        case .terminalFailed:
+            return .failed
+        }
+    }
+
+    private static func statusRecordStatus(
+        for status: LocalStore.SessionSnapshotUploadRetryWorkItem.Status
+    ) -> LocalStore.SessionSnapshotUploadStatusRecord.Status {
+        switch status {
+        case .pending:
+            return .queued
+        case .inFlight:
+            return .uploading
+        case .failed:
+            return .retryScheduled
+        case .terminalFailed:
+            return .failed
+        }
+    }
+
+    private static func cloudState(
+        for status: LocalStore.SessionSnapshotUploadStatusRecord.Status
+    ) -> SessionSnapshotCloudState {
+        switch status {
+        case .queued:
+            return .queued
+        case .uploading:
+            return .uploading
+        case .retryScheduled:
+            return .retryScheduled
+        case .failed:
+            return .failed
+        case .uploaded:
+            return .uploaded
+        }
+    }
+
+    private func refreshSessionSnapshotCloudStatusCache() {
+        let records = (try? localStore.fetchSessionSnapshotUploadStatusRecords()) ?? []
+        let retryItems = (try? localStore.fetchSessionSnapshotUploadRetryWorkItems()) ?? []
+        let next = Self.makeSessionSnapshotCloudStatusBySessionID(
+            records: records,
+            retryItems: retryItems
+        )
+        if sessionSnapshotCloudStatusBySessionID != next {
+            sessionSnapshotCloudStatusBySessionID = next
+        }
+    }
+
+    private func persistSessionSnapshotCloudStatus(
+        for item: LocalStore.SessionSnapshotUploadRetryWorkItem,
+        status: LocalStore.SessionSnapshotUploadStatusRecord.Status,
+        reason: String? = nil,
+        updatedAt: Date = Date()
+    ) {
+        let record = LocalStore.SessionSnapshotUploadStatusRecord(
+            snapshotID: item.snapshotID,
+            organizationID: item.organizationID,
+            propertyID: item.propertyID,
+            sessionID: item.sessionID,
+            snapshotKind: item.snapshotKind,
+            trigger: item.trigger,
+            triggerSource: item.triggerSource,
+            idempotencyKey: item.idempotencyKey,
+            storagePath: item.storagePath,
+            generatedAt: item.generatedAt,
+            status: status,
+            reason: reason,
+            updatedAt: updatedAt
+        )
+        do {
+            _ = try localStore.upsertSessionSnapshotUploadStatusRecord(record)
+            refreshSessionSnapshotCloudStatusCache()
+        } catch {
+            recordDiagnosticsError(error)
+        }
+    }
+
+    private func persistSessionSnapshotCloudStatus(
+        session: Session,
+        orgID: UUID,
+        triggerSource: String,
+        status: LocalStore.SessionSnapshotUploadStatusRecord.Status,
+        reason: String? = nil,
+        generatedAt: Date = Date(),
+        snapshotID: UUID = UUID()
+    ) {
+        let storagePath = Self.sessionSnapshotStoragePath(
+            orgID: orgID,
+            propertyID: session.propertyID,
+            sessionID: session.id,
+            snapshotKind: .completed,
+            snapshotID: snapshotID
+        )
+        let record = LocalStore.SessionSnapshotUploadStatusRecord(
+            snapshotID: snapshotID,
+            organizationID: orgID,
+            propertyID: session.propertyID,
+            sessionID: session.id,
+            snapshotKind: SessionSnapshotKind.completed.rawValue,
+            trigger: "auto_completed_sealed_archive:\(triggerSource)",
+            triggerSource: triggerSource,
+            idempotencyKey: Self.sessionSnapshotAutoUploadCheckpointKey(session: session, triggerSource: triggerSource),
+            storagePath: storagePath,
+            generatedAt: generatedAt,
+            status: status,
+            reason: reason,
+            updatedAt: generatedAt
+        )
+        do {
+            _ = try localStore.upsertSessionSnapshotUploadStatusRecord(record)
+            refreshSessionSnapshotCloudStatusCache()
+        } catch {
+            recordDiagnosticsError(error)
+        }
     }
 
     private static func sessionSnapshotAutoUploadCheckpointKey(session: Session, triggerSource: String) -> String {
@@ -15307,6 +15833,355 @@ final class AppState: ObservableObject {
             firstDeliveredAt
         ]
         return parts.joined(separator: "|")
+    }
+
+    @MainActor
+    @discardableResult
+    private func performSessionSnapshotUploadRetry(
+        source: String,
+        now: Date = Date()
+    ) async -> SessionSnapshotUploadRetryRunSummary {
+        guard beginSessionSnapshotUploadRetryRun() else {
+            return SessionSnapshotUploadRetryRunSummary(
+                didStart: false,
+                source: source,
+                discoveredCount: 0,
+                normalizedInFlightCount: 0,
+                skippedBackoffCount: 0,
+                attemptedCount: 0,
+                succeededCount: 0,
+                failedCount: 0,
+                terminalFailedCount: 0,
+                skippedIneligibleCount: 0
+            )
+        }
+        defer { endSessionSnapshotUploadRetryRun() }
+
+        let initialItems: [LocalStore.SessionSnapshotUploadRetryWorkItem]
+        do {
+            initialItems = try localStore.fetchSessionSnapshotUploadRetryWorkItems()
+        } catch {
+            recordDiagnosticsError(error)
+            return SessionSnapshotUploadRetryRunSummary(
+                didStart: false,
+                source: source,
+                discoveredCount: 0,
+                normalizedInFlightCount: 0,
+                skippedBackoffCount: 0,
+                attemptedCount: 0,
+                succeededCount: 0,
+                failedCount: 0,
+                terminalFailedCount: 0,
+                skippedIneligibleCount: 0
+            )
+        }
+
+        var normalizedInFlightCount = 0
+        for item in initialItems where item.status == .inFlight {
+            var normalized = item
+            normalized.status = .pending
+            normalized.updatedAt = now
+            normalizedInFlightCount += 1
+            try? localStore.updateSessionSnapshotUploadRetryWorkItem(normalized)
+            persistSessionSnapshotCloudStatus(for: normalized, status: .queued, updatedAt: now)
+        }
+
+        let items = (try? localStore.fetchSessionSnapshotUploadRetryWorkItems()) ?? []
+        var skippedBackoffCount = 0
+        var attemptedCount = 0
+        var succeededCount = 0
+        var failedCount = 0
+        var terminalFailedCount = 0
+        var skippedIneligibleCount = 0
+
+        let replayable = items.sorted { lhs, rhs in
+            if lhs.createdAt != rhs.createdAt {
+                return lhs.createdAt < rhs.createdAt
+            }
+            return lhs.id.uuidString < rhs.id.uuidString
+        }
+
+        for item in replayable {
+            guard shouldReplaySessionSnapshotUploadRetry(item, now: now) else {
+                if item.status == .failed, let next = item.nextAttemptAt, now < next {
+                    skippedBackoffCount += 1
+                }
+                continue
+            }
+
+            guard let session = try? localSessionForSnapshotUpload(
+                propertyID: item.propertyID,
+                sessionID: item.sessionID
+            ) else {
+                var terminal = item
+                terminal.status = .terminalFailed
+                terminal.lastError = "local_session_not_found"
+                terminal.updatedAt = now
+                try? localStore.updateSessionSnapshotUploadRetryWorkItem(terminal)
+                persistSessionSnapshotCloudStatus(for: terminal, status: .failed, updatedAt: now)
+                terminalFailedCount += 1
+                continue
+            }
+            let eligibility = evaluateSessionSnapshotAutoUploadEligibility(
+                session: session,
+                orgID: item.organizationID
+            )
+            guard eligibility.allowed else {
+                skippedIneligibleCount += 1
+                recordSessionSnapshotAutoUploadSkipped(
+                    propertyID: item.propertyID,
+                    sessionID: item.sessionID,
+                    triggerSource: item.triggerSource,
+                    reason: eligibility.reason
+                )
+                continue
+            }
+
+            attemptedCount += 1
+            let result = await performSessionSnapshotUploadRetryAttempt(item: item, now: now)
+            switch result.outcome {
+            case .succeeded:
+                succeededCount += 1
+            case .failed:
+                if result.message == "archive_snapshot_missing_or_invalid" ||
+                    result.message == "session_json_missing_or_unreadable" ||
+                    result.message == "session_json_id_mismatch" {
+                    terminalFailedCount += 1
+                } else {
+                    failedCount += 1
+                }
+            case .disabled, .unavailable, .orphanRisk:
+                failedCount += 1
+            }
+        }
+
+        return SessionSnapshotUploadRetryRunSummary(
+            didStart: true,
+            source: source,
+            discoveredCount: items.count,
+            normalizedInFlightCount: normalizedInFlightCount,
+            skippedBackoffCount: skippedBackoffCount,
+            attemptedCount: attemptedCount,
+            succeededCount: succeededCount,
+            failedCount: failedCount,
+            terminalFailedCount: terminalFailedCount,
+            skippedIneligibleCount: skippedIneligibleCount
+        )
+    }
+
+    @MainActor
+    private func performSessionSnapshotUploadRetryForItem(
+        itemID: UUID,
+        source: String,
+        now: Date
+    ) async -> SessionSnapshotUploadResult? {
+        let items = (try? localStore.fetchSessionSnapshotUploadRetryWorkItems()) ?? []
+        guard let item = items.first(where: { $0.id == itemID }) else {
+            return nil
+        }
+        guard shouldReplaySessionSnapshotUploadRetry(item, now: now) else { return nil }
+        guard let session = try? localSessionForSnapshotUpload(propertyID: item.propertyID, sessionID: item.sessionID) else {
+            var terminal = item
+            terminal.status = .terminalFailed
+            terminal.lastError = "local_session_not_found"
+            terminal.updatedAt = now
+            try? localStore.updateSessionSnapshotUploadRetryWorkItem(terminal)
+            persistSessionSnapshotCloudStatus(for: terminal, status: .failed, updatedAt: now)
+            return SessionSnapshotUploadResult(
+                outcome: .failed,
+                snapshotID: item.snapshotID,
+                sessionID: item.sessionID,
+                propertyID: item.propertyID,
+                storagePath: item.storagePath,
+                message: "local_session_not_found"
+            )
+        }
+        let eligibility = evaluateSessionSnapshotAutoUploadEligibility(
+            session: session,
+            orgID: item.organizationID
+        )
+        guard eligibility.allowed else {
+            recordSessionSnapshotAutoUploadSkipped(
+                propertyID: item.propertyID,
+                sessionID: item.sessionID,
+                triggerSource: item.triggerSource,
+                reason: eligibility.reason
+            )
+            return nil
+        }
+        return await performSessionSnapshotUploadRetryAttempt(item: item, now: now)
+    }
+
+    private func shouldReplaySessionSnapshotUploadRetry(
+        _ item: LocalStore.SessionSnapshotUploadRetryWorkItem,
+        now: Date
+    ) -> Bool {
+        switch item.status {
+        case .pending:
+            return true
+        case .failed:
+            return item.nextAttemptAt.map { now >= $0 } ?? true
+        case .inFlight, .terminalFailed:
+            return false
+        }
+    }
+
+    private func beginSessionSnapshotUploadRetryRun() -> Bool {
+        sessionSnapshotUploadRetryStateQueue.sync {
+            if isSessionSnapshotUploadRetryInFlight {
+                return false
+            }
+            isSessionSnapshotUploadRetryInFlight = true
+            return true
+        }
+    }
+
+    private func endSessionSnapshotUploadRetryRun() {
+        let _: Void = sessionSnapshotUploadRetryStateQueue.sync {
+            isSessionSnapshotUploadRetryInFlight = false
+        }
+    }
+
+    @MainActor
+    private func performSessionSnapshotUploadRetryAttempt(
+        item: LocalStore.SessionSnapshotUploadRetryWorkItem,
+        now: Date
+    ) async -> SessionSnapshotUploadResult {
+        var inFlight = item
+        inFlight.status = .inFlight
+        inFlight.attemptCount += 1
+        inFlight.lastAttemptAt = now
+        inFlight.nextAttemptAt = nil
+        inFlight.lastError = nil
+        inFlight.updatedAt = now
+        do {
+            inFlight = try localStore.updateSessionSnapshotUploadRetryWorkItem(inFlight)
+            persistSessionSnapshotCloudStatus(for: inFlight, status: .uploading, updatedAt: now)
+        } catch {
+            recordDiagnosticsError(error)
+            return SessionSnapshotUploadResult(
+                outcome: .failed,
+                snapshotID: item.snapshotID,
+                sessionID: item.sessionID,
+                propertyID: item.propertyID,
+                storagePath: item.storagePath,
+                message: Self.diagnosticsPreviewText(error.localizedDescription, maxLength: 160)
+            )
+        }
+
+        recordSessionSnapshotAutoUploadAttempt(
+            propertyID: inFlight.propertyID,
+            sessionID: inFlight.sessionID,
+            triggerSource: inFlight.triggerSource,
+            attemptedAt: now
+        )
+
+        do {
+            let artifacts = try makeSessionSnapshotUploadArtifacts(fromRetryItem: inFlight)
+            if !inFlight.storageUploadCompleted {
+                try await uploadSessionSnapshotStorageObject(artifacts.object)
+                inFlight.storageUploadCompleted = true
+                inFlight.updatedAt = Date()
+                inFlight = try localStore.updateSessionSnapshotUploadRetryWorkItem(inFlight)
+                recordSessionSnapshotStorageUploadCompleted(
+                    snapshotID: inFlight.snapshotID,
+                    propertyID: inFlight.propertyID,
+                    sessionID: inFlight.sessionID,
+                    path: inFlight.storagePath,
+                    kind: .completed,
+                    trigger: inFlight.trigger
+                )
+            }
+
+            try await insertSessionSnapshotRow(artifacts.row)
+            recordSessionSnapshotRowInsertCompleted(
+                snapshotID: inFlight.snapshotID,
+                propertyID: inFlight.propertyID,
+                sessionID: inFlight.sessionID,
+                path: inFlight.storagePath,
+                kind: .completed,
+                trigger: inFlight.trigger
+            )
+            try? localStore.removeSessionSnapshotUploadRetryWorkItem(id: inFlight.id)
+            persistSessionSnapshotCloudStatus(for: inFlight, status: .uploaded)
+            let result = SessionSnapshotUploadResult(
+                outcome: .succeeded,
+                snapshotID: inFlight.snapshotID,
+                sessionID: inFlight.sessionID,
+                propertyID: inFlight.propertyID,
+                storagePath: inFlight.storagePath,
+                message: nil
+            )
+            recordSessionSnapshotUploadSuccess(
+                snapshotID: inFlight.snapshotID,
+                propertyID: inFlight.propertyID,
+                sessionID: inFlight.sessionID,
+                path: inFlight.storagePath,
+                kind: .completed,
+                trigger: inFlight.trigger
+            )
+            recordSessionSnapshotAutoUploadResult(result, triggerSource: inFlight.triggerSource)
+            return result
+        } catch {
+            let sanitized = Self.diagnosticsPreviewText(error.localizedDescription, maxLength: 160) ?? "snapshot_upload_retry_failed"
+            let terminal = isTerminalSessionSnapshotUploadRetryError(error)
+            var failed = inFlight
+            failed.status = terminal ? .terminalFailed : .failed
+            failed.lastError = terminal ? terminalSessionSnapshotUploadRetryReason(error) : sanitized
+            failed.lastAttemptAt = now
+            failed.nextAttemptAt = terminal ? nil : now.addingTimeInterval(offlineReplayBackoffInterval(forAttemptCount: failed.attemptCount))
+            failed.updatedAt = Date()
+            try? localStore.updateSessionSnapshotUploadRetryWorkItem(failed)
+            persistSessionSnapshotCloudStatus(
+                for: failed,
+                status: terminal ? .failed : .retryScheduled,
+                updatedAt: failed.updatedAt
+            )
+
+            let outcome: SessionSnapshotUploadOutcome = isSessionSnapshotRemoteUnavailable(error) ? .unavailable : .failed
+            recordSessionSnapshotUploadFailure(
+                outcome: outcome,
+                snapshotID: inFlight.snapshotID,
+                propertyID: inFlight.propertyID,
+                sessionID: inFlight.sessionID,
+                path: inFlight.storagePath,
+                kind: .completed,
+                trigger: inFlight.trigger,
+                error: error
+            )
+            let result = SessionSnapshotUploadResult(
+                outcome: outcome,
+                snapshotID: inFlight.snapshotID,
+                sessionID: inFlight.sessionID,
+                propertyID: inFlight.propertyID,
+                storagePath: inFlight.storagePath,
+                message: failed.lastError
+            )
+            recordSessionSnapshotAutoUploadResult(result, triggerSource: inFlight.triggerSource)
+            return result
+        }
+    }
+
+    private func isTerminalSessionSnapshotUploadRetryError(_ error: Error) -> Bool {
+        terminalSessionSnapshotUploadRetryReason(error) != nil
+    }
+
+    private func terminalSessionSnapshotUploadRetryReason(_ error: Error) -> String? {
+        if let preview = error as? SessionSnapshotPreviewError {
+            switch preview {
+            case .sessionJSONMissingOrUnreadable:
+                return "session_json_missing_or_unreadable"
+            case .sessionJSONIDMismatch:
+                return "session_json_id_mismatch"
+            case .checksumGenerationFailed:
+                return "checksum_generation_failed"
+            }
+        }
+        let message = error.localizedDescription
+        if message.contains("archive_snapshot_missing_or_invalid") {
+            return "archive_snapshot_missing_or_invalid"
+        }
+        return nil
     }
 
     private func localSessionForSnapshotUpload(propertyID: UUID, sessionID: UUID) throws -> Session {
@@ -17461,6 +18336,31 @@ final class AppState: ObservableObject {
             sessionID: sessionID,
             relativePath: relativePath
            ) {
+            localOriginalExists = FileManager.default.fileExists(atPath: fileURL.path)
+        } else {
+            localOriginalExists = false
+        }
+        return SessionSnapshotMediaManifestItem(
+            id: shot.shotID,
+            originalFilenamePreview: diagnosticsPreviewText(shot.originalFilename, maxLength: 80),
+            originalRelativePathPresent: relativePath != nil,
+            originalByteSize: shot.originalByteSize,
+            localOriginalExists: localOriginalExists,
+            storageBucketPresent: trimmedNonEmpty(shot.storageBucket) != nil,
+            storagePathPresent: trimmedNonEmpty(shot.storagePath) != nil,
+            checksumPresent: trimmedNonEmpty(shot.checksumSHA256) != nil,
+            storageByteSize: shot.byteSize
+        )
+    }
+
+    private static func makeSessionSnapshotMediaManifestItem(
+        forArchivedShot shot: ShotMetadata,
+        payloadRoot: URL
+    ) -> SessionSnapshotMediaManifestItem {
+        let relativePath = trimmedNonEmpty(shot.originalRelativePath)
+        let localOriginalExists: Bool
+        if let relativePath {
+            let fileURL = payloadRoot.appendingPathComponent(relativePath, isDirectory: false)
             localOriginalExists = FileManager.default.fileExists(atPath: fileURL.path)
         } else {
             localOriginalExists = false
@@ -37593,23 +38493,25 @@ final class AppState: ObservableObject {
 
         DispatchQueue.global(qos: .utility).async {
             let start = Date()
-            let fetchedState = try? self.localStore.fetchPropertyAndOrganizationStateFromHubIndex(downloadTimeout: self.startupHubIndexTimeout)
+            let fetchedResult = (try? self.localStore.fetchPropertyAndOrganizationStateFromHubIndex(downloadTimeout: self.startupHubIndexTimeout))
+                .map { state in
+                    (state: state, caches: self.makeHubCaches(for: state.properties))
+                }
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
-                if let fetchedState, !fetchedState.properties.isEmpty {
+                if let fetchedResult, !fetchedResult.state.properties.isEmpty {
                     let elapsedMs = Int(Date().timeIntervalSince(start) * 1000)
                     self.logHubFetch(
                         phase: "warmLaunch",
-                        source: fetchedState.source.rawValue,
-                        properties: fetchedState.properties.count,
-                        orgs: fetchedState.organizations.count,
+                        source: fetchedResult.state.source.rawValue,
+                        properties: fetchedResult.state.properties.count,
+                        orgs: fetchedResult.state.organizations.count,
                         elapsedMs: elapsedMs
                     )
-                    let caches = self.makeHubCaches(for: fetchedState.properties)
                     self.applyHubCachePayload(
-                        properties: fetchedState.properties,
-                        organizations: fetchedState.organizations,
-                        caches: caches
+                        properties: fetchedResult.state.properties,
+                        organizations: fetchedResult.state.organizations,
+                        caches: fetchedResult.caches
                     )
                 } else {
                     let elapsedMs = Int(Date().timeIntervalSince(start) * 1000)
@@ -38088,6 +38990,41 @@ final class AppState: ObservableObject {
 
     func propertyStatusRecord(for propertyID: UUID) -> PropertyStatusRecord? {
         propertyStatusByPropertyID[propertyID]
+    }
+
+    private func updateLocalPropertyStatusPresentationCache(
+        propertyID: UUID,
+        sessionID: UUID,
+        status: PropertyStatusValue,
+        reason: String
+    ) {
+        let existing = propertyStatusByPropertyID[propertyID]
+        let orgID = existing?.orgID ??
+            properties.first(where: { $0.id == propertyID })?.orgId ??
+            allProperties.first(where: { $0.id == propertyID })?.orgId ??
+            activeOrganizationID
+        guard let orgID else { return }
+
+        let record = PropertyStatusRecord(
+            propertyID: propertyID,
+            orgID: orgID,
+            status: status,
+            activeSessionID: nil,
+            draftSessionID: nil,
+            pendingExportSessionID: status == .pendingExport ? sessionID : nil,
+            lastExportedSessionID: status == .exported ? sessionID : existing?.lastExportedSessionID,
+            ownerUserID: authenticatedSupabaseUser?.id ?? existing?.ownerUserID,
+            ownerDeviceID: currentDeviceIdentifier(),
+            heartbeatAt: existing?.heartbeatAt,
+            updatedAt: Date(),
+            updatedBy: authenticatedSupabaseUser?.id ?? existing?.updatedBy,
+            statusReason: reason,
+            revision: existing?.revision ?? 0
+        )
+        var nextCache = propertyStatusByPropertyID
+        nextCache[propertyID] = record
+        propertyStatusByPropertyID = nextCache
+        lastPropertyStatusRefreshAt = Date()
     }
 
     func evaluatePropertyStatusEntryPreflight(
@@ -43752,6 +44689,7 @@ final class AppState: ObservableObject {
         currentSession = persisted
         reloadSessionCache(for: persisted.propertyID)
         schedulePhaseBSessionShadowWrite(for: persisted)
+        scheduleSessionArchiveSnapshot(persisted, trigger: markExported ? "completeCurrentSessionExported" : "completeCurrentSession")
         schedulePropertyStatusShadowWrite(
             transition: markExported ? .exported : .pendingExport,
             propertyID: persisted.propertyID,
@@ -43809,14 +44747,10 @@ final class AppState: ObservableObject {
     func sessions(for propertyID: UUID) -> [Session] {
         guard canAccessProperty(propertyID) else { return [] }
         if let cached = sessionIndexByProperty[propertyID] {
-            return cached.filter { $0.deletedAt == nil }
+            return Self.uniqueSessionsByID(cached).filter { $0.deletedAt == nil }
         }
         let fetched = (try? localStore.fetchSessions(propertyID: propertyID)) ?? []
-        var uniqueByID: [UUID: Session] = [:]
-        for session in fetched {
-            uniqueByID[session.id] = session
-        }
-        return uniqueByID.values
+        return Self.uniqueSessionsByID(fetched)
             .filter { $0.deletedAt == nil }
             .sorted { $0.startedAt < $1.startedAt }
     }
@@ -44104,6 +45038,12 @@ final class AppState: ObservableObject {
         let persisted = (try? localStore.upsertSession(session)) ?? session
         currentSession = persisted
         reloadSessionCache(for: persisted.propertyID)
+        updateLocalPropertyStatusPresentationCache(
+            propertyID: persisted.propertyID,
+            sessionID: persisted.id,
+            status: .exported,
+            reason: "mark_current_session_exported_local"
+        )
         schedulePhaseBSessionShadowWrite(for: persisted)
         scheduleSessionArchiveSnapshot(persisted, trigger: "markCurrentSessionExported")
         schedulePropertyStatusShadowWrite(
@@ -44144,6 +45084,12 @@ final class AppState: ObservableObject {
         let persisted = persistedSession ?? session
         currentSession = persisted
         reloadSessionCache(for: persisted.propertyID)
+        updateLocalPropertyStatusPresentationCache(
+            propertyID: persisted.propertyID,
+            sessionID: persisted.id,
+            status: .pendingExport,
+            reason: "export_later_sealed_local"
+        )
         schedulePhaseBSessionShadowWrite(for: persisted)
         scheduleSessionArchiveSnapshot(persisted, trigger: "sealCurrentSessionForExportLater")
         schedulePropertyStatusShadowWrite(
@@ -44172,6 +45118,12 @@ final class AppState: ObservableObject {
         let persisted = persistedSession ?? session
         currentSession = persisted
         reloadSessionCache(for: persisted.propertyID)
+        updateLocalPropertyStatusPresentationCache(
+            propertyID: persisted.propertyID,
+            sessionID: persisted.id,
+            status: .pendingExport,
+            reason: "export_now_sealed_local"
+        )
         schedulePhaseBSessionShadowWrite(for: persisted)
         scheduleSessionArchiveSnapshot(persisted, trigger: "sealCurrentSessionForExportNow")
         schedulePropertyStatusShadowWrite(
@@ -44274,6 +45226,12 @@ final class AppState: ObservableObject {
                 currentSession = persisted
             }
             reloadSessionCache(for: propertyID)
+            updateLocalPropertyStatusPresentationCache(
+                propertyID: persisted.propertyID,
+                sessionID: persisted.id,
+                status: .exported,
+                reason: "mark_session_exported_local"
+            )
             schedulePhaseBSessionShadowWrite(for: persisted)
             scheduleSessionArchiveSnapshot(persisted, trigger: "markSessionExported")
             schedulePropertyStatusShadowWrite(
@@ -44452,6 +45410,7 @@ final class AppState: ObservableObject {
         queuePendingSupabaseMediaBackfillIfNeeded(reason: "scene_active")
         Task { @MainActor [weak self] in
             guard let self else { return }
+            _ = await self.performSessionSnapshotUploadRetry(source: "scene_active")
             await self.reconcileOccupancyForAppLifecycle(reason: "scene_active")
             await self.performForegroundAccessRefreshSequence()
         }
@@ -44493,27 +45452,48 @@ final class AppState: ObservableObject {
         organizations: [Organization],
         caches: HubCachePayload
     ) {
-        let canonicalProperties = properties.sorted(by: Self.propertyIsOrderedBefore)
+        let canonicalProperties = Self.uniquePropertiesByID(properties)
         let preservedOrganizations = mergeOrganizationContacts(into: organizations)
+        let canonicalCaches = normalizedHubCachePayload(caches)
         if allProperties != canonicalProperties {
             allProperties = canonicalProperties
         }
         if allOrganizations != preservedOrganizations {
             allOrganizations = preservedOrganizations
         }
-        if allSessionIndexByProperty != caches.sessionIndex {
-            allSessionIndexByProperty = caches.sessionIndex
+        if allSessionIndexByProperty != canonicalCaches.sessionIndex {
+            allSessionIndexByProperty = canonicalCaches.sessionIndex
         }
-        if allDraftSessionByProperty != caches.drafts {
-            allDraftSessionByProperty = caches.drafts
+        if allDraftSessionByProperty != canonicalCaches.drafts {
+            allDraftSessionByProperty = canonicalCaches.drafts
         }
-        if allPendingExportSessionByProperty != caches.pending {
-            allPendingExportSessionByProperty = caches.pending
+        if allPendingExportSessionByProperty != canonicalCaches.pending {
+            allPendingExportSessionByProperty = canonicalCaches.pending
         }
-        if allHubMetaByProperty != caches.meta {
-            allHubMetaByProperty = caches.meta
+        if allHubMetaByProperty != canonicalCaches.meta {
+            allHubMetaByProperty = canonicalCaches.meta
         }
         applyTenantScopedState()
+    }
+
+    private func normalizedHubCachePayload(_ caches: HubCachePayload) -> HubCachePayload {
+        let sessionIndex = caches.sessionIndex.mapValues { sessions in
+            Self.uniqueSessionsByID(sessions).sorted { $0.startedAt < $1.startedAt }
+        }
+        let drafts = caches.drafts.filter { propertyID, draft in
+            draft.deletedAt == nil &&
+            sessionIndex[propertyID]?.contains(where: { $0.id == draft.id }) == true
+        }
+        let pending = caches.pending.filter { propertyID, pendingSession in
+            pendingSession.deletedAt == nil &&
+            sessionIndex[propertyID]?.contains(where: { $0.id == pendingSession.id }) == true
+        }
+        return HubCachePayload(
+            sessionIndex: sessionIndex,
+            drafts: drafts,
+            pending: pending,
+            meta: caches.meta
+        )
     }
 
     private func mergeOrganizationContacts(into organizations: [Organization]) -> [Organization] {
@@ -44789,6 +45769,54 @@ final class AppState: ObservableObject {
             propertyID: propertyID,
             profile: profile
         ).captureProfile
+    }
+
+    func _debugSessionSnapshotUploadRetryWorkItemsForTests() throws -> [LocalStore.SessionSnapshotUploadRetryWorkItem] {
+        try localStore.fetchSessionSnapshotUploadRetryWorkItems()
+    }
+
+    @MainActor
+    func _debugPerformSessionSnapshotUploadRetryForTests(
+        source: String = "test",
+        now: Date = Date()
+    ) async -> SessionSnapshotUploadRetryRunSummary {
+        await performSessionSnapshotUploadRetry(source: source, now: now)
+    }
+
+    func _debugSessionSnapshotAutoUploadEligibilityForTests(
+        session: Session
+    ) -> SessionSnapshotAutoUploadEligibility {
+        evaluateSessionSnapshotAutoUploadEligibility(
+            session: session,
+            orgID: sessionSnapshotAutoUploadOrgID(for: session)
+        )
+    }
+
+    func _debugSetSessionCacheForTests(propertyID: UUID, sessions: [Session]) {
+        let normalized = Self.uniqueSessionsByID(sessions).sorted { $0.startedAt < $1.startedAt }
+        allSessionIndexByProperty[propertyID] = normalized
+        sessionIndexByProperty[propertyID] = normalized
+    }
+
+    func _debugApplyHubPresentationPayloadForTests(
+        properties: [Property],
+        organizations: [Organization],
+        sessionsByProperty: [UUID: [Session]],
+        pendingByProperty: [UUID: Session] = [:]
+    ) {
+        let caches = HubCachePayload(
+            sessionIndex: sessionsByProperty,
+            drafts: [:],
+            pending: pendingByProperty,
+            meta: Dictionary(uniqueKeysWithValues: Self.uniquePropertiesByID(properties).map {
+                ($0.id, makeHubMeta(for: $0, organizations: organizations))
+            })
+        )
+        applyHubCachePayload(
+            properties: properties,
+            organizations: organizations,
+            caches: caches
+        )
     }
 
     private static func debugJSONObject<T: Encodable>(_ payload: T) throws -> [String: Any] {
@@ -45844,11 +46872,48 @@ final class AppState: ObservableObject {
 
     private func loadAndNormalizeSessions(propertyID: UUID) -> [Session] {
         let fetched = (try? localStore.fetchSessionsForCacheBuild(propertyID: propertyID)) ?? []
+        return Self.uniqueSessionsByID(fetched).sorted { $0.startedAt < $1.startedAt }
+    }
+
+    private static func uniqueSessionsByID(_ sessions: [Session]) -> [Session] {
         var uniqueByID: [UUID: Session] = [:]
-        for session in fetched {
+        for session in sessions {
             uniqueByID[session.id] = session
         }
-        return uniqueByID.values.sorted { $0.startedAt < $1.startedAt }
+        return Array(uniqueByID.values)
+    }
+
+    private static func uniquePropertiesByID(_ properties: [Property]) -> [Property] {
+        var uniqueByID: [UUID: Property] = [:]
+        var positionByID: [UUID: Int] = [:]
+        for (index, property) in properties.enumerated() {
+            guard let existing = uniqueByID[property.id] else {
+                uniqueByID[property.id] = property
+                positionByID[property.id] = index
+                continue
+            }
+            let existingPosition = positionByID[property.id] ?? -1
+            if shouldPreferProperty(property, over: existing, newPosition: index, existingPosition: existingPosition) {
+                uniqueByID[property.id] = property
+                positionByID[property.id] = index
+            }
+        }
+        return Array(uniqueByID.values).sorted(by: Self.propertyIsOrderedBefore)
+    }
+
+    private static func shouldPreferProperty(
+        _ candidate: Property,
+        over existing: Property,
+        newPosition: Int,
+        existingPosition: Int
+    ) -> Bool {
+        if candidate.updatedAt != existing.updatedAt {
+            return candidate.updatedAt > existing.updatedAt
+        }
+        if candidate.createdAt != existing.createdAt {
+            return candidate.createdAt > existing.createdAt
+        }
+        return newPosition > existingPosition
     }
 
     private func normalizedAddressLine(_ rawAddress: String?) -> String {
@@ -45949,15 +47014,41 @@ final class AppState: ObservableObject {
 
     private func scheduleSessionArchiveSnapshot(_ session: Session, trigger: String) {
         guard session.status == .completed, session.isSealed else { return }
+        let scheduleKey = Self.sessionArchiveSnapshotScheduleKey(session: session, trigger: trigger)
+        let shouldSchedule = sessionSnapshotUploadRetryStateQueue.sync { () -> Bool in
+            guard !sessionArchiveSnapshotSchedulingKeys.contains(scheduleKey) else { return false }
+            sessionArchiveSnapshotSchedulingKeys.insert(scheduleKey)
+            return true
+        }
+        guard shouldSchedule else { return }
         let deviceID = currentDeviceIdentifier()
+        let scheduledAt = Date()
+        let scheduledOrgID = sessionSnapshotAutoUploadOrgID(for: session)
+        if let scheduledOrgID {
+            persistSessionSnapshotCloudStatus(
+                session: session,
+                orgID: scheduledOrgID,
+                triggerSource: trigger,
+                status: backendFeatureFlags.sessionSnapshotAutoUploadEnabled ? .queued : .failed,
+                reason: backendFeatureFlags.sessionSnapshotAutoUploadEnabled
+                    ? "archive_snapshot_scheduled"
+                    : "auto_upload_disabled",
+                generatedAt: scheduledAt
+            )
+        }
         archiveSnapshotQueue.async { [weak self] in
             guard let self else { return }
+            defer {
+                self.sessionSnapshotUploadRetryStateQueue.sync {
+                    self.sessionArchiveSnapshotSchedulingKeys.remove(scheduleKey)
+                }
+            }
             do {
-                _ = try self.localStore.createSessionArchiveSnapshot(
+                guard let archiveURL = try self.localStore.createSessionArchiveSnapshot(
                     session: session,
                     trigger: trigger,
                     deviceID: deviceID
-                )
+                ) else { return }
                 DispatchQueue.main.async { [weak self] in
                     self?.invalidateSessionArchiveAvailabilityCache(
                         propertyID: session.propertyID,
@@ -45968,10 +47059,24 @@ final class AppState: ObservableObject {
                 Task {
                     await self.attemptAutomaticSessionSnapshotUploadForCompletedSealedCheckpoint(
                         session: session,
-                        triggerSource: trigger
+                        triggerSource: trigger,
+                        archivePath: archiveURL.path,
+                        attemptedAt: scheduledAt
                     )
                 }
             } catch {
+                if let scheduledOrgID {
+                    DispatchQueue.main.async { [weak self] in
+                        self?.persistSessionSnapshotCloudStatus(
+                            session: session,
+                            orgID: scheduledOrgID,
+                            triggerSource: trigger,
+                            status: .failed,
+                            reason: "archive_snapshot_creation_failed",
+                            generatedAt: scheduledAt
+                        )
+                    }
+                }
                 print(
                     "[SessionArchive] result=failed " +
                     "propertyID=\(session.propertyID.uuidString) " +
@@ -45981,6 +47086,20 @@ final class AppState: ObservableObject {
                 )
             }
         }
+    }
+
+    private static func sessionArchiveSnapshotScheduleKey(session: Session, trigger: String) -> String {
+        let formatter = ISO8601DateFormatter()
+        return [
+            session.propertyID.uuidString.lowercased(),
+            session.id.uuidString.lowercased(),
+            trigger,
+            session.status.rawValue,
+            session.isSealed ? "sealed" : "unsealed",
+            session.endedAt.map { formatter.string(from: $0) } ?? "no-ended-at",
+            session.exportedAt.map { formatter.string(from: $0) } ?? "no-exported-at",
+            session.firstDeliveredAt.map { formatter.string(from: $0) } ?? "no-first-delivered-at"
+        ].joined(separator: "|")
     }
 
     private func offloadEligibleSessionMedia(excludingSessionID: UUID?) {

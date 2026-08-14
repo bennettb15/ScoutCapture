@@ -432,6 +432,145 @@ final class LocalStore {
         }
     }
 
+    struct SessionSnapshotUploadRetryWorkItem: Codable, Equatable, Identifiable {
+        enum Status: String, Codable {
+            case pending
+            case inFlight = "in_flight"
+            case failed
+            case terminalFailed = "terminal_failed"
+        }
+
+        let id: UUID
+        let snapshotID: UUID
+        let organizationID: UUID
+        let propertyID: UUID
+        let sessionID: UUID
+        let snapshotKind: String
+        let trigger: String
+        let triggerSource: String
+        var archivePath: String
+        var storageBucket: String
+        var storagePath: String
+        let generatedAt: Date
+        var sourceDeviceID: String?
+        let idempotencyKey: String
+        var storageUploadCompleted: Bool
+        var rowInsertCompleted: Bool
+        var createdAt: Date
+        var updatedAt: Date
+        var attemptCount: Int
+        var lastAttemptAt: Date?
+        var nextAttemptAt: Date?
+        var lastError: String?
+        var status: Status
+
+        init(
+            id: UUID = UUID(),
+            snapshotID: UUID,
+            organizationID: UUID,
+            propertyID: UUID,
+            sessionID: UUID,
+            snapshotKind: String,
+            trigger: String,
+            triggerSource: String,
+            archivePath: String,
+            storageBucket: String,
+            storagePath: String,
+            generatedAt: Date,
+            sourceDeviceID: String?,
+            idempotencyKey: String,
+            storageUploadCompleted: Bool = false,
+            rowInsertCompleted: Bool = false,
+            createdAt: Date = Date(),
+            updatedAt: Date = Date(),
+            attemptCount: Int = 0,
+            lastAttemptAt: Date? = nil,
+            nextAttemptAt: Date? = nil,
+            lastError: String? = nil,
+            status: Status = .pending
+        ) {
+            self.id = id
+            self.snapshotID = snapshotID
+            self.organizationID = organizationID
+            self.propertyID = propertyID
+            self.sessionID = sessionID
+            self.snapshotKind = snapshotKind
+            self.trigger = trigger
+            self.triggerSource = triggerSource
+            self.archivePath = archivePath
+            self.storageBucket = storageBucket
+            self.storagePath = storagePath
+            self.generatedAt = generatedAt
+            self.sourceDeviceID = sourceDeviceID
+            self.idempotencyKey = idempotencyKey
+            self.storageUploadCompleted = storageUploadCompleted
+            self.rowInsertCompleted = rowInsertCompleted
+            self.createdAt = createdAt
+            self.updatedAt = updatedAt
+            self.attemptCount = attemptCount
+            self.lastAttemptAt = lastAttemptAt
+            self.nextAttemptAt = nextAttemptAt
+            self.lastError = lastError
+            self.status = status
+        }
+    }
+
+    struct SessionSnapshotUploadStatusRecord: Codable, Equatable, Identifiable {
+        enum Status: String, Codable {
+            case queued
+            case uploading
+            case retryScheduled = "retry_scheduled"
+            case failed
+            case uploaded
+        }
+
+        let id: String
+        let snapshotID: UUID
+        let organizationID: UUID
+        let propertyID: UUID
+        let sessionID: UUID
+        let snapshotKind: String
+        let trigger: String
+        let triggerSource: String
+        let idempotencyKey: String
+        let storagePath: String
+        let generatedAt: Date
+        var status: Status
+        var reason: String?
+        var updatedAt: Date
+
+        init(
+            snapshotID: UUID,
+            organizationID: UUID,
+            propertyID: UUID,
+            sessionID: UUID,
+            snapshotKind: String,
+            trigger: String,
+            triggerSource: String,
+            idempotencyKey: String,
+            storagePath: String,
+            generatedAt: Date,
+            status: Status,
+            reason: String? = nil,
+            updatedAt: Date = Date()
+        ) {
+            self.id = idempotencyKey
+            self.snapshotID = snapshotID
+            self.organizationID = organizationID
+            self.propertyID = propertyID
+            self.sessionID = sessionID
+            self.snapshotKind = snapshotKind
+            self.trigger = trigger
+            self.triggerSource = triggerSource
+            self.idempotencyKey = idempotencyKey
+            self.storagePath = storagePath
+            self.generatedAt = generatedAt
+            self.status = status
+            self.reason = reason
+            self.updatedAt = updatedAt
+        }
+    }
+
     private let currentSessionSchemaVersion = 12
     private let fileIOQueue = DispatchQueue(label: "ScoutCapture.LocalStore.fileIO")
     private let fileIOQueueKey = DispatchSpecificKey<UInt8>()
@@ -580,6 +719,8 @@ final class LocalStore {
     private let hubIndexURL: URL
     private let localHubIndexCacheURL: URL
     private let queuedMutationsURL: URL
+    private let sessionSnapshotUploadRetryQueueURL: URL
+    private let sessionSnapshotUploadStatusURL: URL
     private let propertyTombstonesURL: URL
     private let propertySyncEventsDirectoryURL: URL
     private let propertyFoldersURL: URL
@@ -610,6 +751,8 @@ final class LocalStore {
             .appendingPathComponent("ScoutCapture", isDirectory: true)
         self.localHubIndexCacheURL = localAppSupportRoot.appendingPathComponent("local-hub-index.json")
         self.queuedMutationsURL = scoutRoot.appendingPathComponent("queued_mutations.json")
+        self.sessionSnapshotUploadRetryQueueURL = scoutRoot.appendingPathComponent("session_snapshot_upload_retry_queue.json")
+        self.sessionSnapshotUploadStatusURL = scoutRoot.appendingPathComponent("session_snapshot_upload_status.json")
         self.propertyTombstonesURL = scoutRoot.appendingPathComponent("property-tombstones.json")
         self.propertySyncEventsDirectoryURL = scoutRoot
             .appendingPathComponent("sync-events", isDirectory: true)
@@ -653,6 +796,8 @@ final class LocalStore {
         self.hubIndexURL = scoutRoot.appendingPathComponent("hub-index.json")
         self.localHubIndexCacheURL = appRoot.appendingPathComponent("local-hub-index.json")
         self.queuedMutationsURL = scoutRoot.appendingPathComponent("queued_mutations.json")
+        self.sessionSnapshotUploadRetryQueueURL = scoutRoot.appendingPathComponent("session_snapshot_upload_retry_queue.json")
+        self.sessionSnapshotUploadStatusURL = scoutRoot.appendingPathComponent("session_snapshot_upload_status.json")
         self.propertyTombstonesURL = scoutRoot.appendingPathComponent("property-tombstones.json")
         self.propertySyncEventsDirectoryURL = scoutRoot
             .appendingPathComponent("sync-events", isDirectory: true)
@@ -1577,6 +1722,132 @@ final class LocalStore {
 
         let data = try encoder.encode(queuedMutations)
         try atomicWriteFileData(data, to: queuedMutationsURL)
+    }
+
+    func fetchSessionSnapshotUploadRetryWorkItems() throws -> [SessionSnapshotUploadRetryWorkItem] {
+        try performFileIOSync {
+            try readSessionSnapshotUploadRetryWorkItems()
+        }
+    }
+
+    @discardableResult
+    func upsertSessionSnapshotUploadRetryWorkItem(
+        _ item: SessionSnapshotUploadRetryWorkItem
+    ) throws -> SessionSnapshotUploadRetryWorkItem {
+        try performFileIOSync {
+            var items = try readSessionSnapshotUploadRetryWorkItems()
+            if let index = items.firstIndex(where: { $0.idempotencyKey == item.idempotencyKey }) {
+                var existing = items[index]
+                if existing.status == .failed || existing.status == .terminalFailed || existing.rowInsertCompleted {
+                    return existing
+                }
+                existing.updatedAt = item.updatedAt
+                existing.archivePath = item.archivePath
+                existing.storageBucket = item.storageBucket
+                existing.storagePath = item.storagePath
+                existing.sourceDeviceID = item.sourceDeviceID
+                if existing.status == .pending {
+                    existing.status = .pending
+                }
+                items[index] = existing
+                try writeSessionSnapshotUploadRetryWorkItems(items)
+                NotificationCenter.default.post(name: .scoutPersistentDataDidChange, object: nil)
+                return existing
+            }
+
+            items.append(item)
+            try writeSessionSnapshotUploadRetryWorkItems(items)
+            NotificationCenter.default.post(name: .scoutPersistentDataDidChange, object: nil)
+            return item
+        }
+    }
+
+    @discardableResult
+    func updateSessionSnapshotUploadRetryWorkItem(
+        _ item: SessionSnapshotUploadRetryWorkItem
+    ) throws -> SessionSnapshotUploadRetryWorkItem {
+        try performFileIOSync {
+            var items = try readSessionSnapshotUploadRetryWorkItems()
+            guard let index = items.firstIndex(where: { $0.id == item.id }) else {
+                throw NSError(
+                    domain: "LocalStore.SessionSnapshotUploadRetry",
+                    code: 1,
+                    userInfo: [NSLocalizedDescriptionKey: "Session snapshot upload retry item not found: \(item.id.uuidString)"]
+                )
+            }
+            items[index] = item
+            try writeSessionSnapshotUploadRetryWorkItems(items)
+            NotificationCenter.default.post(name: .scoutPersistentDataDidChange, object: nil)
+            return item
+        }
+    }
+
+    func removeSessionSnapshotUploadRetryWorkItem(id: UUID) throws {
+        try performFileIOSync {
+            var items = try readSessionSnapshotUploadRetryWorkItems()
+            items.removeAll { $0.id == id }
+            try writeSessionSnapshotUploadRetryWorkItems(items)
+            NotificationCenter.default.post(name: .scoutPersistentDataDidChange, object: nil)
+        }
+    }
+
+    func fetchSessionSnapshotUploadStatusRecords() throws -> [SessionSnapshotUploadStatusRecord] {
+        try performFileIOSync {
+            try readSessionSnapshotUploadStatusRecords()
+        }
+    }
+
+    @discardableResult
+    func upsertSessionSnapshotUploadStatusRecord(
+        _ record: SessionSnapshotUploadStatusRecord
+    ) throws -> SessionSnapshotUploadStatusRecord {
+        try performFileIOSync {
+            var records = try readSessionSnapshotUploadStatusRecords()
+            if let index = records.firstIndex(where: { $0.idempotencyKey == record.idempotencyKey }) {
+                records[index] = record
+            } else {
+                records.append(record)
+            }
+            try writeSessionSnapshotUploadStatusRecords(records)
+            NotificationCenter.default.post(name: .scoutPersistentDataDidChange, object: nil)
+            return record
+        }
+    }
+
+    private func readSessionSnapshotUploadRetryWorkItems() throws -> [SessionSnapshotUploadRetryWorkItem] {
+        guard fileManager.fileExists(atPath: sessionSnapshotUploadRetryQueueURL.path) else { return [] }
+        let data = try Data(contentsOf: sessionSnapshotUploadRetryQueueURL)
+        return try decoder.decode([SessionSnapshotUploadRetryWorkItem].self, from: data)
+    }
+
+    private func writeSessionSnapshotUploadRetryWorkItems(_ items: [SessionSnapshotUploadRetryWorkItem]) throws {
+        if items.isEmpty {
+            if fileManager.fileExists(atPath: sessionSnapshotUploadRetryQueueURL.path) {
+                try fileManager.removeItem(at: sessionSnapshotUploadRetryQueueURL)
+            }
+            return
+        }
+
+        let data = try encoder.encode(items)
+        try atomicWriteFileData(data, to: sessionSnapshotUploadRetryQueueURL)
+    }
+
+    private func readSessionSnapshotUploadStatusRecords() throws -> [SessionSnapshotUploadStatusRecord] {
+        guard fileManager.fileExists(atPath: sessionSnapshotUploadStatusURL.path) else { return [] }
+        let data = try Data(contentsOf: sessionSnapshotUploadStatusURL)
+        return try decoder.decode([SessionSnapshotUploadStatusRecord].self, from: data)
+    }
+
+    private func writeSessionSnapshotUploadStatusRecords(_ records: [SessionSnapshotUploadStatusRecord]) throws {
+        if records.isEmpty {
+            if fileManager.fileExists(atPath: sessionSnapshotUploadStatusURL.path) {
+                try fileManager.removeItem(at: sessionSnapshotUploadStatusURL)
+            }
+            return
+        }
+
+        let data = try encoder.encode(records)
+        try atomicWriteFileData(data, to: sessionSnapshotUploadStatusURL)
     }
 
     // MARK: - Properties CRUD
