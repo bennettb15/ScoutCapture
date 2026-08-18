@@ -14,6 +14,8 @@
 	<true/>
 	<key>session_snapshot_auto_upload_enabled</key>
 	<false/>
+	<key>session_snapshot_production_auto_upload_target_enabled</key>
+	<false/>
 	<key>session_coordination_enabled</key>
 	<true/>
 	<key>shadow_write_enabled</key>

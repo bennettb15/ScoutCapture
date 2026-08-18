@@ -95,6 +95,10 @@ struct SupabaseRuntimeConfiguration {
         targetClassification == .approvedProductionValidation
     }
 
+    var isExactProductionSnapshotAutoUploadTarget: Bool {
+        isExactProductionSnapshotHydrationTarget
+    }
+
     var isExactProductionSnapshotHydrationTarget: Bool {
         guard let url else { return false }
         guard url.scheme?.lowercased() == "https",
@@ -227,6 +231,7 @@ struct BackendFeatureFlags {
     let sessionCoordinationEnabled: Bool
     let sessionSnapshotShadowWriteEnabled: Bool
     let sessionSnapshotAutoUploadEnabled: Bool
+    let sessionSnapshotProductionAutoUploadTargetEnabled: Bool
     let sessionSnapshotAutoUploadKillSwitch: Bool
     let sessionSnapshotAutoUploadOrgAllowlist: Set<UUID>
     let sessionSnapshotAutoUploadPropertyAllowlist: Set<UUID>
@@ -241,6 +246,7 @@ struct BackendFeatureFlags {
         sessionCoordinationEnabled: Bool,
         sessionSnapshotShadowWriteEnabled: Bool = false,
         sessionSnapshotAutoUploadEnabled: Bool = false,
+        sessionSnapshotProductionAutoUploadTargetEnabled: Bool = false,
         sessionSnapshotAutoUploadKillSwitch: Bool = false,
         sessionSnapshotAutoUploadOrgAllowlist: Set<UUID> = [],
         sessionSnapshotAutoUploadPropertyAllowlist: Set<UUID> = []
@@ -254,6 +260,7 @@ struct BackendFeatureFlags {
         self.sessionCoordinationEnabled = sessionCoordinationEnabled
         self.sessionSnapshotShadowWriteEnabled = sessionSnapshotShadowWriteEnabled
         self.sessionSnapshotAutoUploadEnabled = sessionSnapshotAutoUploadEnabled
+        self.sessionSnapshotProductionAutoUploadTargetEnabled = sessionSnapshotProductionAutoUploadTargetEnabled
         self.sessionSnapshotAutoUploadKillSwitch = sessionSnapshotAutoUploadKillSwitch
         self.sessionSnapshotAutoUploadOrgAllowlist = sessionSnapshotAutoUploadOrgAllowlist
         self.sessionSnapshotAutoUploadPropertyAllowlist = sessionSnapshotAutoUploadPropertyAllowlist
@@ -299,6 +306,13 @@ struct BackendFeatureFlags {
                 allowEnvironmentOverride: allowSessionSnapshotEnvironmentOverride
             ),
             sessionSnapshotAutoUploadEnabled: Self.sessionSnapshotAutoUploadValue(
+                bundle: bundle,
+                userDefaults: userDefaults,
+                environment: environment
+            ),
+            sessionSnapshotProductionAutoUploadTargetEnabled: Self.boolValue(
+                for: "session_snapshot_production_auto_upload_target_enabled",
+                environmentKey: "SCOUTCAPTURE_SESSION_SNAPSHOT_PRODUCTION_AUTO_UPLOAD_TARGET_ENABLED",
                 bundle: bundle,
                 userDefaults: userDefaults,
                 environment: environment
@@ -434,6 +448,26 @@ struct BackendFeatureFlags {
         return Set(parts.compactMap { part in
             UUID(uuidString: String(part).trimmingCharacters(in: CharacterSet.whitespacesAndNewlines))
         })
+    }
+
+    private static func boolValue(
+        for key: String,
+        environmentKey: String,
+        bundle: Bundle,
+        userDefaults: UserDefaults,
+        environment: [String: String]
+    ) -> Bool {
+        if let rawValue = environment[environmentKey]?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+            switch rawValue {
+            case "1", "true", "yes", "on":
+                return true
+            case "0", "false", "no", "off":
+                return false
+            default:
+                break
+            }
+        }
+        return Self.boolValue(for: key, bundle: bundle, userDefaults: userDefaults)
     }
 
     private static func boolValue(
@@ -15477,6 +15511,11 @@ final class AppState: ObservableObject {
             session: session,
             orgID: orgID
         )
+        logSessionSnapshotAutoUploadEligibilityTrace(
+            session: session,
+            orgID: orgID,
+            triggerSource: "attempt:\(triggerSource)"
+        )
         guard eligibility.allowed else {
             if let orgID {
                 persistSessionSnapshotCloudStatus(
@@ -15599,10 +15638,13 @@ final class AppState: ObservableObject {
         guard supabaseConfiguration.isConfigured else {
             return SessionSnapshotAutoUploadEligibility(allowed: false, reason: "supabase_config_invalid")
         }
-        guard supabaseConfiguration.isSessionSnapshotShadowWriteOverrideAllowed else {
+        let productionAutoUploadTargetAllowed =
+            backendFeatureFlags.sessionSnapshotProductionAutoUploadTargetEnabled &&
+            supabaseConfiguration.isExactProductionSnapshotAutoUploadTarget
+        guard supabaseConfiguration.isSessionSnapshotShadowWriteOverrideAllowed || productionAutoUploadTargetAllowed else {
             return SessionSnapshotAutoUploadEligibility(allowed: false, reason: "snapshot_target_not_approved")
         }
-        guard !supabaseConfiguration.isProductionSnapshotValidationManualOnly else {
+        guard !supabaseConfiguration.isProductionSnapshotValidationManualOnly || productionAutoUploadTargetAllowed else {
             return SessionSnapshotAutoUploadEligibility(allowed: false, reason: "production_validation_manual_only")
         }
         guard let orgID else {
@@ -15620,6 +15662,50 @@ final class AppState: ObservableObject {
             }
         }
         return SessionSnapshotAutoUploadEligibility(allowed: true, reason: "eligible")
+    }
+
+    private func logSessionSnapshotAutoUploadEligibilityTrace(
+        session: Session,
+        orgID: UUID?,
+        triggerSource: String
+    ) {
+        let productionAutoUploadTargetAllowed =
+            backendFeatureFlags.sessionSnapshotProductionAutoUploadTargetEnabled &&
+            supabaseConfiguration.isExactProductionSnapshotAutoUploadTarget
+        let allowlistMatches = orgID.map {
+            sessionSnapshotAutoUploadAllowlistMatches(propertyID: session.propertyID, orgID: $0)
+        } ?? false
+        let authGatePassed = !requiresAuthentication || (isAuthenticationReady && authenticatedSupabaseUser != nil)
+        let activeOrgGatePassed = !requiresAuthentication || (isOrganizationContextReady && activeOrganizationID == orgID)
+        let targetApproved =
+            supabaseConfiguration.isSessionSnapshotShadowWriteOverrideAllowed || productionAutoUploadTargetAllowed
+        let manualOnlyGatePassed =
+            !supabaseConfiguration.isProductionSnapshotValidationManualOnly || productionAutoUploadTargetAllowed
+
+        print(
+            "[SessionSnapshotAutoUploadEligibility] " +
+            "trigger=\(triggerSource) " +
+            "sessionID=\(session.id.uuidString) " +
+            "propertyID=\(session.propertyID.uuidString) " +
+            "orgID=\(orgID?.uuidString ?? "nil") " +
+            "autoUploadEnabled=\(backendFeatureFlags.sessionSnapshotAutoUploadEnabled) " +
+            "killSwitchInactive=\(!backendFeatureFlags.sessionSnapshotAutoUploadKillSwitch) " +
+            "allowlistPresent=\(backendFeatureFlags.sessionSnapshotAutoUploadHasAllowlist) " +
+            "completedSealedActive=\(session.status == .completed && session.isSealed && session.deletedAt == nil) " +
+            "shadowWriteEnabled=\(backendFeatureFlags.sessionSnapshotShadowWriteEnabled) " +
+            "supabaseConfigured=\(supabaseConfiguration.isConfigured) " +
+            "productionAutoUploadTargetEnabled=\(backendFeatureFlags.sessionSnapshotProductionAutoUploadTargetEnabled) " +
+            "exactProductionAutoUploadTarget=\(supabaseConfiguration.isExactProductionSnapshotAutoUploadTarget) " +
+            "targetApproved=\(targetApproved) " +
+            "manualOnlyGatePassed=\(manualOnlyGatePassed) " +
+            "orgPresent=\(orgID != nil) " +
+            "allowlistMatches=\(allowlistMatches) " +
+            "requiresAuthentication=\(requiresAuthentication) " +
+            "authenticationGatePassed=\(authGatePassed) " +
+            "organizationContextReady=\(isOrganizationContextReady) " +
+            "activeOrganizationID=\(activeOrganizationID?.uuidString ?? "nil") " +
+            "activeOrgGatePassed=\(activeOrgGatePassed)"
+        )
     }
 
     private func sessionSnapshotAutoUploadOrgID(for session: Session) -> UUID? {
@@ -47025,14 +47111,23 @@ final class AppState: ObservableObject {
         let scheduledAt = Date()
         let scheduledOrgID = sessionSnapshotAutoUploadOrgID(for: session)
         if let scheduledOrgID {
+            let eligibility = evaluateSessionSnapshotAutoUploadEligibility(
+                session: session,
+                orgID: scheduledOrgID
+            )
+            logSessionSnapshotAutoUploadEligibilityTrace(
+                session: session,
+                orgID: scheduledOrgID,
+                triggerSource: "schedule:\(trigger)"
+            )
             persistSessionSnapshotCloudStatus(
                 session: session,
                 orgID: scheduledOrgID,
                 triggerSource: trigger,
-                status: backendFeatureFlags.sessionSnapshotAutoUploadEnabled ? .queued : .failed,
-                reason: backendFeatureFlags.sessionSnapshotAutoUploadEnabled
+                status: eligibility.allowed ? .queued : .failed,
+                reason: eligibility.allowed
                     ? "archive_snapshot_scheduled"
-                    : "auto_upload_disabled",
+                    : eligibility.reason,
                 generatedAt: scheduledAt
             )
         }

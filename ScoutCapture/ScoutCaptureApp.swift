@@ -20,6 +20,90 @@ private func verboseLog(_ message: @autoclosure () -> String) {
     print(message())
 }
 
+#if DEBUG
+enum DebugSessionSnapshotAutoUploadDefaultsBootstrap {
+    static let argumentName = "--scoutcapture-debug-session-snapshot-auto-upload-defaults"
+
+    private static let requiredTrueKeys: Set<String> = [
+        "session_snapshot_auto_upload_enabled",
+        "session_snapshot_production_auto_upload_target_enabled",
+        "session_snapshot_shadow_write_enabled"
+    ]
+    private static let requiredFalseKeys: Set<String> = [
+        "supabase_read_enabled",
+        "canonical_read_candidate_enabled"
+    ]
+    private static let orgAllowlistKey = "session_snapshot_auto_upload_org_allowlist"
+    private static let clearedKeys: Set<String> = [
+        "session_snapshot_auto_upload_property_allowlist",
+        "canonical_read_candidate_org_allowlist",
+        "canonical_read_candidate_property_allowlist",
+        "canonical_read_candidate_session_allowlist"
+    ]
+
+    @discardableResult
+    static func applyIfRequested(
+        arguments: [String] = ProcessInfo.processInfo.arguments,
+        userDefaults: UserDefaults = .standard,
+        bundleIdentifier: String? = Bundle.main.bundleIdentifier
+    ) -> Bool {
+        guard let argumentIndex = arguments.firstIndex(of: argumentName) else { return false }
+        let payloadIndex = arguments.index(after: argumentIndex)
+        guard arguments.indices.contains(payloadIndex) else {
+            print("[DebugSessionSnapshotAutoUploadDefaultsBootstrap] skipped reason=missing_payload")
+            return false
+        }
+        guard isAllowedBundleIdentifier(bundleIdentifier) else {
+            print("[DebugSessionSnapshotAutoUploadDefaultsBootstrap] skipped reason=bundle_not_allowed")
+            return false
+        }
+        guard let data = Data(base64Encoded: arguments[payloadIndex]),
+              let values = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              validate(values: values) else {
+            print("[DebugSessionSnapshotAutoUploadDefaultsBootstrap] skipped reason=invalid_payload")
+            return false
+        }
+
+        for key in requiredTrueKeys {
+            userDefaults.set(true, forKey: key)
+        }
+        for key in requiredFalseKeys {
+            userDefaults.set(false, forKey: key)
+        }
+        userDefaults.set(values[orgAllowlistKey] as? String, forKey: orgAllowlistKey)
+        for key in clearedKeys {
+            userDefaults.removeObject(forKey: key)
+        }
+        userDefaults.synchronize()
+        let appliedKeys = requiredTrueKeys.union(requiredFalseKeys).union([orgAllowlistKey])
+        print("[DebugSessionSnapshotAutoUploadDefaultsBootstrap] applied keys=\(appliedKeys.sorted().joined(separator: ",")) cleared=\(clearedKeys.sorted().joined(separator: ","))")
+        return true
+    }
+
+    private static func isAllowedBundleIdentifier(_ bundleIdentifier: String?) -> Bool {
+        guard let bundleIdentifier else { return false }
+        return bundleIdentifier == "com.scoutsystems.scoutcapture.dev" || bundleIdentifier.hasSuffix(".dev")
+    }
+
+    private static func validate(values: [String: Any]) -> Bool {
+        let allowedKeys = requiredTrueKeys.union(requiredFalseKeys).union([orgAllowlistKey])
+        guard Set(values.keys) == allowedKeys else { return false }
+        guard requiredTrueKeys.allSatisfy({ values[$0] as? Bool == true }) else { return false }
+        guard requiredFalseKeys.allSatisfy({ values[$0] as? Bool == false }) else { return false }
+        guard let rawAllowlist = values[orgAllowlistKey] as? String else { return false }
+        return parsedUUIDs(from: rawAllowlist).isEmpty == false
+    }
+
+    private static func parsedUUIDs(from rawValue: String) -> [UUID] {
+        rawValue
+            .split { character in
+                character == "," || character == ";" || character == "\n" || character == "\t" || character == " "
+            }
+            .compactMap { UUID(uuidString: String($0).trimmingCharacters(in: .whitespacesAndNewlines)) }
+    }
+}
+#endif
+
 final class AppDelegate: NSObject, UIApplicationDelegate {
 
     func application(
@@ -78,6 +162,9 @@ struct ScoutCaptureApp: App {
     @Environment(\.scenePhase) private var scenePhase
 
     init() {
+        #if DEBUG
+        DebugSessionSnapshotAutoUploadDefaultsBootstrap.applyIfRequested()
+        #endif
         let hasCompleted = UserDefaults.standard.bool(forKey: Self.firstLaunchCompletedKey)
         _hasCompletedFirstLaunch = State(initialValue: hasCompleted)
         #if DEBUG
