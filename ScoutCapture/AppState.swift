@@ -16719,6 +16719,448 @@ final class AppState: ObservableObject {
         }
     }
 
+    private struct VerifiedSessionSnapshotMetadataCandidate {
+        let row: SessionSnapshotUploadRow
+        let payload: SessionSnapshotPayloadForChecksum
+        let payloadData: Data
+        let metadata: SessionMetadata
+    }
+
+    @discardableResult
+    func hydrateMetadataFromLatestVerifiedSessionSnapshotForPropertyOpen(
+        propertyID: UUID,
+        activeOrganizationID: UUID,
+        checkedAt: Date = Date()
+    ) async -> SessionSnapshotHydrationResult {
+        guard backendFeatureFlags.supabaseEnabled,
+              supabaseConfiguration.isConfigured,
+              canAccessProperty(propertyID),
+              canAccessOrganization(activeOrganizationID),
+              let property = properties.first(where: { $0.id == propertyID }) ??
+                allProperties.first(where: { $0.id == propertyID }),
+              property.orgId == activeOrganizationID else {
+            return SessionSnapshotHydrationResult(
+                hydratedAt: checkedAt,
+                allowed: false,
+                blockedReason: "property_open_snapshot_recall_prereq_failed",
+                sourceSnapshotID: nil,
+                propertyID: propertyID,
+                sessionID: nil,
+                hydratedShotCount: 0,
+                hydratedIssueCount: 0,
+                hydratedGuidedCount: 0
+            )
+        }
+
+        do {
+            let rows = try await fetchSessionSnapshotRows(
+                snapshotID: nil,
+                propertyID: propertyID,
+                sessionID: nil
+            )
+            let sortedRows = rows
+                .filter { $0.propertyID == propertyID && $0.orgID == activeOrganizationID }
+                .sorted(by: Self.sessionSnapshotUploadRowSort)
+            guard !sortedRows.isEmpty else {
+                return SessionSnapshotHydrationResult(
+                    hydratedAt: checkedAt,
+                    allowed: false,
+                    blockedReason: "snapshot_row_not_found",
+                    sourceSnapshotID: nil,
+                    propertyID: propertyID,
+                    sessionID: nil,
+                    hydratedShotCount: 0,
+                    hydratedIssueCount: 0,
+                    hydratedGuidedCount: 0
+                )
+            }
+
+            for row in sortedRows {
+                guard let candidate = await verifiedSessionSnapshotMetadataCandidateForPropertyOpen(
+                    row: row,
+                    propertyID: propertyID,
+                    activeOrganizationID: activeOrganizationID,
+                    checkedAt: checkedAt
+                ) else {
+                    continue
+                }
+                let comparison = localSessionSnapshotRestoreComparison(
+                    propertyID: propertyID,
+                    sessionID: candidate.row.sessionID
+                )
+                let readback = Self.makeSessionSnapshotReadbackResult(
+                    row: candidate.row,
+                    payloadData: candidate.payloadData,
+                    checkedAt: checkedAt,
+                    failureReason: nil
+                )
+                let outcome = Self.sessionSnapshotMetadataRecallOutcome(
+                    row: candidate.row,
+                    decodedPayload: candidate.payload,
+                    readback: readback,
+                    localComparison: comparison
+                )
+                guard outcome.outcome == .restorableMetadataCandidate else {
+                    return SessionSnapshotHydrationResult(
+                        hydratedAt: checkedAt,
+                        allowed: false,
+                        blockedReason: outcome.outcome.rawValue,
+                        sourceSnapshotID: candidate.row.id,
+                        propertyID: propertyID,
+                        sessionID: candidate.row.sessionID,
+                        hydratedShotCount: 0,
+                        hydratedIssueCount: 0,
+                        hydratedGuidedCount: 0
+                    )
+                }
+
+                let result = try applyAutomaticPropertyOpenSnapshotMetadataRecall(
+                    candidate: candidate,
+                    propertyID: propertyID,
+                    checkedAt: checkedAt
+                )
+                print(
+                    "[SessionSnapshotRecall] propertyID=\(propertyID.uuidString) " +
+                    "sessionID=\(candidate.row.sessionID.uuidString) " +
+                    "snapshotID=\(candidate.row.id.uuidString) result=hydrated " +
+                    "shots=\(result.hydratedShotCount) issues=\(result.hydratedIssueCount) guided=\(result.hydratedGuidedCount)"
+                )
+                return result
+            }
+
+            return SessionSnapshotHydrationResult(
+                hydratedAt: checkedAt,
+                allowed: false,
+                blockedReason: "verified_snapshot_not_found",
+                sourceSnapshotID: sortedRows.first?.id,
+                propertyID: propertyID,
+                sessionID: sortedRows.first?.sessionID,
+                hydratedShotCount: 0,
+                hydratedIssueCount: 0,
+                hydratedGuidedCount: 0
+            )
+        } catch {
+            print(
+                "[SessionSnapshotRecall] propertyID=\(propertyID.uuidString) " +
+                "result=skipped reason=\(Self.diagnosticErrorCategory(for: error).rawValue)"
+            )
+            return SessionSnapshotHydrationResult(
+                hydratedAt: checkedAt,
+                allowed: false,
+                blockedReason: Self.diagnosticErrorCategory(for: error).rawValue,
+                sourceSnapshotID: nil,
+                propertyID: propertyID,
+                sessionID: nil,
+                hydratedShotCount: 0,
+                hydratedIssueCount: 0,
+                hydratedGuidedCount: 0
+            )
+        }
+    }
+
+    private func verifiedSessionSnapshotMetadataCandidateForPropertyOpen(
+        row: SessionSnapshotUploadRow,
+        propertyID: UUID,
+        activeOrganizationID: UUID,
+        checkedAt: Date
+    ) async -> VerifiedSessionSnapshotMetadataCandidate? {
+        do {
+            let payloadData = try await downloadSessionSnapshotPayload(
+                bucket: row.payloadStorageBucket,
+                path: row.payloadStoragePath
+            )
+            let readback = Self.makeSessionSnapshotReadbackResult(
+                row: row,
+                payloadData: payloadData,
+                checkedAt: checkedAt,
+                failureReason: nil
+            )
+            guard readback.checksumVerified,
+                  readback.byteSizeMatches,
+                  readback.countsValid,
+                  readback.rowObjectConsistent,
+                  row.snapshotSchemaVersion == 1,
+                  let payload = Self.decodeSessionSnapshotPayload(payloadData),
+                  payload.snapshotSchemaVersion == 1,
+                  payload.orgID == activeOrganizationID,
+                  payload.propertyID == propertyID,
+                  payload.sessionID == row.sessionID,
+                  payload.rawSessionJSONSHA256.lowercased() == row.rawSessionJSONSHA256.lowercased(),
+                  Self.sessionSnapshotSHA256Hex(for: Data(payload.rawSessionJSON.utf8)) == row.rawSessionJSONSHA256.lowercased() else {
+                return nil
+            }
+            let metadata = try Self.decodeHydratableSessionMetadata(from: payload.rawSessionJSON)
+            guard metadata.propertyID == propertyID,
+                  metadata.sessionID == row.sessionID,
+                  metadata.orgID == nil || metadata.orgID == activeOrganizationID else {
+                return nil
+            }
+            return VerifiedSessionSnapshotMetadataCandidate(
+                row: row,
+                payload: payload,
+                payloadData: payloadData,
+                metadata: metadata
+            )
+        } catch {
+            return nil
+        }
+    }
+
+    private func applyAutomaticPropertyOpenSnapshotMetadataRecall(
+        candidate: VerifiedSessionSnapshotMetadataCandidate,
+        propertyID: UUID,
+        checkedAt: Date
+    ) throws -> SessionSnapshotHydrationResult {
+        let sessionID = candidate.row.sessionID
+        let snapshotMetadata = candidate.metadata
+        let existingMetadata = try? localStore.loadSessionMetadata(propertyID: propertyID, sessionID: sessionID)
+        let mergedMetadata = Self.mergeAutomaticSnapshotMetadata(
+            snapshot: snapshotMetadata,
+            existing: existingMetadata,
+            snapshotGeneratedAt: candidate.payload.generatedAt,
+            propertyID: propertyID,
+            sessionID: sessionID
+        )
+        let existingSessions = (try? localStore.fetchSessionsForCacheBuild(propertyID: propertyID)) ?? []
+        let existingSession = existingSessions.first { $0.id == sessionID }
+        let snapshotSession = Session(
+            id: sessionID,
+            propertyID: propertyID,
+            startedAt: mergedMetadata.startedAt,
+            status: mergedMetadata.status,
+            endedAt: mergedMetadata.endedAt,
+            exportedAt: mergedMetadata.exportedAt,
+            isSealed: mergedMetadata.isSealed,
+            firstDeliveredAt: mergedMetadata.firstDeliveredAt,
+            reExportExpiresAt: mergedMetadata.reExportExpiresAt,
+            notes: existingSession?.notes,
+            captureProfile: existingSession?.captureProfile,
+            deletedAt: existingSession?.deletedAt
+        )
+
+        if existingSession == nil ||
+            Self.sessionKnownStateAt(existingSession) <= candidate.payload.generatedAt {
+            _ = try localStore.upsertSession(snapshotSession)
+        }
+        try localStore.saveSessionMetadataAtomically(
+            propertyID: propertyID,
+            sessionID: sessionID,
+            metadata: mergedMetadata
+        )
+        try mergeAutomaticSnapshotGuidedMetadata(mergedMetadata.guidedShots, propertyID: propertyID)
+        try localStore.mergeRemoteFlaggedReferenceObservations(
+            propertyID: propertyID,
+            sessionID: sessionID,
+            metadata: mergedMetadata
+        )
+        reloadSessionCache(for: propertyID)
+
+        return SessionSnapshotHydrationResult(
+            hydratedAt: checkedAt,
+            allowed: true,
+            blockedReason: nil,
+            sourceSnapshotID: candidate.row.id,
+            propertyID: propertyID,
+            sessionID: sessionID,
+            hydratedShotCount: mergedMetadata.shots.count,
+            hydratedIssueCount: mergedMetadata.issues.count,
+            hydratedGuidedCount: mergedMetadata.guidedShots.count
+        )
+    }
+
+    private static func sessionSnapshotMetadataRecallOutcome(
+        row: SessionSnapshotUploadRow,
+        decodedPayload: SessionSnapshotPayloadForChecksum,
+        readback: SessionSnapshotReadbackResult,
+        localComparison: SessionSnapshotRestoreLocalComparison
+    ) -> (outcome: SessionSnapshotRestoreDiagnosticOutcome, reason: String?) {
+        guard row.snapshotSchemaVersion == 1, decodedPayload.snapshotSchemaVersion == 1 else {
+            return (.unsupportedSchema, "snapshot schema version unsupported")
+        }
+        guard readback.checksumVerified else {
+            return (.checksumFailed, "snapshot payload checksum mismatch")
+        }
+        guard readback.byteSizeMatches else {
+            return (.unableToVerify, "snapshot payload byte size mismatch")
+        }
+        guard readback.rowObjectConsistent else {
+            return (.parentMismatch, "snapshot row/object consistency failed")
+        }
+        guard readback.countsValid else {
+            return (.unableToVerify, "snapshot row/object counts mismatch")
+        }
+
+        if localComparison.sessionExists,
+           let localKnownStateAt = localComparison.knownStateAt,
+           localKnownStateAt > decodedPayload.generatedAt {
+            return (.localNewerConflict, "local session state is newer than snapshot")
+        }
+
+        if localComparison.sessionExists,
+           let localShotCount = localComparison.shotCount,
+           let localIssueCount = localComparison.issueCount,
+           let localGuidedCount = localComparison.guidedCount,
+           (localShotCount > decodedPayload.shotCount ||
+            localIssueCount > decodedPayload.issueCount ||
+            localGuidedCount > decodedPayload.guidedCount) {
+            return (.staleSnapshot, "snapshot counts are behind local metadata")
+        }
+
+        return (.restorableMetadataCandidate, nil)
+    }
+
+    private func mergeAutomaticSnapshotGuidedMetadata(_ snapshotGuided: [GuidedShot], propertyID: UUID) throws {
+        guard !snapshotGuided.isEmpty else { return }
+        var existing = (try? localStore.fetchGuidedShots(propertyID: propertyID)) ?? []
+        var existingByID = Dictionary(uniqueKeysWithValues: existing.map { ($0.id, $0) })
+        var changed = false
+        for guided in snapshotGuided {
+            if let local = existingByID[guided.id],
+               Self.guidedKnownStateAt(local) > Self.guidedKnownStateAt(guided) {
+                continue
+            }
+            existingByID[guided.id] = guided
+            changed = true
+        }
+        guard changed else { return }
+        existing = existingByID.values.sorted { lhs, rhs in
+            let left = lhs.angleIndex ?? Int.max
+            let right = rhs.angleIndex ?? Int.max
+            if left != right { return left < right }
+            return lhs.id.uuidString < rhs.id.uuidString
+        }
+        try localStore.saveGuidedShots(existing, propertyID: propertyID)
+    }
+
+    private nonisolated static func mergeAutomaticSnapshotMetadata(
+        snapshot: SessionMetadata,
+        existing: SessionMetadata?,
+        snapshotGeneratedAt: Date,
+        propertyID: UUID,
+        sessionID: UUID
+    ) -> SessionMetadata {
+        guard var existing else {
+            var normalized = snapshot
+            normalized.propertyID = propertyID
+            normalized.sessionID = sessionID
+            return normalized
+        }
+
+        if sessionMetadataKnownStateAt(existing) <= snapshotGeneratedAt {
+            let localShots = existing.shots
+            let localIssues = existing.issues
+            let localGuided = existing.guidedShots
+            existing = snapshot
+            existing.shots = localShots
+            existing.issues = localIssues
+            existing.guidedShots = localGuided
+        }
+
+        existing.propertyID = propertyID
+        existing.sessionID = sessionID
+        existing.schemaVersion = max(existing.schemaVersion, snapshot.schemaVersion)
+        existing.shots = mergeSnapshotItems(
+            snapshot: snapshot.shots,
+            existing: existing.shots,
+            id: \.shotID,
+            knownState: shotKnownStateAt
+        )
+        existing.issues = mergeSnapshotItems(
+            snapshot: snapshot.issues,
+            existing: existing.issues,
+            id: \.issueID,
+            knownState: issueKnownStateAt
+        )
+        existing.guidedShots = mergeSnapshotItems(
+            snapshot: snapshot.guidedShots,
+            existing: existing.guidedShots,
+            id: \.id,
+            knownState: guidedKnownStateAt
+        )
+        return existing
+    }
+
+    private nonisolated static func mergeSnapshotItems<Item, ID: Hashable>(
+        snapshot: [Item],
+        existing: [Item],
+        id: KeyPath<Item, ID>,
+        knownState: (Item) -> Date
+    ) -> [Item] {
+        var mergedByID = Dictionary(uniqueKeysWithValues: existing.map { ($0[keyPath: id], $0) })
+        for item in snapshot {
+            let itemID = item[keyPath: id]
+            if let local = mergedByID[itemID],
+               knownState(local) > knownState(item) {
+                continue
+            }
+            mergedByID[itemID] = item
+        }
+        return mergedByID.values.sorted { lhs, rhs in
+            knownState(lhs) == knownState(rhs)
+                ? String(describing: lhs[keyPath: id]) < String(describing: rhs[keyPath: id])
+                : knownState(lhs) < knownState(rhs)
+        }
+    }
+
+    private nonisolated static func sessionKnownStateAt(_ session: Session?) -> Date {
+        guard let session else { return .distantPast }
+        return [
+            session.startedAt,
+            session.endedAt,
+            session.exportedAt,
+            session.firstDeliveredAt,
+            session.reExportExpiresAt,
+            session.deletedAt
+        ]
+        .compactMap { $0 }
+        .max() ?? session.startedAt
+    }
+
+    private nonisolated static func sessionMetadataKnownStateAt(_ metadata: SessionMetadata) -> Date {
+        let itemDates = metadata.shots.map(shotKnownStateAt) +
+            metadata.issues.map(issueKnownStateAt) +
+            metadata.guidedShots.map(guidedKnownStateAt)
+        return ([
+            metadata.startedAt,
+            metadata.endedAt,
+            metadata.exportedAt,
+            metadata.firstDeliveredAt,
+            metadata.reExportExpiresAt
+        ].compactMap { $0 } + itemDates)
+            .max() ?? metadata.startedAt
+    }
+
+    private nonisolated static func shotKnownStateAt(_ shot: ShotMetadata) -> Date {
+        [
+            shot.createdAt,
+            shot.updatedAt,
+            shot.retiredAt,
+            shot.lifecycleUpdatedAt
+        ]
+        .compactMap { $0 }
+        .max() ?? shot.updatedAt
+    }
+
+    private nonisolated static func issueKnownStateAt(_ issue: IssueMetadata) -> Date {
+        ([
+            issue.firstSeenAt,
+            issue.lastSeenAt,
+            issue.resolvedAt
+        ].compactMap { $0 } + issue.historyEvents.map(\.timestamp))
+            .max() ?? .distantPast
+    }
+
+    private nonisolated static func guidedKnownStateAt(_ guided: GuidedShot) -> Date {
+        [
+            guided.shot?.capturedAt,
+            guided.retiredAt,
+            guided.reassignedAt,
+            guided.labelEditedAt
+        ]
+        .compactMap { $0 }
+        .max() ?? .distantPast
+    }
+
     var sessionSnapshotHydrationPolicyDiagnostics: SessionSnapshotHydrationPolicyDiagnostics {
         guard supabaseConfiguration.isConfigured else {
             return SessionSnapshotHydrationPolicyDiagnostics(
@@ -41969,6 +42411,10 @@ final class AppState: ObservableObject {
 
         Task { [weak self] in
             await self?.performPropertyOpenFreshnessCheck(
+                propertyID: propertyID,
+                activeOrganizationID: activeOrganizationID
+            )
+            await self?.hydrateMetadataFromLatestVerifiedSessionSnapshotForPropertyOpen(
                 propertyID: propertyID,
                 activeOrganizationID: activeOrganizationID
             )
