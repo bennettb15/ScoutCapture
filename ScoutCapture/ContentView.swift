@@ -3837,6 +3837,7 @@ struct ContentView: View {
     @State private var sessionExportErrorMessage: String? = nil
     @State private var isCheckingSessionCompletionConflicts: Bool = false
     @State private var sessionCoordinationConflictReview: AppState.SessionCoordinationConflictReview? = nil
+    @State private var isEndingSession: Bool = false
     @State private var didTriggerExitToHubForMissingSession: Bool = false
     private var sheetTheme: SheetControlTheme { .forScheme(colorScheme) }
 
@@ -6517,6 +6518,7 @@ struct ContentView: View {
             }
             .onDisappear {
                 isPollingDeviceOrientation = false
+                isEndingSession = false
                 locationManager.stop()
                 UIDevice.current.endGeneratingDeviceOrientationNotifications()
             }
@@ -6601,6 +6603,7 @@ struct ContentView: View {
                 SessionActionsSheet(
                     summary: summary,
                     isPreparingExport: isPreparingSessionExport,
+                    isEndingSession: isEndingSession,
                     onResume: {
                         showSessionActionsSheet = false
                     },
@@ -6620,6 +6623,11 @@ struct ContentView: View {
             if isPreparingSessionExport {
                 SessionExportChecklistOverlay(checklist: sessionExportChecklist)
                     .zIndex(700)
+            }
+
+            if isEndingSession {
+                ExportProgressOverlay(title: "Ending...")
+                    .zIndex(705)
             }
 
             if showSessionExportErrorPopup {
@@ -7066,6 +7074,7 @@ struct ContentView: View {
 
     private func endSessionControl() -> some View {
         Button {
+            guard !isEndingSession else { return }
             presentSessionActionsSheet()
         } label: {
             Text("End")
@@ -7077,6 +7086,8 @@ struct ContentView: View {
             .offset(y: 1.5)
         }
         .buttonStyle(.plain)
+        .disabled(isEndingSession)
+        .opacity(isEndingSession ? 0.55 : 1.0)
     }
 
     private var isCaptureProfileLocked: Bool { sessionCaptureProfileLocked }
@@ -11976,6 +11987,7 @@ extension ContentView {
     }
 
     private func presentSessionActionsSheet() {
+        guard !isEndingSession else { return }
         guard let propertyID = appState.selectedPropertyID else { return }
         guard let currentSession = appState.currentSession else {
             print("[EndSession] no active session")
@@ -12337,21 +12349,36 @@ extension ContentView {
     }
 
     private func handleSaveDraftAndExit(summary: SessionActionsSummary) {
+        guard !isEndingSession else { return }
+        isEndingSession = true
+        showSessionActionsSheet = false
+        DispatchQueue.main.async {
+            finishSaveDraftAndExit(summary: summary)
+        }
+    }
+
+    private func finishEndingSessionByExitingToHub() {
+        if let onExitToHub {
+            onExitToHub()
+        } else {
+            isEndingSession = false
+        }
+    }
+
+    private func finishSaveDraftAndExit(summary: SessionActionsSummary) {
         resetSelectionForSwitch()
         camera.updateDetailNoteActive(false)
         if summary.hasCaptures {
             let persistedDraft = appState.saveDraftCurrentSession(scheduleShadowWrite: false)
             appState.triggerBackupForLifecycleEvent()
             appState.refreshPropertiesInBackground()
-            showSessionActionsSheet = false
             if let persistedDraft {
                 appState.scheduleSessionShadowWriteAfterCoordinationRelease(for: persistedDraft)
             }
-            onExitToHub?()
+            finishEndingSessionByExitingToHub()
             return
         } else if let propertyID = appState.selectedPropertyID,
                   let sessionID = appState.currentSession?.id {
-            showSessionActionsSheet = false
             Task {
                 await appState.releaseCurrentSessionCoordinationLockIfOwned()
                 if appState.currentSession?.id == sessionID,
@@ -12360,33 +12387,50 @@ extension ContentView {
                 }
                 appState.refreshPropertiesInBackground()
                 await MainActor.run {
-                    onExitToHub?()
+                    finishEndingSessionByExitingToHub()
                 }
             }
             return
         }
+        isEndingSession = false
     }
 
     private func handleExportLaterAndExit(summary: SessionActionsSummary) {
-        guard summary.isExportLaterEnabled else { return }
-        appState.sealCurrentSessionForExportLater()
-        appState.refreshPropertiesInBackground()
+        guard summary.isExportLaterEnabled else {
+            isEndingSession = false
+            return
+        }
+        let alreadyEnding = isEndingSession
+        isEndingSession = true
         showSessionActionsSheet = false
-        Task {
-            await appState.releaseCurrentSessionCoordinationLockIfOwned()
-            await MainActor.run {
-                onExitToHub?()
+
+        let finish = {
+            appState.sealCurrentSessionForExportLater()
+            appState.refreshPropertiesInBackground()
+            Task {
+                await appState.releaseCurrentSessionCoordinationLockIfOwned()
+                await MainActor.run {
+                    finishEndingSessionByExitingToHub()
+                }
             }
+        }
+
+        if alreadyEnding {
+            finish()
+        } else {
+            DispatchQueue.main.async(execute: finish)
         }
     }
 
     private func attemptExportLaterAndExit(summary: SessionActionsSummary) {
+        guard !isEndingSession else { return }
         guard let propertyID = appState.selectedPropertyID,
               let sessionID = appState.currentSession?.id else {
             handleExportLaterAndExit(summary: summary)
             return
         }
         guard !isCheckingSessionCompletionConflicts else { return }
+        isEndingSession = true
         isCheckingSessionCompletionConflicts = true
         Task {
             let review = await appState.preCompletionConflictReview(
@@ -12396,6 +12440,7 @@ extension ContentView {
             await MainActor.run {
                 isCheckingSessionCompletionConflicts = false
                 if let review {
+                    isEndingSession = false
                     sessionCoordinationConflictReview = review
                     return
                 }
@@ -14289,6 +14334,7 @@ extension ContentView {
         @Environment(\.colorScheme) private var colorScheme
         let summary: SessionActionsSummary
         let isPreparingExport: Bool
+        let isEndingSession: Bool
         let onResume: () -> Void
         let onSaveDraftAndExit: () -> Void
         let onExportNow: () -> Void
@@ -14380,25 +14426,25 @@ extension ContentView {
                 actionButton(
                     title: "Resume",
                     role: .primary,
-                    isEnabled: !isPreparingExport,
+                    isEnabled: !isPreparingExport && !isEndingSession,
                     action: onResume
                 )
                 actionButton(
                     title: isPreparingExport ? "Preparing Export..." : summary.exportActionTitle,
                     role: .secondary,
-                    isEnabled: !isPreparingExport && summary.isExportActionEnabled,
+                    isEnabled: !isPreparingExport && !isEndingSession && summary.isExportActionEnabled,
                     action: onExportNow
                 )
                 actionButton(
-                    title: "Export Later",
+                    title: isEndingSession ? "Ending..." : "Export Later",
                     role: .tertiary,
-                    isEnabled: !isPreparingExport && summary.isExportLaterEnabled,
+                    isEnabled: !isPreparingExport && !isEndingSession && summary.isExportLaterEnabled,
                     action: onExportLater
                 )
                 actionButton(
-                    title: summary.exitActionTitle,
+                    title: isEndingSession ? "Ending..." : summary.exitActionTitle,
                     role: .secondary,
-                    isEnabled: !isPreparingExport,
+                    isEnabled: !isPreparingExport && !isEndingSession,
                     action: onSaveDraftAndExit
                 )
 
