@@ -27,8 +27,7 @@
       buildConfiguration = "Debug"
       selectedDebuggerIdentifier = "Xcode.DebuggerFoundation.Debugger.LLDB"
       selectedLauncherIdentifier = "Xcode.DebuggerFoundation.Launcher.LLDB"
-      shouldUseLaunchSchemeArgsEnv = "YES"
-      shouldAutocreateTestPlan = "YES">
+      shouldUseLaunchSchemeArgsEnv = "YES">
       <MacroExpansion>
          <BuildableReference
             BuildableIdentifier = "primary"
@@ -38,6 +37,12 @@
             ReferencedContainer = "container:ScoutCapture.xcodeproj">
          </BuildableReference>
       </MacroExpansion>
+      <TestPlans>
+         <TestPlanReference
+            reference = "container:ScoutCapture.xctestplan"
+            default = "YES">
+         </TestPlanReference>
+      </TestPlans>
       <Testables>
          <TestableReference
             skipped = "NO"
@@ -73,6 +78,83 @@
             ReferencedContainer = "container:ScoutCapture.xcodeproj">
          </BuildableReference>
       </BuildableProductRunnable>
+      <EnvironmentVariables>
+         <EnvironmentVariable
+            key = "SCOUTCAPTURE_SUPABASE_URL"
+            value = "https://chlvazmtucoszicehtnm.supabase.co"
+            isEnabled = "YES">
+         </EnvironmentVariable>
+         <EnvironmentVariable
+            key = "SCOUTCAPTURE_SUPABASE_ANON_KEY"
+            value = "sb_publishable_WixxIYHzr8VB-rmZ8q8DiQ_adVqsd2x"
+            isEnabled = "YES">
+         </EnvironmentVariable>
+         <EnvironmentVariable
+            key = "session_snapshot_shadow_write_enabled"
+            value = "true"
+            isEnabled = "NO">
+         </EnvironmentVariable>
+         <EnvironmentVariable
+            key = "SCOUTCAPTURE_SESSION_SNAPSHOT_SHADOW_WRITE_ENABLED"
+            value = "true"
+            isEnabled = "YES">
+         </EnvironmentVariable>
+         <EnvironmentVariable
+            key = "SCOUTCAPTURE_PRODUCTION_SNAPSHOT_VALIDATION_ALLOWED"
+            value = "true"
+            isEnabled = "YES">
+         </EnvironmentVariable>
+         <EnvironmentVariable
+            key = "SCOUTCAPTURE_SESSION_SNAPSHOT_AUTO_UPLOAD_ENABLED"
+            value = "true"
+            isEnabled = "YES">
+         </EnvironmentVariable>
+         <EnvironmentVariable
+            key = "SCOUTCAPTURE_SESSION_SNAPSHOT_AUTO_UPLOAD_KILL_SWITCH"
+            value = "true"
+            isEnabled = "YES">
+         </EnvironmentVariable>
+         <EnvironmentVariable
+            key = "SCOUTCAPTURE_CANONICAL_READ_CANDIDATE_ENABLED"
+            value = "true"
+            isEnabled = "YES">
+         </EnvironmentVariable>
+         <EnvironmentVariable
+            key = "SCOUTCAPTURE_CANONICAL_READ_CANDIDATE_ORG_ALLOWLIST"
+            value = "d4ba94ff-25e1-4072-aa79-9a548fcb3008"
+            isEnabled = "YES">
+         </EnvironmentVariable>
+         <EnvironmentVariable
+            key = "SCOUTCAPTURE_CANONICAL_READ_CANDIDATE_PROPERTY_ALLOWLIST"
+            value = "243A9328-066D-442D-A4F5-2ABBD1E2857B"
+            isEnabled = "YES">
+         </EnvironmentVariable>
+         <EnvironmentVariable
+            key = "SCOUTCAPTURE_CANONICAL_READ_CANDIDATE_SESSION_ALLOWLIST"
+            value = "0DD10857-978B-4EC4-B947-227E78F8AFEA"
+            isEnabled = "YES">
+         </EnvironmentVariable>
+         <EnvironmentVariable
+            key = "SCOUTCAPTURE_PRODUCTION_SINGLE_SESSION_CANONICAL_ACTIVATION_ENABLED"
+            value = "true"
+            isEnabled = "YES">
+         </EnvironmentVariable>
+         <EnvironmentVariable
+            key = "SCOUTCAPTURE_PRODUCTION_SINGLE_SESSION_CANONICAL_ACTIVATION_ORG_ALLOWLIST"
+            value = "d4ba94ff-25e1-4072-aa79-9a548fcb3008"
+            isEnabled = "YES">
+         </EnvironmentVariable>
+         <EnvironmentVariable
+            key = "SCOUTCAPTURE_PRODUCTION_SINGLE_SESSION_CANONICAL_ACTIVATION_PROPERTY_ALLOWLIST"
+            value = "243A9328-066D-442D-A4F5-2ABBD1E2857B"
+            isEnabled = "YES">
+         </EnvironmentVariable>
+         <EnvironmentVariable
+            key = "SCOUTCAPTURE_PRODUCTION_SINGLE_SESSION_CANONICAL_ACTIVATION_SESSION_ALLOWLIST"
+            value = "0DD10857-978B-4EC4-B947-227E78F8AFEA"
+            isEnabled = "YES">
+         </EnvironmentVariable>
+      </EnvironmentVariables>
    </LaunchAction>
    <ProfileAction
       buildConfiguration = "Release"

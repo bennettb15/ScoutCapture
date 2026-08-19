@@ -1,29 +1,30 @@
 import SwiftUI
 
 struct LoadingView: View {
+    @Environment(\.colorScheme) private var colorScheme
     var progress: Double = 0.0
     var showsProgressBar: Bool = true
     var showsLogo: Bool = true
 
     private var backgroundColor: Color {
-        .black
+        Color("StartupBackground")
     }
 
     private var logoName: String {
-        "ScoutCaptureLogoWhite"
+        "StartupLogo"
     }
 
     private var trackColor: Color {
-        Color.white.opacity(0.20)
+        colorScheme == .dark ? Color.white.opacity(0.20) : Color.black.opacity(0.12)
     }
 
     private var fillColor: Color {
-        Color.white.opacity(0.96)
+        colorScheme == .dark ? Color.white.opacity(0.96) : Color.black.opacity(0.82)
     }
 
     var body: some View {
         GeometryReader { proxy in
-            let logoWidth = max(proxy.size.width - 32, 0)
+            let logoWidth = min(max(proxy.size.width * 0.85, 0), 360)
             let logoHeight = logoWidth * (238.0 / 772.0)
             let progressOffsetY = showsLogo ? (logoHeight / 2.0) + 18.0 : 0
             ZStack {
@@ -55,5 +56,6 @@ struct LoadingView: View {
                 .accessibilityValue("In progress")
             }
         }
+        .ignoresSafeArea()
     }
 }

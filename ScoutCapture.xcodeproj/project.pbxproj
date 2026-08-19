@@ -6,6 +6,10 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXBuildFile section */
+		D3A9B5E52F87D42F00C2C513 /* Supabase in Frameworks */ = {isa = PBXBuildFile; productRef = D3A9B5E42F87D42F00C2C513 /* Supabase */; };
+/* End PBXBuildFile section */
+
 /* Begin PBXContainerItemProxy section */
 		E54A7A7524D14C26A9A7B10A /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
@@ -17,6 +21,7 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
+		D303564F2F91C96200147CA7 /* ScoutCapture.xctestplan */ = {isa = PBXFileReference; lastKnownFileType = text; path = ScoutCapture.xctestplan; sourceTree = "<group>"; };
 		D35FBC532F324104009057B0 /* ScoutCapture.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = ScoutCapture.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		E54A7A7524D14C26A9A7B101 /* ScoutCaptureTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = ScoutCaptureTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
@@ -52,6 +57,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				D3A9B5E52F87D42F00C2C513 /* Supabase in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -68,6 +74,7 @@
 		D35FBC4A2F324104009057B0 = {
 			isa = PBXGroup;
 			children = (
+				D303564F2F91C96200147CA7 /* ScoutCapture.xctestplan */,
 				D35FBC552F324104009057B0 /* ScoutCapture */,
 				E54A7A7524D14C26A9A7B102 /* ScoutCaptureTests */,
 				D35FBC542F324104009057B0 /* Products */,
@@ -103,6 +110,7 @@
 			);
 			name = ScoutCapture;
 			packageProductDependencies = (
+				D3A9B5E42F87D42F00C2C513 /* Supabase */,
 			);
 			productName = ScoutCapture;
 			productReference = D35FBC532F324104009057B0 /* ScoutCapture.app */;
@@ -159,6 +167,9 @@
 			);
 			mainGroup = D35FBC4A2F324104009057B0;
 			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				D3A9B5E32F87D42F00C2C513 /* XCRemoteSwiftPackageReference "supabase-swift" */,
+			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = D35FBC542F324104009057B0 /* Products */;
 			projectDirPath = "";
@@ -368,6 +379,12 @@
 				PRODUCT_BUNDLE_IDENTIFIER = com.scoutsystems.scoutcapture.dev;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				PROVISIONING_PROFILE_SPECIFIER = "";
+				SCOUTCAPTURE_SESSION_SNAPSHOT_AUTO_UPLOAD_ENABLED = NO;
+				SCOUTCAPTURE_SESSION_SNAPSHOT_AUTO_UPLOAD_KILL_SWITCH = NO;
+				SCOUTCAPTURE_SESSION_SNAPSHOT_AUTO_UPLOAD_ORG_ALLOWLIST = "";
+				SCOUTCAPTURE_SESSION_SNAPSHOT_AUTO_UPLOAD_PROPERTY_ALLOWLIST = "";
+				SCOUTCAPTURE_SESSION_SNAPSHOT_PRODUCTION_AUTO_UPLOAD_TARGET_ENABLED = NO;
+				SCOUTCAPTURE_SESSION_SNAPSHOT_SHADOW_WRITE_ENABLED = NO;
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
 				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
@@ -412,6 +429,12 @@
 				PRODUCT_BUNDLE_IDENTIFIER = com.scoutsystems.scoutcapture.dev;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				PROVISIONING_PROFILE_SPECIFIER = "";
+				SCOUTCAPTURE_SESSION_SNAPSHOT_AUTO_UPLOAD_ENABLED = NO;
+				SCOUTCAPTURE_SESSION_SNAPSHOT_AUTO_UPLOAD_KILL_SWITCH = NO;
+				SCOUTCAPTURE_SESSION_SNAPSHOT_AUTO_UPLOAD_ORG_ALLOWLIST = "";
+				SCOUTCAPTURE_SESSION_SNAPSHOT_AUTO_UPLOAD_PROPERTY_ALLOWLIST = "";
+				SCOUTCAPTURE_SESSION_SNAPSHOT_PRODUCTION_AUTO_UPLOAD_TARGET_ENABLED = NO;
+				SCOUTCAPTURE_SESSION_SNAPSHOT_SHADOW_WRITE_ENABLED = NO;
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
 				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
@@ -501,6 +524,25 @@
 			defaultConfigurationName = Release;
 		};
 /* End XCConfigurationList section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		D3A9B5E32F87D42F00C2C513 /* XCRemoteSwiftPackageReference "supabase-swift" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/supabase/supabase-swift";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 2.5.1;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		D3A9B5E42F87D42F00C2C513 /* Supabase */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = D3A9B5E32F87D42F00C2C513 /* XCRemoteSwiftPackageReference "supabase-swift" */;
+			productName = Supabase;
+		};
+/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = D35FBC4B2F324104009057B0 /* Project object */;
 }

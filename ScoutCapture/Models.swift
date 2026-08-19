@@ -16,6 +16,23 @@ enum CanonicalElevation {
     }
 }
 
+enum CaptureProfile: String, Codable, CaseIterable, Equatable {
+    case residential
+    case commercial
+
+    init?(storedValue: String?) {
+        guard let storedValue else { return nil }
+        self.init(rawValue: storedValue.trimmingCharacters(in: .whitespacesAndNewlines).lowercased())
+    }
+
+    var title: String {
+        switch self {
+        case .residential: "Residential"
+        case .commercial: "Commercial"
+        }
+    }
+}
+
 struct SessionMetadata: Codable {
     var schemaVersion: Int
     var propertyID: UUID
@@ -345,6 +362,30 @@ struct SessionMetadata: Codable {
     }
 }
 
+extension SessionMetadata {
+    static var empty: SessionMetadata {
+        SessionMetadata(
+            schemaVersion: 1,
+            propertyID: UUID(),
+            sessionID: UUID(),
+            propertyNameAtCapture: nil,
+            propertyNameAtExport: nil,
+            startedAt: Date(),
+            endedAt: nil,
+            status: .draft,
+            isBaselineSession: false,
+            exportedAt: nil,
+            isSealed: false,
+            appVersion: "",
+            deviceModel: "",
+            osVersion: "",
+            shots: [],
+            issues: [],
+            guidedShots: []
+        )
+    }
+}
+
 struct Organization: Codable, Identifiable, Equatable {
     let id: UUID
     var name: String
@@ -439,6 +480,117 @@ struct OrganizationContact: Codable, Identifiable, Equatable {
     }
 }
 
+enum ShotLifecycleState: String, Codable, CaseIterable, Equatable {
+    case active
+    case retired
+    case superseded
+
+    var isActiveForDefaultWorkflows: Bool {
+        self == .active
+    }
+
+    var isHistorical: Bool {
+        switch self {
+        case .active:
+            return false
+        case .retired, .superseded:
+            return true
+        }
+    }
+
+    var isRetired: Bool {
+        self == .retired
+    }
+
+    var isSuperseded: Bool {
+        self == .superseded
+    }
+
+    var shouldAppearInDefaultGallery: Bool {
+        isActiveForDefaultWorkflows
+    }
+
+    var shouldAppearInDefaultReports: Bool {
+        isActiveForDefaultWorkflows
+    }
+
+    var shouldAppearInDefaultExports: Bool {
+        isActiveForDefaultWorkflows
+    }
+}
+
+enum ShotLifecycleValidationError: Equatable {
+    case selfSupersession(shotID: UUID)
+    case replacementCycle(shotIDs: [UUID])
+}
+
+enum ShotLifecycleRules {
+    static func validateReplacement(
+        shotID: UUID,
+        supersededByShotID: UUID?
+    ) -> [ShotLifecycleValidationError] {
+        guard supersededByShotID == shotID else { return [] }
+        return [.selfSupersession(shotID: shotID)]
+    }
+
+    static func validateReplacementLinks(
+        supersededByShotIDByShotID: [UUID: UUID]
+    ) -> [ShotLifecycleValidationError] {
+        var errors: [ShotLifecycleValidationError] = []
+        let nonSelfReplacementLinks = supersededByShotIDByShotID.filter { shotID, replacementID in
+            shotID != replacementID
+        }
+
+        for (shotID, replacementID) in supersededByShotIDByShotID where shotID == replacementID {
+            errors.append(.selfSupersession(shotID: shotID))
+        }
+
+        var processed: Set<UUID> = []
+
+        for shotID in nonSelfReplacementLinks.keys where !processed.contains(shotID) {
+            if let cycle = replacementCycle(
+                startingAt: shotID,
+                supersededByShotIDByShotID: nonSelfReplacementLinks,
+                processed: &processed
+            ) {
+                errors.append(.replacementCycle(shotIDs: cycle))
+            }
+        }
+
+        return errors
+    }
+
+    private static func replacementCycle(
+        startingAt shotID: UUID,
+        supersededByShotIDByShotID: [UUID: UUID],
+        processed: inout Set<UUID>
+    ) -> [UUID]? {
+        var path: [UUID] = []
+        var pathIndexByShotID: [UUID: Int] = [:]
+        var current: UUID? = shotID
+
+        while let currentShotID = current {
+            if let cycleStartIndex = pathIndexByShotID[currentShotID] {
+                let cycle = Array(path[cycleStartIndex...])
+                processed.formUnion(path)
+                return cycle
+            }
+
+            if processed.contains(currentShotID) {
+                processed.formUnion(path)
+                return nil
+            }
+
+            pathIndexByShotID[currentShotID] = path.count
+            path.append(currentShotID)
+            current = supersededByShotIDByShotID[currentShotID]
+        }
+
+        processed.formUnion(path)
+        return nil
+    }
+}
+
 struct ShotMetadata: Codable, Identifiable, Equatable {
     let shotID: UUID
     // Deprecated duplication kept for backwards compatibility with existing readers.
@@ -466,6 +618,13 @@ struct ShotMetadata: Codable, Identifiable, Equatable {
     var originalFilename: String
     var originalRelativePath: String
     var originalByteSize: Int?
+    var storageBucket: String?
+    var storagePath: String?
+    var checksumSHA256: String?
+    var byteSize: Int?
+    var uploadState: String
+    var uploadAttempts: Int
+    var lastUploadError: String?
     var stampedFilename: String?
     var stampedRelativePath: String?
     var captureMode: String?
@@ -478,8 +637,30 @@ struct ShotMetadata: Codable, Identifiable, Equatable {
     var accuracyMeters: Double?
     var imageWidth: Int?
     var imageHeight: Int?
+    var lifecycleState: ShotLifecycleState
+    var retiredAt: Date?
+    var retiredReason: String?
+    var retiredByUserID: UUID?
+    var supersededByShotID: UUID?
+    var supersedesShotID: UUID?
+    var replacementReason: String?
+    var hiddenFromReports: Bool?
+    var hiddenFromGallery: Bool?
+    var lifecycleUpdatedAt: Date?
 
     var id: UUID { shotID }
+    var isActiveForDefaultWorkflows: Bool { lifecycleState.isActiveForDefaultWorkflows }
+    var isHistorical: Bool { lifecycleState.isHistorical }
+    var isRetired: Bool { lifecycleState.isRetired }
+    var isSuperseded: Bool { lifecycleState.isSuperseded }
+    var shouldAppearInDefaultGallery: Bool {
+        hiddenFromGallery.map { !$0 } ?? lifecycleState.shouldAppearInDefaultGallery
+    }
+    var shouldAppearInDefaultReports: Bool {
+        hiddenFromReports.map { !$0 } ?? lifecycleState.shouldAppearInDefaultReports
+    }
+    var shouldAppearInDefaultExports: Bool { lifecycleState.shouldAppearInDefaultExports }
+
     var logicalShotIdentity: String {
         let normalizedKey = shotKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             ? ShotMetadata.makeShotKey(
@@ -532,6 +713,18 @@ struct ShotMetadata: Codable, Identifiable, Equatable {
         case originalFilename
         case originalRelativePath
         case originalByteSize
+        case storageBucket
+        case storagePath
+        case checksumSHA256
+        case checksum_sha256
+        case byteSize
+        case byte_size
+        case uploadState
+        case upload_state
+        case uploadAttempts
+        case upload_attempts
+        case lastUploadError
+        case last_upload_error
         case stampedFilename
         case stampedRelativePath
         case captureMode
@@ -543,6 +736,16 @@ struct ShotMetadata: Codable, Identifiable, Equatable {
         case accuracyMeters
         case imageWidth
         case imageHeight
+        case lifecycleState
+        case retiredAt
+        case retiredReason
+        case retiredByUserID
+        case supersededByShotID
+        case supersedesShotID
+        case replacementReason
+        case hiddenFromReports
+        case hiddenFromGallery
+        case lifecycleUpdatedAt
         case logicalShotIdentity
         case trade
         case priority
@@ -573,6 +776,13 @@ struct ShotMetadata: Codable, Identifiable, Equatable {
         originalFilename: String,
         originalRelativePath: String,
         originalByteSize: Int?,
+        storageBucket: String? = nil,
+        storagePath: String? = nil,
+        checksumSHA256: String? = nil,
+        byteSize: Int? = nil,
+        uploadState: String = "pending",
+        uploadAttempts: Int = 0,
+        lastUploadError: String? = nil,
         stampedFilename: String?,
         stampedRelativePath: String?,
         captureMode: String?,
@@ -583,7 +793,17 @@ struct ShotMetadata: Codable, Identifiable, Equatable {
         longitude: Double?,
         accuracyMeters: Double?,
         imageWidth: Int?,
-        imageHeight: Int?
+        imageHeight: Int?,
+        lifecycleState: ShotLifecycleState = .active,
+        retiredAt: Date? = nil,
+        retiredReason: String? = nil,
+        retiredByUserID: UUID? = nil,
+        supersededByShotID: UUID? = nil,
+        supersedesShotID: UUID? = nil,
+        replacementReason: String? = nil,
+        hiddenFromReports: Bool? = nil,
+        hiddenFromGallery: Bool? = nil,
+        lifecycleUpdatedAt: Date? = nil
     ) {
         self.shotID = shotID
         self.propertyID = propertyID
@@ -609,6 +829,13 @@ struct ShotMetadata: Codable, Identifiable, Equatable {
         self.originalFilename = originalFilename
         self.originalRelativePath = originalRelativePath
         self.originalByteSize = originalByteSize
+        self.storageBucket = ShotMetadata.trimmedNonEmpty(storageBucket)
+        self.storagePath = ShotMetadata.trimmedNonEmpty(storagePath)
+        self.checksumSHA256 = ShotMetadata.trimmedNonEmpty(checksumSHA256)
+        self.byteSize = byteSize
+        self.uploadState = ShotMetadata.normalizedUploadState(uploadState)
+        self.uploadAttempts = max(0, uploadAttempts)
+        self.lastUploadError = ShotMetadata.trimmedNonEmpty(lastUploadError)
         self.stampedFilename = stampedFilename
         self.stampedRelativePath = stampedRelativePath
         self.captureMode = captureMode
@@ -620,6 +847,16 @@ struct ShotMetadata: Codable, Identifiable, Equatable {
         self.accuracyMeters = accuracyMeters
         self.imageWidth = imageWidth
         self.imageHeight = imageHeight
+        self.lifecycleState = lifecycleState
+        self.retiredAt = retiredAt
+        self.retiredReason = ShotMetadata.trimmedNonEmpty(retiredReason)
+        self.retiredByUserID = retiredByUserID
+        self.supersededByShotID = supersededByShotID
+        self.supersedesShotID = supersedesShotID
+        self.replacementReason = ShotMetadata.trimmedNonEmpty(replacementReason)
+        self.hiddenFromReports = hiddenFromReports
+        self.hiddenFromGallery = hiddenFromGallery
+        self.lifecycleUpdatedAt = lifecycleUpdatedAt
     }
 
     init(from decoder: Decoder) throws {
@@ -663,6 +900,30 @@ struct ShotMetadata: Codable, Identifiable, Equatable {
             originalRelativePath = decodedRelative
         }
         originalByteSize = try c.decodeIfPresent(Int.self, forKey: .originalByteSize)
+        storageBucket = ShotMetadata.trimmedNonEmpty(try c.decodeIfPresent(String.self, forKey: .storageBucket))
+        storagePath = ShotMetadata.trimmedNonEmpty(try c.decodeIfPresent(String.self, forKey: .storagePath))
+        checksumSHA256 = ShotMetadata.trimmedNonEmpty(
+            try c.decodeIfPresent(String.self, forKey: .checksumSHA256)
+                ?? c.decodeIfPresent(String.self, forKey: .checksum_sha256)
+        )
+        byteSize = try c.decodeIfPresent(Int.self, forKey: .byteSize)
+            ?? c.decodeIfPresent(Int.self, forKey: .byte_size)
+            ?? originalByteSize
+        uploadState = ShotMetadata.normalizedUploadState(
+            try c.decodeIfPresent(String.self, forKey: .uploadState)
+                ?? c.decodeIfPresent(String.self, forKey: .upload_state)
+                ?? (storagePath == nil ? "pending" : "uploaded")
+        )
+        uploadAttempts = max(
+            0,
+            try c.decodeIfPresent(Int.self, forKey: .uploadAttempts)
+                ?? c.decodeIfPresent(Int.self, forKey: .upload_attempts)
+                ?? 0
+        )
+        lastUploadError = ShotMetadata.trimmedNonEmpty(
+            try c.decodeIfPresent(String.self, forKey: .lastUploadError)
+                ?? c.decodeIfPresent(String.self, forKey: .last_upload_error)
+        )
         stampedFilename = try c.decodeIfPresent(String.self, forKey: .stampedFilename)
         let decodedStampedRelative = try c.decodeIfPresent(String.self, forKey: .stampedRelativePath)?
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
@@ -682,6 +943,16 @@ struct ShotMetadata: Codable, Identifiable, Equatable {
         accuracyMeters = try c.decodeIfPresent(Double.self, forKey: .accuracyMeters)
         imageWidth = try c.decodeIfPresent(Int.self, forKey: .imageWidth)
         imageHeight = try c.decodeIfPresent(Int.self, forKey: .imageHeight)
+        lifecycleState = try ShotMetadata.decodeLifecycleState(from: c)
+        retiredAt = try c.decodeIfPresent(Date.self, forKey: .retiredAt)
+        retiredReason = ShotMetadata.trimmedNonEmpty(try c.decodeIfPresent(String.self, forKey: .retiredReason))
+        retiredByUserID = try c.decodeIfPresent(UUID.self, forKey: .retiredByUserID)
+        supersededByShotID = try c.decodeIfPresent(UUID.self, forKey: .supersededByShotID)
+        supersedesShotID = try c.decodeIfPresent(UUID.self, forKey: .supersedesShotID)
+        replacementReason = ShotMetadata.trimmedNonEmpty(try c.decodeIfPresent(String.self, forKey: .replacementReason))
+        hiddenFromReports = try c.decodeIfPresent(Bool.self, forKey: .hiddenFromReports)
+        hiddenFromGallery = try c.decodeIfPresent(Bool.self, forKey: .hiddenFromGallery)
+        lifecycleUpdatedAt = try c.decodeIfPresent(Date.self, forKey: .lifecycleUpdatedAt)
     }
 
     func encode(to encoder: Encoder) throws {
@@ -711,6 +982,13 @@ struct ShotMetadata: Codable, Identifiable, Equatable {
         try c.encode(originalFilename, forKey: .originalFilename)
         try c.encode(originalRelativePath, forKey: .originalRelativePath)
         try c.encodeIfPresent(originalByteSize, forKey: .originalByteSize)
+        try c.encodeIfPresent(ShotMetadata.trimmedNonEmpty(storageBucket), forKey: .storageBucket)
+        try c.encodeIfPresent(ShotMetadata.trimmedNonEmpty(storagePath), forKey: .storagePath)
+        try c.encodeIfPresent(ShotMetadata.trimmedNonEmpty(checksumSHA256), forKey: .checksumSHA256)
+        try c.encodeIfPresent(byteSize ?? originalByteSize, forKey: .byteSize)
+        try c.encode(ShotMetadata.normalizedUploadState(uploadState), forKey: .uploadState)
+        try c.encode(max(0, uploadAttempts), forKey: .uploadAttempts)
+        try c.encodeIfPresent(ShotMetadata.trimmedNonEmpty(lastUploadError), forKey: .lastUploadError)
         try c.encodeIfPresent(stampedFilename, forKey: .stampedFilename)
         try c.encodeIfPresent(stampedRelativePath, forKey: .stampedRelativePath)
         try c.encodeIfPresent(captureMode, forKey: .captureMode)
@@ -721,6 +999,18 @@ struct ShotMetadata: Codable, Identifiable, Equatable {
         try c.encodeIfPresent(accuracyMeters, forKey: .accuracyMeters)
         try c.encodeIfPresent(imageWidth, forKey: .imageWidth)
         try c.encodeIfPresent(imageHeight, forKey: .imageHeight)
+        if lifecycleState != .active {
+            try c.encode(lifecycleState, forKey: .lifecycleState)
+        }
+        try c.encodeIfPresent(retiredAt, forKey: .retiredAt)
+        try c.encodeIfPresent(ShotMetadata.trimmedNonEmpty(retiredReason), forKey: .retiredReason)
+        try c.encodeIfPresent(retiredByUserID, forKey: .retiredByUserID)
+        try c.encodeIfPresent(supersededByShotID, forKey: .supersededByShotID)
+        try c.encodeIfPresent(supersedesShotID, forKey: .supersedesShotID)
+        try c.encodeIfPresent(ShotMetadata.trimmedNonEmpty(replacementReason), forKey: .replacementReason)
+        try c.encodeIfPresent(hiddenFromReports, forKey: .hiddenFromReports)
+        try c.encodeIfPresent(hiddenFromGallery, forKey: .hiddenFromGallery)
+        try c.encodeIfPresent(lifecycleUpdatedAt, forKey: .lifecycleUpdatedAt)
         try c.encode(logicalShotIdentity, forKey: .logicalShotIdentity)
         try c.encodeIfPresent(ShotMetadata.trimmedNonEmpty(trade), forKey: .trade)
         try c.encodeIfPresent(ShotMetadata.normalizedPriority(priority), forKey: .priority)
@@ -761,6 +1051,32 @@ struct ShotMetadata: Codable, Identifiable, Equatable {
         guard let value else { return nil }
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? nil : trimmed
+    }
+
+    private static func decodeLifecycleState(
+        from container: KeyedDecodingContainer<CodingKeys>
+    ) throws -> ShotLifecycleState {
+        guard let rawValue = try container.decodeIfPresent(String.self, forKey: .lifecycleState)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased(),
+              !rawValue.isEmpty else {
+            return .active
+        }
+        return ShotLifecycleState(rawValue: rawValue) ?? .active
+    }
+
+    private static func normalizedUploadState(_ value: String?) -> String {
+        let trimmed = trimmedNonEmpty(value)?.lowercased()
+        switch trimmed {
+        case "uploading":
+            return "uploading"
+        case "uploaded":
+            return "uploaded"
+        case "failed":
+            return "failed"
+        default:
+            return "pending"
+        }
     }
 
     private static func validExifOrientation(_ value: Int?) -> Int? {
@@ -953,10 +1269,240 @@ struct IssueMetadata: Codable, Identifiable, Equatable {
     }
 }
 
+struct RemoteShotMetadataRecord: Decodable, Equatable {
+    let id: UUID
+    let orgID: UUID?
+    let propertyID: UUID?
+    let sessionID: UUID?
+    let createdAt: Date?
+    let updatedAt: Date?
+    let updatedBy: UUID?
+    let revision: Int64?
+    let deletedAt: Date?
+    let building: String?
+    let elevation: String?
+    let detailType: String?
+    let angleIndex: Int?
+    let shotKey: String?
+    let logicalShotIdentity: String?
+    let captureKind: String?
+    let firstCaptureKind: String?
+    let isGuided: Bool?
+    let isFlagged: Bool?
+    let issueID: UUID?
+    let issueStatus: String?
+    let trade: String?
+    let reason: String?
+    let priority: String?
+    let captureMode: String?
+    let lens: String?
+    let latitude: Double?
+    let longitude: Double?
+    let accuracyMeters: Double?
+    let imageWidth: Int?
+    let imageHeight: Int?
+    let lifecycleState: ShotLifecycleState
+    let retiredAt: Date?
+    let retiredReason: String?
+    let retiredByUserID: UUID?
+    let supersededByShotID: UUID?
+    let supersedesShotID: UUID?
+    let replacementReason: String?
+    let hiddenFromReports: Bool?
+    let hiddenFromGallery: Bool?
+    let lifecycleUpdatedAt: Date?
+    let storageBucket: String?
+    let storagePath: String?
+    let checksumSHA256: String?
+    let byteSize: Int?
+    let uploadState: String?
+    let uploadAttempts: Int?
+    let lastUploadError: String?
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case orgID = "org_id"
+        case propertyID = "property_id"
+        case sessionID = "session_id"
+        case createdAt = "created_at"
+        case updatedAt = "updated_at"
+        case updatedBy = "updated_by"
+        case revision
+        case deletedAt = "deleted_at"
+        case building
+        case elevation
+        case detailType = "detail_type"
+        case angleIndex = "angle_index"
+        case shotKey = "shot_key"
+        case logicalShotIdentity = "logical_shot_identity"
+        case captureKind = "capture_kind"
+        case firstCaptureKind = "first_capture_kind"
+        case isGuided = "is_guided"
+        case isFlagged = "is_flagged"
+        case issueID = "issue_id"
+        case issueStatus = "issue_status"
+        case trade
+        case reason
+        case priority
+        case captureMode = "capture_mode"
+        case lens
+        case latitude
+        case longitude
+        case accuracyMeters = "accuracy_meters"
+        case imageWidth = "image_width"
+        case imageHeight = "image_height"
+        case lifecycleState = "lifecycle_state"
+        case retiredAt = "retired_at"
+        case retiredReason = "retired_reason"
+        case retiredByUserID = "retired_by"
+        case supersededByShotID = "superseded_by_shot_id"
+        case supersedesShotID = "supersedes_shot_id"
+        case replacementReason = "replacement_reason"
+        case hiddenFromReports = "hidden_from_reports"
+        case hiddenFromGallery = "hidden_from_gallery"
+        case lifecycleUpdatedAt = "lifecycle_updated_at"
+        case storageBucket = "storage_bucket"
+        case storagePath = "storage_path"
+        case checksumSHA256 = "checksum_sha256"
+        case byteSize = "byte_size"
+        case uploadState = "upload_state"
+        case uploadAttempts = "upload_attempts"
+        case lastUploadError = "last_upload_error"
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(UUID.self, forKey: .id)
+        orgID = try c.decodeIfPresent(UUID.self, forKey: .orgID)
+        propertyID = try c.decodeIfPresent(UUID.self, forKey: .propertyID)
+        sessionID = try c.decodeIfPresent(UUID.self, forKey: .sessionID)
+        createdAt = try c.decodeIfPresent(Date.self, forKey: .createdAt)
+        updatedAt = try c.decodeIfPresent(Date.self, forKey: .updatedAt)
+        updatedBy = try c.decodeIfPresent(UUID.self, forKey: .updatedBy)
+        revision = try c.decodeIfPresent(Int64.self, forKey: .revision)
+        deletedAt = try c.decodeIfPresent(Date.self, forKey: .deletedAt)
+        building = try c.decodeIfPresent(String.self, forKey: .building)
+        elevation = try c.decodeIfPresent(String.self, forKey: .elevation)
+        detailType = try c.decodeIfPresent(String.self, forKey: .detailType)
+        angleIndex = try c.decodeIfPresent(Int.self, forKey: .angleIndex)
+        shotKey = try c.decodeIfPresent(String.self, forKey: .shotKey)
+        logicalShotIdentity = try c.decodeIfPresent(String.self, forKey: .logicalShotIdentity)
+        captureKind = try c.decodeIfPresent(String.self, forKey: .captureKind)
+        firstCaptureKind = try c.decodeIfPresent(String.self, forKey: .firstCaptureKind)
+        isGuided = try c.decodeIfPresent(Bool.self, forKey: .isGuided)
+        isFlagged = try c.decodeIfPresent(Bool.self, forKey: .isFlagged)
+        issueID = try c.decodeIfPresent(UUID.self, forKey: .issueID)
+        issueStatus = try c.decodeIfPresent(String.self, forKey: .issueStatus)
+        trade = try c.decodeIfPresent(String.self, forKey: .trade)
+        reason = try c.decodeIfPresent(String.self, forKey: .reason)
+        priority = try c.decodeIfPresent(String.self, forKey: .priority)
+        captureMode = try c.decodeIfPresent(String.self, forKey: .captureMode)
+        lens = try c.decodeIfPresent(String.self, forKey: .lens)
+        latitude = try c.decodeIfPresent(Double.self, forKey: .latitude)
+        longitude = try c.decodeIfPresent(Double.self, forKey: .longitude)
+        accuracyMeters = try c.decodeIfPresent(Double.self, forKey: .accuracyMeters)
+        imageWidth = try c.decodeIfPresent(Int.self, forKey: .imageWidth)
+        imageHeight = try c.decodeIfPresent(Int.self, forKey: .imageHeight)
+        lifecycleState = try Self.decodeLifecycleState(from: c)
+        retiredAt = try c.decodeIfPresent(Date.self, forKey: .retiredAt)
+        retiredReason = Self.trimmedNonEmpty(try c.decodeIfPresent(String.self, forKey: .retiredReason))
+        retiredByUserID = try c.decodeIfPresent(UUID.self, forKey: .retiredByUserID)
+        supersededByShotID = try c.decodeIfPresent(UUID.self, forKey: .supersededByShotID)
+        supersedesShotID = try c.decodeIfPresent(UUID.self, forKey: .supersedesShotID)
+        replacementReason = Self.trimmedNonEmpty(try c.decodeIfPresent(String.self, forKey: .replacementReason))
+        hiddenFromReports = try c.decodeIfPresent(Bool.self, forKey: .hiddenFromReports)
+        hiddenFromGallery = try c.decodeIfPresent(Bool.self, forKey: .hiddenFromGallery)
+        lifecycleUpdatedAt = try c.decodeIfPresent(Date.self, forKey: .lifecycleUpdatedAt)
+        storageBucket = try c.decodeIfPresent(String.self, forKey: .storageBucket)
+        storagePath = try c.decodeIfPresent(String.self, forKey: .storagePath)
+        checksumSHA256 = try c.decodeIfPresent(String.self, forKey: .checksumSHA256)
+        byteSize = try c.decodeIfPresent(Int.self, forKey: .byteSize)
+        uploadState = try c.decodeIfPresent(String.self, forKey: .uploadState)
+        uploadAttempts = try c.decodeIfPresent(Int.self, forKey: .uploadAttempts)
+        lastUploadError = try c.decodeIfPresent(String.self, forKey: .lastUploadError)
+    }
+
+    func merged(withLocal local: ShotMetadata) -> ShotMetadata {
+        ShotMetadata(
+            shotID: local.shotID,
+            propertyID: propertyID ?? local.propertyID,
+            sessionID: sessionID ?? local.sessionID,
+            createdAt: createdAt ?? local.createdAt,
+            capturedAtLocal: local.capturedAtLocal,
+            updatedAt: updatedAt ?? local.updatedAt,
+            building: Self.trimmedNonEmpty(building) ?? local.building,
+            elevation: Self.trimmedNonEmpty(elevation) ?? local.elevation,
+            detailType: Self.trimmedNonEmpty(detailType) ?? local.detailType,
+            angleIndex: angleIndex ?? local.angleIndex,
+            trade: Self.trimmedNonEmpty(trade) ?? local.trade,
+            priority: Self.trimmedNonEmpty(priority) ?? local.priority,
+            shotKey: Self.trimmedNonEmpty(shotKey) ?? local.shotKey,
+            isGuided: isGuided ?? local.isGuided,
+            isFlagged: isFlagged ?? local.isFlagged,
+            issueID: issueID ?? local.issueID,
+            issueStatus: Self.trimmedNonEmpty(issueStatus) ?? local.issueStatus,
+            captureKind: Self.trimmedNonEmpty(captureKind) ?? local.captureKind,
+            firstCaptureKind: Self.trimmedNonEmpty(firstCaptureKind) ?? local.firstCaptureKind,
+            noteText: Self.trimmedNonEmpty(reason) ?? local.noteText,
+            noteCategory: local.noteCategory,
+            originalFilename: local.originalFilename,
+            originalRelativePath: local.originalRelativePath,
+            originalByteSize: local.originalByteSize,
+            storageBucket: Self.trimmedNonEmpty(storageBucket) ?? local.storageBucket,
+            storagePath: Self.trimmedNonEmpty(storagePath) ?? local.storagePath,
+            checksumSHA256: Self.trimmedNonEmpty(checksumSHA256) ?? local.checksumSHA256,
+            byteSize: byteSize ?? local.byteSize,
+            uploadState: Self.trimmedNonEmpty(uploadState) ?? local.uploadState,
+            uploadAttempts: max(local.uploadAttempts, uploadAttempts ?? local.uploadAttempts),
+            lastUploadError: Self.trimmedNonEmpty(lastUploadError) ?? local.lastUploadError,
+            stampedFilename: local.stampedFilename,
+            stampedRelativePath: local.stampedRelativePath,
+            captureMode: Self.trimmedNonEmpty(captureMode) ?? local.captureMode,
+            lens: Self.trimmedNonEmpty(lens) ?? local.lens,
+            exifOrientation: local.exifOrientation,
+            orientation: local.orientation,
+            latitude: latitude ?? local.latitude,
+            longitude: longitude ?? local.longitude,
+            accuracyMeters: accuracyMeters ?? local.accuracyMeters,
+            imageWidth: imageWidth ?? local.imageWidth,
+            imageHeight: imageHeight ?? local.imageHeight,
+            lifecycleState: lifecycleState,
+            retiredAt: retiredAt ?? local.retiredAt,
+            retiredReason: Self.trimmedNonEmpty(retiredReason) ?? local.retiredReason,
+            retiredByUserID: retiredByUserID ?? local.retiredByUserID,
+            supersededByShotID: supersededByShotID ?? local.supersededByShotID,
+            supersedesShotID: supersedesShotID ?? local.supersedesShotID,
+            replacementReason: Self.trimmedNonEmpty(replacementReason) ?? local.replacementReason,
+            hiddenFromReports: hiddenFromReports ?? local.hiddenFromReports,
+            hiddenFromGallery: hiddenFromGallery ?? local.hiddenFromGallery,
+            lifecycleUpdatedAt: lifecycleUpdatedAt ?? local.lifecycleUpdatedAt
+        )
+    }
+
+    private static func trimmedNonEmpty(_ value: String?) -> String? {
+        guard let value else { return nil }
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    private static func decodeLifecycleState(
+        from container: KeyedDecodingContainer<CodingKeys>
+    ) throws -> ShotLifecycleState {
+        guard let rawValue = try container.decodeIfPresent(String.self, forKey: .lifecycleState)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased(),
+              !rawValue.isEmpty else {
+            return .active
+        }
+        return ShotLifecycleState(rawValue: rawValue) ?? .active
+    }
+}
+
 struct Property: Codable, Identifiable, Equatable {
     let id: UUID
     var orgId: UUID?
     var folderId: String?
+    var captureProfile: CaptureProfile?
     var clientName: String?
     var clientPhone: String?
     var clientEmail: String?
@@ -968,6 +1514,7 @@ struct Property: Codable, Identifiable, Equatable {
     var zip: String?
     var baselineSessionID: UUID?
     var isArchived: Bool
+    var deletedAt: Date?
     var createdAt: Date
     var updatedAt: Date
 
@@ -975,6 +1522,7 @@ struct Property: Codable, Identifiable, Equatable {
         id: UUID = UUID(),
         orgId: UUID? = nil,
         folderId: String? = nil,
+        captureProfile: CaptureProfile? = nil,
         clientName: String? = nil,
         clientPhone: String? = nil,
         clientEmail: String? = nil,
@@ -986,12 +1534,14 @@ struct Property: Codable, Identifiable, Equatable {
         zip: String? = nil,
         baselineSessionID: UUID? = nil,
         isArchived: Bool = false,
+        deletedAt: Date? = nil,
         createdAt: Date = Date(),
         updatedAt: Date = Date()
     ) {
         self.id = id
         self.orgId = orgId
         self.folderId = folderId?.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.captureProfile = captureProfile
         self.clientName = clientName
         self.clientPhone = clientPhone
         self.clientEmail = clientEmail?.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1003,6 +1553,7 @@ struct Property: Codable, Identifiable, Equatable {
         self.zip = zip?.trimmingCharacters(in: .whitespacesAndNewlines)
         self.baselineSessionID = baselineSessionID
         self.isArchived = isArchived
+        self.deletedAt = deletedAt
         self.createdAt = createdAt
         self.updatedAt = updatedAt
     }
@@ -1011,6 +1562,7 @@ struct Property: Codable, Identifiable, Equatable {
         case id
         case orgId
         case folderId
+        case captureProfile
         case clientName
         case clientPhone
         case clientEmail
@@ -1022,6 +1574,7 @@ struct Property: Codable, Identifiable, Equatable {
         case zip
         case baselineSessionID
         case isArchived
+        case deletedAt
         case createdAt
         case updatedAt
     }
@@ -1031,6 +1584,7 @@ struct Property: Codable, Identifiable, Equatable {
         id = try c.decode(UUID.self, forKey: .id)
         orgId = try c.decodeIfPresent(UUID.self, forKey: .orgId)
         folderId = try c.decodeIfPresent(String.self, forKey: .folderId)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        captureProfile = try c.decodeIfPresent(CaptureProfile.self, forKey: .captureProfile)
         clientName = try c.decodeIfPresent(String.self, forKey: .clientName)
         clientPhone = try c.decodeIfPresent(String.self, forKey: .clientPhone)
         clientEmail = try c.decodeIfPresent(String.self, forKey: .clientEmail)?.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1042,6 +1596,7 @@ struct Property: Codable, Identifiable, Equatable {
         zip = try c.decodeIfPresent(String.self, forKey: .zip)?.trimmingCharacters(in: .whitespacesAndNewlines)
         baselineSessionID = try c.decodeIfPresent(UUID.self, forKey: .baselineSessionID)
         isArchived = try c.decodeIfPresent(Bool.self, forKey: .isArchived) ?? false
+        deletedAt = try c.decodeIfPresent(Date.self, forKey: .deletedAt)
         createdAt = try c.decode(Date.self, forKey: .createdAt)
         updatedAt = try c.decode(Date.self, forKey: .updatedAt)
     }
@@ -1051,6 +1606,7 @@ struct Property: Codable, Identifiable, Equatable {
         try c.encode(id, forKey: .id)
         try c.encodeIfPresent(orgId, forKey: .orgId)
         try c.encodeIfPresent(folderId?.trimmingCharacters(in: .whitespacesAndNewlines), forKey: .folderId)
+        try c.encodeIfPresent(captureProfile, forKey: .captureProfile)
         try c.encodeIfPresent(clientName, forKey: .clientName)
         try c.encodeIfPresent(clientPhone, forKey: .clientPhone)
         try c.encodeIfPresent(clientEmail?.trimmingCharacters(in: .whitespacesAndNewlines), forKey: .clientEmail)
@@ -1062,6 +1618,7 @@ struct Property: Codable, Identifiable, Equatable {
         try c.encodeIfPresent(zip?.trimmingCharacters(in: .whitespacesAndNewlines), forKey: .zip)
         try c.encodeIfPresent(baselineSessionID, forKey: .baselineSessionID)
         try c.encode(isArchived, forKey: .isArchived)
+        try c.encodeIfPresent(deletedAt, forKey: .deletedAt)
         try c.encode(createdAt, forKey: .createdAt)
         try c.encode(updatedAt, forKey: .updatedAt)
     }
@@ -1083,6 +1640,8 @@ struct Session: Codable, Identifiable, Equatable {
     var firstDeliveredAt: Date?
     var reExportExpiresAt: Date?
     var notes: String?
+    var captureProfile: CaptureProfile?
+    var deletedAt: Date?
 
     init(
         id: UUID = UUID(),
@@ -1094,7 +1653,9 @@ struct Session: Codable, Identifiable, Equatable {
         isSealed: Bool = false,
         firstDeliveredAt: Date? = nil,
         reExportExpiresAt: Date? = nil,
-        notes: String? = nil
+        notes: String? = nil,
+        captureProfile: CaptureProfile? = nil,
+        deletedAt: Date? = nil
     ) {
         self.id = id
         self.propertyID = propertyID
@@ -1106,6 +1667,8 @@ struct Session: Codable, Identifiable, Equatable {
         self.firstDeliveredAt = firstDeliveredAt
         self.reExportExpiresAt = reExportExpiresAt
         self.notes = notes
+        self.captureProfile = captureProfile
+        self.deletedAt = deletedAt
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -1119,6 +1682,8 @@ struct Session: Codable, Identifiable, Equatable {
         case firstDeliveredAt
         case reExportExpiresAt
         case notes
+        case captureProfile
+        case deletedAt
     }
 
     init(from decoder: Decoder) throws {
@@ -1138,6 +1703,8 @@ struct Session: Codable, Identifiable, Equatable {
             reExportExpiresAt = nil
         }
         notes = try c.decodeIfPresent(String.self, forKey: .notes)
+        captureProfile = try c.decodeIfPresent(CaptureProfile.self, forKey: .captureProfile)
+        deletedAt = try c.decodeIfPresent(Date.self, forKey: .deletedAt)
         if let decodedStatus = try c.decodeIfPresent(Status.self, forKey: .status) {
             status = decodedStatus
         } else {
@@ -1159,6 +1726,8 @@ struct Session: Codable, Identifiable, Equatable {
         try c.encodeIfPresent(firstDeliveredAt, forKey: .firstDeliveredAt)
         try c.encodeIfPresent(reExportExpiresAt, forKey: .reExportExpiresAt)
         try c.encodeIfPresent(notes, forKey: .notes)
+        try c.encodeIfPresent(captureProfile, forKey: .captureProfile)
+        try c.encodeIfPresent(deletedAt, forKey: .deletedAt)
     }
 }
 
