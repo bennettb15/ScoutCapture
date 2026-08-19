@@ -850,7 +850,14 @@ struct SessionHubView: View {
             .navigationDestination(for: HubRoute.self) { route in
                 switch route {
                 case let .propertySession(propertyID, resumeDraft):
-                    PropertySessionView(propertyID: propertyID, resumeDraft: resumeDraft)
+                    PropertySessionView(
+                        propertyID: propertyID,
+                        resumeDraft: resumeDraft,
+                        onPendingExportRecovered: { property, session in
+                            pendingExportPromptProperty = property
+                            pendingExportPromptSession = session
+                        }
+                    )
                         .environmentObject(appState)
                 }
             }
@@ -1170,8 +1177,7 @@ struct SessionHubView: View {
         let sessionsForProperty = appState.sessions(for: property.id).sorted { $0.startedAt > $1.startedAt }
         let badgeModel = appState.propertyCardBadgeModel(for: property.id)
         let pendingSession = sessionsForProperty.first(where: { appState.isPendingDeliveryLocallyAvailable($0) })
-        let sessionUploadStatus = pendingSession.flatMap { appState.sessionSnapshotCloudStatus(for: $0) } ??
-            sessionsForProperty.compactMap { appState.sessionSnapshotCloudStatus(for: $0) }.first
+        let sessionUploadStatus = appState.sessionSnapshotCloudStatusForPropertyRow(propertyID: property.id)
         let hasDraft = badgeModel.showDraft
         let hasPendingExport = badgeModel.showPendingExport
         let latestReExportSession = reExportCandidateSession(for: property.id)
@@ -12478,6 +12484,7 @@ struct PropertySessionView: View {
     @Environment(\.dismiss) private var dismiss
     let propertyID: UUID
     let resumeDraft: Bool
+    let onPendingExportRecovered: (Property, Session) -> Void
 
     @State private var didSetup: Bool = false
     @State private var showCameraContent: Bool = false
@@ -12742,6 +12749,10 @@ struct PropertySessionView: View {
             "currentSessionStatus=\(appState.currentSession?.status.rawValue ?? "nil")"
         )
         guard let sessionID = appState.currentSession?.id else {
+            if sessionEntryBlock?.blockContext == "pending_export" {
+                isCheckingSessionCoordination = false
+                return
+            }
             beginOpenFlow(forceRetry: true)
             return
         }
@@ -12779,6 +12790,14 @@ struct PropertySessionView: View {
 }
 
     private func claimBlockedSession() {
+        if sessionEntryBlock?.blockContext == "pending_export",
+           let recovery = appState.recoverLocalPendingExportForPropertyOpen(propertyID: propertyID) {
+            sessionEntryBlock = nil
+            isCheckingSessionCoordination = false
+            onPendingExportRecovered(recovery.property, recovery.session)
+            dismiss()
+            return
+        }
         beginSessionCoordinationFlow(forceClaim: true)
     }
 

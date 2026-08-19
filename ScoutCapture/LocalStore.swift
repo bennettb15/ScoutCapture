@@ -1724,9 +1724,12 @@ final class LocalStore {
         try atomicWriteFileData(data, to: queuedMutationsURL)
     }
 
-    func fetchSessionSnapshotUploadRetryWorkItems() throws -> [SessionSnapshotUploadRetryWorkItem] {
+    func fetchSessionSnapshotUploadRetryWorkItems(downloadTimeout: TimeInterval = 0) throws -> [SessionSnapshotUploadRetryWorkItem] {
         try performFileIOSync {
-            try readSessionSnapshotUploadRetryWorkItems()
+            try readSessionSnapshotUploadRetryWorkItems(
+                downloadTimeout: downloadTimeout,
+                requireCurrentIfUbiquitous: downloadTimeout > 0
+            )
         }
     }
 
@@ -1791,9 +1794,12 @@ final class LocalStore {
         }
     }
 
-    func fetchSessionSnapshotUploadStatusRecords() throws -> [SessionSnapshotUploadStatusRecord] {
+    func fetchSessionSnapshotUploadStatusRecords(downloadTimeout: TimeInterval = 0) throws -> [SessionSnapshotUploadStatusRecord] {
         try performFileIOSync {
-            try readSessionSnapshotUploadStatusRecords()
+            try readSessionSnapshotUploadStatusRecords(
+                downloadTimeout: downloadTimeout,
+                requireCurrentIfUbiquitous: downloadTimeout > 0
+            )
         }
     }
 
@@ -1804,6 +1810,9 @@ final class LocalStore {
         try performFileIOSync {
             var records = try readSessionSnapshotUploadStatusRecords()
             if let index = records.firstIndex(where: { $0.idempotencyKey == record.idempotencyKey }) {
+                if records[index].status == .uploaded && record.status != .uploaded {
+                    return records[index]
+                }
                 records[index] = record
             } else {
                 records.append(record)
@@ -1814,7 +1823,17 @@ final class LocalStore {
         }
     }
 
-    private func readSessionSnapshotUploadRetryWorkItems() throws -> [SessionSnapshotUploadRetryWorkItem] {
+    private func readSessionSnapshotUploadRetryWorkItems(
+        downloadTimeout: TimeInterval = 0,
+        requireCurrentIfUbiquitous: Bool = false
+    ) throws -> [SessionSnapshotUploadRetryWorkItem] {
+        guard prepareUbiquitousStatusFileRead(
+            at: sessionSnapshotUploadRetryQueueURL,
+            timeout: downloadTimeout,
+            requireCurrentIfUbiquitous: requireCurrentIfUbiquitous
+        ) else {
+            return []
+        }
         guard fileManager.fileExists(atPath: sessionSnapshotUploadRetryQueueURL.path) else { return [] }
         let data = try Data(contentsOf: sessionSnapshotUploadRetryQueueURL)
         return try decoder.decode([SessionSnapshotUploadRetryWorkItem].self, from: data)
@@ -1832,10 +1851,50 @@ final class LocalStore {
         try atomicWriteFileData(data, to: sessionSnapshotUploadRetryQueueURL)
     }
 
-    private func readSessionSnapshotUploadStatusRecords() throws -> [SessionSnapshotUploadStatusRecord] {
+    private func readSessionSnapshotUploadStatusRecords(
+        downloadTimeout: TimeInterval = 0,
+        requireCurrentIfUbiquitous: Bool = false
+    ) throws -> [SessionSnapshotUploadStatusRecord] {
+        guard prepareUbiquitousStatusFileRead(
+            at: sessionSnapshotUploadStatusURL,
+            timeout: downloadTimeout,
+            requireCurrentIfUbiquitous: requireCurrentIfUbiquitous
+        ) else {
+            return []
+        }
         guard fileManager.fileExists(atPath: sessionSnapshotUploadStatusURL.path) else { return [] }
         let data = try Data(contentsOf: sessionSnapshotUploadStatusURL)
         return try decoder.decode([SessionSnapshotUploadStatusRecord].self, from: data)
+    }
+
+    private func prepareUbiquitousStatusFileRead(
+        at url: URL,
+        timeout: TimeInterval,
+        requireCurrentIfUbiquitous: Bool
+    ) -> Bool {
+        if !fileManager.fileExists(atPath: url.path) {
+            return ensureUbiquitousItemAvailable(at: url, timeout: timeout)
+        }
+        guard requireCurrentIfUbiquitous else { return true }
+        let keys: Set<URLResourceKey> = [.isUbiquitousItemKey, .ubiquitousItemDownloadingStatusKey]
+        guard let values = try? url.resourceValues(forKeys: keys),
+              values.isUbiquitousItem == true else {
+            return true
+        }
+        if values.ubiquitousItemDownloadingStatus == .current {
+            return true
+        }
+        try? fileManager.startDownloadingUbiquitousItem(at: url)
+        guard timeout > 0 else { return false }
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if let latestValues = try? url.resourceValues(forKeys: keys),
+               latestValues.ubiquitousItemDownloadingStatus == .current {
+                return true
+            }
+            Thread.sleep(forTimeInterval: 0.05)
+        }
+        return ((try? url.resourceValues(forKeys: keys))?.ubiquitousItemDownloadingStatus == .current)
     }
 
     private func writeSessionSnapshotUploadStatusRecords(_ records: [SessionSnapshotUploadStatusRecord]) throws {

@@ -4439,7 +4439,11 @@ final class AppState: ObservableObject {
         case "draft":
             return "A draft is in progress by \(block.ownerDescription)."
         case "pending_export":
-            return "This property has a session pending export."
+            var lines = ["Locked by: \(block.ownerDescription)"]
+            if let lockedAt = block.lockedAt, let lockedAtFormatter {
+                lines.append("Pending since: \(lockedAtFormatter(lockedAt))")
+            }
+            return lines.joined(separator: "\n")
         case "verification_failed":
             return coordinationUnavailableLockMessage
         default:
@@ -6797,6 +6801,12 @@ final class AppState: ObservableObject {
     private var lastPropertyStatusDiagnosticsSignature: String?
     private var lastPropertyStatusDiagnosticsCompletedAt: Date?
     private let propertyStatusDiagnosticsDedupeInterval: TimeInterval = 5
+    private var persistentDataCacheRefreshScheduled = false
+    private var persistentDataCacheRefreshRunning = false
+    private var reconcilingDeliveredSessionState = false
+    private var deliveredSessionStateReconcileQueued = false
+    private var deliveredSessionStateReconciliationWriteCount = 0
+    private var pendingExportOwnerEmailByUserID: [UUID: String] = [:]
     @Published private(set) var activeOrganizationID: UUID?
     @Published private(set) var accessibleOrganizations: [ActiveOrganizationMembership] = []
     @Published private(set) var isOrganizationContextReady: Bool = false
@@ -7789,8 +7799,8 @@ final class AppState: ObservableObject {
 
         self.currentSession = nil
         self.sessionSnapshotCloudStatusBySessionID = Self.makeSessionSnapshotCloudStatusBySessionID(
-            records: (try? self.localStore.fetchSessionSnapshotUploadStatusRecords()) ?? [],
-            retryItems: (try? self.localStore.fetchSessionSnapshotUploadRetryWorkItems()) ?? []
+            records: (try? self.localStore.fetchSessionSnapshotUploadStatusRecords(downloadTimeout: 0.2)) ?? [],
+            retryItems: (try? self.localStore.fetchSessionSnapshotUploadRetryWorkItems(downloadTimeout: 0.2)) ?? []
         )
 
         if let cloudBackupManager {
@@ -7807,6 +7817,7 @@ final class AppState: ObservableObject {
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in
                 print("[AppStateDiag] scoutPersistentDataDidChange_sink")
+                self?.schedulePersistentDataCacheRefresh(reason: "persistent_data_changed")
                 self?.cloudBackupManager?.markDataChanged(scheduleBackupAfter: 30)
             }
             .store(in: &cancellables)
@@ -8297,6 +8308,22 @@ final class AppState: ObservableObject {
     func _debugReplacePropertyStatusCacheForTests(_ records: [PropertyStatusRecord]) {
         propertyStatusByPropertyID = Dictionary(uniqueKeysWithValues: records.map { ($0.propertyID, $0) })
         lastPropertyStatusRefreshAt = Date()
+        reconcileDeliveredSessionStateFromPropertyStatusCache(reason: "debug_replace_property_status_cache")
+    }
+
+    func _debugReplacePropertyStatusCacheWithoutReconcileForTests(_ records: [PropertyStatusRecord]) {
+        propertyStatusByPropertyID = Dictionary(uniqueKeysWithValues: records.map { ($0.propertyID, $0) })
+        lastPropertyStatusRefreshAt = Date()
+    }
+
+    func _debugRunForegroundCacheRefreshForTests(reason: String = "test_foreground_cache_refresh") {
+        refreshVisiblePropertySessionCachesFromLocalStore(reason: reason)
+        reconcileDeliveredSessionStateFromPropertyStatusCache(reason: reason)
+        refreshSessionSnapshotCloudStatusCache()
+    }
+
+    func _debugSchedulePersistentDataCacheRefreshForTests(reason: String = "test_persistent_data_changed") {
+        schedulePersistentDataCacheRefresh(reason: reason)
     }
 
     @MainActor
@@ -8594,6 +8621,11 @@ final class AppState: ObservableObject {
 
     @MainActor
     private func updateActiveOrganizationMembers(_ members: [OrganizationAccessMember]) {
+        for member in members {
+            if let email = normalizedSupabaseText(member.email) {
+                pendingExportOwnerEmailByUserID[member.id] = email
+            }
+        }
         if activeOrganizationMembers != members {
             activeOrganizationMembers = members
         }
@@ -15733,6 +15765,14 @@ final class AppState: ObservableObject {
         sessionSnapshotCloudStatusBySessionID[session.id]
     }
 
+    func sessionSnapshotCloudStatusForPropertyRow(propertyID: UUID) -> SessionSnapshotCloudStatus? {
+        sessions(for: propertyID)
+            .compactMap { sessionSnapshotCloudStatus(for: $0) }
+            .max { lhs, rhs in
+                Self.sessionSnapshotCloudStatus(rhs, isNewerThan: lhs)
+            }
+    }
+
     private static func makeSessionSnapshotCloudStatusBySessionID(
         records: [LocalStore.SessionSnapshotUploadStatusRecord],
         retryItems: [LocalStore.SessionSnapshotUploadRetryWorkItem]
@@ -15750,28 +15790,62 @@ final class AppState: ObservableObject {
                 updatedAt: record.updatedAt
             )
         }
-        let retryStatuses = retryItems.map { item in
-            SessionSnapshotCloudStatus(
-                state: Self.cloudState(for: item.status),
-                snapshotID: item.snapshotID,
-                organizationID: item.organizationID,
-                propertyID: item.propertyID,
-                sessionID: item.sessionID,
-                triggerSource: item.triggerSource,
-                reason: nil,
-                generatedAt: item.generatedAt,
-                updatedAt: item.updatedAt
-            )
-        }
+        let uploadedRecords = records.filter { $0.status == .uploaded }
+        let retryStatuses = retryItems
+            .filter { !Self.sessionSnapshotRetryItem($0, isSupersededByUploadedStatusRecords: uploadedRecords) }
+            .map { item in
+                SessionSnapshotCloudStatus(
+                    state: Self.cloudState(for: item.status),
+                    snapshotID: item.snapshotID,
+                    organizationID: item.organizationID,
+                    propertyID: item.propertyID,
+                    sessionID: item.sessionID,
+                    triggerSource: item.triggerSource,
+                    reason: nil,
+                    generatedAt: item.generatedAt,
+                    updatedAt: item.updatedAt
+                )
+            }
         return (recordStatuses + retryStatuses).reduce(into: [:]) { partial, status in
             guard let existing = partial[status.sessionID] else {
                 partial[status.sessionID] = status
                 return
             }
-            if status.generatedAt > existing.generatedAt ||
-                (status.generatedAt == existing.generatedAt && status.updatedAt > existing.updatedAt) {
+            if Self.sessionSnapshotCloudStatus(status, isNewerThan: existing) {
                 partial[status.sessionID] = status
             }
+        }
+    }
+
+    private static func sessionSnapshotCloudStatus(
+        _ candidate: SessionSnapshotCloudStatus,
+        isNewerThan existing: SessionSnapshotCloudStatus
+    ) -> Bool {
+        if candidate.generatedAt != existing.generatedAt {
+            return candidate.generatedAt > existing.generatedAt
+        }
+        if candidate.updatedAt != existing.updatedAt {
+            return candidate.updatedAt > existing.updatedAt
+        }
+        if candidate.snapshotID != existing.snapshotID {
+            return candidate.snapshotID.uuidString < existing.snapshotID.uuidString
+        }
+        return candidate.state.rawValue < existing.state.rawValue
+    }
+
+    private static func sessionSnapshotRetryItem(
+        _ item: LocalStore.SessionSnapshotUploadRetryWorkItem,
+        isSupersededByUploadedStatusRecords records: [LocalStore.SessionSnapshotUploadStatusRecord]
+    ) -> Bool {
+        records.contains { record in
+            record.status == .uploaded &&
+            record.organizationID == item.organizationID &&
+            record.propertyID == item.propertyID &&
+            record.sessionID == item.sessionID &&
+            (
+                record.snapshotID == item.snapshotID ||
+                record.idempotencyKey == item.idempotencyKey
+            )
         }
     }
 
@@ -15823,8 +15897,8 @@ final class AppState: ObservableObject {
     }
 
     private func refreshSessionSnapshotCloudStatusCache() {
-        let records = (try? localStore.fetchSessionSnapshotUploadStatusRecords()) ?? []
-        let retryItems = (try? localStore.fetchSessionSnapshotUploadRetryWorkItems()) ?? []
+        let records = (try? localStore.fetchSessionSnapshotUploadStatusRecords(downloadTimeout: 0.2)) ?? []
+        let retryItems = (try? localStore.fetchSessionSnapshotUploadRetryWorkItems(downloadTimeout: 0.2)) ?? []
         let next = Self.makeSessionSnapshotCloudStatusBySessionID(
             records: records,
             retryItems: retryItems
@@ -15832,6 +15906,172 @@ final class AppState: ObservableObject {
         if sessionSnapshotCloudStatusBySessionID != next {
             sessionSnapshotCloudStatusBySessionID = next
         }
+    }
+
+    private func refreshVisiblePropertySessionCachesFromLocalStore(reason: String) {
+        let propertyIDs = Set(properties.map(\.id))
+            .sorted { $0.uuidString < $1.uuidString }
+        guard !propertyIDs.isEmpty else { return }
+        var didChange = false
+        for propertyID in propertyIDs {
+            let sessions = loadAndNormalizeSessions(propertyID: propertyID)
+            if allSessionIndexByProperty[propertyID] != sessions {
+                allSessionIndexByProperty[propertyID] = sessions
+                didChange = true
+            }
+
+            let latestDraft = latestVisibleDraft(in: sessions)
+            if allDraftSessionByProperty[propertyID] != latestDraft {
+                allDraftSessionByProperty[propertyID] = latestDraft
+                didChange = true
+            }
+
+            let pendingSession = sessions
+                .filter { $0.deletedAt == nil && isPendingDelivery($0) && sessionHasCaptures($0) }
+                .sorted { $0.startedAt > $1.startedAt }
+                .first
+            if allPendingExportSessionByProperty[propertyID] != pendingSession {
+                allPendingExportSessionByProperty[propertyID] = pendingSession
+                didChange = true
+            }
+
+            if canAccessProperty(propertyID) {
+                if sessionIndexByProperty[propertyID] != sessions {
+                    sessionIndexByProperty[propertyID] = sessions
+                    didChange = true
+                }
+                if draftSessionByProperty[propertyID] != latestDraft {
+                    draftSessionByProperty[propertyID] = latestDraft
+                    didChange = true
+                }
+                if pendingExportSessionByProperty[propertyID] != pendingSession {
+                    pendingExportSessionByProperty[propertyID] = pendingSession
+                    didChange = true
+                }
+            }
+        }
+        if didChange {
+            hubRowRefreshToken = UUID()
+        }
+    }
+
+    private func schedulePersistentDataCacheRefresh(reason: String) {
+        if persistentDataCacheRefreshRunning || persistentDataCacheRefreshScheduled {
+            persistentDataCacheRefreshScheduled = true
+            return
+        }
+        persistentDataCacheRefreshScheduled = true
+        Task { @MainActor [weak self] in
+            self?.runScheduledPersistentDataCacheRefresh(reason: reason)
+        }
+    }
+
+    private func runScheduledPersistentDataCacheRefresh(reason: String) {
+        guard !persistentDataCacheRefreshRunning else {
+            persistentDataCacheRefreshScheduled = true
+            return
+        }
+        persistentDataCacheRefreshRunning = true
+        persistentDataCacheRefreshScheduled = false
+        refreshVisiblePropertySessionCachesFromLocalStore(reason: reason)
+        reconcileDeliveredSessionStateFromPropertyStatusCache(reason: reason)
+        refreshSessionSnapshotCloudStatusCache()
+        persistentDataCacheRefreshRunning = false
+        if persistentDataCacheRefreshScheduled {
+            persistentDataCacheRefreshScheduled = false
+            schedulePersistentDataCacheRefresh(reason: "\(reason)_coalesced")
+        }
+    }
+
+    private func scheduleDeliveredSessionStateReconciliation(reason: String) {
+        Task { @MainActor [weak self] in
+            self?.reconcileDeliveredSessionStateFromPropertyStatusCache(reason: reason)
+        }
+    }
+
+    @discardableResult
+    private func reconcileDeliveredSessionStateFromPropertyStatusCache(reason: String) -> Int {
+        guard !reconcilingDeliveredSessionState else {
+            deliveredSessionStateReconcileQueued = true
+            return 0
+        }
+        reconcilingDeliveredSessionState = true
+        defer {
+            reconcilingDeliveredSessionState = false
+            if deliveredSessionStateReconcileQueued {
+                deliveredSessionStateReconcileQueued = false
+                scheduleDeliveredSessionStateReconciliation(reason: "\(reason)_queued")
+            }
+        }
+
+        let exportedRecords = propertyStatusByPropertyID.values
+            .filter {
+                $0.status == .exported &&
+                $0.pendingExportSessionID == nil &&
+                $0.lastExportedSessionID != nil
+            }
+            .sorted { lhs, rhs in
+                if lhs.updatedAt != rhs.updatedAt { return lhs.updatedAt < rhs.updatedAt }
+                return lhs.propertyID.uuidString < rhs.propertyID.uuidString
+            }
+        guard !exportedRecords.isEmpty else { return 0 }
+
+        var reconciled = 0
+        for record in exportedRecords {
+            guard let sessionID = record.lastExportedSessionID else { continue }
+            let sessions = (try? localStore.fetchSessionsForCacheBuild(propertyID: record.propertyID)) ?? []
+            guard var session = sessions.first(where: { $0.id == sessionID }) else { continue }
+
+            let deliveredAt = session.firstDeliveredAt ?? session.exportedAt ?? record.updatedAt
+            let reExportExpiresAt = session.reExportExpiresAt ??
+                Calendar.current.date(byAdding: .day, value: reExportWindowDays, to: deliveredAt)
+            let needsReconcile =
+                session.status != .completed ||
+                !session.isSealed ||
+                session.endedAt == nil ||
+                session.exportedAt == nil ||
+                session.firstDeliveredAt == nil ||
+                session.reExportExpiresAt == nil
+            guard needsReconcile else { continue }
+
+            session.status = .completed
+            session.isSealed = true
+            if session.endedAt == nil {
+                session.endedAt = deliveredAt
+            }
+            if session.exportedAt == nil {
+                session.exportedAt = deliveredAt
+            }
+            if session.firstDeliveredAt == nil {
+                session.firstDeliveredAt = deliveredAt
+            }
+            if session.reExportExpiresAt == nil {
+                session.reExportExpiresAt = reExportExpiresAt
+            }
+
+            do {
+                _ = try localStore.upsertSession(session)
+                reloadSessionCache(for: record.propertyID)
+                deliveredSessionStateReconciliationWriteCount += 1
+                reconciled += 1
+                print(
+                    "[DeliveryStateReconcile] " +
+                    "propertyID=\(record.propertyID.uuidString) " +
+                    "sessionID=\(sessionID.uuidString) " +
+                    "source=property_status_exported " +
+                    "reason=\(reason)"
+                )
+            } catch {
+                print(
+                    "[DeliveryStateReconcile] " +
+                    "propertyID=\(record.propertyID.uuidString) " +
+                    "sessionID=\(sessionID.uuidString) " +
+                    "source=property_status_exported " +
+                    "reason=\(reason) result=failed error=\(error.localizedDescription)"
+                )
+            }
+        }
+        return reconciled
     }
 
     private func persistSessionSnapshotCloudStatus(
@@ -15943,6 +16183,7 @@ final class AppState: ObservableObject {
         }
         defer { endSessionSnapshotUploadRetryRun() }
 
+        let statusRecords = (try? localStore.fetchSessionSnapshotUploadStatusRecords(downloadTimeout: 0.2)) ?? []
         let initialItems: [LocalStore.SessionSnapshotUploadRetryWorkItem]
         do {
             initialItems = try localStore.fetchSessionSnapshotUploadRetryWorkItems()
@@ -15962,8 +16203,18 @@ final class AppState: ObservableObject {
             )
         }
 
+        let supersededUploadedItems = initialItems.filter {
+            Self.sessionSnapshotRetryItem($0, isSupersededByUploadedStatusRecords: statusRecords)
+        }
+        for item in supersededUploadedItems {
+            try? localStore.removeSessionSnapshotUploadRetryWorkItem(id: item.id)
+        }
+        let activeInitialItems = initialItems.filter { item in
+            !supersededUploadedItems.contains(where: { $0.id == item.id })
+        }
+
         var normalizedInFlightCount = 0
-        for item in initialItems where item.status == .inFlight {
+        for item in activeInitialItems where item.status == .inFlight {
             var normalized = item
             normalized.status = .pending
             normalized.updatedAt = now
@@ -31457,6 +31708,7 @@ final class AppState: ObservableObject {
         nextCache[propertyID] = record
         propertyStatusByPropertyID = nextCache
         lastPropertyStatusRefreshAt = Date()
+        reconcileDeliveredSessionStateFromPropertyStatusCache(reason: "property_status_bootstrap")
         print(
             "[PropertyStatusBootstrap] event=bootstrap_applied " +
             "propertyID=\(propertyID.uuidString) " +
@@ -39424,8 +39676,9 @@ final class AppState: ObservableObject {
         let reExportReason = showReExport ? "local_archive_available" : "no_local_archive_available"
 
         if let propertyStatus = propertyStatusByPropertyID[propertyID] {
-            let propertyStatusAnswer = Self.makePropertyStatusCompareAnswer(
+            let propertyStatusAnswer = makePropertyStatusCompareAnswer(
                 record: propertyStatus,
+                propertyID: propertyID,
                 currentUserID: currentUserID,
                 currentDeviceID: currentDeviceID
             )
@@ -39435,6 +39688,9 @@ final class AppState: ObservableObject {
                 currentUserID: currentUserID,
                 currentDeviceID: currentDeviceID
             )
+            let propertyStatusShowsLock =
+                propertyStatusBadgeState == .locked ||
+                (propertyStatus.status == .pendingExport && propertyStatusAnswer.entryBlocked)
             let propertyStatusSourceSessionID: UUID? = {
                 switch propertyStatus.status {
                 case .occupied:
@@ -39461,11 +39717,11 @@ final class AppState: ObservableObject {
                 draftOwnerUserID: propertyStatus.status == .draft ? propertyStatus.ownerUserID : nil,
                 draftOwnerDeviceID: propertyStatus.status == .draft ? normalizedSupabaseText(propertyStatus.ownerDeviceID) : nil,
                 finalizedOrExported: propertyStatus.status == .exported,
-                showLock: propertyStatusBadgeState == .locked,
+                showLock: propertyStatusShowsLock,
                 showDraft: propertyStatusBadgeState == .draft,
                 showPendingExport: propertyStatusBadgeState == .pendingExport,
                 showReExport: showReExport,
-                lockReason: propertyStatusBadgeState == .locked
+                lockReason: propertyStatusShowsLock
                     ? "\(propertyStatusReasonPrefix):owner_mismatch"
                     : "\(propertyStatusReasonPrefix):lock_hidden",
                 draftReason: propertyStatusBadgeState == .draft
@@ -39553,6 +39809,7 @@ final class AppState: ObservableObject {
         nextCache[propertyID] = record
         propertyStatusByPropertyID = nextCache
         lastPropertyStatusRefreshAt = Date()
+        reconcileDeliveredSessionStateFromPropertyStatusCache(reason: reason)
     }
 
     func evaluatePropertyStatusEntryPreflight(
@@ -39654,6 +39911,7 @@ final class AppState: ObservableObject {
             nextCache[propertyID] = freshRecord
             propertyStatusByPropertyID = nextCache
             lastPropertyStatusRefreshAt = Date()
+            reconcileDeliveredSessionStateFromPropertyStatusCache(reason: "\(context)_fresh")
 
             let freshDecision = makePropertyStatusEntryPreflightDecision(
                 propertyID: propertyID,
@@ -39736,8 +39994,14 @@ final class AppState: ObservableObject {
             currentUserID: currentUserID,
             currentDeviceID: currentDeviceID
         )
+        let pendingExportOwnedByCurrentDevice = propertyStatusPendingExportOwnedByCurrentDevice(
+            record: record,
+            propertyID: propertyID,
+            currentDeviceID: currentDeviceID
+        )
         let ownerDescription = propertyStatusEntryOwnerDescription(record: record)
         let lockedAt = record.heartbeatAt ?? record.updatedAt
+        let pendingExportLockedAt = record.updatedAt
 
         switch record.status {
         case .idle:
@@ -39810,13 +40074,21 @@ final class AppState: ObservableObject {
                 )
             )
         case .pendingExport:
+            guard !pendingExportOwnedByCurrentDevice else {
+                return PropertyStatusEntryPreflightDecision(
+                    source: "property_status",
+                    decision: "allow",
+                    reason: "pending_export_owned_by_current_actor",
+                    block: nil
+                )
+            }
             return PropertyStatusEntryPreflightDecision(
                 source: "property_status",
                 decision: "block",
-                reason: "pending_export",
+                reason: "pending_export_owned_by_other_actor",
                 block: SessionEntryCoordinationBlock(
-                    ownerDescription: "pending export",
-                    lockedAt: lockedAt,
+                    ownerDescription: pendingExportOwnerDescription(record: record),
+                    lockedAt: pendingExportLockedAt,
                     blockContext: "pending_export"
                 )
             )
@@ -39837,12 +40109,14 @@ final class AppState: ObservableObject {
         record: PropertyStatusRecord
     ) async -> PropertyStatusEntryPreflightDecision {
         guard let block = decision.block,
-              record.status == .occupied || record.status == .draft else {
+              record.status == .occupied || record.status == .draft || record.status == .pendingExport else {
             return decision
         }
 
         let resolvedOwnerDescription: String
-        if record.ownerUserID != nil {
+        if record.status == .pendingExport {
+            resolvedOwnerDescription = await pendingExportOwnerDescription(for: record)
+        } else if record.ownerUserID != nil {
             resolvedOwnerDescription = await ownerDescription(
                 for: record.ownerUserID,
                 lockedByDeviceID: record.ownerDeviceID
@@ -39865,6 +40139,62 @@ final class AppState: ObservableObject {
                 blockContext: block.blockContext
             )
         )
+    }
+
+    private func pendingExportOwnerDescription(record: PropertyStatusRecord) -> String {
+        guard let ownerUserID = pendingExportOwnerUserID(record) else { return "another user" }
+        if let email = localOwnerEmail(for: ownerUserID) {
+            return email
+        }
+        return "another user"
+    }
+
+    private func pendingExportOwnerDescription(for record: PropertyStatusRecord) async -> String {
+        guard let ownerUserID = pendingExportOwnerUserID(record) else { return "another user" }
+        if let email = localOwnerEmail(for: ownerUserID) {
+            return email
+        }
+        guard let client = supabaseClient else {
+            return "another user"
+        }
+
+        struct OwnerEmailRecord: Decodable {
+            let email: String?
+        }
+
+        let rows: [OwnerEmailRecord]
+        do {
+            rows = try await client
+                .from("users_profile")
+                .select("email")
+                .eq("id", value: ownerUserID.uuidString.lowercased())
+                .limit(1)
+                .execute()
+                .value
+        } catch {
+            rows = []
+        }
+        if let email = rows.compactMap({ normalizedSupabaseText($0.email) }).first {
+            pendingExportOwnerEmailByUserID[ownerUserID] = email
+            return email
+        }
+        return "another user"
+    }
+
+    private func pendingExportOwnerUserID(_ record: PropertyStatusRecord) -> UUID? {
+        record.ownerUserID ?? record.updatedBy
+    }
+
+    private func localOwnerEmail(for ownerUserID: UUID) -> String? {
+        if ownerUserID == authenticatedSupabaseUser?.id {
+            return normalizedSupabaseText(authenticatedSupabaseUser?.email)
+        }
+        if let email = pendingExportOwnerEmailByUserID[ownerUserID] {
+            return email
+        }
+        return activeOrganizationMembers
+            .first(where: { $0.id == ownerUserID })
+            .flatMap { normalizedSupabaseText($0.email) }
     }
 
     private func logPropertyStatusEntryPreflight(
@@ -40231,6 +40561,7 @@ final class AppState: ObservableObject {
         nextCache[propertyID] = record
         propertyStatusByPropertyID = nextCache
         lastPropertyStatusRefreshAt = Date()
+        reconcileDeliveredSessionStateFromPropertyStatusCache(reason: reason)
         print(
             "[PropertyStatusShadowWrite] property_status_zero_photo_release_applied=true " +
             "propertyID=\(propertyID.uuidString) " +
@@ -40317,6 +40648,7 @@ final class AppState: ObservableObject {
         nextCache[propertyID] = record
         propertyStatusByPropertyID = nextCache
         lastPropertyStatusRefreshAt = Date()
+        reconcileDeliveredSessionStateFromPropertyStatusCache(reason: reason)
         print(
             "[PropertyStatusShadowWrite] property_status_local_cache_updated_after_export " +
             "propertyID=\(propertyID.uuidString) " +
@@ -40527,6 +40859,7 @@ final class AppState: ObservableObject {
             }
             propertyStatusByPropertyID = nextCache
             lastPropertyStatusRefreshAt = completedAt
+            reconcileDeliveredSessionStateFromPropertyStatusCache(reason: trigger)
 
             var nextDiagnostics = propertyStatusDiagnostics
             for propertyID in requestedPropertyIDs {
@@ -40591,8 +40924,9 @@ final class AppState: ObservableObject {
         let currentUserID = authenticatedSupabaseUser?.id
         let currentDeviceID = currentDeviceIdentifier()
         if let propertyStatus = propertyStatusByPropertyID[propertyID] {
-            let answer = Self.makePropertyStatusCompareAnswer(
+            let answer = makePropertyStatusCompareAnswer(
                 record: propertyStatus,
+                propertyID: propertyID,
                 currentUserID: currentUserID,
                 currentDeviceID: currentDeviceID
             )
@@ -40656,8 +40990,9 @@ final class AppState: ObservableObject {
             return .idle
         }()
         let propertyStatusAnswer = propertyStatusByPropertyID[propertyID].map {
-            Self.makePropertyStatusCompareAnswer(
+            makePropertyStatusCompareAnswer(
                 record: $0,
+                propertyID: propertyID,
                 currentUserID: currentUserID,
                 currentDeviceID: currentDeviceID
             )
@@ -40881,6 +41216,35 @@ final class AppState: ObservableObject {
         )
     }
 
+    private func makePropertyStatusCompareAnswer(
+        record: PropertyStatusRecord,
+        propertyID: UUID,
+        currentUserID: UUID?,
+        currentDeviceID: String
+    ) -> PropertyStatusCompareAnswer {
+        let answer = Self.makePropertyStatusCompareAnswer(
+            record: record,
+            currentUserID: currentUserID,
+            currentDeviceID: currentDeviceID
+        )
+        guard record.status == .pendingExport,
+              answer.entryBlocked,
+              propertyStatusPendingExportOwnedByCurrentDevice(
+                record: record,
+                propertyID: propertyID,
+                currentDeviceID: currentDeviceID
+              ) else {
+            return answer
+        }
+        return PropertyStatusCompareAnswer(
+            visibleBadgeState: answer.visibleBadgeState,
+            draftCountIncluded: answer.draftCountIncluded,
+            pendingExportCountIncluded: answer.pendingExportCountIncluded,
+            entryBlocked: false,
+            deleteEligible: answer.deleteEligible
+        )
+    }
+
     static func makePropertyStatusCompareAnswer(
         record: PropertyStatusRecord,
         currentUserID: UUID?,
@@ -40889,6 +41253,10 @@ final class AppState: ObservableObject {
         let ownedByCurrentActor = propertyStatusActorOwnedByCurrentActor(
             record: record,
             currentUserID: currentUserID,
+            currentDeviceID: currentDeviceID
+        )
+        let pendingExportOwnedByCurrentDevice = propertyStatusPendingExportOwnedByCurrentDevice(
+            record: record,
             currentDeviceID: currentDeviceID
         )
 
@@ -40939,7 +41307,7 @@ final class AppState: ObservableObject {
                 visibleBadgeState: .pendingExport,
                 draftCountIncluded: false,
                 pendingExportCountIncluded: true,
-                entryBlocked: false,
+                entryBlocked: !pendingExportOwnedByCurrentDevice,
                 deleteEligible: false
             )
         }
@@ -40981,13 +41349,49 @@ final class AppState: ObservableObject {
         return false
     }
 
+    private static func propertyStatusPendingExportOwnedByCurrentDevice(
+        record: PropertyStatusRecord,
+        currentDeviceID: String
+    ) -> Bool {
+        guard let ownerDeviceID = record.ownerDeviceID?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !ownerDeviceID.isEmpty else {
+            return false
+        }
+        return ownerDeviceID == currentDeviceID
+    }
+
+    private func propertyStatusPendingExportOwnedByCurrentDevice(
+        record: PropertyStatusRecord,
+        propertyID: UUID,
+        currentDeviceID: String
+    ) -> Bool {
+        if Self.propertyStatusPendingExportOwnedByCurrentDevice(
+            record: record,
+            currentDeviceID: currentDeviceID
+        ) {
+            return true
+        }
+        guard record.status == .pendingExport,
+              let pendingExportSessionID = record.pendingExportSessionID else {
+            return false
+        }
+        let availability = cachedSessionArchivePackageAvailability(
+            propertyID: propertyID,
+            sessionID: pendingExportSessionID,
+            requireDelivered: false,
+            expectedDeviceID: currentDeviceID
+        )
+        return availability.available
+    }
+
     func draftBadgeSession(for propertyID: UUID) -> Session? {
         let currentUserID = authenticatedSupabaseUser?.id
         let currentDeviceID = currentDeviceIdentifier()
 
         if let propertyStatus = propertyStatusByPropertyID[propertyID] {
-            let propertyStatusAnswer = Self.makePropertyStatusCompareAnswer(
+            let propertyStatusAnswer = makePropertyStatusCompareAnswer(
                 record: propertyStatus,
+                propertyID: propertyID,
                 currentUserID: currentUserID,
                 currentDeviceID: currentDeviceID
             )
@@ -45304,13 +45708,46 @@ final class AppState: ObservableObject {
 
     func latestPendingExportSession(for propertyID: UUID) -> Session? {
         guard canAccessProperty(propertyID) else { return nil }
-        if let cached = pendingExportSessionByProperty[propertyID] {
+        if let cached = pendingExportSessionByProperty[propertyID],
+           isPendingDelivery(cached),
+           sessionHasCaptures(cached) {
             return cached
         }
         return sessions(for: propertyID)
             .filter { isPendingDelivery($0) && sessionHasCaptures($0) }
             .sorted { $0.startedAt > $1.startedAt }
             .first
+    }
+
+    @discardableResult
+    func recoverLocalPendingExportForPropertyOpen(propertyID: UUID) -> (property: Property, session: Session)? {
+        guard canAccessProperty(propertyID),
+              let property = properties.first(where: { $0.id == propertyID }) ??
+                allProperties.first(where: { $0.id == propertyID }),
+              let record = propertyStatusByPropertyID[propertyID],
+              record.status == .pendingExport,
+              propertyStatusPendingExportOwnedByCurrentDevice(
+                record: record,
+                propertyID: propertyID,
+                currentDeviceID: currentDeviceIdentifier()
+              ),
+              let pendingExportSessionID = record.pendingExportSessionID,
+              let session = sessions(for: propertyID).first(where: { $0.id == pendingExportSessionID }),
+              session.status == .completed,
+              session.isSealed,
+              session.firstDeliveredAt == nil,
+              sessionHasCaptures(session),
+              cachedSessionArchivePackageAvailability(
+                propertyID: propertyID,
+                sessionID: pendingExportSessionID,
+                requireDelivered: false,
+                expectedDeviceID: currentDeviceIdentifier()
+              ).available else {
+            return nil
+        }
+        selectedPropertyID = propertyID
+        currentSession = session
+        return (property, session)
     }
 
     func reconcileRemoteSessionContentForPropertyOpen(propertyID: UUID) async {
@@ -45508,8 +45945,9 @@ final class AppState: ObservableObject {
             guard let record = propertyStatusByPropertyID[property.id] else {
                 return count
             }
-            let answer = Self.makePropertyStatusCompareAnswer(
+            let answer = makePropertyStatusCompareAnswer(
                 record: record,
+                propertyID: property.id,
                 currentUserID: currentUserID,
                 currentDeviceID: currentDeviceID
             )
@@ -45524,8 +45962,9 @@ final class AppState: ObservableObject {
             guard let record = propertyStatusByPropertyID[property.id] else {
                 return count
             }
-            let answer = Self.makePropertyStatusCompareAnswer(
+            let answer = makePropertyStatusCompareAnswer(
                 record: record,
+                propertyID: property.id,
                 currentUserID: currentUserID,
                 currentDeviceID: currentDeviceID
             )
@@ -45939,6 +46378,9 @@ final class AppState: ObservableObject {
     }
 
     func handleSceneDidBecomeActive() {
+        refreshVisiblePropertySessionCachesFromLocalStore(reason: "scene_active")
+        scheduleDeliveredSessionStateReconciliation(reason: "scene_active")
+        refreshSessionSnapshotCloudStatusCache()
         queuePendingSupabaseMediaBackfillIfNeeded(reason: "scene_active")
         Task { @MainActor [weak self] in
             guard let self else { return }
@@ -46537,6 +46979,10 @@ final class AppState: ObservableObject {
 
     func _debugCurrentDeviceIdentifierForTests() -> String {
         currentDeviceIdentifier()
+    }
+
+    func _debugDeliveredSessionStateReconciliationWriteCountForTests() -> Int {
+        deliveredSessionStateReconciliationWriteCount
     }
 
     func _debugSetActivityFeedFetchOverrideForTests(
@@ -47808,7 +48254,26 @@ final class AppState: ObservableObject {
     }
 
     func isPendingDelivery(_ session: Session) -> Bool {
-        session.status == .completed && session.isSealed && session.firstDeliveredAt == nil
+        guard session.status == .completed && session.isSealed && session.firstDeliveredAt == nil else {
+            return false
+        }
+        if let propertyStatus = propertyStatusByPropertyID[session.propertyID] {
+            let answer = makePropertyStatusCompareAnswer(
+                record: propertyStatus,
+                propertyID: session.propertyID,
+                currentUserID: authenticatedSupabaseUser?.id,
+                currentDeviceID: currentDeviceIdentifier()
+            )
+            guard propertyStatus.status == .pendingExport,
+                  answer.visibleBadgeState == .pendingExport,
+                  !answer.entryBlocked else {
+                return false
+            }
+            if let pendingExportSessionID = propertyStatus.pendingExportSessionID {
+                return pendingExportSessionID == session.id
+            }
+        }
+        return true
     }
 
     func isPendingDeliveryLocallyAvailable(_ session: Session) -> Bool {

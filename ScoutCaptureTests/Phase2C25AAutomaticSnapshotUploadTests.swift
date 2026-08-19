@@ -218,9 +218,11 @@ final class Phase2C25AAutomaticSnapshotUploadTests: XCTestCase {
         triggerSource: String = "sealCurrentSessionForExportLater",
         status: LocalStore.SessionSnapshotUploadRetryWorkItem.Status = .pending,
         attemptCount: Int = 0,
-        nextAttemptAt: Date? = nil
+        nextAttemptAt: Date? = nil,
+        snapshotID: UUID = UUID(),
+        updatedAt: Date? = nil,
+        idempotencyKey: String? = nil
     ) -> LocalStore.SessionSnapshotUploadRetryWorkItem {
-        let snapshotID = UUID()
         return LocalStore.SessionSnapshotUploadRetryWorkItem(
             snapshotID: snapshotID,
             organizationID: orgID,
@@ -234,7 +236,8 @@ final class Phase2C25AAutomaticSnapshotUploadTests: XCTestCase {
             storagePath: "org/\(orgID.uuidString)/property/\(property.id.uuidString)/session/\(session.id.uuidString)/\(snapshotID.uuidString).json",
             generatedAt: generatedAt,
             sourceDeviceID: "test-device",
-            idempotencyKey: "\(property.id.uuidString)|\(session.id.uuidString)|\(triggerSource)|\(generatedAt.timeIntervalSinceReferenceDate)",
+            idempotencyKey: idempotencyKey ?? "\(property.id.uuidString)|\(session.id.uuidString)|\(triggerSource)|\(generatedAt.timeIntervalSinceReferenceDate)",
+            updatedAt: updatedAt ?? generatedAt,
             attemptCount: attemptCount,
             nextAttemptAt: nextAttemptAt,
             status: status
@@ -248,9 +251,11 @@ final class Phase2C25AAutomaticSnapshotUploadTests: XCTestCase {
         generatedAt: Date,
         status: LocalStore.SessionSnapshotUploadStatusRecord.Status,
         triggerSource: String = "sealCurrentSessionForExportLater",
-        reason: String? = nil
+        reason: String? = nil,
+        snapshotID: UUID = UUID(),
+        updatedAt: Date? = nil,
+        idempotencyKey: String? = nil
     ) -> LocalStore.SessionSnapshotUploadStatusRecord {
-        let snapshotID = UUID()
         return LocalStore.SessionSnapshotUploadStatusRecord(
             snapshotID: snapshotID,
             organizationID: orgID,
@@ -259,12 +264,12 @@ final class Phase2C25AAutomaticSnapshotUploadTests: XCTestCase {
             snapshotKind: AppState.SessionSnapshotKind.completed.rawValue,
             trigger: "auto_completed_sealed_archive:\(triggerSource)",
             triggerSource: triggerSource,
-            idempotencyKey: "\(property.id.uuidString)|\(session.id.uuidString)|\(triggerSource)|\(generatedAt.timeIntervalSinceReferenceDate)",
+            idempotencyKey: idempotencyKey ?? "\(property.id.uuidString)|\(session.id.uuidString)|\(triggerSource)|\(generatedAt.timeIntervalSinceReferenceDate)",
             storagePath: "org/\(orgID.uuidString)/property/\(property.id.uuidString)/session/\(session.id.uuidString)/\(snapshotID.uuidString).json",
             generatedAt: generatedAt,
             status: status,
             reason: reason,
-            updatedAt: generatedAt
+            updatedAt: updatedAt ?? generatedAt
         )
     }
 
@@ -750,6 +755,7 @@ final class Phase2C25AAutomaticSnapshotUploadTests: XCTestCase {
                 reExportExpiresAt: nil
             )
         )
+        try saveMetadata(store: fixture.store, property: fixture.property, session: pending, orgID: fixture.orgID)
         var older = fixture.property
         older.updatedAt = Date(timeIntervalSinceReferenceDate: 1_000)
         var newer = older
@@ -944,6 +950,31 @@ final class Phase2C25AAutomaticSnapshotUploadTests: XCTestCase {
         XCTAssertFalse(reloaded.backendFeatureFlags.supabaseReadEnabled)
     }
 
+    func testPersistentDataChangeRefreshesUploadedCloudState() async throws {
+        let fixture = try makeFixture(autoUploadEnabled: false)
+        let appState = AppState(
+            localStore: fixture.store,
+            userDefaults: makeDefaults(autoUploadEnabled: true, propertyAllowlist: [fixture.property.id]),
+            environment: localEnvironment(),
+            disableCloudBackupForTests: true
+        )
+        XCTAssertNil(appState.sessionSnapshotCloudStatus(for: fixture.session))
+
+        _ = try fixture.store.upsertSessionSnapshotUploadStatusRecord(
+            statusRecord(
+                property: fixture.property,
+                session: fixture.session,
+                orgID: fixture.orgID,
+                generatedAt: Date(timeIntervalSinceReferenceDate: 3_000),
+                status: .uploaded
+            )
+        )
+
+        try await waitForCloudState(appState: appState, session: fixture.session, expected: .uploaded)
+        XCTAssertEqual(appState.sessionSnapshotCloudStatus(for: fixture.session)?.symbolName, "checkmark.icloud.fill")
+        XCTAssertEqual(appState.sessionSnapshotCloudStatus(for: fixture.session)?.tint, .blue)
+    }
+
     func testOlderSuccessfulCheckpointDoesNotHideNewerPendingCloudState() throws {
         let fixture = try makeFixture(autoUploadEnabled: false)
         _ = try fixture.store.upsertSessionSnapshotUploadStatusRecord(
@@ -975,6 +1006,353 @@ final class Phase2C25AAutomaticSnapshotUploadTests: XCTestCase {
 
         XCTAssertEqual(reloaded.sessionSnapshotCloudStatus(for: fixture.session)?.state, .queued)
         XCTAssertEqual(reloaded.sessionSnapshotCloudStatus(for: fixture.session)?.triggerSource, "markCurrentSessionExported")
+    }
+
+    func testSamePersistedCheckpointSetResolvesIdenticallyAcrossDevices() throws {
+        let fixture = try makeFixture(autoUploadEnabled: false)
+        let tiedAt = Date(timeIntervalSinceReferenceDate: 5_000)
+        let lowerSnapshotID = UUID(uuidString: "00000000-0000-0000-0000-000000000001")!
+        let higherSnapshotID = UUID(uuidString: "FFFFFFFF-FFFF-FFFF-FFFF-FFFFFFFFFFFF")!
+        let uploaded = statusRecord(
+            property: fixture.property,
+            session: fixture.session,
+            orgID: fixture.orgID,
+            generatedAt: tiedAt,
+            status: .uploaded,
+            triggerSource: "sealCurrentSessionForExportLater",
+            snapshotID: lowerSnapshotID,
+            updatedAt: tiedAt,
+            idempotencyKey: "device-a-uploaded"
+        )
+        let failed = statusRecord(
+            property: fixture.property,
+            session: fixture.session,
+            orgID: fixture.orgID,
+            generatedAt: tiedAt,
+            status: .failed,
+            triggerSource: "markCurrentSessionExported",
+            snapshotID: higherSnapshotID,
+            updatedAt: tiedAt,
+            idempotencyKey: "device-a-failed"
+        )
+        _ = try fixture.store.upsertSessionSnapshotUploadStatusRecord(uploaded)
+        _ = try fixture.store.upsertSessionSnapshotUploadStatusRecord(failed)
+
+        let mirroredRoot = try makeTempStorageRoot()
+        let mirroredStore = LocalStore(testStorageRootURL: mirroredRoot)
+        _ = try mirroredStore.createOrganization(Organization(id: fixture.orgID, name: "Automatic Snapshot Org"))
+        _ = try mirroredStore.createProperty(fixture.property)
+        _ = try mirroredStore.upsertSession(fixture.session)
+        try saveMetadata(store: mirroredStore, property: fixture.property, session: fixture.session, orgID: fixture.orgID)
+        _ = try mirroredStore.upsertSessionSnapshotUploadStatusRecord(failed)
+        _ = try mirroredStore.upsertSessionSnapshotUploadStatusRecord(uploaded)
+
+        let firstDevice = AppState(
+            localStore: fixture.store,
+            userDefaults: makeDefaults(autoUploadEnabled: true, propertyAllowlist: [fixture.property.id]),
+            environment: localEnvironment(),
+            disableCloudBackupForTests: true
+        )
+        let secondDevice = AppState(
+            localStore: mirroredStore,
+            userDefaults: makeDefaults(autoUploadEnabled: true, propertyAllowlist: [fixture.property.id]),
+            environment: localEnvironment(),
+            disableCloudBackupForTests: true
+        )
+
+        XCTAssertEqual(firstDevice.sessionSnapshotCloudStatus(for: fixture.session), secondDevice.sessionSnapshotCloudStatus(for: fixture.session))
+        XCTAssertEqual(firstDevice.sessionSnapshotCloudStatus(for: fixture.session)?.snapshotID, lowerSnapshotID)
+    }
+
+    func testNewerFailedCheckpointBeatsOlderUploadedCheckpoint() throws {
+        let fixture = try makeFixture(autoUploadEnabled: false)
+        _ = try fixture.store.upsertSessionSnapshotUploadStatusRecord(
+            statusRecord(
+                property: fixture.property,
+                session: fixture.session,
+                orgID: fixture.orgID,
+                generatedAt: Date(timeIntervalSinceReferenceDate: 3_000),
+                status: .uploaded,
+                triggerSource: "sealCurrentSessionForExportLater"
+            )
+        )
+        _ = try fixture.store.upsertSessionSnapshotUploadStatusRecord(
+            statusRecord(
+                property: fixture.property,
+                session: fixture.session,
+                orgID: fixture.orgID,
+                generatedAt: Date(timeIntervalSinceReferenceDate: 4_000),
+                status: .failed,
+                triggerSource: "markCurrentSessionExported",
+                reason: "row_insert_failed"
+            )
+        )
+
+        let reloaded = AppState(
+            localStore: fixture.store,
+            userDefaults: makeDefaults(autoUploadEnabled: true, propertyAllowlist: [fixture.property.id]),
+            environment: localEnvironment(),
+            disableCloudBackupForTests: true
+        )
+
+        XCTAssertEqual(reloaded.sessionSnapshotCloudStatus(for: fixture.session)?.state, .failed)
+        XCTAssertEqual(reloaded.sessionSnapshotCloudStatus(for: fixture.session)?.triggerSource, "markCurrentSessionExported")
+    }
+
+    func testNewerUploadedCheckpointBeatsOlderFailedCheckpoint() throws {
+        let fixture = try makeFixture(autoUploadEnabled: false)
+        _ = try fixture.store.upsertSessionSnapshotUploadStatusRecord(
+            statusRecord(
+                property: fixture.property,
+                session: fixture.session,
+                orgID: fixture.orgID,
+                generatedAt: Date(timeIntervalSinceReferenceDate: 3_000),
+                status: .failed,
+                triggerSource: "sealCurrentSessionForExportLater",
+                reason: "retryable_failure"
+            )
+        )
+        _ = try fixture.store.upsertSessionSnapshotUploadStatusRecord(
+            statusRecord(
+                property: fixture.property,
+                session: fixture.session,
+                orgID: fixture.orgID,
+                generatedAt: Date(timeIntervalSinceReferenceDate: 4_000),
+                status: .uploaded,
+                triggerSource: "markCurrentSessionExported"
+            )
+        )
+
+        let reloaded = AppState(
+            localStore: fixture.store,
+            userDefaults: makeDefaults(autoUploadEnabled: true, propertyAllowlist: [fixture.property.id]),
+            environment: localEnvironment(),
+            disableCloudBackupForTests: true
+        )
+
+        XCTAssertEqual(reloaded.sessionSnapshotCloudStatus(for: fixture.session)?.state, .uploaded)
+        XCTAssertEqual(reloaded.sessionSnapshotCloudStatus(for: fixture.session)?.triggerSource, "markCurrentSessionExported")
+    }
+
+    func testExternalStatusRefreshCannotLeaveStaleBlueRedDisagreement() async throws {
+        let fixture = try makeFixture(autoUploadEnabled: false)
+        _ = try fixture.store.upsertSessionSnapshotUploadStatusRecord(
+            statusRecord(
+                property: fixture.property,
+                session: fixture.session,
+                orgID: fixture.orgID,
+                generatedAt: Date(timeIntervalSinceReferenceDate: 3_000),
+                status: .uploaded,
+                triggerSource: "sealCurrentSessionForExportLater"
+            )
+        )
+        let firstDevice = AppState(
+            localStore: fixture.store,
+            userDefaults: makeDefaults(autoUploadEnabled: true, propertyAllowlist: [fixture.property.id]),
+            environment: localEnvironment(),
+            disableCloudBackupForTests: true
+        )
+        let secondDevice = AppState(
+            localStore: fixture.store,
+            userDefaults: makeDefaults(autoUploadEnabled: true, propertyAllowlist: [fixture.property.id]),
+            environment: localEnvironment(),
+            disableCloudBackupForTests: true
+        )
+        XCTAssertEqual(firstDevice.sessionSnapshotCloudStatus(for: fixture.session)?.state, .uploaded)
+        XCTAssertEqual(secondDevice.sessionSnapshotCloudStatus(for: fixture.session)?.state, .uploaded)
+
+        _ = try fixture.store.upsertSessionSnapshotUploadStatusRecord(
+            statusRecord(
+                property: fixture.property,
+                session: fixture.session,
+                orgID: fixture.orgID,
+                generatedAt: Date(timeIntervalSinceReferenceDate: 4_000),
+                status: .failed,
+                triggerSource: "markCurrentSessionExported",
+                reason: "row_insert_failed"
+            )
+        )
+
+        try await waitForCloudState(appState: firstDevice, session: fixture.session, expected: .failed)
+        try await waitForCloudState(appState: secondDevice, session: fixture.session, expected: .failed)
+        XCTAssertEqual(firstDevice.sessionSnapshotCloudStatus(for: fixture.session), secondDevice.sessionSnapshotCloudStatus(for: fixture.session))
+    }
+
+    func testRelaunchConvergesToLatestSnapshotStatus() throws {
+        let fixture = try makeFixture(autoUploadEnabled: false)
+        _ = try fixture.store.upsertSessionSnapshotUploadStatusRecord(
+            statusRecord(
+                property: fixture.property,
+                session: fixture.session,
+                orgID: fixture.orgID,
+                generatedAt: Date(timeIntervalSinceReferenceDate: 3_000),
+                status: .failed,
+                triggerSource: "sealCurrentSessionForExportLater",
+                reason: "network_unavailable"
+            )
+        )
+        _ = try fixture.store.upsertSessionSnapshotUploadStatusRecord(
+            statusRecord(
+                property: fixture.property,
+                session: fixture.session,
+                orgID: fixture.orgID,
+                generatedAt: Date(timeIntervalSinceReferenceDate: 4_000),
+                status: .uploaded,
+                triggerSource: "markCurrentSessionExported"
+            )
+        )
+
+        let firstRelaunch = AppState(
+            localStore: fixture.store,
+            userDefaults: makeDefaults(autoUploadEnabled: true, propertyAllowlist: [fixture.property.id]),
+            environment: localEnvironment(),
+            disableCloudBackupForTests: true
+        )
+        let secondRelaunch = AppState(
+            localStore: fixture.store,
+            userDefaults: makeDefaults(autoUploadEnabled: true, propertyAllowlist: [fixture.property.id]),
+            environment: localEnvironment(),
+            disableCloudBackupForTests: true
+        )
+
+        XCTAssertEqual(firstRelaunch.sessionSnapshotCloudStatus(for: fixture.session)?.state, .uploaded)
+        XCTAssertEqual(firstRelaunch.sessionSnapshotCloudStatus(for: fixture.session), secondRelaunch.sessionSnapshotCloudStatus(for: fixture.session))
+    }
+
+    func testUploadedStatusSupersedesStaleRetryForSameCheckpoint() throws {
+        let fixture = try makeFixture(autoUploadEnabled: false)
+        let checkpointID = UUID()
+        let checkpointKey = "same-checkpoint"
+        _ = try fixture.store.upsertSessionSnapshotUploadStatusRecord(
+            statusRecord(
+                property: fixture.property,
+                session: fixture.session,
+                orgID: fixture.orgID,
+                generatedAt: Date(timeIntervalSinceReferenceDate: 5_000),
+                status: .uploaded,
+                triggerSource: "markCurrentSessionExported",
+                snapshotID: checkpointID,
+                updatedAt: Date(timeIntervalSinceReferenceDate: 5_010),
+                idempotencyKey: checkpointKey
+            )
+        )
+        _ = try fixture.store.upsertSessionSnapshotUploadRetryWorkItem(
+            retryItem(
+                property: fixture.property,
+                session: fixture.session,
+                orgID: fixture.orgID,
+                generatedAt: Date(timeIntervalSinceReferenceDate: 5_000),
+                triggerSource: "markCurrentSessionExported",
+                status: .failed,
+                snapshotID: checkpointID,
+                updatedAt: Date(timeIntervalSinceReferenceDate: 5_020),
+                idempotencyKey: checkpointKey
+            )
+        )
+
+        let reloaded = AppState(
+            localStore: fixture.store,
+            userDefaults: makeDefaults(autoUploadEnabled: true, propertyAllowlist: [fixture.property.id]),
+            environment: localEnvironment(),
+            disableCloudBackupForTests: true
+        )
+
+        XCTAssertEqual(reloaded.sessionSnapshotCloudStatus(for: fixture.session)?.state, .uploaded)
+        XCTAssertEqual(reloaded.sessionSnapshotCloudStatus(for: fixture.session)?.snapshotID, checkpointID)
+    }
+
+    func testUploadedCheckpointCannotBeDowngradedByStaleRetryStatusWrite() throws {
+        let fixture = try makeFixture(autoUploadEnabled: false)
+        let checkpointID = UUID()
+        let checkpointKey = "durable-success-checkpoint"
+        _ = try fixture.store.upsertSessionSnapshotUploadStatusRecord(
+            statusRecord(
+                property: fixture.property,
+                session: fixture.session,
+                orgID: fixture.orgID,
+                generatedAt: Date(timeIntervalSinceReferenceDate: 5_000),
+                status: .uploaded,
+                triggerSource: "markCurrentSessionExported",
+                snapshotID: checkpointID,
+                updatedAt: Date(timeIntervalSinceReferenceDate: 5_010),
+                idempotencyKey: checkpointKey
+            )
+        )
+        _ = try fixture.store.upsertSessionSnapshotUploadStatusRecord(
+            statusRecord(
+                property: fixture.property,
+                session: fixture.session,
+                orgID: fixture.orgID,
+                generatedAt: Date(timeIntervalSinceReferenceDate: 5_000),
+                status: .retryScheduled,
+                triggerSource: "markCurrentSessionExported",
+                reason: "stale_retry_write",
+                snapshotID: checkpointID,
+                updatedAt: Date(timeIntervalSinceReferenceDate: 5_020),
+                idempotencyKey: checkpointKey
+            )
+        )
+
+        let record = try XCTUnwrap(try fixture.store.fetchSessionSnapshotUploadStatusRecords().first)
+
+        XCTAssertEqual(record.status, .uploaded)
+        XCTAssertEqual(record.snapshotID, checkpointID)
+        XCTAssertNil(record.reason)
+    }
+
+    func testPropertyRowCloudStatusUsesLatestAuthoritativeCheckpoint() throws {
+        let fixture = try makeFixture(autoUploadEnabled: false)
+        let olderSession = fixture.session
+        let newerSession = try fixture.store.upsertSession(
+            Session(
+                id: UUID(),
+                propertyID: fixture.property.id,
+                startedAt: Date(timeIntervalSinceReferenceDate: 4_500),
+                status: .completed,
+                endedAt: Date(timeIntervalSinceReferenceDate: 4_600),
+                exportedAt: nil,
+                isSealed: true,
+                firstDeliveredAt: nil,
+                reExportExpiresAt: nil
+            )
+        )
+        try saveMetadata(store: fixture.store, property: fixture.property, session: newerSession, orgID: fixture.orgID)
+        _ = try fixture.store.upsertSessionSnapshotUploadStatusRecord(
+            statusRecord(
+                property: fixture.property,
+                session: olderSession,
+                orgID: fixture.orgID,
+                generatedAt: Date(timeIntervalSinceReferenceDate: 5_000),
+                status: .failed,
+                triggerSource: "markCurrentSessionExported"
+            )
+        )
+        _ = try fixture.store.upsertSessionSnapshotUploadStatusRecord(
+            statusRecord(
+                property: fixture.property,
+                session: newerSession,
+                orgID: fixture.orgID,
+                generatedAt: Date(timeIntervalSinceReferenceDate: 4_000),
+                status: .uploaded,
+                triggerSource: "sealCurrentSessionForExportLater"
+            )
+        )
+
+        let reloaded = AppState(
+            localStore: fixture.store,
+            userDefaults: makeDefaults(autoUploadEnabled: true, propertyAllowlist: [fixture.property.id]),
+            environment: localEnvironment(),
+            disableCloudBackupForTests: true
+        )
+        configureAuthenticatedContext(reloaded, orgID: fixture.orgID)
+        reloaded._debugApplyHubPresentationPayloadForTests(
+            properties: [fixture.property],
+            organizations: [Organization(id: fixture.orgID, name: "Automatic Snapshot Org")],
+            sessionsByProperty: [fixture.property.id: [olderSession, newerSession]]
+        )
+
+        XCTAssertEqual(reloaded.sessionSnapshotCloudStatusForPropertyRow(propertyID: fixture.property.id)?.state, .failed)
+        XCTAssertEqual(reloaded.sessionSnapshotCloudStatusForPropertyRow(propertyID: fixture.property.id)?.sessionID, olderSession.id)
     }
 
     func testSessionWithoutSnapshotWorkShowsNoCloudStatus() throws {
