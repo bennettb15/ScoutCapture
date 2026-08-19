@@ -11336,7 +11336,7 @@ final class AppState: ObservableObject {
             return summary
         }
 
-        let queuedMutations: [LocalStore.QueuedMutation]
+        var queuedMutations: [LocalStore.QueuedMutation]
         do {
             queuedMutations = try localStore.fetchQueuedMutations()
         } catch {
@@ -11354,6 +11354,26 @@ final class AppState: ObservableObject {
             )
             recordOfflineReplayDiagnostics(summary)
             return summary
+        }
+
+        let preAcknowledgedHistoricalDebtCount: Int
+        do {
+            let preAcknowledged = try preAcknowledgeHistoricalPropertyRLSQueueDebt(
+                in: queuedMutations,
+                orgID: orgID,
+                source: source
+            )
+            queuedMutations = preAcknowledged.queuedMutations
+            preAcknowledgedHistoricalDebtCount = preAcknowledged.acknowledgedCount
+        } catch {
+            preAcknowledgedHistoricalDebtCount = 0
+            recordDiagnosticsError(error)
+            print(
+                "[OfflineReplay] historical_debt_preacknowledge_failed " +
+                "source=\(source) " +
+                "orgID=\(orgID.uuidString) " +
+                "error=\(error.localizedDescription)"
+            )
         }
 
         let orgMutations = queuedMutations.filter { $0.organizationID == orgID && $0.status != .completed }
@@ -11393,6 +11413,7 @@ final class AppState: ObservableObject {
             "orgID=\(orgID.uuidString) " +
             "discoveredCount=\(orgMutations.count) " +
             "eligibleCount=\(replayable.count) " +
+            "preAcknowledgedHistoricalDebtCount=\(preAcknowledgedHistoricalDebtCount) " +
             "normalizedInFlightCount=\(normalizedInFlightCount)"
         )
 
@@ -11500,7 +11521,6 @@ final class AppState: ObservableObject {
                     "operation=\(item.operation)"
                 )
             } catch {
-                failedCount += 1
                 recordDiagnosticsError(error)
                 var failedItem = inFlightItem
                 failedItem.attemptCount += 1
@@ -11511,6 +11531,36 @@ final class AppState: ObservableObject {
                 failedItem.lastError = error.localizedDescription
                 failedItem.status = .failed
                 failedItem.updatedAt = Date()
+                if shouldAutoAcknowledgePermanentPropertyRLSFailure(item: failedItem, error: error) {
+                    let inspectionItem = makeQueueDebtInspectionItem(failedItem)
+                    failedItem.acknowledgedAt = Date()
+                    failedItem.acknowledgedReason = "Automatically acknowledged as permanent properties RLS replay debt."
+                    failedItem.acknowledgedClassification = inspectionItem.classification.rawValue
+                    failedItem.acknowledgementSource = "offline_replay"
+                    failedItem.nextAttemptAt = nil
+                    _ = try? localStore.updateQueuedMutation(failedItem)
+                    print(
+                        "[OfflineReplay] item_terminal_acknowledged " +
+                        "source=\(source) " +
+                        "queueItemID=\(item.id.uuidString) " +
+                        "entityType=\(item.entityType) " +
+                        "entityID=\(item.entityID.uuidString) " +
+                        "operation=\(item.operation) " +
+                        "attemptCount=\(failedItem.attemptCount) " +
+                        "classification=\(inspectionItem.classification.rawValue) " +
+                        "error=\(error.localizedDescription)"
+                    )
+                    print(
+                        "[OfflineQueue] result=acknowledged_terminal " +
+                        "queueItemID=\(item.id.uuidString) " +
+                        "entityType=\(item.entityType) " +
+                        "entityID=\(item.entityID.uuidString) " +
+                        "operation=\(item.operation) " +
+                        "classification=\(inspectionItem.classification.rawValue)"
+                    )
+                    continue
+                }
+                failedCount += 1
                 try? localStore.updateQueuedMutation(failedItem)
                 print(
                     "[OfflineReplay] item_failure " +
@@ -11542,6 +11592,7 @@ final class AppState: ObservableObject {
             "discoveredCount=\(orgMutations.count) " +
             "normalizedInFlightCount=\(normalizedInFlightCount) " +
             "skippedBackoffCount=\(skippedBackoffCount) " +
+            "preAcknowledgedHistoricalDebtCount=\(preAcknowledgedHistoricalDebtCount) " +
             "attemptedCount=\(attemptedCount) " +
             "succeededCount=\(succeededCount) " +
             "failedCount=\(failedCount) " +
@@ -11560,6 +11611,143 @@ final class AppState: ObservableObject {
         )
         recordOfflineReplayDiagnostics(summary)
         return summary
+    }
+
+    private func preAcknowledgeHistoricalPropertyRLSQueueDebt(
+        in queuedMutations: [LocalStore.QueuedMutation],
+        orgID: UUID,
+        source: String
+    ) throws -> (queuedMutations: [LocalStore.QueuedMutation], acknowledgedCount: Int) {
+        let acknowledgedAt = Date()
+        var acknowledgedItems: [LocalStore.QueuedMutation] = []
+
+        for item in queuedMutations where item.organizationID == orgID && item.status != .completed {
+            guard shouldPreAcknowledgeHistoricalPropertyRLSQueueDebt(item) else { continue }
+            let inspectionItem = makeQueueDebtInspectionItem(item)
+            var acknowledged = item
+            acknowledged.acknowledgedAt = acknowledgedAt
+            acknowledged.acknowledgedReason = "Automatically acknowledged as permanent properties RLS replay debt."
+            acknowledged.acknowledgedClassification = inspectionItem.classification.rawValue
+            acknowledged.acknowledgementSource = "offline_replay_prepass"
+            acknowledged.nextAttemptAt = nil
+            acknowledged.updatedAt = acknowledgedAt
+            acknowledgedItems.append(acknowledged)
+        }
+
+        guard !acknowledgedItems.isEmpty else {
+            return (queuedMutations, 0)
+        }
+
+        try localStore.updateQueuedMutations(acknowledgedItems)
+
+        var updatedQueue = queuedMutations
+        let acknowledgedByID = Dictionary(uniqueKeysWithValues: acknowledgedItems.map { ($0.id, $0) })
+        for index in updatedQueue.indices {
+            guard let acknowledged = acknowledgedByID[updatedQueue[index].id] else { continue }
+            updatedQueue[index] = acknowledged
+        }
+
+        for item in acknowledgedItems {
+            print(
+                "[OfflineReplay] item_terminal_preacknowledged " +
+                "source=\(source) " +
+                "queueItemID=\(item.id.uuidString) " +
+                "entityType=\(item.entityType) " +
+                "entityID=\(item.entityID.uuidString) " +
+                "operation=\(item.operation) " +
+                "attemptCount=\(item.attemptCount) " +
+                "classification=\(item.acknowledgedClassification ?? "unknown")"
+            )
+        }
+
+        print(
+            "[OfflineReplay] historical_debt_preacknowledged " +
+            "source=\(source) " +
+            "orgID=\(orgID.uuidString) " +
+            "count=\(acknowledgedItems.count)"
+        )
+
+        return (updatedQueue, acknowledgedItems.count)
+    }
+
+    private func shouldPreAcknowledgeHistoricalPropertyRLSQueueDebt(_ item: LocalStore.QueuedMutation) -> Bool {
+        guard !item.isAcknowledgedHistoricalDebt else { return false }
+        guard item.status == .failed else { return false }
+        guard item.operation == "upsert_property" || item.operation == "upsert_session" else { return false }
+        guard let lastError = item.lastError,
+              isPermanentPropertiesRLSReplayErrorMessage(lastError) else {
+            return false
+        }
+        let inspectionItem = makeQueueDebtInspectionItem(item)
+        do {
+            try validateHistoricalQueueDebtAcknowledgement(item: item, inspectionItem: inspectionItem)
+            return true
+        } catch {
+            return false
+        }
+    }
+
+    private func shouldAutoAcknowledgePermanentPropertyRLSFailure(
+        item: LocalStore.QueuedMutation,
+        error: Error
+    ) -> Bool {
+        guard isPermanentPropertiesRLSReplayError(error) else { return false }
+        guard item.operation == "upsert_property" || item.operation == "upsert_session" else { return false }
+        let inspectionItem = makeQueueDebtInspectionItem(item)
+        do {
+            try validateHistoricalQueueDebtAcknowledgement(item: item, inspectionItem: inspectionItem)
+            return true
+        } catch {
+            return false
+        }
+    }
+
+    private func isPermanentPropertiesRLSReplayError(_ error: Error) -> Bool {
+        let nsError = error as NSError
+        return isPermanentPropertiesRLSReplayErrorMessage("\(nsError.domain) \(error.localizedDescription)")
+    }
+
+    private func isPermanentPropertiesRLSReplayErrorMessage(_ message: String) -> Bool {
+        let message = message.lowercased()
+        guard message.contains("row-level security") ||
+                message.contains("row level security") ||
+                message.contains("rls") else {
+            return false
+        }
+        guard message.contains("properties") else { return false }
+        if Self.isTransientReplayErrorMessage(message) {
+            return false
+        }
+        return true
+    }
+
+    private nonisolated static func isTransientReplayErrorMessage(_ message: String) -> Bool {
+        let transientMarkers = [
+            "network",
+            "not connected",
+            "internet",
+            "offline",
+            "connection",
+            "timed out",
+            "timeout",
+            "cancelled",
+            "temporarily",
+            "rate limit",
+            "too many requests",
+            "429",
+            "500",
+            "501",
+            "502",
+            "503",
+            "504",
+            "server error",
+            "service unavailable",
+            "jwt",
+            "token",
+            "auth session",
+            "authentication"
+        ]
+        return transientMarkers.contains { message.contains($0) }
     }
 
     private func reconcilePropertyShadowWrite(

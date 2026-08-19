@@ -1697,6 +1697,34 @@ final class LocalStore {
         }
     }
 
+    @discardableResult
+    func updateQueuedMutations(_ mutations: [QueuedMutation]) throws -> [QueuedMutation] {
+        guard !mutations.isEmpty else { return [] }
+        return try performFileIOSync {
+            var queued = try readQueuedMutations()
+            let updatesByID = Dictionary(uniqueKeysWithValues: mutations.map { ($0.id, $0) })
+            var missingIDs = Set(updatesByID.keys)
+
+            for index in queued.indices {
+                guard let mutation = updatesByID[queued[index].id] else { continue }
+                queued[index] = mutation
+                missingIDs.remove(mutation.id)
+            }
+
+            if let missingID = missingIDs.first {
+                throw NSError(
+                    domain: "LocalStore.QueuedMutations",
+                    code: 1,
+                    userInfo: [NSLocalizedDescriptionKey: "Queued mutation not found: \(missingID.uuidString)"]
+                )
+            }
+
+            try writeQueuedMutations(queued)
+            NotificationCenter.default.post(name: .scoutPersistentDataDidChange, object: nil)
+            return mutations
+        }
+    }
+
     func removeQueuedMutation(id: UUID) throws {
         try performFileIOSync {
             var queued = try readQueuedMutations()

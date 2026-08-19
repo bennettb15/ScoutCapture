@@ -407,6 +407,247 @@ final class Phase2C10OfflineReplayTests: XCTestCase {
         XCTAssertEqual(diagnostics.lastError?.category, .unknown)
     }
 
+    func testPermanentPropertyRLSFailureIsAutomaticallyAcknowledged() async throws {
+        let fixture = try makeFixture()
+        defer { tearDownFixture(fixture) }
+
+        let original = try await createQueuedPropertyMutation(fixture: fixture, name: "Legacy RLS Property")
+
+        let replayAppState = makeAppState(
+            fixture: fixture,
+            propertyOverride: { _ in
+                throw NSError(domain: "PostgREST", code: 42501, userInfo: [
+                    NSLocalizedDescriptionKey: "new row violates row-level security policy for table \"properties\""
+                ])
+            }
+        )
+        await configureReplayEnvironment(replayAppState, orgID: fixture.organizationID)
+
+        let summary = await replayAppState._debugPerformOfflineReplayForTests(source: "permanent_property_rls_test")
+        let queued = try fixture.localStore.fetchQueuedMutations()
+        let acknowledged = try XCTUnwrap(queued.first)
+
+        XCTAssertTrue(summary.didStart)
+        XCTAssertEqual(summary.attemptedCount, 1)
+        XCTAssertEqual(summary.failedCount, 0)
+        XCTAssertEqual(acknowledged.id, original.id)
+        XCTAssertEqual(acknowledged.status, .failed)
+        XCTAssertEqual(acknowledged.attemptCount, 1)
+        XCTAssertNotNil(acknowledged.lastAttemptAt)
+        XCTAssertNil(acknowledged.nextAttemptAt)
+        XCTAssertEqual(acknowledged.lastError, "new row violates row-level security policy for table \"properties\"")
+        XCTAssertNotNil(acknowledged.acknowledgedAt)
+        XCTAssertEqual(acknowledged.acknowledgedClassification, AppState.QueueDebtClassification.staleRLSPropertyUpsert.rawValue)
+        XCTAssertEqual(acknowledged.acknowledgementSource, "offline_replay")
+    }
+
+    func testAutomaticallyAcknowledgedRLSDebtIsSkippedOnFutureReplayAndRemainsDiagnosticVisible() async throws {
+        let fixture = try makeFixture()
+        defer { tearDownFixture(fixture) }
+
+        _ = try await createQueuedPropertyMutation(fixture: fixture, name: "Diagnostic RLS Property")
+
+        let replayAppState = makeAppState(
+            fixture: fixture,
+            propertyOverride: { _ in
+                throw NSError(domain: "PostgREST", code: 42501, userInfo: [
+                    NSLocalizedDescriptionKey: "new row violates row-level security policy for table properties"
+                ])
+            }
+        )
+        await configureReplayEnvironment(replayAppState, orgID: fixture.organizationID)
+
+        _ = await replayAppState._debugPerformOfflineReplayForTests(source: "first_terminal_rls_test")
+        let second = await replayAppState._debugPerformOfflineReplayForTests(source: "foreground")
+        let queued = try fixture.localStore.fetchQueuedMutations()
+        let diagnosticItems = replayAppState.diagnosticsFailedQueueItems()
+        replayAppState._debugRefreshOfflineQueueDiagnosticsForTests()
+        let diagnostics = replayAppState._debugLocalDiagnosticsForTests().offlineQueue
+
+        XCTAssertTrue(second.didStart)
+        XCTAssertEqual(second.discoveredCount, 1)
+        XCTAssertEqual(second.attemptedCount, 0)
+        XCTAssertEqual(second.failedCount, 0)
+        XCTAssertEqual(queued.count, 1)
+        XCTAssertNotNil(queued[0].acknowledgedAt)
+        XCTAssertEqual(diagnosticItems.count, 1)
+        XCTAssertNotNil(diagnosticItems[0].acknowledgedAt)
+        XCTAssertEqual(diagnostics.totalQueued, 1)
+        XCTAssertEqual(diagnostics.failedCount, 0)
+        XCTAssertEqual(diagnostics.acknowledgedHistoricalCount, 1)
+    }
+
+    func testHistoricalRLSQueueDebtIsPreAcknowledgedBeforeReplay() async throws {
+        let fixture = try makeFixture()
+        defer { tearDownFixture(fixture) }
+
+        var mutation = try await createQueuedPropertyMutation(fixture: fixture, name: "Prepass RLS Property")
+        mutation.status = .failed
+        mutation.attemptCount = 4
+        mutation.lastAttemptAt = Date().addingTimeInterval(-300)
+        mutation.nextAttemptAt = Date().addingTimeInterval(-60)
+        mutation.lastError = "new row violates row-level security policy for table \"properties\""
+        _ = try fixture.localStore.updateQueuedMutation(mutation)
+
+        var replayAttemptCount = 0
+        let replayAppState = makeAppState(
+            fixture: fixture,
+            propertyOverride: { _ in
+                replayAttemptCount += 1
+                XCTFail("Historical properties RLS debt should be acknowledged before replay.")
+            }
+        )
+        await configureReplayEnvironment(replayAppState, orgID: fixture.organizationID)
+
+        let summary = await replayAppState._debugPerformOfflineReplayForTests(source: "historical_rls_prepass_test")
+        let acknowledged = try XCTUnwrap(try fixture.localStore.fetchQueuedMutations().first)
+
+        XCTAssertTrue(summary.didStart)
+        XCTAssertEqual(summary.discoveredCount, 1)
+        XCTAssertEqual(summary.attemptedCount, 0)
+        XCTAssertEqual(summary.failedCount, 0)
+        XCTAssertEqual(replayAttemptCount, 0)
+        XCTAssertEqual(acknowledged.id, mutation.id)
+        XCTAssertEqual(acknowledged.status, .failed)
+        XCTAssertEqual(acknowledged.attemptCount, 4)
+        XCTAssertNil(acknowledged.nextAttemptAt)
+        XCTAssertNotNil(acknowledged.acknowledgedAt)
+        XCTAssertEqual(acknowledged.acknowledgedClassification, AppState.QueueDebtClassification.staleRLSPropertyUpsert.rawValue)
+        XCTAssertEqual(acknowledged.acknowledgementSource, "offline_replay_prepass")
+    }
+
+    func testPermanentParentPropertyRLSFailureDuringSessionReplayIsAutomaticallyAcknowledged() async throws {
+        let fixture = try makeFixture()
+        defer { tearDownFixture(fixture) }
+
+        let original = try await createQueuedSessionMutation(fixture: fixture)
+
+        let replayAppState = makeAppState(
+            fixture: fixture,
+            sessionOverride: { _, _, _ in
+                throw NSError(domain: "PostgREST", code: 42501, userInfo: [
+                    NSLocalizedDescriptionKey: "new row violates row-level security policy for table \"properties\""
+                ])
+            }
+        )
+        await configureReplayEnvironment(replayAppState, orgID: fixture.organizationID)
+
+        let summary = await replayAppState._debugPerformOfflineReplayForTests(source: "session_parent_property_rls_test")
+        let acknowledged = try XCTUnwrap(try fixture.localStore.fetchQueuedMutations().first)
+
+        XCTAssertTrue(summary.didStart)
+        XCTAssertEqual(summary.attemptedCount, 1)
+        XCTAssertEqual(summary.failedCount, 0)
+        XCTAssertEqual(acknowledged.id, original.id)
+        XCTAssertEqual(acknowledged.operation, "upsert_session")
+        XCTAssertNotNil(acknowledged.acknowledgedAt)
+        XCTAssertEqual(acknowledged.acknowledgedClassification, AppState.QueueDebtClassification.staleRLSSessionParentProperty.rawValue)
+    }
+
+    func testSessionTableRLSFailureStillUsesRetryBackoff() async throws {
+        let fixture = try makeFixture()
+        defer { tearDownFixture(fixture) }
+
+        let original = try await createQueuedSessionMutation(fixture: fixture)
+
+        let replayAppState = makeAppState(
+            fixture: fixture,
+            sessionOverride: { _, _, _ in
+                throw NSError(domain: "PostgREST", code: 42501, userInfo: [
+                    NSLocalizedDescriptionKey: "new row violates row-level security policy for table \"sessions\""
+                ])
+            }
+        )
+        await configureReplayEnvironment(replayAppState, orgID: fixture.organizationID)
+
+        let summary = await replayAppState._debugPerformOfflineReplayForTests(source: "session_table_rls_retry_test")
+        let failed = try XCTUnwrap(try fixture.localStore.fetchQueuedMutations().first)
+
+        XCTAssertTrue(summary.didStart)
+        XCTAssertEqual(summary.attemptedCount, 1)
+        XCTAssertEqual(summary.failedCount, 1)
+        XCTAssertEqual(failed.id, original.id)
+        XCTAssertEqual(failed.operation, "upsert_session")
+        XCTAssertNil(failed.acknowledgedAt)
+        XCTAssertNotNil(failed.nextAttemptAt)
+    }
+
+    func testTransientNetworkFailureStillRetriesWithBackoff() async throws {
+        let fixture = try makeFixture()
+        defer { tearDownFixture(fixture) }
+
+        let original = try await createQueuedPropertyMutation(fixture: fixture, name: "Network Retry Property")
+
+        let replayAppState = makeAppState(
+            fixture: fixture,
+            propertyOverride: { _ in
+                throw NSError(domain: NSURLErrorDomain, code: NSURLErrorNotConnectedToInternet, userInfo: [
+                    NSLocalizedDescriptionKey: "The Internet connection appears to be offline."
+                ])
+            }
+        )
+        await configureReplayEnvironment(replayAppState, orgID: fixture.organizationID)
+
+        let summary = await replayAppState._debugPerformOfflineReplayForTests(source: "network_retry_test")
+        let failed = try XCTUnwrap(try fixture.localStore.fetchQueuedMutations().first)
+
+        XCTAssertTrue(summary.didStart)
+        XCTAssertEqual(summary.failedCount, 1)
+        XCTAssertEqual(failed.id, original.id)
+        XCTAssertEqual(failed.status, .failed)
+        XCTAssertEqual(failed.attemptCount, 1)
+        XCTAssertNil(failed.acknowledgedAt)
+        XCTAssertNotNil(failed.nextAttemptAt)
+    }
+
+    func testAuthNotReadyLeavesQueuedMutationRetryableForLaterReplay() async throws {
+        let fixture = try makeFixture()
+        defer { tearDownFixture(fixture) }
+
+        let original = try await createQueuedPropertyMutation(fixture: fixture, name: "Auth Later Property")
+        let replayAppState = makeSuccessfulReplayAppState(fixture: fixture)
+        await configureReplayEnvironment(
+            replayAppState,
+            orgID: fixture.organizationID,
+            authenticated: false,
+            authenticationReady: false
+        )
+
+        let blocked = await replayAppState._debugPerformOfflineReplayForTests(source: "auth_not_ready_test")
+        let stillQueued = try XCTUnwrap(try fixture.localStore.fetchQueuedMutations().first)
+
+        XCTAssertFalse(blocked.didStart)
+        XCTAssertEqual(stillQueued.id, original.id)
+        XCTAssertEqual(stillQueued.status, .pending)
+        XCTAssertNil(stillQueued.acknowledgedAt)
+
+        await configureReplayEnvironment(replayAppState, orgID: fixture.organizationID)
+        let replayed = await replayAppState._debugPerformOfflineReplayForTests(source: "auth_ready_later_test")
+
+        XCTAssertTrue(replayed.didStart)
+        XCTAssertEqual(replayed.succeededCount, 1)
+        XCTAssertTrue(try fixture.localStore.fetchQueuedMutations().isEmpty)
+    }
+
+    func testValidPropertyAndSessionReplayRemainSuccessful() async throws {
+        let fixture = try makeFixture()
+        defer { tearDownFixture(fixture) }
+
+        _ = try await createQueuedPropertyMutation(fixture: fixture, name: "QA 9.4 Success Property")
+        _ = try await createQueuedSessionMutation(fixture: fixture)
+
+        let replayAppState = makeSuccessfulReplayAppState(fixture: fixture)
+        await configureReplayEnvironment(replayAppState, orgID: fixture.organizationID)
+
+        let summary = await replayAppState._debugPerformOfflineReplayForTests(source: "valid_current_property_success_test")
+
+        XCTAssertTrue(summary.didStart)
+        XCTAssertEqual(summary.attemptedCount, 2)
+        XCTAssertEqual(summary.succeededCount, 2)
+        XCTAssertEqual(summary.failedCount, 0)
+        XCTAssertTrue(try fixture.localStore.fetchQueuedMutations().isEmpty)
+    }
+
     func testDiagnosticsStoreReplaySuccessSummary() async throws {
         let fixture = try makeFixture()
         defer { tearDownFixture(fixture) }
@@ -709,10 +950,10 @@ final class Phase2C10OfflineReplayTests: XCTestCase {
         let fixture = try makeFixture()
         defer { tearDownFixture(fixture) }
 
-        var mutation = try await createQueuedPropertyMutation(fixture: fixture, name: "Retryable RLS")
+        var mutation = try await createQueuedPropertyMutation(fixture: fixture, name: "Retryable Network")
         mutation.status = .failed
         mutation.attemptCount = 2
-        mutation.lastError = "new row violates row-level security policy for table properties"
+        mutation.lastError = "The Internet connection appears to be offline."
         mutation.nextAttemptAt = Date().addingTimeInterval(-60)
         _ = try fixture.localStore.updateQueuedMutation(mutation)
 
