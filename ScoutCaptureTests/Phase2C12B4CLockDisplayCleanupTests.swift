@@ -843,6 +843,13 @@ final class Phase2C12B4CLockDisplayCleanupTests: XCTestCase {
         fixture.appState.selectProperty(id: fixture.property.id)
         let activeSession = try XCTUnwrap(fixture.appState.startSession(skipPropertyStatusPreflight: true))
         let deviceID = fixture.appState._debugCurrentDeviceIdentifierForTests()
+        seedPropertyStatus(
+            fixture: fixture,
+            status: .occupied,
+            activeSessionID: activeSession.id,
+            ownerDeviceID: deviceID,
+            heartbeatAt: Date(timeIntervalSinceNow: -31 * 60)
+        )
         let oldOccupiedAt = Date(timeIntervalSinceNow: -31 * 60)
         fixture.appState._debugSetRemotePropertySessionOccupancyOnlyForTests(
             propertyID: fixture.property.id,
@@ -859,6 +866,71 @@ final class Phase2C12B4CLockDisplayCleanupTests: XCTestCase {
         let renewedAt = try XCTUnwrap(parseISO8601(renewed.occupiedAt))
         XCTAssertGreaterThan(renewedAt, oldOccupiedAt)
         XCTAssertEqual(activeSession.propertyID, fixture.property.id)
+    }
+
+    func testHeartbeatSkipsBeforePropertyStatusClaimCompletes() async throws {
+        let fixture = try makeFixture()
+        defer { tearDownFixture(fixture) }
+
+        fixture.appState.selectProperty(id: fixture.property.id)
+        let activeSession = try XCTUnwrap(fixture.appState.startSession(skipPropertyStatusPreflight: true))
+        var heartbeatPersistCount = 0
+        fixture.appState._debugSetPropertySoftDeleteOverridesForTests(
+            occupancyPersist: { _, _ in
+                heartbeatPersistCount += 1
+                return true
+            }
+        )
+        seedPropertyStatus(
+            fixture: fixture,
+            status: .idle,
+            activeSessionID: nil,
+            ownerDeviceID: nil,
+            heartbeatAt: nil
+        )
+
+        await fixture.appState._debugRefreshActiveOccupancyHeartbeatForTests(
+            reason: "pre_claim_race_test",
+            force: true
+        )
+
+        XCTAssertEqual(heartbeatPersistCount, 0)
+        let remoteOccupancy = fixture.appState._debugReadRemotePropertySessionOccupancyForTests(propertyID: fixture.property.id)
+        XCTAssertNil(remoteOccupancy.occupiedAt)
+        XCTAssertEqual(activeSession.propertyID, fixture.property.id)
+    }
+
+    func testHeartbeatContinuesAfterOwnerOccupiedPropertyStatusClaim() async throws {
+        let fixture = try makeFixture()
+        defer { tearDownFixture(fixture) }
+
+        fixture.appState.selectProperty(id: fixture.property.id)
+        let activeSession = try XCTUnwrap(fixture.appState.startSession(skipPropertyStatusPreflight: true))
+        let deviceID = fixture.appState._debugCurrentDeviceIdentifierForTests()
+        var heartbeatPersistCount = 0
+        fixture.appState._debugSetPropertySoftDeleteOverridesForTests(
+            occupancyPersist: { _, _ in
+                heartbeatPersistCount += 1
+                return true
+            }
+        )
+        seedPropertyStatus(
+            fixture: fixture,
+            status: .occupied,
+            activeSessionID: activeSession.id,
+            ownerDeviceID: deviceID,
+            heartbeatAt: Date(timeIntervalSinceNow: -31 * 60)
+        )
+
+        await fixture.appState._debugRefreshActiveOccupancyHeartbeatForTests(
+            reason: "post_claim_test",
+            force: true
+        )
+
+        XCTAssertEqual(heartbeatPersistCount, 1)
+        let remoteOccupancy = fixture.appState._debugReadRemotePropertySessionOccupancyForTests(propertyID: fixture.property.id)
+        XCTAssertEqual(remoteOccupancy.occupiedByDeviceID, deviceID)
+        XCTAssertNotNil(remoteOccupancy.occupiedAt)
     }
 
     func testForegroundRecoveryReleasesStaleNonActiveOwnedOccupancy() async throws {

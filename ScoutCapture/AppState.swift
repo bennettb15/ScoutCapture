@@ -35272,6 +35272,12 @@ final class AppState: ObservableObject {
            now.timeIntervalSince(lastHeartbeatAt) < sessionOccupancyHeartbeatInterval {
             return
         }
+        guard propertyStatusAllowsOccupancyHeartbeat(
+            propertyID: context.session.propertyID,
+            sessionID: context.session.id
+        ) else {
+            return
+        }
 
         let desiredOccupancy = PropertySessionOccupancyState(
             occupiedByUserID: authenticatedSupabaseUser?.id,
@@ -35300,6 +35306,31 @@ final class AppState: ObservableObject {
             "persisted=\(didPersist) " +
             "occupiedAt=\(now.ISO8601Format())"
         )
+    }
+
+    @MainActor
+    private func propertyStatusAllowsOccupancyHeartbeat(
+        propertyID: UUID,
+        sessionID: UUID
+    ) -> Bool {
+        guard let record = propertyStatusByPropertyID[propertyID],
+              record.propertyID == propertyID,
+              Self.propertyStatusActorOwnedByCurrentActor(
+                record: record,
+                currentUserID: authenticatedSupabaseUser?.id,
+                currentDeviceID: currentDeviceIdentifier()
+              ) else {
+            return false
+        }
+
+        switch record.status {
+        case .occupied:
+            return record.activeSessionID == sessionID
+        case .draft:
+            return record.draftSessionID == sessionID
+        case .idle, .pendingExport, .exported:
+            return false
+        }
     }
 
     @MainActor
