@@ -374,6 +374,144 @@ final class Phase2C28AutomaticSnapshotMetadataRecallTests: XCTestCase {
         XCTAssertNil(fixture.appState._debugLocalDiagnosticsForTests().sessionSnapshotUpload.lastMediaRetrievalAt)
     }
 
+    func testGuidedPresentationRecoversRowsFromCurrentSessionMetadataAfterRemoteConvergence() async throws {
+        let fixture = try makeFixture()
+        _ = try fixture.deviceBStore.upsertSession(fixture.session)
+        try saveMetadata(
+            store: fixture.deviceBStore,
+            property: fixture.property,
+            session: fixture.session,
+            orgID: fixture.orgID,
+            shotID: fixture.shotID,
+            issueID: fixture.issueID,
+            guidedID: fixture.guidedID,
+            shotUpdatedAt: Date(timeIntervalSinceReferenceDate: 130),
+            issueLastSeenAt: Date(timeIntervalSinceReferenceDate: 130),
+            guidedShotCapturedAt: Date(timeIntervalSinceReferenceDate: 120),
+            note: "current remote metadata",
+            guidedTitle: "stale snapshot guided"
+        )
+        var metadata = try fixture.deviceBStore.loadSessionMetadata(
+            propertyID: fixture.property.id,
+            sessionID: fixture.session.id
+        )
+        metadata.guidedShots = []
+        try fixture.deviceBStore.saveSessionMetadataAtomically(
+            propertyID: fixture.property.id,
+            sessionID: fixture.session.id,
+            metadata: metadata
+        )
+
+        let recovered = ContentView.guidedShotsRecoveredFromCurrentSessionMetadata(
+            metadata,
+            session: fixture.session,
+            sessionFolderURL: fixture.deviceBStore.sessionFolderURL(
+                propertyID: fixture.property.id,
+                sessionID: fixture.session.id
+            )
+        )
+
+        XCTAssertEqual(recovered.map(\.id), [fixture.shotID])
+        XCTAssertEqual(recovered.first?.title, "A N Overview")
+        XCTAssertEqual(recovered.first?.shot?.id, fixture.shotID)
+        XCTAssertEqual(recovered.first?.shot?.note, "current remote metadata")
+    }
+
+    func testMissingGuidedOriginalSchedulesCurrentSessionOperationalMediaHydration() async throws {
+        let fixture = try makeFixture()
+        _ = try fixture.deviceBStore.upsertSession(fixture.session)
+        try saveMetadata(
+            store: fixture.deviceBStore,
+            property: fixture.property,
+            session: fixture.session,
+            orgID: fixture.orgID,
+            shotID: fixture.shotID,
+            issueID: fixture.issueID,
+            guidedID: fixture.guidedID,
+            shotUpdatedAt: Date(timeIntervalSinceReferenceDate: 130),
+            issueLastSeenAt: Date(timeIntervalSinceReferenceDate: 130),
+            guidedShotCapturedAt: Date(timeIntervalSinceReferenceDate: 120),
+            note: "missing current guided original",
+            guidedTitle: "North overview"
+        )
+        let metadata = try fixture.deviceBStore.loadSessionMetadata(
+            propertyID: fixture.property.id,
+            sessionID: fixture.session.id
+        )
+
+        let missingRequests = ContentView.currentGuidedOperationalHydrationRequests(
+            propertyID: fixture.property.id,
+            sessionID: fixture.session.id,
+            metadata: metadata,
+            localMediaExists: { _ in false }
+        )
+        let existingRequests = ContentView.currentGuidedOperationalHydrationRequests(
+            propertyID: fixture.property.id,
+            sessionID: fixture.session.id,
+            metadata: metadata,
+            localMediaExists: { _ in true }
+        )
+
+        XCTAssertEqual(missingRequests.count, 1)
+        XCTAssertEqual(missingRequests.first?.propertyID, fixture.property.id)
+        XCTAssertEqual(missingRequests.first?.sessionID, fixture.session.id)
+        XCTAssertEqual(missingRequests.first?.shotID, fixture.shotID)
+        XCTAssertEqual(missingRequests.first?.relativePathOverride, "Originals/missing-original.jpg")
+        XCTAssertTrue(existingRequests.isEmpty)
+    }
+
+    func testGuidedRecoveryDoesNotStayBlankWhenTestMetadataIsCurrentAndRelaunches() async throws {
+        let fixture = try makeFixture()
+        _ = try fixture.deviceBStore.upsertSession(fixture.session)
+        try saveMetadata(
+            store: fixture.deviceBStore,
+            property: fixture.property,
+            session: fixture.session,
+            orgID: fixture.orgID,
+            shotID: fixture.shotID,
+            issueID: fixture.issueID,
+            guidedID: fixture.guidedID,
+            shotUpdatedAt: Date(timeIntervalSinceReferenceDate: 130),
+            issueLastSeenAt: Date(timeIntervalSinceReferenceDate: 130),
+            guidedShotCapturedAt: Date(timeIntervalSinceReferenceDate: 120),
+            note: "relaunch convergence",
+            guidedTitle: "North overview"
+        )
+        var metadata = try fixture.deviceBStore.loadSessionMetadata(
+            propertyID: fixture.property.id,
+            sessionID: fixture.session.id
+        )
+        metadata.guidedShots = []
+        try fixture.deviceBStore.saveSessionMetadataAtomically(
+            propertyID: fixture.property.id,
+            sessionID: fixture.session.id,
+            metadata: metadata
+        )
+        let sessionFolder = fixture.deviceBStore.sessionFolderURL(
+            propertyID: fixture.property.id,
+            sessionID: fixture.session.id
+        )
+
+        let firstRefresh = ContentView.guidedShotsRecoveredFromCurrentSessionMetadata(
+            metadata,
+            session: fixture.session,
+            sessionFolderURL: sessionFolder
+        )
+        let relaunchMetadata = try fixture.deviceBStore.loadSessionMetadata(
+            propertyID: fixture.property.id,
+            sessionID: fixture.session.id
+        )
+        let relaunchRefresh = ContentView.guidedShotsRecoveredFromCurrentSessionMetadata(
+            relaunchMetadata,
+            session: fixture.session,
+            sessionFolderURL: sessionFolder
+        )
+
+        XCTAssertFalse(firstRefresh.isEmpty)
+        XCTAssertEqual(relaunchRefresh.map(\.id), firstRefresh.map(\.id))
+        XCTAssertEqual(relaunchRefresh.first?.shot?.imageLocalIdentifier, firstRefresh.first?.shot?.imageLocalIdentifier)
+    }
+
     func testMissingSnapshotDoesNotCorruptLocalProperty() async throws {
         let fixture = try makeFixture(rows: { _ in [] })
 

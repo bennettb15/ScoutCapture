@@ -603,6 +603,9 @@ final class AppState: ObservableObject {
     typealias SessionSnapshotStorageDownloadOverride = (String, String) async throws -> Data
     typealias SessionSnapshotMediaDownloadOverride = (String, String) async throws -> Data
     typealias CanonicalReadRemoteSnapshotFetchOverride = (UUID, UUID?, UUID?) async throws -> CanonicalReadRemoteSnapshot
+#if DEBUG
+    typealias PropertyOpenFreshnessRecheckOverride = @MainActor (UUID) async -> Void
+#endif
 
     enum SessionSnapshotKind: String, Codable, CaseIterable, Equatable {
         case draft
@@ -6846,6 +6849,7 @@ final class AppState: ObservableObject {
     @Published private(set) var pendingOrganizationInvitations: [PendingOrganizationInvitation] = []
     @Published private(set) var localDiagnostics = LocalDiagnosticsState()
     @Published private(set) var propertyOpenFreshnessByPropertyID: [UUID: PropertyOpenFreshnessSnapshot] = [:]
+    private var propertyOpenFreshnessHydrationRecheckPropertyIDs: Set<UUID> = []
 
     @Published var selectedPropertyID: UUID? {
         didSet {
@@ -7506,6 +7510,7 @@ final class AppState: ObservableObject {
     private var sessionRestoreRPCOverride: SessionRestoreRPCOverride?
     private var sessionRestoreRefreshOverride: SessionRestoreRefreshOverride?
     private var mediaRecoveryUploadOverride: MediaRecoveryUploadOverride?
+    private var propertyOpenFreshnessRecheckOverride: PropertyOpenFreshnessRecheckOverride?
     private var mediaRecoveryRemoteSnapshotForTests: RemoteDivergenceSnapshot?
     private var sessionCoordinationDebugRemoteRecords: [UUID: RemoteSessionCoordinationRecord] = [:]
 #endif
@@ -8337,6 +8342,23 @@ final class AppState: ObservableObject {
 
     func _debugRefreshPropertiesLocallyForTests() {
         performLocalPropertyRefreshFallback()
+    }
+
+    @MainActor
+    func _debugSetPropertyOpenFreshnessSnapshotForTests(_ snapshot: PropertyOpenFreshnessSnapshot) {
+        propertyOpenFreshnessByPropertyID[snapshot.propertyID] = snapshot
+    }
+
+    @MainActor
+    func _debugSetPropertyOpenFreshnessRecheckOverrideForTests(
+        _ override: PropertyOpenFreshnessRecheckOverride?
+    ) {
+        propertyOpenFreshnessRecheckOverride = override
+    }
+
+    @MainActor
+    func _debugNotifyOperationalMediaHydrationSucceededForTests(propertyID: UUID) async {
+        await triggerPropertyOpenFreshnessRecheckAfterOperationalMediaHydration(propertyID: propertyID)
     }
 
     @MainActor
@@ -32391,6 +32413,9 @@ final class AppState: ObservableObject {
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
                 NotificationCenter.default.post(name: .scoutClearLocalUICache, object: nil)
+                Task { @MainActor [weak self] in
+                    await self?.triggerPropertyOpenFreshnessRecheckAfterOperationalMediaHydration(propertyID: propertyID)
+                }
             }
 
             print(
@@ -42811,6 +42836,48 @@ final class AppState: ObservableObject {
 
     func propertyOpenFreshness(for propertyID: UUID) -> PropertyOpenFreshnessSnapshot? {
         propertyOpenFreshnessByPropertyID[propertyID]
+    }
+
+    static func shouldRecheckPropertyOpenFreshnessAfterOperationalMediaHydration(
+        propertyID: UUID,
+        selectedPropertyID: UUID?,
+        currentSessionPropertyID: UUID?,
+        snapshot: PropertyOpenFreshnessSnapshot?
+    ) -> Bool {
+        guard selectedPropertyID == propertyID || currentSessionPropertyID == propertyID else {
+            return false
+        }
+        guard snapshot?.status == .remoteUpdatesAvailable else {
+            return false
+        }
+        let reason = snapshot?.reason
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased() ?? ""
+        return reason == "reference_metadata_pending" || reason == "reference_media_pending"
+    }
+
+    @MainActor
+    private func triggerPropertyOpenFreshnessRecheckAfterOperationalMediaHydration(propertyID: UUID) async {
+        guard Self.shouldRecheckPropertyOpenFreshnessAfterOperationalMediaHydration(
+            propertyID: propertyID,
+            selectedPropertyID: selectedPropertyID,
+            currentSessionPropertyID: currentSession?.propertyID,
+            snapshot: propertyOpenFreshnessByPropertyID[propertyID]
+        ) else {
+            return
+        }
+        guard !propertyOpenFreshnessHydrationRecheckPropertyIDs.contains(propertyID) else { return }
+        propertyOpenFreshnessHydrationRecheckPropertyIDs.insert(propertyID)
+        defer { propertyOpenFreshnessHydrationRecheckPropertyIDs.remove(propertyID) }
+
+#if DEBUG
+        if let propertyOpenFreshnessRecheckOverride {
+            await propertyOpenFreshnessRecheckOverride(propertyID)
+            return
+        }
+#endif
+
+        beginPropertyOpenFreshnessCheck(propertyID: propertyID)
     }
 
     func beginPropertyOpenFreshnessCheck(propertyID: UUID) {

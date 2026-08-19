@@ -25,6 +25,36 @@ final class Phase2C19CPropertyOpenFreshnessTests: XCTestCase {
         )
     }
 
+    private func freshnessSnapshot(
+        propertyID: UUID,
+        status: AppState.PropertyOpenFreshnessStatus,
+        reason: String
+    ) -> AppState.PropertyOpenFreshnessSnapshot {
+        AppState.PropertyOpenFreshnessSnapshot(
+            propertyID: propertyID,
+            status: status,
+            checkedAt: Date(timeIntervalSinceReferenceDate: 3_000),
+            localUpdatedAt: older,
+            remoteUpdatedAt: older,
+            remoteRevision: 2,
+            hasUnsyncedLocalPropertyWork: false,
+            reason: reason
+        )
+    }
+
+    private func makeFreshnessHUDAppState() throws -> AppState {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ScoutCapture-FreshnessHUD-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let defaults = UserDefaults(suiteName: "ScoutCapture-FreshnessHUD-\(UUID().uuidString)") ?? .standard
+        return AppState(
+            localStore: LocalStore(testStorageRootURL: root),
+            userDefaults: defaults,
+            environment: [:],
+            disableCloudBackupForTests: true
+        )
+    }
+
     func testRemoteOlderOrEqualClassifiesCurrent() {
         let olderResult = AppState.evaluatePropertyOpenFreshness(
             localPropertyID: propertyID,
@@ -179,5 +209,87 @@ final class Phase2C19CPropertyOpenFreshnessTests: XCTestCase {
         )
 
         XCTAssertEqual(queued, before)
+    }
+
+    @MainActor
+    func testOperationalMediaHydrationSuccessRechecksReferencePendingFreshnessAndConvergesCurrent() async throws {
+        let appState = try makeFreshnessHUDAppState()
+        let entered = expectation(description: "scoped freshness recheck entered")
+        var releaseRecheck: CheckedContinuation<Void, Never>?
+        var recheckedPropertyIDs: [UUID] = []
+
+        appState.selectedPropertyID = propertyID
+        appState._debugSetPropertyOpenFreshnessSnapshotForTests(
+            freshnessSnapshot(
+                propertyID: propertyID,
+                status: .remoteUpdatesAvailable,
+                reason: "reference_media_pending"
+            )
+        )
+        appState._debugSetPropertyOpenFreshnessRecheckOverrideForTests { propertyID in
+            recheckedPropertyIDs.append(propertyID)
+            entered.fulfill()
+            await withCheckedContinuation { continuation in
+                releaseRecheck = continuation
+            }
+            appState._debugSetPropertyOpenFreshnessSnapshotForTests(
+                self.freshnessSnapshot(
+                    propertyID: propertyID,
+                    status: .current,
+                    reason: "reference_metadata_current"
+                )
+            )
+        }
+
+        let firstSignal = Task { @MainActor in
+            await appState._debugNotifyOperationalMediaHydrationSucceededForTests(propertyID: propertyID)
+        }
+        await fulfillment(of: [entered], timeout: 5.0)
+        await appState._debugNotifyOperationalMediaHydrationSucceededForTests(propertyID: propertyID)
+        releaseRecheck?.resume()
+        await firstSignal.value
+
+        XCTAssertEqual(recheckedPropertyIDs, [propertyID])
+        XCTAssertEqual(appState.propertyOpenFreshness(for: propertyID)?.status, .current)
+        XCTAssertEqual(appState.propertyOpenFreshness(for: propertyID)?.reason, "reference_metadata_current")
+
+        await appState._debugNotifyOperationalMediaHydrationSucceededForTests(propertyID: propertyID)
+        try await Task.sleep(nanoseconds: 50_000_000)
+
+        XCTAssertEqual(recheckedPropertyIDs, [propertyID])
+    }
+
+    @MainActor
+    func testOperationalMediaHydrationSuccessDoesNotRecheckUnrelatedOrAlreadyCurrentProperties() async throws {
+        let appState = try makeFreshnessHUDAppState()
+        let unrelatedPropertyID = UUID()
+        var recheckedPropertyIDs: [UUID] = []
+
+        appState.selectedPropertyID = propertyID
+        appState._debugSetPropertyOpenFreshnessSnapshotForTests(
+            freshnessSnapshot(
+                propertyID: unrelatedPropertyID,
+                status: .remoteUpdatesAvailable,
+                reason: "reference_media_pending"
+            )
+        )
+        appState._debugSetPropertyOpenFreshnessSnapshotForTests(
+            freshnessSnapshot(
+                propertyID: propertyID,
+                status: .current,
+                reason: "reference_metadata_current"
+            )
+        )
+        appState._debugSetPropertyOpenFreshnessRecheckOverrideForTests { propertyID in
+            recheckedPropertyIDs.append(propertyID)
+        }
+
+        await appState._debugNotifyOperationalMediaHydrationSucceededForTests(propertyID: unrelatedPropertyID)
+        await appState._debugNotifyOperationalMediaHydrationSucceededForTests(propertyID: propertyID)
+        try await Task.sleep(nanoseconds: 50_000_000)
+
+        XCTAssertTrue(recheckedPropertyIDs.isEmpty)
+        XCTAssertEqual(appState.propertyOpenFreshness(for: unrelatedPropertyID)?.status, .remoteUpdatesAvailable)
+        XCTAssertEqual(appState.propertyOpenFreshness(for: propertyID)?.status, .current)
     }
 }
