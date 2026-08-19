@@ -916,6 +916,7 @@ struct SessionHubView: View {
             .sheet(isPresented: $showSettingsSheet) {
                 HubSettingsSheet(
                     showArchivedProperties: $showArchivedProperties,
+                    onOpenCloudBackup: { showCloudBackupSheet = true },
                     onOpenDebugTools: { showDebugTools = true }
                 )
             }
@@ -1513,19 +1514,6 @@ struct SessionHubView: View {
                     HStack {
                         Spacer(minLength: 0)
                         Button {
-                            showCloudBackupSheet = true
-                        } label: {
-                            cloudStatusIcon
-                                .frame(width: 42, height: 42)
-                                .background(buttonFill)
-                                .clipShape(Circle())
-                                .overlay(
-                                    Circle()
-                                        .stroke(buttonStroke, lineWidth: 1)
-                                )
-                        }
-                        .buttonStyle(.plain)
-                        Button {
                             showSettingsSheet = true
                         } label: {
                             Image(systemName: "gearshape")
@@ -1850,6 +1838,7 @@ struct SessionHubView: View {
 
         @EnvironmentObject private var appState: AppState
         @Binding var showArchivedProperties: Bool
+        let onOpenCloudBackup: (() -> Void)?
         let onOpenDebugTools: (() -> Void)?
         @Environment(\.dismiss) private var dismiss
         @Environment(\.colorScheme) private var colorScheme
@@ -1912,6 +1901,15 @@ struct SessionHubView: View {
                         Section("View") {
                             Toggle("Show Archived", isOn: $showArchivedProperties)
                                 .tint(.blue)
+                        }
+
+                        Section("Backup") {
+                            Button("iCloud Backup") {
+                                dismiss()
+                                DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                                    onOpenCloudBackup?()
+                                }
+                            }
                         }
 
                         if let activeOrganizationID = appState.activeOrganizationID {
