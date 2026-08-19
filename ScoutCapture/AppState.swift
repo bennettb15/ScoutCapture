@@ -289,7 +289,8 @@ struct BackendFeatureFlags {
         bundle: Bundle = .main,
         userDefaults: UserDefaults = .standard,
         environment: [String: String] = ProcessInfo.processInfo.environment,
-        allowSessionSnapshotEnvironmentOverride: Bool = false
+        allowSessionSnapshotEnvironmentOverride: Bool = false,
+        allowSessionSnapshotKillSwitchEnvironmentOverride: Bool = false
     ) -> BackendFeatureFlags {
         BackendFeatureFlags(
             supabaseEnabled: Self.boolValue(for: "supabase_enabled", bundle: bundle, userDefaults: userDefaults),
@@ -317,9 +318,11 @@ struct BackendFeatureFlags {
                 userDefaults: userDefaults,
                 environment: environment
             ),
-            sessionSnapshotAutoUploadKillSwitch: Self.boolEnvironmentValue(
-                for: "SCOUTCAPTURE_SESSION_SNAPSHOT_AUTO_UPLOAD_KILL_SWITCH",
-                environment: environment
+            sessionSnapshotAutoUploadKillSwitch: Self.sessionSnapshotAutoUploadKillSwitchValue(
+                bundle: bundle,
+                userDefaults: userDefaults,
+                environment: environment,
+                allowEnvironmentOverride: allowSessionSnapshotKillSwitchEnvironmentOverride
             ),
             sessionSnapshotAutoUploadOrgAllowlist: Self.uuidAllowlistValue(
                 for: "session_snapshot_auto_upload_org_allowlist",
@@ -391,6 +394,35 @@ struct BackendFeatureFlags {
         }
 
         switch rawOverride.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "1", "true", "yes", "on":
+            return true
+        case "0", "false", "no", "off":
+            return false
+        default:
+            return configuredValue
+        }
+    }
+
+    private static func sessionSnapshotAutoUploadKillSwitchValue(
+        bundle: Bundle,
+        userDefaults: UserDefaults,
+        environment: [String: String],
+        allowEnvironmentOverride: Bool
+    ) -> Bool {
+        let configuredValue = Self.boolValue(
+            for: "session_snapshot_auto_upload_kill_switch",
+            bundle: bundle,
+            userDefaults: userDefaults
+        )
+
+        guard allowEnvironmentOverride else { return configuredValue }
+        guard let rawOverride = environment["SCOUTCAPTURE_SESSION_SNAPSHOT_AUTO_UPLOAD_KILL_SWITCH"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased() else {
+            return configuredValue
+        }
+
+        switch rawOverride {
         case "1", "true", "yes", "on":
             return true
         case "0", "false", "no", "off":
@@ -7731,6 +7763,7 @@ final class AppState: ObservableObject {
         localStore: LocalStore? = nil,
         userDefaults: UserDefaults = .standard,
         environment: [String: String] = ProcessInfo.processInfo.environment,
+        bundle: Bundle = .main,
         propertyShadowWriteOverride: PropertyShadowWriteOverride? = nil,
         propertyRemoteInsertOverride: PropertyRemoteInsertOverride? = nil,
         propertyStatusBootstrapOverride: PropertyStatusBootstrapOverride? = nil,
@@ -7779,16 +7812,18 @@ final class AppState: ObservableObject {
         self.captureProfileRemotePropertyIDsFetchOverride = captureProfileRemotePropertyIDsFetchOverride
         self.captureProfileBackfillEnsureOverride = captureProfileBackfillEnsureOverride
         self.captureProfileBackfillWriteOverride = captureProfileBackfillWriteOverride
-        let supabaseConfiguration = AppState.loadSupabaseConfiguration(environment: environment)
+        let supabaseConfiguration = AppState.loadSupabaseConfiguration(bundle: bundle, environment: environment)
         self.supabaseConfiguration = supabaseConfiguration
         self.canonicalReadCandidateConfiguration = AppState.loadCanonicalReadCandidateConfiguration(
             userDefaults: userDefaults,
             environment: environment
         )
         self.backendFeatureFlags = BackendFeatureFlags.load(
+            bundle: bundle,
             userDefaults: userDefaults,
             environment: environment,
-            allowSessionSnapshotEnvironmentOverride: supabaseConfiguration.isSessionSnapshotShadowWriteOverrideAllowed
+            allowSessionSnapshotEnvironmentOverride: supabaseConfiguration.isSessionSnapshotShadowWriteOverrideAllowed,
+            allowSessionSnapshotKillSwitchEnvironmentOverride: AppStateTestEnvironment.isRunningUnderXCTest
         )
 
         if let rawID = userDefaults.string(forKey: selectedPropertyDefaultsKey) {
@@ -35370,7 +35405,9 @@ final class AppState: ObservableObject {
                     occupiedByDeviceID: nil,
                     occupiedAt: nil
                 )
+                #if DEBUG
                 propertySessionOccupancyDebugRemoteRecords.removeValue(forKey: propertyID)
+                #endif
                 print(
                     "[SessionCoordinationEval] event=occupancy_ignored " +
                     "reason=finalization_newer_than_occupancy " +
@@ -35385,7 +35422,9 @@ final class AppState: ObservableObject {
                     occupiedByDeviceID: nil,
                     occupiedAt: nil
                 )
+                #if DEBUG
                 propertySessionOccupancyDebugRemoteRecords.removeValue(forKey: propertyID)
+                #endif
             } else {
             let isOwnedByCurrentActor =
                 propertyOccupancy.occupiedByUserID == currentUserID &&
@@ -41548,7 +41587,11 @@ final class AppState: ObservableObject {
         let localSession = sessions(for: propertyID).first(where: { $0.id == sessionID }) ??
             allSessionIndexByProperty[propertyID]?.first(where: { $0.id == sessionID }) ??
             (currentSession?.id == sessionID ? currentSession : nil)
+        #if DEBUG
         let remote = sessionCoordinationDebugRemoteRecords[sessionID]
+        #else
+        let remote: RemoteSessionCoordinationRecord? = nil
+        #endif
         let state = sessionCoordinationStateBySessionID[sessionID]
         let remoteLockedAt = remote?.lockedAt.flatMap(parseSupabaseDateString)
         let effectiveLockedByUserID = remote?.lockedByUserID ?? state?.lockedByUserID

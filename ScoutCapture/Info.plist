@@ -13,9 +13,17 @@
 	<key>media_supabase_upload_enabled</key>
 	<true/>
 	<key>session_snapshot_auto_upload_enabled</key>
-	<false/>
+	<string>$(SCOUTCAPTURE_SESSION_SNAPSHOT_AUTO_UPLOAD_ENABLED)</string>
 	<key>session_snapshot_production_auto_upload_target_enabled</key>
-	<false/>
+	<string>$(SCOUTCAPTURE_SESSION_SNAPSHOT_PRODUCTION_AUTO_UPLOAD_TARGET_ENABLED)</string>
+	<key>session_snapshot_shadow_write_enabled</key>
+	<string>$(SCOUTCAPTURE_SESSION_SNAPSHOT_SHADOW_WRITE_ENABLED)</string>
+	<key>session_snapshot_auto_upload_org_allowlist</key>
+	<string>$(SCOUTCAPTURE_SESSION_SNAPSHOT_AUTO_UPLOAD_ORG_ALLOWLIST)</string>
+	<key>session_snapshot_auto_upload_property_allowlist</key>
+	<string>$(SCOUTCAPTURE_SESSION_SNAPSHOT_AUTO_UPLOAD_PROPERTY_ALLOWLIST)</string>
+	<key>session_snapshot_auto_upload_kill_switch</key>
+	<string>$(SCOUTCAPTURE_SESSION_SNAPSHOT_AUTO_UPLOAD_KILL_SWITCH)</string>
 	<key>session_coordination_enabled</key>
 	<true/>
 	<key>shadow_write_enabled</key>

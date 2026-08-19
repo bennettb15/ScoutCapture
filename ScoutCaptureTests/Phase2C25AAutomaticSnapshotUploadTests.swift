@@ -1,6 +1,19 @@
 import XCTest
 @testable import ScoutCapture
 
+private final class Phase2C25AReleaseConfigBundle: Bundle {
+    private let values: [String: Any]
+
+    init(values: [String: Any]) {
+        self.values = values
+        super.init()
+    }
+
+    override func object(forInfoDictionaryKey key: String) -> Any? {
+        values[key]
+    }
+}
+
 @MainActor
 final class Phase2C25AAutomaticSnapshotUploadTests: XCTestCase {
     private func makeTempStorageRoot() throws -> URL {
@@ -28,6 +41,39 @@ final class Phase2C25AAutomaticSnapshotUploadTests: XCTestCase {
             defaults.set(propertyAllowlist.map(\.uuidString).joined(separator: ","), forKey: "session_snapshot_auto_upload_property_allowlist")
         }
         return defaults
+    }
+
+    private func makeEmptyDefaults() -> UserDefaults {
+        let suiteName = "ScoutCapture-2C25A-ReleaseConfig-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName) ?? .standard
+        defaults.removePersistentDomain(forName: suiteName)
+        return defaults
+    }
+
+    private func productionReleaseConfigBundle(
+        shadowWriteEnabled: Bool = true,
+        autoUploadEnabled: Bool = true,
+        productionAutoUploadTargetEnabled: Bool = true,
+        killSwitchActive: Bool = false,
+        orgAllowlist: [UUID],
+        propertyAllowlist: [UUID] = []
+    ) -> Bundle {
+        Phase2C25AReleaseConfigBundle(values: [
+            "SUPABASE_URL": "https://chlvazmtucoszicehtnm.supabase.co",
+            "SUPABASE_ANON_KEY": "production-validation-anon-key",
+            "media_supabase_upload_enabled": true,
+            "session_snapshot_auto_upload_enabled": autoUploadEnabled ? "YES" : "NO",
+            "session_snapshot_production_auto_upload_target_enabled": productionAutoUploadTargetEnabled ? "YES" : "NO",
+            "session_snapshot_shadow_write_enabled": shadowWriteEnabled ? "YES" : "NO",
+            "session_snapshot_auto_upload_kill_switch": killSwitchActive ? "YES" : "NO",
+            "session_snapshot_auto_upload_org_allowlist": orgAllowlist.map(\.uuidString).joined(separator: ","),
+            "session_snapshot_auto_upload_property_allowlist": propertyAllowlist.map(\.uuidString).joined(separator: ","),
+            "session_coordination_enabled": true,
+            "shadow_write_enabled": true,
+            "supabase_enabled": true,
+            "supabase_read_enabled": false,
+            "supabase_property_read_enabled": true
+        ])
     }
 
     private func localEnvironment(_ extras: [String: String] = [:]) -> [String: String] {
@@ -1402,6 +1448,45 @@ final class Phase2C25AAutomaticSnapshotUploadTests: XCTestCase {
         XCTAssertFalse(appState.backendFeatureFlags.supabaseReadEnabled)
     }
 
+    func testProductionReleaseConfigCustomerOrgAutoUploadAllowedWithoutSchemeDefaultsPropertyAllowlistOrBroadReads() async throws {
+        var insertCount = 0
+        let fixture = try makeFixture(autoUploadEnabled: false)
+        let defaults = makeEmptyDefaults()
+        let appState = AppState(
+            localStore: fixture.store,
+            userDefaults: defaults,
+            environment: [:],
+            bundle: productionReleaseConfigBundle(orgAllowlist: [fixture.orgID]),
+            sessionSnapshotStorageUploadOverride: { _ in },
+            sessionSnapshotRowInsertOverride: { _ in insertCount += 1 },
+            disableCloudBackupForTests: true
+        )
+        configureAuthenticatedContext(appState, orgID: fixture.orgID)
+
+        let result = await appState.attemptAutomaticSessionSnapshotUploadForCompletedSealedCheckpoint(
+            session: fixture.session,
+            triggerSource: "sealCurrentSessionForExportLater"
+        )
+
+        XCTAssertEqual(result?.outcome, .succeeded)
+        XCTAssertEqual(insertCount, 1)
+        XCTAssertTrue(appState.backendFeatureFlags.sessionSnapshotAutoUploadEnabled)
+        XCTAssertTrue(appState.backendFeatureFlags.sessionSnapshotProductionAutoUploadTargetEnabled)
+        XCTAssertTrue(appState.backendFeatureFlags.sessionSnapshotShadowWriteEnabled)
+        XCTAssertFalse(appState.backendFeatureFlags.sessionSnapshotAutoUploadKillSwitch)
+        XCTAssertTrue(appState.backendFeatureFlags.sessionSnapshotAutoUploadOrgAllowlist.contains(fixture.orgID))
+        XCTAssertTrue(appState.backendFeatureFlags.sessionSnapshotAutoUploadPropertyAllowlist.isEmpty)
+        XCTAssertEqual(appState.localDiagnostics.sessionSnapshotUpload.lastAutoUploadOutcome, "succeeded")
+        XCTAssertEqual(appState.sessionSnapshotCloudStatus(for: fixture.session)?.state, .uploaded)
+        XCTAssertFalse(appState.backendFeatureFlags.supabaseReadEnabled)
+        XCTAssertFalse(appState.localDiagnostics.sessionSnapshotUpload.lastCanonicalReadCandidateProductionWideEnabled)
+        XCTAssertFalse(appState.localDiagnostics.sessionSnapshotUpload.lastCanonicalCandidateActivationAllowed)
+        XCTAssertEqual(appState.localDiagnostics.sessionSnapshotUpload.lastCanonicalCandidateActivationActiveSource, "local")
+        XCTAssertNil(defaults.object(forKey: "session_snapshot_auto_upload_enabled"))
+        XCTAssertNil(defaults.object(forKey: "session_snapshot_auto_upload_org_allowlist"))
+        XCTAssertNil(defaults.object(forKey: "session_snapshot_auto_upload_property_allowlist"))
+    }
+
     func testFailedSnapshotUploadPersistsRetryWorkAndReloadRestoresIt() async throws {
         let fixture = try makeFixture(autoUploadEnabled: false)
         let appState = AppState(
@@ -1653,6 +1738,32 @@ final class Phase2C25AAutomaticSnapshotUploadTests: XCTestCase {
         XCTAssertEqual(appState.localDiagnostics.sessionSnapshotUpload.autoUploadSkippedReason, "snapshot_target_not_approved")
     }
 
+    func testProductionReleaseConfigNonEnabledOrgIsBlocked() async throws {
+        var attemptedStorageUpload = false
+        let fixture = try makeFixture(autoUploadEnabled: false)
+        let appState = AppState(
+            localStore: fixture.store,
+            userDefaults: makeEmptyDefaults(),
+            environment: [:],
+            bundle: productionReleaseConfigBundle(orgAllowlist: [UUID()]),
+            sessionSnapshotStorageUploadOverride: { _ in attemptedStorageUpload = true },
+            sessionSnapshotRowInsertOverride: { _ in },
+            disableCloudBackupForTests: true
+        )
+        configureAuthenticatedContext(appState, orgID: fixture.orgID)
+
+        let result = await appState.attemptAutomaticSessionSnapshotUploadForCompletedSealedCheckpoint(
+            session: fixture.session,
+            triggerSource: "sealCurrentSessionForExportLater"
+        )
+
+        XCTAssertNil(result)
+        XCTAssertFalse(attemptedStorageUpload)
+        XCTAssertEqual(appState.localDiagnostics.sessionSnapshotUpload.autoUploadSkippedReason, "allowlist_no_match")
+        XCTAssertTrue(appState.backendFeatureFlags.sessionSnapshotAutoUploadPropertyAllowlist.isEmpty)
+        XCTAssertFalse(appState.backendFeatureFlags.supabaseReadEnabled)
+    }
+
     func testProductionCustomerOrgAutoUploadAllowedAndPersistsQueuedStatus() async throws {
         var insertCount = 0
         let fixture = try makeFixture(autoUploadEnabled: false)
@@ -1743,6 +1854,49 @@ final class Phase2C25AAutomaticSnapshotUploadTests: XCTestCase {
         XCTAssertEqual(appState.localDiagnostics.sessionSnapshotUpload.autoUploadSkippedReason, "kill_switch_active")
     }
 
+    func testProductionReleaseConfigKillSwitchBlocksAllowedOrg() async throws {
+        var attemptedStorageUpload = false
+        let fixture = try makeFixture(autoUploadEnabled: false)
+        let appState = AppState(
+            localStore: fixture.store,
+            userDefaults: makeEmptyDefaults(),
+            environment: [:],
+            bundle: productionReleaseConfigBundle(killSwitchActive: true, orgAllowlist: [fixture.orgID]),
+            sessionSnapshotStorageUploadOverride: { _ in attemptedStorageUpload = true },
+            sessionSnapshotRowInsertOverride: { _ in },
+            disableCloudBackupForTests: true
+        )
+        configureAuthenticatedContext(appState, orgID: fixture.orgID)
+
+        let result = await appState.attemptAutomaticSessionSnapshotUploadForCompletedSealedCheckpoint(
+            session: fixture.session,
+            triggerSource: "sealCurrentSessionForExportLater"
+        )
+
+        XCTAssertNil(result)
+        XCTAssertFalse(attemptedStorageUpload)
+        XCTAssertEqual(appState.localDiagnostics.sessionSnapshotUpload.autoUploadSkippedReason, "kill_switch_active")
+        XCTAssertFalse(appState.backendFeatureFlags.supabaseReadEnabled)
+    }
+
+    func testProductionReleaseConfigIgnoresSchemeKillSwitchEnvironmentUnlessExplicitlyAllowed() {
+        let orgID = UUID()
+        let flags = BackendFeatureFlags.load(
+            bundle: productionReleaseConfigBundle(orgAllowlist: [orgID]),
+            userDefaults: makeEmptyDefaults(),
+            environment: ["SCOUTCAPTURE_SESSION_SNAPSHOT_AUTO_UPLOAD_KILL_SWITCH": "true"],
+            allowSessionSnapshotKillSwitchEnvironmentOverride: false
+        )
+
+        XCTAssertFalse(flags.sessionSnapshotAutoUploadKillSwitch)
+        XCTAssertTrue(flags.sessionSnapshotAutoUploadEnabled)
+        XCTAssertTrue(flags.sessionSnapshotProductionAutoUploadTargetEnabled)
+        XCTAssertTrue(flags.sessionSnapshotShadowWriteEnabled)
+        XCTAssertTrue(flags.sessionSnapshotAutoUploadOrgAllowlist.contains(orgID))
+        XCTAssertTrue(flags.sessionSnapshotAutoUploadPropertyAllowlist.isEmpty)
+        XCTAssertFalse(flags.supabaseReadEnabled)
+    }
+
     func testProductionAutoUploadFeatureDisabledBlocksAllowedOrg() async throws {
         var attemptedStorageUpload = false
         let fixture = try makeFixture(autoUploadEnabled: false)
@@ -1795,6 +1949,31 @@ final class Phase2C25AAutomaticSnapshotUploadTests: XCTestCase {
         XCTAssertNil(result)
         XCTAssertFalse(attemptedStorageUpload)
         XCTAssertEqual(appState.localDiagnostics.sessionSnapshotUpload.autoUploadSkippedReason, "active_org_required")
+    }
+
+    func testProductionReleaseConfigAuthOrgMismatchBlocksAllowedOrg() async throws {
+        var attemptedStorageUpload = false
+        let fixture = try makeFixture(autoUploadEnabled: false)
+        let appState = AppState(
+            localStore: fixture.store,
+            userDefaults: makeEmptyDefaults(),
+            environment: [:],
+            bundle: productionReleaseConfigBundle(orgAllowlist: [fixture.orgID]),
+            sessionSnapshotStorageUploadOverride: { _ in attemptedStorageUpload = true },
+            sessionSnapshotRowInsertOverride: { _ in },
+            disableCloudBackupForTests: true
+        )
+        configureAuthenticatedContext(appState, orgID: UUID())
+
+        let result = await appState.attemptAutomaticSessionSnapshotUploadForCompletedSealedCheckpoint(
+            session: fixture.session,
+            triggerSource: "sealCurrentSessionForExportLater"
+        )
+
+        XCTAssertNil(result)
+        XCTAssertFalse(attemptedStorageUpload)
+        XCTAssertEqual(appState.localDiagnostics.sessionSnapshotUpload.autoUploadSkippedReason, "active_org_required")
+        XCTAssertFalse(appState.backendFeatureFlags.supabaseReadEnabled)
     }
 
     func testProductionAutoUploadShadowWriteDisabledBlocksAllowedOrg() async throws {
