@@ -43019,7 +43019,15 @@ final class AppState: ObservableObject {
 
     func organizationContacts(for organizationID: UUID?) -> [OrganizationContact] {
         guard canAccessOrganization(organizationID), let organizationID else { return [] }
-        return organizations.first(where: { $0.id == organizationID })?.contacts ?? []
+        if let contacts = organizations.first(where: { $0.id == organizationID })?.contacts,
+           !contacts.isEmpty {
+            return contacts
+        }
+        let organizationName = organizationSelectionOptions.first(where: { $0.id == organizationID })?.name
+        return (try? localStore.organizationContacts(
+            organizationID: organizationID,
+            organizationName: organizationName
+        )) ?? []
     }
 
     @discardableResult
@@ -46806,16 +46814,31 @@ final class AppState: ObservableObject {
         )
 
         return organizations.map { organization in
-            guard organization.contacts.isEmpty,
-                  let preservedContacts = existingContactsByOrganizationID[organization.id],
-                  !preservedContacts.isEmpty else {
+            guard organization.contacts.isEmpty else {
+                return organization
+            }
+
+            if let preservedContacts = existingContactsByOrganizationID[organization.id],
+               !preservedContacts.isEmpty {
+                return Organization(
+                    id: organization.id,
+                    name: organization.name,
+                    contacts: preservedContacts
+                )
+            }
+
+            let legacyContacts = (try? localStore.legacySessionContacts(
+                organizationID: organization.id,
+                organizationName: organization.name
+            )) ?? []
+            guard !legacyContacts.isEmpty else {
                 return organization
             }
 
             return Organization(
                 id: organization.id,
                 name: organization.name,
-                contacts: preservedContacts
+                contacts: legacyContacts
             )
         }
     }

@@ -1955,11 +1955,10 @@ final class LocalStore {
         try performFileIOSync {
             if let hubIndex = try readHubIndexRaw(downloadTimeout: downloadTimeout),
                !hubIndex.properties.isEmpty {
-                let properties = hubIndex.properties.map { $0.asProperty() }
-                let organizations = hubIndex.organizations.map { $0.asOrganization() }
+                let state = propertyAndOrganizationState(from: hubIndex)
                 return HubFetchResult(
-                    properties: properties,
-                    organizations: organizations,
+                    properties: state.properties,
+                    organizations: state.organizations,
                     source: .iCloudSmallManifest
                 )
             }
@@ -1979,11 +1978,10 @@ final class LocalStore {
                   !hubIndex.properties.isEmpty else {
                 return nil
             }
-            let properties = hubIndex.properties.map { $0.asProperty() }
-            let organizations = hubIndex.organizations.map { $0.asOrganization() }
+            let state = propertyAndOrganizationState(from: hubIndex)
             return HubFetchResult(
-                properties: properties,
-                organizations: organizations,
+                properties: state.properties,
+                organizations: state.organizations,
                 source: .iCloudSmallManifest
             )
         }
@@ -1995,11 +1993,10 @@ final class LocalStore {
                   !hubIndex.properties.isEmpty else {
                 return nil
             }
-            let properties = hubIndex.properties.map { $0.asProperty() }
-            let organizations = hubIndex.organizations.map { $0.asOrganization() }
+            let state = propertyAndOrganizationState(from: hubIndex)
             return HubFetchResult(
-                properties: properties,
-                organizations: organizations,
+                properties: state.properties,
+                organizations: state.organizations,
                 source: .localSnapshot
             )
         }
@@ -2127,6 +2124,29 @@ final class LocalStore {
             try writeOrganizations(state.organizations)
             NotificationCenter.default.post(name: .scoutPersistentDataDidChange, object: nil)
             return state.organizations.first(where: { $0.id == organizationID }) ?? organization
+        }
+    }
+
+    func legacySessionContacts(organizationID: UUID, organizationName: String?) throws -> [OrganizationContact] {
+        try performFileIOSync {
+            legacySessionContactsUnlocked(
+                organizationID: organizationID,
+                organizationName: organizationName
+            )
+        }
+    }
+
+    func organizationContacts(organizationID: UUID, organizationName: String?) throws -> [OrganizationContact] {
+        try performFileIOSync {
+            let state = try migratedPropertyAndOrganizationState()
+            if let contacts = state.organizations.first(where: { $0.id == organizationID })?.contacts,
+               !contacts.isEmpty {
+                return normalizedOrganizationContacts(contacts)
+            }
+            return legacySessionContactsUnlocked(
+                organizationID: organizationID,
+                organizationName: organizationName
+            )
         }
     }
 
@@ -4344,9 +4364,29 @@ final class LocalStore {
         struct OrganizationRow: Codable {
             let id: UUID
             let name: String
+            let contacts: [OrganizationContact]
+
+            init(id: UUID, name: String, contacts: [OrganizationContact] = []) {
+                self.id = id
+                self.name = name
+                self.contacts = contacts
+            }
+
+            private enum CodingKeys: String, CodingKey {
+                case id
+                case name
+                case contacts
+            }
+
+            init(from decoder: Decoder) throws {
+                let c = try decoder.container(keyedBy: CodingKeys.self)
+                id = try c.decode(UUID.self, forKey: .id)
+                name = try c.decode(String.self, forKey: .name)
+                contacts = try c.decodeIfPresent([OrganizationContact].self, forKey: .contacts) ?? []
+            }
 
             func asOrganization() -> Organization {
-                Organization(id: id, name: name, contacts: [])
+                Organization(id: id, name: name, contacts: contacts)
             }
         }
 
@@ -4437,10 +4477,21 @@ final class LocalStore {
                 )
             },
             organizations: organizations.map { org in
-                HubIndex.OrganizationRow(id: org.id, name: org.name)
+                HubIndex.OrganizationRow(id: org.id, name: org.name, contacts: org.contacts)
             }
         )
         return try encoder.encode(payload)
+    }
+
+    private func propertyAndOrganizationState(from hubIndex: HubIndex) -> (properties: [Property], organizations: [Organization]) {
+        let properties = hubIndex.properties
+            .map { $0.asProperty() }
+            .sorted { $0.createdAt < $1.createdAt }
+        let organizations = organizationsByApplyingPropertyContacts(
+            to: hubIndex.organizations.map { $0.asOrganization() },
+            properties: properties
+        )
+        return (properties, organizations)
     }
 
     private func snapshotPropertyListCacheArtifacts(at urls: [URL]) throws -> [PropertyListCacheArtifactSnapshot] {
@@ -4580,7 +4631,7 @@ final class LocalStore {
         let originalOrganizationIDs = Set(organizations.map(\.id))
         let defaultOrganization = defaultOrganization(in: &organizations)
         let validOrganizationIDs = Set(organizations.map(\.id))
-        let didChangeOrganizations = !organizationsFileExists || Set(organizations.map(\.id)) != originalOrganizationIDs
+        var didChangeOrganizations = !organizationsFileExists || Set(organizations.map(\.id)) != originalOrganizationIDs
 
         var properties = try readPropertiesRaw(downloadTimeout: downloadTimeout)
         var didChangeProperties = false
@@ -4605,6 +4656,15 @@ final class LocalStore {
             let next = try nextAvailableFolderNumber(used: &seenFolderNumbers)
             properties[index].folderId = formatFolderID(next)
             didChangeProperties = true
+        }
+
+        let organizationsWithPropertyContacts = organizationsByApplyingPropertyContacts(
+            to: organizations,
+            properties: properties
+        )
+        if organizationsWithPropertyContacts != organizations {
+            organizations = organizationsWithPropertyContacts
+            didChangeOrganizations = true
         }
 
         if didChangeOrganizations {
@@ -4680,6 +4740,101 @@ final class LocalStore {
         var contacts = organizations[organizationIndex].contacts
         upsertOrganizationContact(candidate, into: &contacts)
         organizations[organizationIndex].contacts = normalizedOrganizationContacts(contacts)
+    }
+
+    private func organizationsByApplyingPropertyContacts(
+        to organizations: [Organization],
+        properties: [Property]
+    ) -> [Organization] {
+        var output = normalizedOrganizations(organizations)
+        for property in properties {
+            syncOrganizationContacts(in: &output, with: property)
+        }
+        for index in output.indices where output[index].contacts.isEmpty {
+            let legacyContacts = legacySessionContactsUnlocked(
+                organizationID: output[index].id,
+                organizationName: output[index].name
+            )
+            guard !legacyContacts.isEmpty else { continue }
+            var organization = output[index]
+            organization.contacts = normalizedOrganizationContacts(legacyContacts)
+            output[index] = organization
+        }
+        return normalizedOrganizations(output)
+    }
+
+    private func legacySessionContactsUnlocked(
+        organizationID: UUID,
+        organizationName: String?
+    ) -> [OrganizationContact] {
+        guard fileManager.fileExists(atPath: propertyFoldersURL.path) else {
+            return []
+        }
+
+        let propertyFolderURLs = (try? fileManager.contentsOfDirectory(
+            at: propertyFoldersURL,
+            includingPropertiesForKeys: [.isDirectoryKey],
+            options: [.skipsHiddenFiles]
+        )) ?? []
+
+        var contacts: [OrganizationContact] = []
+        for propertyFolderURL in propertyFolderURLs {
+            guard (try? propertyFolderURL.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true else {
+                continue
+            }
+
+            let sessionsURL = propertyFolderURL.appendingPathComponent("Sessions", isDirectory: true)
+            guard fileManager.fileExists(atPath: sessionsURL.path) else { continue }
+
+            let sessionFolderURLs = (try? fileManager.contentsOfDirectory(
+                at: sessionsURL,
+                includingPropertiesForKeys: [.isDirectoryKey],
+                options: [.skipsHiddenFiles]
+            )) ?? []
+            for sessionFolderURL in sessionFolderURLs {
+                guard (try? sessionFolderURL.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true else {
+                    continue
+                }
+
+                let metadataURL = sessionFolderURL.appendingPathComponent("session.json", isDirectory: false)
+                guard fileManager.fileExists(atPath: metadataURL.path),
+                      let data = try? Data(contentsOf: metadataURL),
+                      let metadata = try? decoder.decode(SessionMetadata.self, from: data),
+                      legacySessionMetadata(metadata, matchesOrganizationID: organizationID, organizationName: organizationName),
+                      let contact = organizationContact(fromLegacySessionMetadata: metadata) else {
+                    continue
+                }
+                upsertOrganizationContact(contact, into: &contacts)
+            }
+        }
+
+        return normalizedOrganizationContacts(contacts)
+    }
+
+    private func legacySessionMetadata(
+        _ metadata: SessionMetadata,
+        matchesOrganizationID organizationID: UUID,
+        organizationName: String?
+    ) -> Bool {
+        if let metadataOrgID = metadata.orgID {
+            return metadataOrgID == organizationID
+        }
+        guard let organizationName = trimmedNonEmpty(organizationName),
+              let metadataOrganizationName = trimmedNonEmpty(metadata.orgNameAtCapture) else {
+            return false
+        }
+        return organizationName.caseInsensitiveCompare(metadataOrganizationName) == .orderedSame
+    }
+
+    private func organizationContact(fromLegacySessionMetadata metadata: SessionMetadata) -> OrganizationContact? {
+        guard let name = trimmedNonEmpty(metadata.primaryContactNameAtCapture) else {
+            return nil
+        }
+        return OrganizationContact(
+            name: name,
+            phone: normalizedPropertyPhone(metadata.propertyPhoneAtCapture),
+            email: trimmedNonEmpty(metadata.primaryContactEmailAtCapture)
+        )
     }
 
     private func upsertOrganizationContact(_ candidate: OrganizationContact, into contacts: inout [OrganizationContact]) {

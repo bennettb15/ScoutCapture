@@ -93,8 +93,12 @@ struct SessionMetadata: Codable {
         case propertyNameAtExport
         case primaryContactNameAtCapture
         case primaryContactName
+        case clientName
+        case contactName
         case primaryContactEmailAtCapture
         case primaryContactEmail
+        case clientEmail
+        case contactEmail
         case propertyAddressAtCapture
         case propertyAddress
         case propertyStreetAtCapture
@@ -107,6 +111,8 @@ struct SessionMetadata: Codable {
         case propertyZip
         case propertyPhoneAtCapture
         case primaryContactPhone
+        case clientPhone
+        case contactPhone
         case timeZoneIdentifierAtCapture
         case timeZoneOffsetAtCapture
         case timeZoneOffsetMinutesAtCapture
@@ -232,10 +238,14 @@ struct SessionMetadata: Codable {
         primaryContactNameAtCapture = SessionMetadata.trimmedNonEmpty(
             try c.decodeIfPresent(String.self, forKey: .primaryContactNameAtCapture)
                 ?? c.decodeIfPresent(String.self, forKey: .primaryContactName)
+                ?? c.decodeIfPresent(String.self, forKey: .clientName)
+                ?? c.decodeIfPresent(String.self, forKey: .contactName)
         )
         primaryContactEmailAtCapture = SessionMetadata.trimmedNonEmpty(
             try c.decodeIfPresent(String.self, forKey: .primaryContactEmailAtCapture)
                 ?? c.decodeIfPresent(String.self, forKey: .primaryContactEmail)
+                ?? c.decodeIfPresent(String.self, forKey: .clientEmail)
+                ?? c.decodeIfPresent(String.self, forKey: .contactEmail)
         )
         propertyAddressAtCapture = SessionMetadata.trimmedNonEmpty(
             try c.decodeIfPresent(String.self, forKey: .propertyAddressAtCapture)
@@ -260,6 +270,8 @@ struct SessionMetadata: Codable {
         propertyPhoneAtCapture = SessionMetadata.trimmedNonEmpty(
             try c.decodeIfPresent(String.self, forKey: .propertyPhoneAtCapture)
                 ?? c.decodeIfPresent(String.self, forKey: .primaryContactPhone)
+                ?? c.decodeIfPresent(String.self, forKey: .clientPhone)
+                ?? c.decodeIfPresent(String.self, forKey: .contactPhone)
         )
         timeZoneIdentifierAtCapture = try c.decodeIfPresent(String.self, forKey: .timeZoneIdentifierAtCapture)?
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? TimeZone.current.identifier
