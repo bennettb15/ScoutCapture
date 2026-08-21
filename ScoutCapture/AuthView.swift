@@ -148,7 +148,7 @@ struct AuthView: View {
 
                     Spacer(minLength: 0)
                 }
-                .padding(.top, proxy.safeAreaInsets.top + 12)
+                .padding(.top, proxy.safeAreaInsets.top + 52)
                 .zIndex(1)
 
                 ScrollView(showsIndicators: false) {
