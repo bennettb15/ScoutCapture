@@ -604,6 +604,7 @@ final class AppState: ObservableObject {
     typealias SessionSnapshotMediaDownloadOverride = (String, String) async throws -> Data
     typealias CanonicalReadRemoteSnapshotFetchOverride = (UUID, UUID?, UUID?) async throws -> CanonicalReadRemoteSnapshot
 #if DEBUG
+    typealias PasswordRecoveryRequestOverride = (String, URL) async throws -> Void
     typealias PropertyOpenFreshnessRecheckOverride = @MainActor (UUID) async -> Void
 #endif
 
@@ -7487,6 +7488,7 @@ final class AppState: ObservableObject {
 #endif
     private var lastForegroundSyncDeltaCompletedAt: Date?
 #if DEBUG
+    private var passwordRecoveryRequestOverride: PasswordRecoveryRequestOverride?
     private var syncDeltaFetchOverride: SyncDeltaFetchOverride?
     private var activityFeedFetchOverride: ActivityFeedFetchOverride?
     private var auditEventEmitOverride: AuditEventEmitOverride?
@@ -10152,6 +10154,50 @@ final class AppState: ObservableObject {
                 return .signedIn
             }
             return .requiresEmailConfirmation
+        } catch {
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.authenticationErrorMessage = error.localizedDescription
+            }
+            throw error
+        }
+    }
+
+    func requestPasswordReset(
+        email: String,
+        redirectTo: URL = PasswordRecoveryFlow.resetRedirectURL
+    ) async throws {
+        let trimmedEmail = email.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        setAuthenticating(true)
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.authenticationErrorMessage = nil
+        }
+        defer { setAuthenticating(false) }
+
+        do {
+#if DEBUG
+            if let passwordRecoveryRequestOverride {
+                try await passwordRecoveryRequestOverride(trimmedEmail, redirectTo)
+                return
+            }
+#endif
+            guard let url = supabaseConfiguration.url,
+                  let anonKey = supabaseConfiguration.anonKey else { return }
+
+            let recoveryClient = SupabaseClient(
+                supabaseURL: url,
+                supabaseKey: anonKey,
+                options: SupabaseClientOptions(
+                    auth: .init(
+                        storageKey: "scoutcapture-password-recovery-email",
+                        flowType: .implicit,
+                        autoRefreshToken: false
+                    )
+                )
+            )
+            try await recoveryClient.auth.resetPasswordForEmail(trimmedEmail, redirectTo: redirectTo)
         } catch {
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
@@ -47335,6 +47381,12 @@ final class AppState: ObservableObject {
 
     func _debugDeliveredSessionStateReconciliationWriteCountForTests() -> Int {
         deliveredSessionStateReconciliationWriteCount
+    }
+
+    func _debugSetPasswordRecoveryRequestOverrideForTests(
+        _ override: PasswordRecoveryRequestOverride?
+    ) {
+        passwordRecoveryRequestOverride = override
     }
 
     func _debugSetActivityFeedFetchOverrideForTests(
