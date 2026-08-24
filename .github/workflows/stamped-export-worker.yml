@@ -1,0 +1,54 @@
+name: Stamped Export Worker
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "*/5 * * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: stamped-export-worker-scout-dev
+  cancel-in-progress: false
+
+jobs:
+  stamped-export-worker:
+    name: Process queued stamped exports
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'workflow_dispatch' || vars.STAMPED_EXPORT_WORKER_ENABLED == 'true')
+    env:
+      SUPABASE_URL: ${{ secrets.SCOUT_DEV_SUPABASE_URL }}
+      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SCOUT_DEV_SUPABASE_SERVICE_ROLE_KEY }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Validate required secrets
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -z "${SUPABASE_URL:-}" || -z "${SUPABASE_SERVICE_ROLE_KEY:-}" ]]; then
+            echo "::error::SCOUT_DEV_SUPABASE_URL and SCOUT_DEV_SUPABASE_SERVICE_ROLE_KEY secrets are required."
+            exit 1
+          fi
+
+      - name: Build report worker image
+        run: docker build -f web-contract/report-production/Dockerfile -t scoutcapture-report-worker:stamped-export .
+
+      - name: Runtime preflight
+        run: docker run --rm scoutcapture-report-worker:stamped-export --runtime-check --pretty --require-heif
+
+      - name: Process queued stamped export jobs
+        run: |
+          docker run --rm \
+            -e SUPABASE_URL \
+            -e SUPABASE_SERVICE_ROLE_KEY \
+            scoutcapture-report-worker:stamped-export \
+              --stamped-zip-poll-once \
+              --allow-remote-validation \
+              --expected-project-ref chlvazmtucoszicehtnm \
+              --allow-org-property d4ba94ff-25e1-4072-aa79-9a548fcb3008:d626703e-671b-44e1-a26d-642c5597730e \
+              --stamped-zip-limit 5 \
+              --pretty

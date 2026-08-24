@@ -1,0 +1,15 @@
+.git
+.DS_Store
+**/.DS_Store
+**/__pycache__/
+**/*.pyc
+**/.pytest_cache/
+**/.mypy_cache/
+**/.ruff_cache/
+node_modules/
+DerivedData/
+build/
+dist/
+web-contract/report-media/audit/
+web-contract/report-renderer/audit/
+web-contract/report-production/draft_migrations/
