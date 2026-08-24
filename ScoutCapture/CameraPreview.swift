@@ -565,10 +565,10 @@ final class CameraManager: NSObject, ObservableObject {
                 }
             }
 
-            // Prefer HEIC (HEVC) when supported.
+            // Prefer JPEG for original captures so downstream uploads and exports stay broadly compatible.
             let settings: AVCapturePhotoSettings
-            if self.photoOutput.availablePhotoCodecTypes.contains(.hevc) {
-                settings = AVCapturePhotoSettings(format: [AVVideoCodecKey: AVVideoCodecType.hevc])
+            if self.photoOutput.availablePhotoCodecTypes.contains(.jpeg) {
+                settings = AVCapturePhotoSettings(format: [AVVideoCodecKey: AVVideoCodecType.jpeg])
             } else {
                 settings = AVCapturePhotoSettings()
             }

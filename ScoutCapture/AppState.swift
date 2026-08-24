@@ -30187,11 +30187,19 @@ final class AppState: ObservableObject {
            let data = try? Data(contentsOf: url) {
             return data
         }
-        let filename = sanitizedStorageFilename(shot.originalFilename, fallbackShotID: shot.shotID)
-        let url = localStore
-            .originalsFolderURL(propertyID: propertyID, sessionID: sessionID)
-            .appendingPathComponent(filename, isDirectory: false)
-        return try? Data(contentsOf: url)
+        let originalsRoot = localStore.originalsFolderURL(propertyID: propertyID, sessionID: sessionID)
+        let filenames = [
+            sanitizedStorageFilename(shot.originalFilename, fallbackShotID: shot.shotID),
+            OriginalPhotoFormat.legacyHEICFilename(for: shot.shotID)
+        ]
+        var seen = Set<String>()
+        for filename in filenames where seen.insert(filename).inserted {
+            let url = originalsRoot.appendingPathComponent(filename, isDirectory: false)
+            if let data = try? Data(contentsOf: url) {
+                return data
+            }
+        }
+        return nil
     }
 
     private func makeLocalHealthPackageCandidateEvidence(
@@ -38975,8 +38983,9 @@ final class AppState: ObservableObject {
     }
 
     private func sanitizedStorageFilename(_ originalFilename: String, fallbackShotID: UUID) -> String {
-        let candidate = URL(fileURLWithPath: originalFilename).lastPathComponent
-        let fallback = "\(fallbackShotID.uuidString.lowercased()).heic"
+        let fallback = "\(fallbackShotID.uuidString.lowercased()).\(OriginalPhotoFormat.fileExtension)"
+        let trimmedOriginal = originalFilename.trimmingCharacters(in: .whitespacesAndNewlines)
+        let candidate = trimmedOriginal.isEmpty ? "" : URL(fileURLWithPath: trimmedOriginal).lastPathComponent
         let base = candidate.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? fallback : candidate
         let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "._-"))
         let sanitizedScalars = base.unicodeScalars.map { allowed.contains($0) ? Character($0) : "_" }
@@ -46264,7 +46273,7 @@ final class AppState: ObservableObject {
         let storageLeaf = row.storagePath
             .flatMap { normalizedSupabaseText($0) }
             .map { URL(fileURLWithPath: $0).lastPathComponent }
-        let filename = storageLeaf?.isEmpty == false ? storageLeaf! : "\(row.id.uuidString).heic"
+        let filename = storageLeaf?.isEmpty == false ? storageLeaf! : OriginalPhotoFormat.defaultFilename(for: row.id)
         let relativePath = "Originals/\(filename)"
         return ShotMetadata(
             shotID: row.id,
@@ -47475,6 +47484,14 @@ final class AppState: ObservableObject {
 
     func _debugSupabaseUploadOperationKeyForTests(sessionID: UUID, shotID: UUID) -> String {
         supabaseUploadOperationKey(sessionID: sessionID, shotID: shotID)
+    }
+
+    func _debugOperationalMediaStoragePathForTests(sessionID: UUID, shotID: UUID, originalFilename: String) -> String {
+        operationalMediaStoragePath(sessionID: sessionID, shotID: shotID, originalFilename: originalFilename)
+    }
+
+    func _debugContentTypeForTests(fileURL: URL) -> String {
+        contentType(for: fileURL)
     }
 
     func _debugRunPendingSupabaseMediaBackfillForTests(reason: String = "test") async -> SupabaseMediaBackfillRunSummary {

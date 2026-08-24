@@ -1,5 +1,20 @@
 import Foundation
 import UIKit
+import UniformTypeIdentifiers
+
+enum OriginalPhotoFormat {
+    static let fileExtension = "jpg"
+    static let utType: UTType = .jpeg
+    static let quality: CGFloat = 0.92
+
+    static func defaultFilename(for shotID: UUID) -> String {
+        "\(shotID.uuidString).\(fileExtension)"
+    }
+
+    static func legacyHEICFilename(for shotID: UUID) -> String {
+        "\(shotID.uuidString).heic"
+    }
+}
 
 enum CanonicalElevation {
     static func normalize(_ value: String?) -> String? {

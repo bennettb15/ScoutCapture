@@ -1049,7 +1049,7 @@ final class LocalStore {
             guard exportShotIDs.contains(sourceShot.shotID) else { continue }
 
             let sourceURL = try exportOriginalSourceURL(for: sourceShot, metadata: metadata)
-            let exportFilename = uniqueExportOriginalFilename(for: sourceShot, usedFilenames: &usedFilenames)
+            let exportFilename = uniqueExportOriginalFilename(for: sourceShot, sourceURL: sourceURL, usedFilenames: &usedFilenames)
             let exportRelativePath = "Originals/\(exportFilename)"
             exportReadyMetadata.shots[index].originalFilename = exportFilename
             exportReadyMetadata.shots[index].originalRelativePath = exportRelativePath
@@ -1087,7 +1087,7 @@ final class LocalStore {
         var usedFilenames = Set<String>()
         return clientExportShots(in: metadata).compactMap { shot in
             guard let sourceURL = try? exportOriginalSourceURL(for: shot, metadata: metadata) else { return nil }
-            let filename = uniqueExportOriginalFilename(for: shot, usedFilenames: &usedFilenames)
+            let filename = uniqueExportOriginalFilename(for: shot, sourceURL: sourceURL, usedFilenames: &usedFilenames)
             return ExportOriginalFile(filename: filename, sourceURL: sourceURL)
         }
     }
@@ -1151,18 +1151,44 @@ final class LocalStore {
     }
 
     private func exportOriginalFilename(for shot: ShotMetadata) -> String {
-        let directName = URL(fileURLWithPath: shot.originalFilename).lastPathComponent
-        if !directName.isEmpty {
-            return directName
+        if let filename = trimmedNonEmpty(shot.originalFilename) {
+            let directName = URL(fileURLWithPath: filename).lastPathComponent
+            if !directName.isEmpty {
+                return directName
+            }
         }
-        return URL(fileURLWithPath: shot.originalRelativePath).lastPathComponent
+        if let relativePath = trimmedNonEmpty(shot.originalRelativePath) {
+            let directName = URL(fileURLWithPath: relativePath).lastPathComponent
+            if !directName.isEmpty {
+                return directName
+            }
+        }
+        return ""
     }
 
-    private func uniqueExportOriginalFilename(for shot: ShotMetadata, usedFilenames: inout Set<String>) -> String {
+    private func normalizedExportLeafName(_ rawName: String) -> String {
+        let directName = URL(fileURLWithPath: rawName).lastPathComponent
+        if !directName.isEmpty && directName != "/" {
+            return directName
+        }
+        return ""
+    }
+
+    private func uniqueExportOriginalFilename(for shot: ShotMetadata, sourceURL: URL? = nil, usedFilenames: inout Set<String>) -> String {
         let rawName = exportOriginalFilename(for: shot)
-        let fallbackName = "\(shot.shotID.uuidString).heic"
-        let baseName = rawName.isEmpty ? fallbackName : rawName
-        let leaf = URL(fileURLWithPath: baseName).lastPathComponent
+        let sourceName = sourceURL.map { normalizedExportLeafName($0.lastPathComponent) } ?? ""
+        let fallbackName = sourceName.isEmpty ? OriginalPhotoFormat.defaultFilename(for: shot.shotID) : sourceName
+        let defaultName = OriginalPhotoFormat.defaultFilename(for: shot.shotID)
+        let sourceExtension = URL(fileURLWithPath: sourceName).pathExtension.lowercased()
+        let baseName: String
+        if rawName.caseInsensitiveCompare(defaultName) == .orderedSame,
+           ["heic", "heif"].contains(sourceExtension),
+           !sourceName.isEmpty {
+            baseName = sourceName
+        } else {
+            baseName = rawName.isEmpty ? fallbackName : rawName
+        }
+        let leaf = normalizedExportLeafName(baseName)
         let candidate = leaf.isEmpty ? fallbackName : leaf
         let lowerCandidate = candidate.lowercased()
         if usedFilenames.insert(lowerCandidate).inserted {
@@ -1202,7 +1228,8 @@ final class LocalStore {
             candidates.append(originalsRoot.appendingPathComponent(URL(fileURLWithPath: filename).lastPathComponent, isDirectory: false))
         }
 
-        candidates.append(originalsRoot.appendingPathComponent("\(shot.shotID.uuidString).heic", isDirectory: false))
+        candidates.append(originalsRoot.appendingPathComponent(OriginalPhotoFormat.defaultFilename(for: shot.shotID), isDirectory: false))
+        candidates.append(originalsRoot.appendingPathComponent(OriginalPhotoFormat.legacyHEICFilename(for: shot.shotID), isDirectory: false))
 
         var seen = Set<String>()
         var candidateDiagnostics: [String] = []
@@ -5484,8 +5511,11 @@ final class LocalStore {
         sessionID: UUID,
         captureTimeZone: CaptureTimeZoneContext
     ) -> ShotMetadata {
-        let fileName = URL(fileURLWithPath: shot.originalFilename).lastPathComponent
-        let normalizedFilename = fileName.isEmpty ? shot.originalFilename : fileName
+        let originalFilename = shot.originalFilename.trimmingCharacters(in: .whitespacesAndNewlines)
+        let fileName = originalFilename.isEmpty ? "" : URL(fileURLWithPath: originalFilename).lastPathComponent
+        let normalizedFilename = (fileName.isEmpty || fileName == "/")
+            ? OriginalPhotoFormat.defaultFilename(for: shot.shotID)
+            : fileName
         let normalizedRelativePath = shot.originalRelativePath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             ? "Originals/\(normalizedFilename)"
             : shot.originalRelativePath
@@ -5687,7 +5717,7 @@ final class LocalStore {
 
             let localIdentifier = trimmedNonEmpty(shot.imageLocalIdentifier) ?? ""
             let originalFilename = localIdentifier.isEmpty
-                ? "\(shot.id.uuidString).heic"
+                ? OriginalPhotoFormat.defaultFilename(for: shot.id)
                 : URL(fileURLWithPath: localIdentifier).lastPathComponent
             let originalRelativePath = "Originals/\(originalFilename)"
             let originalByteSize: Int? = {

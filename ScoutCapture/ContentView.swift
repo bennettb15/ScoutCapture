@@ -511,16 +511,19 @@ final class ReportLibraryModel: ObservableObject {
         mediaHydrationHandler = handler
     }
 
-    private func galleryRelativePath(for shot: ShotMetadata) -> String {
+    private func galleryRelativePathCandidates(for shot: ShotMetadata) -> [String] {
         let existing = shot.originalRelativePath.trimmingCharacters(in: .whitespacesAndNewlines)
         if !existing.isEmpty {
-            return existing
+            return [existing]
         }
         let originalFilename = shot.originalFilename.trimmingCharacters(in: .whitespacesAndNewlines)
         if !originalFilename.isEmpty {
-            return "Originals/\(originalFilename)"
+            return ["Originals/\(originalFilename)"]
         }
-        return "Originals/\(shot.shotID.uuidString).heic"
+        return [
+            "Originals/\(OriginalPhotoFormat.defaultFilename(for: shot.shotID))",
+            "Originals/\(OriginalPhotoFormat.legacyHEICFilename(for: shot.shotID))"
+        ]
     }
 
     func reloadAssets() {
@@ -561,16 +564,18 @@ final class ReportLibraryModel: ObservableObject {
                         if shot.createdAt < window.start { return nil }
                         if let end = window.end, shot.createdAt > end { return nil }
                     }
-                    let relative = self.galleryRelativePath(for: shot)
-                    guard !relative.isEmpty else { return nil }
-                    let url = sessionFolder.appendingPathComponent(relative, isDirectory: false)
-                    guard fileManager.fileExists(atPath: url.path) else {
+                    let relativeCandidates = self.galleryRelativePathCandidates(for: shot)
+                    guard let primaryRelative = relativeCandidates.first, !primaryRelative.isEmpty else { return nil }
+                    let url = relativeCandidates
+                        .map { sessionFolder.appendingPathComponent($0, isDirectory: false) }
+                        .first { fileManager.fileExists(atPath: $0.path) }
+                    guard let url else {
                         missingRequests.append(
                             AppState.OperationalMediaHydrationRequest(
                                 propertyID: propertyID,
                                 sessionID: sessionID,
                                 shotID: shot.shotID,
-                                relativePathOverride: relative
+                                relativePathOverride: primaryRelative
                             )
                         )
                         return nil
@@ -676,11 +681,13 @@ final class ReportLibraryModel: ObservableObject {
                     let preferredName = URL(fileURLWithPath: preferred).lastPathComponent
                     let filename: String
                     if preferred.isEmpty {
-                        filename = "\(shotID.uuidString).heic"
+                        filename = OriginalPhotoFormat.defaultFilename(for: shotID)
                     } else {
                         let sanitized = preferredName.replacingOccurrences(of: "/", with: "-")
                         let stem = URL(fileURLWithPath: sanitized).deletingPathExtension().lastPathComponent
-                        filename = stem.isEmpty ? "\(shotID.uuidString).heic" : "\(stem).heic"
+                        filename = stem.isEmpty
+                            ? OriginalPhotoFormat.defaultFilename(for: shotID)
+                            : "\(stem).\(OriginalPhotoFormat.fileExtension)"
                     }
                     let output = self.localStore
                         .sessionFolderURL(propertyID: propertyID, sessionID: sessionID)
@@ -718,17 +725,17 @@ final class ReportLibraryModel: ObservableObject {
                         return attrs[.creationDate] as? Date
                     }()
                     self.debugLogSaveStage(
-                        "save original start path=\(output.path) ext=\(output.pathExtension.lowercased()) type=\(UTType.heic.identifier)"
+                        "save original start path=\(output.path) ext=\(output.pathExtension.lowercased()) type=\(OriginalPhotoFormat.utType.identifier)"
                     )
-                    let heicData = try self.encodeImageData(
+                    let originalData = try self.encodeImageData(
                         from: data,
-                        outputType: .heic,
+                        outputType: OriginalPhotoFormat.utType,
                         captureTime: EmbeddedCaptureTime(captureDate: captureDate),
                         metadataContext: metadataContext,
-                        compressionQuality: 0.98
+                        compressionQuality: OriginalPhotoFormat.quality
                     )
-                    self.debugLogSaveStage("encodedBytes=\(heicData.count)")
-                    let data = heicData as Data
+                    self.debugLogSaveStage("encodedBytes=\(originalData.count)")
+                    let data = originalData as Data
 
                     let dirItemsBeforeRemove = (try? self.fileManager.contentsOfDirectory(atPath: parentDir.path)) ?? []
                     self.debugLogSaveStage(
@@ -802,12 +809,12 @@ final class ReportLibraryModel: ObservableObject {
                         self.debugLogSaveStage(
                             "dirList AFTER write count=\(dirItemsAfterWrite.count) items=\(dirItemsAfterWrite.sorted())"
                         )
-                        let heics = dirItemsAfterWrite.filter {
+                        let originals = dirItemsAfterWrite.filter {
                             let lower = $0.lowercased()
-                            return lower.hasSuffix(".heic") || lower.hasSuffix(".heif")
+                            return lower.hasSuffix(".jpg") || lower.hasSuffix(".jpeg") || lower.hasSuffix(".heic") || lower.hasSuffix(".heif")
                         }
                         self.debugLogSaveStage(
-                            "dirList count=\(dirItemsAfterWrite.count) heicCount=\(heics.count) items=\(dirItemsAfterWrite.sorted())"
+                            "dirList count=\(dirItemsAfterWrite.count) originalImageCount=\(originals.count) items=\(dirItemsAfterWrite.sorted())"
                         )
                     } else {
                         let items = (try? self.fileManager.contentsOfDirectory(atPath: parentDir.path)) ?? []
@@ -4130,16 +4137,19 @@ struct ContentView: View {
         return loaded
     }
 
-    private func guidedHistoricalRelativePath(for shot: ShotMetadata) -> String {
+    private func guidedHistoricalRelativePathCandidates(for shot: ShotMetadata) -> [String] {
         let existing = shot.originalRelativePath.trimmingCharacters(in: .whitespacesAndNewlines)
         if !existing.isEmpty {
-            return existing
+            return [existing]
         }
         let originalFilename = shot.originalFilename.trimmingCharacters(in: .whitespacesAndNewlines)
         if originalFilename.isEmpty {
-            return "Originals/\(shot.shotID.uuidString).heic"
+            return [
+                "Originals/\(OriginalPhotoFormat.defaultFilename(for: shot.shotID))",
+                "Originals/\(OriginalPhotoFormat.legacyHEICFilename(for: shot.shotID))"
+            ]
         }
-        return "Originals/\(originalFilename)"
+        return ["Originals/\(originalFilename)"]
     }
 
     private func guidedHistoricalResolvedSessionImagePath(
@@ -4157,24 +4167,26 @@ struct ContentView: View {
             return resolved
         }
 
-        let fallbackRelativePath = guidedHistoricalRelativePath(for: shot)
-        guard !fallbackRelativePath.isEmpty else {
+        let fallbackRelativePaths = guidedHistoricalRelativePathCandidates(for: shot)
+        guard let primaryFallbackRelativePath = fallbackRelativePaths.first, !primaryFallbackRelativePath.isEmpty else {
             return resolved
         }
 
-        if let originalURL = localStore.resolveSessionRelativeFileURL(
-            propertyID: propertyID,
-            sessionID: sessionID,
-            relativePath: fallbackRelativePath
-        ) {
-            return (originalURL.path, "original_derived", fallbackRelativePath, true)
+        for fallbackRelativePath in fallbackRelativePaths {
+            if let originalURL = localStore.resolveSessionRelativeFileURL(
+                propertyID: propertyID,
+                sessionID: sessionID,
+                relativePath: fallbackRelativePath
+            ) {
+                return (originalURL.path, "original_derived", fallbackRelativePath, true)
+            }
         }
 
         let derivedPath = localStore
             .sessionFolderURL(propertyID: propertyID, sessionID: sessionID)
-            .appendingPathComponent(fallbackRelativePath, isDirectory: false)
+            .appendingPathComponent(primaryFallbackRelativePath, isDirectory: false)
             .path
-        return (derivedPath, "original_derived", fallbackRelativePath, false)
+        return (derivedPath, "original_derived", primaryFallbackRelativePath, false)
     }
 
     private func mostRecentHistoricalGuidedThumbnailResolution(
@@ -4672,16 +4684,19 @@ struct ContentView: View {
             .first
     }
 
-    private func flaggedHistoricalRelativePath(for shot: ShotMetadata) -> String {
+    private func flaggedHistoricalRelativePathCandidates(for shot: ShotMetadata) -> [String] {
         let existing = shot.originalRelativePath.trimmingCharacters(in: .whitespacesAndNewlines)
         if !existing.isEmpty {
-            return existing
+            return [existing]
         }
         let originalFilename = shot.originalFilename.trimmingCharacters(in: .whitespacesAndNewlines)
         if originalFilename.isEmpty {
-            return "Originals/\(shot.shotID.uuidString).heic"
+            return [
+                "Originals/\(OriginalPhotoFormat.defaultFilename(for: shot.shotID))",
+                "Originals/\(OriginalPhotoFormat.legacyHEICFilename(for: shot.shotID))"
+            ]
         }
-        return "Originals/\(originalFilename)"
+        return ["Originals/\(originalFilename)"]
     }
 
     private func flaggedResolvedSessionImagePath(
@@ -4699,24 +4714,26 @@ struct ContentView: View {
             return resolved
         }
 
-        let fallbackRelativePath = flaggedHistoricalRelativePath(for: shot)
-        guard !fallbackRelativePath.isEmpty else {
+        let fallbackRelativePaths = flaggedHistoricalRelativePathCandidates(for: shot)
+        guard let primaryFallbackRelativePath = fallbackRelativePaths.first, !primaryFallbackRelativePath.isEmpty else {
             return resolved
         }
 
-        if let originalURL = localStore.resolveSessionRelativeFileURL(
-            propertyID: propertyID,
-            sessionID: sessionID,
-            relativePath: fallbackRelativePath
-        ) {
-            return (originalURL.path, "original_derived", fallbackRelativePath, true)
+        for fallbackRelativePath in fallbackRelativePaths {
+            if let originalURL = localStore.resolveSessionRelativeFileURL(
+                propertyID: propertyID,
+                sessionID: sessionID,
+                relativePath: fallbackRelativePath
+            ) {
+                return (originalURL.path, "original_derived", fallbackRelativePath, true)
+            }
         }
 
         let derivedPath = localStore
             .sessionFolderURL(propertyID: propertyID, sessionID: sessionID)
-            .appendingPathComponent(fallbackRelativePath, isDirectory: false)
+            .appendingPathComponent(primaryFallbackRelativePath, isDirectory: false)
             .path
-        return (derivedPath, "original_derived", fallbackRelativePath, false)
+        return (derivedPath, "original_derived", primaryFallbackRelativePath, false)
     }
 
     private func flaggedResolutionCandidate(
@@ -10403,7 +10420,7 @@ extension ContentView {
 
         let localIdentifier = shot.imageLocalIdentifier?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         let fileNameFromIdentifier = URL(fileURLWithPath: localIdentifier).lastPathComponent
-        let originalFilename = fileNameFromIdentifier.isEmpty ? "\(shot.id.uuidString).heic" : fileNameFromIdentifier
+        let originalFilename = fileNameFromIdentifier.isEmpty ? OriginalPhotoFormat.defaultFilename(for: shot.id) : fileNameFromIdentifier
         let normalizedElevation = CanonicalElevation.normalize(elevationValue) ?? elevationValue
         let shotKey = ShotMetadata.makeShotKey(
             building: buildingValue,
@@ -10482,7 +10499,7 @@ extension ContentView {
             )) ?? []
             let originalsCount = originalsItems.filter {
                 let lower = $0.lastPathComponent.lowercased()
-                return lower.hasSuffix(".heic") || lower.hasSuffix(".heif")
+                return lower.hasSuffix(".jpg") || lower.hasSuffix(".jpeg") || lower.hasSuffix(".heic") || lower.hasSuffix(".heif")
             }.count
 #if DEBUG
             print("[Session] shotsCount=\(updated.shots.count) originalsCount=\(originalsCount)")
@@ -13335,7 +13352,7 @@ extension ContentView {
     }()
 
     private func sessionExportFilename(for asset: ReportAsset, index: Int) -> String {
-        let fallback = "photo-\(index).heic"
+        let fallback = "photo-\(index).\(OriginalPhotoFormat.fileExtension)"
         let original = asset.originalFilename.trimmingCharacters(in: .whitespacesAndNewlines)
         let baseName = URL(fileURLWithPath: original).lastPathComponent
         let resolved = baseName.isEmpty ? fallback : baseName
@@ -15954,7 +15971,7 @@ extension ContentView {
         }
         
         private func makeArchiveFilename(for asset: ReportAsset, index: Int) -> String {
-            let fallback = "photo-\(index).heic"
+            let fallback = "photo-\(index).\(OriginalPhotoFormat.fileExtension)"
             let original = asset.originalFilename.trimmingCharacters(in: .whitespacesAndNewlines)
             let baseName = URL(fileURLWithPath: original).lastPathComponent
             let resolved = baseName.isEmpty ? fallback : baseName
