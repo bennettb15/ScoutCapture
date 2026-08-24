@@ -108,6 +108,22 @@ def parse_args() -> argparse.Namespace:
         help="Optional authenticated user id to record on a temporary export request.",
     )
     parser.add_argument(
+        "--stamped-zip-poll-once",
+        action="store_true",
+        help="Claim and process queued stamped JPG ZIP temporary_exports once.",
+    )
+    parser.add_argument(
+        "--stamped-zip-poll-dry-run",
+        action="store_true",
+        help="List queued stamped JPG ZIP exports that would be processed without claiming or writing.",
+    )
+    parser.add_argument(
+        "--stamped-zip-limit",
+        type=int,
+        default=5,
+        help="Maximum queued stamped JPG ZIP exports to inspect in --stamped-zip-poll-once mode.",
+    )
+    parser.add_argument(
         "--runtime-check",
         action="store_true",
         help="Check local worker runtime dependencies and exit before any Supabase access.",
@@ -689,6 +705,25 @@ def create_temporary_export(
     )
 
 
+def claim_temporary_export(
+    client: SupabaseServiceClient,
+    export_row: dict[str, Any],
+) -> dict[str, Any] | None:
+    now = safe_iso_now()
+    rows = client.patch(
+        "temporary_exports",
+        {"id": f"eq.{export_row['id']}", "status": "eq.queued"},
+        {
+            "status": "generating",
+            "attempt_count": int(export_row.get("attempt_count") or 0) + 1,
+            "locked_at": now,
+            "locked_by": "stamped-zip-poll-worker",
+            "last_error": None,
+        },
+    )
+    return rows[0] if rows else None
+
+
 def zip_prepared_current_media(
     prepared_media_path: pathlib.Path,
     zip_path: pathlib.Path,
@@ -727,67 +762,87 @@ def zip_prepared_current_media(
     return names, zip_path.stat().st_size
 
 
-def generate_stamped_zip_export(
+def build_stamped_zip_export(
     args: argparse.Namespace,
     client: SupabaseServiceClient,
     repo: pathlib.Path,
+    package: dict[str, Any],
+    selected_shot_ids: list[str] | None = None,
+    export: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    package = select_ready_package(client, args.stamped_zip_package_id)
     if not package_is_allowlisted(package, args):
         raise WorkerError("--stamped-zip-package-id package must be explicitly allowlisted by session or org/property.")
 
     snapshot_row = snapshot_metadata(client, package["snapshot_id"])
-    selected_shot_ids = normalized_selected_shot_ids(args)
+    selected_shot_ids = selected_shot_ids or []
     cache_key = stamped_zip_cache_key(package, snapshot_row, selected_shot_ids)
-    reusable = reusable_temporary_export(client, cache_key)
-    if reusable:
-        result = {
-            "ok": True,
-            "action": "reused",
-            "package_id": package["id"],
-            "export_id": reusable["id"],
-            "status": reusable["status"],
-            "cache_key": cache_key,
-            "storage_bucket": reusable.get("storage_bucket"),
-            "storage_path": reusable.get("storage_path"),
-            "filename": reusable.get("filename"),
-            "expires_at": reusable.get("expires_at"),
-            "byte_size": reusable.get("byte_size"),
-            "zip_entries": [],
-        }
-        print(stable_json(result, args.pretty))
-        return result
+    if export is None:
+        reusable = reusable_temporary_export(client, cache_key)
+        if reusable:
+            result = {
+                "ok": True,
+                "action": "reused",
+                "package_id": package["id"],
+                "export_id": reusable["id"],
+                "status": reusable["status"],
+                "cache_key": cache_key,
+                "storage_bucket": reusable.get("storage_bucket"),
+                "storage_path": reusable.get("storage_path"),
+                "filename": reusable.get("filename"),
+                "expires_at": reusable.get("expires_at"),
+                "byte_size": reusable.get("byte_size"),
+                "zip_entries": [],
+            }
+            print(stable_json(result, args.pretty))
+            return result
+        export = create_temporary_export(client, package, cache_key, args.requested_by_user_id)
+        action = "created"
+    else:
+        action = "processed"
+        if str(export.get("cache_key") or "") != cache_key:
+            client.patch(
+                "temporary_exports",
+                {"id": f"eq.{export['id']}"},
+                {
+                    "status": "failed",
+                    "locked_at": None,
+                    "locked_by": None,
+                    "last_error": "Queued stamped ZIP cache key did not match package snapshot metadata.",
+                },
+            )
+            raise WorkerError(f"Queued stamped ZIP cache key mismatch for export {export['id']}.")
+        if export.get("status") not in {"generating", "queued"}:
+            raise WorkerError(f"Queued stamped ZIP export {export['id']} is not processable.")
 
-    output_root = pathlib.Path(args.output_dir).resolve() / str(package["session_id"]).lower() / "stamped_zip"
-    validation_path = output_root / "report_input_validation.json"
-    media_dir = output_root / "prepared_media"
-    zip_dir = output_root / "zip"
-    output_root.mkdir(parents=True, exist_ok=True)
-    env = dict(os.environ)
-
-    run_step(
-        [
-            sys.executable,
-            str(repo / "web-contract" / "report-input" / "report_input_phase1.py"),
-            "--session-id",
-            package["session_id"],
-            "--snapshot-id",
-            package["snapshot_id"],
-            "--output",
-            str(validation_path),
-            "--pretty",
-        ],
-        repo,
-        env,
-    )
-    validation = read_json(validation_path)
-    if not validation.get("renderable_remotely"):
-        raise WorkerError(f"ReportInput is not renderable remotely: {validation.get('gaps')}")
-    if validation.get("media", {}).get("missing_count") != 0:
-        raise WorkerError("ReportInput has missing remote media; refusing ZIP export.")
-
-    export = create_temporary_export(client, package, cache_key, args.requested_by_user_id)
     try:
+        output_root = pathlib.Path(args.output_dir).resolve() / str(package["session_id"]).lower() / "stamped_zip"
+        validation_path = output_root / "report_input_validation.json"
+        media_dir = output_root / "prepared_media"
+        zip_dir = output_root / "zip"
+        output_root.mkdir(parents=True, exist_ok=True)
+        env = dict(os.environ)
+
+        run_step(
+            [
+                sys.executable,
+                str(repo / "web-contract" / "report-input" / "report_input_phase1.py"),
+                "--session-id",
+                package["session_id"],
+                "--snapshot-id",
+                package["snapshot_id"],
+                "--output",
+                str(validation_path),
+                "--pretty",
+            ],
+            repo,
+            env,
+        )
+        validation = read_json(validation_path)
+        if not validation.get("renderable_remotely"):
+            raise WorkerError(f"ReportInput is not renderable remotely: {validation.get('gaps')}")
+        if validation.get("media", {}).get("missing_count") != 0:
+            raise WorkerError("ReportInput has missing remote media; refusing ZIP export.")
+
         run_step(
             [
                 sys.executable,
@@ -841,7 +896,7 @@ def generate_stamped_zip_export(
 
     result = {
         "ok": True,
-        "action": "created",
+        "action": action,
         "package_id": package["id"],
         "export_id": export["id"],
         "status": export.get("status"),
@@ -858,6 +913,125 @@ def generate_stamped_zip_export(
     }
     print(stable_json(result, args.pretty))
     return result
+
+
+def generate_stamped_zip_export(
+    args: argparse.Namespace,
+    client: SupabaseServiceClient,
+    repo: pathlib.Path,
+) -> dict[str, Any]:
+    package = select_ready_package(client, args.stamped_zip_package_id)
+    selected_shot_ids = normalized_selected_shot_ids(args)
+    return build_stamped_zip_export(args, client, repo, package, selected_shot_ids)
+
+
+def discover_queued_stamped_exports(client: SupabaseServiceClient, limit: int) -> list[dict[str, Any]]:
+    return client.select(
+        "temporary_exports",
+        {
+            "select": "*",
+            "artifact_type": "eq.stamped_jpg_zip",
+            "status": "eq.queued",
+            "deleted_at": "is.null",
+            "order": "requested_at.asc",
+            "limit": str(max(1, limit)),
+        },
+    )
+
+
+def temporary_export_is_allowlisted(export_row: dict[str, Any], args: argparse.Namespace) -> bool:
+    session_id = str(export_row.get("session_id") or "").lower()
+    org_id = str(export_row.get("org_id") or "").lower()
+    property_id = str(export_row.get("property_id") or "").lower()
+    return session_id in allowed_session_ids(args) or (org_id, property_id) in allowed_org_properties(args)
+
+
+def package_for_temporary_export(
+    client: SupabaseServiceClient,
+    export_row: dict[str, Any],
+) -> dict[str, Any] | None:
+    rows = client.select(
+        "report_packages",
+        {
+            "select": "*",
+            "org_id": f"eq.{export_row['org_id']}",
+            "property_id": f"eq.{export_row['property_id']}",
+            "session_id": f"eq.{export_row['session_id']}",
+            "snapshot_id": f"eq.{export_row['snapshot_id']}",
+            "status": "eq.ready",
+            "deleted_at": "is.null",
+            "order": "completed_at.desc",
+            "limit": "1",
+        },
+    )
+    return rows[0] if rows else None
+
+
+def run_stamped_zip_poll_once(
+    args: argparse.Namespace,
+    client: SupabaseServiceClient,
+    repo: pathlib.Path,
+) -> dict[str, Any]:
+    if not allowed_session_ids(args) and not allowed_org_properties(args):
+        raise WorkerError("--stamped-zip-poll-once requires at least one --allow-session-id or --allow-org-property.")
+
+    discovered = discover_queued_stamped_exports(client, args.stamped_zip_limit)
+    summary: dict[str, Any] = {
+        "ok": True,
+        "mode": "stamped-zip-poll-once",
+        "dry_run": bool(args.stamped_zip_poll_dry_run),
+        "environment": client.environment,
+        "local_dev_only": client.environment == "local-dev",
+        "production_writes_made": False,
+        "remote_validation_writes_made": client.environment == "remote-validation",
+        "discovered_count": len(discovered),
+        "processed": [],
+        "skipped": [],
+        "would_process": [],
+    }
+
+    for export_row in discovered:
+        base_log = {
+            "export_id": export_row.get("id"),
+            "session_id": export_row.get("session_id"),
+            "snapshot_id": export_row.get("snapshot_id"),
+            "org_id": export_row.get("org_id"),
+            "property_id": export_row.get("property_id"),
+        }
+        if not temporary_export_is_allowlisted(export_row, args):
+            summary["skipped"].append({**base_log, "reason": "not_allowlisted"})
+            continue
+        if str(export_row.get("cache_key") or "").startswith("stamped-jpg-zip-selected:"):
+            summary["skipped"].append({**base_log, "reason": "selected_export_queue_not_supported"})
+            continue
+        package = package_for_temporary_export(client, export_row)
+        if not package:
+            summary["skipped"].append({**base_log, "reason": "ready_package_not_found"})
+            continue
+        if args.stamped_zip_poll_dry_run:
+            summary["would_process"].append({**base_log, "package_id": package["id"]})
+            continue
+        claimed = claim_temporary_export(client, export_row)
+        if not claimed:
+            summary["skipped"].append({**base_log, "reason": "already_claimed"})
+            continue
+        result = build_stamped_zip_export(args, client, repo, package, [], claimed)
+        summary["processed"].append(
+            {
+                **base_log,
+                "package_id": package["id"],
+                "export_id": result["export_id"],
+                "status": result["status"],
+                "filename": result.get("filename"),
+                "zip_entry_count": len(result.get("zip_entries") or []),
+            }
+        )
+
+    output_path = pathlib.Path(args.output_dir).resolve() / "stamped_zip_poll_once_summary.json"
+    write_json(output_path, summary, args.pretty)
+    summary["summary_path"] = str(output_path)
+    print(stable_json(summary, True))
+    return summary
 
 
 def retention_candidates(client: SupabaseServiceClient, property_id: str) -> list[dict[str, Any]]:
@@ -1257,6 +1431,10 @@ def main() -> int:
 
     repo = pathlib.Path(__file__).resolve().parents[2]
     client = SupabaseServiceClient.from_env(args)
+
+    if args.stamped_zip_poll_once:
+        run_stamped_zip_poll_once(args, client, repo)
+        return 0
 
     if args.stamped_zip_package_id:
         generate_stamped_zip_export(args, client, repo)
