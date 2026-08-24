@@ -224,10 +224,10 @@ def format_local_date(raw: str | None) -> str:
 def load_font(size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
     candidates = [
         "/System/Library/Fonts/SFNS.ttf",
-        "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
-        "/Library/Fonts/Arial Bold.ttf",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-        "/usr/share/fonts/dejavu/DejaVuSans-Bold.ttf",
+        "/System/Library/Fonts/Supplemental/Arial.ttf",
+        "/Library/Fonts/Arial.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/dejavu/DejaVuSans.ttf",
     ]
     for path in candidates:
         if pathlib.Path(path).exists():
@@ -326,10 +326,10 @@ def prepare_image(item: MediaItem, source_path: pathlib.Path, output_path: pathl
     is_portrait = out_height > out_width
     output_long_edge = max(out_width, out_height)
     overlay_scale = max(min(output_long_edge / STAMPED_MAX_LONG_EDGE, 1), 0.72)
-    font_size = max((49 if is_portrait else 42) * overlay_scale, 30 if is_portrait else 26)
-    pill_height = max((96 if is_portrait else 84) * overlay_scale, 70 if is_portrait else 64)
-    horizontal_padding = max((30 if is_portrait else 27) * overlay_scale, 20)
-    vertical_padding = max((19 if is_portrait else 17) * overlay_scale, 13)
+    font_size = max((43 if is_portrait else 37) * overlay_scale, 27 if is_portrait else 23)
+    pill_height = max((84 if is_portrait else 74) * overlay_scale, 58 if is_portrait else 52)
+    horizontal_padding = max((26 if is_portrait else 23) * overlay_scale, 17)
+    vertical_padding = max((16 if is_portrait else 15) * overlay_scale, 11)
     bottom_margin = max((36 if is_portrait else 32) * overlay_scale, 22)
     side_margin = max((36 if is_portrait else 32) * overlay_scale, 22)
     corner_radius = max((19 if is_portrait else 17) * overlay_scale, 13)
