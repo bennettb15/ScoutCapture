@@ -31,6 +31,7 @@ DELIVERABLES_BUCKET = "scoutcapture-deliverables"
 RENDERER_VERSION = "phase2c-shadow-reportlab-refinement-1"
 MEDIA_PREPARER_VERSION = "phase2a-shadow-media-prep-2-local-date"
 STAMPED_ZIP_EXPORT_VERSION = "stamped-zip-export-2-friendly-filename"
+ORIGINAL_JPG_PREVIEW_VERSION = "original-jpg-preview-1"
 REPORT_CONTRACT_VERSION = "phase1-report-input-1"
 PACKAGED_LOGO_SVG = pathlib.Path("web-contract/report-production/assets/ScoutOnlyLogo.svg")
 DISABLED_LOGO_PDF = pathlib.Path("web-contract/report-production/assets/ScoutLogoBlue.pdf")
@@ -132,6 +133,18 @@ def parse_args() -> argparse.Namespace:
         "--require-heif",
         action="store_true",
         help="With --runtime-check, fail if HEIC/HEIF decoding is not registered.",
+    )
+    parser.add_argument(
+        "--heic-preview-session-id",
+        action="append",
+        default=[],
+        help="Generate missing display-only JPG previews for one completed HEIC session. May be repeated.",
+    )
+    parser.add_argument(
+        "--heic-preview-max-long-edge",
+        type=int,
+        default=1800,
+        help="Maximum long edge for display-only original JPG previews.",
     )
     parser.add_argument("--pretty", action="store_true")
     return parser.parse_args()
@@ -398,6 +411,26 @@ class SupabaseServiceClient:
             timeout=120,
         )
 
+    def download_object(self, bucket: str, path: str) -> bytes:
+        encoded_path = "/".join(urllib.parse.quote(part) for part in path.split("/"))
+        return self.request("GET", f"{self.url}/storage/v1/object/{urllib.parse.quote(bucket)}/{encoded_path}", headers={"Accept": "*/*"}, timeout=120)
+
+    def object_exists(self, bucket: str, path: str) -> bool:
+        encoded_path = "/".join(urllib.parse.quote(part) for part in path.split("/"))
+        req = urllib.request.Request(f"{self.url}/storage/v1/object/{urllib.parse.quote(bucket)}/{encoded_path}", method="GET")
+        req.add_header("apikey", self.key)
+        req.add_header("Authorization", f"Bearer {self.key}")
+        req.add_header("Accept", "*/*")
+        try:
+            with urllib.request.urlopen(req, timeout=30) as response:
+                response.read(1)
+                return True
+        except urllib.error.HTTPError as error:
+            detail = error.read().decode("utf-8", errors="replace")
+            if error.code == 404 or (error.code == 400 and "not found" in detail.lower()):
+                return False
+            raise WorkerError(f"Supabase object check failed GET {bucket}/{path}: {error.code} {detail}") from error
+
     def delete_object(self, bucket: str, path: str) -> None:
         encoded_path = "/".join(urllib.parse.quote(part) for part in path.split("/"))
         self.request("DELETE", f"{self.url}/storage/v1/object/{urllib.parse.quote(bucket)}/{encoded_path}")
@@ -439,6 +472,13 @@ def expected_zip_path(org_id: str, property_id: str, session_id: str, export_id:
     return (
         f"orgs/{org_id.lower()}/properties/{property_id.lower()}/sessions/{session_id.lower()}"
         f"/exports/stamped-jpg/{export_id.lower()}.zip"
+    )
+
+
+def expected_original_jpg_preview_path(org_id: str, property_id: str, session_id: str, shot_id: str) -> str:
+    return (
+        f"orgs/{org_id.lower()}/properties/{property_id.lower()}/sessions/{session_id.lower()}"
+        f"/previews/original-jpg/{shot_id.lower()}.jpg"
     )
 
 
@@ -1124,6 +1164,188 @@ def ready_package_exists(client: SupabaseServiceClient, snapshot_id: str) -> boo
     return bool(rows)
 
 
+def extension_for_storage_path(path: str) -> str:
+    return pathlib.PurePosixPath(str(path or "")).suffix.lower().lstrip(".")
+
+
+def shot_is_heic(row: dict[str, Any]) -> bool:
+    return extension_for_storage_path(str(row.get("storage_path") or "")) in {"heic", "heif"}
+
+
+def decode_preview_image(source_bytes: bytes, source_name: str) -> Any:
+    try:
+        from PIL import Image, ImageOps
+        import pillow_heif
+
+        pillow_heif.register_heif_opener()
+    except Exception as error:
+        raise WorkerError(f"HEIC preview generation requires Pillow and pillow-heif: {error}") from error
+
+    try:
+        image = Image.open(io.BytesIO(source_bytes))
+        image.load()
+    except Exception as error:
+        raise WorkerError(f"Could not decode HEIC original for preview {source_name}: {error}") from error
+    return ImageOps.exif_transpose(image).convert("RGB")
+
+
+def save_preview_jpg(source_bytes: bytes, source_name: str, output_path: pathlib.Path, max_long_edge: int) -> dict[str, Any]:
+    from PIL import Image
+
+    image = decode_preview_image(source_bytes, source_name)
+    source_width, source_height = image.size
+    long_edge = max(source_width, source_height)
+    if long_edge > max_long_edge > 0:
+        scale = max_long_edge / long_edge
+        image = image.resize(
+            (max(1, round(source_width * scale)), max(1, round(source_height * scale))),
+            Image.Resampling.LANCZOS,
+        )
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    image.save(output_path, "JPEG", quality=84, optimize=True, progressive=True)
+    data = output_path.read_bytes()
+    return {
+        "source_width": source_width,
+        "source_height": source_height,
+        "preview_width": image.size[0],
+        "preview_height": image.size[1],
+        "byte_size": len(data),
+        "sha256": hashlib.sha256(data).hexdigest(),
+        "magic_hex": data[:3].hex(),
+    }
+
+
+def select_session_for_preview(client: SupabaseServiceClient, session_id: str) -> dict[str, Any]:
+    rows = client.select(
+        "sessions",
+        {
+            "select": "id,org_id,property_id,status,deleted_at",
+            "id": f"eq.{session_id}",
+            "deleted_at": "is.null",
+            "limit": "1",
+        },
+    )
+    if not rows:
+        raise WorkerError(f"Session not found for HEIC preview generation: {session_id}")
+    return rows[0]
+
+
+def select_shots_for_preview(client: SupabaseServiceClient, session: dict[str, Any]) -> list[dict[str, Any]]:
+    return client.select(
+        "shots",
+        {
+            "select": "id,org_id,property_id,session_id,storage_bucket,storage_path,byte_size,upload_state,deleted_at",
+            "org_id": f"eq.{session['org_id']}",
+            "session_id": f"eq.{session['id']}",
+            "storage_bucket": "eq.scoutcapture-originals",
+            "upload_state": "eq.uploaded",
+            "deleted_at": "is.null",
+            "order": "position.asc,captured_at.asc",
+        },
+    )
+
+
+def run_heic_preview_generation(
+    args: argparse.Namespace,
+    client: SupabaseServiceClient,
+) -> dict[str, Any]:
+    requested_sessions = sorted({str(item).strip().lower() for item in args.heic_preview_session_id if str(item).strip()})
+    if not requested_sessions:
+        raise WorkerError("--heic-preview-session-id is required for HEIC preview generation.")
+
+    output_root = pathlib.Path(args.output_dir).resolve() / "heic_previews"
+    output_root.mkdir(parents=True, exist_ok=True)
+    summary: dict[str, Any] = {
+        "ok": True,
+        "mode": "heic-preview-session",
+        "environment": client.environment,
+        "local_dev_only": client.environment == "local-dev",
+        "production_writes_made": False,
+        "remote_validation_writes_made": client.environment == "remote-validation",
+        "preview_version": ORIGINAL_JPG_PREVIEW_VERSION,
+        "storage_bucket": DELIVERABLES_BUCKET,
+        "max_long_edge": args.heic_preview_max_long_edge,
+        "sessions": [],
+        "errors": [],
+    }
+
+    for session_id in requested_sessions:
+        if session_id not in allowed_session_ids(args):
+            raise WorkerError("--heic-preview-session-id must be explicitly included in --allow-session-id.")
+        session = select_session_for_preview(client, session_id)
+        session_allowlist_row = {
+            "session_id": session["id"],
+            "org_id": session["org_id"],
+            "property_id": session["property_id"],
+        }
+        if not package_is_allowlisted(session_allowlist_row, args):
+            raise WorkerError("HEIC preview session must be explicitly allowlisted by session or org/property.")
+
+        rows = select_shots_for_preview(client, session)
+        session_summary: dict[str, Any] = {
+            "session_id": session_id,
+            "org_id": session["org_id"],
+            "property_id": session["property_id"],
+            "total_originals": len(rows),
+            "heic_originals": 0,
+            "browser_previewable_originals": 0,
+            "generated": 0,
+            "existing": 0,
+            "skipped_non_heic": 0,
+            "failed": 0,
+            "previews": [],
+        }
+        for row in rows:
+            ext = extension_for_storage_path(str(row.get("storage_path") or ""))
+            if ext in {"jpg", "jpeg", "png"}:
+                session_summary["browser_previewable_originals"] += 1
+                session_summary["skipped_non_heic"] += 1
+                continue
+            if not shot_is_heic(row):
+                session_summary["skipped_non_heic"] += 1
+                continue
+            session_summary["heic_originals"] += 1
+            preview_path = expected_original_jpg_preview_path(session["org_id"], session["property_id"], row["session_id"], row["id"])
+            preview_entry = {
+                "shot_id": row["id"],
+                "source_storage_bucket": row["storage_bucket"],
+                "source_storage_path": row["storage_path"],
+                "preview_storage_bucket": DELIVERABLES_BUCKET,
+                "preview_storage_path": preview_path,
+            }
+            try:
+                if client.object_exists(DELIVERABLES_BUCKET, preview_path):
+                    session_summary["existing"] += 1
+                    preview_entry["action"] = "existing"
+                else:
+                    source_bytes = client.download_object(row["storage_bucket"], row["storage_path"])
+                    local_path = output_root / session_id / f"{str(row['id']).lower()}.jpg"
+                    preview_meta = save_preview_jpg(
+                        source_bytes,
+                        pathlib.PurePosixPath(row["storage_path"]).name,
+                        local_path,
+                        args.heic_preview_max_long_edge,
+                    )
+                    if preview_meta["magic_hex"] != "ffd8ff":
+                        raise WorkerError(f"Preview JPEG magic mismatch for {row['id']}: {preview_meta['magic_hex']}")
+                    client.upload_object(DELIVERABLES_BUCKET, preview_path, local_path, "image/jpeg")
+                    session_summary["generated"] += 1
+                    preview_entry.update({"action": "generated", **preview_meta, "local_path": str(local_path)})
+            except Exception as error:
+                session_summary["failed"] += 1
+                preview_entry["action"] = "failed"
+                preview_entry["error"] = str(error)
+                summary["errors"].append({"session_id": session_id, "shot_id": row.get("id"), "error": str(error)})
+            session_summary["previews"].append(preview_entry)
+        summary["sessions"].append(session_summary)
+
+    output_path = output_root / "heic_preview_summary.json"
+    write_json(output_path, summary, args.pretty)
+    summary["summary_path"] = str(output_path)
+    print(stable_json(summary, True))
+    return summary
+
+
 def discover_poll_snapshots(client: SupabaseServiceClient) -> list[dict[str, Any]]:
     return client.select(
         "session_snapshots",
@@ -1435,6 +1657,10 @@ def main() -> int:
     if args.stamped_zip_poll_once:
         run_stamped_zip_poll_once(args, client, repo)
         return 0
+
+    if args.heic_preview_session_id:
+        summary = run_heic_preview_generation(args, client)
+        return 0 if not summary.get("errors") else 1
 
     if args.stamped_zip_package_id:
         generate_stamped_zip_export(args, client, repo)
