@@ -50,5 +50,8 @@ jobs:
               --allow-remote-validation \
               --expected-project-ref chlvazmtucoszicehtnm \
               --allow-org-property d4ba94ff-25e1-4072-aa79-9a548fcb3008:d626703e-671b-44e1-a26d-642c5597730e \
+              --allow-org-property 399ee6e7-3355-48d0-8a75-8c46059f7f11:719f06c5-9e43-4888-82b0-c12d9dff3f5c \
+              --allow-org-property 399ee6e7-3355-48d0-8a75-8c46059f7f11:1e1fbe04-b351-496a-aa46-405425b5a067 \
+              --allow-org-property 399ee6e7-3355-48d0-8a75-8c46059f7f11:9605f8b7-7ef6-4796-b21e-3f9ea92f4e96 \
               --stamped-zip-limit 5 \
               --pretty
