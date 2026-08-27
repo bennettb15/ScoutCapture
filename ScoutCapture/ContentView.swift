@@ -6666,7 +6666,7 @@ struct ContentView: View {
 
             if let sessionCoordinationConflictReview {
                 ExportErrorOverlay(
-                    title: "Review Remote Session Mismatch",
+                    title: "Review Portal Changes",
                     message: sessionCoordinationConflictMessage(review: sessionCoordinationConflictReview),
                     retryTitle: "Return to Session",
                     cancelTitle: "Dismiss",
@@ -12471,7 +12471,7 @@ extension ContentView {
     ) -> String {
         review.diffs
             .prefix(3)
-            .map { "\($0.label): remote='\($0.remoteValue)' session='\($0.localValue)'" }
+            .map { "\($0.label): portal='\($0.remoteValue)' session='\($0.localValue)'" }
             .joined(separator: "\n")
     }
 
@@ -13871,26 +13871,6 @@ extension ContentView {
                 to: &updated
             )
 
-            let wasResolved = updated.status == .resolved || updated.resolvedInSessionID != nil
-            if wasResolved {
-                updated.status = .active
-                updated.resolvedInSessionID = nil
-                updated.resolutionPhotoRef = nil
-                updated.resolutionStatement = nil
-                appendObservationHistoryEvent(
-                    ObservationHistoryEvent(
-                        timestamp: Date(),
-                        sessionID: appState.currentSession?.id,
-                        kind: .reopened,
-                        beforeValue: "resolved",
-                        afterValue: "active",
-                        field: "status",
-                        shotID: shot.id
-                    ),
-                    to: &updated
-                )
-            }
-
             let revisedText = revisedObservationText?.trimmingCharacters(in: .whitespacesAndNewlines)
             if let revisedText, !revisedText.isEmpty {
                 let priorReason = Self.observationCurrentReasonText(updated)
@@ -13927,34 +13907,19 @@ extension ContentView {
                 )
             }
 
-            let persisted = try localStore.updateObservation(updated)
-            if let sessionID = appState.currentSession?.id {
-                do {
-                    _ = try localStore.syncFlaggedObservationUpdateToSessionMetadata(
-                        propertyID: propertyID,
-                        sessionID: sessionID,
-                        observation: persisted,
-                        shotID: shot.id,
-                        trade: revisedTrade ?? selectedTrade,
-                        activeCaptureKind: retakeContext == nil ? "follow_up_capture" : "retake"
-                    )
-                    appState.scheduleShotMetadataSupabaseWriteIfNeeded(
-                        propertyID: propertyID,
-                        sessionID: sessionID,
-                        shotID: shot.id,
-                        reason: "flagged_issue_update"
-                    )
-                } catch {
-                    // Keep the capture decision flow resilient; the observation itself has already been saved.
-                }
+            _ = try localStore.updateObservation(updated)
+            if revisedPriority != nil || revisedTrade != nil {
+                applyFlaggedShotMetadataOverrides(
+                    propertyID: propertyID,
+                    sessionID: appState.currentSession?.id,
+                    shotID: shot.id,
+                    priority: revisedPriority ?? "",
+                    trade: revisedTrade ?? ""
+                )
+                selectedPriority = Self.normalizedPriority(revisedPriority ?? "")
+                selectedTrade = revisedTrade ?? ""
             }
-            if revisedPriority != nil {
-                selectedPriority = Self.normalizedPriority(persisted.priority)
-            }
-            if let revisedTrade {
-                selectedTrade = revisedTrade
-            }
-            let note = Self.observationCurrentReasonText(persisted) ?? ""
+            let note = Self.observationCurrentReasonText(updated) ?? ""
             if note.isEmpty {
                 showFlaggedActionToastNow("Update captured")
             } else {

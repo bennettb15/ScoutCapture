@@ -2651,72 +2651,6 @@ final class LocalStore {
     }
 
     @discardableResult
-    func syncFlaggedObservationUpdateToSessionMetadata(
-        propertyID: UUID,
-        sessionID: UUID,
-        observation: Observation,
-        shotID: UUID,
-        trade: String?,
-        activeCaptureKind: String,
-        updatedAt: Date = Date()
-    ) throws -> ShotMetadata? {
-        try ensurePropertyExists(propertyID)
-        var metadata = try loadSessionMetadata(propertyID: propertyID, sessionID: sessionID)
-        let reason = trimmedNonEmpty(observation.currentReason)
-            ?? trimmedNonEmpty(observation.note)
-            ?? trimmedNonEmpty(observation.statement)
-        let normalizedPriority = normalizedSessionPriority(observation.priority)
-        let normalizedTrade = trimmedNonEmpty(trade)
-        let isResolved = observation.status == .resolved
-        let issueStatus = isResolved ? "resolved" : "active"
-        let captureKindForActiveUpdate = trimmedNonEmpty(activeCaptureKind) ?? "follow_up_capture"
-
-        var syncedShot: ShotMetadata?
-        if let shotIndex = metadata.shots.firstIndex(where: { $0.shotID == shotID }) {
-            metadata.shots[shotIndex].isFlagged = true
-            metadata.shots[shotIndex].issueID = observation.id
-            metadata.shots[shotIndex].issueStatus = issueStatus
-            if let reason {
-                metadata.shots[shotIndex].noteText = reason
-            }
-            metadata.shots[shotIndex].priority = normalizedPriority
-            metadata.shots[shotIndex].trade = normalizedTrade
-            if !isResolved,
-               trimmedNonEmpty(metadata.shots[shotIndex].captureKind) == "resolved_capture" {
-                metadata.shots[shotIndex].captureKind = captureKindForActiveUpdate
-            }
-            if metadata.shots[shotIndex].firstCaptureKind == nil {
-                metadata.shots[shotIndex].firstCaptureKind = "captured"
-            }
-            metadata.shots[shotIndex].updatedAt = updatedAt
-            syncedShot = metadata.shots[shotIndex]
-        }
-
-        let issue = IssueMetadata(
-            issueID: observation.id,
-            issueStatus: issueStatus,
-            currentReason: reason,
-            previousReason: trimmedNonEmpty(observation.previousReason),
-            firstSeenAt: observation.createdAt,
-            firstSeenAtLocal: nil,
-            lastSeenAt: observation.updatedAt,
-            lastSeenAtLocal: nil,
-            resolvedAt: isResolved ? observation.updatedAt : nil,
-            resolvedAtLocal: nil,
-            lastCaptureSessionId: observation.resolvedInSessionID ?? observation.updatedInSessionID ?? sessionID,
-            detailNote: reason,
-            shotKey: syncedShot?.shotKey ?? metadata.issues.first(where: { $0.issueID == observation.id })?.shotKey,
-            historyEvents: metadata.issues.first(where: { $0.issueID == observation.id })?.historyEvents ?? []
-        )
-        metadata.issues.removeAll { $0.issueID == observation.id }
-        metadata.issues.append(issue)
-
-        try saveSessionMetadataAtomically(propertyID: propertyID, sessionID: sessionID, metadata: metadata)
-        let persisted = try loadSessionMetadata(propertyID: propertyID, sessionID: sessionID)
-        return persisted.shots.first(where: { $0.shotID == shotID })
-    }
-
-    @discardableResult
     func retireShot(
         propertyID: UUID,
         sessionID: UUID,
@@ -6004,21 +5938,6 @@ final class LocalStore {
         guard let value else { return nil }
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? nil : trimmed
-    }
-
-    private func normalizedSessionPriority(_ value: String?) -> String? {
-        switch trimmedNonEmpty(value)?.lowercased() {
-        case "low":
-            return "Low"
-        case "medium":
-            return "Medium"
-        case "high":
-            return "High"
-        case "critical":
-            return "Critical"
-        default:
-            return nil
-        }
     }
 
     private func timeZoneOffsetString(secondsFromGMT: Int) -> String {
