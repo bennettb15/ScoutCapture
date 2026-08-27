@@ -50,6 +50,10 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--session-id", help="Completed ScoutCapture session UUID to process.")
     parser.add_argument(
+        "--snapshot-id",
+        help="Specific completed sealed session_snapshots.id to process with --session-id.",
+    )
+    parser.add_argument(
         "--poll-once",
         action="store_true",
         help="Local/dev proof mode: find allowlisted sealed completed snapshots missing a ready package and process them once.",
@@ -1359,6 +1363,41 @@ def discover_poll_snapshots(client: SupabaseServiceClient) -> list[dict[str, Any
     )
 
 
+def snapshot_sort_key(snapshot: dict[str, Any]) -> tuple[str, str]:
+    return (
+        str(snapshot.get("created_at") or ""),
+        str(snapshot.get("id") or ""),
+    )
+
+
+def latest_snapshots_per_session(
+    snapshots: list[dict[str, Any]]
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    latest_by_session: dict[str, dict[str, Any]] = {}
+    superseded: list[dict[str, Any]] = []
+
+    for snapshot in snapshots:
+        session_id = str(snapshot.get("session_id") or "")
+        if not session_id:
+            superseded.append(snapshot)
+            continue
+
+        current = latest_by_session.get(session_id)
+        if current is None:
+            latest_by_session[session_id] = snapshot
+            continue
+
+        if snapshot_sort_key(snapshot) > snapshot_sort_key(current):
+            superseded.append(current)
+            latest_by_session[session_id] = snapshot
+        else:
+            superseded.append(snapshot)
+
+    latest = sorted(latest_by_session.values(), key=snapshot_sort_key)
+    superseded = sorted(superseded, key=snapshot_sort_key)
+    return latest, superseded
+
+
 def process_session(
     args: argparse.Namespace,
     client: SupabaseServiceClient,
@@ -1589,6 +1628,7 @@ def run_poll_once(
         raise WorkerError("--poll-once requires at least one --allow-session-id or --allow-org-property.")
 
     discovered = discover_poll_snapshots(client)
+    latest_snapshots, superseded_snapshots = latest_snapshots_per_session(discovered)
     poll_summary: dict[str, Any] = {
         "ok": True,
         "mode": "poll-once",
@@ -1600,12 +1640,26 @@ def run_poll_once(
         "allow_session_ids": sorted(allowed_sessions),
         "allow_org_properties": [f"{org_id}:{property_id}" for org_id, property_id in sorted(allowed_pairs)],
         "discovered_count": len(discovered),
+        "latest_snapshot_count": len(latest_snapshots),
+        "superseded_snapshot_count": len(superseded_snapshots),
         "processed": [],
         "skipped": [],
         "would_process": [],
     }
 
-    for snapshot in discovered:
+    for snapshot in superseded_snapshots:
+        session_id = str(snapshot.get("session_id") or "")
+        poll_summary["skipped"].append(
+            {
+                "snapshot_id": str(snapshot.get("id") or ""),
+                "session_id": session_id,
+                "org_id": snapshot.get("org_id"),
+                "property_id": snapshot.get("property_id"),
+                "reason": "superseded_by_newer_session_snapshot",
+            }
+        )
+
+    for snapshot in latest_snapshots:
         session_id = str(snapshot.get("session_id") or "")
         snapshot_id = str(snapshot.get("id") or "")
         base_log = {
@@ -1672,9 +1726,11 @@ def main() -> int:
 
     if not args.session_id:
         raise WorkerError("--session-id is required unless --poll-once is used.")
+    if args.snapshot_id and not args.session_id:
+        raise WorkerError("--snapshot-id requires --session-id.")
     if args.session_id.lower() not in allowed_session_ids(args):
         raise WorkerError("--session-id must be explicitly included in --allow-session-id.")
-    process_session(args, client, repo, args.session_id)
+    process_session(args, client, repo, args.session_id, args.snapshot_id)
     return 0
 
 
