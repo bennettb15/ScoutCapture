@@ -1000,6 +1000,7 @@ struct ShotMetadata: Codable, Identifiable, Equatable {
         try c.encode(isFlagged, forKey: .isFlagged)
         try c.encodeIfPresent(issueID, forKey: .issueID)
         try c.encodeIfPresent(issueID, forKey: .issueId)
+        try c.encodeIfPresent(ShotMetadata.trimmedNonEmpty(issueStatus), forKey: .issueStatus)
         try c.encodeIfPresent(ShotMetadata.trimmedNonEmpty(currentReason), forKey: .currentReason)
         try c.encodeIfPresent(ShotMetadata.trimmedNonEmpty(propertyName), forKey: .propertyName)
         try c.encodeIfPresent(ShotMetadata.trimmedNonEmpty(captureKind), forKey: .captureKind)

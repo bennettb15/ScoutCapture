@@ -768,6 +768,47 @@ final class Phase2C10BSessionCoordinationTests: XCTestCase {
         XCTAssertTrue(review?.diffs.first?.label.contains("Flagged Reason") ?? false)
     }
 
+    func testPreCompletionConflictIgnoresNewLocalFlaggedReasonStaleRemoteSnapshot() async throws {
+        let fixture = try makeFixture()
+        defer { tearDownFixture(fixture) }
+
+        fixture.appState._debugSetSessionCoordinationEntrySnapshotForTests(
+            sessionID: fixture.session.id,
+            snapshot: nil
+        )
+
+        var localMetadata = fixture.metadata
+        localMetadata.issues[0].currentReason = "Final ScoutCapture reason"
+        localMetadata.shots[0].noteText = "Final ScoutCapture reason"
+        try fixture.localStore.saveSessionMetadataAtomically(
+            propertyID: fixture.property.id,
+            sessionID: fixture.session.id,
+            metadata: localMetadata
+        )
+
+        var staleRemoteMetadata = fixture.metadata
+        staleRemoteMetadata.issues[0].currentReason = "First attempted reason"
+        staleRemoteMetadata.shots[0].noteText = "First attempted reason"
+        fixture.appState._debugSetSessionCoordinationFetchResultForTests(
+            AppState.DebugSessionCoordinationRemoteInput(
+                sessionID: fixture.session.id,
+                orgID: fixture.organizationID,
+                propertyID: fixture.property.id,
+                lockedByUserID: fixture.userID,
+                lockedByDeviceID: "same-device",
+                lockedAt: iso8601(Date()),
+                coordinationTier1Snapshot: fixture.appState._debugSessionCoordinationSnapshotStringForTests(metadata: staleRemoteMetadata),
+                updatedAt: Date()
+            )
+        )
+
+        let review = await fixture.appState.preCompletionConflictReview(
+            propertyID: fixture.property.id,
+            sessionID: fixture.session.id
+        )
+        XCTAssertNil(review)
+    }
+
     func testStructuralChangesAreIgnoredWhenTier1SnapshotMatches() async throws {
         let fixture = try makeFixture()
         defer { tearDownFixture(fixture) }

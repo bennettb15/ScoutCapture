@@ -35927,6 +35927,7 @@ final class AppState: ObservableObject {
 
         let diffs = sessionCoordinationDiffs(
             remoteSnapshotString: remoteRecord.coordinationTier1Snapshot,
+            baselineSnapshotString: baselineSnapshot,
             localMetadata: metadata
         )
         guard !diffs.isEmpty else { return nil }
@@ -36218,11 +36219,16 @@ final class AppState: ObservableObject {
 
     private func sessionCoordinationDiffs(
         remoteSnapshotString: String?,
+        baselineSnapshotString: String?,
         localMetadata: SessionMetadata
     ) -> [SessionCoordinationDiff] {
         guard let remote = decodeSessionCoordinationTier1Snapshot(remoteSnapshotString) else { return [] }
+        let baseline = decodeSessionCoordinationTier1Snapshot(baselineSnapshotString)
         let local = sessionCoordinationTier1Snapshot(metadata: localMetadata)
 
+        let baselinePriorityIDs = Set(baseline?.priorities.map(\.id) ?? [])
+        let baselineTradeIDs = Set(baseline?.trades.map(\.id) ?? [])
+        let baselineReasonIDs = Set(baseline?.flaggedReasons.map(\.id) ?? [])
         let remotePriorities = Dictionary(uniqueKeysWithValues: remote.priorities.map { ($0.id, $0.value) })
         let localPriorities = Dictionary(uniqueKeysWithValues: local.priorities.map { ($0.id, $0.value) })
         let remoteTrades = Dictionary(uniqueKeysWithValues: remote.trades.map { ($0.id, $0.value) })
@@ -36232,6 +36238,7 @@ final class AppState: ObservableObject {
 
         var diffs: [SessionCoordinationDiff] = []
         for id in Set(remotePriorities.keys).intersection(localPriorities.keys).sorted(by: { $0.uuidString < $1.uuidString }) {
+            guard baselinePriorityIDs.contains(id) else { continue }
             let remoteValue = remotePriorities[id] ?? ""
             let localValue = localPriorities[id] ?? ""
             guard remoteValue != localValue else { continue }
@@ -36243,6 +36250,7 @@ final class AppState: ObservableObject {
             ))
         }
         for id in Set(remoteTrades.keys).intersection(localTrades.keys).sorted(by: { $0.uuidString < $1.uuidString }) {
+            guard baselineTradeIDs.contains(id) else { continue }
             let remoteValue = remoteTrades[id] ?? ""
             let localValue = localTrades[id] ?? ""
             guard remoteValue != localValue else { continue }
@@ -36254,6 +36262,7 @@ final class AppState: ObservableObject {
             ))
         }
         for id in Set(remoteReasons.keys).intersection(localReasons.keys).sorted(by: { $0.uuidString < $1.uuidString }) {
+            guard baselineReasonIDs.contains(id) else { continue }
             let remoteValue = remoteReasons[id] ?? ""
             let localValue = localReasons[id] ?? ""
             guard remoteValue != localValue else { continue }
