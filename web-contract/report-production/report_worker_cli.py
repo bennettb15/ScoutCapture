@@ -40,6 +40,13 @@ REPORT_TYPE_MAP = {
     "priority": "flagged_observations",
     "comparison": "flagged_comparison",
 }
+REQUIRED_RUNTIME_PATHS = [
+    pathlib.Path("web-contract/report-input/report_input_phase1.py"),
+    pathlib.Path("web-contract/report-media/report_media_phase2a.py"),
+    pathlib.Path("web-contract/report-renderer/report_renderer_phase2b.py"),
+    pathlib.Path("web-contract/report-production/assets/ScoutOnlyLogo.svg"),
+    pathlib.Path("web-contract/shared/scout_report_visuals.py"),
+]
 
 
 class WorkerError(RuntimeError):
@@ -229,6 +236,7 @@ def package_version(name: str) -> str | None:
 
 
 def runtime_check(require_heif: bool = False) -> tuple[bool, dict[str, Any]]:
+    repo = pathlib.Path(__file__).resolve().parents[2]
     details: dict[str, Any] = {
         "ok": True,
         "production_ready": True,
@@ -236,10 +244,23 @@ def runtime_check(require_heif: bool = False) -> tuple[bool, dict[str, Any]]:
         "python_version": sys.version,
         "platform": platform.platform(),
         "packages": {},
+        "runtime_files": {},
         "pdfinfo": {},
         "heif": {},
         "blocking_gaps": [],
     }
+
+    for relative_path in REQUIRED_RUNTIME_PATHS:
+        full_path = repo / relative_path
+        exists = full_path.exists()
+        details["runtime_files"][str(relative_path)] = {
+            "path": str(full_path),
+            "exists": exists,
+        }
+        if not exists:
+            details["ok"] = False
+            details["production_ready"] = False
+            details["blocking_gaps"].append(f"Required runtime file is missing: {full_path}")
 
     try:
         from PIL import Image, ImageDraw, ImageFont, ImageOps  # noqa: F401
