@@ -825,7 +825,9 @@ def build_validation(args: argparse.Namespace) -> dict[str, Any]:
         shot for shot in shots if shot["is_flagged"] or shot["is_resolved_in_session"]
     ]
     current_comparison_shots.sort(key=comparison_sort_key)
-    priority_shots = [shot for shot in shots if shot["is_flagged"]]
+    priority_shots = [
+        shot for shot in shots if shot["is_flagged"] and not shot["is_resolved_in_session"]
+    ]
     priority_counts: dict[str, int] = {"critical": 0, "high": 0, "medium": 0, "low": 0}
     for shot in priority_shots:
         priority_counts[shot["normalized_priority"]] += 1

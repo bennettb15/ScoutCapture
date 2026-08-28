@@ -13815,7 +13815,27 @@ extension ContentView {
                 to: &updated
             )
 
-            _ = try localStore.updateObservation(updated)
+            let persisted = try localStore.updateObservation(updated)
+            if let sessionID = appState.currentSession?.id {
+                do {
+                    _ = try localStore.syncFlaggedObservationUpdateToSessionMetadata(
+                        propertyID: propertyID,
+                        sessionID: sessionID,
+                        observation: persisted,
+                        shotID: shot.id,
+                        trade: selectedTrade,
+                        activeCaptureKind: retakeContext == nil ? "follow_up_capture" : "retake"
+                    )
+                    appState.scheduleShotMetadataSupabaseWriteIfNeeded(
+                        propertyID: propertyID,
+                        sessionID: sessionID,
+                        shotID: shot.id,
+                        reason: "flagged_issue_resolved"
+                    )
+                } catch {
+                    // Keep the capture decision flow resilient; the observation itself has already been saved.
+                }
+            }
             showFlaggedActionToastNow("Issue resolved")
             finalizeArmedIssueCaptureAfterDecision()
             refreshActiveIssues()
@@ -13965,7 +13985,28 @@ extension ContentView {
                 to: &updated
             )
 
-            _ = try localStore.updateObservation(updated)
+            let persisted = try localStore.updateObservation(updated)
+            if let sessionID = appState.currentSession?.id,
+               let shotID = persisted.linkedShotID {
+                do {
+                    _ = try localStore.syncFlaggedObservationUpdateToSessionMetadata(
+                        propertyID: propertyID,
+                        sessionID: sessionID,
+                        observation: persisted,
+                        shotID: shotID,
+                        trade: selectedTrade,
+                        activeCaptureKind: "follow_up_capture"
+                    )
+                    appState.scheduleShotMetadataSupabaseWriteIfNeeded(
+                        propertyID: propertyID,
+                        sessionID: sessionID,
+                        shotID: shotID,
+                        reason: "flagged_issue_resolved"
+                    )
+                } catch {
+                    // Keep checklist resolution resilient; the observation itself has already been saved.
+                }
+            }
             showFlaggedActionToastNow("Issue resolved")
             refreshActiveIssues()
         } catch {
@@ -14332,7 +14373,27 @@ extension ContentView {
                 ),
                 to: &updated
             )
-            _ = try localStore.updateObservation(updated)
+            let persisted = try localStore.updateObservation(updated)
+            if let sessionID = appState.currentSession?.id {
+                do {
+                    _ = try localStore.syncFlaggedObservationUpdateToSessionMetadata(
+                        propertyID: propertyID,
+                        sessionID: sessionID,
+                        observation: persisted,
+                        shotID: shot.id,
+                        trade: selectedTrade,
+                        activeCaptureKind: "follow_up_capture"
+                    )
+                    appState.scheduleShotMetadataSupabaseWriteIfNeeded(
+                        propertyID: propertyID,
+                        sessionID: sessionID,
+                        shotID: shot.id,
+                        reason: "flagged_issue_resolved"
+                    )
+                } catch {
+                    // Keep resolution capture resilient; the observation itself has already been saved.
+                }
+            }
 
             resolutionTargetObservation = nil
             resetResolutionCapturePreview()
