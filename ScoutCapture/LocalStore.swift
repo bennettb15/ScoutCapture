@@ -2693,6 +2693,16 @@ final class LocalStore {
             syncedShot = metadata.shots[shotIndex]
         }
 
+        syncResolvedObservationStateToGuidedRows(
+            propertyID: propertyID,
+            sessionID: sessionID,
+            metadata: &metadata,
+            observation: observation,
+            syncedShot: syncedShot,
+            updatedAt: updatedAt,
+            isResolved: isResolved
+        )
+
         let issue = IssueMetadata(
             issueID: observation.id,
             issueStatus: issueStatus,
@@ -2715,6 +2725,95 @@ final class LocalStore {
         try saveSessionMetadataAtomically(propertyID: propertyID, sessionID: sessionID, metadata: metadata)
         let persisted = try loadSessionMetadata(propertyID: propertyID, sessionID: sessionID)
         return persisted.shots.first(where: { $0.shotID == shotID })
+    }
+
+    private func syncResolvedObservationStateToGuidedRows(
+        propertyID: UUID,
+        sessionID: UUID,
+        metadata: inout SessionMetadata,
+        observation: Observation,
+        syncedShot: ShotMetadata?,
+        updatedAt: Date,
+        isResolved: Bool
+    ) {
+        var observationShotIDs = Set(observation.shots.map(\.id))
+        if let linkedShotID = observation.linkedShotID {
+            observationShotIDs.insert(linkedShotID)
+        }
+        let shotID = syncedShot?.shotID
+        guard !observationShotIDs.isEmpty || shotID != nil else { return }
+        let syncedReference = syncedShotReference()
+
+        func matchesObservation(_ guided: GuidedShot) -> Bool {
+            if let shotID, guided.id == shotID || guided.shot?.id == shotID {
+                return true
+            }
+            if observationShotIDs.contains(guided.id) {
+                return true
+            }
+            if let linkedShotID = guided.shot?.id, observationShotIDs.contains(linkedShotID) {
+                return true
+            }
+            return false
+        }
+
+        func syncedShotReference() -> Shot? {
+            guard let syncedShot else { return nil }
+            let relative = syncedShot.originalRelativePath.trimmingCharacters(in: .whitespacesAndNewlines)
+            let localIdentifier: String
+            if relative.isEmpty {
+                localIdentifier = sessionFolderURL(propertyID: propertyID, sessionID: sessionID)
+                    .appendingPathComponent("Originals", isDirectory: true)
+                    .appendingPathComponent(syncedShot.originalFilename, isDirectory: false)
+                    .path
+            } else {
+                localIdentifier = sessionFolderURL(propertyID: propertyID, sessionID: sessionID)
+                    .appendingPathComponent(relative, isDirectory: false)
+                    .path
+            }
+            return Shot(
+                id: syncedShot.shotID,
+                capturedAt: syncedShot.updatedAt,
+                imageLocalIdentifier: localIdentifier,
+                note: syncedShot.noteText
+            )
+        }
+
+        func applyState(_ guided: inout GuidedShot) {
+            if let syncedReference {
+                guided.shot = syncedReference
+                guided.isCompleted = true
+            }
+            guided.skipReason = nil
+            guided.skipReasonNote = nil
+            guided.skipSessionID = nil
+
+            if isResolved {
+                guided.status = .retired
+                guided.isRetired = true
+                guided.retiredAt = guided.retiredAt ?? updatedAt
+                guided.retiredInSessionID = guided.retiredInSessionID ?? sessionID
+            } else {
+                guided.status = .active
+                guided.isRetired = false
+                guided.retiredAt = nil
+                guided.retiredInSessionID = nil
+            }
+        }
+
+        for index in metadata.guidedShots.indices where matchesObservation(metadata.guidedShots[index]) {
+            applyState(&metadata.guidedShots[index])
+        }
+
+        guard var propertyGuided = try? readGuidedShots(propertyID: propertyID) else { return }
+        var didUpdatePropertyGuided = false
+        for index in propertyGuided.indices where matchesObservation(propertyGuided[index]) {
+            applyState(&propertyGuided[index])
+            didUpdatePropertyGuided = true
+        }
+        if didUpdatePropertyGuided {
+            try? writeGuidedShots(propertyGuided, propertyID: propertyID)
+        }
     }
 
     @discardableResult
