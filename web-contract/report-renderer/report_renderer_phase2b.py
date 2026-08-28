@@ -91,6 +91,10 @@ class Phase2BError(RuntimeError):
     pass
 
 
+def is_not_applicable_error(error: Exception) -> bool:
+    return " is not applicable: " in str(error)
+
+
 @dataclass(frozen=True)
 class MediaLookup:
     by_role_shot: dict[tuple[str, str], dict[str, Any]]
@@ -2176,6 +2180,7 @@ def main() -> int:
         "weather": weather,
         "weather_cache_path": str(weather_cache_path),
         "reports": [],
+        "skipped_reports": [],
         "historical_oracles": [],
         "stamped_oracles": [],
         "warnings": weather_warnings,
@@ -2183,7 +2188,15 @@ def main() -> int:
     for report_type in reports:
         report_dir = output_dir / report_type
         report_dir.mkdir(parents=True, exist_ok=True)
-        plan = build_plan(report_type, validation, lookup, report_date, logo, weather, validation_path.parent)
+        try:
+            plan = build_plan(report_type, validation, lookup, report_date, logo, weather, validation_path.parent)
+        except Phase2BError as error:
+            if args.report == "all" and is_not_applicable_error(error):
+                skip = {"report_type": report_type, "reason": str(error)}
+                summary["skipped_reports"].append(skip)
+                print(f"Skipping {report_type} report: {error}", file=sys.stderr)
+                continue
+            raise
         plan_path = report_dir / f"report_plan_{report_type}.json"
         write_json(plan_path, plan, args.pretty)
         pdf_path = report_dir / plan["output_filename"]

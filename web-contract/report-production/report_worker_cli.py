@@ -1509,6 +1509,8 @@ def process_session(
         failed = [item for item in render_summary.get("reports", []) if item.get("validation_failures")]
         if failed:
             raise WorkerError(f"PDF validation failures: {failed}")
+        if not render_summary.get("reports"):
+            raise WorkerError(f"No applicable PDF reports were generated: {render_summary.get('skipped_reports')}")
     except Exception as error:
         if package is not None:
             client.patch(
@@ -1582,6 +1584,7 @@ def process_session(
                 "weather_metadata": render_summary.get("weather") or {},
                 "validation_summary": {
                     "report_count": len(uploaded_files),
+                    "skipped_reports": render_summary.get("skipped_reports", []),
                     "pdf_validation_failures": [],
                 },
                 "manifest": {
@@ -1591,6 +1594,7 @@ def process_session(
                     "remote_validation_writes_made": client.environment == "remote-validation",
                     "local_dev_writes_made": client.environment == "local-dev",
                     "reports": uploaded_files,
+                    "skipped_reports": render_summary.get("skipped_reports", []),
                 },
             },
         )
@@ -1627,6 +1631,7 @@ def process_session(
         "prepared_media_json": str(prepared_media_path),
         "render_summary_json": str(render_dir / "phase2c_summary.json"),
         "uploaded_files": uploaded_files,
+        "skipped_reports": render_summary.get("skipped_reports", []),
         "retention": {
             "mode": args.retention_mode,
             "candidate_count": len(candidates),
@@ -1634,7 +1639,7 @@ def process_session(
         },
     }
     write_json(summary_path, summary, args.pretty)
-    print(stable_json({"ok": True, "session_id": session_id, "package_id": package["id"], "package_action": package_action, "uploaded_files": uploaded_files, "retention": summary["retention"], "summary_path": str(summary_path)}, True))
+    print(stable_json({"ok": True, "session_id": session_id, "package_id": package["id"], "package_action": package_action, "uploaded_files": uploaded_files, "skipped_reports": summary["skipped_reports"], "retention": summary["retention"], "summary_path": str(summary_path)}, True))
     return summary
 
 
@@ -1708,6 +1713,7 @@ def run_poll_once(
                 "package_id": result["package_id"],
                 "package_action": result["package_action"],
                 "file_count": len(result["uploaded_files"]),
+                "skipped_reports": result.get("skipped_reports", []),
                 "retention": result["retention"],
             }
         )
