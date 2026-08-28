@@ -3863,7 +3863,19 @@ final class LocalStore {
         try writeGuidedShots(normalizedGuided, propertyID: propertyID)
 
         let sessionFolder = sessionFolderURL(propertyID: propertyID, sessionID: sessionID)
-        let flaggedShotsByIssueID = Dictionary(grouping: metadata.shots.filter { $0.isFlagged && $0.issueID != nil }) { shot in
+        let issueRowsByID = metadata.issues.reduce(into: [UUID: IssueMetadata]()) { partial, issue in
+            partial[issue.issueID] = issue
+        }
+        let issueShotsByIssueID = Dictionary(grouping: metadata.shots.filter { shot in
+            guard let issueID = shot.issueID else { return false }
+            let issueStatus = trimmedNonEmpty(issueRowsByID[issueID]?.issueStatus)?.lowercased()
+            let shotStatus = trimmedNonEmpty(shot.issueStatus)?.lowercased()
+            let captureKind = trimmedNonEmpty(shot.captureKind)?.lowercased()
+            return shot.isFlagged ||
+                issueStatus == "resolved" ||
+                shotStatus == "resolved" ||
+                captureKind == "resolved_capture"
+        }) { shot in
             shot.issueID!
         }
 
@@ -3882,7 +3894,7 @@ final class LocalStore {
         }
 
         func buildObservation(issue: IssueMetadata, fallbackSessionID: UUID) -> Observation {
-            let shots = (flaggedShotsByIssueID[issue.issueID] ?? [])
+            let shots = (issueShotsByIssueID[issue.issueID] ?? [])
                 .sorted { $0.createdAt < $1.createdAt }
                 .map { shot in
                     Shot(
@@ -3894,7 +3906,7 @@ final class LocalStore {
                 }
 
             let linkedShot = shots.last?.id
-            let latestMetaShot = (flaggedShotsByIssueID[issue.issueID] ?? []).sorted { $0.updatedAt > $1.updatedAt }.first
+            let latestMetaShot = (issueShotsByIssueID[issue.issueID] ?? []).sorted { $0.updatedAt > $1.updatedAt }.first
             let status: Observation.Status = issue.issueStatus.lowercased() == "resolved" ? .resolved : .active
             let createdAt = issue.firstSeenAt ?? issue.lastSeenAt ?? metadata.startedAt
             let updatedAt = issue.lastSeenAt ?? issue.resolvedAt ?? createdAt
@@ -3934,7 +3946,7 @@ final class LocalStore {
         }
 
         // Fallback: if flagged shots exist without issue rows, still restore a usable flagged entry.
-        let orphanIssueIDs = Set(flaggedShotsByIssueID.keys).subtracting(processedIssueIDs)
+        let orphanIssueIDs = Set(issueShotsByIssueID.keys).subtracting(processedIssueIDs)
         for issueID in orphanIssueIDs {
             let synthetic = IssueMetadata(
                 issueID: issueID,
@@ -3971,10 +3983,26 @@ final class LocalStore {
         try performFileIOSync {
             try ensurePropertyExists(propertyID)
             let sessionFolder = sessionFolderURL(propertyID: propertyID, sessionID: sessionID)
-            let flaggedShotsByIssueID = Dictionary(grouping: metadata.shots.filter { $0.isFlagged && $0.issueID != nil }) { shot in
+            let issueRowsByID = metadata.issues.reduce(into: [UUID: IssueMetadata]()) { partial, issue in
+                partial[issue.issueID] = issue
+            }
+            let issueShotsByIssueID = Dictionary(grouping: metadata.shots.filter { shot in
+                guard let issueID = shot.issueID else { return false }
+                let issueStatus = trimmedNonEmpty(issueRowsByID[issueID]?.issueStatus)?.lowercased()
+                let shotStatus = trimmedNonEmpty(shot.issueStatus)?.lowercased()
+                let captureKind = trimmedNonEmpty(shot.captureKind)?.lowercased()
+                return shot.isFlagged ||
+                    issueStatus == "resolved" ||
+                    shotStatus == "resolved" ||
+                    captureKind == "resolved_capture"
+            }) { shot in
                 shot.issueID!
             }
-            guard !flaggedShotsByIssueID.isEmpty else { return }
+            let resolvedIssueIDs = Set(metadata.issues.compactMap { issue -> UUID? in
+                trimmedNonEmpty(issue.issueStatus)?.lowercased() == "resolved" ? issue.issueID : nil
+            })
+            let candidateIssueIDs = Set(issueShotsByIssueID.keys).union(resolvedIssueIDs)
+            guard !candidateIssueIDs.isEmpty else { return }
 
             var observations = try readObservations(propertyID: propertyID)
             var observationsByID = Dictionary(uniqueKeysWithValues: observations.map { ($0.id, $0) })
@@ -3991,12 +4019,12 @@ final class LocalStore {
             }
 
             var didMutate = false
-            for (issueID, flaggedShots) in flaggedShotsByIssueID {
-                let orderedShots = flaggedShots.sorted { $0.createdAt < $1.createdAt }
-                guard let latestShot = orderedShots.max(by: { $0.updatedAt < $1.updatedAt }) else { continue }
+            for issueID in candidateIssueIDs {
+                let orderedShots = (issueShotsByIssueID[issueID] ?? []).sorted { $0.createdAt < $1.createdAt }
+                let latestShot = orderedShots.max(by: { $0.updatedAt < $1.updatedAt })
                 let issue = metadata.issues.first(where: { $0.issueID == issueID })
                 let createdAt = issue?.firstSeenAt ?? orderedShots.first?.createdAt ?? metadata.startedAt
-                let updatedAt = issue?.lastSeenAt ?? latestShot.updatedAt
+                let updatedAt = issue?.lastSeenAt ?? issue?.resolvedAt ?? latestShot?.updatedAt ?? metadata.startedAt
                 let shots = orderedShots.map { shot in
                     Shot(
                         id: shot.shotID,
@@ -4015,24 +4043,29 @@ final class LocalStore {
                     statement: trimmedNonEmpty(issue?.detailNote) ?? "",
                     status: status
                 )
+                let resolvedByThisSnapshot = status == .resolved &&
+                    (issue?.lastCaptureSessionId == sessionID || issue?.resolvedAt != nil)
                 if next.updatedAt > updatedAt,
                    next.updatedInSessionID != sessionID,
-                   next.resolvedInSessionID != sessionID {
+                   next.resolvedInSessionID != sessionID,
+                   !resolvedByThisSnapshot {
                     continue
                 }
-                next.updatedAt = updatedAt
+                next.updatedAt = max(next.updatedAt, updatedAt)
                 next.status = status
-                next.linkedShotID = shots.last?.id
+                next.linkedShotID = shots.last?.id ?? next.linkedShotID
                 next.updatedInSessionID = issue?.lastCaptureSessionId ?? sessionID
                 next.resolvedInSessionID = status == .resolved ? (issue?.lastCaptureSessionId ?? sessionID) : nil
-                next.building = latestShot.building
-                next.targetElevation = latestShot.elevation
-                next.detailType = latestShot.detailType
-                next.priority = latestShot.priority
-                next.currentReason = trimmedNonEmpty(issue?.currentReason) ?? trimmedNonEmpty(issue?.detailNote) ?? trimmedNonEmpty(latestShot.noteText)
+                next.building = latestShot?.building ?? next.building
+                next.targetElevation = latestShot?.elevation ?? next.targetElevation
+                next.detailType = latestShot?.detailType ?? next.detailType
+                next.priority = latestShot?.priority ?? next.priority
+                next.currentReason = trimmedNonEmpty(issue?.currentReason) ?? trimmedNonEmpty(issue?.detailNote) ?? trimmedNonEmpty(latestShot?.noteText)
                 next.previousReason = trimmedNonEmpty(issue?.previousReason)
                 next.note = trimmedNonEmpty(issue?.detailNote)
-                next.shots = shots
+                if !shots.isEmpty {
+                    next.shots = shots
+                }
                 observationsByID[issueID] = next
                 didMutate = true
             }

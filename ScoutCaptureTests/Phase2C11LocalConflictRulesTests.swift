@@ -889,4 +889,102 @@ final class Phase2C11LocalConflictRulesTests: XCTestCase {
         XCTAssertNil(reloadedIssue?.resolvedAtLocal)
         XCTAssertEqual(reloaded.flaggedIssues.count, 1)
     }
+
+    func testRemoteResolvedSnapshotMergeClearsStaleActiveObservationOnReload() throws {
+        let fixture = try makeLocalStoreFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.storageRoot) }
+
+        let issueID = UUID()
+        let shotID = UUID()
+        let staleActiveObservation = Observation(
+            id: issueID,
+            propertyID: fixture.propertyID,
+            sessionID: fixture.sessionID,
+            createdAt: Date(timeIntervalSinceReferenceDate: 100),
+            updatedAt: Date(timeIntervalSinceReferenceDate: 200),
+            statement: "Stale active reason",
+            status: .active,
+            linkedShotID: shotID,
+            updatedInSessionID: nil,
+            resolvedInSessionID: nil,
+            priority: "High",
+            currentReason: "Stale active reason",
+            note: "Stale active reason"
+        )
+        _ = try fixture.localStore.createObservation(staleActiveObservation)
+
+        var metadata = try fixture.localStore.loadSessionMetadata(
+            propertyID: fixture.propertyID,
+            sessionID: fixture.sessionID
+        )
+        metadata.shots = [
+            ShotMetadata(
+                shotID: shotID,
+                propertyID: fixture.propertyID,
+                sessionID: fixture.sessionID,
+                createdAt: Date(timeIntervalSinceReferenceDate: 110),
+                capturedAtLocal: nil,
+                updatedAt: Date(timeIntervalSinceReferenceDate: 120),
+                building: "Building",
+                elevation: "North",
+                detailType: "Panel",
+                angleIndex: 1,
+                trade: "Electrical",
+                priority: "Low",
+                shotKey: "building|north|panel|1",
+                isGuided: true,
+                isFlagged: false,
+                issueID: issueID,
+                issueStatus: "resolved",
+                captureKind: "resolved_capture",
+                firstCaptureKind: "captured",
+                noteText: "Resolved reason",
+                noteCategory: nil,
+                originalFilename: "resolved.jpg",
+                originalRelativePath: "Originals/resolved.jpg",
+                originalByteSize: 128,
+                stampedFilename: nil,
+                stampedRelativePath: nil,
+                captureMode: nil,
+                lens: nil,
+                exifOrientation: nil,
+                latitude: nil,
+                longitude: nil,
+                accuracyMeters: nil,
+                imageWidth: nil,
+                imageHeight: nil
+            )
+        ]
+        metadata.issues = [
+            IssueMetadata(
+                issueID: issueID,
+                issueStatus: "resolved",
+                currentReason: "Resolved reason",
+                firstSeenAt: Date(timeIntervalSinceReferenceDate: 100),
+                lastSeenAt: Date(timeIntervalSinceReferenceDate: 120),
+                resolvedAt: Date(timeIntervalSinceReferenceDate: 120),
+                lastCaptureSessionId: fixture.sessionID,
+                detailNote: "Resolved reason",
+                shotKey: "building|north|panel|1"
+            )
+        ]
+
+        try fixture.localStore.mergeRemoteFlaggedReferenceObservations(
+            propertyID: fixture.propertyID,
+            sessionID: fixture.sessionID,
+            metadata: metadata
+        )
+
+        let reloadedObservation = try XCTUnwrap(
+            fixture.localStore.fetchObservations(propertyID: fixture.propertyID)
+                .first(where: { $0.id == issueID })
+        )
+        XCTAssertEqual(reloadedObservation.status, .resolved)
+        XCTAssertEqual(reloadedObservation.resolvedInSessionID, fixture.sessionID)
+        XCTAssertEqual(reloadedObservation.linkedShotID, shotID)
+        XCTAssertEqual(reloadedObservation.shots.map(\.id), [shotID])
+        XCTAssertEqual(reloadedObservation.currentReason, "Resolved reason")
+        XCTAssertEqual(reloadedObservation.priority, "Low")
+        XCTAssertEqual(reloadedObservation.updatedAt, Date(timeIntervalSinceReferenceDate: 200))
+    }
 }
