@@ -2346,10 +2346,12 @@ final class LocalStore {
     func fetchObservations(propertyID: UUID) throws -> [Observation] {
         try ensurePropertyExists(propertyID)
         let observations = try readObservations(propertyID: propertyID)
-        if try hasLegacyElevationValues(in: observationsFileURL(for: propertyID)) {
-            try writeObservations(observations, propertyID: propertyID)
+        let normalized = LocalConflictRules.normalizeObservations(observations)
+        if try hasLegacyElevationValues(in: observationsFileURL(for: propertyID)) ||
+            normalized != observations {
+            try writeObservations(normalized, propertyID: propertyID)
         }
-        return observations
+        return normalized
     }
 
     @discardableResult
@@ -2395,10 +2397,12 @@ final class LocalStore {
     func fetchGuidedShots(propertyID: UUID) throws -> [GuidedShot] {
         try ensurePropertyExists(propertyID)
         let guidedShots = try readGuidedShots(propertyID: propertyID)
-        if try hasLegacyElevationValues(in: guidedShotsFileURL(for: propertyID)) {
-            try writeGuidedShots(guidedShots, propertyID: propertyID)
+        let normalized = LocalConflictRules.normalizeGuidedCompletionStates(guidedShots)
+        if try hasLegacyElevationValues(in: guidedShotsFileURL(for: propertyID)) ||
+            normalized != guidedShots {
+            try writeGuidedShots(normalized, propertyID: propertyID)
         }
-        return guidedShots
+        return normalized
     }
 
     func saveGuidedShots(_ guidedShots: [GuidedShot], propertyID: UUID) throws {
@@ -2746,6 +2750,10 @@ final class LocalStore {
 
         func matchesObservation(_ guided: GuidedShot) -> Bool {
             if let shotID, guided.id == shotID || guided.shot?.id == shotID {
+                return true
+            }
+            if let syncedShot,
+               LocalConflictRules.guidedShot(guided, matches: syncedShot) {
                 return true
             }
             if observationShotIDs.contains(guided.id) {
@@ -5159,16 +5167,7 @@ final class LocalStore {
     }
 
     private func writeObservations(_ observations: [Observation], propertyID: UUID) throws {
-        let normalized = observations.map { observation in
-            var updated = observation
-            updated.historyEvents = LocalConflictRules.normalizeObservationHistoryEventsAppendOnly(
-                observation.historyEvents
-            )
-            updated.updateHistory = LocalConflictRules.normalizeObservationUpdateEntriesAppendOnly(
-                observation.updateHistory
-            )
-            return updated
-        }
+        let normalized = LocalConflictRules.normalizeObservations(observations)
         let data = try encoder.encode(normalized)
         let fileURL = observationsFileURL(for: propertyID)
         try data.write(to: fileURL, options: .atomic)

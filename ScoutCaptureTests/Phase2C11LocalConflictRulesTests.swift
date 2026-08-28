@@ -63,13 +63,30 @@ final class Phase2C11LocalConflictRulesTests: XCTestCase {
     private func makeGuidedShot(
         id: UUID = UUID(),
         title: String = "Panel",
-        isCompleted: Bool = false
+        isCompleted: Bool = false,
+        building: String? = nil,
+        targetElevation: String? = nil,
+        detailType: String? = nil,
+        angleIndex: Int? = nil,
+        shot: Shot? = nil,
+        status: GuidedCheckpointStatus = .active,
+        isRetired: Bool = false,
+        retiredAt: Date? = nil,
+        retiredInSessionID: UUID? = nil
     ) -> GuidedShot {
         GuidedShot(
             id: id,
+            status: status,
             title: title,
-            shot: nil,
-            isCompleted: isCompleted
+            building: building,
+            targetElevation: targetElevation,
+            detailType: detailType,
+            angleIndex: angleIndex,
+            shot: shot,
+            isCompleted: isCompleted,
+            isRetired: isRetired,
+            retiredAt: retiredAt,
+            retiredInSessionID: retiredInSessionID
         )
     }
 
@@ -222,6 +239,96 @@ final class Phase2C11LocalConflictRulesTests: XCTestCase {
         XCTAssertTrue(normalized[0].isCompleted)
     }
 
+    func testGuidedCompletionNormalizerSuppressesOlderActiveDuplicateWhenNewerResolvedMatchesGuidedKey() throws {
+        let activeShot = Shot(
+            id: UUID(),
+            capturedAt: Date(timeIntervalSinceReferenceDate: 100),
+            imageLocalIdentifier: "/tmp/stale-active.jpg",
+            note: nil
+        )
+        let active = makeGuidedShot(
+            id: UUID(),
+            title: "Stale active panel",
+            isCompleted: true,
+            building: "Building",
+            targetElevation: "North",
+            detailType: "Panel",
+            angleIndex: 1,
+            shot: activeShot
+        )
+        let resolved = makeGuidedShot(
+            id: UUID(),
+            title: "Resolved panel",
+            isCompleted: true,
+            building: " building ",
+            targetElevation: "north",
+            detailType: "panel",
+            angleIndex: 1,
+            shot: Shot(
+                id: UUID(),
+                capturedAt: Date(timeIntervalSinceReferenceDate: 200),
+                imageLocalIdentifier: "/tmp/resolved.jpg",
+                note: nil
+            ),
+            status: .retired,
+            isRetired: true,
+            retiredAt: Date(timeIntervalSinceReferenceDate: 200),
+            retiredInSessionID: UUID()
+        )
+
+        let normalized = LocalConflictRules.normalizeGuidedCompletionStates([active, resolved])
+        let stale = try XCTUnwrap(normalized.first(where: { $0.id == active.id }))
+
+        XCTAssertEqual(normalized.count, 2)
+        XCTAssertEqual(stale.status, .retired)
+        XCTAssertEqual(stale.isRetired, true)
+        XCTAssertEqual(stale.retiredAt, resolved.retiredAt)
+        XCTAssertEqual(normalized.filter { $0.status != .retired && !$0.isRetired }.count, 0)
+    }
+
+    func testGuidedCompletionNormalizerPreservesNewerActiveDuplicateAfterReopen() throws {
+        let resolved = makeGuidedShot(
+            id: UUID(),
+            title: "Resolved panel",
+            isCompleted: true,
+            building: "Building",
+            targetElevation: "North",
+            detailType: "Panel",
+            angleIndex: 1,
+            shot: Shot(
+                id: UUID(),
+                capturedAt: Date(timeIntervalSinceReferenceDate: 100),
+                imageLocalIdentifier: "/tmp/resolved.jpg",
+                note: nil
+            ),
+            status: .retired,
+            isRetired: true,
+            retiredAt: Date(timeIntervalSinceReferenceDate: 100),
+            retiredInSessionID: UUID()
+        )
+        let reopened = makeGuidedShot(
+            id: UUID(),
+            title: "Reopened panel",
+            isCompleted: true,
+            building: "Building",
+            targetElevation: "North",
+            detailType: "Panel",
+            angleIndex: 1,
+            shot: Shot(
+                id: UUID(),
+                capturedAt: Date(timeIntervalSinceReferenceDate: 200),
+                imageLocalIdentifier: "/tmp/reopened.jpg",
+                note: nil
+            )
+        )
+
+        let normalized = LocalConflictRules.normalizeGuidedCompletionStates([resolved, reopened])
+        let active = try XCTUnwrap(normalized.first(where: { $0.id == reopened.id }))
+
+        XCTAssertEqual(active.status, .active)
+        XCTAssertEqual(active.isRetired, false)
+    }
+
     func testObservationReconcileTieKeepsCurrentStatusAndAppendsAudit() {
         let observationID = UUID()
         let sharedTimestamp = Date(timeIntervalSinceReferenceDate: 100)
@@ -321,6 +428,96 @@ final class Phase2C11LocalConflictRulesTests: XCTestCase {
         XCTAssertEqual(reconciled.updatedAt, Date(timeIntervalSinceReferenceDate: 200))
         XCTAssertEqual(reconciled.historyEvents.count, 2)
         XCTAssertEqual(reconciled.updateHistory.count, 1)
+    }
+
+    func testObservationNormalizerSuppressesOlderActiveDuplicateWhenNewerResolvedMatchesLocation() throws {
+        let resolvedSessionID = UUID()
+        let staleActive = Observation(
+            id: UUID(),
+            propertyID: UUID(),
+            sessionID: UUID(),
+            createdAt: Date(timeIntervalSinceReferenceDate: 100),
+            updatedAt: Date(timeIntervalSinceReferenceDate: 100),
+            statement: "Stale active issue",
+            status: .active,
+            linkedShotID: UUID(),
+            building: "Building",
+            targetElevation: "North",
+            detailType: "Panel",
+            priority: "High",
+            currentReason: "Stale active issue",
+            note: "Stale active issue"
+        )
+        let resolved = Observation(
+            id: UUID(),
+            propertyID: staleActive.propertyID,
+            sessionID: resolvedSessionID,
+            createdAt: Date(timeIntervalSinceReferenceDate: 90),
+            updatedAt: Date(timeIntervalSinceReferenceDate: 200),
+            statement: "Resolved issue",
+            status: .resolved,
+            linkedShotID: UUID(),
+            resolutionPhotoRef: "/tmp/resolved.jpg",
+            resolutionStatement: "Resolved in the field",
+            updatedInSessionID: resolvedSessionID,
+            resolvedInSessionID: resolvedSessionID,
+            building: " building ",
+            targetElevation: "north",
+            detailType: "panel",
+            priority: "Low",
+            currentReason: "Resolved issue",
+            note: "Resolved issue"
+        )
+
+        let normalized = LocalConflictRules.normalizeObservations([staleActive, resolved])
+        let suppressed = try XCTUnwrap(normalized.first(where: { $0.id == staleActive.id }))
+
+        XCTAssertEqual(suppressed.status, .resolved)
+        XCTAssertEqual(suppressed.updatedAt, resolved.updatedAt)
+        XCTAssertEqual(suppressed.resolvedInSessionID, resolvedSessionID)
+        XCTAssertEqual(suppressed.resolutionPhotoRef, "/tmp/resolved.jpg")
+        XCTAssertEqual(normalized.filter { $0.status == .active }.count, 0)
+    }
+
+    func testObservationNormalizerPreservesNewerActiveDuplicateAfterReopen() throws {
+        let resolved = Observation(
+            id: UUID(),
+            propertyID: UUID(),
+            sessionID: UUID(),
+            createdAt: Date(timeIntervalSinceReferenceDate: 100),
+            updatedAt: Date(timeIntervalSinceReferenceDate: 100),
+            statement: "Resolved issue",
+            status: .resolved,
+            linkedShotID: UUID(),
+            resolvedInSessionID: UUID(),
+            building: "Building",
+            targetElevation: "North",
+            detailType: "Panel",
+            priority: "Low",
+            currentReason: "Resolved issue",
+            note: "Resolved issue"
+        )
+        let reopened = Observation(
+            id: UUID(),
+            propertyID: resolved.propertyID,
+            sessionID: UUID(),
+            createdAt: Date(timeIntervalSinceReferenceDate: 110),
+            updatedAt: Date(timeIntervalSinceReferenceDate: 200),
+            statement: "Reopened issue",
+            status: .active,
+            linkedShotID: UUID(),
+            building: "Building",
+            targetElevation: "North",
+            detailType: "Panel",
+            priority: "High",
+            currentReason: "Reopened issue",
+            note: "Reopened issue"
+        )
+
+        let normalized = LocalConflictRules.normalizeObservations([resolved, reopened])
+        let active = try XCTUnwrap(normalized.first(where: { $0.id == reopened.id }))
+
+        XCTAssertEqual(active.status, .active)
     }
 
     func testSaveGuidedShotsNormalizesDuplicateIDsBeforePersist() throws {
@@ -898,6 +1095,141 @@ final class Phase2C11LocalConflictRulesTests: XCTestCase {
         XCTAssertEqual(metadataGuided.status, .retired)
         XCTAssertTrue(metadataGuided.isRetired)
         XCTAssertEqual(metadataGuided.retiredInSessionID, fixture.sessionID)
+    }
+
+    func testResolvedFlaggedObservationRetiresOlderActiveGuidedDuplicateByGuidedKey() throws {
+        let fixture = try makeLocalStoreFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.storageRoot) }
+
+        let issueID = UUID()
+        let staleGuidedID = UUID()
+        let resolvedShotID = UUID()
+        let staleShot = Shot(
+            id: staleGuidedID,
+            capturedAt: Date(timeIntervalSinceReferenceDate: 100),
+            imageLocalIdentifier: "/tmp/stale-active-guided.jpg",
+            note: "Stale active reason"
+        )
+        let staleGuided = GuidedShot(
+            id: staleGuidedID,
+            title: "Building North Panel",
+            building: "Building",
+            targetElevation: "North",
+            detailType: "Panel",
+            angleIndex: 1,
+            referenceImageLocalIdentifier: "/tmp/reference.jpg",
+            referenceImagePath: "/tmp/reference.jpg",
+            shot: staleShot,
+            isCompleted: true
+        )
+        try fixture.localStore.saveGuidedShots([staleGuided], propertyID: fixture.propertyID)
+
+        let observation = Observation(
+            id: issueID,
+            propertyID: fixture.propertyID,
+            sessionID: fixture.sessionID,
+            createdAt: Date(timeIntervalSinceReferenceDate: 100),
+            updatedAt: Date(timeIntervalSinceReferenceDate: 105),
+            statement: "Active reason",
+            status: .active,
+            linkedShotID: resolvedShotID,
+            updatedInSessionID: fixture.sessionID,
+            priority: "High",
+            currentReason: "Active reason",
+            note: "Active reason"
+        )
+        _ = try fixture.localStore.createObservation(observation)
+
+        var metadata = try fixture.localStore.loadSessionMetadata(
+            propertyID: fixture.propertyID,
+            sessionID: fixture.sessionID
+        )
+        metadata.guidedShots = [staleGuided]
+        metadata.shots = [
+            ShotMetadata(
+                shotID: resolvedShotID,
+                propertyID: fixture.propertyID,
+                sessionID: fixture.sessionID,
+                createdAt: Date(timeIntervalSinceReferenceDate: 120),
+                capturedAtLocal: nil,
+                updatedAt: Date(timeIntervalSinceReferenceDate: 120),
+                building: "Building",
+                elevation: "North",
+                detailType: "Panel",
+                angleIndex: 1,
+                trade: "Electrical",
+                priority: "High",
+                shotKey: "building|north|panel|1",
+                isGuided: true,
+                isFlagged: true,
+                issueID: issueID,
+                issueStatus: "active",
+                captureKind: "captured",
+                firstCaptureKind: "captured",
+                noteText: "Active reason",
+                noteCategory: nil,
+                originalFilename: "resolved-guided.jpg",
+                originalRelativePath: "Originals/resolved-guided.jpg",
+                originalByteSize: 128,
+                stampedFilename: nil,
+                stampedRelativePath: nil,
+                captureMode: nil,
+                lens: nil,
+                exifOrientation: nil,
+                latitude: nil,
+                longitude: nil,
+                accuracyMeters: nil,
+                imageWidth: nil,
+                imageHeight: nil
+            )
+        ]
+        metadata.issues = [
+            IssueMetadata(
+                issueID: issueID,
+                issueStatus: "active",
+                currentReason: "Active reason",
+                firstSeenAt: Date(timeIntervalSinceReferenceDate: 100),
+                lastSeenAt: Date(timeIntervalSinceReferenceDate: 120),
+                lastCaptureSessionId: fixture.sessionID,
+                detailNote: "Active reason",
+                shotKey: "building|north|panel|1"
+            )
+        ]
+        try fixture.localStore.saveSessionMetadataAtomically(
+            propertyID: fixture.propertyID,
+            sessionID: fixture.sessionID,
+            metadata: metadata
+        )
+
+        var resolvedObservation = observation
+        resolvedObservation.status = .resolved
+        resolvedObservation.resolvedInSessionID = fixture.sessionID
+        resolvedObservation.resolutionPhotoRef = "/tmp/resolved-guided.jpg"
+        resolvedObservation.resolutionStatement = "Condition no longer visibly present."
+        let persistedObservation = try fixture.localStore.updateObservation(resolvedObservation)
+
+        _ = try fixture.localStore.syncFlaggedObservationUpdateToSessionMetadata(
+            propertyID: fixture.propertyID,
+            sessionID: fixture.sessionID,
+            observation: persistedObservation,
+            shotID: resolvedShotID,
+            trade: "Electrical",
+            activeCaptureKind: "follow_up_capture",
+            updatedAt: Date(timeIntervalSinceReferenceDate: 130)
+        )
+
+        let propertyGuided = try fixture.localStore.fetchGuidedShots(propertyID: fixture.propertyID)
+        XCTAssertEqual(propertyGuided.filter { $0.status != .retired && !$0.isRetired }.count, 0)
+        let suppressed = try XCTUnwrap(propertyGuided.first(where: { $0.id == staleGuidedID }))
+        XCTAssertEqual(suppressed.status, .retired)
+        XCTAssertTrue(suppressed.isRetired)
+        XCTAssertEqual(suppressed.retiredInSessionID, fixture.sessionID)
+
+        let reloaded = try fixture.localStore.loadSessionMetadata(
+            propertyID: fixture.propertyID,
+            sessionID: fixture.sessionID
+        )
+        XCTAssertEqual(reloaded.guidedShots.filter { $0.status != .retired && !$0.isRetired }.count, 0)
     }
 
     func testFlaggedObservationReopenSyncClearsResolvedShotAndIssueState() throws {
