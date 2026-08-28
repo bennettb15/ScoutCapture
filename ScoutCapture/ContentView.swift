@@ -5548,22 +5548,18 @@ struct ContentView: View {
         }
 
         var exportActionTitle: String {
-            if isSealedNotDelivered { return "Deliver" }
-            if isSessionSealed && firstDeliveredAt != nil {
-                return reExportEligibleNow ? "Re-export" : "Re-export Window Expired"
-            }
-            return "Export"
+            return "Complete Session"
         }
 
         var exitActionTitle: String {
-            hasCaptures ? "Save Draft and Exit" : "Exit"
+            hasCaptures ? "Exit as Draft" : "Exit"
         }
 
         var isExportActionEnabled: Bool {
             if hasOutstandingChecklistItems { return false }
             if isSealedNotDelivered { return true }
             if isSessionSealed && firstDeliveredAt != nil {
-                return reExportEligibleNow
+                return false
             }
             return canSealNow
         }
@@ -5577,16 +5573,19 @@ struct ContentView: View {
             if isSessionSealed && firstDeliveredAt != nil && !reExportEligibleNow {
                 return "Re export window expired."
             }
+            if isSessionSealed && firstDeliveredAt != nil {
+                return "Use Re-export from the home screen for a manual ZIP."
+            }
             if canSealNow {
                 return nil
             }
             if !hasBaseline && currentSessionCaptureCount == 0 {
-                return "Export is disabled until at least one photo is captured."
+                return "Complete Session is disabled until at least one photo is captured."
             }
             if !hasBaseline {
-                return "Export is disabled until at least one photo is captured."
+                return "Complete Session is disabled until at least one photo is captured."
             }
-            return "Export is disabled until all guided and flagged items are complete."
+            return "Complete Session is disabled until all guided and flagged items are complete."
         }
     }
 
@@ -6630,9 +6629,6 @@ struct ContentView: View {
                     onExportNow: {
                         attemptStartExportNowFlow()
                     },
-                    onExportLater: {
-                        attemptExportLaterAndExit(summary: summary)
-                    }
                 )
                 .zIndex(500)
             }
@@ -6655,7 +6651,7 @@ struct ContentView: View {
                     cancelTitle: "Cancel",
                     onRetry: {
                         showSessionExportErrorPopup = false
-                        startExportNowFlow()
+                        startManualSessionExportFlow()
                     },
                     onCancel: {
                         showSessionExportErrorPopup = false
@@ -12280,6 +12276,39 @@ extension ContentView {
     }
 
     private func startExportNowFlow() {
+        guard !isEndingSession else { return }
+        if let summary = sessionActionsSummary,
+           (!summary.isExportActionEnabled || summary.hasOutstandingChecklistItems) {
+            return
+        }
+        isEndingSession = true
+        showSessionActionsSheet = false
+        waitForPendingCaptureSavesThenBeginExportNow()
+    }
+
+    private func waitForPendingCaptureSavesThenBeginExportNow() {
+        if pendingCaptureSaveCount > 0 {
+            print(
+                "[CompleteSession] event=wait_for_capture_saves " +
+                "pendingCaptureSaveCount=\(pendingCaptureSaveCount)"
+            )
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                waitForPendingCaptureSavesThenBeginExportNow()
+            }
+            return
+        }
+
+        appState.completeCurrentSessionWithoutZIP()
+        appState.refreshPropertiesInBackground()
+        Task {
+            await appState.releaseCurrentSessionCoordinationLockIfOwned()
+            await MainActor.run {
+                finishEndingSessionByExitingToHub()
+            }
+        }
+    }
+
+    private func startManualSessionExportFlow() {
         guard !isPreparingSessionExport else { return }
         if let summary = sessionActionsSummary,
            (!summary.isExportActionEnabled || summary.hasOutstandingChecklistItems) {
@@ -12289,17 +12318,17 @@ extension ContentView {
         sessionExportErrorMessage = nil
         isPreparingSessionExport = true
         sessionExportChecklist = ExportChecklistState()
-        waitForPendingCaptureSavesThenBeginExportNow()
+        waitForPendingCaptureSavesThenBeginManualSessionExport()
     }
 
-    private func waitForPendingCaptureSavesThenBeginExportNow() {
+    private func waitForPendingCaptureSavesThenBeginManualSessionExport() {
         if pendingCaptureSaveCount > 0 {
             print(
                 "[ExportProgress] event=wait_for_capture_saves " +
                 "pendingCaptureSaveCount=\(pendingCaptureSaveCount)"
             )
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
-                waitForPendingCaptureSavesThenBeginExportNow()
+                waitForPendingCaptureSavesThenBeginManualSessionExport()
             }
             return
         }
@@ -14416,7 +14445,6 @@ extension ContentView {
         let onResume: () -> Void
         let onSaveDraftAndExit: () -> Void
         let onExportNow: () -> Void
-        let onExportLater: () -> Void
 
         private var neutralFill: Color {
             colorScheme == .light ? Color.white.opacity(0.90) : Color.black.opacity(0.65)
@@ -14508,25 +14536,19 @@ extension ContentView {
                     action: onResume
                 )
                 actionButton(
-                    title: isPreparingExport ? "Preparing Export..." : summary.exportActionTitle,
-                    role: .secondary,
-                    isEnabled: !isPreparingExport && !isEndingSession && summary.isExportActionEnabled,
-                    action: onExportNow
-                )
-                actionButton(
-                    title: isEndingSession ? "Ending..." : "Export Later",
-                    role: .tertiary,
-                    isEnabled: !isPreparingExport && !isEndingSession && summary.isExportLaterEnabled,
-                    action: onExportLater
-                )
-                actionButton(
-                    title: isEndingSession ? "Ending..." : summary.exitActionTitle,
+                    title: summary.exitActionTitle,
                     role: .secondary,
                     isEnabled: !isPreparingExport && !isEndingSession,
                     action: onSaveDraftAndExit
                 )
+                actionButton(
+                    title: isEndingSession ? "Ending..." : summary.exportActionTitle,
+                    role: .tertiary,
+                    isEnabled: !isPreparingExport && !isEndingSession && summary.isExportActionEnabled,
+                    action: onExportNow
+                )
 
-                if !summary.isExportActionEnabled || !summary.isExportLaterEnabled {
+                if !summary.isExportActionEnabled {
                     Text(disabledHintText)
                         .font(.system(size: 12, weight: .medium))
                         .foregroundColor(.white.opacity(0.72))
@@ -14538,15 +14560,18 @@ extension ContentView {
 
         private var disabledHintText: String {
             if summary.isSessionSealed && summary.firstDeliveredAt == nil {
-                return "Session sealed. Use Deliver to complete first delivery."
+                return "Session sealed. Use Re-export from the home screen for a manual ZIP."
             }
             if summary.isSessionSealed && summary.firstDeliveredAt != nil && !summary.reExportEligibleNow {
                 return "Re export window expired."
             }
-            if !summary.hasBaseline && summary.currentSessionCaptureCount == 0 {
-                return "Export is disabled until at least one photo is captured."
+            if summary.isSessionSealed && summary.firstDeliveredAt != nil {
+                return "Use Re-export from the home screen for a manual ZIP."
             }
-            return "Export and Export Later are disabled until all guided and flagged items are complete."
+            if !summary.hasBaseline && summary.currentSessionCaptureCount == 0 {
+                return "Complete Session is disabled until at least one photo is captured."
+            }
+            return "Complete Session is disabled until all guided and flagged items are complete."
         }
 
         private enum ActionRole {

@@ -1183,6 +1183,8 @@ struct SessionHubView: View {
         let hasPendingExport = badgeModel.showPendingExport
         let latestReExportSession = reExportCandidateSession(for: property.id)
         let hasReExportGlyph = badgeModel.showReExport && latestReExportSession != nil
+        let manualExportSession = latestReExportSession ?? pendingSession
+        let hasManualExportAction = manualExportSession != nil && (hasReExportGlyph || hasPendingExport)
         let clientLine = propertyClientLine(property)
         let addressLine = propertyAddressLine(property)
         let hasMapsButton = mapsAddressQuery(for: property) != nil
@@ -1310,10 +1312,10 @@ struct SessionHubView: View {
             }
         }
         .swipeActions(edge: .leading, allowsFullSwipe: false) {
-            if hasReExportGlyph, let reExportSession = latestReExportSession {
+            if hasManualExportAction, let manualExportSession {
                 Button {
-                    print("[ReExportInvoke] propertyID=\(property.id.uuidString) sessionID=\(reExportSession.id.uuidString) source=leadingSwipe")
-                    beginPendingExport(for: property, session: reExportSession)
+                    print("[ReExportInvoke] propertyID=\(property.id.uuidString) sessionID=\(manualExportSession.id.uuidString) source=leadingSwipe")
+                    beginPendingExport(for: property, session: manualExportSession)
                 } label: {
                     Label("Re-export", systemImage: "clock.arrow.circlepath")
                 }

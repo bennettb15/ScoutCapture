@@ -46467,6 +46467,41 @@ final class AppState: ObservableObject {
         emitSessionCompletedAuditEventIfNeeded(for: persistedSession, wasAlreadyCompleted: wasAlreadyCompleted)
     }
 
+    func completeCurrentSessionWithoutZIP() {
+        guard var session = currentSession else { return }
+        let wasAlreadyCompleted = session.status == .completed
+        session.status = .completed
+        if session.endedAt == nil {
+            session.endedAt = Date()
+        }
+        session.exportedAt = nil
+        session.isSealed = true
+        print("[CompleteSession] action=complete_without_zip sessionID=\(session.id.uuidString) isSealed=true firstDeliveredAt=nil reExportExpiresAt=nil")
+        currentSession = session
+        let persistedSession = try? localStore.upsertSession(session)
+        let persisted = persistedSession ?? session
+        currentSession = persisted
+        reloadSessionCache(for: persisted.propertyID)
+        updateLocalPropertyStatusPresentationCache(
+            propertyID: persisted.propertyID,
+            sessionID: persisted.id,
+            status: .pendingExport,
+            reason: "complete_session_without_zip_local"
+        )
+        schedulePhaseBSessionShadowWrite(for: persisted)
+        scheduleSessionArchiveSnapshot(persisted, trigger: "completeCurrentSessionWithoutZIP")
+        schedulePropertyStatusShadowWrite(
+            transition: .pendingExport,
+            propertyID: persisted.propertyID,
+            sessionID: persisted.id,
+            reason: "complete_session_without_zip"
+        )
+        scheduleOffloadEligibleSessionMedia(excludingSessionID: currentSession?.id)
+        cloudBackupManager?.setCaptureModeActive(false)
+        triggerBackupForLifecycleEvent()
+        emitSessionCompletedAuditEventIfNeeded(for: persistedSession, wasAlreadyCompleted: wasAlreadyCompleted)
+    }
+
     func sealCurrentSessionForExportNow() {
         guard var session = currentSession else { return }
         let wasAlreadyCompleted = session.status == .completed

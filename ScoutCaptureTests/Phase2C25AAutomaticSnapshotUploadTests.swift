@@ -496,11 +496,47 @@ final class Phase2C25AAutomaticSnapshotUploadTests: XCTestCase {
         try await waitForArchiveCount(store: completed.store, expected: 1)
         XCTAssertEqual(try completed.store.fetchSessionArchiveSummaries().first?.trigger, "completeCurrentSession")
 
+        let completedWithoutZIP = try makeFixture()
+        completedWithoutZIP.appState.currentSession = completedWithoutZIP.session
+        completedWithoutZIP.appState.completeCurrentSessionWithoutZIP()
+        try await waitForArchiveCount(store: completedWithoutZIP.store, expected: 1)
+        XCTAssertEqual(
+            try completedWithoutZIP.store.fetchSessionArchiveSummaries().first?.trigger,
+            "completeCurrentSessionWithoutZIP"
+        )
+
         let delivered = try makeFixture()
         delivered.appState.currentSession = delivered.session
         delivered.appState.markCurrentSessionExported()
         try await waitForArchiveCount(store: delivered.store, expected: 1)
         XCTAssertEqual(try delivered.store.fetchSessionArchiveSummaries().first?.trigger, "markCurrentSessionExported")
+    }
+
+    func testCompleteCurrentSessionWithoutZIPKeepsManualExportArtifactsRebuildable() throws {
+        let fixture = try makeFixture()
+        fixture.appState.currentSession = fixture.session
+
+        fixture.appState.completeCurrentSessionWithoutZIP()
+
+        let completed = try XCTUnwrap(fixture.appState.currentSession)
+        XCTAssertEqual(completed.status, .completed)
+        XCTAssertTrue(completed.isSealed)
+        XCTAssertNil(completed.exportedAt)
+        XCTAssertNil(completed.firstDeliveredAt)
+        XCTAssertNil(completed.reExportExpiresAt)
+        XCTAssertTrue(fixture.appState.isPendingDelivery(completed))
+        XCTAssertTrue(fixture.appState.propertyCardBadgeModel(for: fixture.property.id).showPendingExport)
+        XCTAssertEqual(
+            fixture.appState.propertyStatusRecord(for: fixture.property.id)?.pendingExportSessionID,
+            fixture.session.id
+        )
+
+        let rebuiltArtifacts = try fixture.store.validatedSessionExportArtifacts(for: completed)
+        XCTAssertTrue(rebuiltArtifacts.prewritePassed)
+        XCTAssertTrue(rebuiltArtifacts.postwritePassed)
+        XCTAssertEqual(rebuiltArtifacts.originalFiles.count, 1)
+        XCTAssertFalse(rebuiltArtifacts.sessionData.isEmpty)
+        XCTAssertFalse(rebuiltArtifacts.validationData.isEmpty)
     }
 
     func testExportLaterImmediatelyUpdatesPendingExportPresentationState() async throws {
