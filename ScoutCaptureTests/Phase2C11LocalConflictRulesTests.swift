@@ -646,6 +646,120 @@ final class Phase2C11LocalConflictRulesTests: XCTestCase {
         XCTAssertEqual(reloadedIssue?.issueStatus, "active")
     }
 
+    func testFlaggedObservationResolveSyncsResolvedShotAndIssueState() throws {
+        let fixture = try makeLocalStoreFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.storageRoot) }
+
+        let issueID = UUID()
+        let shotID = UUID()
+        let activeObservation = Observation(
+            id: issueID,
+            propertyID: fixture.propertyID,
+            sessionID: fixture.sessionID,
+            createdAt: Date(timeIntervalSinceReferenceDate: 100),
+            updatedAt: Date(timeIntervalSinceReferenceDate: 105),
+            statement: "Active reason",
+            status: .active,
+            linkedShotID: shotID,
+            updatedInSessionID: fixture.sessionID,
+            priority: "Medium",
+            currentReason: "Active reason",
+            note: "Active reason"
+        )
+        _ = try fixture.localStore.createObservation(activeObservation)
+
+        var metadata = try fixture.localStore.loadSessionMetadata(
+            propertyID: fixture.propertyID,
+            sessionID: fixture.sessionID
+        )
+        metadata.shots = [
+            ShotMetadata(
+                shotID: shotID,
+                propertyID: fixture.propertyID,
+                sessionID: fixture.sessionID,
+                createdAt: Date(timeIntervalSinceReferenceDate: 100),
+                capturedAtLocal: nil,
+                updatedAt: Date(timeIntervalSinceReferenceDate: 105),
+                building: "Building",
+                elevation: "North",
+                detailType: "Panel",
+                angleIndex: 1,
+                trade: "Electrical",
+                priority: "Medium",
+                shotKey: "building|north|panel|1",
+                isGuided: false,
+                isFlagged: true,
+                issueID: issueID,
+                issueStatus: "active",
+                captureKind: "reference",
+                firstCaptureKind: "captured",
+                noteText: "Active reason",
+                noteCategory: nil,
+                originalFilename: "resolved.jpg",
+                originalRelativePath: "Originals/resolved.jpg",
+                originalByteSize: 128,
+                stampedFilename: nil,
+                stampedRelativePath: nil,
+                captureMode: nil,
+                lens: nil,
+                exifOrientation: nil,
+                latitude: nil,
+                longitude: nil,
+                accuracyMeters: nil,
+                imageWidth: nil,
+                imageHeight: nil
+            )
+        ]
+        metadata.issues = [
+            IssueMetadata(
+                issueID: issueID,
+                issueStatus: "active",
+                currentReason: "Active reason"
+            )
+        ]
+        try fixture.localStore.saveSessionMetadataAtomically(
+            propertyID: fixture.propertyID,
+            sessionID: fixture.sessionID,
+            metadata: metadata
+        )
+
+        var resolvedObservation = activeObservation
+        resolvedObservation.status = .resolved
+        resolvedObservation.resolvedInSessionID = fixture.sessionID
+        resolvedObservation.resolutionPhotoRef = "resolved-photo"
+        resolvedObservation.resolutionStatement = "Condition no longer visibly present."
+        resolvedObservation.currentReason = "Resolved reason"
+        resolvedObservation.note = "Resolved reason"
+        resolvedObservation.statement = "Resolved reason"
+        let persistedObservation = try fixture.localStore.updateObservation(resolvedObservation)
+
+        _ = try fixture.localStore.syncFlaggedObservationUpdateToSessionMetadata(
+            propertyID: fixture.propertyID,
+            sessionID: fixture.sessionID,
+            observation: persistedObservation,
+            shotID: shotID,
+            trade: "Electrical",
+            activeCaptureKind: "follow_up_capture",
+            updatedAt: Date(timeIntervalSinceReferenceDate: 130)
+        )
+
+        let reloaded = try fixture.localStore.loadSessionMetadata(
+            propertyID: fixture.propertyID,
+            sessionID: fixture.sessionID
+        )
+        let reloadedShot = reloaded.shots.first(where: { $0.shotID == shotID })
+        let reloadedIssue = reloaded.issues.first(where: { $0.issueID == issueID })
+        XCTAssertEqual(reloadedShot?.issueStatus, "resolved")
+        XCTAssertEqual(reloadedShot?.captureKind, "resolved_capture")
+        XCTAssertEqual(reloadedShot?.noteText, "Resolved reason")
+        XCTAssertEqual(reloadedShot?.priority, "Medium")
+        XCTAssertEqual(reloadedIssue?.issueStatus, "resolved")
+        XCTAssertEqual(reloadedIssue?.currentReason, "Resolved reason")
+        XCTAssertNotNil(reloadedIssue?.resolvedAt)
+        XCTAssertEqual(reloadedIssue?.lastCaptureSessionId, fixture.sessionID)
+        XCTAssertEqual(reloaded.flaggedIssues.count, 0)
+    }
+
     func testFlaggedObservationReopenSyncClearsResolvedShotAndIssueState() throws {
         let fixture = try makeLocalStoreFixture()
         defer { try? FileManager.default.removeItem(at: fixture.storageRoot) }

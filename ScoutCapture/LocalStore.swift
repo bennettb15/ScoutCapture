@@ -2681,8 +2681,9 @@ final class LocalStore {
             }
             metadata.shots[shotIndex].priority = normalizedPriority
             metadata.shots[shotIndex].trade = normalizedTrade
-            if !isResolved,
-               trimmedNonEmpty(metadata.shots[shotIndex].captureKind) == "resolved_capture" {
+            if isResolved {
+                metadata.shots[shotIndex].captureKind = "resolved_capture"
+            } else if trimmedNonEmpty(metadata.shots[shotIndex].captureKind) == "resolved_capture" {
                 metadata.shots[shotIndex].captureKind = captureKindForActiveUpdate
             }
             if metadata.shots[shotIndex].firstCaptureKind == nil {
