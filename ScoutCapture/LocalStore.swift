@@ -2673,7 +2673,7 @@ final class LocalStore {
 
         var syncedShot: ShotMetadata?
         if let shotIndex = metadata.shots.firstIndex(where: { $0.shotID == shotID }) {
-            metadata.shots[shotIndex].isFlagged = true
+            metadata.shots[shotIndex].isFlagged = !isResolved
             metadata.shots[shotIndex].issueID = observation.id
             metadata.shots[shotIndex].issueStatus = issueStatus
             if let reason {
