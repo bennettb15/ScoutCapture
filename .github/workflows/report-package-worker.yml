@@ -2,6 +2,20 @@ name: Report Package Worker
 
 on:
   workflow_dispatch:
+    inputs:
+      session_id:
+        description: "Optional ScoutCapture session UUID to process. Empty runs the scoped poll worker."
+        required: false
+        type: string
+      snapshot_id:
+        description: "Optional triggering session_snapshots UUID. Used for trace logging; poll mode still dedupes to the latest completed sealed snapshot for the session."
+        required: false
+        type: string
+      trigger_source:
+        description: "Optional source label for diagnostics."
+        required: false
+        default: "manual"
+        type: string
   schedule:
     - cron: "*/5 * * * *"
 
@@ -9,7 +23,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: report-package-worker-scout-dev
+  group: report-package-worker-${{ inputs.session_id || 'poll' }}
   cancel-in-progress: false
 
 jobs:
@@ -21,6 +35,9 @@ jobs:
     env:
       SUPABASE_URL: ${{ secrets.SCOUT_DEV_SUPABASE_URL }}
       SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SCOUT_DEV_SUPABASE_SERVICE_ROLE_KEY }}
+      REPORT_WORKER_SESSION_ID: ${{ inputs.session_id || '' }}
+      REPORT_WORKER_SNAPSHOT_ID: ${{ inputs.snapshot_id || '' }}
+      REPORT_WORKER_TRIGGER_SOURCE: ${{ inputs.trigger_source || github.event_name }}
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -41,14 +58,29 @@ jobs:
         run: docker run --rm scoutcapture-report-worker:report-package --runtime-check --pretty --require-heif
 
       - name: Process completed QA Test 9.5 snapshots
+        shell: bash
         run: |
+          set -euo pipefail
+          allow_pair="d4ba94ff-25e1-4072-aa79-9a548fcb3008:d626703e-671b-44e1-a26d-642c5597730e"
+          worker_args=(
+            --poll-once
+            --allow-remote-validation
+            --expected-project-ref chlvazmtucoszicehtnm
+            --allow-org-property "${allow_pair}"
+            --retention-mode dry-run
+            --pretty
+          )
+          if [[ -n "${REPORT_WORKER_SESSION_ID}" ]]; then
+            echo "Report worker trigger source: ${REPORT_WORKER_TRIGGER_SOURCE}"
+            echo "Restricting poll to session_id=${REPORT_WORKER_SESSION_ID}"
+            echo "Trigger snapshot_id=${REPORT_WORKER_SNAPSHOT_ID:-none}; worker will process the latest completed sealed snapshot for the session."
+            worker_args+=(--allow-session-id "${REPORT_WORKER_SESSION_ID}")
+          else
+            echo "No session_id input supplied; running scoped QA Test 9.5 poll."
+          fi
+
           docker run --rm \
             -e SUPABASE_URL \
             -e SUPABASE_SERVICE_ROLE_KEY \
             scoutcapture-report-worker:report-package \
-              --poll-once \
-              --allow-remote-validation \
-              --expected-project-ref chlvazmtucoszicehtnm \
-              --allow-org-property d4ba94ff-25e1-4072-aa79-9a548fcb3008:d626703e-671b-44e1-a26d-642c5597730e \
-              --retention-mode dry-run \
-              --pretty
+              "${worker_args[@]}"
