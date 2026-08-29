@@ -41255,6 +41255,37 @@ final class AppState: ObservableObject {
         guard let draftSessionID = record.draftSessionID else {
             return false
         }
+        if propertyStatusDraftRepresentsKnownNoOpSession(record, propertyID: propertyID) {
+            let idleRecord = PropertyStatusRecord(
+                propertyID: record.propertyID,
+                orgID: record.orgID,
+                status: .idle,
+                activeSessionID: nil,
+                draftSessionID: nil,
+                pendingExportSessionID: nil,
+                lastExportedSessionID: record.lastExportedSessionID,
+                ownerUserID: nil,
+                ownerDeviceID: nil,
+                heartbeatAt: nil,
+                updatedAt: Date(),
+                updatedBy: record.updatedBy,
+                statusReason: "\(reason):no_material_draft_ignored",
+                revision: record.revision
+            )
+            var nextCache = propertyStatusByPropertyID
+            nextCache[propertyID] = idleRecord
+            propertyStatusByPropertyID = nextCache
+            lastPropertyStatusRefreshAt = Date()
+            print(
+                "[PropertyStatusShadowWrite] property_status_returned_draft_cache_applied=false " +
+                "propertyID=\(propertyID.uuidString) " +
+                "sessionID=\(draftSessionID.uuidString) " +
+                "property_status_status=\(record.status.rawValue) " +
+                "reason=no_material_draft_shell_ignored " +
+                "statusReason=\(reason)"
+            )
+            return true
+        }
         let currentUserID = authenticatedSupabaseUser?.id
         let ownedByCurrentActor = Self.propertyStatusActorOwnedByCurrentActor(
             record: record,
@@ -41900,6 +41931,16 @@ final class AppState: ObservableObject {
             currentUserID: currentUserID,
             currentDeviceID: currentDeviceID
         )
+        if record.status == .draft,
+           propertyStatusDraftRepresentsKnownNoOpSession(record, propertyID: propertyID) {
+            return PropertyStatusCompareAnswer(
+                visibleBadgeState: .idle,
+                draftCountIncluded: false,
+                pendingExportCountIncluded: false,
+                entryBlocked: false,
+                deleteEligible: true
+            )
+        }
         if record.status == .pendingExport,
            let pendingExportSessionID = record.pendingExportSessionID,
            let session = noZIPCompletionEvidenceSession(
@@ -41931,6 +41972,32 @@ final class AppState: ObservableObject {
             entryBlocked: false,
             deleteEligible: answer.deleteEligible
         )
+    }
+
+    private func propertyStatusDraftRepresentsKnownNoOpSession(
+        _ record: PropertyStatusRecord,
+        propertyID: UUID
+    ) -> Bool {
+        guard record.status == .draft,
+              let draftSessionID = record.draftSessionID else {
+            return false
+        }
+        if let currentSession,
+           currentSession.propertyID == propertyID,
+           currentSession.id == draftSessionID,
+           currentSession.status == .draft,
+           !currentSession.isSealed {
+            return !sessionHasCaptures(currentSession)
+        }
+        guard let localDraft = sessions(for: propertyID).first(where: { $0.id == draftSessionID }) else {
+            return false
+        }
+        guard localDraft.status == .draft,
+              !localDraft.isSealed,
+              !isFinalSession(localDraft) else {
+            return false
+        }
+        return !sessionHasCaptures(localDraft)
     }
 
     static func makePropertyStatusCompareAnswer(
