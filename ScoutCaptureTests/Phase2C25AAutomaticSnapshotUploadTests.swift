@@ -539,6 +539,99 @@ final class Phase2C25AAutomaticSnapshotUploadTests: XCTestCase {
         XCTAssertFalse(rebuiltArtifacts.validationData.isEmpty)
     }
 
+    func testCompletedSessionCannotBeSilentlyDemotedToDraftOnExit() throws {
+        let fixture = try makeFixture()
+        fixture.appState.currentSession = fixture.session
+
+        let saved = try XCTUnwrap(fixture.appState.saveDraftCurrentSession(scheduleShadowWrite: false))
+
+        XCTAssertEqual(saved.status, .completed)
+        XCTAssertTrue(saved.isSealed)
+        XCTAssertEqual(saved.endedAt, fixture.session.endedAt)
+        let persisted = try XCTUnwrap(try fixture.store.fetchSessions(propertyID: fixture.property.id).first)
+        XCTAssertEqual(persisted.status, .completed)
+        XCTAssertTrue(persisted.isSealed)
+        XCTAssertEqual(persisted.endedAt, fixture.session.endedAt)
+    }
+
+    func testCompleteSessionWithoutZIPOfflineQueuesRetryAndKeepsCompletedState() async throws {
+        let fixture = try makeFixture(
+            autoUploadEnabled: true,
+            allowGeneratedOrg: true,
+            storageUploadOverride: { _ in
+                throw AppState.SessionSnapshotUploadError.remoteUnavailable("test bucket unavailable")
+            },
+            rowInsertOverride: { _ in XCTFail("row insert should not run after storage failure") }
+        )
+        fixture.appState.currentSession = fixture.session
+
+        fixture.appState.completeCurrentSessionWithoutZIP()
+
+        try await waitForArchiveCount(store: fixture.store, expected: 1)
+        try await waitForCloudState(appState: fixture.appState, session: fixture.session, expected: .retryScheduled)
+        let pending = try XCTUnwrap(try fixture.appState._debugSessionSnapshotUploadRetryWorkItemsForTests().first)
+        XCTAssertEqual(pending.triggerSource, "completeCurrentSessionWithoutZIP")
+        XCTAssertEqual(pending.status, .failed)
+        XCTAssertEqual(pending.attemptCount, 1)
+        XCTAssertNotNil(pending.nextAttemptAt)
+        XCTAssertFalse(pending.storageUploadCompleted)
+
+        let saved = try XCTUnwrap(fixture.appState.saveDraftCurrentSession(scheduleShadowWrite: false))
+        let persisted = try XCTUnwrap(try fixture.store.fetchSessions(propertyID: fixture.property.id).first)
+        XCTAssertEqual(saved.status, .completed)
+        XCTAssertEqual(persisted.status, .completed)
+        XCTAssertTrue(persisted.isSealed)
+        XCTAssertEqual(persisted.endedAt, fixture.session.endedAt)
+    }
+
+    func testForegroundRetryRecoversQueuedSnapshotStatusWithoutRetryItemAfterCrash() async throws {
+        var uploadedObjects: [AppState.SessionSnapshotStorageObject] = []
+        var insertedRows: [AppState.SessionSnapshotUploadRow] = []
+        let fixture = try makeFixture(
+            autoUploadEnabled: true,
+            allowGeneratedOrg: true,
+            storageUploadOverride: { object in uploadedObjects.append(object) },
+            rowInsertOverride: { row in insertedRows.append(row) }
+        )
+        _ = try XCTUnwrap(
+            fixture.store.createSessionArchiveSnapshot(
+                session: fixture.session,
+                trigger: "completeCurrentSessionWithoutZIP",
+                deviceID: "test-device"
+            )
+        )
+        let snapshotID = UUID()
+        let queuedStatus = statusRecord(
+            property: fixture.property,
+            session: fixture.session,
+            orgID: fixture.orgID,
+            generatedAt: fixture.session.endedAt ?? Date(timeIntervalSinceReferenceDate: 200),
+            status: .queued,
+            triggerSource: "completeCurrentSessionWithoutZIP",
+            reason: "archive_snapshot_scheduled",
+            snapshotID: snapshotID,
+            idempotencyKey: "recoverable-complete-session-without-zip"
+        )
+        _ = try fixture.store.upsertSessionSnapshotUploadStatusRecord(queuedStatus)
+
+        XCTAssertTrue(try fixture.appState._debugSessionSnapshotUploadRetryWorkItemsForTests().isEmpty)
+
+        let summary = await fixture.appState._debugPerformSessionSnapshotUploadRetryForTests(
+            source: "scene_active",
+            now: Date(timeIntervalSinceReferenceDate: 300)
+        )
+
+        XCTAssertEqual(summary.attemptedCount, 1)
+        XCTAssertEqual(summary.succeededCount, 1)
+        XCTAssertEqual(uploadedObjects.count, 1)
+        XCTAssertEqual(uploadedObjects.first?.path, queuedStatus.storagePath)
+        XCTAssertEqual(insertedRows.count, 1)
+        XCTAssertEqual(insertedRows.first?.id, snapshotID)
+        XCTAssertEqual(insertedRows.first?.payloadStoragePath, queuedStatus.storagePath)
+        XCTAssertTrue(try fixture.appState._debugSessionSnapshotUploadRetryWorkItemsForTests().isEmpty)
+        XCTAssertEqual(fixture.appState.sessionSnapshotCloudStatus(for: fixture.session)?.state, .uploaded)
+    }
+
     func testExportLaterImmediatelyUpdatesPendingExportPresentationState() async throws {
         let fixture = try makeFixture()
         fixture.appState.currentSession = fixture.session

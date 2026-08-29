@@ -16140,6 +16140,29 @@ final class AppState: ObservableObject {
         }
     }
 
+    private static func sessionSnapshotStatusRecordCanRecoverMissingRetryItem(
+        _ record: LocalStore.SessionSnapshotUploadStatusRecord
+    ) -> Bool {
+        switch record.status {
+        case .queued, .uploading, .retryScheduled:
+            return true
+        case .failed, .uploaded:
+            return false
+        }
+    }
+
+    private static func sessionSnapshotStatusRecord(
+        _ candidate: LocalStore.SessionSnapshotUploadStatusRecord,
+        isSupersededByUploadedStatusRecords records: [LocalStore.SessionSnapshotUploadStatusRecord]
+    ) -> Bool {
+        records.contains { record in
+            record.status == .uploaded &&
+            record.organizationID == candidate.organizationID &&
+            record.propertyID == candidate.propertyID &&
+            record.sessionID == candidate.sessionID
+        }
+    }
+
     private static func cloudState(
         for status: LocalStore.SessionSnapshotUploadRetryWorkItem.Status
     ) -> SessionSnapshotCloudState {
@@ -16493,14 +16516,25 @@ final class AppState: ObservableObject {
                 skippedIneligibleCount: 0
             )
         }
+        let recoveredMissingRetryCount = recoverMissingSessionSnapshotUploadRetryItems(
+            statusRecords: statusRecords,
+            retryItems: initialItems,
+            now: now
+        )
+        let activeItems: [LocalStore.SessionSnapshotUploadRetryWorkItem]
+        if recoveredMissingRetryCount > 0 {
+            activeItems = (try? localStore.fetchSessionSnapshotUploadRetryWorkItems()) ?? initialItems
+        } else {
+            activeItems = initialItems
+        }
 
-        let supersededUploadedItems = initialItems.filter {
+        let supersededUploadedItems = activeItems.filter {
             Self.sessionSnapshotRetryItem($0, isSupersededByUploadedStatusRecords: statusRecords)
         }
         for item in supersededUploadedItems {
             try? localStore.removeSessionSnapshotUploadRetryWorkItem(id: item.id)
         }
-        let activeInitialItems = initialItems.filter { item in
+        let activeInitialItems = activeItems.filter { item in
             !supersededUploadedItems.contains(where: { $0.id == item.id })
         }
 
@@ -16595,6 +16629,81 @@ final class AppState: ObservableObject {
             terminalFailedCount: terminalFailedCount,
             skippedIneligibleCount: skippedIneligibleCount
         )
+    }
+
+    @discardableResult
+    private func recoverMissingSessionSnapshotUploadRetryItems(
+        statusRecords: [LocalStore.SessionSnapshotUploadStatusRecord],
+        retryItems: [LocalStore.SessionSnapshotUploadRetryWorkItem],
+        now: Date
+    ) -> Int {
+        var existingIdempotencyKeys = Set(retryItems.map(\.idempotencyKey))
+        let uploadedRecords = statusRecords.filter { $0.status == .uploaded }
+        var recoveredCount = 0
+
+        for record in statusRecords.sorted(by: { $0.generatedAt < $1.generatedAt }) {
+            guard record.triggerSource == "completeCurrentSessionWithoutZIP" else { continue }
+            guard Self.sessionSnapshotStatusRecordCanRecoverMissingRetryItem(record) else { continue }
+            guard !existingIdempotencyKeys.contains(record.idempotencyKey) else { continue }
+            guard !Self.sessionSnapshotStatusRecord(record, isSupersededByUploadedStatusRecords: uploadedRecords) else { continue }
+            guard let session = try? localSessionForSnapshotUpload(
+                propertyID: record.propertyID,
+                sessionID: record.sessionID
+            ) else { continue }
+            let eligibility = evaluateSessionSnapshotAutoUploadEligibility(
+                session: session,
+                orgID: record.organizationID
+            )
+            guard eligibility.allowed else { continue }
+            let availability = cachedSessionArchivePackageAvailability(
+                propertyID: record.propertyID,
+                sessionID: record.sessionID,
+                requireDelivered: false,
+                expectedDeviceID: nil
+            )
+            guard availability.available, let archivePath = availability.archivePath else { continue }
+
+            let item = LocalStore.SessionSnapshotUploadRetryWorkItem(
+                snapshotID: record.snapshotID,
+                organizationID: record.organizationID,
+                propertyID: record.propertyID,
+                sessionID: record.sessionID,
+                snapshotKind: record.snapshotKind,
+                trigger: record.trigger,
+                triggerSource: record.triggerSource,
+                archivePath: archivePath,
+                storageBucket: sessionSnapshotStorageBucket,
+                storagePath: record.storagePath,
+                generatedAt: record.generatedAt,
+                sourceDeviceID: availability.originatingDeviceID ?? currentDeviceIdentifier(),
+                idempotencyKey: record.idempotencyKey,
+                createdAt: record.generatedAt,
+                updatedAt: now
+            )
+
+            do {
+                let recovered = try localStore.upsertSessionSnapshotUploadRetryWorkItem(item)
+                persistSessionSnapshotCloudStatus(
+                    for: recovered,
+                    status: .queued,
+                    reason: "recovered_missing_retry_item",
+                    updatedAt: now
+                )
+                recoveredCount += 1
+                existingIdempotencyKeys.insert(record.idempotencyKey)
+                print(
+                    "[SessionSnapshotAutoUploadRecovery] " +
+                    "result=recovered_missing_retry_item " +
+                    "propertyID=\(record.propertyID.uuidString) " +
+                    "sessionID=\(record.sessionID.uuidString) " +
+                    "triggerSource=\(record.triggerSource)"
+                )
+            } catch {
+                recordDiagnosticsError(error)
+            }
+        }
+
+        return recoveredCount
     }
 
     @MainActor
@@ -45891,6 +46000,10 @@ final class AppState: ObservableObject {
     @discardableResult
     func saveDraftCurrentSession(scheduleShadowWrite: Bool = true) -> Session? {
         guard var session = currentSession else { return nil }
+        guard !isFinalSession(session) else {
+            cloudBackupManager?.setCaptureModeActive(false)
+            return session
+        }
         session.status = .draft
         session.endedAt = nil
         session.exportedAt = nil
