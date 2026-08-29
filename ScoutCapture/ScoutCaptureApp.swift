@@ -1179,6 +1179,7 @@ struct SessionHubView: View {
         let badgeModel = appState.propertyCardBadgeModel(for: property.id)
         let pendingSession = sessionsForProperty.first(where: { appState.isPendingDeliveryLocallyAvailable($0) })
         let sessionUploadStatus = appState.sessionSnapshotCloudStatusForPropertyRow(propertyID: property.id)
+        let uploadStatusChip = sessionUploadStatus.flatMap(sessionSnapshotUploadStatusChip)
         let hasDraft = badgeModel.showDraft
         let hasPendingExport = badgeModel.showPendingExport
         let latestReExportSession = reExportCandidateSession(for: property.id)
@@ -1189,7 +1190,7 @@ struct SessionHubView: View {
         let addressLine = propertyAddressLine(property)
         let hasMapsButton = mapsAddressQuery(for: property) != nil
         let hasPhoneActions = hasValidPhoneNumber(property)
-        let hasStatusRow = hasDraft || hasPendingExport || hasReExportGlyph
+        let hasStatusRow = hasDraft || hasPendingExport || hasReExportGlyph || uploadStatusChip != nil
         let showLock = badgeModel.showLock
         HStack(alignment: .top, spacing: 10) {
             VStack(alignment: .leading, spacing: 4) {
@@ -1242,6 +1243,10 @@ struct SessionHubView: View {
 
                             if hasPendingExport {
                                 chipLabel("Pending Export", tint: .blue)
+                            }
+
+                            if let uploadStatusChip {
+                                chipLabel(uploadStatusChip.title, tint: uploadStatusChip.tint)
                             }
                         }
 
@@ -1503,6 +1508,26 @@ struct SessionHubView: View {
             .foregroundColor(sessionSnapshotCloudTint(status.tint))
             .accessibilityLabel(Text(status.accessibilityLabel))
             .help(status.helpText)
+    }
+
+    private func sessionSnapshotUploadStatusChip(
+        _ status: AppState.SessionSnapshotCloudStatus
+    ) -> (title: String, tint: Color)? {
+        if status.isConfigurationBlocked {
+            return nil
+        }
+        switch status.state {
+        case .queued:
+            return ("Upload Queued", .blue)
+        case .uploading:
+            return ("Uploading", .blue)
+        case .retryScheduled:
+            return ("Upload Retry", .orange)
+        case .failed:
+            return ("Upload Failed", .red)
+        case .uploaded:
+            return nil
+        }
     }
 
     private var countersHeader: some View {

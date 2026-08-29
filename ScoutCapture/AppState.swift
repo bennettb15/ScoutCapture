@@ -16336,6 +16336,9 @@ final class AppState: ObservableObject {
             let sessions = (try? localStore.fetchSessionsForCacheBuild(propertyID: record.propertyID)) ?? []
             guard var session = sessions.first(where: { $0.id == sessionID }) else { continue }
 
+            let noZIPCompletedStatus =
+                normalizedSupabaseText(record.statusReason)?.contains("complete_session_without_zip") == true ||
+                noZIPCompletionSatisfiesManualDelivery(for: session)
             let deliveredAt = session.firstDeliveredAt ?? session.exportedAt ?? record.updatedAt
             let reExportExpiresAt = session.reExportExpiresAt ??
                 Calendar.current.date(byAdding: .day, value: reExportWindowDays, to: deliveredAt)
@@ -16343,7 +16346,7 @@ final class AppState: ObservableObject {
                 session.status != .completed ||
                 !session.isSealed ||
                 session.endedAt == nil ||
-                session.exportedAt == nil ||
+                (!noZIPCompletedStatus && session.exportedAt == nil) ||
                 session.firstDeliveredAt == nil ||
                 session.reExportExpiresAt == nil
             guard needsReconcile else { continue }
@@ -16353,7 +16356,7 @@ final class AppState: ObservableObject {
             if session.endedAt == nil {
                 session.endedAt = deliveredAt
             }
-            if session.exportedAt == nil {
+            if !noZIPCompletedStatus && session.exportedAt == nil {
                 session.exportedAt = deliveredAt
             }
             if session.firstDeliveredAt == nil {
@@ -16763,6 +16766,114 @@ final class AppState: ObservableObject {
         }
     }
 
+    private func prepareCanonicalShotStateForNoZIPSnapshotUpload(
+        item: LocalStore.SessionSnapshotUploadRetryWorkItem
+    ) async throws {
+        guard backendFeatureFlags.supabaseEnabled,
+              isPhaseBMetadataShadowWriteEnabled else {
+            return
+        }
+        guard let property = allProperties.first(where: { $0.id == item.propertyID }) ??
+                properties.first(where: { $0.id == item.propertyID }) ??
+                (try? localStore.fetchProperties().first(where: { $0.id == item.propertyID })) else {
+            throw SessionSnapshotUploadError.remoteUnavailable("completed_session_property_missing")
+        }
+        guard let metadata = try? localStore.loadSessionMetadata(
+            propertyID: item.propertyID,
+            sessionID: item.sessionID
+        ) else {
+            throw SessionSnapshotUploadError.notPreviewable("completed_session_metadata_missing")
+        }
+        guard !metadata.shots.isEmpty else { return }
+        let orgID = resolveShotMetadataWriteOrgID(
+            propertyID: item.propertyID,
+            sessionID: item.sessionID,
+            property: property,
+            metadata: metadata
+        ) ?? item.organizationID
+        guard canAccessOrganization(orgID) else {
+            throw SessionSnapshotUploadError.remoteUnavailable("completed_session_org_inactive")
+        }
+
+        for shot in metadata.shots {
+            try await persistShotRichMetadataToSupabase(
+                orgID: orgID,
+                propertyID: item.propertyID,
+                sessionID: item.sessionID,
+                metadata: metadata,
+                shot: shot,
+                allowInsert: true
+            )
+
+            var preparedShot = shot
+            if !isOperationalMediaUploadComplete(preparedShot) {
+                await performOperationalMediaUpload(
+                    propertyID: item.propertyID,
+                    sessionID: item.sessionID,
+                    shotID: shot.shotID
+                )
+                guard let refreshed = try? localStore.loadSessionMetadata(
+                    propertyID: item.propertyID,
+                    sessionID: item.sessionID
+                ),
+                      let refreshedShot = refreshed.shots.first(where: { $0.shotID == shot.shotID }) else {
+                    throw SessionSnapshotUploadError.remoteUnavailable("completed_session_media_upload_pending")
+                }
+                preparedShot = refreshedShot
+            }
+
+            guard isOperationalMediaUploadComplete(preparedShot) else {
+                throw SessionSnapshotUploadError.remoteUnavailable("completed_session_media_upload_pending")
+            }
+
+#if DEBUG
+            if shotMetadataWriteOverride == nil {
+                try await persistShotStorageMetadataToSupabase(
+                    orgID: orgID,
+                    propertyID: item.propertyID,
+                    sessionID: item.sessionID,
+                    shotID: preparedShot.shotID,
+                    storageBucket: preparedShot.storageBucket,
+                    storagePath: preparedShot.storagePath,
+                    checksumSHA256: preparedShot.checksumSHA256,
+                    byteSize: preparedShot.byteSize,
+                    uploadState: "uploaded",
+                    uploadAttempts: preparedShot.uploadAttempts,
+                    lastUploadError: nil
+                )
+            }
+#else
+            try await persistShotStorageMetadataToSupabase(
+                orgID: orgID,
+                propertyID: item.propertyID,
+                sessionID: item.sessionID,
+                shotID: preparedShot.shotID,
+                storageBucket: preparedShot.storageBucket,
+                storagePath: preparedShot.storagePath,
+                checksumSHA256: preparedShot.checksumSHA256,
+                byteSize: preparedShot.byteSize,
+                uploadState: "uploaded",
+                uploadAttempts: preparedShot.uploadAttempts,
+                lastUploadError: nil
+            )
+#endif
+            try await persistShotRichMetadataToSupabase(
+                orgID: orgID,
+                propertyID: item.propertyID,
+                sessionID: item.sessionID,
+                metadata: metadata,
+                shot: preparedShot,
+                allowInsert: true
+            )
+        }
+    }
+
+    private func isOperationalMediaUploadComplete(_ shot: ShotMetadata) -> Bool {
+        normalizedSupabaseText(shot.storageBucket) == supabaseOperationalMediaBucket &&
+            normalizedSupabaseText(shot.storagePath) != nil &&
+            normalizedSupabaseText(shot.uploadState)?.lowercased() == "uploaded"
+    }
+
     private func beginSessionSnapshotUploadRetryRun() -> Bool {
         sessionSnapshotUploadRetryStateQueue.sync {
             if isSessionSnapshotUploadRetryInFlight {
@@ -16814,6 +16925,9 @@ final class AppState: ObservableObject {
         )
 
         do {
+            if inFlight.triggerSource == "completeCurrentSessionWithoutZIP" {
+                try await prepareCanonicalShotStateForNoZIPSnapshotUpload(item: inFlight)
+            }
             let artifacts = try makeSessionSnapshotUploadArtifacts(fromRetryItem: inFlight)
             if !inFlight.storageUploadCompleted {
                 try await uploadSessionSnapshotStorageObject(artifacts.object)
@@ -35338,7 +35452,8 @@ final class AppState: ObservableObject {
     private func releasePropertySessionOccupancyIfOwned(
         propertyID: UUID,
         sessionID: UUID? = nil,
-        emitReleasedEvent: Bool = false
+        emitReleasedEvent: Bool = false,
+        ownershipState: PropertySessionOccupancyState? = nil
     ) async {
         guard backendFeatureFlags.sessionCoordinationEnabled,
               let property = properties.first(where: { $0.id == propertyID }) ?? allProperties.first(where: { $0.id == propertyID }),
@@ -35346,7 +35461,7 @@ final class AppState: ObservableObject {
             return
         }
 
-        let state = propertySessionOccupancyByPropertyID[propertyID]
+        let state = ownershipState ?? propertySessionOccupancyByPropertyID[propertyID]
         let currentUserID = authenticatedSupabaseUser?.id
         let currentDeviceID = currentDeviceIdentifier()
         let sameOccupancyDevice = normalizedSupabaseText(state?.occupiedByDeviceID) == currentDeviceID
@@ -35919,6 +36034,11 @@ final class AppState: ObservableObject {
                 desiredState: desiredOccupancy
             )
             guard didPersistOccupancy else {
+                if propertyHasNoZIPCompletionDeliveryEvidence(propertyID: propertyID) {
+                    locallyLockedPropertyIDs.remove(propertyID)
+                    print("[SessionCoordinationEval] event=return result=allowed reason=zero_photo_occupancy_claim_unavailable_after_no_zip_completion")
+                    return .allowed
+                }
                 locallyLockedPropertyIDs.insert(propertyID)
                 print("[SessionCoordinationEval] event=return result=blocked reason=zero_photo_occupancy_claim_unavailable")
                 return .blocked(
@@ -35950,6 +36070,11 @@ final class AppState: ObservableObject {
                     sessionID: sessionID,
                     emitReleasedEvent: false
                 )
+                if propertyHasNoZIPCompletionDeliveryEvidence(propertyID: propertyID) {
+                    locallyLockedPropertyIDs.remove(propertyID)
+                    print("[SessionCoordinationEval] event=return result=allowed reason=property_status_zero_photo_claim_unavailable_after_no_zip_completion")
+                    return .allowed
+                }
                 locallyLockedPropertyIDs.insert(propertyID)
                 print("[SessionCoordinationEval] event=return result=blocked reason=property_status_zero_photo_claim_unavailable")
                 return .blocked(
@@ -36048,6 +36173,17 @@ final class AppState: ObservableObject {
               let sessionID = currentSession?.id else {
             return
         }
+        await releaseSessionCoordinationAndOccupancyIfOwned(
+            propertyID: propertyID,
+            sessionID: sessionID
+        )
+    }
+
+    @MainActor
+    func releaseSessionCoordinationAndOccupancyIfOwned(
+        propertyID: UUID,
+        sessionID: UUID
+    ) async {
         let occupancyState = propertySessionOccupancyByPropertyID[propertyID]
         let emitReleasedFromOccupancy =
             occupancyOnlyClaimedSessionIDs.contains(sessionID) ||
@@ -36063,6 +36199,78 @@ final class AppState: ObservableObject {
             emitReleasedEvent: !emitReleasedFromOccupancy
         )
     }
+
+    @MainActor
+    private func scheduleNoZIPCompletionCoordinationCleanup(for session: Session) {
+        let propertyID = session.propertyID
+        let sessionID = session.id
+        let currentDeviceID = currentDeviceIdentifier()
+        let occupancyState = propertySessionOccupancyByPropertyID[propertyID]
+        let sessionState = sessionCoordinationStateBySessionID[sessionID]
+        let hasOccupancyClaim =
+            occupancyOnlyClaimedSessionIDs.contains(sessionID) ||
+            normalizedSupabaseText(occupancyState?.occupiedByDeviceID) == currentDeviceID
+        let hasSessionLock =
+            sessionState?.lockedByUserID != nil ||
+            normalizedSupabaseText(sessionState?.lockedByDeviceID) != nil ||
+            sessionState?.lockedAt != nil
+
+        clearSessionLockDisplayState(
+            propertyID: propertyID,
+            sessionID: sessionID,
+            reason: "complete_session_without_zip"
+        )
+#if DEBUG
+        clearDebugRemoteSessionCoordinationLockForNoZIPCompletion(session)
+#endif
+        occupancyOnlyClaimedSessionIDs.remove(sessionID)
+
+        guard hasOccupancyClaim || hasSessionLock else { return }
+
+        Task {
+            if hasOccupancyClaim {
+                await self.releasePropertySessionOccupancyIfOwned(
+                    propertyID: propertyID,
+                    sessionID: sessionID,
+                    emitReleasedEvent: true,
+                    ownershipState: occupancyState
+                )
+            }
+            if hasSessionLock {
+                await self.releaseSessionCoordinationLockIfOwnedUsingState(
+                    propertyID: propertyID,
+                    sessionID: sessionID,
+                    emitReleasedEvent: !hasOccupancyClaim,
+                    ownershipState: sessionState
+                )
+            }
+        }
+    }
+
+#if DEBUG
+    private func clearDebugRemoteSessionCoordinationLockForNoZIPCompletion(_ session: Session) {
+        guard AppStateTestEnvironment.isRunningUnderXCTest,
+              let cached = sessionCoordinationDebugRemoteRecords[session.id] else {
+            return
+        }
+        sessionCoordinationDebugRemoteRecords[session.id] = RemoteSessionCoordinationRecord(
+            id: cached.id,
+            orgID: cached.orgID,
+            propertyID: cached.propertyID,
+            status: session.status.rawValue,
+            completedAt: session.endedAt,
+            exportedAt: session.exportedAt,
+            isSealed: session.isSealed,
+            firstDeliveredAt: session.firstDeliveredAt,
+            reExportExpiresAt: session.reExportExpiresAt,
+            lockedByUserID: nil,
+            lockedByDeviceID: nil,
+            lockedAt: nil,
+            coordinationTier1Snapshot: cached.coordinationTier1Snapshot,
+            updatedAt: Date()
+        )
+    }
+#endif
 
     @MainActor
     func releaseSessionCoordinationLockIfOwned(
@@ -36113,9 +36321,14 @@ final class AppState: ObservableObject {
 
         let state = ownershipState ?? sessionCoordinationStateBySessionID[sessionID]
         let lockedByDeviceID = state?.lockedByDeviceID ?? nil
-        let ownsByAuthenticatedUser =
-            state?.lockedByUserID == authenticatedSupabaseUser?.id &&
+        let currentUserID = authenticatedSupabaseUser?.id
+        let ownsByCurrentDevice =
             normalizedSupabaseText(lockedByDeviceID) == currentDeviceIdentifier()
+        let ownsBySameOrUnknownUser =
+            state?.lockedByUserID == nil ||
+            currentUserID == nil ||
+            state?.lockedByUserID == currentUserID
+        let ownsByAuthenticatedUser = ownsByCurrentDevice && ownsBySameOrUnknownUser
 #if DEBUG
         let ownsByCurrentTestProcess =
             AppStateTestEnvironment.isRunningUnderXCTest &&
@@ -40163,7 +40376,7 @@ final class AppState: ObservableObject {
                 materialDraftSessionID: propertyStatus.status == .draft ? propertyStatusSourceSessionID : nil,
                 draftOwnerUserID: propertyStatus.status == .draft ? propertyStatus.ownerUserID : nil,
                 draftOwnerDeviceID: propertyStatus.status == .draft ? normalizedSupabaseText(propertyStatus.ownerDeviceID) : nil,
-                finalizedOrExported: propertyStatus.status == .exported,
+                finalizedOrExported: propertyStatus.status == .exported || propertyStatusBadgeState == .exported,
                 showLock: propertyStatusShowsLock,
                 showDraft: propertyStatusBadgeState == .draft,
                 showPendingExport: propertyStatusBadgeState == .pendingExport,
@@ -40208,8 +40421,8 @@ final class AppState: ObservableObject {
     func reExportCandidateSession(for propertyID: UUID, now: Date = Date()) -> Session? {
         let candidates = sessions(for: propertyID)
             .sorted { lhs, rhs in
-                let l = lhs.firstDeliveredAt ?? .distantPast
-                let r = rhs.firstDeliveredAt ?? .distantPast
+                let l = reExportSortDate(for: lhs) ?? .distantPast
+                let r = reExportSortDate(for: rhs) ?? .distantPast
                 if l == r {
                     return lhs.startedAt > rhs.startedAt
                 }
@@ -40521,6 +40734,19 @@ final class AppState: ObservableObject {
                 )
             )
         case .pendingExport:
+            if let pendingExportSessionID = record.pendingExportSessionID,
+               let session = noZIPCompletionEvidenceSession(
+                propertyID: propertyID,
+                sessionID: pendingExportSessionID
+               ),
+               noZIPCompletionSatisfiesManualDelivery(for: session) {
+                return PropertyStatusEntryPreflightDecision(
+                    source: "property_status",
+                    decision: "allow",
+                    reason: "pending_export_satisfied_by_no_zip_completion",
+                    block: nil
+                )
+            }
             guard !pendingExportOwnedByCurrentDevice else {
                 return PropertyStatusEntryPreflightDecision(
                     source: "property_status",
@@ -41674,6 +41900,21 @@ final class AppState: ObservableObject {
             currentUserID: currentUserID,
             currentDeviceID: currentDeviceID
         )
+        if record.status == .pendingExport,
+           let pendingExportSessionID = record.pendingExportSessionID,
+           let session = noZIPCompletionEvidenceSession(
+            propertyID: propertyID,
+            sessionID: pendingExportSessionID
+           ),
+           noZIPCompletionSatisfiesManualDelivery(for: session) {
+            return PropertyStatusCompareAnswer(
+                visibleBadgeState: .exported,
+                draftCountIncluded: false,
+                pendingExportCountIncluded: false,
+                entryBlocked: false,
+                deleteEligible: true
+            )
+        }
         guard record.status == .pendingExport,
               answer.entryBlocked,
               propertyStatusPendingExportOwnedByCurrentDevice(
@@ -46241,6 +46482,7 @@ final class AppState: ObservableObject {
               session.status == .completed,
               session.isSealed,
               session.firstDeliveredAt == nil,
+              !noZIPCompletionSatisfiesManualDelivery(for: session),
               sessionHasCaptures(session),
               cachedSessionArchivePackageAvailability(
                 propertyID: propertyID,
@@ -46583,13 +46825,22 @@ final class AppState: ObservableObject {
     func completeCurrentSessionWithoutZIP() {
         guard var session = currentSession else { return }
         let wasAlreadyCompleted = session.status == .completed
+        let completedAt = Date()
         session.status = .completed
         if session.endedAt == nil {
-            session.endedAt = Date()
+            session.endedAt = completedAt
         }
         session.exportedAt = nil
         session.isSealed = true
-        print("[CompleteSession] action=complete_without_zip sessionID=\(session.id.uuidString) isSealed=true firstDeliveredAt=nil reExportExpiresAt=nil")
+        applyNoZIPCompletionDeliveryMarker(to: &session, completedAt: completedAt)
+        print(
+            "[CompleteSession] action=complete_without_zip " +
+            "sessionID=\(session.id.uuidString) " +
+            "isSealed=true " +
+            "exportedAt=nil " +
+            "firstDeliveredAt=\(String(describing: session.firstDeliveredAt)) " +
+            "reExportExpiresAt=\(String(describing: session.reExportExpiresAt))"
+        )
         currentSession = session
         let persistedSession = try? localStore.upsertSession(session)
         let persisted = persistedSession ?? session
@@ -46598,16 +46849,20 @@ final class AppState: ObservableObject {
         updateLocalPropertyStatusPresentationCache(
             propertyID: persisted.propertyID,
             sessionID: persisted.id,
-            status: .pendingExport,
-            reason: "complete_session_without_zip_local"
+            status: .exported,
+            reason: "complete_session_without_zip_snapshot_queued_local"
         )
+        scheduleNoZIPCompletionCoordinationCleanup(for: persisted)
         schedulePhaseBSessionShadowWrite(for: persisted)
-        scheduleSessionArchiveSnapshot(persisted, trigger: "completeCurrentSessionWithoutZIP")
+        createDurableSessionArchiveSnapshotAndQueueUpload(
+            persisted,
+            trigger: "completeCurrentSessionWithoutZIP"
+        )
         schedulePropertyStatusShadowWrite(
-            transition: .pendingExport,
+            transition: .exported,
             propertyID: persisted.propertyID,
             sessionID: persisted.id,
-            reason: "complete_session_without_zip"
+            reason: "complete_session_without_zip_snapshot_queued"
         )
         scheduleOffloadEligibleSessionMedia(excludingSessionID: currentSession?.id)
         cloudBackupManager?.setCaptureModeActive(false)
@@ -48644,6 +48899,180 @@ final class AppState: ObservableObject {
         }
     }
 
+    @MainActor
+    private func createDurableSessionArchiveSnapshotAndQueueUpload(_ session: Session, trigger: String) {
+        guard session.status == .completed, session.isSealed else { return }
+        let scheduleKey = Self.sessionArchiveSnapshotScheduleKey(session: session, trigger: trigger)
+        let shouldSchedule = sessionSnapshotUploadRetryStateQueue.sync { () -> Bool in
+            guard !sessionArchiveSnapshotSchedulingKeys.contains(scheduleKey) else { return false }
+            sessionArchiveSnapshotSchedulingKeys.insert(scheduleKey)
+            return true
+        }
+        guard shouldSchedule else { return }
+        defer {
+            sessionSnapshotUploadRetryStateQueue.sync {
+                sessionArchiveSnapshotSchedulingKeys.remove(scheduleKey)
+            }
+        }
+
+        let generatedAt = Date()
+        let orgID = sessionSnapshotAutoUploadOrgID(for: session)
+        if let orgID {
+            let eligibility = evaluateSessionSnapshotAutoUploadEligibility(session: session, orgID: orgID)
+            logSessionSnapshotAutoUploadEligibilityTrace(
+                session: session,
+                orgID: orgID,
+                triggerSource: "queue:\(trigger)"
+            )
+            persistSessionSnapshotCloudStatus(
+                session: session,
+                orgID: orgID,
+                triggerSource: trigger,
+                status: eligibility.allowed ? .queued : .failed,
+                reason: eligibility.allowed ? "archive_snapshot_queued" : eligibility.reason,
+                generatedAt: generatedAt
+            )
+        }
+
+        do {
+            guard let archiveURL = try localStore.createSessionArchiveSnapshot(
+                session: session,
+                trigger: trigger,
+                deviceID: currentDeviceIdentifier()
+            ) else {
+                if let orgID {
+                    persistSessionSnapshotCloudStatus(
+                        session: session,
+                        orgID: orgID,
+                        triggerSource: trigger,
+                        status: .failed,
+                        reason: "archive_snapshot_creation_failed",
+                        generatedAt: generatedAt
+                    )
+                }
+                return
+            }
+            invalidateSessionArchiveAvailabilityCache(
+                propertyID: session.propertyID,
+                sessionID: session.id,
+                reason: "durable_archive_snapshot_created"
+            )
+            guard let itemID = queueSessionSnapshotUploadRetryItem(
+                session: session,
+                triggerSource: trigger,
+                archivePath: archiveURL.path,
+                generatedAt: generatedAt
+            ) else {
+                return
+            }
+            Task {
+                await self.performSessionSnapshotUploadRetryForItem(
+                    itemID: itemID,
+                    source: "auto_completed_sealed_archive",
+                    now: generatedAt
+                )
+            }
+        } catch {
+            recordDiagnosticsError(error)
+            if let orgID {
+                persistSessionSnapshotCloudStatus(
+                    session: session,
+                    orgID: orgID,
+                    triggerSource: trigger,
+                    status: .failed,
+                    reason: "archive_snapshot_creation_failed",
+                    generatedAt: generatedAt
+                )
+            }
+            print(
+                "[SessionArchive] result=failed " +
+                "propertyID=\(session.propertyID.uuidString) " +
+                "sessionID=\(session.id.uuidString) " +
+                "trigger=\(trigger) " +
+                "error=\(error.localizedDescription)"
+            )
+        }
+    }
+
+    @MainActor
+    private func queueSessionSnapshotUploadRetryItem(
+        session: Session,
+        triggerSource: String,
+        archivePath: String,
+        generatedAt: Date
+    ) -> UUID? {
+        let propertyID = session.propertyID
+        let sessionID = session.id
+        let orgID = sessionSnapshotAutoUploadOrgID(for: session)
+        let eligibility = evaluateSessionSnapshotAutoUploadEligibility(session: session, orgID: orgID)
+        guard eligibility.allowed else {
+            if let orgID {
+                persistSessionSnapshotCloudStatus(
+                    session: session,
+                    orgID: orgID,
+                    triggerSource: triggerSource,
+                    status: .failed,
+                    reason: eligibility.reason,
+                    generatedAt: generatedAt
+                )
+            }
+            recordSessionSnapshotAutoUploadSkipped(
+                propertyID: propertyID,
+                sessionID: sessionID,
+                triggerSource: triggerSource,
+                reason: eligibility.reason
+            )
+            return nil
+        }
+        guard let orgID else { return nil }
+        let snapshotID = UUID()
+        let storagePath = Self.sessionSnapshotStoragePath(
+            orgID: orgID,
+            propertyID: propertyID,
+            sessionID: sessionID,
+            snapshotKind: .completed,
+            snapshotID: snapshotID
+        )
+        let item = LocalStore.SessionSnapshotUploadRetryWorkItem(
+            snapshotID: snapshotID,
+            organizationID: orgID,
+            propertyID: propertyID,
+            sessionID: sessionID,
+            snapshotKind: SessionSnapshotKind.completed.rawValue,
+            trigger: "auto_completed_sealed_archive:\(triggerSource)",
+            triggerSource: triggerSource,
+            archivePath: archivePath,
+            storageBucket: sessionSnapshotStorageBucket,
+            storagePath: storagePath,
+            generatedAt: generatedAt,
+            sourceDeviceID: currentDeviceIdentifier(),
+            idempotencyKey: Self.sessionSnapshotAutoUploadCheckpointKey(session: session, triggerSource: triggerSource)
+        )
+
+        do {
+            let queuedItem = try localStore.upsertSessionSnapshotUploadRetryWorkItem(item)
+            persistSessionSnapshotCloudStatus(for: queuedItem, status: .queued, updatedAt: generatedAt)
+            return queuedItem.id
+        } catch {
+            recordDiagnosticsError(error)
+            recordSessionSnapshotAutoUploadSkipped(
+                propertyID: propertyID,
+                sessionID: sessionID,
+                triggerSource: triggerSource,
+                reason: "retry_queue_persist_failed"
+            )
+            persistSessionSnapshotCloudStatus(
+                session: session,
+                orgID: orgID,
+                triggerSource: triggerSource,
+                status: .failed,
+                reason: "retry_queue_persist_failed",
+                generatedAt: generatedAt
+            )
+            return nil
+        }
+    }
+
     private static func sessionArchiveSnapshotScheduleKey(session: Session, trigger: String) -> String {
         let formatter = ISO8601DateFormatter()
         return [
@@ -48826,6 +49255,9 @@ final class AppState: ObservableObject {
         guard session.status == .completed && session.isSealed && session.firstDeliveredAt == nil else {
             return false
         }
+        guard !noZIPCompletionSatisfiesManualDelivery(for: session) else {
+            return false
+        }
         if let propertyStatus = propertyStatusByPropertyID[session.propertyID] {
             let answer = makePropertyStatusCompareAnswer(
                 record: propertyStatus,
@@ -48843,6 +49275,105 @@ final class AppState: ObservableObject {
             }
         }
         return true
+    }
+
+    private func noZIPCompletionSatisfiesManualDelivery(for session: Session) -> Bool {
+        guard session.status == .completed,
+              session.isSealed,
+              session.exportedAt == nil else {
+            return false
+        }
+
+        if sessionSnapshotCloudStatusBySessionID[session.id]?.triggerSource == "completeCurrentSessionWithoutZIP" {
+            return true
+        }
+
+        if let records = try? localStore.fetchSessionSnapshotUploadStatusRecords(downloadTimeout: 0),
+           records.contains(where: {
+               $0.propertyID == session.propertyID &&
+               $0.sessionID == session.id &&
+               $0.triggerSource == "completeCurrentSessionWithoutZIP"
+           }) {
+            return true
+        }
+
+        if let retryItems = try? localStore.fetchSessionSnapshotUploadRetryWorkItems(downloadTimeout: 0),
+           retryItems.contains(where: {
+               $0.propertyID == session.propertyID &&
+               $0.sessionID == session.id &&
+               $0.triggerSource == "completeCurrentSessionWithoutZIP"
+           }) {
+            return true
+        }
+
+        if let archiveSummaries = try? localStore.fetchSessionArchiveSummaries(),
+           archiveSummaries.contains(where: {
+               $0.propertyID == session.propertyID &&
+               $0.sessionID == session.id &&
+               $0.trigger == "completeCurrentSessionWithoutZIP"
+           }) {
+            return true
+        }
+
+        return false
+    }
+
+    private func propertyHasNoZIPCompletionDeliveryEvidence(propertyID: UUID) -> Bool {
+        sessions(for: propertyID)
+            .contains { noZIPCompletionSatisfiesManualDelivery(for: $0) }
+    }
+
+    private func noZIPCompletionEvidenceSession(propertyID: UUID, sessionID: UUID) -> Session? {
+        if let session = sessions(for: propertyID).first(where: { $0.id == sessionID }) {
+            return session
+        }
+        return (try? localStore.fetchSessions(propertyID: propertyID))?
+            .first(where: { $0.id == sessionID && $0.deletedAt == nil })
+    }
+
+    private func reExportSortDate(for session: Session) -> Date? {
+        if let firstDeliveredAt = session.firstDeliveredAt {
+            return firstDeliveredAt
+        }
+        return noZIPCompletionDeliveredAt(for: session)
+    }
+
+    private func noZIPCompletionDeliveredAt(for session: Session) -> Date? {
+        guard noZIPCompletionSatisfiesManualDelivery(for: session) else { return nil }
+        if let endedAt = session.endedAt {
+            return endedAt
+        }
+        if let status = sessionSnapshotCloudStatusBySessionID[session.id] {
+            return status.generatedAt
+        }
+        if let records = try? localStore.fetchSessionSnapshotUploadStatusRecords(downloadTimeout: 0),
+           let record = records
+            .filter({
+                $0.propertyID == session.propertyID &&
+                $0.sessionID == session.id &&
+                $0.triggerSource == "completeCurrentSessionWithoutZIP"
+            })
+            .sorted(by: { $0.generatedAt > $1.generatedAt })
+            .first {
+            return record.generatedAt
+        }
+        if let archiveSummaries = try? localStore.fetchSessionArchiveSummaries(),
+           let archive = archiveSummaries
+            .filter({
+                $0.propertyID == session.propertyID &&
+                $0.sessionID == session.id &&
+                $0.trigger == "completeCurrentSessionWithoutZIP"
+            })
+            .sorted(by: { $0.createdAt > $1.createdAt })
+            .first {
+            return archive.createdAt
+        }
+        return nil
+    }
+
+    private func noZIPCompletionReExportExpiresAt(for session: Session) -> Date? {
+        guard let deliveredAt = noZIPCompletionDeliveredAt(for: session) else { return nil }
+        return Calendar.current.date(byAdding: .day, value: reExportWindowDays, to: deliveredAt)
     }
 
     func isPendingDeliveryLocallyAvailable(_ session: Session) -> Bool {
@@ -48873,13 +49404,14 @@ final class AppState: ObservableObject {
     }
 
     func isReExportEligible(_ session: Session, now: Date = Date()) -> Bool {
-        guard session.firstDeliveredAt != nil else { return false }
-        guard let expiresAt = session.reExportExpiresAt else { return false }
+        guard reExportSortDate(for: session) != nil else { return false }
+        guard let expiresAt = session.reExportExpiresAt ?? noZIPCompletionReExportExpiresAt(for: session) else { return false }
         return now < expiresAt
     }
 
     func isReExportLocallyAvailable(_ session: Session, now: Date = Date()) -> Bool {
         let currentDeviceID = currentDeviceIdentifier()
+        let noZIPFallbackArchiveAllowed = session.firstDeliveredAt == nil && noZIPCompletionSatisfiesManualDelivery(for: session)
         let cacheKey = reExportAvailabilityCacheKey(session: session, currentDeviceID: currentDeviceID)
         let signature = reExportAvailabilitySignature(session: session, currentDeviceID: currentDeviceID)
         let verboseLogging = isReExportAvailabilityVerboseLoggingEnabled
@@ -48928,7 +49460,7 @@ final class AppState: ObservableObject {
         let availability = cachedSessionArchivePackageAvailability(
             propertyID: session.propertyID,
             sessionID: session.id,
-            requireDelivered: true,
+            requireDelivered: !noZIPFallbackArchiveAllowed,
             expectedDeviceID: currentDeviceID,
             logCacheHit: verboseLogging,
             logFresh: verboseLogging
@@ -48943,7 +49475,7 @@ final class AppState: ObservableObject {
             pathExists: availability.pathExists,
             checksumVerified: availability.checksumVerified,
             originatingDeviceID: availability.originatingDeviceID,
-            expiresAt: session.reExportExpiresAt
+            expiresAt: session.reExportExpiresAt ?? noZIPCompletionReExportExpiresAt(for: session)
         )
         reExportAvailabilityCache[cacheKey] = entry
         if verboseLogging {
@@ -48974,8 +49506,8 @@ final class AppState: ObservableObject {
         [
             session.status.rawValue,
             session.isSealed ? "sealed" : "unsealed",
-            session.firstDeliveredAt?.timeIntervalSinceReferenceDate.description ?? "nil",
-            session.reExportExpiresAt?.timeIntervalSinceReferenceDate.description ?? "nil",
+            reExportSortDate(for: session)?.timeIntervalSinceReferenceDate.description ?? "nil",
+            (session.reExportExpiresAt ?? noZIPCompletionReExportExpiresAt(for: session))?.timeIntervalSinceReferenceDate.description ?? "nil",
             normalizedSupabaseText(currentDeviceID) ?? "unknown-device"
         ].joined(separator: "|")
     }
@@ -49137,6 +49669,21 @@ final class AppState: ObservableObject {
             let isReExportEligible = deliveredAt < expiresAt
             print("[ExportEligibility] sessionID=\(session.id.uuidString) now=\(deliveredAt) firstDeliveredAt=\(first) reExportExpiresAt=\(expiresAt) eligible=\(isReExportEligible)")
             print("[DeliveryState] sessionID=\(session.id.uuidString) sealed=\(session.isSealed) firstDeliveredAt=\(String(describing: session.firstDeliveredAt)) reExportExpiresAt=\(String(describing: session.reExportExpiresAt)) exportedAt=\(String(describing: session.exportedAt)) isPendingDelivery=\(isPendingDelivery) isReExportEligible=\(isReExportEligible)")
+        }
+    }
+
+    private func applyNoZIPCompletionDeliveryMarker(to session: inout Session, completedAt: Date) {
+        session.isSealed = true
+        session.exportedAt = nil
+        if session.firstDeliveredAt == nil {
+            session.firstDeliveredAt = completedAt
+            print("[CompleteSession] sessionID=\(session.id.uuidString) noZIPFirstDeliveredAt=\(completedAt)")
+        }
+        if session.reExportExpiresAt == nil, let first = session.firstDeliveredAt {
+            session.reExportExpiresAt = Calendar.current.date(byAdding: .day, value: reExportWindowDays, to: first)
+            if let expiresAt = session.reExportExpiresAt {
+                print("[CompleteSession] sessionID=\(session.id.uuidString) noZIPReExportExpiresAt=\(expiresAt)")
+            }
         }
     }
 

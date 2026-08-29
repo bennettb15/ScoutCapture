@@ -477,6 +477,59 @@ final class Phase2C10BSessionCoordinationTests: XCTestCase {
         XCTAssertNil(remoteOccupancy.occupiedAt)
     }
 
+    func testNoZIPCompletionClearsOwnedCoordinationDisplayImmediately() async throws {
+        let fixture = try makeFixture()
+        defer { tearDownFixture(fixture) }
+        fixture.appState._debugSetAuditEventEmitOverrideForTests { _, _, _, _, _ in }
+
+        let entryResult = await fixture.appState.evaluateSessionEntryCoordination(
+            propertyID: fixture.property.id,
+            sessionID: fixture.session.id
+        )
+        XCTAssertEqual(entryResult, .allowed)
+        XCTAssertNotNil(
+            fixture.appState._debugReadSessionCoordinationStateForTests(
+                sessionID: fixture.session.id
+            ).lockedAt
+        )
+
+        fixture.appState.completeCurrentSessionWithoutZIP()
+
+        let lockState = fixture.appState._debugReadSessionCoordinationStateForTests(
+            sessionID: fixture.session.id
+        )
+        XCTAssertNil(lockState.lockedByUserID)
+        XCTAssertNil(lockState.lockedByDeviceID)
+        XCTAssertNil(lockState.lockedAt)
+        let occupancy = fixture.appState._debugReadPropertySessionOccupancyForTests(
+            propertyID: fixture.property.id
+        )
+        XCTAssertNil(occupancy.occupiedByUserID)
+        XCTAssertNil(occupancy.occupiedByDeviceID)
+        XCTAssertNil(occupancy.occupiedAt)
+    }
+
+    func testPostNoZIPZeroPhotoEntryDoesNotBlockWhenOccupancyVerificationFails() async throws {
+        let fixture = try makeFixture()
+        defer { tearDownFixture(fixture) }
+        fixture.appState._debugSetAuditEventEmitOverrideForTests { _, _, _, _, _ in }
+
+        fixture.appState.completeCurrentSessionWithoutZIP()
+        let nextSession = try makeOtherDraftSession(fixture)
+        fixture.appState.currentSession = nextSession
+        fixture.appState._debugSetPropertySoftDeleteOverridesForTests(
+            occupancyPersist: { _, _ in false }
+        )
+
+        let result = await fixture.appState.evaluateSessionEntryCoordination(
+            propertyID: fixture.property.id,
+            sessionID: nextSession.id
+        )
+
+        XCTAssertEqual(result, .allowed)
+        XCTAssertFalse(fixture.appState.propertyCardBadgeModel(for: fixture.property.id).showLock)
+    }
+
     func testEntryAllowsSameOwnerDeviceLock() async throws {
         let fixture = try makeFixture()
         defer { tearDownFixture(fixture) }

@@ -12298,12 +12298,17 @@ extension ContentView {
             return
         }
 
+        let completedPropertyID = appState.selectedPropertyID
+        let completedSessionID = appState.currentSession?.id
         appState.completeCurrentSessionWithoutZIP()
         appState.refreshPropertiesInBackground()
-        Task {
-            await appState.releaseCurrentSessionCoordinationLockIfOwned()
-            await MainActor.run {
-                finishEndingSessionByExitingToHub()
+        finishEndingSessionByExitingToHub()
+        if let completedPropertyID, let completedSessionID {
+            Task {
+                await appState.releaseSessionCoordinationAndOccupancyIfOwned(
+                    propertyID: completedPropertyID,
+                    sessionID: completedSessionID
+                )
             }
         }
     }

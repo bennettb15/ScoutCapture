@@ -100,6 +100,7 @@ final class Phase2C25AAutomaticSnapshotUploadTests: XCTestCase {
         orgAllowlist: [UUID] = [],
         propertyAllowlist: [UUID] = [],
         environmentExtras: [String: String] = [:],
+        shotMetadataWriteOverride: AppState.ShotMetadataWriteOverride? = nil,
         storageUploadOverride: AppState.SessionSnapshotStorageUploadOverride? = nil,
         rowInsertOverride: AppState.SessionSnapshotRowInsertOverride? = nil
     ) throws -> (store: LocalStore, appState: AppState, property: Property, session: Session, orgID: UUID) {
@@ -131,6 +132,7 @@ final class Phase2C25AAutomaticSnapshotUploadTests: XCTestCase {
                 propertyAllowlist: propertyAllowlist
             ),
             environment: localEnvironment(environmentExtras),
+            shotMetadataWriteOverride: shotMetadataWriteOverride ?? { _, _, _, _ in },
             sessionSnapshotStorageUploadOverride: storageUploadOverride ?? { _ in },
             sessionSnapshotRowInsertOverride: rowInsertOverride ?? { _ in },
             disableCloudBackupForTests: true
@@ -522,14 +524,13 @@ final class Phase2C25AAutomaticSnapshotUploadTests: XCTestCase {
         XCTAssertEqual(completed.status, .completed)
         XCTAssertTrue(completed.isSealed)
         XCTAssertNil(completed.exportedAt)
-        XCTAssertNil(completed.firstDeliveredAt)
-        XCTAssertNil(completed.reExportExpiresAt)
-        XCTAssertTrue(fixture.appState.isPendingDelivery(completed))
-        XCTAssertTrue(fixture.appState.propertyCardBadgeModel(for: fixture.property.id).showPendingExport)
-        XCTAssertEqual(
-            fixture.appState.propertyStatusRecord(for: fixture.property.id)?.pendingExportSessionID,
-            fixture.session.id
-        )
+        XCTAssertNotNil(completed.firstDeliveredAt)
+        XCTAssertNotNil(completed.reExportExpiresAt)
+        XCTAssertFalse(fixture.appState.isPendingDelivery(completed))
+        XCTAssertFalse(fixture.appState.propertyCardBadgeModel(for: fixture.property.id).showPendingExport)
+        XCTAssertTrue(fixture.appState.isReExportLocallyAvailable(completed))
+        XCTAssertEqual(fixture.appState.propertyStatusRecord(for: fixture.property.id)?.status, .exported)
+        XCTAssertNil(fixture.appState.propertyStatusRecord(for: fixture.property.id)?.pendingExportSessionID)
 
         let rebuiltArtifacts = try fixture.store.validatedSessionExportArtifacts(for: completed)
         XCTAssertTrue(rebuiltArtifacts.prewritePassed)
@@ -537,6 +538,104 @@ final class Phase2C25AAutomaticSnapshotUploadTests: XCTestCase {
         XCTAssertEqual(rebuiltArtifacts.originalFiles.count, 1)
         XCTAssertFalse(rebuiltArtifacts.sessionData.isEmpty)
         XCTAssertFalse(rebuiltArtifacts.validationData.isEmpty)
+    }
+
+    func testCompleteCurrentSessionWithoutZIPAllowsNextSession() throws {
+        let fixture = try makeFixture()
+        fixture.appState.currentSession = fixture.session
+
+        fixture.appState.completeCurrentSessionWithoutZIP()
+        let completed = try XCTUnwrap(fixture.appState.currentSession)
+        XCTAssertFalse(fixture.appState.isPendingDelivery(completed))
+        XCTAssertNil(try fixture.store.fetchSessions(propertyID: fixture.property.id).first?.exportedAt)
+
+        fixture.appState.currentSession = nil
+        let next = try XCTUnwrap(fixture.appState.startSession())
+        XCTAssertEqual(next.status, .draft)
+        XCTAssertNotEqual(next.id, completed.id)
+    }
+
+    func testLegacyNoZIPCompletedSessionWithUploadedSnapshotDoesNotShowPendingExport() throws {
+        let fixture = try makeFixture()
+        _ = try fixture.store.createSessionArchiveSnapshot(
+            session: fixture.session,
+            trigger: "completeCurrentSessionWithoutZIP",
+            deviceID: fixture.appState._debugCurrentDeviceIdentifierForTests()
+        )
+        _ = try fixture.store.upsertSessionSnapshotUploadStatusRecord(
+            statusRecord(
+                property: fixture.property,
+                session: fixture.session,
+                orgID: fixture.orgID,
+                generatedAt: fixture.session.endedAt ?? Date(timeIntervalSinceReferenceDate: 200),
+                status: .uploaded,
+                triggerSource: "completeCurrentSessionWithoutZIP"
+            )
+        )
+
+        XCTAssertNil(fixture.session.exportedAt)
+        XCTAssertNil(fixture.session.firstDeliveredAt)
+        XCTAssertFalse(fixture.appState.isPendingDelivery(fixture.session))
+        XCTAssertFalse(fixture.appState.isPendingDeliveryLocallyAvailable(fixture.session))
+        fixture.appState._debugRunForegroundCacheRefreshForTests(reason: "legacy_no_zip")
+        XCTAssertNil(fixture.appState.latestPendingExportSession(for: fixture.property.id))
+        XCTAssertFalse(fixture.appState.propertyCardBadgeModel(for: fixture.property.id).showPendingExport)
+        XCTAssertTrue(fixture.appState.isReExportLocallyAvailable(fixture.session))
+
+        fixture.appState.currentSession = nil
+        let next = try XCTUnwrap(fixture.appState.startSession())
+        XCTAssertEqual(next.status, .draft)
+        XCTAssertNotEqual(next.id, fixture.session.id)
+    }
+
+    func testStalePendingExportPropertyStatusIsAllowedForLegacyNoZIPCompletion() throws {
+        let fixture = try makeFixture()
+        _ = try fixture.store.createSessionArchiveSnapshot(
+            session: fixture.session,
+            trigger: "completeCurrentSessionWithoutZIP",
+            deviceID: fixture.appState._debugCurrentDeviceIdentifierForTests()
+        )
+        _ = try fixture.store.upsertSessionSnapshotUploadStatusRecord(
+            statusRecord(
+                property: fixture.property,
+                session: fixture.session,
+                orgID: fixture.orgID,
+                generatedAt: fixture.session.endedAt ?? Date(timeIntervalSinceReferenceDate: 200),
+                status: .uploaded,
+                triggerSource: "completeCurrentSessionWithoutZIP"
+            )
+        )
+        fixture.appState._debugReplacePropertyStatusCacheWithoutReconcileForTests([
+            AppState.PropertyStatusRecord(
+                propertyID: fixture.property.id,
+                orgID: fixture.orgID,
+                status: .pendingExport,
+                activeSessionID: nil,
+                draftSessionID: nil,
+                pendingExportSessionID: fixture.session.id,
+                lastExportedSessionID: nil,
+                ownerUserID: nil,
+                ownerDeviceID: "legacy-device",
+                heartbeatAt: nil,
+                updatedAt: Date(timeIntervalSinceReferenceDate: 210),
+                updatedBy: nil,
+                statusReason: "legacy_no_zip_missing_delivery_marker",
+                revision: 1
+            )
+        ])
+
+        let badge = fixture.appState.propertyCardBadgeModel(for: fixture.property.id)
+        XCTAssertFalse(badge.showPendingExport)
+        XCTAssertTrue(badge.finalizedOrExported)
+
+        let preflight = try XCTUnwrap(
+            fixture.appState.evaluatePropertyStatusEntryPreflight(
+                propertyID: fixture.property.id,
+                context: "legacy_no_zip"
+            )
+        )
+        XCTAssertEqual(preflight.decision, "allow")
+        XCTAssertEqual(preflight.reason, "pending_export_satisfied_by_no_zip_completion")
     }
 
     func testCompletedSessionCannotBeSilentlyDemotedToDraftOnExit() throws {
@@ -581,7 +680,38 @@ final class Phase2C25AAutomaticSnapshotUploadTests: XCTestCase {
         XCTAssertEqual(saved.status, .completed)
         XCTAssertEqual(persisted.status, .completed)
         XCTAssertTrue(persisted.isSealed)
+        XCTAssertNotNil(persisted.firstDeliveredAt)
         XCTAssertEqual(persisted.endedAt, fixture.session.endedAt)
+    }
+
+    func testNoZIPSnapshotUploadWaitsForCompletedShotMediaBeforeReportTrigger() async throws {
+        var attemptedSnapshotStorageUpload = false
+        let fixture = try makeFixture(
+            autoUploadEnabled: true,
+            allowGeneratedOrg: true,
+            storageUploadOverride: { _ in attemptedSnapshotStorageUpload = true },
+            rowInsertOverride: { _ in XCTFail("snapshot row insert should wait until shot media is uploaded") }
+        )
+        try fixture.store.updateShotStorageMetadata(
+            propertyID: fixture.property.id,
+            sessionID: fixture.session.id,
+            shotID: try XCTUnwrap(fixture.store.loadSessionMetadata(propertyID: fixture.property.id, sessionID: fixture.session.id).shots.first?.shotID)
+        ) { shot in
+            shot.storageBucket = nil
+            shot.storagePath = nil
+            shot.uploadState = "pending"
+            shot.updatedAt = Date(timeIntervalSinceReferenceDate: 250)
+        }
+        fixture.appState.currentSession = fixture.session
+
+        fixture.appState.completeCurrentSessionWithoutZIP()
+
+        try await waitForCloudState(appState: fixture.appState, session: fixture.session, expected: .retryScheduled)
+        XCTAssertFalse(attemptedSnapshotStorageUpload)
+        let pending = try XCTUnwrap(try fixture.appState._debugSessionSnapshotUploadRetryWorkItemsForTests().first)
+        XCTAssertEqual(pending.triggerSource, "completeCurrentSessionWithoutZIP")
+        XCTAssertEqual(pending.status, .failed)
+        XCTAssertEqual(pending.lastError, "Session snapshot remote table or bucket is unavailable: completed_session_media_upload_pending")
     }
 
     func testForegroundRetryRecoversQueuedSnapshotStatusWithoutRetryItemAfterCrash() async throws {
