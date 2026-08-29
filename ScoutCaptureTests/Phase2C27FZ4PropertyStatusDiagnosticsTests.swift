@@ -294,11 +294,13 @@ final class Phase2C27FZ4PropertyStatusDiagnosticsTests: XCTestCase {
     func testPropertyStatusOwnerDraftDrivesBadgeAndDraftCount() throws {
         let fixture = try makeCutoverFixture()
         let deviceID = fixture.appState._debugCurrentDeviceIdentifierForTests()
+        let draft = try seedCapturedDraft(propertyID: fixture.property.id, localStore: fixture.localStore)
+        fixture.appState._debugRefreshPropertiesLocallyForTests()
         let record = makeStatusRecord(
             propertyID: fixture.property.id,
             orgID: fixture.orgID,
             status: .draft,
-            draftSessionID: UUID(),
+            draftSessionID: draft.id,
             ownerUserID: fixture.userID,
             ownerDeviceID: deviceID
         )
@@ -317,11 +319,13 @@ final class Phase2C27FZ4PropertyStatusDiagnosticsTests: XCTestCase {
 
     func testPropertyStatusOwnerDraftSameUserDifferentDeviceStillOwns() throws {
         let fixture = try makeCutoverFixture()
+        let draft = try seedCapturedDraft(propertyID: fixture.property.id, localStore: fixture.localStore)
+        fixture.appState._debugRefreshPropertiesLocallyForTests()
         let record = makeStatusRecord(
             propertyID: fixture.property.id,
             orgID: fixture.orgID,
             status: .draft,
-            draftSessionID: UUID(),
+            draftSessionID: draft.id,
             ownerUserID: fixture.userID,
             ownerDeviceID: "old-device"
         )
@@ -1177,7 +1181,9 @@ final class Phase2C27FZ4PropertyStatusDiagnosticsTests: XCTestCase {
 
     func testDraftPromotionLocalCacheUpdateShowsOwnerDraftBadgeImmediately() throws {
         let fixture = try makeCutoverFixture()
-        let sessionID = UUID()
+        let draft = try seedCapturedDraft(propertyID: fixture.property.id, localStore: fixture.localStore)
+        fixture.appState._debugRefreshPropertiesLocallyForTests()
+        let sessionID = draft.id
         let record = makeStatusRecord(
             propertyID: fixture.property.id,
             orgID: fixture.orgID,
@@ -1204,7 +1210,9 @@ final class Phase2C27FZ4PropertyStatusDiagnosticsTests: XCTestCase {
 
     func testDraftPromotionLocalCacheUpdateAcceptsSameUserNullDeviceDraft() throws {
         let fixture = try makeCutoverFixture()
-        let sessionID = UUID()
+        let draft = try seedCapturedDraft(propertyID: fixture.property.id, localStore: fixture.localStore)
+        fixture.appState._debugRefreshPropertiesLocallyForTests()
+        let sessionID = draft.id
         let record = makeStatusRecord(
             propertyID: fixture.property.id,
             orgID: fixture.orgID,
@@ -1234,7 +1242,9 @@ final class Phase2C27FZ4PropertyStatusDiagnosticsTests: XCTestCase {
 
     func testDraftPromotionLocalCacheUpdateAcceptsSameUserDifferentDeviceDraft() throws {
         let fixture = try makeCutoverFixture()
-        let sessionID = UUID()
+        let draft = try seedCapturedDraft(propertyID: fixture.property.id, localStore: fixture.localStore)
+        fixture.appState._debugRefreshPropertiesLocallyForTests()
+        let sessionID = draft.id
         let record = makeStatusRecord(
             propertyID: fixture.property.id,
             orgID: fixture.orgID,
@@ -1379,6 +1389,85 @@ final class Phase2C27FZ4PropertyStatusDiagnosticsTests: XCTestCase {
         XCTAssertFalse(badge.showDraft)
         XCTAssertFalse(badge.showLock)
         XCTAssertFalse(badge.showPendingExport)
+        XCTAssertEqual(fixture.appState.draftPropertyCount(), 0)
+    }
+
+    func testNoZIPNoOpReleaseReturnedRemoteDraftWithoutLocalSessionIsTreatedAsIdle() throws {
+        let fixture = try makeCutoverFixture()
+        let completedSession = try seedCapturedPendingExportSession(
+            propertyID: fixture.property.id,
+            localStore: fixture.localStore
+        )
+        _ = try fixture.localStore.createSessionArchiveSnapshot(
+            session: completedSession,
+            trigger: "completeCurrentSessionWithoutZIP",
+            deviceID: fixture.appState._debugCurrentDeviceIdentifierForTests()
+        )
+        fixture.appState.refreshPropertySessionState(propertyID: fixture.property.id)
+        let remoteOnlyDraftSessionID = UUID()
+        let returnedDraftRecord = makeStatusRecord(
+            propertyID: fixture.property.id,
+            orgID: fixture.orgID,
+            status: .draft,
+            activeSessionID: remoteOnlyDraftSessionID,
+            draftSessionID: remoteOnlyDraftSessionID,
+            ownerUserID: fixture.userID,
+            ownerDeviceID: fixture.appState._debugCurrentDeviceIdentifierForTests(),
+            statusReason: "zero_photo_or_occupancy_release:material_draft_preserved"
+        )
+
+        fixture.appState._debugUpdateLocalPropertyStatusCacheAfterReleaseForTests(
+            returnedDraftRecord,
+            propertyID: fixture.property.id,
+            reason: "test_no_zip_no_op_release"
+        )
+
+        let cached = fixture.appState.propertyStatusRecord(for: fixture.property.id)
+        let badge = fixture.appState.propertyCardBadgeModel(for: fixture.property.id)
+        let entry = fixture.appState.evaluatePropertyStatusEntryPreflight(propertyID: fixture.property.id)
+        XCTAssertEqual(cached?.status, .idle)
+        XCTAssertNil(cached?.activeSessionID)
+        XCTAssertNil(cached?.draftSessionID)
+        XCTAssertFalse(badge.showDraft)
+        XCTAssertFalse(badge.showLock)
+        XCTAssertFalse(badge.showPendingExport)
+        XCTAssertEqual(entry?.decision, "allow")
+        XCTAssertEqual(fixture.appState.draftPropertyCount(), 0)
+    }
+
+    func testNoZIPStaleZeroPhotoReleaseDraftStatusDoesNotShowDraftBadge() throws {
+        let fixture = try makeCutoverFixture()
+        let completedSession = try seedCapturedPendingExportSession(
+            propertyID: fixture.property.id,
+            localStore: fixture.localStore
+        )
+        _ = try fixture.localStore.createSessionArchiveSnapshot(
+            session: completedSession,
+            trigger: "completeCurrentSessionWithoutZIP",
+            deviceID: fixture.appState._debugCurrentDeviceIdentifierForTests()
+        )
+        fixture.appState.refreshPropertySessionState(propertyID: fixture.property.id)
+        let remoteOnlyDraftSessionID = UUID()
+        let staleDraftRecord = makeStatusRecord(
+            propertyID: fixture.property.id,
+            orgID: fixture.orgID,
+            status: .draft,
+            activeSessionID: remoteOnlyDraftSessionID,
+            draftSessionID: remoteOnlyDraftSessionID,
+            ownerUserID: UUID(),
+            ownerDeviceID: "other-device",
+            statusReason: "zero_photo_or_occupancy_release:material_draft_preserved"
+        )
+
+        fixture.appState._debugReplacePropertyStatusCacheForTests([staleDraftRecord])
+
+        let badge = fixture.appState.propertyCardBadgeModel(for: fixture.property.id)
+        let entry = fixture.appState.evaluatePropertyStatusEntryPreflight(propertyID: fixture.property.id)
+        XCTAssertFalse(badge.showDraft)
+        XCTAssertFalse(badge.showLock)
+        XCTAssertFalse(badge.showPendingExport)
+        XCTAssertEqual(entry?.decision, "allow")
+        XCTAssertEqual(entry?.reason, "draft_without_material_local_session")
         XCTAssertEqual(fixture.appState.draftPropertyCount(), 0)
     }
 
@@ -1991,7 +2080,8 @@ final class Phase2C27FZ4PropertyStatusDiagnosticsTests: XCTestCase {
         ownerDeviceID: String? = nil,
         heartbeatAt: Date? = Date(),
         updatedAt: Date = Date(),
-        updatedBy: UUID? = nil
+        updatedBy: UUID? = nil,
+        statusReason: String? = nil
     ) -> AppState.PropertyStatusRecord {
         AppState.PropertyStatusRecord(
             propertyID: propertyID,
@@ -2006,7 +2096,7 @@ final class Phase2C27FZ4PropertyStatusDiagnosticsTests: XCTestCase {
             heartbeatAt: heartbeatAt,
             updatedAt: updatedAt,
             updatedBy: updatedBy ?? ownerUserID,
-            statusReason: "test:\(status.rawValue)",
+            statusReason: statusReason ?? "test:\(status.rawValue)",
             revision: 1
         )
     }

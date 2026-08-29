@@ -40663,6 +40663,21 @@ final class AppState: ObservableObject {
         let lockedAt = record.heartbeatAt ?? record.updatedAt
         let pendingExportLockedAt = record.updatedAt
 
+        let draftHasNoMaterialLocalSession = record.status == .draft &&
+            propertyStatusDraftMaterialLocalSession(record, propertyID: propertyID) == nil
+        let draftCanBeTreatedAsStaleLocalNoOp = ownedByCurrentActor ||
+            propertyHasNoZIPCompletionDeliveryEvidence(propertyID: propertyID)
+
+        if draftHasNoMaterialLocalSession,
+           draftCanBeTreatedAsStaleLocalNoOp {
+            return PropertyStatusEntryPreflightDecision(
+                source: "property_status",
+                decision: "allow",
+                reason: "draft_without_material_local_session",
+                block: nil
+            )
+        }
+
         switch record.status {
         case .idle:
             return PropertyStatusEntryPreflightDecision(
@@ -41931,8 +41946,18 @@ final class AppState: ObservableObject {
             currentUserID: currentUserID,
             currentDeviceID: currentDeviceID
         )
-        if record.status == .draft,
-           propertyStatusDraftRepresentsKnownNoOpSession(record, propertyID: propertyID) {
+        let ownedByCurrentActor = Self.propertyStatusActorOwnedByCurrentActor(
+            record: record,
+            currentUserID: currentUserID,
+            currentDeviceID: currentDeviceID
+        )
+        let draftHasNoMaterialLocalSession = record.status == .draft &&
+            propertyStatusDraftMaterialLocalSession(record, propertyID: propertyID) == nil
+        let draftCanBeTreatedAsStaleLocalNoOp = ownedByCurrentActor ||
+            propertyHasNoZIPCompletionDeliveryEvidence(propertyID: propertyID)
+
+        if draftHasNoMaterialLocalSession,
+           draftCanBeTreatedAsStaleLocalNoOp {
             return PropertyStatusCompareAnswer(
                 visibleBadgeState: .idle,
                 draftCountIncluded: false,
@@ -41998,6 +42023,42 @@ final class AppState: ObservableObject {
             return false
         }
         return !sessionHasCaptures(localDraft)
+    }
+
+    private func propertyStatusDraftMaterialLocalSession(
+        _ record: PropertyStatusRecord,
+        propertyID: UUID
+    ) -> Session? {
+        guard record.status == .draft else { return nil }
+
+        let sourceSessionIDs = [record.draftSessionID, record.activeSessionID].compactMap { $0 }
+        let materialLocalDrafts = materialLocalDraftSessions(for: propertyID)
+        if !sourceSessionIDs.isEmpty {
+            return materialLocalDrafts.first { sourceSessionIDs.contains($0.id) }
+        }
+
+        return materialLocalDrafts.first
+    }
+
+    private func materialLocalDraftSessions(for propertyID: UUID) -> [Session] {
+        var sessionsByID: [UUID: Session] = [:]
+        for session in sessions(for: propertyID) {
+            sessionsByID[session.id] = session
+        }
+        if let currentSession,
+           currentSession.propertyID == propertyID {
+            sessionsByID[currentSession.id] = currentSession
+        }
+
+        return sessionsByID.values
+            .filter { session in
+                session.deletedAt == nil &&
+                session.status == .draft &&
+                !session.isSealed &&
+                !isFinalSession(session) &&
+                sessionHasCaptures(session)
+            }
+            .sorted { $0.startedAt > $1.startedAt }
     }
 
     static func makePropertyStatusCompareAnswer(
