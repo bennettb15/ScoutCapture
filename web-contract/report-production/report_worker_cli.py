@@ -573,13 +573,19 @@ def package_is_allowlisted(package: dict[str, Any], args: argparse.Namespace) ->
 def get_or_create_package(
     client: SupabaseServiceClient,
     validation: dict[str, Any],
+    snapshot_row: dict[str, Any],
     attempt_started_at: str,
 ) -> tuple[dict[str, Any], str]:
     session = validation["inputs"]["session"]
-    session_id = validation["session_id"]
-    snapshot_id = validation["source_snapshot_id"]
-    org_id = session["org_id"]
-    property_id = session["property_id"]
+    snapshot_id = str(snapshot_row["id"])
+    validation_snapshot_id = str(validation["source_snapshot_id"])
+    if validation_snapshot_id.lower() != snapshot_id.lower():
+        raise WorkerError(
+            f"ReportInput snapshot mismatch: validation={validation_snapshot_id}, snapshot={snapshot_id}."
+        )
+    session_id = str(snapshot_row["session_id"])
+    org_id = str(snapshot_row["org_id"])
+    property_id = str(snapshot_row["property_id"])
     idempotency_key = f"pdf-package:{snapshot_id}:{RENDERER_VERSION}"
     existing = client.select(
         "report_packages",
@@ -630,8 +636,10 @@ def snapshot_metadata(client: SupabaseServiceClient, snapshot_id: str) -> dict[s
     rows = client.select(
         "session_snapshots",
         {
-            "select": "id,raw_session_json_sha256,snapshot_payload_sha256",
+            "select": "id,org_id,property_id,session_id,snapshot_kind,session_status,is_sealed,raw_session_json_sha256,snapshot_payload_sha256",
             "id": f"eq.{snapshot_id}",
+            "snapshot_kind": "eq.completed",
+            "is_sealed": "eq.true",
             "deleted_at": "is.null",
             "limit": "1",
         },
@@ -1471,8 +1479,8 @@ def process_session(
     package = None
     package_action = None
     try:
-        package, package_action = get_or_create_package(client, validation, attempt_started_at)
         snapshot_row = snapshot_metadata(client, validation["source_snapshot_id"])
+        package, package_action = get_or_create_package(client, validation, snapshot_row, attempt_started_at)
 
         run_step(
             [
