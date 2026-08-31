@@ -306,6 +306,11 @@ final class AssetImageCache: ObservableObject {
         }
     }
 
+    func cachedThumbnail(for asset: ReportAsset, pixelSize: CGFloat) -> UIImage? {
+        let key = "\(asset.localIdentifier)-\(Int(pixelSize))" as NSString
+        return cache.object(forKey: key)
+    }
+
     func requestFull(for asset: ReportAsset, completion: @escaping (UIImage?) -> Void) {
 
         let key = "\(asset.localIdentifier)-full" as NSString
@@ -3648,6 +3653,9 @@ struct ContentView: View {
     @State private var carryoverIssueBadgeCount: Int = 0
     @State private var flaggedPendingCaptureCount: Int = 0
     @State private var showCoreElevationChecklist: Bool = false
+    @State private var coreElevationChecklistRowsSnapshot: [CoreElevationChecklistRowState] =
+        CoreElevationChecklistCategory.allCases.map { CoreElevationChecklistRowState(category: $0, count: 0) }
+    @State private var activeIssuesOpenRefreshWorkItem: DispatchWorkItem? = nil
     @State private var guidedReferenceKeys: Set<String> = []
     @State private var flaggedReferenceIDs: Set<UUID> = []
     @State private var guidedUpdatedKeysThisSession: Set<String> = []
@@ -3729,6 +3737,7 @@ struct ContentView: View {
         "Interior Finish"
     ]
     private static let priorityOptions: [String] = ["Low", "Medium", "High", "Critical"]
+    private static let defaultFlaggedPriority = "Low"
 
     private static func normalizedPriority(_ value: String?) -> String {
         let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
@@ -3744,6 +3753,11 @@ struct ContentView: View {
         default:
             return ""
         }
+    }
+
+    private static func flaggedPriorityOrDefault(_ value: String?) -> String {
+        let normalized = normalizedPriority(value)
+        return normalized.isEmpty ? defaultFlaggedPriority : normalized
     }
 
     private static func priorityColor(_ priority: String) -> Color {
@@ -3845,6 +3859,7 @@ struct ContentView: View {
     @State private var isCheckingSessionCompletionConflicts: Bool = false
     @State private var sessionCoordinationConflictReview: AppState.SessionCoordinationConflictReview? = nil
     @State private var isEndingSession: Bool = false
+    @State private var endingSessionProgressTitle: String = "Closing..."
     @State private var didTriggerExitToHubForMissingSession: Bool = false
     private var sheetTheme: SheetControlTheme { .forScheme(colorScheme) }
 
@@ -5625,6 +5640,9 @@ struct ContentView: View {
     @State private var showCameraSwapBlackout: Bool = false
     @State private var displayedZoomSteps: [ZoomStep] = []
     @State private var zoomStepsWorkItem: DispatchWorkItem? = nil
+    @State private var cachedHudAngleIndex: Int = 1
+    @State private var cachedHudAngleContextKey: String = ""
+    @State private var hudAngleRefreshWorkItem: DispatchWorkItem? = nil
     private let cameraSwapOverlayDuration: Double = 0.72
     
     private let deviceOrientationPoll = Timer.publish(every: 0.06, on: .main, in: .common).autoconnect()
@@ -6288,6 +6306,116 @@ struct ContentView: View {
         }
     }
 
+    private func refreshCoreElevationChecklistSnapshot() {
+        coreElevationChecklistRowsSnapshot = coreElevationChecklistRows
+    }
+
+    private func deferCameraOverlayWork(_ action: @escaping () -> Void) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+            action()
+        }
+    }
+
+    private func presentMetadataFilter() {
+        showMetadataFilterSheet = true
+    }
+
+    private func dismissMetadataFilter() {
+        showMetadataFilterSheet = false
+    }
+
+    private func presentGuidedChecklist() {
+        showGuidedChecklist = true
+        deferCameraOverlayWork {
+            ensureReferenceResolutionReady()
+            let snapshot = guidedSessionCountSnapshot()
+            let sessionIDText = appState.currentSession?.id.uuidString ?? "NONE"
+            verboseLog("[GuidedCount] session=\(sessionIDText) guidedTotal=\(snapshot.total) capturedForSession=\(snapshot.captured) remaining=\(snapshot.remaining)")
+            let liveGuidedCount = guidedRemainingForCompass
+            verboseLog("[Badge] opened guidedCount=\(liveGuidedCount) flaggedCount=\(flaggedPendingCaptureCount)")
+        }
+    }
+
+    private func presentCoreElevationChecklist() {
+        showCoreElevationChecklist = true
+        deferCameraOverlayWork {
+            refreshCoreElevationChecklistSnapshot()
+        }
+    }
+
+    private func scheduleActiveIssuesOpenRefresh() {
+        activeIssuesOpenRefreshWorkItem?.cancel()
+        let item = DispatchWorkItem {
+            guard showActiveIssuesSheet else { return }
+            ensureReferenceResolutionReady()
+            refreshActiveIssues()
+        }
+        activeIssuesOpenRefreshWorkItem = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.65, execute: item)
+    }
+
+    private func dismissActiveIssuesSheet() {
+        activeIssuesOpenRefreshWorkItem?.cancel()
+        activeIssuesOpenRefreshWorkItem = nil
+        showActiveIssuesSheet = false
+    }
+
+    private func presentActiveIssuesOrToast(hasIssuesBadge: Bool) {
+        if !activeObservations.isEmpty || hasIssuesBadge {
+            showActiveIssuesSheet = true
+            scheduleActiveIssuesOpenRefresh()
+            return
+        }
+
+        deferCameraOverlayWork {
+            ensureReferenceResolutionReady()
+            refreshActiveIssues()
+            if !activeObservations.isEmpty {
+                showActiveIssuesSheet = true
+            } else {
+                showNoFlaggedIssuesToast = true
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.8) {
+                    showNoFlaggedIssuesToast = false
+                }
+            }
+        }
+    }
+
+    private func scheduleHudAngleIndexRefresh() {
+        hudAngleRefreshWorkItem?.cancel()
+        let item = DispatchWorkItem {
+            refreshHudAngleIndex()
+        }
+        hudAngleRefreshWorkItem = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.08, execute: item)
+    }
+
+    private func refreshHudAngleIndex() {
+        guard case .free = currentCaptureIntent else {
+            cachedHudAngleContextKey = ""
+            return
+        }
+        guard let propertyID = appState.selectedPropertyID else {
+            cachedHudAngleIndex = 1
+            cachedHudAngleContextKey = ""
+            return
+        }
+
+        let contextKey = captureAngleContextKey(building: selectedBuilding, elevation: elevation, detailType: currentDetailType)
+        let next = max(
+            1,
+            nextAngleIndexForCaptureContext(
+                propertyID: propertyID,
+                building: selectedBuilding,
+                elevation: elevation,
+                detailType: currentDetailType,
+                excludingShotID: UUID()
+            )
+        )
+        cachedHudAngleContextKey = contextKey
+        cachedHudAngleIndex = next
+    }
+
     // MARK: - SwiftUI View conformance
     var body: some View {
         contentBody
@@ -6296,54 +6424,6 @@ struct ContentView: View {
     private var contentBody: some View {
         baseContentBody
             .ignoresSafeArea(.keyboard, edges: .bottom)
-            // 3-dot quick menu
-            .sheet(isPresented: $showQuickMenu) {
-                QuickMenuSheet(
-                    glyphRotationAngle: bottomGlyphRotationAngle,
-                    flashSetting: camera.flashSetting,
-                    isFrontCamera: isFrontCameraUI,
-                    selectedBuildingLabel: selectedBuilding,
-                    isGridOn: $showGrid,
-                    isLevelOn: $showLevel,
-                    onBuildingList: {
-                        showQuickMenu = false
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
-                            showLandscapeElevationMenu = false
-                            showLandscapeDetailMenu = false
-                            showManageBuildingsSheet = true
-                        }
-                    },
-                    onInteriorList: {
-                        showQuickMenu = false
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
-                            manageContext = ManageContext(mode: .interior, profile: captureProfile)
-                        }
-                    },
-                    onExteriorList: {
-                        showQuickMenu = false
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
-                            manageContext = ManageContext(mode: .exterior, profile: captureProfile)
-                        }
-                    },
-                    onTrades: {
-                        showQuickMenu = false
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
-                            showManageTradesSheet = true
-                        }
-                    },
-                    onFlash: { camera.cycleFlash() },
-                    onCameraSwap: { swapCameraWithRotationFreeze() }
-                )
-                .presentationDetents(
-                    UIDevice.current.userInterfaceIdiom == .pad
-                    ? [.height(430)]
-                    : [.medium]
-                )
-                .presentationDragIndicator(.visible)
-                .onDisappear {
-                    showQuickMenu = false
-                }
-            }
             .sheet(isPresented: $showMetadataFilterSheet) {
                 metadataFilterSheet
             }
@@ -6449,7 +6529,7 @@ struct ContentView: View {
             }
             .onChange(of: showMetadataFilterSheet) { wasShown, isShown in
                 guard wasShown, !isShown else { return }
-                DispatchQueue.main.async {
+                deferCameraOverlayWork {
                     presentPendingManageDestinationIfNeeded()
                 }
             }
@@ -6482,6 +6562,11 @@ struct ContentView: View {
                         showDetailOverlay = false
                     }
                 )
+            }
+            .frame(width: 0, height: 0)
+
+            OverFullScreenPresenter(isPresented: $showQuickMenu) {
+                quickMenuOverlay
             }
             .frame(width: 0, height: 0)
 
@@ -6523,6 +6608,8 @@ struct ContentView: View {
                 loadTradeOptions()
                 refreshActiveIssues()
                 refreshGuidedShots()
+                refreshCoreElevationChecklistSnapshot()
+                refreshHudAngleIndex()
                 isPollingDeviceOrientation = true
             }
             .onReceive(NotificationCenter.default.publisher(for: UIDevice.orientationDidChangeNotification)) { _ in
@@ -6552,6 +6639,8 @@ struct ContentView: View {
                 resetSelectionForSwitch()
                 refreshActiveIssues()
                 refreshGuidedShots()
+                refreshCoreElevationChecklistSnapshot()
+                refreshHudAngleIndex()
             }
             .onChange(of: appState.currentSession?.id) { previousSessionID, nextSessionID in
                 reservedAngleByContextKey = [:]
@@ -6589,6 +6678,8 @@ struct ContentView: View {
                 }
                 refreshActiveIssues()
                 refreshGuidedShots()
+                refreshCoreElevationChecklistSnapshot()
+                refreshHudAngleIndex()
             }
             .onChange(of: appState.currentSession?.status) { _, _ in
                 ensureCameraSessionPrecondition()
@@ -6597,9 +6688,26 @@ struct ContentView: View {
                 }
                 resetSelectionForSwitch()
                 refreshActiveIssues()
+                refreshCoreElevationChecklistSnapshot()
+                scheduleHudAngleIndexRefresh()
             }
             .onChange(of: detailNote) { _, _ in
                 camera.updateDetailNoteActive(hasDetailNote)
+            }
+            .onChange(of: selectedBuilding) { _, _ in
+                scheduleHudAngleIndexRefresh()
+            }
+            .onChange(of: elevation) { _, _ in
+                scheduleHudAngleIndexRefresh()
+            }
+            .onChange(of: currentDetailType) { _, _ in
+                scheduleHudAngleIndexRefresh()
+            }
+            .onChange(of: locationMode) { _, _ in
+                scheduleHudAngleIndexRefresh()
+            }
+            .onChange(of: captureProfile) { _, _ in
+                scheduleHudAngleIndexRefresh()
             }
             .onAppear {
                 ensureCameraSessionPrecondition()
@@ -6639,7 +6747,7 @@ struct ContentView: View {
             }
 
             if isEndingSession {
-                ExportProgressOverlay(title: "Ending...")
+                ExportProgressOverlay(title: endingSessionProgressTitle)
                     .zIndex(705)
             }
 
@@ -6713,6 +6821,9 @@ struct ContentView: View {
             buildingCodeForOption: buildingCode(from:),
             buildingDisplayNameForOption: buildingDisplayName(for:),
             cache: imageCache,
+            onClose: {
+                dismissActiveIssuesSheet()
+            },
             onSelectIssue: { observation in
                 beginFlaggedIssueInteraction(observation)
             },
@@ -6754,7 +6865,10 @@ struct ContentView: View {
                 showGuidedChecklist = false
             },
             onSelectGuided: { guidedShot in
-                armGuidedShot(guidedShot)
+                showGuidedChecklist = false
+                DispatchQueue.main.async {
+                    armGuidedShot(guidedShot)
+                }
             },
             onSkip: { guidedShot, reason, otherNote in
                 markGuidedShotSkipped(guidedShot, reason: reason, otherNote: otherNote)
@@ -6763,7 +6877,10 @@ struct ContentView: View {
                 undoGuidedShotSkip(guidedShot)
             },
             onRetake: { guidedShot in
-                armGuidedRetake(guidedShot)
+                showGuidedChecklist = false
+                DispatchQueue.main.async {
+                    armGuidedRetake(guidedShot)
+                }
             },
             onRetire: { guidedShot, reason in
                 retireGuidedShot(guidedShot, reason: reason)
@@ -6785,11 +6902,82 @@ struct ContentView: View {
     private var coreElevationChecklistSheetView: some View {
         CoreElevationChecklistSheet(
             elevationTitle: CanonicalElevation.normalize(elevation) ?? elevation,
-            rows: coreElevationChecklistRows,
+            rows: coreElevationChecklistRowsSnapshot,
             onClose: {
                 showCoreElevationChecklist = false
             }
         )
+    }
+
+    private var quickMenuOverlay: some View {
+        GeometryReader { geo in
+            let panelWidth = min(max(320, geo.size.width - 24), 560)
+            let panelHeight: CGFloat = UIDevice.current.userInterfaceIdiom == .pad ? 430 : 360
+
+            ZStack {
+                Color.black.opacity(0.46)
+                    .ignoresSafeArea()
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        showQuickMenu = false
+                    }
+
+                VStack {
+                    Spacer(minLength: 0)
+
+                    QuickMenuSheet(
+                        glyphRotationAngle: bottomGlyphRotationAngle,
+                        flashSetting: camera.flashSetting,
+                        isFrontCamera: isFrontCameraUI,
+                        selectedBuildingLabel: selectedBuilding,
+                        isGridOn: $showGrid,
+                        isLevelOn: $showLevel,
+                        onBuildingList: {
+                            showQuickMenu = false
+                            DispatchQueue.main.async {
+                                showLandscapeElevationMenu = false
+                                showLandscapeDetailMenu = false
+                                showManageBuildingsSheet = true
+                            }
+                        },
+                        onInteriorList: {
+                            showQuickMenu = false
+                            DispatchQueue.main.async {
+                                manageContext = ManageContext(mode: .interior, profile: captureProfile)
+                            }
+                        },
+                        onExteriorList: {
+                            showQuickMenu = false
+                            DispatchQueue.main.async {
+                                manageContext = ManageContext(mode: .exterior, profile: captureProfile)
+                            }
+                        },
+                        onTrades: {
+                            showQuickMenu = false
+                            DispatchQueue.main.async {
+                                showManageTradesSheet = true
+                            }
+                        },
+                        onFlash: {
+                            camera.cycleFlash()
+                        },
+                        onCameraSwap: {
+                            swapCameraWithRotationFreeze()
+                        }
+                    )
+                    .frame(width: panelWidth, height: panelHeight)
+                    .background(.ultraThinMaterial)
+                    .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 18, style: .continuous)
+                            .stroke(Color.white.opacity(0.18), lineWidth: 1)
+                    )
+                    .shadow(color: Color.black.opacity(0.45), radius: 18, x: 0, y: 10)
+                    .padding(.bottom, max(16, geo.safeAreaInsets.bottom + 12))
+                }
+                .padding(.horizontal, 12)
+            }
+        }
     }
 
     @ViewBuilder
@@ -6989,7 +7177,7 @@ struct ContentView: View {
             .contentShape(Rectangle())
             .onTapGesture {
                 guard isMetadataFilterAvailable else { return }
-                showMetadataFilterSheet = true
+                presentMetadataFilter()
             }
 
         let tappableContent = HStack(spacing: 0) {
@@ -7001,7 +7189,7 @@ struct ContentView: View {
                     .contentShape(Rectangle())
                     .onTapGesture {
                         guard isMetadataFilterAvailable else { return }
-                        showMetadataFilterSheet = true
+                        presentMetadataFilter()
                     }
                 filterGlyph
             }
@@ -7069,7 +7257,7 @@ struct ContentView: View {
     private func metadataFilterButton(size: CGFloat) -> some View {
         Button {
             guard isMetadataFilterAvailable else { return }
-            showMetadataFilterSheet = true
+            presentMetadataFilter()
         } label: {
             Circle()
                 .fill(Color.black.opacity(isMetadataFilterAvailable ? 0.48 : 0.30))
@@ -7403,17 +7591,12 @@ struct ContentView: View {
            let angle = flaggedAngleIndexByID[issueID] {
             return max(1, angle)
         }
-        guard let propertyID = appState.selectedPropertyID else { return 1 }
-        return max(
-            1,
-            nextAngleIndexForCaptureContext(
-                propertyID: propertyID,
-                building: selectedBuilding,
-                elevation: elevation,
-                detailType: currentDetailType,
-                excludingShotID: UUID()
-            )
-        )
+        let contextKey = captureAngleContextKey(building: selectedBuilding, elevation: elevation, detailType: currentDetailType)
+        if cachedHudAngleContextKey == contextKey {
+            return max(1, cachedHudAngleIndex)
+        }
+        scheduleHudAngleIndexRefresh()
+        return max(1, cachedHudAngleIndex)
     }
 
     private var metadataFilterSheet: some View {
@@ -7472,7 +7655,7 @@ struct ContentView: View {
                     Spacer(minLength: 0)
 
                     Button(action: {
-                        showMetadataFilterSheet = false
+                        dismissMetadataFilter()
                     }) {
                         Text("Done")
                             .font(.system(size: 17, weight: .medium))
@@ -7561,7 +7744,10 @@ struct ContentView: View {
         var body: some View {
             List(options, id: \.value) { option in
                 Button {
-                    onSelect(option.value)
+                    dismiss()
+                    DispatchQueue.main.async {
+                        onSelect(option.value)
+                    }
                 } label: {
                     HStack(spacing: 10) {
                         Text(option.title)
@@ -7675,19 +7861,20 @@ struct ContentView: View {
             selectedTrade = value
         }
         metadataSelectionContext = nil
+        scheduleHudAngleIndexRefresh()
     }
 
     private func beginManageListFlowFromMetadata(_ destination: PendingManageDestination) {
         shouldReopenMetadataAfterManagerDismiss = true
         pendingManageDestination = destination
-        showMetadataFilterSheet = false
+        dismissMetadataFilter()
     }
 
     private func reopenMetadataSheetAfterManagerDismissIfNeeded() {
         guard shouldReopenMetadataAfterManagerDismiss else { return }
         shouldReopenMetadataAfterManagerDismiss = false
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
-            showMetadataFilterSheet = true
+            presentMetadataFilter()
         }
     }
 
@@ -9066,10 +9253,32 @@ extension ContentView {
             }
         )
     }
+
+    private struct FlaggedReasonGlyph: View {
+        let size: CGFloat
+        let foregroundColor: Color
+        let markColor: Color
+
+        var body: some View {
+            ZStack {
+                Image(systemName: "flag.fill")
+                    .font(.system(size: proportionalCircleGlyphSize(for: size), weight: .medium))
+                    .foregroundColor(foregroundColor)
+
+                Image(systemName: "exclamationmark")
+                    .font(.system(size: max(8, size * 0.23), weight: .black))
+                    .foregroundColor(markColor)
+                    .offset(x: size * 0.04, y: -size * 0.07)
+            }
+            .frame(width: size, height: size)
+        }
+    }
+
     private struct PopDetailNoteButton: View {
         let size: CGFloat
         let hasDetailNote: Bool
         let selectedPriority: String
+        let isFlaggedIssueMode: Bool
         let isEnabled: Bool
         let onHaptic: () -> Void
         let onTap: () -> Void
@@ -9111,10 +9320,18 @@ extension ContentView {
                         )
                         .frame(width: size + 6, height: size + 6)
                         .opacity(hasDetailNote ? 1.0 : 0.0)
-                    
-                    Image(systemName: "note.text")
-                        .font(.system(size: proportionalCircleGlyphSize(for: size), weight: .medium))
-                        .foregroundColor(hasDetailNote ? .white : .white.opacity(0.92))
+
+                    if isFlaggedIssueMode {
+                        FlaggedReasonGlyph(
+                            size: size,
+                            foregroundColor: hasDetailNote ? .white : .white.opacity(0.92),
+                            markColor: .black.opacity(0.86)
+                        )
+                    } else {
+                        Image(systemName: "note.text")
+                            .font(.system(size: proportionalCircleGlyphSize(for: size), weight: .medium))
+                            .foregroundColor(hasDetailNote ? .white : .white.opacity(0.92))
+                    }
                 }
                 .frame(width: size, height: size)
                 .contentShape(Circle())
@@ -9138,6 +9355,7 @@ extension ContentView {
             size: size,
             hasDetailNote: hasDetailNote,
             selectedPriority: selectedPriority,
+            isFlaggedIssueMode: true,
             isEnabled: isEnabled,
             onHaptic: {
                 fireQuickButtonHaptic()
@@ -9355,20 +9573,12 @@ extension ContentView {
 
             guidedCompassButton {
                 fireQuickButtonHaptic()
-                ensureReferenceResolutionReady()
-                let snapshot = guidedSessionCountSnapshot()
-                let sessionIDText = appState.currentSession?.id.uuidString ?? "NONE"
-                verboseLog("[GuidedCount] session=\(sessionIDText) guidedTotal=\(snapshot.total) capturedForSession=\(snapshot.captured) remaining=\(snapshot.remaining)")
-                let liveGuidedCount = guidedRemainingForCompass
-                verboseLog("[Badge] beforeOpen guidedCount=\(liveGuidedCount) flaggedCount=\(flaggedPendingCaptureCount)")
-                showGuidedChecklist = true
-                let liveGuidedCountAfter = guidedRemainingForCompass
-                verboseLog("[Badge] afterOpen guidedCount=\(liveGuidedCountAfter) flaggedCount=\(flaggedPendingCaptureCount)")
+                presentGuidedChecklist()
             }
 
             coreElevationChecklistButton {
                 fireQuickButtonHaptic()
-                showCoreElevationChecklist = true
+                presentCoreElevationChecklist()
             }
         }
     }
@@ -9381,16 +9591,7 @@ extension ContentView {
 
         return Button(action: {
             fireQuickButtonHaptic()
-            ensureReferenceResolutionReady()
-            refreshActiveIssues()
-            if !activeObservations.isEmpty {
-                showActiveIssuesSheet = true
-            } else {
-                showNoFlaggedIssuesToast = true
-                DispatchQueue.main.asyncAfter(deadline: .now() + 1.8) {
-                    showNoFlaggedIssuesToast = false
-                }
-            }
+            presentActiveIssuesOrToast(hasIssuesBadge: hasIssues)
         }) {
             ZStack(alignment: .topTrailing) {
                 Image(systemName: "flag.fill")
@@ -9601,7 +9802,14 @@ extension ContentView {
                 let base = (step.label == "1") ? "1" : step.label
                 let label = selected ? "\(base)x" : base
                 
-                Button(action: { camera.setZoomStep(step) }) {
+                Button(action: {
+                    var transaction = Transaction()
+                    transaction.disablesAnimations = true
+                    withTransaction(transaction) {
+                        stableZoomSelectionId = step.id
+                    }
+                    camera.setZoomStep(step)
+                }) {
                     Text(label)
                         .font(.system(size: 15, weight: selected ? .semibold : .regular))
                         .foregroundColor(selected ? .white : Color.white.opacity(0.92))
@@ -9635,18 +9843,28 @@ extension ContentView {
         }
         // Keep selected zoom centered.
         .offset(x: offsetX)
-        // Animate horizontal reflow and selection changes.
+        // Animate available step changes, but keep selection/label changes immediate.
         .animation(zoomReflowAnimation, value: stepsKey)
-        .animation(zoomReflowAnimation, value: camera.selectedZoomId)
         .frame(width: w, alignment: .center)
         .padding(.vertical, 2)
         .contentShape(Rectangle())
+        .transaction { transaction in
+            transaction.animation = nil
+        }
         .onAppear {
-            stableZoomSelectionId = camera.selectedZoomId
+            var transaction = Transaction()
+            transaction.disablesAnimations = true
+            withTransaction(transaction) {
+                stableZoomSelectionId = camera.selectedZoomId
+            }
             syncDisplayedZoomSteps(immediate: true)
         }
         .onChange(of: camera.selectedZoomId) { _, newValue in
-            stableZoomSelectionId = newValue
+            var transaction = Transaction()
+            transaction.disablesAnimations = true
+            withTransaction(transaction) {
+                stableZoomSelectionId = newValue
+            }
         }
         .onChange(of: camera.zoomSteps) { _, _ in
             syncDisplayedZoomSteps(immediate: false)
@@ -9823,16 +10041,37 @@ extension ContentView {
         let gap: CGFloat = 14
         let xOffset: CGFloat = (r + gap)
         
-        func circleIconButton(systemName: String, selected: Bool, action: @escaping () -> Void) -> some View {
+        func circleIconButton(
+            systemName: String,
+            selected: Bool,
+            showsFlaggedReasonGlyph: Bool = false,
+            badgeSystemName: String? = nil,
+            action: @escaping () -> Void
+        ) -> some View {
             Button(action: action) {
                 ZStack {
                     Circle()
                         .fill(selected ? Color.white : Color.white.opacity(0.18))
                         .frame(width: 52, height: 52)
-                    
-                    Image(systemName: systemName)
-                        .font(.system(size: proportionalCircleGlyphSize(for: 52), weight: .medium))
-                        .foregroundColor(selected ? .black : .white)
+
+                    if showsFlaggedReasonGlyph {
+                        FlaggedReasonGlyph(
+                            size: 52,
+                            foregroundColor: selected ? .black : .white,
+                            markColor: selected ? .white : .black.opacity(0.86)
+                        )
+                    } else {
+                        Image(systemName: systemName)
+                            .font(.system(size: proportionalCircleGlyphSize(for: 52), weight: .medium))
+                            .foregroundColor(selected ? .black : .white)
+                    }
+
+                    if let badgeSystemName {
+                        Image(systemName: badgeSystemName)
+                            .font(.system(size: 10, weight: .black))
+                            .foregroundColor(selected ? .red : .white)
+                            .offset(x: 10, y: -10)
+                    }
                 }
                 .contentShape(Circle())
                 .frame(width: 52, height: 52)
@@ -9841,9 +10080,14 @@ extension ContentView {
         }
         
         let lastAsset = reportLibrary.assets.last
+        let isFlaggedNoteMode = armedUpdateObservationID != nil
         
         return ZStack {
-            circleIconButton(systemName: "note.text", selected: hasDetailNote) {
+            circleIconButton(
+                systemName: "flag.fill",
+                selected: hasDetailNote || isFlaggedNoteMode,
+                showsFlaggedReasonGlyph: true
+            ) {
                 draftDetailNote = detailNote
                 showDetailOverlay = true
             }
@@ -9883,7 +10127,6 @@ extension ContentView {
     
     private func capture() {
         let noteAtCapture = detailNote.trimmingCharacters(in: .whitespacesAndNewlines)
-        let priorityAtCapture = Self.normalizedPriority(selectedPriority)
         let isFlaggedCaptureIntent: Bool = {
             switch currentCaptureIntent {
             case .flagged:
@@ -9894,6 +10137,13 @@ extension ContentView {
                 return false
             }
         }()
+        let normalizedSelectedPriority = Self.normalizedPriority(selectedPriority)
+        let priorityAtCapture = isFlaggedCaptureIntent && normalizedSelectedPriority.isEmpty
+            ? Self.defaultFlaggedPriority
+            : normalizedSelectedPriority
+        if isFlaggedCaptureIntent && selectedPriority != priorityAtCapture {
+            selectedPriority = priorityAtCapture
+        }
         if (!noteAtCapture.isEmpty || isFlaggedCaptureIntent) && priorityAtCapture.isEmpty {
             showFlaggedActionToastNow("Priority is required for flagged capture")
             return
@@ -9968,7 +10218,7 @@ extension ContentView {
         let preferredRetakeFilename = activeRetakeContext?.existingOriginalFilename
         let reservedAngleIndexAtCapture: Int? = {
             guard case .free = captureIntent else { return nil }
-            return reserveNextAngleIndexForCaptureContext(
+            return reserveCachedAngleIndexForCaptureContext(
                 propertyID: propertyID,
                 building: selectedBuilding,
                 elevation: elevation,
@@ -10151,10 +10401,16 @@ extension ContentView {
                             reservedAngleIndexAtCapture: reservedAngleIndexAtCapture
                         )
                         if !wasGuidedRetakeCapture {
-                            reportLibrary.reloadSessionAssets(propertyID: propertyID, sessionID: sessionID)
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+                                reportLibrary.reloadSessionAssets(propertyID: propertyID, sessionID: sessionID)
+                            }
                         }
-                        refreshActiveIssues()
-                        refreshGuidedShots()
+                        if captureIsFlagged {
+                            refreshActiveIssues()
+                        } else {
+                            refreshReferenceSetsAndPendingCounts()
+                        }
+                        scheduleHudAngleIndexRefresh()
                         if wasGuidedRetakeCapture {
                             refreshUIAfterRetakeSuccess(
                                 existingFilename: retakeExistingFilename,
@@ -10507,6 +10763,11 @@ extension ContentView {
                 reason: "initial_capture",
                 allowInsert: true
             )
+            appState.refreshCurrentSessionDraftBadgeAfterCapture(
+                propertyID: propertyID,
+                sessionID: session.id,
+                reason: "initial_capture_local_badge"
+            )
             appState.promoteCurrentSessionToActiveCaptureLockIfNeeded(reason: "initial_capture")
             appState.uploadOperationalMediaIfNeeded(
                 propertyID: propertyID,
@@ -10667,6 +10928,32 @@ extension ContentView {
         )
         let reserved = max(reservedLast + 1, persistedNext)
         reservedAngleByContextKey[contextKey] = reserved
+        return reserved
+    }
+
+    private func reserveCachedAngleIndexForCaptureContext(
+        propertyID: UUID,
+        building: String,
+        elevation: String,
+        detailType: String,
+        excludingShotID: UUID
+    ) -> Int {
+        let contextKey = captureAngleContextKey(building: building, elevation: elevation, detailType: detailType)
+        guard cachedHudAngleContextKey == contextKey else {
+            return reserveNextAngleIndexForCaptureContext(
+                propertyID: propertyID,
+                building: building,
+                elevation: elevation,
+                detailType: detailType,
+                excludingShotID: excludingShotID
+            )
+        }
+
+        let reservedLast = reservedAngleByContextKey[contextKey] ?? 0
+        let reserved = max(1, reservedLast + 1, cachedHudAngleIndex)
+        reservedAngleByContextKey[contextKey] = reserved
+        cachedHudAngleIndex = reserved + 1
+        scheduleHudAngleIndexRefresh()
         return reserved
     }
 
@@ -11100,12 +11387,12 @@ extension ContentView {
         if !detail.isEmpty {
             detailTypesModel.setSelected(detail, for: locationMode, profile: captureProfile)
         }
-        loadGuidedArmedThumbnail(for: guidedShot)
         showGuidedAlignmentOverlay = false
         armedGuidedRetakeShotID = nil
         armedGuidedShotID = guidedShot.id
         setCaptureIntent(.guided(guidedShot.id))
         showGuidedChecklist = false
+        loadGuidedArmedThumbnail(for: guidedShot)
     }
 
     private func armGuidedRetake(_ guidedShot: GuidedShot) {
@@ -11152,7 +11439,6 @@ extension ContentView {
                 retakeReferenceSource = "none"
             }
         }
-        loadGuidedArmedThumbnail(for: guidedShot, forcedPath: retakeReferencePath)
         showGuidedAlignmentOverlay = false
         let rawPath = existingShot.imageLocalIdentifier?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         let existingFilename = rawPath.isEmpty ? nil : URL(fileURLWithPath: rawPath).lastPathComponent
@@ -11168,19 +11454,18 @@ extension ContentView {
         armedGuidedShotID = guidedShot.id
         setCaptureIntent(.retake(existingShot.id))
         showGuidedChecklist = false
+        loadGuidedArmedThumbnail(for: guidedShot, forcedPath: retakeReferencePath)
     }
 
     private func loadGuidedArmedThumbnail(for guidedShot: GuidedShot, forcedPath: String? = nil) {
-        let sessionIDText = appState.currentSession?.id.uuidString ?? "NONE"
         let chosenPath = (forcedPath ?? guidedResolvedThumbnailPathByID[guidedShot.id])?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        let chosenExists = !chosenPath.isEmpty && FileManager.default.fileExists(atPath: chosenPath)
-        guard !chosenPath.isEmpty, chosenExists, let image = UIImage(contentsOfFile: chosenPath) else {
+        guard !chosenPath.isEmpty, FileManager.default.fileExists(atPath: chosenPath) else {
             guidedReferenceAssetLocalID = nil
             guidedReferenceThumbnail = nil
             return
         }
         guidedReferenceAssetLocalID = chosenPath
-        guidedReferenceThumbnail = image
+        loadGuidedReferenceThumbnail(referencePath: chosenPath, localIdentifier: nil)
     }
 
     private func markGuidedShotSkipped(_ guidedShot: GuidedShot, reason: SkipReason, otherNote: String?) {
@@ -11717,6 +12002,11 @@ extension ContentView {
             let normalizedGuidedShots = try saveNormalizedGuidedShots(allGuidedShots, propertyID: propertyID)
             guidedShots = visibleGuidedShots(from: normalizedGuidedShots)
             retiredGuidedShots = retiredGuidedShots(from: normalizedGuidedShots)
+            if let localIdentifier = shot.imageLocalIdentifier?.trimmingCharacters(in: .whitespacesAndNewlines),
+               !localIdentifier.isEmpty {
+                guidedResolvedThumbnailPathByID[armedID] = localIdentifier
+            }
+            activeSessionShotIDs.insert(shot.id)
             refreshSessionActionsSummaryIfVisible()
 
             if isRetake {
@@ -11785,6 +12075,11 @@ extension ContentView {
             let normalizedGuidedShots = try saveNormalizedGuidedShots(allGuidedShots, propertyID: propertyID)
             guidedShots = visibleGuidedShots(from: normalizedGuidedShots)
             retiredGuidedShots = retiredGuidedShots(from: normalizedGuidedShots)
+            if let localIdentifier = shot.imageLocalIdentifier?.trimmingCharacters(in: .whitespacesAndNewlines),
+               !localIdentifier.isEmpty {
+                guidedResolvedThumbnailPathByID[guided.id] = localIdentifier
+            }
+            activeSessionShotIDs.insert(shot.id)
         } catch {
             // Keep capture resilient if guided persistence fails.
         }
@@ -11961,9 +12256,31 @@ extension ContentView {
 
     private func loadGuidedReferenceThumbnail(referencePath: String?, localIdentifier: String?) {
         let path = referencePath?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        if !path.isEmpty, let image = UIImage(contentsOfFile: path) {
+        if !path.isEmpty {
             guidedReferenceAssetLocalID = path
-            guidedReferenceThumbnail = image
+            let px = max(180, 88 * UIScreen.currentScale * 2.0)
+            if let asset = Self.reportAsset(fromPath: path) {
+                if let cached = imageCache.cachedThumbnail(for: asset, pixelSize: px) {
+                    guidedReferenceThumbnail = cached
+                    return
+                }
+                imageCache.requestThumbnail(for: asset, pixelSize: px) { image in
+                    DispatchQueue.main.async {
+                        guard guidedReferenceAssetLocalID == path else { return }
+                        guidedReferenceThumbnail = image
+                    }
+                }
+                return
+            }
+
+            guidedReferenceThumbnail = nil
+            DispatchQueue.global(qos: .userInitiated).async {
+                let image = UIImage(contentsOfFile: path)
+                DispatchQueue.main.async {
+                    guard guidedReferenceAssetLocalID == path else { return }
+                    guidedReferenceThumbnail = image
+                }
+            }
             return
         }
 
@@ -11979,6 +12296,10 @@ extension ContentView {
             return
         }
         let px = max(180, 88 * UIScreen.currentScale * 2.0)
+        if let cached = imageCache.cachedThumbnail(for: asset, pixelSize: px) {
+            guidedReferenceThumbnail = cached
+            return
+        }
         imageCache.requestThumbnail(for: asset, pixelSize: px) { image in
             DispatchQueue.main.async {
                 guard guidedReferenceAssetLocalID == id else { return }
@@ -12281,6 +12602,7 @@ extension ContentView {
            (!summary.isExportActionEnabled || summary.hasOutstandingChecklistItems) {
             return
         }
+        endingSessionProgressTitle = "Completing Session..."
         isEndingSession = true
         showSessionActionsSheet = false
         waitForPendingCaptureSavesThenBeginExportNow()
@@ -12401,6 +12723,7 @@ extension ContentView {
 
     private func handleSaveDraftAndExit(summary: SessionActionsSummary) {
         guard !isEndingSession else { return }
+        endingSessionProgressTitle = "Closing Draft..."
         isEndingSession = true
         showSessionActionsSheet = false
         DispatchQueue.main.async {
@@ -12452,6 +12775,7 @@ extension ContentView {
             return
         }
         let alreadyEnding = isEndingSession
+        endingSessionProgressTitle = "Completing Session..."
         isEndingSession = true
         showSessionActionsSheet = false
 
@@ -12481,6 +12805,7 @@ extension ContentView {
             return
         }
         guard !isCheckingSessionCompletionConflicts else { return }
+        endingSessionProgressTitle = "Completing Session..."
         isEndingSession = true
         isCheckingSessionCompletionConflicts = true
         Task {
@@ -13600,24 +13925,23 @@ extension ContentView {
             return false
         }
 
-        do {
-            let observations = try localStore.fetchObservations(propertyID: propertyID)
-            guard let existing = observations.first(where: { $0.id == armedID }) else {
-                cancelArmedIssueCapture()
-                return false
-            }
-            flaggedActionTargetObservation = existing
-            pendingFlaggedDecisionShot = shot
-            pendingFlaggedDecisionPhotoRef = shot.imageLocalIdentifier
-            showFlaggedActionPrimaryChoice = true
-            showFlaggedUpdateCommentChoice = false
-            showFlaggedUpdatedObservationInput = false
-            draftUpdatedObservation = ""
-            return true
-        } catch {
+        let currentTarget = flaggedActionTargetObservation.flatMap { $0.id == armedID ? $0 : nil }
+        let existing = currentTarget ?? (try? localStore.fetchObservations(propertyID: propertyID))
+            .flatMap { observations in observations.first(where: { $0.id == armedID }) }
+
+        guard let existing else {
             cancelArmedIssueCapture()
             return false
         }
+
+        flaggedActionTargetObservation = existing
+        pendingFlaggedDecisionShot = shot
+        pendingFlaggedDecisionPhotoRef = shot.imageLocalIdentifier
+        showFlaggedActionPrimaryChoice = true
+        showFlaggedUpdateCommentChoice = false
+        showFlaggedUpdatedObservationInput = false
+        draftUpdatedObservation = ""
+        return true
     }
 
     private func clearPendingFlaggedDecision() {
@@ -13723,6 +14047,7 @@ extension ContentView {
         }()
 
         resetSelectionForSwitch()
+        flaggedActionTargetObservation = observation
         if let building = observation.building?.trimmingCharacters(in: .whitespacesAndNewlines), !building.isEmpty {
             selectedBuilding = buildingCode(from: building)
         }
@@ -13734,7 +14059,7 @@ extension ContentView {
         }
         armedIssueNoteText = Self.observationCurrentReasonText(observation) ?? ""
         detailNote = armedIssueNoteText
-        selectedPriority = Self.normalizedPriority(observation.priority)
+        selectedPriority = Self.flaggedPriorityOrDefault(observation.priority)
         selectedTrade = latestTradeForIssue(propertyID: propertyID, issueID: observation.id) ?? ""
         isArmedIssueDetailNoteReadOnly = true
         if let referencePath = flaggedReferencePathByID[observation.id],
@@ -13759,7 +14084,11 @@ extension ContentView {
     }
 
     private func selectFlaggedPrimaryResolve() {
-        applyPendingFlaggedResolve()
+        showFlaggedActionPrimaryChoice = false
+        showFlaggedActionToastNow("Resolving issue...")
+        DispatchQueue.main.async {
+            applyPendingFlaggedResolve()
+        }
     }
 
     private func selectFlaggedPrimaryUpdate() {
@@ -13768,18 +14097,22 @@ extension ContentView {
     }
 
     private func selectFlaggedUpdateLeaveUnchanged() {
-        applyPendingFlaggedUpdate(
-            revisedObservationText: nil,
-            revisedPriority: nil,
-            revisedTrade: nil
-        )
+        showFlaggedUpdateCommentChoice = false
+        showFlaggedActionToastNow("Saving update...")
+        DispatchQueue.main.async {
+            applyPendingFlaggedUpdate(
+                revisedObservationText: nil,
+                revisedPriority: nil,
+                revisedTrade: nil
+            )
+        }
     }
 
     private func selectFlaggedUpdateRevise() {
         showFlaggedUpdateCommentChoice = false
         showFlaggedUpdatedObservationInput = true
         draftUpdatedObservation = ""
-        draftUpdatedPriority = Self.normalizedPriority(selectedPriority)
+        draftUpdatedPriority = Self.flaggedPriorityOrDefault(selectedPriority)
         draftUpdatedTrade = selectedTrade.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
@@ -13794,11 +14127,15 @@ extension ContentView {
             showFlaggedActionToastNow("Reminder: SCOUT records visual observations only.")
         }
 
-        applyPendingFlaggedUpdate(
-            revisedObservationText: revised,
-            revisedPriority: revisedPriority,
-            revisedTrade: revisedTrade
-        )
+        showFlaggedUpdatedObservationInput = false
+        showFlaggedActionToastNow("Saving update...")
+        DispatchQueue.main.async {
+            applyPendingFlaggedUpdate(
+                revisedObservationText: revised,
+                revisedPriority: revisedPriority,
+                revisedTrade: revisedTrade
+            )
+        }
     }
 
     private func applyPendingFlaggedResolve() {
@@ -13816,10 +14153,7 @@ extension ContentView {
             var updated = existing
             updated.status = .resolved
             if updated.priority?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true {
-                let normalizedPriority = Self.normalizedPriority(selectedPriority)
-                if !normalizedPriority.isEmpty {
-                    updated.priority = normalizedPriority
-                }
+                updated.priority = Self.flaggedPriorityOrDefault(selectedPriority)
             }
             updated.linkedShotID = shot.id
             upsertShot(shot, in: &updated)
@@ -13910,10 +14244,7 @@ extension ContentView {
             if let revisedPriority {
                 updated.priority = Self.normalizedPriority(revisedPriority)
             } else if updated.priority?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true {
-                let normalizedPriority = Self.normalizedPriority(selectedPriority)
-                if !normalizedPriority.isEmpty {
-                    updated.priority = normalizedPriority
-                }
+                updated.priority = Self.flaggedPriorityOrDefault(selectedPriority)
             }
             appendObservationHistoryEvent(
                 ObservationHistoryEvent(
@@ -14313,16 +14644,17 @@ extension ContentView {
     }
 
     private func armIssueUpdate(_ observation: Observation, revisedObservationText: String?) {
-        showActiveIssuesSheet = false
+        dismissActiveIssuesSheet()
         armedGuidedShotID = nil
         armedGuidedRetakeShotID = nil
         retakeContext = nil
         resolutionTargetObservation = nil
         resetResolutionCapturePreview()
+        flaggedActionTargetObservation = observation
         armedIssueRevisedObservationText = revisedObservationText?.trimmingCharacters(in: .whitespacesAndNewlines)
         armedIssueNoteText = Self.observationCurrentReasonText(observation) ?? ""
         detailNote = armedIssueNoteText
-        selectedPriority = Self.normalizedPriority(observation.priority)
+        selectedPriority = Self.flaggedPriorityOrDefault(observation.priority)
         selectedTrade = latestTradeForIssue(propertyID: observation.propertyID, issueID: observation.id) ?? ""
         isArmedIssueDetailNoteReadOnly = true
         if let resolvedFlaggedPath = flaggedResolvedThumbnailPathByID[observation.id],
@@ -14352,7 +14684,7 @@ extension ContentView {
     }
 
     private func enterResolutionMode(_ observation: Observation) {
-        showActiveIssuesSheet = false
+        dismissActiveIssuesSheet()
         armedUpdateObservationID = nil
         resolutionTargetObservation = observation
         setCaptureIntent(.flagged(observation.id))
@@ -14547,7 +14879,7 @@ extension ContentView {
                     action: onSaveDraftAndExit
                 )
                 actionButton(
-                    title: isEndingSession ? "Ending..." : summary.exportActionTitle,
+                    title: isEndingSession ? "Completing Session..." : summary.exportActionTitle,
                     role: .tertiary,
                     isEnabled: !isPreparingExport && !isEndingSession && summary.isExportActionEnabled,
                     action: onExportNow
@@ -14599,7 +14931,7 @@ extension ContentView {
                 case .secondary:
                     return neutralFill
                 case .tertiary:
-                    return Color.white.opacity(0.06)
+                    return .white
                 }
             }()
             let stroke: Color = {
@@ -14609,7 +14941,7 @@ extension ContentView {
                 case .secondary:
                     return neutralStroke
                 case .tertiary:
-                    return Color.white.opacity(0.20)
+                    return Color.red.opacity(0.30)
                 }
             }()
             let label: Color = {
@@ -14619,7 +14951,7 @@ extension ContentView {
                 case .secondary:
                     return neutralLabel
                 case .tertiary:
-                    return .white.opacity(0.94)
+                    return .red.opacity(0.88)
                 }
             }()
 
@@ -18226,8 +18558,8 @@ extension ContentView {
 
         private var thumbnailView: some View {
             Group {
-                if let thumbnail {
-                    Image(uiImage: thumbnail)
+                if let image = thumbnail ?? cachedThumbnailForCurrentSource(pixelSize: max(120, 48 * UIScreen.currentScale * 2.0)) {
+                    Image(uiImage: image)
                         .resizable()
                         .scaledToFill()
                 } else if isThumbnailLoading {
@@ -18265,14 +18597,29 @@ extension ContentView {
                 return
             }
 
-            isThumbnailLoading = true
             let px = max(120, 48 * UIScreen.currentScale * 2.0)
+            if let cached = cache.cachedThumbnail(for: asset, pixelSize: px) {
+                thumbnail = cached
+                isThumbnailLoading = false
+                return
+            }
+
+            isThumbnailLoading = true
             cache.requestThumbnail(for: asset, pixelSize: px) { image in
                 DispatchQueue.main.async {
                     self.thumbnail = image
                     self.isThumbnailLoading = false
                 }
             }
+        }
+
+        private func cachedThumbnailForCurrentSource(pixelSize: CGFloat) -> UIImage? {
+            let source = thumbnailPath ?? ""
+            guard !source.isEmpty,
+                  let asset = ContentView.reportAsset(from: source) ?? ContentView.reportAsset(fromPath: source) else {
+                return nil
+            }
+            return cache.cachedThumbnail(for: asset, pixelSize: pixelSize)
         }
     }
 
@@ -18354,6 +18701,21 @@ extension ContentView {
             return !resolvedReferencePath.isEmpty
         }
 
+        private var thumbnailPath: String? {
+            let shotPath = guidedShot.shot?.imageLocalIdentifier?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            if isCapturedInCurrentSession, !shotPath.isEmpty {
+                return shotPath
+            }
+
+            let resolved = resolvedThumbnailPath?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            if !resolved.isEmpty {
+                return resolved
+            }
+
+            let reference = referencePath?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            return reference.isEmpty ? nil : reference
+        }
+
         var body: some View {
             rowContent
             .onTapGesture {
@@ -18425,8 +18787,6 @@ extension ContentView {
                 loadThumbnailIfNeeded()
             }
             .onChange(of: resolvedThumbnailPath ?? "") { _, _ in
-                loadedID = ""
-                thumbnail = nil
                 loadThumbnailIfNeeded()
             }
             .onChange(of: currentSessionID) { _, _ in
@@ -18435,8 +18795,6 @@ extension ContentView {
                 loadThumbnailIfNeeded()
             }
             .onChange(of: isCapturedInCurrentSession) { _, _ in
-                loadedID = ""
-                thumbnail = nil
                 loadThumbnailIfNeeded()
             }
             .onChange(of: refreshToken) { _, _ in
@@ -18467,8 +18825,8 @@ extension ContentView {
 
         private var thumbnailView: some View {
             Group {
-                if let thumbnail {
-                    Image(uiImage: thumbnail)
+                if let image = thumbnail ?? cachedThumbnailForCurrentSource(pixelSize: max(120, 56 * UIScreen.currentScale * 2.0)) {
+                    Image(uiImage: image)
                         .resizable()
                         .scaledToFill()
                 } else if isThumbnailLoading {
@@ -18556,7 +18914,7 @@ extension ContentView {
 
         private func loadThumbnailIfNeeded() {
             let sessionIDText = currentSessionID?.uuidString ?? "NONE"
-            let chosenPath = resolvedThumbnailPath?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let chosenPath = thumbnailPath?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             let sourceID = "chosen:\(sessionIDText):\(chosenPath)"
             guard sourceID != loadedID || (thumbnail == nil && !isThumbnailLoading) else { return }
             loadedID = sourceID
@@ -18568,8 +18926,14 @@ extension ContentView {
             }
 
             if let asset = ContentView.reportAsset(fromPath: chosenPath) {
-                isThumbnailLoading = true
                 let px = max(120, 56 * UIScreen.currentScale * 2.0)
+                if let cached = cache.cachedThumbnail(for: asset, pixelSize: px) {
+                    thumbnail = cached
+                    isThumbnailLoading = false
+                    return
+                }
+
+                isThumbnailLoading = true
                 cache.requestThumbnail(for: asset, pixelSize: px) { image in
                     DispatchQueue.main.async {
                         self.thumbnail = image
@@ -18628,6 +18992,15 @@ extension ContentView {
             case .notApplicable: return "Skipped - Not applicable"
             }
         }
+
+        private func cachedThumbnailForCurrentSource(pixelSize: CGFloat) -> UIImage? {
+            let chosenPath = thumbnailPath?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            guard !chosenPath.isEmpty,
+                  let asset = ContentView.reportAsset(from: chosenPath) ?? ContentView.reportAsset(fromPath: chosenPath) else {
+                return nil
+            }
+            return cache.cachedThumbnail(for: asset, pixelSize: pixelSize)
+        }
     }
 
     private struct ActiveIssuesSheet: View {
@@ -18646,6 +19019,7 @@ extension ContentView {
         let buildingCodeForOption: (String) -> String
         let buildingDisplayNameForOption: (String) -> String
         let cache: AssetImageCache
+        let onClose: () -> Void
         let onSelectIssue: (Observation) -> Void
         let onRetakeIssue: (Observation) -> Void
         let onReclassifyIssue: (Observation, String, String, String) -> Void
@@ -18691,7 +19065,10 @@ extension ContentView {
                 let contentH = isLandscape ? w : h
 
                 NavigationStack {
-                    Group {
+                    ZStack {
+                        Color(uiColor: .secondarySystemGroupedBackground)
+                            .ignoresSafeArea()
+
                         if observations.isEmpty {
                             VStack(spacing: 10) {
                                 Image(systemName: "flag.slash")
@@ -18714,12 +19091,16 @@ extension ContentView {
                                     hasCapturedImage: capturedImageLocalID(for: observation) != nil,
                                     canRetake: canRetakeObservation(observation),
                                     onTapRow: {
-                                        onSelectIssue(observation)
-                                        dismiss()
+                                        closeImmediately()
+                                        DispatchQueue.main.async {
+                                            onSelectIssue(observation)
+                                        }
                                     },
                                     onTapRetake: {
-                                        onRetakeIssue(observation)
-                                        dismiss()
+                                        closeImmediately()
+                                        DispatchQueue.main.async {
+                                            onRetakeIssue(observation)
+                                        }
                                     },
                                     onTapViewReferenceImage: {
                                         showIssueImagePreview(observation, isCaptured: false)
@@ -18741,36 +19122,33 @@ extension ContentView {
                             .background(Color.clear)
                         }
                     }
-                    .background(
-                        Color(uiColor: .secondarySystemGroupedBackground)
-                            .ignoresSafeArea()
-                    )
                     .toolbar(.hidden, for: .navigationBar)
                     .safeAreaInset(edge: .top, spacing: 0) {
-                        HStack(spacing: 10) {
-                            Spacer(minLength: 0)
-
+                        ZStack {
                             Text("Active Issues")
                                 .font(.system(size: 18, weight: .medium))
                                 .foregroundColor(theme.label)
                                 .minimumScaleFactor(0.75)
                                 .lineLimit(1)
+                                .frame(maxWidth: .infinity, alignment: .center)
 
-                            Spacer(minLength: 0)
+                            HStack(spacing: 10) {
+                                Spacer(minLength: 0)
 
-                            Button(action: { dismiss() }) {
-                                Text("Done")
-                                    .font(.system(size: 18, weight: .medium))
-                                    .foregroundColor(theme.label)
-                                    .frame(width: 72, height: 42)
-                                    .background(theme.fill)
-                                    .clipShape(Capsule())
-                                    .overlay(
-                                        Capsule()
-                                            .stroke(theme.stroke, lineWidth: 1)
-                                    )
+                                Button(action: closeImmediately) {
+                                    Text("Done")
+                                        .font(.system(size: 18, weight: .medium))
+                                        .foregroundColor(theme.label)
+                                        .frame(width: 72, height: 42)
+                                        .background(theme.fill)
+                                        .clipShape(Capsule())
+                                        .overlay(
+                                            Capsule()
+                                                .stroke(theme.stroke, lineWidth: 1)
+                                        )
+                                }
+                                .buttonStyle(.plain)
                             }
-                            .buttonStyle(.plain)
                         }
                         .padding(.horizontal, 14)
                         .padding(.top, 14)
@@ -18913,6 +19291,13 @@ extension ContentView {
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
                 guard token == inlineToastToken else { return }
                 inlineToastText = nil
+            }
+        }
+
+        private func closeImmediately() {
+            dismiss()
+            DispatchQueue.main.async {
+                onClose()
             }
         }
 
@@ -19272,8 +19657,8 @@ extension ContentView {
 
             private var thumbnailView: some View {
                 Group {
-                    if let thumbnail {
-                        Image(uiImage: thumbnail)
+                    if let image = thumbnail ?? cachedThumbnailForCurrentSource(pixelSize: max(120, 56 * UIScreen.currentScale * 2.0)) {
+                        Image(uiImage: image)
                             .resizable()
                             .scaledToFill()
                     } else if isThumbnailLoading {
@@ -19299,6 +19684,15 @@ extension ContentView {
                     RoundedRectangle(cornerRadius: 8)
                         .stroke(Color.white.opacity(0.12), lineWidth: 1)
                 )
+                .overlay(alignment: .topTrailing) {
+                    if hasCapturedImage {
+                        Image(systemName: "checkmark.circle.fill")
+                            .font(.system(size: 16, weight: .semibold))
+                            .foregroundColor(.white)
+                            .shadow(color: .black.opacity(0.45), radius: 1.5, x: 0, y: 1)
+                            .padding(4)
+                    }
+                }
             }
 
             private func loadThumbnailIfNeeded() {
@@ -19321,8 +19715,14 @@ extension ContentView {
                 loadedID = chosenID
 
                 if let asset = ContentView.reportAsset(from: chosenID) {
-                    isThumbnailLoading = true
                     let px = max(120, 56 * UIScreen.currentScale * 2.0)
+                    if let cached = cache.cachedThumbnail(for: asset, pixelSize: px) {
+                        thumbnail = cached
+                        isThumbnailLoading = false
+                        return
+                    }
+
+                    isThumbnailLoading = true
                     cache.requestThumbnail(for: asset, pixelSize: px) { image in
                         DispatchQueue.main.async {
                             self.thumbnail = image
@@ -19351,6 +19751,12 @@ extension ContentView {
                             return
                         }
                         let px = max(120, 56 * UIScreen.currentScale * 2.0)
+                        if let cached = cache.cachedThumbnail(for: asset, pixelSize: px) {
+                            self.thumbnail = cached
+                            self.isThumbnailLoading = false
+                            return
+                        }
+
                         cache.requestThumbnail(for: asset, pixelSize: px) { image in
                             DispatchQueue.main.async {
                                 self.thumbnail = image
@@ -19359,6 +19765,15 @@ extension ContentView {
                         }
                     }
                 }
+            }
+
+            private func cachedThumbnailForCurrentSource(pixelSize: CGFloat) -> UIImage? {
+                let chosenID = resolvedThumbnailPath?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                guard !chosenID.isEmpty,
+                      let asset = ContentView.reportAsset(from: chosenID) else {
+                    return nil
+                }
+                return cache.cachedThumbnail(for: asset, pixelSize: pixelSize)
             }
         }
 
@@ -20036,8 +20451,9 @@ extension ContentView {
                             .frame(maxWidth: .infinity, alignment: .center)
                             .padding(.top, 8)
                         }
-                        .padding(.top, 18)
+                        .padding(.top, 30)
                         .padding(.horizontal, 18)
+                        .padding(.bottom, 4)
                     }
                     .navigationBarTitleDisplayMode(.inline)
                 }

@@ -322,6 +322,7 @@ final class CameraManager: NSObject, ObservableObject {
 
     // Debug delay work item so we do not mislabel during smooth ramp
     private var debugWorkItem: DispatchWorkItem?
+    private var zoomRequestSerial: UInt64 = 0
 
     // Stable orientation tracking for capture.
     // UIDevice.current.orientation can be faceUp/unknown at shutter time.
@@ -526,9 +527,14 @@ final class CameraManager: NSObject, ObservableObject {
 
         if isCapturing { return }
 
-        DispatchQueue.main.async {
+        if Thread.isMainThread {
             self.isCapturing = true
             self.refreshTargetMegapixelLabelForUIZoom(self.currentUIZoom)
+        } else {
+            DispatchQueue.main.async {
+                self.isCapturing = true
+                self.refreshTargetMegapixelLabelForUIZoom(self.currentUIZoom)
+            }
         }
 
         // Snapshot the effective HD flag on the main thread to avoid races.
@@ -659,29 +665,41 @@ final class CameraManager: NSObject, ObservableObject {
     // MARK: Zoom
 
     func setZoomStep(_ step: ZoomStep) {
+        zoomRequestSerial &+= 1
+        let requestSerial = zoomRequestSerial
         currentUIZoom = step.factor
-
-        if effectiveHDEnabled && currentPosition == .back {
-            sessionQueue.async { [weak self] in
-                self?.applyHDModeRouting(desiredUIZoom: step.factor)
-            }
-
+        if Thread.isMainThread {
+            self.selectedZoomId = step.id
+            self.refreshTargetMegapixelLabelForUIZoom(step.factor)
+        } else {
             DispatchQueue.main.async {
                 self.selectedZoomId = step.id
                 self.refreshTargetMegapixelLabelForUIZoom(step.factor)
             }
+        }
+
+        if effectiveHDEnabled && currentPosition == .back {
+            sessionQueue.async { [weak self] in
+                guard let self, self.zoomRequestSerial == requestSerial else { return }
+                self.applyHDModeRouting(desiredUIZoom: step.factor)
+            }
+
             return
         }
 
-        setNativeZoom(uiZoom: step.factor, selectedId: step.id)
+        sessionQueue.async { [weak self] in
+            guard let self, self.zoomRequestSerial == requestSerial else { return }
+            self.setNativeZoom(uiZoom: step.factor, selectedId: step.id, requestSerial: requestSerial)
+        }
     }
 
     func isZoomSelected(_ step: ZoomStep) -> Bool {
         step.id == selectedZoomId
     }
 
-    private func setNativeZoom(uiZoom: CGFloat, selectedId: String) {
+    private func setNativeZoom(uiZoom: CGFloat, selectedId: String, requestSerial: UInt64? = nil) {
         guard let device = videoDevice else { return }
+        if let requestSerial, requestSerial != zoomRequestSerial { return }
 
         let minZ = CGFloat(device.minAvailableVideoZoomFactor)
         let maxZ = CGFloat(device.maxAvailableVideoZoomFactor)
@@ -690,15 +708,18 @@ final class CameraManager: NSObject, ObservableObject {
 
         do {
             try device.lockForConfiguration()
-            device.ramp(toVideoZoomFactor: target, withRate: 8.0)
+            device.cancelVideoZoomRamp()
+            device.ramp(toVideoZoomFactor: target, withRate: 14.0)
             device.unlockForConfiguration()
 
             DispatchQueue.main.async {
+                if let requestSerial, requestSerial != self.zoomRequestSerial { return }
                 self.selectedZoomId = selectedId
             }
         } catch {}
 
         DispatchQueue.main.async {
+            if let requestSerial, requestSerial != self.zoomRequestSerial { return }
             self.refreshLensDebug()
             if !(self.effectiveHDEnabled && self.currentPosition == .back) {
                 self.refreshTargetMegapixelLabelForUIZoom(uiZoom)

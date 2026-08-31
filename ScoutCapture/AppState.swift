@@ -40453,8 +40453,8 @@ final class AppState: ObservableObject {
             propertyID: propertyID,
             orgID: orgID,
             status: status,
-            activeSessionID: nil,
-            draftSessionID: nil,
+            activeSessionID: status == .occupied ? sessionID : nil,
+            draftSessionID: status == .draft ? sessionID : nil,
             pendingExportSessionID: status == .pendingExport ? sessionID : nil,
             lastExportedSessionID: status == .exported ? sessionID : existing?.lastExportedSessionID,
             ownerUserID: authenticatedSupabaseUser?.id ?? existing?.ownerUserID,
@@ -46363,6 +46363,37 @@ final class AppState: ObservableObject {
         let persisted = (try? localStore.upsertSession(session)) ?? session
         currentSession = persisted
         reloadSessionCache(for: session.propertyID)
+        return persisted
+    }
+
+    @discardableResult
+    func refreshCurrentSessionDraftBadgeAfterCapture(
+        propertyID: UUID,
+        sessionID: UUID,
+        reason: String
+    ) -> Session? {
+        guard let session = currentSession,
+              session.propertyID == propertyID,
+              session.id == sessionID else {
+            reloadSessionCache(for: propertyID)
+            return nil
+        }
+
+        guard session.status == .draft, !isFinalSession(session) else {
+            reloadSessionCache(for: propertyID)
+            return session
+        }
+
+        let persisted = (try? localStore.upsertSession(session)) ?? session
+        currentSession = persisted
+        reloadSessionCache(for: propertyID)
+        guard sessionHasCaptures(persisted) else { return persisted }
+        updateLocalPropertyStatusPresentationCache(
+            propertyID: propertyID,
+            sessionID: sessionID,
+            status: .draft,
+            reason: reason
+        )
         return persisted
     }
 
