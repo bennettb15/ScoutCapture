@@ -3315,10 +3315,7 @@ struct SessionHubView: View {
             }
             return
         }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.18) {
-            guard tapToken == propertyTapToken else { return }
-            openProperty(property)
-        }
+        openProperty(property)
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) {
             guard tapToken == propertyTapToken else { return }
             if pressedPropertyID == property.id { pressedPropertyID = nil }
@@ -12520,6 +12517,7 @@ struct PropertySessionView: View {
     @State private var isCheckingSessionBeforeOpen: Bool = true
     @State private var isCheckingSessionCoordination: Bool = false
     @State private var sessionEntryBlock: AppState.SessionEntryCoordinationBlock? = nil
+    @State private var didSchedulePostOpenReferenceReconcile: Bool = false
 
     private let camera = CameraManager.shared
     private let timeoutSeconds: Double = 4.0
@@ -12558,12 +12556,6 @@ struct PropertySessionView: View {
                         sessionEntryBlock = block
                         return
                     }
-                    let openedAt = Date()
-                    await appState.reconcileRemoteSessionContentForPropertyOpen(propertyID: propertyID)
-                    print(
-                        "[PropertyOpenPerf] propertyID=\(propertyID.uuidString) " +
-                        "elapsedMs=\(Int(Date().timeIntervalSince(openedAt) * 1000))"
-                    )
                     let skipCachedPropertyStatusPreflight = propertyStatusPreflight.skipCachedPropertyStatusPreflight
                     if resumeDraft {
                         if appState.currentSession?.propertyID != propertyID || appState.currentSession?.status != .draft {
@@ -12757,7 +12749,21 @@ struct PropertySessionView: View {
         withAnimation(.easeInOut(duration: 0.14)) {
             showCameraContent = true
         }
+        schedulePostOpenReferenceReconcile()
         appState.ensureCurrentSessionMetadataInBackground()
+    }
+
+    private func schedulePostOpenReferenceReconcile() {
+        guard !didSchedulePostOpenReferenceReconcile else { return }
+        didSchedulePostOpenReferenceReconcile = true
+        let startedAt = Date()
+        Task {
+            await appState.reconcileRemoteSessionContentForPropertyOpen(propertyID: propertyID)
+            print(
+                "[PropertyOpenPerf] propertyID=\(propertyID.uuidString) " +
+                "postOpenReferenceReconcileElapsedMs=\(Int(Date().timeIntervalSince(startedAt) * 1000))"
+            )
+        }
     }
 
     private func refreshSessionReadiness() {

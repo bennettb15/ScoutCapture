@@ -35247,14 +35247,23 @@ final class AppState: ObservableObject {
         orgID: UUID,
         propertyID: UUID,
         currentUserID: UUID?,
-        currentDeviceID: String
+        currentDeviceID: String,
+        preloadedLockRecords: [RemotePropertySessionLockRecord]? = nil,
+        preloadedFinalizationEvidence: PropertyFinalizationEvidence? = nil
     ) async -> RemotePropertySessionLockRecord? {
-        let records = await fetchRemotePropertySessionLockRecordsForPrecedence(orgID: orgID, propertyID: propertyID)
-        let finalizationEvidence = await latestFinalizationEvidence(
-            orgID: orgID,
-            propertyID: propertyID,
-            lockRecords: records
-        )
+        let records: [RemotePropertySessionLockRecord]
+        let finalizationEvidence: PropertyFinalizationEvidence?
+        if let preloadedLockRecords {
+            records = preloadedLockRecords
+            finalizationEvidence = preloadedFinalizationEvidence
+        } else {
+            records = await fetchRemotePropertySessionLockRecordsForPrecedence(orgID: orgID, propertyID: propertyID)
+            finalizationEvidence = await latestFinalizationEvidence(
+                orgID: orgID,
+                propertyID: propertyID,
+                lockRecords: records
+            )
+        }
         let locks = records
             .filter { hasActiveRemoteLock(record: $0) }
             .filter { record in
@@ -35831,7 +35840,9 @@ final class AppState: ObservableObject {
             orgID: orgID,
             propertyID: propertyID,
             currentUserID: currentUserID,
-            currentDeviceID: currentDeviceID
+            currentDeviceID: currentDeviceID,
+            preloadedLockRecords: propertyLockRecords,
+            preloadedFinalizationEvidence: propertyFinalizationEvidence
         ) {
             let propertyOccupancy = try? await fetchRemotePropertySessionOccupancyRecord(
                 orgID: orgID,
