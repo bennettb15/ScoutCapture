@@ -12,7 +12,12 @@ final class Phase2C11LocalConflictRulesTests: XCTestCase {
     private func makeShot(
         shotID: UUID = UUID(),
         updatedAt: Date,
-        originalRelativePath: String
+        originalRelativePath: String,
+        isGuided: Bool = false,
+        isFlagged: Bool = false,
+        issueID: UUID? = nil,
+        issueStatus: String? = nil,
+        captureKind: String? = nil
     ) -> ShotMetadata {
         ShotMetadata(
             shotID: shotID,
@@ -28,11 +33,11 @@ final class Phase2C11LocalConflictRulesTests: XCTestCase {
             trade: nil,
             priority: nil,
             shotKey: "building|north|overview|1",
-            isGuided: false,
-            isFlagged: false,
-            issueID: nil,
-            issueStatus: nil,
-            captureKind: nil,
+            isGuided: isGuided,
+            isFlagged: isFlagged,
+            issueID: issueID,
+            issueStatus: issueStatus,
+            captureKind: captureKind,
             firstCaptureKind: nil,
             noteText: nil,
             noteCategory: nil,
@@ -68,6 +73,8 @@ final class Phase2C11LocalConflictRulesTests: XCTestCase {
         targetElevation: String? = nil,
         detailType: String? = nil,
         angleIndex: Int? = nil,
+        referenceImageLocalIdentifier: String? = nil,
+        referenceImagePath: String? = nil,
         shot: Shot? = nil,
         status: GuidedCheckpointStatus = .active,
         isRetired: Bool = false,
@@ -82,6 +89,8 @@ final class Phase2C11LocalConflictRulesTests: XCTestCase {
             targetElevation: targetElevation,
             detailType: detailType,
             angleIndex: angleIndex,
+            referenceImageLocalIdentifier: referenceImageLocalIdentifier,
+            referenceImagePath: referenceImagePath,
             shot: shot,
             isCompleted: isCompleted,
             isRetired: isRetired,
@@ -327,6 +336,252 @@ final class Phase2C11LocalConflictRulesTests: XCTestCase {
 
         XCTAssertEqual(active.status, .active)
         XCTAssertEqual(active.isRetired, false)
+    }
+
+    func testActiveFlaggedObservationSuppressesRepresentedGuidedChecklistRows() {
+        let sharedImageIdentifier = "/tmp/bottom-photo.heic"
+        let convertedGuided = makeGuidedShot(
+            id: UUID(),
+            title: "Angle 9",
+            isCompleted: true,
+            building: "Building",
+            targetElevation: "North",
+            detailType: "Bottom",
+            angleIndex: 9,
+            shot: Shot(
+                id: UUID(),
+                capturedAt: Date(timeIntervalSinceReferenceDate: 100),
+                imageLocalIdentifier: sharedImageIdentifier,
+                note: nil
+            )
+        )
+        let normalGuided = makeGuidedShot(
+            id: UUID(),
+            title: "Angle 11",
+            isCompleted: true,
+            building: "Building",
+            targetElevation: "North",
+            detailType: "Bottom",
+            angleIndex: 11,
+            shot: Shot(
+                id: UUID(),
+                capturedAt: Date(timeIntervalSinceReferenceDate: 90),
+                imageLocalIdentifier: "/tmp/ordinary-guided.heic",
+                note: nil
+            )
+        )
+        let activeFlagged = Observation(
+            propertyID: UUID(),
+            sessionID: UUID(),
+            createdAt: Date(timeIntervalSinceReferenceDate: 100),
+            updatedAt: Date(timeIntervalSinceReferenceDate: 120),
+            statement: "Convert",
+            status: .active,
+            linkedShotID: UUID(),
+            currentReason: "Convert",
+            shots: [
+                Shot(
+                    id: UUID(),
+                    capturedAt: Date(timeIntervalSinceReferenceDate: 120),
+                    imageLocalIdentifier: sharedImageIdentifier,
+                    note: nil
+                )
+            ]
+        )
+
+        let visible = LocalConflictRules.suppressGuidedShotsRepresentedByActiveFlaggedObservations(
+            [convertedGuided, normalGuided],
+            observations: [activeFlagged]
+        )
+
+        XCTAssertEqual(visible.map(\.id), [normalGuided.id])
+    }
+
+    func testResolvedFlaggedObservationDoesNotSuppressGuidedChecklistRows() {
+        let shotID = UUID()
+        let guided = makeGuidedShot(
+            id: UUID(),
+            title: "Angle 9",
+            isCompleted: true,
+            shot: Shot(
+                id: shotID,
+                capturedAt: Date(timeIntervalSinceReferenceDate: 100),
+                imageLocalIdentifier: "/tmp/bottom-photo.heic",
+                note: nil
+            )
+        )
+        let resolvedFlagged = Observation(
+            propertyID: UUID(),
+            sessionID: UUID(),
+            createdAt: Date(timeIntervalSinceReferenceDate: 100),
+            updatedAt: Date(timeIntervalSinceReferenceDate: 120),
+            statement: "Resolved",
+            status: .resolved,
+            linkedShotID: shotID,
+            shots: [
+                Shot(
+                    id: shotID,
+                    capturedAt: Date(timeIntervalSinceReferenceDate: 120),
+                    imageLocalIdentifier: "/tmp/bottom-photo.heic",
+                    note: nil
+                )
+            ]
+        )
+
+        let visible = LocalConflictRules.suppressGuidedShotsRepresentedByActiveFlaggedObservations(
+            [guided],
+            observations: [resolvedFlagged]
+        )
+
+        XCTAssertEqual(visible.map(\.id), [guided.id])
+    }
+
+    func testActiveFlaggedObservationGuidedReferencesSuppressGuidedChecklistRows() {
+        let guidedID = UUID()
+        let guided = makeGuidedShot(
+            id: guidedID,
+            title: "Angle 9",
+            isCompleted: true,
+            shot: Shot(
+                id: UUID(),
+                capturedAt: Date(timeIntervalSinceReferenceDate: 100),
+                imageLocalIdentifier: "/tmp/bottom-photo.heic",
+                note: nil
+            )
+        )
+        let activeFlagged = Observation(
+            propertyID: UUID(),
+            sessionID: UUID(),
+            createdAt: Date(timeIntervalSinceReferenceDate: 100),
+            updatedAt: Date(timeIntervalSinceReferenceDate: 120),
+            statement: "Convert",
+            status: .active,
+            currentReason: "Convert",
+            guidedShots: [
+                makeGuidedShot(
+                    id: guidedID,
+                    title: "Angle 9",
+                    referenceImagePath: "/tmp/bottom-photo.heic"
+                )
+            ]
+        )
+
+        let visible = LocalConflictRules.suppressGuidedShotsRepresentedByActiveFlaggedObservations(
+            [guided],
+            observations: [activeFlagged]
+        )
+
+        XCTAssertTrue(visible.isEmpty)
+    }
+
+    func testActiveIssueMetadataKeySuppressesBlankGuidedShellRow() {
+        let issueID = UUID()
+        let blankGuidedShell = makeGuidedShot(
+            id: UUID(),
+            title: "Angle 9",
+            isCompleted: false,
+            building: "Building",
+            targetElevation: "North",
+            detailType: "Overview",
+            angleIndex: 1,
+            shot: nil
+        )
+        let promotedMetadata = makeShot(
+            updatedAt: Date(timeIntervalSinceReferenceDate: 100),
+            originalRelativePath: "Originals/promoted.heic",
+            isGuided: true,
+            isFlagged: true,
+            issueID: issueID,
+            issueStatus: "active",
+            captureKind: "retake"
+        )
+        let evidence = LocalConflictRules.activeFlaggedGuidedSuppressionEvidence(
+            issueLinkedGuidedShots: [promotedMetadata]
+        )
+
+        let visible = LocalConflictRules.suppressGuidedShotsRepresentedByActiveFlaggedObservations(
+            [blankGuidedShell],
+            observations: [],
+            evidence: evidence
+        )
+
+        XCTAssertTrue(visible.isEmpty)
+    }
+
+    func testActiveIssueMetadataShotIDSuppressesPropertyCarryForwardGuidedRow() {
+        let guidedID = UUID()
+        let issueID = UUID()
+        let propertyCarryForward = makeGuidedShot(
+            id: guidedID,
+            title: "Angle 9",
+            isCompleted: true,
+            building: "Building",
+            targetElevation: "North",
+            detailType: "Overview",
+            angleIndex: 1,
+            shot: Shot(
+                id: guidedID,
+                capturedAt: Date(timeIntervalSinceReferenceDate: 90),
+                imageLocalIdentifier: "/tmp/original-guided.heic",
+                note: nil
+            )
+        )
+        let promotedMetadata = makeShot(
+            shotID: guidedID,
+            updatedAt: Date(timeIntervalSinceReferenceDate: 100),
+            originalRelativePath: "Originals/promoted-retake.heic",
+            isGuided: true,
+            isFlagged: true,
+            issueID: issueID,
+            issueStatus: "active",
+            captureKind: "retake"
+        )
+        let evidence = LocalConflictRules.activeFlaggedGuidedSuppressionEvidence(
+            issueLinkedGuidedShots: [promotedMetadata]
+        )
+
+        let visible = LocalConflictRules.suppressGuidedShotsRepresentedByActiveFlaggedObservations(
+            [propertyCarryForward],
+            observations: [],
+            evidence: evidence
+        )
+
+        XCTAssertTrue(visible.isEmpty)
+    }
+
+    func testIssueLinkedGuidedShotMetadataIsNotOrdinaryGuidedWork() {
+        let issueID = UUID()
+        let promoted = makeShot(
+            updatedAt: Date(timeIntervalSinceReferenceDate: 100),
+            originalRelativePath: "Originals/promoted.heic",
+            isGuided: true,
+            isFlagged: true,
+            issueID: issueID,
+            issueStatus: "active",
+            captureKind: "retake"
+        )
+        let resolved = makeShot(
+            updatedAt: Date(timeIntervalSinceReferenceDate: 120),
+            originalRelativePath: "Originals/resolved.heic",
+            isGuided: true,
+            isFlagged: false,
+            issueID: issueID,
+            issueStatus: "resolved",
+            captureKind: "resolved_capture"
+        )
+
+        XCTAssertFalse(LocalConflictRules.shotMetadataIsOrdinaryGuidedWork(promoted))
+        XCTAssertFalse(LocalConflictRules.shotMetadataIsOrdinaryGuidedWork(resolved))
+    }
+
+    func testNormalGuidedShotMetadataRemainsOrdinaryGuidedWork() {
+        let guided = makeShot(
+            updatedAt: Date(timeIntervalSinceReferenceDate: 100),
+            originalRelativePath: "Originals/guided.heic",
+            isGuided: true
+        )
+
+        XCTAssertTrue(LocalConflictRules.shotMetadataIsOrdinaryGuidedWork(guided))
     }
 
     func testObservationReconcileTieKeepsCurrentStatusAndAppendsAudit() {

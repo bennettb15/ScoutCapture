@@ -17712,7 +17712,11 @@ final class AppState: ObservableObject {
             sessionID: sessionID,
             metadata: mergedMetadata
         )
-        try mergeAutomaticSnapshotGuidedMetadata(mergedMetadata.guidedShots, propertyID: propertyID)
+        try mergeAutomaticSnapshotGuidedMetadata(
+            mergedMetadata.guidedShots,
+            snapshotShots: mergedMetadata.shots,
+            propertyID: propertyID
+        )
         try localStore.mergeRemoteFlaggedReferenceObservations(
             propertyID: propertyID,
             sessionID: sessionID,
@@ -17774,12 +17778,31 @@ final class AppState: ObservableObject {
         return (.restorableMetadataCandidate, nil)
     }
 
-    private func mergeAutomaticSnapshotGuidedMetadata(_ snapshotGuided: [GuidedShot], propertyID: UUID) throws {
-        guard !snapshotGuided.isEmpty else { return }
+    private func mergeAutomaticSnapshotGuidedMetadata(
+        _ snapshotGuided: [GuidedShot],
+        snapshotShots: [ShotMetadata],
+        propertyID: UUID
+    ) throws {
+        let suppressionEvidence = LocalConflictRules.activeFlaggedGuidedSuppressionEvidence(
+            issueLinkedGuidedShots: snapshotShots
+        )
+        guard !snapshotGuided.isEmpty || !suppressionEvidence.isEmpty else { return }
+        let filteredSnapshotGuided = Self.guidedRowsAfterActiveFlaggedSuppression(
+            snapshotGuided,
+            evidence: suppressionEvidence
+        )
         var existing = (try? localStore.fetchGuidedShots(propertyID: propertyID)) ?? []
+        let filteredExisting = Self.guidedRowsAfterActiveFlaggedSuppression(
+            existing,
+            evidence: suppressionEvidence
+        )
         var existingByID = Dictionary(uniqueKeysWithValues: existing.map { ($0.id, $0) })
-        var changed = false
-        for guided in snapshotGuided {
+        var changed = filteredExisting != existing
+        if changed {
+            existing = filteredExisting
+            existingByID = Dictionary(uniqueKeysWithValues: existing.map { ($0.id, $0) })
+        }
+        for guided in filteredSnapshotGuided {
             if let local = existingByID[guided.id],
                Self.guidedKnownStateAt(local) > Self.guidedKnownStateAt(guided) {
                 continue
@@ -17795,6 +17818,21 @@ final class AppState: ObservableObject {
             return lhs.id.uuidString < rhs.id.uuidString
         }
         try localStore.saveGuidedShots(existing, propertyID: propertyID)
+    }
+
+    private static func guidedRowsAfterActiveFlaggedSuppression(
+        _ guidedShots: [GuidedShot],
+        evidence: LocalConflictRules.ActiveFlaggedGuidedSuppressionEvidence
+    ) -> [GuidedShot] {
+        guard !evidence.isEmpty else { return guidedShots }
+        let retired = guidedShots.filter { $0.isRetired || $0.status == .retired }
+        let active = guidedShots.filter { !$0.isRetired && $0.status != .retired }
+        let visibleActive = LocalConflictRules.suppressGuidedShotsRepresentedByActiveFlaggedObservations(
+            active,
+            observations: [],
+            evidence: evidence
+        )
+        return retired + visibleActive
     }
 
     private nonisolated static func mergeAutomaticSnapshotMetadata(

@@ -4228,7 +4228,10 @@ struct ContentView: View {
             }
 
             let matchingShots = metadata.shots
-                .filter { shotMetadata($0, matches: guidedShot, guidedKey: key) }
+                .filter {
+                    LocalConflictRules.shotMetadataIsOrdinaryGuidedWork($0) &&
+                    shotMetadata($0, matches: guidedShot, guidedKey: key)
+                }
                 .sorted { lhs, rhs in
                     if lhs.updatedAt != rhs.updatedAt { return lhs.updatedAt > rhs.updatedAt }
                     return lhs.createdAt > rhs.createdAt
@@ -4316,7 +4319,10 @@ struct ContentView: View {
             }
 
             let matchingShots = metadata.shots
-                .filter { shotMetadata($0, matches: guidedShot, guidedKey: key) }
+                .filter {
+                    LocalConflictRules.shotMetadataIsOrdinaryGuidedWork($0) &&
+                    shotMetadata($0, matches: guidedShot, guidedKey: key)
+                }
                 .sorted { lhs, rhs in
                     if lhs.updatedAt != rhs.updatedAt { return lhs.updatedAt > rhs.updatedAt }
                     return lhs.createdAt > rhs.createdAt
@@ -4434,7 +4440,7 @@ struct ContentView: View {
 
         for shot in metadata.shots
             .filter({ shot in
-                shot.isGuided &&
+                LocalConflictRules.shotMetadataIsOrdinaryGuidedWork(shot) &&
                 shot.sessionID == session.id &&
                 shot.lifecycleState.isActiveForDefaultWorkflows &&
                 shot.createdAt >= session.startedAt &&
@@ -4505,7 +4511,7 @@ struct ContentView: View {
         }
 
         return Array(Set(metadata.shots.compactMap { shot in
-            guard shot.isGuided,
+            guard LocalConflictRules.shotMetadataIsOrdinaryGuidedWork(shot),
                   shot.sessionID == sessionID,
                   shot.lifecycleState.isActiveForDefaultWorkflows else {
                 return nil
@@ -6728,6 +6734,7 @@ struct ContentView: View {
                     summary: summary,
                     isPreparingExport: isPreparingSessionExport,
                     isEndingSession: isEndingSession,
+                    endingTitle: endingSessionProgressTitle,
                     onResume: {
                         showSessionActionsSheet = false
                     },
@@ -9361,21 +9368,6 @@ extension ContentView {
                 fireQuickButtonHaptic()
             },
             onTap: {
-                if case .guided = currentCaptureIntent {
-                    clearGuidedAndRetakeArming()
-                    guidedReferenceAssetLocalID = nil
-                    guidedReferenceThumbnail = nil
-                    showGuidedAlignmentOverlay = false
-                    showArmedReferenceMenu = false
-                    setCaptureIntent(.free)
-                } else if case .retake = currentCaptureIntent {
-                    clearGuidedAndRetakeArming()
-                    guidedReferenceAssetLocalID = nil
-                    guidedReferenceThumbnail = nil
-                    showGuidedAlignmentOverlay = false
-                    showArmedReferenceMenu = false
-                    setCaptureIntent(.free)
-                }
                 draftDetailNote = detailNote
                 showDetailOverlay = true
             }
@@ -10350,6 +10342,17 @@ extension ContentView {
                             ? queueResolutionCaptureIfNeeded(with: shot, data: data)
                             : false
                         var createdObservationID: UUID? = nil
+                        if didApplyGuidedShot,
+                           armedFlaggedIDAtCapture == nil,
+                           !noteAtCapture.isEmpty {
+                            createdObservationID = createObservationFromCapturedDetailNote(
+                                noteAtCapture,
+                                priority: capturePriority,
+                                shot: shot,
+                                retakeContext: activeRetakeContext,
+                                historyCaptureKind: wasGuidedRetakeCapture ? .retake : .captured
+                            )
+                        }
                         if !didApplyGuidedShot && !didApplyIssueUpdate && !didQueueResolution {
                             if case .free = captureIntent {
                                 if noteAtCapture.isEmpty {
@@ -10407,6 +10410,9 @@ extension ContentView {
                         }
                         if captureIsFlagged {
                             refreshActiveIssues()
+                            if didApplyGuidedShot {
+                                refreshGuidedShots()
+                            }
                         } else {
                             refreshReferenceSetsAndPendingCounts()
                         }
@@ -10440,12 +10446,21 @@ extension ContentView {
         }
     }
 
-    private func createObservationFromCapturedDetailNote(_ noteText: String, priority: String, shot: Shot) -> UUID? {
+    private func createObservationFromCapturedDetailNote(
+        _ noteText: String,
+        priority: String,
+        shot: Shot,
+        retakeContext: RetakeContext? = nil,
+        historyCaptureKind: ObservationHistoryEvent.Kind = .captured
+    ) -> UUID? {
         guard !noteText.isEmpty else { return nil }
         guard !Self.normalizedPriority(priority).isEmpty else { return nil }
         guard let propertyID = appState.selectedPropertyID else { return nil }
         let reason = noteText.trimmingCharacters(in: .whitespacesAndNewlines)
         let normalizedPriority = Self.normalizedPriority(priority)
+        let buildingValue = retakeContext?.building ?? selectedBuilding
+        let elevationValue = retakeContext?.elevation ?? elevation
+        let detailTypeValue = retakeContext?.detailType ?? currentDetailType
 
         let observation = Observation(
             propertyID: propertyID,
@@ -10454,9 +10469,9 @@ extension ContentView {
             status: .active,
             linkedShotID: shot.id,
             updatedInSessionID: appState.currentSession?.id,
-            building: selectedBuilding,
-            targetElevation: elevation,
-            detailType: currentDetailType,
+            building: buildingValue,
+            targetElevation: elevationValue,
+            detailType: detailTypeValue,
             priority: normalizedPriority,
             currentReason: reason,
             historyEvents: [
@@ -10471,7 +10486,7 @@ extension ContentView {
                 ObservationHistoryEvent(
                     timestamp: shot.capturedAt,
                     sessionID: appState.currentSession?.id,
-                    kind: .captured,
+                    kind: historyCaptureKind,
                     shotID: shot.id
                 )
             ],
@@ -10979,10 +10994,17 @@ extension ContentView {
         if !allowReferenceThumbnailResolution {
             activeSessionShotIDs = sessionShotIDsForActiveSession(propertyID: propertyID, sessionID: activeSessionID)
             let baselineState = persistedBaselineState(propertyID: propertyID)
+            let activeFlaggedObservations = activeFlaggedObservationsForGuidedSuppression(propertyID: propertyID)
+            let suppressionEvidence = activeFlaggedGuidedSuppressionEvidence(
+                propertyID: propertyID,
+                observations: activeFlaggedObservations
+            )
             guidedShots = loadGuidedChecklistForSession(
                 propertyID: propertyID,
                 sessionID: activeSessionID,
-                baselineState: baselineState
+                baselineState: baselineState,
+                activeFlaggedObservations: activeFlaggedObservations,
+                suppressionEvidence: suppressionEvidence
             )
             retiredGuidedShots = retiredGuidedShotsForProperty(propertyID)
             guidedResolvedThumbnailPathByID = [:]
@@ -11024,10 +11046,17 @@ extension ContentView {
             metadataCache[activeSessionID] = currentSessionMetadata
         }
 
+        let activeFlaggedObservations = activeFlaggedObservationsForGuidedSuppression(propertyID: propertyID)
+        let suppressionEvidence = activeFlaggedGuidedSuppressionEvidence(
+            propertyID: propertyID,
+            observations: activeFlaggedObservations
+        )
         var fetchedGuidedShots = loadGuidedChecklistForSession(
             propertyID: propertyID,
             sessionID: activeSessionID,
-            baselineState: baselineState
+            baselineState: baselineState,
+            activeFlaggedObservations: activeFlaggedObservations,
+            suppressionEvidence: suppressionEvidence
         )
         var resolvedMap: [UUID: String] = [:]
         var referenceMap: [UUID: String] = [:]
@@ -11036,7 +11065,8 @@ extension ContentView {
                 uniqueKeysWithValues: (sessionMetadata?.shots ?? [])
                     .filter { shot in
                         guard let activeSessionID else { return false }
-                        return shot.isGuided && shot.sessionID == activeSessionID
+                        return LocalConflictRules.shotMetadataIsOrdinaryGuidedWork(shot) &&
+                            shot.sessionID == activeSessionID
                     }
                     .map { ($0.shotID, $0) }
             )
@@ -11124,6 +11154,11 @@ extension ContentView {
                 metadataCache: &metadataCache
             )
         }
+        fetchedGuidedShots = visibleGuidedShots(
+            from: fetchedGuidedShots,
+            activeFlaggedObservations: activeFlaggedObservations,
+            suppressionEvidence: suppressionEvidence
+        )
         activeSessionShotIDs = sessionShotIDs
         guidedShots = fetchedGuidedShots
         retiredGuidedShots = retiredGuidedShotsForProperty(propertyID)
@@ -11154,24 +11189,41 @@ extension ContentView {
     private func loadGuidedChecklistForSession(
         propertyID: UUID,
         sessionID: UUID?,
-        baselineState: (baselineSessionID: UUID?, hasBaseline: Bool)
+        baselineState: (baselineSessionID: UUID?, hasBaseline: Bool),
+        activeFlaggedObservations: [Observation]? = nil,
+        suppressionEvidence: LocalConflictRules.ActiveFlaggedGuidedSuppressionEvidence? = nil
     ) -> [GuidedShot] {
         if let existing = try? localStore.fetchGuidedShots(propertyID: propertyID), !existing.isEmpty {
             let normalized = Self.normalizedGuidedShotsWithStableAngles(existing)
-            if normalized != existing {
-                try? localStore.saveGuidedShots(normalized, propertyID: propertyID)
+            let observations = activeFlaggedObservations ?? activeFlaggedObservationsForGuidedSuppression(propertyID: propertyID)
+            let evidence = suppressionEvidence ?? activeFlaggedGuidedSuppressionEvidence(
+                propertyID: propertyID,
+                observations: observations
+            )
+            let persisted = persistableGuidedShotsAfterActiveFlaggedSuppression(
+                normalized,
+                activeFlaggedObservations: observations,
+                suppressionEvidence: evidence
+            )
+            if persisted != existing {
+                try? localStore.saveGuidedShots(persisted, propertyID: propertyID)
             }
             let scoped = guidedShotsScopedToCurrentSession(
-                normalized,
+                persisted,
                 propertyID: propertyID,
                 sessionID: sessionID
+            )
+            let visible = visibleGuidedShots(
+                from: scoped,
+                activeFlaggedObservations: observations,
+                suppressionEvidence: evidence
             )
             syncGuidedShotsToCurrentSessionMetadataIfPersisted(
                 propertyID: propertyID,
                 sessionID: sessionID,
-                guidedShots: scoped
+                guidedShots: visible
             )
-            return visibleGuidedShots(from: scoped)
+            return visible
         }
 
         guard let sessionID else {
@@ -11187,14 +11239,31 @@ extension ContentView {
             )
             if !recovered.isEmpty {
                 let normalized = Self.normalizedGuidedShotsWithStableAngles(recovered)
-                try? localStore.saveGuidedShots(normalized, propertyID: propertyID)
+                let observations = activeFlaggedObservations ?? activeFlaggedObservationsForGuidedSuppression(propertyID: propertyID)
+                let evidence = suppressionEvidence ?? activeFlaggedGuidedSuppressionEvidence(
+                    propertyID: propertyID,
+                    observations: observations
+                )
+                let visible = visibleGuidedShots(
+                    from: normalized,
+                    activeFlaggedObservations: observations,
+                    suppressionEvidence: evidence
+                )
+                try? localStore.saveGuidedShots(
+                    persistableGuidedShotsAfterActiveFlaggedSuppression(
+                        normalized,
+                        activeFlaggedObservations: observations,
+                        suppressionEvidence: evidence
+                    ),
+                    propertyID: propertyID
+                )
                 syncGuidedShotsToCurrentSessionMetadataIfPersisted(
                     propertyID: propertyID,
                     sessionID: sessionID,
-                    guidedShots: normalized
+                    guidedShots: visible
                 )
                 print("[GuidedSeed] session=\(sessionID.uuidString) recoveredCount=\(normalized.count) source=current_session_metadata")
-                return visibleGuidedShots(from: normalized)
+                return visible
             }
         }
         guard baselineState.hasBaseline, let baselineSessionID = baselineState.baselineSessionID else {
@@ -11212,7 +11281,7 @@ extension ContentView {
         seeded.reserveCapacity(baselineMetadata.shots.count)
 
         for shot in baselineMetadata.shots
-            .filter(\.isGuided)
+            .filter({ LocalConflictRules.shotMetadataIsOrdinaryGuidedWork($0) })
             .sorted(by: { lhs, rhs in
                 if lhs.createdAt != rhs.createdAt { return lhs.createdAt < rhs.createdAt }
                 if lhs.angleIndex != rhs.angleIndex { return lhs.angleIndex < rhs.angleIndex }
@@ -11258,15 +11327,42 @@ extension ContentView {
 
         let normalizedSeeded = Self.normalizedGuidedShotsWithStableAngles(seeded)
         if !normalizedSeeded.isEmpty {
-            try? localStore.saveGuidedShots(normalizedSeeded, propertyID: propertyID)
+            let observations = activeFlaggedObservations ?? activeFlaggedObservationsForGuidedSuppression(propertyID: propertyID)
+            let evidence = suppressionEvidence ?? activeFlaggedGuidedSuppressionEvidence(
+                propertyID: propertyID,
+                observations: observations
+            )
+            let visible = visibleGuidedShots(
+                from: normalizedSeeded,
+                activeFlaggedObservations: observations,
+                suppressionEvidence: evidence
+            )
+            try? localStore.saveGuidedShots(
+                persistableGuidedShotsAfterActiveFlaggedSuppression(
+                    normalizedSeeded,
+                    activeFlaggedObservations: observations,
+                    suppressionEvidence: evidence
+                ),
+                propertyID: propertyID
+            )
             syncGuidedShotsToCurrentSessionMetadataIfPersisted(
                 propertyID: propertyID,
                 sessionID: sessionID,
-                guidedShots: normalizedSeeded
+                guidedShots: visible
             )
         }
-        print("[GuidedSeed] session=\(sessionID.uuidString) seededCount=\(normalizedSeeded.count)")
-        return visibleGuidedShots(from: normalizedSeeded)
+        let observations = activeFlaggedObservations ?? activeFlaggedObservationsForGuidedSuppression(propertyID: propertyID)
+        let evidence = suppressionEvidence ?? activeFlaggedGuidedSuppressionEvidence(
+            propertyID: propertyID,
+            observations: observations
+        )
+        let visible = visibleGuidedShots(
+            from: normalizedSeeded,
+            activeFlaggedObservations: observations,
+            suppressionEvidence: evidence
+        )
+        print("[GuidedSeed] session=\(sessionID.uuidString) seededCount=\(visible.count)")
+        return visible
     }
 
     private func guidedShotsScopedToCurrentSession(
@@ -12145,8 +12241,56 @@ extension ContentView {
         return normalized
     }
 
-    private func visibleGuidedShots(from guidedShots: [GuidedShot]) -> [GuidedShot] {
-        guidedShots.filter { !$0.isRetired && $0.status != .retired }
+    private func activeFlaggedObservationsForGuidedSuppression(propertyID: UUID) -> [Observation] {
+        ((try? localStore.fetchObservations(propertyID: propertyID)) ?? activeObservations)
+            .filter { $0.status == .active }
+    }
+
+    private func activeFlaggedGuidedSuppressionEvidence(
+        propertyID: UUID,
+        observations: [Observation]
+    ) -> LocalConflictRules.ActiveFlaggedGuidedSuppressionEvidence {
+        let issueLinkedGuidedShots = ((try? localStore.fetchSessions(propertyID: propertyID)) ?? [])
+            .flatMap { session -> [ShotMetadata] in
+                guard let metadata = try? localStore.loadSessionMetadata(propertyID: propertyID, sessionID: session.id) else {
+                    return []
+                }
+                return metadata.shots.filter { shot in
+                    shot.isGuided && !LocalConflictRules.shotMetadataIsOrdinaryGuidedWork(shot)
+                }
+            }
+        return LocalConflictRules.activeFlaggedGuidedSuppressionEvidence(
+            observations: observations,
+            issueLinkedGuidedShots: issueLinkedGuidedShots
+        )
+    }
+
+    private func visibleGuidedShots(
+        from guidedShots: [GuidedShot],
+        activeFlaggedObservations: [Observation]? = nil,
+        suppressionEvidence: LocalConflictRules.ActiveFlaggedGuidedSuppressionEvidence = LocalConflictRules.ActiveFlaggedGuidedSuppressionEvidence()
+    ) -> [GuidedShot] {
+        let activeRows = guidedShots.filter { !$0.isRetired && $0.status != .retired }
+        let observations = activeFlaggedObservations ?? activeObservations
+        return LocalConflictRules.suppressGuidedShotsRepresentedByActiveFlaggedObservations(
+            activeRows,
+            observations: observations,
+            evidence: suppressionEvidence
+        )
+    }
+
+    private func persistableGuidedShotsAfterActiveFlaggedSuppression(
+        _ guidedShots: [GuidedShot],
+        activeFlaggedObservations: [Observation],
+        suppressionEvidence: LocalConflictRules.ActiveFlaggedGuidedSuppressionEvidence
+    ) -> [GuidedShot] {
+        let retainedRetired = retiredGuidedShots(from: guidedShots)
+        let visibleActive = visibleGuidedShots(
+            from: guidedShots,
+            activeFlaggedObservations: activeFlaggedObservations,
+            suppressionEvidence: suppressionEvidence
+        )
+        return Self.normalizedGuidedShotsWithStableAngles(retainedRetired + visibleActive)
     }
 
     private func retiredGuidedShots(from guidedShots: [GuidedShot]) -> [GuidedShot] {
@@ -12414,7 +12558,17 @@ extension ContentView {
     private func persistedGuidedSummary(propertyID: UUID, sessionID: UUID) -> (remaining: Int, metadataShotCount: Int) {
         guard let metadata = try? localStore.loadSessionMetadata(propertyID: propertyID, sessionID: sessionID) else {
             let fallbackGuided = (try? localStore.fetchGuidedShots(propertyID: propertyID)) ?? []
-            let fallbackRemaining = fallbackGuided.filter {
+            let activeFlaggedObservations = activeFlaggedObservationsForGuidedSuppression(propertyID: propertyID)
+            let suppressionEvidence = activeFlaggedGuidedSuppressionEvidence(
+                propertyID: propertyID,
+                observations: activeFlaggedObservations
+            )
+            let visibleFallback = visibleGuidedShots(
+                from: fallbackGuided,
+                activeFlaggedObservations: activeFlaggedObservations,
+                suppressionEvidence: suppressionEvidence
+            )
+            let fallbackRemaining = visibleFallback.filter {
                 !isGuidedShotSkippedInCurrentSession($0) && !isShotCapturedInCurrentSession($0.shot)
             }.count
             return (fallbackRemaining, 0)
@@ -12432,7 +12586,17 @@ extension ContentView {
             return shot.shotKey
         })
 
-        let guided = (try? localStore.fetchGuidedShots(propertyID: propertyID)) ?? []
+        let allGuided = (try? localStore.fetchGuidedShots(propertyID: propertyID)) ?? []
+        let activeFlaggedObservations = activeFlaggedObservationsForGuidedSuppression(propertyID: propertyID)
+        let suppressionEvidence = activeFlaggedGuidedSuppressionEvidence(
+            propertyID: propertyID,
+            observations: activeFlaggedObservations
+        )
+        let guided = visibleGuidedShots(
+            from: allGuided,
+            activeFlaggedObservations: activeFlaggedObservations,
+            suppressionEvidence: suppressionEvidence
+        )
         let remaining = guided.filter { guidedShot in
             if isGuidedShotSkippedInCurrentSession(guidedShot) {
                 return false
@@ -12723,7 +12887,7 @@ extension ContentView {
 
     private func handleSaveDraftAndExit(summary: SessionActionsSummary) {
         guard !isEndingSession else { return }
-        endingSessionProgressTitle = "Closing Draft..."
+        endingSessionProgressTitle = summary.hasCaptures ? "Closing Draft..." : "Closing..."
         isEndingSession = true
         showSessionActionsSheet = false
         DispatchQueue.main.async {
@@ -14313,6 +14477,7 @@ extension ContentView {
             }
             finalizeArmedIssueCaptureAfterDecision()
             refreshActiveIssues()
+            refreshGuidedShots()
         } catch {
             finalizeArmedIssueCaptureAfterDecision()
         }
@@ -14497,6 +14662,10 @@ extension ContentView {
             flaggedReferencePathByID = [:]
             flaggedAngleIndexByID = [:]
             carryoverIssueBadgeCount = 0
+            suppressVisibleGuidedShotsForLoadedActiveObservations(
+                propertyID: propertyID,
+                sessionID: activeSessionID
+            )
             reportLibrary.setActiveIssueCount(activeObservations.count)
             verboseLog(
                 "[FlaggedData] deferred sessionID=\(activeSessionID?.uuidString ?? "NONE") " +
@@ -14612,6 +14781,10 @@ extension ContentView {
                 carryoverIssueBadgeCount = 0
             }
 
+            suppressVisibleGuidedShotsForLoadedActiveObservations(
+                propertyID: propertyID,
+                sessionID: activeSessionID
+            )
             reportLibrary.setActiveIssueCount(activeObservations.count)
             verboseLog(
                 "[FlaggedData] using sessionID=\(activeSessionID?.uuidString ?? "NONE") " +
@@ -14641,6 +14814,29 @@ extension ContentView {
                 "guidedPending=\(guidedRemainingForCompass) flaggedPending=\(flaggedPendingCaptureCount) carryoverIssues=0"
             )
         }
+    }
+
+    private func suppressVisibleGuidedShotsForLoadedActiveObservations(
+        propertyID: UUID,
+        sessionID: UUID?
+    ) {
+        let suppressionEvidence = activeFlaggedGuidedSuppressionEvidence(
+            propertyID: propertyID,
+            observations: activeObservations
+        )
+        let visible = visibleGuidedShots(
+            from: guidedShots,
+            activeFlaggedObservations: activeObservations,
+            suppressionEvidence: suppressionEvidence
+        )
+        guard visible != guidedShots else { return }
+        guidedShots = visible
+        syncGuidedShotsToCurrentSessionMetadataIfPersisted(
+            propertyID: propertyID,
+            sessionID: sessionID,
+            guidedShots: visible
+        )
+        refreshSessionActionsSummaryIfVisible()
     }
 
     private func armIssueUpdate(_ observation: Observation, revisedObservationText: String?) {
@@ -14779,6 +14975,7 @@ extension ContentView {
         let summary: SessionActionsSummary
         let isPreparingExport: Bool
         let isEndingSession: Bool
+        let endingTitle: String
         let onResume: () -> Void
         let onSaveDraftAndExit: () -> Void
         let onExportNow: () -> Void
@@ -14879,7 +15076,7 @@ extension ContentView {
                     action: onSaveDraftAndExit
                 )
                 actionButton(
-                    title: isEndingSession ? "Completing Session..." : summary.exportActionTitle,
+                    title: isEndingSession ? endingTitle : summary.exportActionTitle,
                     role: .tertiary,
                     isEnabled: !isPreparingExport && !isEndingSession && summary.isExportActionEnabled,
                     action: onExportNow
