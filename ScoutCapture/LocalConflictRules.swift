@@ -5,6 +5,33 @@ enum LocalConflictRules {
     // Session lock ownership and any `locked_*` fields remain delegated to the
     // existing 2C-10b session coordination helpers and must not be routed
     // through these generic reducers.
+    struct ActiveFlaggedGuidedSuppressionEvidence: Equatable {
+        var shotIDs: Set<UUID>
+        var imageIdentifiers: Set<String>
+        var guidedKeys: Set<String>
+
+        init(
+            shotIDs: Set<UUID> = [],
+            imageIdentifiers: Set<String> = [],
+            guidedKeys: Set<String> = []
+        ) {
+            self.shotIDs = shotIDs
+            self.imageIdentifiers = imageIdentifiers
+            self.guidedKeys = guidedKeys
+        }
+
+        var isEmpty: Bool {
+            shotIDs.isEmpty && imageIdentifiers.isEmpty && guidedKeys.isEmpty
+        }
+
+        func merged(with other: ActiveFlaggedGuidedSuppressionEvidence) -> ActiveFlaggedGuidedSuppressionEvidence {
+            ActiveFlaggedGuidedSuppressionEvidence(
+                shotIDs: shotIDs.union(other.shotIDs),
+                imageIdentifiers: imageIdentifiers.union(other.imageIdentifiers),
+                guidedKeys: guidedKeys.union(other.guidedKeys)
+            )
+        }
+    }
 
     static func shouldApplyPropertyLastWriteWins(
         currentUpdatedAt: Date?,
@@ -96,6 +123,131 @@ enum LocalConflictRules {
         return guidedKey == shotKey
     }
 
+    static func shotMetadataIsOrdinaryGuidedWork(_ shot: ShotMetadata) -> Bool {
+        guard shot.isGuided else { return false }
+        if shot.isFlagged || shot.issueID != nil {
+            return false
+        }
+        let issueStatus = trimmedNonEmpty(shot.issueStatus)?.lowercased()
+        if issueStatus == "active" || issueStatus == "resolved" {
+            return false
+        }
+        let captureKind = trimmedNonEmpty(shot.captureKind)?.lowercased()
+        if captureKind == "resolved_capture" ||
+            captureKind == "follow_up_capture" ||
+            captureKind == "reference" ||
+            captureKind == "reclassified" {
+            return false
+        }
+        return true
+    }
+
+    static func activeFlaggedGuidedSuppressionEvidence(
+        observations: [Observation] = [],
+        issueLinkedGuidedShots: [ShotMetadata] = []
+    ) -> ActiveFlaggedGuidedSuppressionEvidence {
+        let activeObservations = observations.filter { $0.status == .active }
+        let observationEvidence = activeObservations.reduce(into: ActiveFlaggedGuidedSuppressionEvidence()) { partial, observation in
+            partial.shotIDs.formUnion(observation.shots.map(\.id))
+            if let linkedShotID = observation.linkedShotID {
+                partial.shotIDs.insert(linkedShotID)
+            }
+            partial.shotIDs.formUnion(observation.guidedShots.map(\.id))
+            partial.shotIDs.formUnion(observation.guidedShots.compactMap { $0.shot?.id })
+            for shot in observation.shots {
+                partial.imageIdentifiers.formUnion(imageIdentifierVariants(shot.imageLocalIdentifier))
+            }
+            for guided in observation.guidedShots {
+                if let key = guidedShotIdentityKey(guided) {
+                    partial.guidedKeys.insert(key)
+                }
+                partial.imageIdentifiers.formUnion(imageIdentifierVariants(guided.shot?.imageLocalIdentifier))
+                partial.imageIdentifiers.formUnion(imageIdentifierVariants(guided.referenceImagePath))
+                partial.imageIdentifiers.formUnion(imageIdentifierVariants(guided.referenceImageLocalIdentifier))
+            }
+        }
+
+        let metadataEvidence = issueLinkedGuidedShots
+            .filter(metadataShotRepresentsActiveFlaggedGuidedIssue)
+            .reduce(into: ActiveFlaggedGuidedSuppressionEvidence()) { partial, shot in
+                partial.shotIDs.insert(shot.shotID)
+                if let supersedesShotID = shot.supersedesShotID {
+                    partial.shotIDs.insert(supersedesShotID)
+                }
+                if let supersededByShotID = shot.supersededByShotID {
+                    partial.shotIDs.insert(supersededByShotID)
+                }
+                if let key = guidedShotIdentityKey(
+                    building: shot.building,
+                    elevation: shot.elevation,
+                    detailType: shot.detailType,
+                    angleIndex: shot.angleIndex
+                ) {
+                    partial.guidedKeys.insert(key)
+                }
+                let shotKey = shot.shotKey.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+                if !shotKey.isEmpty {
+                    partial.guidedKeys.insert(shotKey)
+                }
+                partial.imageIdentifiers.formUnion(imageIdentifierVariants(shot.originalRelativePath))
+                partial.imageIdentifiers.formUnion(imageIdentifierVariants(shot.stampedRelativePath))
+                partial.imageIdentifiers.formUnion(imageIdentifierVariants(shot.originalFilename))
+                partial.imageIdentifiers.formUnion(imageIdentifierVariants(shot.stampedFilename))
+                partial.imageIdentifiers.formUnion(imageIdentifierVariants(shot.storagePath))
+            }
+
+        return observationEvidence.merged(with: metadataEvidence)
+    }
+
+    static func suppressGuidedShotsRepresentedByActiveFlaggedObservations(
+        _ guidedShots: [GuidedShot],
+        observations: [Observation],
+        evidence additionalEvidence: ActiveFlaggedGuidedSuppressionEvidence = ActiveFlaggedGuidedSuppressionEvidence()
+    ) -> [GuidedShot] {
+        let evidence = activeFlaggedGuidedSuppressionEvidence(observations: observations)
+            .merged(with: additionalEvidence)
+        guard !evidence.isEmpty else { return guidedShots }
+
+        return guidedShots.filter { guided in
+            if evidence.shotIDs.contains(guided.id) {
+                return false
+            }
+            if let shotID = guided.shot?.id, evidence.shotIDs.contains(shotID) {
+                return false
+            }
+            if let key = guidedShotIdentityKey(guided),
+               evidence.guidedKeys.contains(key) {
+                return false
+            }
+            var imageIdentifiers = imageIdentifierVariants(guided.shot?.imageLocalIdentifier)
+            imageIdentifiers.formUnion(imageIdentifierVariants(guided.referenceImagePath))
+            imageIdentifiers.formUnion(imageIdentifierVariants(guided.referenceImageLocalIdentifier))
+            if imageIdentifiers.contains(where: { evidence.imageIdentifiers.contains($0) }) {
+                return false
+            }
+            return true
+        }
+    }
+
+    private static func metadataShotRepresentsActiveFlaggedGuidedIssue(_ shot: ShotMetadata) -> Bool {
+        guard shot.isGuided, !shotMetadataIsOrdinaryGuidedWork(shot) else { return false }
+        let issueStatus = trimmedNonEmpty(shot.issueStatus)?.lowercased()
+        if issueStatus == "resolved" {
+            return false
+        }
+        return shot.isFlagged || shot.issueID != nil || issueStatus == "active"
+    }
+
+    private static func imageIdentifierVariants(_ value: String?) -> Set<String> {
+        guard let trimmed = trimmedNonEmpty(value) else { return [] }
+        var variants: Set<String> = [trimmed.lowercased()]
+        let filename = URL(fileURLWithPath: trimmed).lastPathComponent.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !filename.isEmpty {
+            variants.insert(filename.lowercased())
+        }
+        return variants
+    }
+
     private static func applyResolvedGuidedPrecedence(_ guidedShots: [GuidedShot]) -> [GuidedShot] {
         let latestResolvedByKey = guidedShots.reduce(into: [String: GuidedShot]()) { partial, guided in
             guard guided.status == .retired || guided.isRetired,
@@ -151,6 +303,11 @@ enum LocalConflictRules {
 
     private static func normalizedGuidedPart(_ value: String?) -> String {
         value?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
+    }
+
+    private static func trimmedNonEmpty(_ value: String?) -> String? {
+        let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return trimmed.isEmpty ? nil : trimmed
     }
 
     static func reconcileObservationStatus(
