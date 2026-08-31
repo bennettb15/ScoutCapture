@@ -2,7 +2,6 @@ const DEFAULT_REPOSITORY = "bennettb15/ScoutCapture";
 const DEFAULT_WORKFLOW = "report-package-worker.yml";
 const DEFAULT_REF = "main";
 const DEFAULT_ALLOWED_ORG_ID = "d4ba94ff-25e1-4072-aa79-9a548fcb3008";
-const DEFAULT_ALLOWED_PROPERTY_ID = "d626703e-671b-44e1-a26d-642c5597730e";
 
 type SnapshotRecord = {
   id?: unknown;
@@ -118,8 +117,7 @@ Deno.serve(async (request: Request): Promise<Response> => {
   if (record.deleted_at !== null && record.deleted_at !== undefined) return skip("snapshot_deleted", logBase);
 
   const allowedOrgId = env("REPORT_PACKAGE_TRIGGER_ALLOWED_ORG_ID", DEFAULT_ALLOWED_ORG_ID).toLowerCase();
-  const allowedPropertyId = env("REPORT_PACKAGE_TRIGGER_ALLOWED_PROPERTY_ID", DEFAULT_ALLOWED_PROPERTY_ID).toLowerCase();
-  if (orgId !== allowedOrgId || propertyId !== allowedPropertyId) {
+  if (orgId !== allowedOrgId) {
     return skip("not_allowlisted", logBase);
   }
 

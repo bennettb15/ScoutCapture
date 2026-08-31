@@ -57,16 +57,16 @@ jobs:
       - name: Runtime preflight
         run: docker run --rm scoutcapture-report-worker:report-package --runtime-check --pretty --require-heif
 
-      - name: Process completed QA Test 9.5 snapshots
+      - name: Process completed Test Org snapshots
         shell: bash
         run: |
           set -euo pipefail
-          allow_pair="d4ba94ff-25e1-4072-aa79-9a548fcb3008:d626703e-671b-44e1-a26d-642c5597730e"
+          allow_org="d4ba94ff-25e1-4072-aa79-9a548fcb3008"
           worker_args=(
             --poll-once
             --allow-remote-validation
             --expected-project-ref chlvazmtucoszicehtnm
-            --allow-org-property "${allow_pair}"
+            --allow-org-id "${allow_org}"
             --retention-mode dry-run
             --pretty
           )
@@ -76,7 +76,7 @@ jobs:
             echo "Trigger snapshot_id=${REPORT_WORKER_SNAPSHOT_ID:-none}; worker will process the latest completed sealed snapshot for the session."
             worker_args+=(--allow-session-id "${REPORT_WORKER_SESSION_ID}")
           else
-            echo "No session_id input supplied; running scoped QA Test 9.5 poll."
+            echo "No session_id input supplied; running scoped Test Org poll."
           fi
 
           docker run --rm \

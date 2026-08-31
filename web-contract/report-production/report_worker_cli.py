@@ -84,6 +84,12 @@ def parse_args() -> argparse.Namespace:
         help="Explicitly allow sealed completed snapshots for one org/property pair in --poll-once mode.",
     )
     parser.add_argument(
+        "--allow-org-id",
+        action="append",
+        default=[],
+        help="Explicitly allow sealed completed snapshots for all properties in one org in --poll-once mode.",
+    )
+    parser.add_argument(
         "--output-dir",
         default="/private/tmp/scoutcapture-report-worker",
         help="Local worker artifact directory.",
@@ -221,8 +227,8 @@ def execution_environment(url: str, args: argparse.Namespace) -> str:
         raise WorkerError("--expected-project-ref is required with --allow-remote-validation.")
     if expected_ref != project_ref:
         raise WorkerError("--expected-project-ref does not match SUPABASE_URL project ref.")
-    if not args.allow_session_id and not args.allow_org_property:
-        raise WorkerError("Remote validation requires at least one --allow-session-id or --allow-org-property.")
+    if not args.allow_session_id and not args.allow_org_property and not args.allow_org_id:
+        raise WorkerError("Remote validation requires at least one --allow-session-id, --allow-org-property, or --allow-org-id.")
     if args.session_id and args.session_id.lower() not in allowed_session_ids(args):
         raise WorkerError("Remote validation --session-id must be explicitly included in --allow-session-id.")
     return "remote-validation"
@@ -1150,6 +1156,10 @@ def allowed_session_ids(args: argparse.Namespace) -> set[str]:
     return {item.lower() for item in args.allow_session_id}
 
 
+def allowed_org_ids(args: argparse.Namespace) -> set[str]:
+    return {item.strip().lower() for item in args.allow_org_id if item.strip()}
+
+
 def allowed_org_properties(args: argparse.Namespace) -> set[tuple[str, str]]:
     allowed: set[tuple[str, str]] = set()
     for item in args.allow_org_property:
@@ -1167,12 +1177,13 @@ def allowed_org_properties(args: argparse.Namespace) -> set[tuple[str, str]]:
 def snapshot_is_allowlisted(
     snapshot: dict[str, Any],
     allowed_sessions: set[str],
+    allowed_orgs: set[str],
     allowed_pairs: set[tuple[str, str]],
 ) -> bool:
     session_id = str(snapshot.get("session_id") or "").lower()
     org_id = str(snapshot.get("org_id") or "").lower()
     property_id = str(snapshot.get("property_id") or "").lower()
-    return session_id in allowed_sessions or (org_id, property_id) in allowed_pairs
+    return session_id in allowed_sessions or org_id in allowed_orgs or (org_id, property_id) in allowed_pairs
 
 
 def ready_package_exists(client: SupabaseServiceClient, snapshot_id: str) -> bool:
@@ -1649,9 +1660,10 @@ def run_poll_once(
     repo: pathlib.Path,
 ) -> dict[str, Any]:
     allowed_sessions = allowed_session_ids(args)
+    allowed_orgs = allowed_org_ids(args)
     allowed_pairs = allowed_org_properties(args)
-    if not allowed_sessions and not allowed_pairs:
-        raise WorkerError("--poll-once requires at least one --allow-session-id or --allow-org-property.")
+    if not allowed_sessions and not allowed_orgs and not allowed_pairs:
+        raise WorkerError("--poll-once requires at least one --allow-session-id, --allow-org-id, or --allow-org-property.")
 
     discovered = discover_poll_snapshots(client)
     latest_snapshots, superseded_snapshots = latest_snapshots_per_session(discovered)
@@ -1664,6 +1676,7 @@ def run_poll_once(
         "production_writes_made": False,
         "remote_validation_writes_made": client.environment == "remote-validation",
         "allow_session_ids": sorted(allowed_sessions),
+        "allow_org_ids": sorted(allowed_orgs),
         "allow_org_properties": [f"{org_id}:{property_id}" for org_id, property_id in sorted(allowed_pairs)],
         "discovered_count": len(discovered),
         "latest_snapshot_count": len(latest_snapshots),
@@ -1694,7 +1707,7 @@ def run_poll_once(
             "org_id": snapshot.get("org_id"),
             "property_id": snapshot.get("property_id"),
         }
-        if not snapshot_is_allowlisted(snapshot, allowed_sessions, allowed_pairs):
+        if not snapshot_is_allowlisted(snapshot, allowed_sessions, allowed_orgs, allowed_pairs):
             poll_summary["skipped"].append({**base_log, "reason": "not_allowlisted"})
             continue
         if ready_package_exists(client, snapshot_id):
