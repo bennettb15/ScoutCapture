@@ -9,26 +9,42 @@ enum LocalConflictRules {
         var shotIDs: Set<UUID>
         var imageIdentifiers: Set<String>
         var guidedKeys: Set<String>
+        var guidedBaseKeys: Set<String>
+        var guidedBaseKeyCutoffs: [String: Date]
 
         init(
             shotIDs: Set<UUID> = [],
             imageIdentifiers: Set<String> = [],
-            guidedKeys: Set<String> = []
+            guidedKeys: Set<String> = [],
+            guidedBaseKeys: Set<String> = [],
+            guidedBaseKeyCutoffs: [String: Date] = [:]
         ) {
             self.shotIDs = shotIDs
             self.imageIdentifiers = imageIdentifiers
             self.guidedKeys = guidedKeys
+            self.guidedBaseKeys = guidedBaseKeys
+            self.guidedBaseKeyCutoffs = guidedBaseKeyCutoffs
         }
 
         var isEmpty: Bool {
-            shotIDs.isEmpty && imageIdentifiers.isEmpty && guidedKeys.isEmpty
+            shotIDs.isEmpty && imageIdentifiers.isEmpty && guidedKeys.isEmpty && guidedBaseKeys.isEmpty && guidedBaseKeyCutoffs.isEmpty
         }
 
         func merged(with other: ActiveFlaggedGuidedSuppressionEvidence) -> ActiveFlaggedGuidedSuppressionEvidence {
-            ActiveFlaggedGuidedSuppressionEvidence(
+            var mergedCutoffs = guidedBaseKeyCutoffs
+            for (key, cutoff) in other.guidedBaseKeyCutoffs {
+                if let existing = mergedCutoffs[key] {
+                    mergedCutoffs[key] = max(existing, cutoff)
+                } else {
+                    mergedCutoffs[key] = cutoff
+                }
+            }
+            return ActiveFlaggedGuidedSuppressionEvidence(
                 shotIDs: shotIDs.union(other.shotIDs),
                 imageIdentifiers: imageIdentifiers.union(other.imageIdentifiers),
-                guidedKeys: guidedKeys.union(other.guidedKeys)
+                guidedKeys: guidedKeys.union(other.guidedKeys),
+                guidedBaseKeys: guidedBaseKeys.union(other.guidedBaseKeys),
+                guidedBaseKeyCutoffs: mergedCutoffs
             )
         }
     }
@@ -52,6 +68,32 @@ enum LocalConflictRules {
             merged.append(incoming)
         }
         return merged
+    }
+
+    static func currentIssueShotSortPrecedes(
+        _ lhs: ShotMetadata,
+        _ rhs: ShotMetadata,
+        linkedShotID: UUID?
+    ) -> Bool {
+        let lhsIsLinked = linkedShotID.map { lhs.shotID == $0 } ?? false
+        let rhsIsLinked = linkedShotID.map { rhs.shotID == $0 } ?? false
+        if lhsIsLinked != rhsIsLinked {
+            return lhsIsLinked
+        }
+
+        if lhs.isFlagged != rhs.isFlagged {
+            return lhs.isFlagged
+        }
+
+        if lhs.updatedAt != rhs.updatedAt {
+            return lhs.updatedAt > rhs.updatedAt
+        }
+
+        if lhs.createdAt != rhs.createdAt {
+            return lhs.createdAt > rhs.createdAt
+        }
+
+        return lhs.shotID.uuidString < rhs.shotID.uuidString
     }
 
     static func applyGuidedCompletionState(
@@ -107,6 +149,34 @@ enum LocalConflictRules {
         ].joined(separator: "|")
     }
 
+    static func guidedShotBaseIdentityKey(_ guidedShot: GuidedShot) -> String? {
+        guidedShotBaseIdentityKey(
+            building: guidedShot.building,
+            elevation: guidedShot.targetElevation,
+            detailType: guidedShot.detailType
+        )
+    }
+
+    static func guidedShotBaseIdentityKey(
+        building: String?,
+        elevation: String?,
+        detailType: String?
+    ) -> String? {
+        let normalizedBuilding = normalizedGuidedPart(building)
+        let normalizedElevation = normalizedGuidedPart(CanonicalElevation.normalize(elevation) ?? elevation)
+        let normalizedDetail = normalizedGuidedPart(detailType)
+        guard !normalizedBuilding.isEmpty,
+              !normalizedElevation.isEmpty,
+              !normalizedDetail.isEmpty else {
+            return nil
+        }
+        return [
+            normalizedBuilding,
+            normalizedElevation,
+            normalizedDetail
+        ].joined(separator: "|")
+    }
+
     static func guidedShot(_ guidedShot: GuidedShot, matches shot: ShotMetadata) -> Bool {
         if guidedShot.id == shot.shotID || guidedShot.shot?.id == shot.shotID {
             return true
@@ -123,7 +193,7 @@ enum LocalConflictRules {
         return guidedKey == shotKey
     }
 
-    static func shotMetadataIsOrdinaryGuidedWork(_ shot: ShotMetadata) -> Bool {
+    nonisolated static func shotMetadataIsOrdinaryGuidedWork(_ shot: ShotMetadata) -> Bool {
         guard shot.isGuided else { return false }
         if shot.isFlagged || shot.issueID != nil {
             return false
@@ -142,12 +212,41 @@ enum LocalConflictRules {
         return true
     }
 
+    static func issueLinkedShotIsCurrentSessionCapture(
+        linkedShotID: UUID?,
+        updatedInSessionID: UUID?,
+        resolvedInSessionID: UUID?,
+        currentSessionID: UUID?,
+        currentSessionShotIDs: Set<UUID>
+    ) -> Bool {
+        guard let currentSessionID,
+              let linkedShotID,
+              currentSessionShotIDs.contains(linkedShotID) else {
+            return false
+        }
+        return updatedInSessionID == currentSessionID || resolvedInSessionID == currentSessionID
+    }
+
     static func activeFlaggedGuidedSuppressionEvidence(
         observations: [Observation] = [],
         issueLinkedGuidedShots: [ShotMetadata] = []
     ) -> ActiveFlaggedGuidedSuppressionEvidence {
-        let activeObservations = observations.filter { $0.status == .active }
-        let observationEvidence = activeObservations.reduce(into: ActiveFlaggedGuidedSuppressionEvidence()) { partial, observation in
+        flaggedGuidedPromotionEvidence(
+            observations: observations,
+            issueLinkedGuidedShots: issueLinkedGuidedShots,
+            includeResolved: false
+        )
+    }
+
+    static func flaggedGuidedPromotionEvidence(
+        observations: [Observation] = [],
+        issueLinkedGuidedShots: [ShotMetadata] = [],
+        includeResolved: Bool
+    ) -> ActiveFlaggedGuidedSuppressionEvidence {
+        let eligibleObservations = observations.filter { observation in
+            observation.status == .active || (includeResolved && observation.status == .resolved)
+        }
+        let observationEvidence = eligibleObservations.reduce(into: ActiveFlaggedGuidedSuppressionEvidence()) { partial, observation in
             partial.shotIDs.formUnion(observation.shots.map(\.id))
             if let linkedShotID = observation.linkedShotID {
                 partial.shotIDs.insert(linkedShotID)
@@ -161,6 +260,13 @@ enum LocalConflictRules {
                 if let key = guidedShotIdentityKey(guided) {
                     partial.guidedKeys.insert(key)
                 }
+                if let baseKey = guidedShotBaseIdentityKey(guided) {
+                    partial.guidedBaseKeys.insert(baseKey)
+                    partial.guidedBaseKeyCutoffs[baseKey] = max(
+                        partial.guidedBaseKeyCutoffs[baseKey] ?? .distantPast,
+                        observation.createdAt
+                    )
+                }
                 partial.imageIdentifiers.formUnion(imageIdentifierVariants(guided.shot?.imageLocalIdentifier))
                 partial.imageIdentifiers.formUnion(imageIdentifierVariants(guided.referenceImagePath))
                 partial.imageIdentifiers.formUnion(imageIdentifierVariants(guided.referenceImageLocalIdentifier))
@@ -168,7 +274,7 @@ enum LocalConflictRules {
         }
 
         let metadataEvidence = issueLinkedGuidedShots
-            .filter(metadataShotRepresentsActiveFlaggedGuidedIssue)
+            .filter { metadataShotRepresentsFlaggedGuidedIssue($0, includeResolved: includeResolved) }
             .reduce(into: ActiveFlaggedGuidedSuppressionEvidence()) { partial, shot in
                 partial.shotIDs.insert(shot.shotID)
                 if let supersedesShotID = shot.supersedesShotID {
@@ -185,6 +291,17 @@ enum LocalConflictRules {
                 ) {
                     partial.guidedKeys.insert(key)
                 }
+                if let baseKey = guidedShotBaseIdentityKey(
+                    building: shot.building,
+                    elevation: shot.elevation,
+                    detailType: shot.detailType
+                ) {
+                    partial.guidedBaseKeys.insert(baseKey)
+                    partial.guidedBaseKeyCutoffs[baseKey] = max(
+                        partial.guidedBaseKeyCutoffs[baseKey] ?? .distantPast,
+                        shot.createdAt
+                    )
+                }
                 let shotKey = shot.shotKey.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
                 if !shotKey.isEmpty {
                     partial.guidedKeys.insert(shotKey)
@@ -199,6 +316,45 @@ enum LocalConflictRules {
         return observationEvidence.merged(with: metadataEvidence)
     }
 
+    static func retiredGuidedShotIsRestorable(
+        _ guidedShot: GuidedShot,
+        promotionEvidence: ActiveFlaggedGuidedSuppressionEvidence,
+        retiredGuidedShots: [GuidedShot]
+    ) -> Bool {
+        guard guidedShot.isRetired || guidedShot.status == .retired else { return false }
+        if promotionEvidence.isEmpty { return true }
+        if promotionEvidence.shotIDs.contains(guidedShot.id) { return false }
+        if let shotID = guidedShot.shot?.id,
+           promotionEvidence.shotIDs.contains(shotID) {
+            return false
+        }
+        if let key = guidedShotIdentityKey(guidedShot),
+           promotionEvidence.guidedKeys.contains(key) {
+            return false
+        }
+        if let baseKey = guidedShotBaseIdentityKey(guidedShot),
+           promotionEvidence.guidedBaseKeys.contains(baseKey) {
+            guard guidedKnownStateAt(guidedShot) <= (promotionEvidence.guidedBaseKeyCutoffs[baseKey] ?? .distantPast) else {
+                return true
+            }
+            let baseMatchCount = retiredGuidedShots.filter {
+                ($0.isRetired || $0.status == .retired) &&
+                    guidedShotBaseIdentityKey($0) == baseKey &&
+                    guidedKnownStateAt($0) <= (promotionEvidence.guidedBaseKeyCutoffs[baseKey] ?? .distantPast)
+            }.count
+            if baseMatchCount == 1 {
+                return false
+            }
+        }
+        var imageIdentifiers = imageIdentifierVariants(guidedShot.shot?.imageLocalIdentifier)
+        imageIdentifiers.formUnion(imageIdentifierVariants(guidedShot.referenceImagePath))
+        imageIdentifiers.formUnion(imageIdentifierVariants(guidedShot.referenceImageLocalIdentifier))
+        if imageIdentifiers.contains(where: { promotionEvidence.imageIdentifiers.contains($0) }) {
+            return false
+        }
+        return true
+    }
+
     static func suppressGuidedShotsRepresentedByActiveFlaggedObservations(
         _ guidedShots: [GuidedShot],
         observations: [Observation],
@@ -207,6 +363,19 @@ enum LocalConflictRules {
         let evidence = activeFlaggedGuidedSuppressionEvidence(observations: observations)
             .merged(with: additionalEvidence)
         guard !evidence.isEmpty else { return guidedShots }
+
+        let activeBaseKeyCounts = guidedShots.reduce(into: [String: Int]()) { counts, guided in
+            guard guided.status != .retired,
+                  !guided.isRetired,
+                  let baseKey = guidedShotBaseIdentityKey(guided) else {
+                return
+            }
+            if let cutoff = evidence.guidedBaseKeyCutoffs[baseKey],
+               guidedKnownStateAt(guided) > cutoff {
+                return
+            }
+            counts[baseKey, default: 0] += 1
+        }
 
         return guidedShots.filter { guided in
             if evidence.shotIDs.contains(guided.id) {
@@ -219,6 +388,12 @@ enum LocalConflictRules {
                evidence.guidedKeys.contains(key) {
                 return false
             }
+            if let baseKey = guidedShotBaseIdentityKey(guided),
+               evidence.guidedBaseKeys.contains(baseKey),
+               guidedKnownStateAt(guided) <= (evidence.guidedBaseKeyCutoffs[baseKey] ?? .distantPast),
+               activeBaseKeyCounts[baseKey] == 1 {
+                return false
+            }
             var imageIdentifiers = imageIdentifierVariants(guided.shot?.imageLocalIdentifier)
             imageIdentifiers.formUnion(imageIdentifierVariants(guided.referenceImagePath))
             imageIdentifiers.formUnion(imageIdentifierVariants(guided.referenceImageLocalIdentifier))
@@ -229,11 +404,14 @@ enum LocalConflictRules {
         }
     }
 
-    private static func metadataShotRepresentsActiveFlaggedGuidedIssue(_ shot: ShotMetadata) -> Bool {
+    nonisolated static func metadataShotRepresentsFlaggedGuidedIssue(
+        _ shot: ShotMetadata,
+        includeResolved: Bool = false
+    ) -> Bool {
         guard shot.isGuided, !shotMetadataIsOrdinaryGuidedWork(shot) else { return false }
         let issueStatus = trimmedNonEmpty(shot.issueStatus)?.lowercased()
         if issueStatus == "resolved" {
-            return false
+            return includeResolved && shot.issueID != nil
         }
         return shot.isFlagged || shot.issueID != nil || issueStatus == "active"
     }
@@ -305,7 +483,7 @@ enum LocalConflictRules {
         value?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
     }
 
-    private static func trimmedNonEmpty(_ value: String?) -> String? {
+    private nonisolated static func trimmedNonEmpty(_ value: String?) -> String? {
         let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         return trimmed.isEmpty ? nil : trimmed
     }

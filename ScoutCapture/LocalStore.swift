@@ -1228,6 +1228,23 @@ final class LocalStore {
             candidates.append(originalsRoot.appendingPathComponent(URL(fileURLWithPath: filename).lastPathComponent, isDirectory: false))
         }
 
+        if let storageSessionID = sessionIDFromShotStoragePath(shot.storagePath),
+           storageSessionID != metadata.sessionID {
+            let storageOriginalsRoot = originalsFolderURL(propertyID: metadata.propertyID, sessionID: storageSessionID)
+            if let relative = trimmedNonEmpty(shot.originalRelativePath) {
+                let relativeURL = URL(fileURLWithPath: relative)
+                candidates.append(storageOriginalsRoot.appendingPathComponent(relativeURL.lastPathComponent, isDirectory: false))
+            }
+            if let filename = trimmedNonEmpty(shot.originalFilename) {
+                candidates.append(storageOriginalsRoot.appendingPathComponent(URL(fileURLWithPath: filename).lastPathComponent, isDirectory: false))
+            }
+            if let storageLeafName = storagePathOriginalFilename(shot.storagePath) {
+                candidates.append(storageOriginalsRoot.appendingPathComponent(storageLeafName, isDirectory: false))
+            }
+            candidates.append(storageOriginalsRoot.appendingPathComponent(OriginalPhotoFormat.defaultFilename(for: shot.shotID), isDirectory: false))
+            candidates.append(storageOriginalsRoot.appendingPathComponent(OriginalPhotoFormat.legacyHEICFilename(for: shot.shotID), isDirectory: false))
+        }
+
         candidates.append(originalsRoot.appendingPathComponent(OriginalPhotoFormat.defaultFilename(for: shot.shotID), isDirectory: false))
         candidates.append(originalsRoot.appendingPathComponent(OriginalPhotoFormat.legacyHEICFilename(for: shot.shotID), isDirectory: false))
 
@@ -1257,6 +1274,24 @@ final class LocalStore {
                 "candidate_paths": candidateDiagnostics.joined(separator: "\n")
             ]
         )
+    }
+
+    private func sessionIDFromShotStoragePath(_ storagePath: String?) -> UUID? {
+        guard let storagePath = trimmedNonEmpty(storagePath) else { return nil }
+        let components = storagePath
+            .split(separator: "/")
+            .map(String.init)
+        guard let sessionsIndex = components.firstIndex(where: { $0.caseInsensitiveCompare("sessions") == .orderedSame }),
+              components.indices.contains(sessionsIndex + 1) else {
+            return nil
+        }
+        return UUID(uuidString: components[sessionsIndex + 1])
+    }
+
+    private func storagePathOriginalFilename(_ storagePath: String?) -> String? {
+        guard let storagePath = trimmedNonEmpty(storagePath) else { return nil }
+        let filename = URL(fileURLWithPath: storagePath).lastPathComponent
+        return filename.isEmpty ? nil : filename
     }
 
     private func clientExportShots(in metadata: SessionMetadata) -> [ShotMetadata] {
@@ -2397,7 +2432,14 @@ final class LocalStore {
     func fetchGuidedShots(propertyID: UUID) throws -> [GuidedShot] {
         try ensurePropertyExists(propertyID)
         let guidedShots = try readGuidedShots(propertyID: propertyID)
-        let normalized = LocalConflictRules.normalizeGuidedCompletionStates(guidedShots)
+        let recovered = guidedShotsRecoveringPostPromotionOrdinaryCaptures(
+            LocalConflictRules.normalizeGuidedCompletionStates(guidedShots),
+            propertyID: propertyID
+        )
+        let normalized = guidedShotsRetiredForActiveFlaggedPromotions(
+            recovered,
+            propertyID: propertyID
+        )
         if try hasLegacyElevationValues(in: guidedShotsFileURL(for: propertyID)) ||
             normalized != guidedShots {
             try writeGuidedShots(normalized, propertyID: propertyID)
@@ -2407,7 +2449,10 @@ final class LocalStore {
 
     func saveGuidedShots(_ guidedShots: [GuidedShot], propertyID: UUID) throws {
         try ensurePropertyExists(propertyID)
-        let normalized = LocalConflictRules.normalizeGuidedCompletionStates(guidedShots)
+        let normalized = guidedShotsRetiredForActiveFlaggedPromotions(
+            LocalConflictRules.normalizeGuidedCompletionStates(guidedShots),
+            propertyID: propertyID
+        )
         try writeGuidedShots(normalized, propertyID: propertyID)
         NotificationCenter.default.post(name: .scoutPersistentDataDidChange, object: nil)
     }
@@ -2490,6 +2535,7 @@ final class LocalStore {
         metadata.propertyID = propertyID
         metadata.sessionID = sessionID
 
+        var persistedShot = shot
         if let index = metadata.shots.firstIndex(where: { $0.shotID == shot.shotID }) {
             let existing = metadata.shots[index]
             var replacement = shot
@@ -2547,6 +2593,7 @@ final class LocalStore {
                 hiddenFromGallery: shot.hiddenFromGallery,
                 lifecycleUpdatedAt: shot.lifecycleUpdatedAt
             )
+            persistedShot = replacement
             metadata.shots = LocalConflictRules.applyAppendOnlyMediaRef(
                 current: metadata.shots,
                 incoming: replacement
@@ -2622,6 +2669,7 @@ final class LocalStore {
                 hiddenFromGallery: shot.hiddenFromGallery,
                 lifecycleUpdatedAt: shot.lifecycleUpdatedAt
             )
+            persistedShot = replacement
             metadata.shots.remove(at: index)
             metadata.shots = LocalConflictRules.applyAppendOnlyMediaRef(
                 current: metadata.shots,
@@ -2637,7 +2685,347 @@ final class LocalStore {
             )
         }
 
+        if shotRepresentsActiveFlaggedGuidedIssue(persistedShot) {
+            _ = retireGuidedRowsPromotedToActiveFlaggedIssue(
+                &metadata.guidedShots,
+                promotedShot: persistedShot,
+                sessionID: sessionID
+            )
+            try retirePropertyGuidedRowsPromotedToActiveFlaggedIssue(
+                propertyID: propertyID,
+                promotedShot: persistedShot,
+                sessionID: sessionID
+            )
+        }
+
         try saveSessionMetadataAtomically(propertyID: propertyID, sessionID: sessionID, metadata: metadata)
+    }
+
+    private func shotRepresentsActiveFlaggedGuidedIssue(_ shot: ShotMetadata) -> Bool {
+        guard shot.isGuided,
+              !LocalConflictRules.shotMetadataIsOrdinaryGuidedWork(shot) else {
+            return false
+        }
+        let issueStatus = trimmedNonEmpty(shot.issueStatus)?.lowercased()
+        if issueStatus == "resolved" {
+            return false
+        }
+        return shot.isFlagged || shot.issueID != nil || issueStatus == "active"
+    }
+
+    private func guidedShotsRetiredForActiveFlaggedPromotions(
+        _ guidedRows: [GuidedShot],
+        propertyID: UUID
+    ) -> [GuidedShot] {
+        var result = guidedRows
+        let promotedShots = activeFlaggedGuidedPromotionShots(propertyID: propertyID)
+        for promotedShot in promotedShots {
+            _ = retireGuidedRowsPromotedToActiveFlaggedIssue(
+                &result,
+                promotedShot: promotedShot,
+                sessionID: promotedShot.sessionID,
+                allowExactMatches: false
+            )
+        }
+        return LocalConflictRules.normalizeGuidedCompletionStates(result)
+    }
+
+    private func activeFlaggedGuidedPromotionShots(propertyID: UUID) -> [ShotMetadata] {
+        let sessions = (try? readSessions(propertyID: propertyID)) ?? []
+        return sessions.flatMap { session -> [ShotMetadata] in
+            guard let metadata = try? loadSessionMetadata(propertyID: propertyID, sessionID: session.id) else {
+                return []
+            }
+            return metadata.shots.filter(shotRepresentsActiveFlaggedGuidedIssue)
+        }
+    }
+
+    private func guidedShotsRecoveringPostPromotionOrdinaryCaptures(
+        _ guidedRows: [GuidedShot],
+        propertyID: UUID
+    ) -> [GuidedShot] {
+        let promotedShots = activeFlaggedGuidedPromotionShots(propertyID: propertyID)
+        let observations = (try? readObservations(propertyID: propertyID)) ?? []
+        let promotionEvidence = LocalConflictRules.activeFlaggedGuidedSuppressionEvidence(
+            observations: observations,
+            issueLinkedGuidedShots: promotedShots
+        )
+        guard !promotionEvidence.isEmpty else { return guidedRows }
+
+        let sessions = ((try? readSessions(propertyID: propertyID)) ?? [])
+            .filter { session in
+                session.deletedAt == nil &&
+                    (session.status == .completed || session.isSealed || session.firstDeliveredAt != nil)
+            }
+            .sorted { lhs, rhs in
+                if lhs.startedAt != rhs.startedAt { return lhs.startedAt < rhs.startedAt }
+                return lhs.id.uuidString < rhs.id.uuidString
+            }
+        guard !sessions.isEmpty else { return guidedRows }
+
+        var recovered = guidedRows
+        var indexByShotID = recovered.indices.reduce(into: [UUID: Array<GuidedShot>.Index]()) { partial, index in
+            if let shotID = recovered[index].shot?.id {
+                partial[shotID] = index
+            }
+        }
+        var indexByIdentityKey = recovered.indices.reduce(into: [String: Array<GuidedShot>.Index]()) { partial, index in
+            if let key = LocalConflictRules.guidedShotIdentityKey(recovered[index]) {
+                partial[key] = index
+            }
+        }
+
+        for session in sessions {
+            guard let metadata = try? loadSessionMetadata(propertyID: propertyID, sessionID: session.id) else {
+                continue
+            }
+            let guidedByShotID = metadata.guidedShots.reduce(into: [UUID: GuidedShot]()) { partial, guided in
+                if let shotID = guided.shot?.id, partial[shotID] == nil {
+                    partial[shotID] = guided
+                }
+            }
+
+            for shot in metadata.shots.sorted(by: { $0.createdAt < $1.createdAt }) {
+                guard shot.lifecycleState == .active,
+                      LocalConflictRules.shotMetadataIsOrdinaryGuidedWork(shot),
+                      let baseKey = LocalConflictRules.guidedShotBaseIdentityKey(
+                        building: shot.building,
+                        elevation: shot.elevation,
+                        detailType: shot.detailType
+                      ),
+                      let cutoff = promotionEvidence.guidedBaseKeyCutoffs[baseKey],
+                      shot.createdAt > cutoff else {
+                    continue
+                }
+
+                let sourceGuided = guidedByShotID[shot.shotID]
+                if sourceGuided.map(guidedShotHasManualSkipEvidence) == true {
+                    continue
+                }
+
+                let candidate = recoveredGuidedShot(
+                    from: shot,
+                    sourceGuided: sourceGuided,
+                    propertyID: propertyID,
+                    sessionID: session.id
+                )
+                guard !LocalConflictRules.suppressGuidedShotsRepresentedByActiveFlaggedObservations(
+                    [candidate],
+                    observations: observations,
+                    evidence: promotionEvidence
+                ).isEmpty else {
+                    continue
+                }
+
+                if let existingIndex = indexByShotID[shot.shotID] {
+                    guard recovered[existingIndex].status == .retired || recovered[existingIndex].isRetired,
+                          !guidedShotHasManualSkipEvidence(recovered[existingIndex]) else {
+                        continue
+                    }
+                    recovered[existingIndex] = recoveredGuidedShot(
+                        from: shot,
+                        sourceGuided: recovered[existingIndex],
+                        propertyID: propertyID,
+                        sessionID: session.id
+                    )
+                    continue
+                }
+
+                if let key = LocalConflictRules.guidedShotIdentityKey(candidate),
+                   let existingIndex = indexByIdentityKey[key] {
+                    guard recovered[existingIndex].status == .retired || recovered[existingIndex].isRetired,
+                          !guidedShotHasManualSkipEvidence(recovered[existingIndex]) else {
+                        continue
+                    }
+                    let restored = recoveredGuidedShot(
+                        from: shot,
+                        sourceGuided: recovered[existingIndex],
+                        propertyID: propertyID,
+                        sessionID: session.id
+                    )
+                    recovered[existingIndex] = restored
+                    if let shotID = restored.shot?.id {
+                        indexByShotID[shotID] = existingIndex
+                    }
+                    continue
+                }
+
+                let newIndex = recovered.endIndex
+                recovered.append(candidate)
+                if let shotID = candidate.shot?.id {
+                    indexByShotID[shotID] = newIndex
+                }
+                if let key = LocalConflictRules.guidedShotIdentityKey(candidate) {
+                    indexByIdentityKey[key] = newIndex
+                }
+            }
+        }
+
+        return LocalConflictRules.normalizeGuidedCompletionStates(recovered)
+    }
+
+    private func recoveredGuidedShot(
+        from shot: ShotMetadata,
+        sourceGuided: GuidedShot?,
+        propertyID: UUID,
+        sessionID: UUID
+    ) -> GuidedShot {
+        var guided = sourceGuided ?? GuidedShot(
+            id: shot.shotID,
+            title: guidedShotTitle(from: shot)
+        )
+        let localIdentifier = localOriginalIdentifier(
+            propertyID: propertyID,
+            sessionID: sessionID,
+            shot: shot
+        )
+        guided.status = .active
+        guided.building = trimmedNonEmpty(guided.building) ?? shot.building
+        guided.targetElevation = CanonicalElevation.normalize(guided.targetElevation) ??
+            CanonicalElevation.normalize(shot.elevation) ??
+            trimmedNonEmpty(shot.elevation)
+        guided.detailType = trimmedNonEmpty(guided.detailType) ?? shot.detailType
+        guided.angleIndex = guided.angleIndex ?? max(1, shot.angleIndex)
+        guided.referenceImageLocalIdentifier = trimmedNonEmpty(guided.referenceImageLocalIdentifier) ?? localIdentifier
+        guided.referenceImagePath = trimmedNonEmpty(guided.referenceImagePath) ?? localIdentifier
+        guided.shot = Shot(
+            id: shot.shotID,
+            capturedAt: shot.createdAt,
+            imageLocalIdentifier: localIdentifier,
+            note: shot.noteText
+        )
+        guided.isCompleted = true
+        guided.skipReason = nil
+        guided.skipReasonNote = nil
+        guided.skipSessionID = nil
+        guided.isRetired = false
+        guided.retiredAt = nil
+        guided.retiredInSessionID = nil
+        return guided
+    }
+
+    private func guidedShotTitle(from shot: ShotMetadata) -> String {
+        let building = trimmedNonEmpty(shot.building)
+        let elevation = CanonicalElevation.normalize(shot.elevation) ?? trimmedNonEmpty(shot.elevation)
+        let detail = trimmedNonEmpty(shot.detailType)
+        return [building, elevation, detail]
+            .compactMap { $0 }
+            .joined(separator: " ")
+    }
+
+    private func localOriginalIdentifier(propertyID: UUID, sessionID: UUID, shot: ShotMetadata) -> String {
+        if let relativePath = trimmedNonEmpty(shot.originalRelativePath) {
+            if relativePath.hasPrefix("/") {
+                return relativePath
+            }
+            return sessionFolderURL(propertyID: propertyID, sessionID: sessionID)
+                .appendingPathComponent(relativePath, isDirectory: false)
+                .path
+        }
+        return originalsFolderURL(propertyID: propertyID, sessionID: sessionID)
+            .appendingPathComponent(shot.originalFilename, isDirectory: false)
+            .path
+    }
+
+    private func guidedShotHasManualSkipEvidence(_ guided: GuidedShot) -> Bool {
+        guided.skipReason != nil ||
+            trimmedNonEmpty(guided.skipReasonNote) != nil ||
+            guided.skipSessionID != nil
+    }
+
+    @discardableResult
+    private func retireGuidedRowsPromotedToActiveFlaggedIssue(
+        _ guidedRows: inout [GuidedShot],
+        promotedShot: ShotMetadata,
+        sessionID: UUID,
+        allowExactMatches: Bool = true
+    ) -> Bool {
+        let matchingIndices = guidedRows.indices.filter { index in
+            guidedRow(guidedRows[index], matchesActiveFlaggedGuidedShot: promotedShot)
+        }
+        let fallbackIndices: [Array<GuidedShot>.Index] = {
+            guard matchingIndices.isEmpty,
+                  let promotedBaseKey = LocalConflictRules.guidedShotBaseIdentityKey(
+                    building: promotedShot.building,
+                    elevation: promotedShot.elevation,
+                    detailType: promotedShot.detailType
+                  ) else {
+                return []
+            }
+            let baseMatches = guidedRows.indices.filter { index in
+                let guided = guidedRows[index]
+                guard guided.status != .retired,
+                      !guided.isRetired,
+                      LocalConflictRules.guidedShotBaseIdentityKey(guided) == promotedBaseKey else {
+                    return false
+                }
+                return guidedKnownStateAt(guided) <= promotedGuidedFallbackCutoff(promotedShot)
+            }
+            return baseMatches.count == 1 ? baseMatches : []
+        }()
+        let indicesToRetire = allowExactMatches ? matchingIndices + fallbackIndices : fallbackIndices
+
+        var didMutate = false
+        for index in Set(indicesToRetire) {
+            guidedRows[index].status = .retired
+            guidedRows[index].isRetired = true
+            guidedRows[index].retiredAt = guidedRows[index].retiredAt ?? promotedGuidedFallbackCutoff(promotedShot)
+            guidedRows[index].retiredInSessionID = guidedRows[index].retiredInSessionID ?? sessionID
+            guidedRows[index].skipReason = nil
+            guidedRows[index].skipReasonNote = nil
+            guidedRows[index].skipSessionID = nil
+            didMutate = true
+        }
+        return didMutate
+    }
+
+    private func promotedGuidedFallbackCutoff(_ promotedShot: ShotMetadata) -> Date {
+        promotedShot.createdAt
+    }
+
+    private func guidedKnownStateAt(_ guidedShot: GuidedShot) -> Date {
+        [
+            guidedShot.retiredAt,
+            guidedShot.reassignedAt,
+            guidedShot.labelEditedAt,
+            guidedShot.shot?.capturedAt
+        ]
+        .compactMap { $0 }
+        .max() ?? .distantPast
+    }
+
+    private func retirePropertyGuidedRowsPromotedToActiveFlaggedIssue(
+        propertyID: UUID,
+        promotedShot: ShotMetadata,
+        sessionID: UUID
+    ) throws {
+        guard var guidedRows = try? readGuidedShots(propertyID: propertyID) else { return }
+        guard retireGuidedRowsPromotedToActiveFlaggedIssue(
+            &guidedRows,
+            promotedShot: promotedShot,
+            sessionID: sessionID
+        ) else {
+            return
+        }
+        try writeGuidedShots(guidedRows, propertyID: propertyID)
+    }
+
+    private func guidedRow(
+        _ guided: GuidedShot,
+        matchesActiveFlaggedGuidedShot shot: ShotMetadata
+    ) -> Bool {
+        if guided.id == shot.shotID || guided.shot?.id == shot.shotID {
+            return true
+        }
+        if let supersedesShotID = shot.supersedesShotID,
+           guided.id == supersedesShotID || guided.shot?.id == supersedesShotID {
+            return true
+        }
+        if let supersededByShotID = shot.supersededByShotID,
+           guided.id == supersededByShotID || guided.shot?.id == supersededByShotID {
+            return true
+        }
+        return LocalConflictRules.guidedShot(guided, matches: shot)
     }
 
     func updateShotStorageMetadata(
@@ -2747,6 +3135,10 @@ final class LocalStore {
         let shotID = syncedShot?.shotID
         guard !observationShotIDs.isEmpty || shotID != nil else { return }
         let syncedReference = syncedShotReference()
+        let shouldRetireGuidedRows = isResolved ||
+            (syncedShot.map { LocalConflictRules.metadataShotRepresentsFlaggedGuidedIssue($0, includeResolved: true) } ?? false) ||
+            !observation.guidedShots.isEmpty
+        guard shouldRetireGuidedRows else { return }
 
         func matchesObservation(_ guided: GuidedShot) -> Bool {
             if let shotID, guided.id == shotID || guided.shot?.id == shotID {
@@ -2796,17 +3188,10 @@ final class LocalStore {
             guided.skipReasonNote = nil
             guided.skipSessionID = nil
 
-            if isResolved {
-                guided.status = .retired
-                guided.isRetired = true
-                guided.retiredAt = guided.retiredAt ?? updatedAt
-                guided.retiredInSessionID = guided.retiredInSessionID ?? sessionID
-            } else {
-                guided.status = .active
-                guided.isRetired = false
-                guided.retiredAt = nil
-                guided.retiredInSessionID = nil
-            }
+            guided.status = .retired
+            guided.isRetired = true
+            guided.retiredAt = guided.retiredAt ?? updatedAt
+            guided.retiredInSessionID = guided.retiredInSessionID ?? sessionID
         }
 
         for index in metadata.guidedShots.indices where matchesObservation(metadata.guidedShots[index]) {
@@ -2974,6 +3359,15 @@ final class LocalStore {
         guard guidedShots[guidedIndex].status == .retired || guidedShots[guidedIndex].isRetired else {
             throw StoreError.guidedShotLifecycleInvalidState(guidedShotID)
         }
+        let retiredRows = guidedShots.filter { $0.status == .retired || $0.isRetired }
+        let promotionEvidence = flaggedGuidedPromotionEvidenceForRestore(propertyID: propertyID)
+        guard LocalConflictRules.retiredGuidedShotIsRestorable(
+            guidedShots[guidedIndex],
+            promotionEvidence: promotionEvidence,
+            retiredGuidedShots: retiredRows
+        ) else {
+            throw StoreError.guidedShotLifecycleInvalidState(guidedShotID)
+        }
 
         var metadata = try loadSessionMetadata(propertyID: propertyID, sessionID: sessionID)
         if let shotID = guidedShots[guidedIndex].shot?.id,
@@ -3002,6 +3396,26 @@ final class LocalStore {
         metadata.guidedShots = normalizedGuided
         try saveSessionMetadataAtomically(propertyID: propertyID, sessionID: sessionID, metadata: metadata)
         return normalizedGuided.first(where: { $0.id == guidedShotID }) ?? guidedShots[guidedIndex]
+    }
+
+    private func flaggedGuidedPromotionEvidenceForRestore(
+        propertyID: UUID
+    ) -> LocalConflictRules.ActiveFlaggedGuidedSuppressionEvidence {
+        let observations = (try? readObservations(propertyID: propertyID)) ?? []
+        let issueLinkedGuidedShots = ((try? readSessions(propertyID: propertyID)) ?? [])
+            .flatMap { session -> [ShotMetadata] in
+                guard let metadata = try? loadSessionMetadata(propertyID: propertyID, sessionID: session.id) else {
+                    return []
+                }
+                return metadata.shots.filter { shot in
+                    shot.isGuided && !LocalConflictRules.shotMetadataIsOrdinaryGuidedWork(shot)
+                }
+            }
+        return LocalConflictRules.flaggedGuidedPromotionEvidence(
+            observations: observations,
+            issueLinkedGuidedShots: issueLinkedGuidedShots,
+            includeResolved: true
+        )
     }
 
     func removeShotMetadata(
@@ -4001,7 +4415,11 @@ final class LocalStore {
         }
 
         func buildObservation(issue: IssueMetadata, fallbackSessionID: UUID) -> Observation {
-            let shots = (issueShotsByIssueID[issue.issueID] ?? [])
+            let issueShots = issueShotsByIssueID[issue.issueID] ?? []
+            let currentMetaShot = issueShots.sorted {
+                LocalConflictRules.currentIssueShotSortPrecedes($0, $1, linkedShotID: nil)
+            }.first
+            let shots = issueShots
                 .sorted { $0.createdAt < $1.createdAt }
                 .map { shot in
                     Shot(
@@ -4012,8 +4430,8 @@ final class LocalStore {
                     )
                 }
 
-            let linkedShot = shots.last?.id
-            let latestMetaShot = (issueShotsByIssueID[issue.issueID] ?? []).sorted { $0.updatedAt > $1.updatedAt }.first
+            let linkedShot = currentMetaShot?.shotID ?? shots.last?.id
+            let latestMetaShot = currentMetaShot
             let status: Observation.Status = issue.issueStatus.lowercased() == "resolved" ? .resolved : .active
             let createdAt = issue.firstSeenAt ?? issue.lastSeenAt ?? metadata.startedAt
             let updatedAt = issue.lastSeenAt ?? issue.resolvedAt ?? createdAt
@@ -4128,7 +4546,9 @@ final class LocalStore {
             var didMutate = false
             for issueID in candidateIssueIDs {
                 let orderedShots = (issueShotsByIssueID[issueID] ?? []).sorted { $0.createdAt < $1.createdAt }
-                let latestShot = orderedShots.max(by: { $0.updatedAt < $1.updatedAt })
+                let latestShot = orderedShots.sorted {
+                    LocalConflictRules.currentIssueShotSortPrecedes($0, $1, linkedShotID: nil)
+                }.first
                 let issue = metadata.issues.first(where: { $0.issueID == issueID })
                 let createdAt = issue?.firstSeenAt ?? orderedShots.first?.createdAt ?? metadata.startedAt
                 let updatedAt = issue?.lastSeenAt ?? issue?.resolvedAt ?? latestShot?.updatedAt ?? metadata.startedAt

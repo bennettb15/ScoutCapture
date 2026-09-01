@@ -540,6 +540,179 @@ final class Phase2C25AAutomaticSnapshotUploadTests: XCTestCase {
         XCTAssertFalse(rebuiltArtifacts.validationData.isEmpty)
     }
 
+    func testArchiveSnapshotResolvesCarriedIssueHistoryShotFromStoragePathSession() throws {
+        let fixture = try makeFixture()
+        let priorSession = try fixture.store.upsertSession(
+            Session(
+                id: UUID(),
+                propertyID: fixture.property.id,
+                startedAt: Date(timeIntervalSinceReferenceDate: 80),
+                status: .completed,
+                endedAt: Date(timeIntervalSinceReferenceDate: 90),
+                exportedAt: nil,
+                isSealed: true,
+                firstDeliveredAt: Date(timeIntervalSinceReferenceDate: 95),
+                reExportExpiresAt: Date(timeIntervalSinceReferenceDate: 700)
+            )
+        )
+        let priorShotID = UUID()
+        let priorFilename = "\(priorShotID.uuidString).jpg"
+        let priorOriginalURL = fixture.store.originalsDirectoryURL(
+            propertyID: fixture.property.id,
+            sessionID: priorSession.id
+        )
+        .appendingPathComponent(priorFilename)
+        try FileManager.default.createDirectory(
+            at: priorOriginalURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try Data("prior-session-issue-history".utf8).write(to: priorOriginalURL, options: .atomic)
+
+        let currentShotID = UUID()
+        let currentFilename = "\(currentShotID.uuidString).jpg"
+        let currentOriginalURL = fixture.store.originalsDirectoryURL(
+            propertyID: fixture.property.id,
+            sessionID: fixture.session.id
+        )
+        .appendingPathComponent(currentFilename)
+        try Data("current-session-guided".utf8).write(to: currentOriginalURL, options: .atomic)
+
+        let issueID = UUID()
+        let priorShot = ShotMetadata(
+            shotID: priorShotID,
+            propertyID: fixture.property.id,
+            sessionID: priorSession.id,
+            createdAt: Date(timeIntervalSinceReferenceDate: 100),
+            updatedAt: Date(timeIntervalSinceReferenceDate: 110),
+            building: "B1",
+            elevation: "North",
+            detailType: "Overview",
+            angleIndex: 1,
+            priority: "Low",
+            shotKey: ShotMetadata.makeShotKey(building: "B1", elevation: "North", detailType: "Overview", angleIndex: 1),
+            isGuided: true,
+            isFlagged: false,
+            issueID: nil,
+            issueStatus: nil,
+            noteText: "Prior issue history",
+            noteCategory: nil,
+            originalFilename: priorFilename,
+            originalRelativePath: "Originals/\(priorFilename)",
+            originalByteSize: 27,
+            storageBucket: "scoutcapture-originals",
+            storagePath: "sessions/\(priorSession.id.uuidString.lowercased())/shots/\(priorShotID.uuidString.lowercased())/\(priorFilename)",
+            checksumSHA256: String(repeating: "b", count: 64),
+            byteSize: 27,
+            stampedFilename: nil,
+            stampedRelativePath: nil,
+            captureMode: nil,
+            lens: nil,
+            exifOrientation: nil,
+            latitude: nil,
+            longitude: nil,
+            accuracyMeters: nil,
+            imageWidth: nil,
+            imageHeight: nil
+        )
+        let currentShot = ShotMetadata(
+            shotID: currentShotID,
+            propertyID: fixture.property.id,
+            sessionID: fixture.session.id,
+            createdAt: Date(timeIntervalSinceReferenceDate: 120),
+            updatedAt: Date(timeIntervalSinceReferenceDate: 130),
+            building: "B1",
+            elevation: "North",
+            detailType: "Overview",
+            angleIndex: 2,
+            shotKey: ShotMetadata.makeShotKey(building: "B1", elevation: "North", detailType: "Overview", angleIndex: 2),
+            isGuided: true,
+            isFlagged: false,
+            issueID: nil,
+            issueStatus: nil,
+            noteText: nil,
+            noteCategory: nil,
+            originalFilename: currentFilename,
+            originalRelativePath: "Originals/\(currentFilename)",
+            originalByteSize: 22,
+            storageBucket: "scoutcapture-originals",
+            storagePath: "sessions/\(fixture.session.id.uuidString.lowercased())/shots/\(currentShotID.uuidString.lowercased())/\(currentFilename)",
+            checksumSHA256: String(repeating: "c", count: 64),
+            byteSize: 22,
+            stampedFilename: nil,
+            stampedRelativePath: nil,
+            captureMode: nil,
+            lens: nil,
+            exifOrientation: nil,
+            latitude: nil,
+            longitude: nil,
+            accuracyMeters: nil,
+            imageWidth: nil,
+            imageHeight: nil
+        )
+        let metadata = SessionMetadata(
+            schemaVersion: 12,
+            propertyID: fixture.property.id,
+            sessionID: fixture.session.id,
+            orgID: fixture.orgID,
+            propertyNameAtCapture: fixture.property.name,
+            propertyNameAtExport: nil,
+            startedAt: fixture.session.startedAt,
+            endedAt: fixture.session.endedAt,
+            status: fixture.session.status,
+            isBaselineSession: false,
+            exportedAt: fixture.session.exportedAt,
+            isSealed: fixture.session.isSealed,
+            firstDeliveredAt: fixture.session.firstDeliveredAt,
+            reExportExpiresAt: fixture.session.reExportExpiresAt,
+            appVersion: "test-app",
+            deviceModel: "test-device",
+            osVersion: "test-os",
+            shots: [priorShot, currentShot],
+            issues: [
+                IssueMetadata(
+                    issueID: issueID,
+                    issueStatus: "active",
+                    currentReason: "Prior issue history",
+                    firstSeenAt: priorShot.createdAt,
+                    lastSeenAt: currentShot.createdAt,
+                    lastCaptureSessionId: fixture.session.id,
+                    shotKey: currentShot.shotKey,
+                    historyEvents: [
+                        IssueHistoryEvent(
+                            timestamp: priorShot.createdAt,
+                            sessionId: priorSession.id,
+                            type: "created",
+                            details: ["shotId": priorShotID.uuidString]
+                        )
+                    ]
+                )
+            ],
+            guidedShots: []
+        )
+        try fixture.store.saveSessionMetadataAtomically(
+            propertyID: fixture.property.id,
+            sessionID: fixture.session.id,
+            metadata: metadata
+        )
+
+        let archiveURL = try XCTUnwrap(
+            fixture.store.createSessionArchiveSnapshot(
+                session: fixture.session,
+                trigger: "completeCurrentSessionWithoutZIP",
+                deviceID: fixture.appState._debugCurrentDeviceIdentifierForTests()
+            )
+        )
+        let archiveOriginalsURL = archiveURL
+            .appendingPathComponent("Payload", isDirectory: true)
+            .appendingPathComponent("Originals", isDirectory: true)
+        let archivedOriginals = try Set(
+            FileManager.default.contentsOfDirectory(atPath: archiveOriginalsURL.path)
+        )
+
+        XCTAssertTrue(archivedOriginals.contains(priorFilename))
+        XCTAssertTrue(archivedOriginals.contains(currentFilename))
+    }
+
     func testCompleteCurrentSessionWithoutZIPAllowsNextSession() throws {
         let fixture = try makeFixture()
         fixture.appState.currentSession = fixture.session
@@ -1821,6 +1994,51 @@ final class Phase2C25AAutomaticSnapshotUploadTests: XCTestCase {
         XCTAssertTrue(try retrying._debugSessionSnapshotUploadRetryWorkItemsForTests().isEmpty)
         XCTAssertEqual(retrying.sessionSnapshotCloudStatus(for: fixture.session)?.state, .uploaded)
         XCTAssertFalse(retrying.backendFeatureFlags.supabaseReadEnabled)
+    }
+
+    func testNoZIPArchiveCreationFailureStatusRebuildsArchiveAndQueuesRetryWork() async throws {
+        let fixture = try makeFixture(autoUploadEnabled: false)
+        let snapshotID = UUID()
+        let generatedAt = Date(timeIntervalSinceReferenceDate: 1_500)
+        _ = try fixture.store.upsertSessionSnapshotUploadStatusRecord(
+            statusRecord(
+                property: fixture.property,
+                session: fixture.session,
+                orgID: fixture.orgID,
+                generatedAt: generatedAt,
+                status: .failed,
+                triggerSource: "completeCurrentSessionWithoutZIP",
+                reason: "archive_snapshot_creation_failed",
+                snapshotID: snapshotID,
+                idempotencyKey: "rebuild-missing-archive"
+            )
+        )
+        var uploadedObjects: [AppState.SessionSnapshotStorageObject] = []
+        var insertedRows: [AppState.SessionSnapshotUploadRow] = []
+        let retrying = AppState(
+            localStore: fixture.store,
+            userDefaults: makeDefaults(autoUploadEnabled: true, propertyAllowlist: [fixture.property.id]),
+            environment: localEnvironment(),
+            sessionSnapshotStorageUploadOverride: { object in uploadedObjects.append(object) },
+            sessionSnapshotRowInsertOverride: { row in insertedRows.append(row) },
+            disableCloudBackupForTests: true
+        )
+        configureAuthenticatedContext(retrying, orgID: fixture.orgID)
+
+        XCTAssertTrue(try retrying._debugSessionSnapshotUploadRetryWorkItemsForTests().isEmpty)
+        let summary = await retrying._debugPerformSessionSnapshotUploadRetryForTests(
+            now: Date(timeIntervalSinceReferenceDate: 1_600)
+        )
+
+        XCTAssertEqual(summary.attemptedCount, 1)
+        XCTAssertEqual(summary.succeededCount, 0)
+        XCTAssertEqual(summary.failedCount, 1)
+        XCTAssertTrue(uploadedObjects.isEmpty)
+        XCTAssertTrue(insertedRows.isEmpty)
+        let retryItem = try XCTUnwrap(try retrying._debugSessionSnapshotUploadRetryWorkItemsForTests().first)
+        XCTAssertEqual(retryItem.snapshotID, snapshotID)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: retryItem.archivePath))
+        XCTAssertEqual(retrying.sessionSnapshotCloudStatus(for: fixture.session)?.state, .retryScheduled)
     }
 
     func testDuplicateSchedulingDuringBackoffDoesNotDuplicateRemoteAttempts() async throws {

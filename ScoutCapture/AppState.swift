@@ -16146,7 +16146,9 @@ final class AppState: ObservableObject {
         switch record.status {
         case .queued, .uploading, .retryScheduled:
             return true
-        case .failed, .uploaded:
+        case .failed:
+            return record.reason == "archive_snapshot_creation_failed"
+        case .uploaded:
             return false
         }
     }
@@ -16664,7 +16666,18 @@ final class AppState: ObservableObject {
                 requireDelivered: false,
                 expectedDeviceID: nil
             )
-            guard availability.available, let archivePath = availability.archivePath else { continue }
+            let archivePath: String
+            if availability.available, let availableArchivePath = availability.archivePath {
+                archivePath = availableArchivePath
+            } else if record.reason == "archive_snapshot_creation_failed",
+                      let rebuiltArchivePath = rebuildSessionArchiveSnapshotForMissingRetryRecovery(
+                        session: session,
+                        trigger: record.triggerSource
+                      ) {
+                archivePath = rebuiltArchivePath
+            } else {
+                continue
+            }
 
             let item = LocalStore.SessionSnapshotUploadRetryWorkItem(
                 snapshotID: record.snapshotID,
@@ -16707,6 +16720,30 @@ final class AppState: ObservableObject {
         }
 
         return recoveredCount
+    }
+
+    private func rebuildSessionArchiveSnapshotForMissingRetryRecovery(
+        session: Session,
+        trigger: String
+    ) -> String? {
+        do {
+            guard let archiveURL = try localStore.createSessionArchiveSnapshot(
+                session: session,
+                trigger: trigger,
+                deviceID: currentDeviceIdentifier()
+            ) else {
+                return nil
+            }
+            invalidateSessionArchiveAvailabilityCache(
+                propertyID: session.propertyID,
+                sessionID: session.id,
+                reason: "recovered_archive_snapshot_created"
+            )
+            return archiveURL.path
+        } catch {
+            recordDiagnosticsError(error)
+            return nil
+        }
     }
 
     @MainActor
@@ -17783,8 +17820,17 @@ final class AppState: ObservableObject {
         snapshotShots: [ShotMetadata],
         propertyID: UUID
     ) throws {
+        let propertyIssueLinkedGuidedShots = ((try? localStore.fetchSessions(propertyID: propertyID)) ?? [])
+            .flatMap { session -> [ShotMetadata] in
+                guard let metadata = try? localStore.loadSessionMetadata(propertyID: propertyID, sessionID: session.id) else {
+                    return []
+                }
+                return metadata.shots.filter { shot in
+                    shot.isGuided && !LocalConflictRules.shotMetadataIsOrdinaryGuidedWork(shot)
+                }
+            }
         let suppressionEvidence = LocalConflictRules.activeFlaggedGuidedSuppressionEvidence(
-            issueLinkedGuidedShots: snapshotShots
+            issueLinkedGuidedShots: snapshotShots + propertyIssueLinkedGuidedShots
         )
         guard !snapshotGuided.isEmpty || !suppressionEvidence.isEmpty else { return }
         let filteredSnapshotGuided = Self.guidedRowsAfterActiveFlaggedSuppression(

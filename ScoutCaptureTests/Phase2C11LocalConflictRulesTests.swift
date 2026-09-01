@@ -11,6 +11,7 @@ final class Phase2C11LocalConflictRulesTests: XCTestCase {
 
     private func makeShot(
         shotID: UUID = UUID(),
+        createdAt: Date = Date(timeIntervalSinceReferenceDate: 10),
         updatedAt: Date,
         originalRelativePath: String,
         isGuided: Bool = false,
@@ -23,7 +24,7 @@ final class Phase2C11LocalConflictRulesTests: XCTestCase {
             shotID: shotID,
             propertyID: UUID(),
             sessionID: UUID(),
-            createdAt: Date(timeIntervalSinceReferenceDate: 10),
+            createdAt: createdAt,
             capturedAtLocal: nil,
             updatedAt: updatedAt,
             building: "Building",
@@ -147,6 +148,65 @@ final class Phase2C11LocalConflictRulesTests: XCTestCase {
         return (localStore, storageRoot, organizationID, propertyID, sessionID)
     }
 
+    func testManualRetiredGuidedShotRemainsRestorable() {
+        let retired = GuidedShot(
+            status: .retired,
+            title: "Building North Overview",
+            building: "Building",
+            targetElevation: "North",
+            detailType: "Overview",
+            angleIndex: 1,
+            skipReason: .inaccessible,
+            skipSessionID: UUID(),
+            isRetired: true,
+            retiredAt: Date(timeIntervalSinceReferenceDate: 100),
+            retiredInSessionID: UUID()
+        )
+
+        XCTAssertTrue(
+            LocalConflictRules.retiredGuidedShotIsRestorable(
+                retired,
+                promotionEvidence: LocalConflictRules.ActiveFlaggedGuidedSuppressionEvidence(),
+                retiredGuidedShots: [retired]
+            )
+        )
+    }
+
+    func testIssueCaptureIndicatorRequiresCurrentSessionLinkedShot() {
+        let currentSessionID = UUID()
+        let previousSessionID = UUID()
+        let currentShotID = UUID()
+        let priorShotID = UUID()
+
+        XCTAssertTrue(
+            LocalConflictRules.issueLinkedShotIsCurrentSessionCapture(
+                linkedShotID: currentShotID,
+                updatedInSessionID: currentSessionID,
+                resolvedInSessionID: nil,
+                currentSessionID: currentSessionID,
+                currentSessionShotIDs: [currentShotID]
+            )
+        )
+        XCTAssertFalse(
+            LocalConflictRules.issueLinkedShotIsCurrentSessionCapture(
+                linkedShotID: priorShotID,
+                updatedInSessionID: previousSessionID,
+                resolvedInSessionID: nil,
+                currentSessionID: currentSessionID,
+                currentSessionShotIDs: [currentShotID]
+            )
+        )
+        XCTAssertFalse(
+            LocalConflictRules.issueLinkedShotIsCurrentSessionCapture(
+                linkedShotID: priorShotID,
+                updatedInSessionID: currentSessionID,
+                resolvedInSessionID: nil,
+                currentSessionID: currentSessionID,
+                currentSessionShotIDs: [currentShotID]
+            )
+        )
+    }
+
     func testPropertyLWWAppliesOnlyWhenIncomingIsNewer() {
         let current = Date(timeIntervalSinceReferenceDate: 200)
 
@@ -191,6 +251,44 @@ final class Phase2C11LocalConflictRulesTests: XCTestCase {
         XCTAssertEqual(merged.count, 1)
         XCTAssertEqual(merged[0].shotID, shotID)
         XCTAssertEqual(merged[0].originalRelativePath, "Originals/new.heic")
+    }
+
+    func testCurrentIssueShotSelectionPrefersLinkedFlaggedRetakeWhenTimestampsTie() {
+        let issueID = UUID()
+        let originalPromotedShotID = UUID()
+        let currentFlaggedRetakeShotID = UUID()
+        let tiedUpdate = Date(timeIntervalSinceReferenceDate: 300)
+
+        let originalPromotedShot = makeShot(
+            shotID: originalPromotedShotID,
+            createdAt: Date(timeIntervalSinceReferenceDate: 100),
+            updatedAt: tiedUpdate,
+            originalRelativePath: "Originals/original-promoted.jpg",
+            isGuided: true,
+            isFlagged: false,
+            issueID: issueID,
+            issueStatus: "active"
+        )
+        let currentFlaggedRetakeShot = makeShot(
+            shotID: currentFlaggedRetakeShotID,
+            createdAt: Date(timeIntervalSinceReferenceDate: 200),
+            updatedAt: tiedUpdate,
+            originalRelativePath: "Originals/current-flagged-retake.jpg",
+            isGuided: false,
+            isFlagged: true,
+            issueID: issueID,
+            issueStatus: "active"
+        )
+
+        let chosen = [originalPromotedShot, currentFlaggedRetakeShot].sorted {
+            LocalConflictRules.currentIssueShotSortPrecedes(
+                $0,
+                $1,
+                linkedShotID: currentFlaggedRetakeShotID
+            )
+        }.first
+
+        XCTAssertEqual(chosen?.shotID, currentFlaggedRetakeShotID)
     }
 
     func testMediaAppendOnlyAppendsNewShotID() {
@@ -395,6 +493,76 @@ final class Phase2C11LocalConflictRulesTests: XCTestCase {
         )
 
         XCTAssertEqual(visible.map(\.id), [normalGuided.id])
+    }
+
+    func testLaterGuidedReferenceWithLineageSurvivesPromotionBaseFallbackSuppression() {
+        let promotedShotID = UUID()
+        let laterGuidedShotID = UUID()
+        let promotedMetadata = ShotMetadata(
+            shotID: promotedShotID,
+            propertyID: UUID(),
+            sessionID: UUID(),
+            createdAt: Date(timeIntervalSinceReferenceDate: 100),
+            capturedAtLocal: nil,
+            updatedAt: Date(timeIntervalSinceReferenceDate: 300),
+            building: "Building",
+            elevation: "North",
+            detailType: "Panel",
+            angleIndex: 2,
+            trade: nil,
+            priority: nil,
+            shotKey: "building|north|panel|2",
+            isGuided: true,
+            isFlagged: true,
+            issueID: UUID(),
+            issueStatus: "active",
+            captureKind: "captured",
+            firstCaptureKind: "captured",
+            noteText: nil,
+            noteCategory: nil,
+            originalFilename: "promoted.jpg",
+            originalRelativePath: "Originals/promoted.jpg",
+            originalByteSize: 128,
+            stampedFilename: nil,
+            stampedRelativePath: nil,
+            captureMode: nil,
+            lens: nil,
+            exifOrientation: nil,
+            latitude: nil,
+            longitude: nil,
+            accuracyMeters: nil,
+            imageWidth: nil,
+            imageHeight: nil
+        )
+
+        let laterGuided = makeGuidedShot(
+            id: laterGuidedShotID,
+            title: "Building North Panel",
+            isCompleted: false,
+            building: "Building",
+            targetElevation: "North",
+            detailType: "Panel",
+            angleIndex: 3,
+            referenceImageLocalIdentifier: "/tmp/later-guided.jpg",
+            referenceImagePath: "/tmp/later-guided.jpg",
+            shot: Shot(
+                id: laterGuidedShotID,
+                capturedAt: Date(timeIntervalSinceReferenceDate: 150),
+                imageLocalIdentifier: "/tmp/later-guided.jpg",
+                note: nil
+            )
+        )
+        let evidence = LocalConflictRules.activeFlaggedGuidedSuppressionEvidence(
+            issueLinkedGuidedShots: [promotedMetadata]
+        )
+
+        let visible = LocalConflictRules.suppressGuidedShotsRepresentedByActiveFlaggedObservations(
+            [laterGuided],
+            observations: [],
+            evidence: evidence
+        )
+
+        XCTAssertEqual(visible.map(\.id), [laterGuidedShotID])
     }
 
     func testResolvedFlaggedObservationDoesNotSuppressGuidedChecklistRows() {
@@ -1098,6 +1266,646 @@ final class Phase2C11LocalConflictRulesTests: XCTestCase {
         XCTAssertEqual(reloadedIssue?.issueStatus, "active")
     }
 
+    func testActiveFlaggedGuidedUpsertRetiresPromotedGuidedCarryForwardRow() throws {
+        let fixture = try makeLocalStoreFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.storageRoot) }
+
+        let issueID = UUID()
+        let originalGuidedShotID = UUID()
+        let promotedShotID = UUID()
+        let guided = GuidedShot(
+            id: originalGuidedShotID,
+            title: "Building North Panel",
+            building: "Building",
+            targetElevation: "North",
+            detailType: "Panel",
+            angleIndex: 1,
+            referenceImageLocalIdentifier: "/tmp/reference.jpg",
+            referenceImagePath: "/tmp/reference.jpg",
+            shot: nil,
+            isCompleted: false
+        )
+        try fixture.localStore.saveGuidedShots([guided], propertyID: fixture.propertyID)
+
+        var sessionMetadata = try fixture.localStore.loadSessionMetadata(
+            propertyID: fixture.propertyID,
+            sessionID: fixture.sessionID
+        )
+        sessionMetadata.guidedShots = [guided]
+        try fixture.localStore.saveSessionMetadataAtomically(
+            propertyID: fixture.propertyID,
+            sessionID: fixture.sessionID,
+            metadata: sessionMetadata
+        )
+
+        let promotedMetadata = ShotMetadata(
+            shotID: promotedShotID,
+            propertyID: fixture.propertyID,
+            sessionID: fixture.sessionID,
+            createdAt: Date(timeIntervalSinceReferenceDate: 100),
+            capturedAtLocal: nil,
+            updatedAt: Date(timeIntervalSinceReferenceDate: 110),
+            building: "Building",
+            elevation: "North",
+            detailType: "Panel",
+            angleIndex: 2,
+            trade: "Electrical",
+            priority: "High",
+            shotKey: "building|north|panel|2",
+            isGuided: true,
+            isFlagged: true,
+            issueID: issueID,
+            issueStatus: "active",
+            captureKind: "captured",
+            firstCaptureKind: "captured",
+            noteText: "Convert",
+            noteCategory: nil,
+            originalFilename: "promoted-guided.jpg",
+            originalRelativePath: "Originals/promoted-guided.jpg",
+            originalByteSize: 128,
+            stampedFilename: nil,
+            stampedRelativePath: nil,
+            captureMode: nil,
+            lens: nil,
+            exifOrientation: nil,
+            latitude: nil,
+            longitude: nil,
+            accuracyMeters: nil,
+            imageWidth: nil,
+            imageHeight: nil
+        )
+
+        try fixture.localStore.upsertShot(
+            propertyID: fixture.propertyID,
+            sessionID: fixture.sessionID,
+            shot: promotedMetadata,
+            matchMode: .append
+        )
+
+        let propertyGuided = try fixture.localStore.fetchGuidedShots(propertyID: fixture.propertyID)
+        XCTAssertEqual(propertyGuided.filter { !$0.isRetired && $0.status != .retired }.count, 0)
+        let retiredPropertyGuided = try XCTUnwrap(propertyGuided.first(where: { $0.id == originalGuidedShotID }))
+        XCTAssertEqual(retiredPropertyGuided.status, .retired)
+        XCTAssertTrue(retiredPropertyGuided.isRetired)
+        XCTAssertEqual(retiredPropertyGuided.retiredInSessionID, fixture.sessionID)
+
+        let reloaded = try fixture.localStore.loadSessionMetadata(
+            propertyID: fixture.propertyID,
+            sessionID: fixture.sessionID
+        )
+        let promotionEvidence = LocalConflictRules.flaggedGuidedPromotionEvidence(
+            issueLinkedGuidedShots: reloaded.shots,
+            includeResolved: true
+        )
+        XCTAssertFalse(
+            LocalConflictRules.retiredGuidedShotIsRestorable(
+                retiredPropertyGuided,
+                promotionEvidence: promotionEvidence,
+                retiredGuidedShots: [retiredPropertyGuided]
+            )
+        )
+        XCTAssertThrowsError(
+            try fixture.localStore.restoreRetiredGuidedShot(
+                propertyID: fixture.propertyID,
+                sessionID: fixture.sessionID,
+                guidedShotID: retiredPropertyGuided.id
+            )
+        )
+        let retiredMetadataGuided = try XCTUnwrap(reloaded.guidedShots.first(where: { $0.id == originalGuidedShotID }))
+        XCTAssertEqual(retiredMetadataGuided.status, .retired)
+        XCTAssertTrue(retiredMetadataGuided.isRetired)
+        XCTAssertEqual(retiredMetadataGuided.retiredInSessionID, fixture.sessionID)
+        XCTAssertEqual(reloaded.shots.first(where: { $0.shotID == promotedShotID })?.issueStatus, "active")
+    }
+
+    func testFetchGuidedShotsRetiresStalePromotionCarryForwardRowByBaseIdentity() throws {
+        let fixture = try makeLocalStoreFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.storageRoot) }
+
+        let issueID = UUID()
+        let originalGuidedShotID = UUID()
+        let promotedShotID = UUID()
+        let guided = GuidedShot(
+            id: originalGuidedShotID,
+            title: "Building North Panel",
+            building: "Building",
+            targetElevation: "North",
+            detailType: "Panel",
+            angleIndex: 1,
+            referenceImageLocalIdentifier: "/tmp/reference.jpg",
+            referenceImagePath: "/tmp/reference.jpg",
+            shot: Shot(
+                id: originalGuidedShotID,
+                capturedAt: Date(timeIntervalSinceReferenceDate: 90),
+                imageLocalIdentifier: "/tmp/original-guided.jpg"
+            ),
+            isCompleted: true
+        )
+        try fixture.localStore.saveGuidedShots([guided], propertyID: fixture.propertyID)
+
+        var sessionMetadata = try fixture.localStore.loadSessionMetadata(
+            propertyID: fixture.propertyID,
+            sessionID: fixture.sessionID
+        )
+        sessionMetadata.shots = [
+            ShotMetadata(
+                shotID: promotedShotID,
+                propertyID: fixture.propertyID,
+                sessionID: fixture.sessionID,
+                createdAt: Date(timeIntervalSinceReferenceDate: 100),
+                capturedAtLocal: nil,
+                updatedAt: Date(timeIntervalSinceReferenceDate: 110),
+                building: "Building",
+                elevation: "North",
+                detailType: "Panel",
+                angleIndex: 2,
+                trade: "Electrical",
+                priority: "High",
+                shotKey: "building|north|panel|2",
+                isGuided: true,
+                isFlagged: true,
+                issueID: issueID,
+                issueStatus: "active",
+                captureKind: "captured",
+                firstCaptureKind: "captured",
+                noteText: "Convert",
+                noteCategory: nil,
+                originalFilename: "promoted-guided.jpg",
+                originalRelativePath: "Originals/promoted-guided.jpg",
+                originalByteSize: 128,
+                stampedFilename: nil,
+                stampedRelativePath: nil,
+                captureMode: nil,
+                lens: nil,
+                exifOrientation: nil,
+                latitude: nil,
+                longitude: nil,
+                accuracyMeters: nil,
+                imageWidth: nil,
+                imageHeight: nil
+            )
+        ]
+        try fixture.localStore.saveSessionMetadataAtomically(
+            propertyID: fixture.propertyID,
+            sessionID: fixture.sessionID,
+            metadata: sessionMetadata
+        )
+
+        let propertyGuided = try fixture.localStore.fetchGuidedShots(propertyID: fixture.propertyID)
+        let retiredGuided = try XCTUnwrap(propertyGuided.first(where: { $0.id == originalGuidedShotID }))
+        XCTAssertEqual(retiredGuided.status, .retired)
+        XCTAssertTrue(retiredGuided.isRetired)
+        XCTAssertEqual(retiredGuided.retiredInSessionID, fixture.sessionID)
+    }
+
+    func testNormalGuidedCapturedAfterFlaggedPromotionStillCarriesForward() throws {
+        let fixture = try makeLocalStoreFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.storageRoot) }
+
+        let issueID = UUID()
+        let staleGuidedShotID = UUID()
+        let promotedShotID = UUID()
+        let laterGuidedShotID = UUID()
+        let staleGuided = GuidedShot(
+            id: staleGuidedShotID,
+            title: "Building North Panel",
+            building: "Building",
+            targetElevation: "North",
+            detailType: "Panel",
+            angleIndex: 1,
+            referenceImageLocalIdentifier: "/tmp/original-guided.jpg",
+            referenceImagePath: "/tmp/original-guided.jpg",
+            shot: Shot(
+                id: staleGuidedShotID,
+                capturedAt: Date(timeIntervalSinceReferenceDate: 90),
+                imageLocalIdentifier: "/tmp/original-guided.jpg"
+            ),
+            isCompleted: true
+        )
+        let laterGuided = GuidedShot(
+            id: laterGuidedShotID,
+            title: "Building North Panel",
+            building: "Building",
+            targetElevation: "North",
+            detailType: "Panel",
+            angleIndex: 3,
+            referenceImageLocalIdentifier: "/tmp/later-normal-guided.jpg",
+            referenceImagePath: "/tmp/later-normal-guided.jpg",
+            shot: Shot(
+                id: laterGuidedShotID,
+                capturedAt: Date(timeIntervalSinceReferenceDate: 150),
+                imageLocalIdentifier: "/tmp/later-normal-guided.jpg"
+            ),
+            isCompleted: true
+        )
+        try fixture.localStore.saveGuidedShots([staleGuided, laterGuided], propertyID: fixture.propertyID)
+
+        var sessionMetadata = try fixture.localStore.loadSessionMetadata(
+            propertyID: fixture.propertyID,
+            sessionID: fixture.sessionID
+        )
+        sessionMetadata.shots = [
+            ShotMetadata(
+                shotID: promotedShotID,
+                propertyID: fixture.propertyID,
+                sessionID: fixture.sessionID,
+                createdAt: Date(timeIntervalSinceReferenceDate: 100),
+                capturedAtLocal: nil,
+                updatedAt: Date(timeIntervalSinceReferenceDate: 110),
+                building: "Building",
+                elevation: "North",
+                detailType: "Panel",
+                angleIndex: 2,
+                trade: "Electrical",
+                priority: "High",
+                shotKey: "building|north|panel|2",
+                isGuided: true,
+                isFlagged: true,
+                issueID: issueID,
+                issueStatus: "active",
+                captureKind: "captured",
+                firstCaptureKind: "captured",
+                noteText: "Convert",
+                noteCategory: nil,
+                originalFilename: "promoted-guided.jpg",
+                originalRelativePath: "Originals/promoted-guided.jpg",
+                originalByteSize: 128,
+                stampedFilename: nil,
+                stampedRelativePath: nil,
+                captureMode: nil,
+                lens: nil,
+                exifOrientation: nil,
+                latitude: nil,
+                longitude: nil,
+                accuracyMeters: nil,
+                imageWidth: nil,
+                imageHeight: nil
+            )
+        ]
+        try fixture.localStore.saveSessionMetadataAtomically(
+            propertyID: fixture.propertyID,
+            sessionID: fixture.sessionID,
+            metadata: sessionMetadata
+        )
+
+        let propertyGuided = try fixture.localStore.fetchGuidedShots(propertyID: fixture.propertyID)
+        let retiredOriginal = try XCTUnwrap(propertyGuided.first(where: { $0.id == staleGuidedShotID }))
+        let carriedNormal = try XCTUnwrap(propertyGuided.first(where: { $0.id == laterGuidedShotID }))
+        XCTAssertEqual(retiredOriginal.status, .retired)
+        XCTAssertTrue(retiredOriginal.isRetired)
+        XCTAssertEqual(carriedNormal.status, .active)
+        XCTAssertFalse(carriedNormal.isRetired)
+        XCTAssertTrue(carriedNormal.isCompleted)
+        XCTAssertEqual(carriedNormal.shot?.id, laterGuidedShotID)
+    }
+
+    func testNormalGuidedCapturedAfterPromotionIsRecoveredWhenPropertyRowIsMissing() throws {
+        let fixture = try makeLocalStoreFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.storageRoot) }
+
+        let firstSessionID = UUID()
+        let promotionSessionID = UUID()
+        let laterSessionID = UUID()
+        let originalGuidedShotID = UUID()
+        let promotedShotID = UUID()
+        let laterGuidedShotID = UUID()
+        let issueID = UUID()
+        let originalCaptureAt = Date(timeIntervalSinceReferenceDate: 90)
+        let promotionCaptureAt = Date(timeIntervalSinceReferenceDate: 100)
+        let lateSyncAt = Date(timeIntervalSinceReferenceDate: 300)
+        let laterGuidedCaptureAt = Date(timeIntervalSinceReferenceDate: 150)
+
+        _ = try fixture.localStore.upsertSession(
+            Session(
+                id: firstSessionID,
+                propertyID: fixture.propertyID,
+                startedAt: originalCaptureAt,
+                status: .completed,
+                endedAt: originalCaptureAt,
+                isSealed: true,
+                firstDeliveredAt: originalCaptureAt
+            )
+        )
+        var firstMetadata = try fixture.localStore.loadSessionMetadata(
+            propertyID: fixture.propertyID,
+            sessionID: firstSessionID
+        )
+        firstMetadata.shots = [
+            ShotMetadata(
+                shotID: originalGuidedShotID,
+                propertyID: fixture.propertyID,
+                sessionID: firstSessionID,
+                createdAt: originalCaptureAt,
+                capturedAtLocal: nil,
+                updatedAt: originalCaptureAt,
+                building: "Building",
+                elevation: "North",
+                detailType: "Panel",
+                angleIndex: 1,
+                trade: nil,
+                priority: nil,
+                shotKey: "building|north|panel|1",
+                isGuided: true,
+                isFlagged: false,
+                issueID: nil,
+                issueStatus: nil,
+                captureKind: "captured",
+                firstCaptureKind: "captured",
+                noteText: nil,
+                noteCategory: nil,
+                originalFilename: "original-guided.jpg",
+                originalRelativePath: "Originals/original-guided.jpg",
+                originalByteSize: 128,
+                stampedFilename: nil,
+                stampedRelativePath: nil,
+                captureMode: nil,
+                lens: nil,
+                exifOrientation: nil,
+                latitude: nil,
+                longitude: nil,
+                accuracyMeters: nil,
+                imageWidth: nil,
+                imageHeight: nil
+            )
+        ]
+        firstMetadata.guidedShots = [
+            GuidedShot(
+                id: UUID(),
+                title: "Building North Panel",
+                building: "Building",
+                targetElevation: "North",
+                detailType: "Panel",
+                angleIndex: 1,
+                referenceImageLocalIdentifier: "/tmp/original-guided.jpg",
+                referenceImagePath: "/tmp/original-guided.jpg",
+                shot: Shot(
+                    id: originalGuidedShotID,
+                    capturedAt: originalCaptureAt,
+                    imageLocalIdentifier: "/tmp/original-guided.jpg"
+                ),
+                isCompleted: true
+            )
+        ]
+        try fixture.localStore.saveSessionMetadataAtomically(
+            propertyID: fixture.propertyID,
+            sessionID: firstSessionID,
+            metadata: firstMetadata
+        )
+
+        _ = try fixture.localStore.upsertSession(
+            Session(
+                id: promotionSessionID,
+                propertyID: fixture.propertyID,
+                startedAt: promotionCaptureAt,
+                status: .completed,
+                endedAt: promotionCaptureAt,
+                isSealed: true,
+                firstDeliveredAt: promotionCaptureAt
+            )
+        )
+        var promotionMetadata = try fixture.localStore.loadSessionMetadata(
+            propertyID: fixture.propertyID,
+            sessionID: promotionSessionID
+        )
+        promotionMetadata.shots = [
+            ShotMetadata(
+                shotID: promotedShotID,
+                propertyID: fixture.propertyID,
+                sessionID: promotionSessionID,
+                createdAt: promotionCaptureAt,
+                capturedAtLocal: nil,
+                updatedAt: lateSyncAt,
+                building: "Building",
+                elevation: "North",
+                detailType: "Panel",
+                angleIndex: 2,
+                trade: "Electrical",
+                priority: "Low",
+                shotKey: "building|north|panel|2",
+                isGuided: true,
+                isFlagged: true,
+                issueID: issueID,
+                issueStatus: "active",
+                captureKind: "captured",
+                firstCaptureKind: "captured",
+                noteText: "Promoted",
+                noteCategory: nil,
+                originalFilename: "promoted-guided.jpg",
+                originalRelativePath: "Originals/promoted-guided.jpg",
+                originalByteSize: 128,
+                stampedFilename: nil,
+                stampedRelativePath: nil,
+                captureMode: nil,
+                lens: nil,
+                exifOrientation: nil,
+                latitude: nil,
+                longitude: nil,
+                accuracyMeters: nil,
+                imageWidth: nil,
+                imageHeight: nil
+            )
+        ]
+        try fixture.localStore.saveSessionMetadataAtomically(
+            propertyID: fixture.propertyID,
+            sessionID: promotionSessionID,
+            metadata: promotionMetadata
+        )
+
+        let retiredOriginal = GuidedShot(
+            id: UUID(),
+            status: .retired,
+            title: "Building North Panel",
+            building: "Building",
+            targetElevation: "North",
+            detailType: "Panel",
+            angleIndex: 1,
+            referenceImageLocalIdentifier: "/tmp/promoted-guided.jpg",
+            referenceImagePath: "/tmp/promoted-guided.jpg",
+            shot: Shot(
+                id: promotedShotID,
+                capturedAt: promotionCaptureAt,
+                imageLocalIdentifier: "/tmp/promoted-guided.jpg"
+            ),
+            isCompleted: true,
+            isRetired: true,
+            retiredAt: promotionCaptureAt,
+            retiredInSessionID: promotionSessionID
+        )
+        try fixture.localStore.saveGuidedShots([retiredOriginal], propertyID: fixture.propertyID)
+
+        _ = try fixture.localStore.upsertSession(
+            Session(
+                id: laterSessionID,
+                propertyID: fixture.propertyID,
+                startedAt: laterGuidedCaptureAt,
+                status: .completed,
+                endedAt: laterGuidedCaptureAt,
+                isSealed: true,
+                firstDeliveredAt: laterGuidedCaptureAt
+            )
+        )
+        var laterMetadata = try fixture.localStore.loadSessionMetadata(
+            propertyID: fixture.propertyID,
+            sessionID: laterSessionID
+        )
+        laterMetadata.shots = [
+            ShotMetadata(
+                shotID: laterGuidedShotID,
+                propertyID: fixture.propertyID,
+                sessionID: laterSessionID,
+                createdAt: laterGuidedCaptureAt,
+                capturedAtLocal: nil,
+                updatedAt: laterGuidedCaptureAt,
+                building: "Building",
+                elevation: "North",
+                detailType: "Panel",
+                angleIndex: 3,
+                trade: nil,
+                priority: nil,
+                shotKey: "building|north|panel|3",
+                isGuided: true,
+                isFlagged: false,
+                issueID: nil,
+                issueStatus: nil,
+                captureKind: "captured",
+                firstCaptureKind: "captured",
+                noteText: nil,
+                noteCategory: nil,
+                originalFilename: "later-normal-guided.jpg",
+                originalRelativePath: "Originals/later-normal-guided.jpg",
+                originalByteSize: 128,
+                stampedFilename: nil,
+                stampedRelativePath: nil,
+                captureMode: nil,
+                lens: nil,
+                exifOrientation: nil,
+                latitude: nil,
+                longitude: nil,
+                accuracyMeters: nil,
+                imageWidth: nil,
+                imageHeight: nil
+            )
+        ]
+        laterMetadata.guidedShots = [
+            GuidedShot(
+                id: UUID(),
+                status: .retired,
+                title: "Building North Panel",
+                building: "Building",
+                targetElevation: "North",
+                detailType: "Panel",
+                angleIndex: 3,
+                referenceImageLocalIdentifier: "/tmp/later-normal-guided.jpg",
+                referenceImagePath: "/tmp/later-normal-guided.jpg",
+                shot: Shot(
+                    id: laterGuidedShotID,
+                    capturedAt: laterGuidedCaptureAt,
+                    imageLocalIdentifier: "/tmp/later-normal-guided.jpg"
+                ),
+                isCompleted: true,
+                isRetired: true,
+                retiredAt: lateSyncAt,
+                retiredInSessionID: laterSessionID
+            )
+        ]
+        try fixture.localStore.saveSessionMetadataAtomically(
+            propertyID: fixture.propertyID,
+            sessionID: laterSessionID,
+            metadata: laterMetadata
+        )
+
+        let propertyGuided = try fixture.localStore.fetchGuidedShots(propertyID: fixture.propertyID)
+        XCTAssertTrue(propertyGuided.contains { guided in
+            guided.shot?.id == promotedShotID &&
+                guided.status == .retired &&
+                guided.isRetired
+        })
+        let carriedNormal = try XCTUnwrap(propertyGuided.first(where: { $0.shot?.id == laterGuidedShotID }))
+        XCTAssertEqual(carriedNormal.status, .active)
+        XCTAssertFalse(carriedNormal.isRetired)
+        XCTAssertTrue(carriedNormal.isCompleted)
+    }
+
+    func testActiveFlaggedGuidedFallbackDoesNotRetireAmbiguousSameDetailAngles() throws {
+        let fixture = try makeLocalStoreFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.storageRoot) }
+
+        let issueID = UUID()
+        let firstGuidedID = UUID()
+        let secondGuidedID = UUID()
+        let promotedShotID = UUID()
+        let firstGuided = GuidedShot(
+            id: firstGuidedID,
+            title: "Building North Panel 1",
+            building: "Building",
+            targetElevation: "North",
+            detailType: "Panel",
+            angleIndex: 1,
+            referenceImageLocalIdentifier: "/tmp/reference-1.jpg",
+            referenceImagePath: "/tmp/reference-1.jpg"
+        )
+        let secondGuided = GuidedShot(
+            id: secondGuidedID,
+            title: "Building North Panel 2",
+            building: "Building",
+            targetElevation: "North",
+            detailType: "Panel",
+            angleIndex: 2,
+            referenceImageLocalIdentifier: "/tmp/reference-2.jpg",
+            referenceImagePath: "/tmp/reference-2.jpg"
+        )
+        try fixture.localStore.saveGuidedShots([firstGuided, secondGuided], propertyID: fixture.propertyID)
+
+        let promotedMetadata = ShotMetadata(
+            shotID: promotedShotID,
+            propertyID: fixture.propertyID,
+            sessionID: fixture.sessionID,
+            createdAt: Date(timeIntervalSinceReferenceDate: 100),
+            capturedAtLocal: nil,
+            updatedAt: Date(timeIntervalSinceReferenceDate: 110),
+            building: "Building",
+            elevation: "North",
+            detailType: "Panel",
+            angleIndex: 3,
+            trade: "Electrical",
+            priority: "High",
+            shotKey: "building|north|panel|3",
+            isGuided: true,
+            isFlagged: true,
+            issueID: issueID,
+            issueStatus: "active",
+            captureKind: "captured",
+            firstCaptureKind: "captured",
+            noteText: "Convert",
+            noteCategory: nil,
+            originalFilename: "promoted-guided.jpg",
+            originalRelativePath: "Originals/promoted-guided.jpg",
+            originalByteSize: 128,
+            stampedFilename: nil,
+            stampedRelativePath: nil,
+            captureMode: nil,
+            lens: nil,
+            exifOrientation: nil,
+            latitude: nil,
+            longitude: nil,
+            accuracyMeters: nil,
+            imageWidth: nil,
+            imageHeight: nil
+        )
+
+        try fixture.localStore.upsertShot(
+            propertyID: fixture.propertyID,
+            sessionID: fixture.sessionID,
+            shot: promotedMetadata,
+            matchMode: .append
+        )
+
+        let propertyGuided = try fixture.localStore.fetchGuidedShots(propertyID: fixture.propertyID)
+        XCTAssertEqual(propertyGuided.filter { !$0.isRetired && $0.status != .retired }.count, 2)
+        XCTAssertTrue(propertyGuided.contains(where: { $0.id == firstGuidedID && !$0.isRetired }))
+        XCTAssertTrue(propertyGuided.contains(where: { $0.id == secondGuidedID && !$0.isRetired }))
+    }
+
     func testFlaggedObservationResolveSyncsResolvedShotAndIssueState() throws {
         let fixture = try makeLocalStoreFixture()
         defer { try? FileManager.default.removeItem(at: fixture.storageRoot) }
@@ -1606,17 +2414,19 @@ final class Phase2C11LocalConflictRulesTests: XCTestCase {
         XCTAssertEqual(reloadedShot?.issueStatus, "active")
         XCTAssertEqual(reloadedShot?.captureKind, "retake")
         XCTAssertEqual(reloadedShot?.noteText, "Retaken flagged reason")
+        XCTAssertEqual(reloadedShot?.priority, "High")
         XCTAssertNotNil(
             reloadedIssue,
             "Expected issue \(issueID.uuidString), got \(reloaded.issues.map { $0.issueID.uuidString })"
         )
         XCTAssertEqual(reloadedIssue?.issueStatus, "active")
+        XCTAssertEqual(reloadedIssue?.currentReason, "Retaken flagged reason")
         XCTAssertNil(reloadedIssue?.resolvedAt)
         XCTAssertNil(reloadedIssue?.resolvedAtLocal)
         XCTAssertEqual(reloaded.flaggedIssues.count, 1)
     }
 
-    func testReopenedFlaggedGuidedObservationRestoresGuidedCarryForwardRow() throws {
+    func testReopenedFlaggedGuidedObservationKeepsGuidedCarryForwardRowRetired() throws {
         let fixture = try makeLocalStoreFixture()
         defer { try? FileManager.default.removeItem(at: fixture.storageRoot) }
 
@@ -1734,6 +2544,7 @@ final class Phase2C11LocalConflictRulesTests: XCTestCase {
         reopenedObservation.currentReason = "Retaken flagged reason"
         reopenedObservation.note = "Retaken flagged reason"
         reopenedObservation.statement = "Retaken flagged reason"
+        reopenedObservation.priority = "High"
         let persistedObservation = try fixture.localStore.updateObservation(reopenedObservation)
 
         _ = try fixture.localStore.syncFlaggedObservationUpdateToSessionMetadata(
@@ -1749,19 +2560,40 @@ final class Phase2C11LocalConflictRulesTests: XCTestCase {
         let propertyGuided = try XCTUnwrap(
             fixture.localStore.fetchGuidedShots(propertyID: fixture.propertyID).first(where: { $0.id == shotID })
         )
-        XCTAssertEqual(propertyGuided.status, .active)
-        XCTAssertFalse(propertyGuided.isRetired)
-        XCTAssertNil(propertyGuided.retiredAt)
-        XCTAssertNil(propertyGuided.retiredInSessionID)
+        XCTAssertEqual(propertyGuided.status, .retired)
+        XCTAssertTrue(propertyGuided.isRetired)
+        XCTAssertNotNil(propertyGuided.retiredAt)
+        XCTAssertEqual(propertyGuided.retiredInSessionID, fixture.sessionID)
 
         let reloaded = try fixture.localStore.loadSessionMetadata(
             propertyID: fixture.propertyID,
             sessionID: fixture.sessionID
         )
         let metadataGuided = try XCTUnwrap(reloaded.guidedShots.first(where: { $0.id == shotID }))
-        XCTAssertEqual(metadataGuided.status, .active)
-        XCTAssertFalse(metadataGuided.isRetired)
-        XCTAssertNil(metadataGuided.retiredInSessionID)
+        XCTAssertEqual(metadataGuided.status, .retired)
+        XCTAssertTrue(metadataGuided.isRetired)
+        XCTAssertEqual(metadataGuided.retiredInSessionID, fixture.sessionID)
+        let promotionEvidence = LocalConflictRules.flaggedGuidedPromotionEvidence(
+            issueLinkedGuidedShots: reloaded.shots,
+            includeResolved: true
+        )
+        XCTAssertFalse(
+            LocalConflictRules.retiredGuidedShotIsRestorable(
+                propertyGuided,
+                promotionEvidence: promotionEvidence,
+                retiredGuidedShots: [propertyGuided]
+            )
+        )
+        let reloadedShot = reloaded.shots.first(where: { $0.shotID == shotID })
+        let reloadedIssue = reloaded.issues.first(where: { $0.issueID == issueID })
+        XCTAssertEqual(reloadedShot?.isFlagged, true)
+        XCTAssertEqual(reloadedShot?.issueStatus, "active")
+        XCTAssertEqual(reloadedShot?.captureKind, "retake")
+        XCTAssertEqual(reloadedShot?.noteText, "Retaken flagged reason")
+        XCTAssertEqual(reloadedShot?.priority, "High")
+        XCTAssertEqual(reloadedIssue?.issueStatus, "active")
+        XCTAssertEqual(reloadedIssue?.currentReason, "Retaken flagged reason")
+        XCTAssertNil(reloadedIssue?.resolvedAt)
         XCTAssertEqual(reloaded.flaggedIssues.count, 1)
     }
 
