@@ -3869,9 +3869,14 @@ struct ContentView: View {
     }
 
     private var hasValidCurrentSession: Bool {
-        guard let session = appState.currentSession else { return false }
-        guard let selectedPropertyID = appState.selectedPropertyID else { return false }
-        return session.propertyID == selectedPropertyID
+        currentSessionScopedPropertyID != nil
+    }
+
+    private var currentSessionScopedPropertyID: UUID? {
+        guard let session = appState.currentSession else { return nil }
+        guard let selectedPropertyID = appState.selectedPropertyID else { return nil }
+        guard session.propertyID == selectedPropertyID else { return nil }
+        return selectedPropertyID
     }
 
     private var shouldShowStartingCameraOverlay: Bool {
@@ -3882,8 +3887,7 @@ struct ContentView: View {
     }
 
     private var hasGuidedBaselineForSelectedProperty: Bool {
-        let propertyID = appState.selectedPropertyID ?? appState.currentSession?.propertyID
-        guard let propertyID else { return false }
+        guard let propertyID = currentSessionScopedPropertyID else { return false }
         return persistedBaselineState(propertyID: propertyID).hasBaseline
     }
 
@@ -3892,7 +3896,7 @@ struct ContentView: View {
     }
 
     private var isCurrentSessionBaselineFromPersisted: Bool {
-        guard let propertyID = appState.selectedPropertyID ?? appState.currentSession?.propertyID else { return false }
+        guard let propertyID = currentSessionScopedPropertyID else { return false }
         guard let sessionID = appState.currentSession?.id else { return false }
         return persistedBaselineState(propertyID: propertyID).baselineSessionID == sessionID
     }
@@ -3978,7 +3982,7 @@ struct ContentView: View {
     }
 
     private func refreshReferenceSetsAndPendingCounts() {
-        guard let propertyID = appState.selectedPropertyID,
+        guard let propertyID = currentSessionScopedPropertyID,
               let currentSession = appState.currentSession else {
             guidedReferenceKeys = []
             flaggedReferenceIDs = []
@@ -4700,7 +4704,11 @@ struct ContentView: View {
                 return (shot, matchBy)
             }
             .sorted { lhs, rhs in
-                lhs.0.updatedAt > rhs.0.updatedAt
+                LocalConflictRules.currentIssueShotSortPrecedes(
+                    lhs.0,
+                    rhs.0,
+                    linkedShotID: observation.linkedShotID
+                )
             }
             .first
     }
@@ -5002,11 +5010,14 @@ struct ContentView: View {
             return candidate.resolution
         }
 
-        let fallbackReference = observation.shots
-            .sorted { $0.capturedAt < $1.capturedAt }
-            .first?
-            .imageLocalIdentifier?
-            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let fallbackReference = (
+            observation.linkedShotID.flatMap { linkedID in
+                observation.shots.first(where: { $0.id == linkedID })
+            } ??
+            observation.shots.sorted { $0.capturedAt > $1.capturedAt }.first
+        )?
+        .imageLocalIdentifier?
+        .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         if !fallbackReference.isEmpty, FileManager.default.fileExists(atPath: fallbackReference) {
             verboseLog("[FlagThumbResolve] matchBy=none target=\(target) chosenShotID=NONE chosenSession=NONE reason=referenceFallback source=reference pathExists=true")
             return GuidedSessionThumbnailResolution(source: .reference, sessionID: nil, path: fallbackReference, exists: true)
@@ -6632,6 +6643,7 @@ struct ContentView: View {
                 UIDevice.current.endGeneratingDeviceOrientationNotifications()
             }
             .onChange(of: appState.selectedPropertyID) { _, _ in
+                clearPropertyScopedChecklistState()
                 reportLibrary.setMediaHydrationHandler { requests in
                     await appState.ensureGalleryMediaAvailableForRequests(requests)
                 }
@@ -6649,6 +6661,7 @@ struct ContentView: View {
                 refreshHudAngleIndex()
             }
             .onChange(of: appState.currentSession?.id) { previousSessionID, nextSessionID in
+                clearPropertyScopedChecklistState()
                 reservedAngleByContextKey = [:]
                 reportLibrary.setMediaHydrationHandler { requests in
                     await appState.ensureGalleryMediaAvailableForRequests(requests)
@@ -6688,6 +6701,9 @@ struct ContentView: View {
                 refreshHudAngleIndex()
             }
             .onChange(of: appState.currentSession?.status) { _, _ in
+                if !hasValidCurrentSession {
+                    clearPropertyScopedChecklistState()
+                }
                 ensureCameraSessionPrecondition()
                 if hasValidCurrentSession {
                     camera.ensurePreviewRunningAsync()
@@ -10972,8 +10988,27 @@ extension ContentView {
         return reserved
     }
 
+    private func clearPropertyScopedChecklistState() {
+        guidedShots = []
+        retiredGuidedShots = []
+        guidedResolvedThumbnailPathByID = [:]
+        guidedReferencePathByID = [:]
+        activeObservations = []
+        activeSessionShotIDs = []
+        flaggedResolvedThumbnailPathByID = [:]
+        flaggedReferencePathByID = [:]
+        flaggedAngleIndexByID = [:]
+        carryoverIssueBadgeCount = 0
+        flaggedPendingCaptureCount = 0
+        guidedReferenceKeys = []
+        flaggedReferenceIDs = []
+        guidedUpdatedKeysThisSession = []
+        flaggedUpdatedIDsThisSession = []
+        reportLibrary.setActiveIssueCount(0)
+    }
+
     private func refreshGuidedShots() {
-        guard let propertyID = appState.selectedPropertyID else {
+        guard let propertyID = currentSessionScopedPropertyID else {
             guidedShots = []
             retiredGuidedShots = []
             guidedResolvedThumbnailPathByID = [:]
@@ -11109,7 +11144,6 @@ extension ContentView {
                         fetchedGuidedShots[index].isCompleted = true
                         sessionShotIDs.insert(existingShot.id)
                     } else {
-                        fetchedGuidedShots[index].shot = nil
                         fetchedGuidedShots[index].isCompleted = false
                     }
                 } else {
@@ -11409,7 +11443,6 @@ extension ContentView {
                             scoped.referenceImageLocalIdentifier = rawPath
                         }
                     }
-                    scoped.shot = nil
                     scoped.isCompleted = false
                 }
             } else {
@@ -12097,7 +12130,10 @@ extension ContentView {
             }
             let normalizedGuidedShots = try saveNormalizedGuidedShots(allGuidedShots, propertyID: propertyID)
             guidedShots = visibleGuidedShots(from: normalizedGuidedShots)
-            retiredGuidedShots = retiredGuidedShots(from: normalizedGuidedShots)
+            retiredGuidedShots = restorableRetiredGuidedShots(
+                from: normalizedGuidedShots,
+                propertyID: propertyID
+            )
             if let localIdentifier = shot.imageLocalIdentifier?.trimmingCharacters(in: .whitespacesAndNewlines),
                !localIdentifier.isEmpty {
                 guidedResolvedThumbnailPathByID[armedID] = localIdentifier
@@ -12170,7 +12206,10 @@ extension ContentView {
             allGuidedShots.append(guided)
             let normalizedGuidedShots = try saveNormalizedGuidedShots(allGuidedShots, propertyID: propertyID)
             guidedShots = visibleGuidedShots(from: normalizedGuidedShots)
-            retiredGuidedShots = retiredGuidedShots(from: normalizedGuidedShots)
+            retiredGuidedShots = restorableRetiredGuidedShots(
+                from: normalizedGuidedShots,
+                propertyID: propertyID
+            )
             if let localIdentifier = shot.imageLocalIdentifier?.trimmingCharacters(in: .whitespacesAndNewlines),
                !localIdentifier.isEmpty {
                 guidedResolvedThumbnailPathByID[guided.id] = localIdentifier
@@ -12297,9 +12336,39 @@ extension ContentView {
         guidedShots.filter { $0.isRetired || $0.status == .retired }
     }
 
+    private func restorableRetiredGuidedShots(
+        from guidedShots: [GuidedShot],
+        propertyID: UUID
+    ) -> [GuidedShot] {
+        let retiredRows = retiredGuidedShots(from: guidedShots)
+        guard !retiredRows.isEmpty else { return [] }
+        let observations = (try? localStore.fetchObservations(propertyID: propertyID)) ?? []
+        let issueLinkedGuidedShots = ((try? localStore.fetchSessions(propertyID: propertyID)) ?? [])
+            .flatMap { session -> [ShotMetadata] in
+                guard let metadata = try? localStore.loadSessionMetadata(propertyID: propertyID, sessionID: session.id) else {
+                    return []
+                }
+                return metadata.shots.filter { shot in
+                    shot.isGuided && !LocalConflictRules.shotMetadataIsOrdinaryGuidedWork(shot)
+                }
+            }
+        let promotionEvidence = LocalConflictRules.flaggedGuidedPromotionEvidence(
+            observations: observations,
+            issueLinkedGuidedShots: issueLinkedGuidedShots,
+            includeResolved: true
+        )
+        return retiredRows.filter {
+            LocalConflictRules.retiredGuidedShotIsRestorable(
+                $0,
+                promotionEvidence: promotionEvidence,
+                retiredGuidedShots: retiredRows
+            )
+        }
+    }
+
     private func retiredGuidedShotsForProperty(_ propertyID: UUID) -> [GuidedShot] {
         let allGuidedShots = (try? localStore.fetchGuidedShots(propertyID: propertyID)) ?? []
-        return retiredGuidedShots(from: allGuidedShots)
+        return restorableRetiredGuidedShots(from: allGuidedShots, propertyID: propertyID)
     }
 
     private func saveNormalizedGuidedShots(_ guidedShots: [GuidedShot], propertyID: UUID) throws -> [GuidedShot] {
@@ -13025,7 +13094,10 @@ extension ContentView {
                 let normalizedGuidedShots = try saveNormalizedGuidedShots(allGuidedShots, propertyID: propertyID)
                 if appState.selectedPropertyID == propertyID {
                     guidedShots = visibleGuidedShots(from: normalizedGuidedShots)
-                    retiredGuidedShots = retiredGuidedShots(from: normalizedGuidedShots)
+                    retiredGuidedShots = restorableRetiredGuidedShots(
+                        from: normalizedGuidedShots,
+                        propertyID: propertyID
+                    )
                 }
             }
         } catch {
@@ -14393,9 +14465,17 @@ extension ContentView {
             }
 
             var updated = existing
+            let wasResolved = updated.status == .resolved ||
+                updated.resolvedInSessionID != nil ||
+                (updated.resolutionPhotoRef?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false) ||
+                (updated.resolutionStatement?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false)
+            updated.status = .active
             updated.linkedShotID = shot.id
             upsertShot(shot, in: &updated)
             updated.updatedInSessionID = appState.currentSession?.id
+            updated.resolvedInSessionID = nil
+            updated.resolutionPhotoRef = nil
+            updated.resolutionStatement = nil
             if updated.building?.isEmpty ?? true {
                 updated.building = selectedBuilding
             }
@@ -14419,6 +14499,20 @@ extension ContentView {
                 ),
                 to: &updated
             )
+            if wasResolved {
+                appendObservationHistoryEvent(
+                    ObservationHistoryEvent(
+                        timestamp: Date(),
+                        sessionID: appState.currentSession?.id,
+                        kind: .reopened,
+                        beforeValue: "resolved",
+                        afterValue: "active",
+                        field: "status",
+                        shotID: shot.id
+                    ),
+                    to: &updated
+                )
+            }
 
             let revisedText = revisedObservationText?.trimmingCharacters(in: .whitespacesAndNewlines)
             if let revisedText, !revisedText.isEmpty {
@@ -14456,7 +14550,27 @@ extension ContentView {
                 )
             }
 
-            _ = try localStore.updateObservation(updated)
+            let persisted = try localStore.updateObservation(updated)
+            if let sessionID = appState.currentSession?.id {
+                do {
+                    _ = try localStore.syncFlaggedObservationUpdateToSessionMetadata(
+                        propertyID: propertyID,
+                        sessionID: sessionID,
+                        observation: persisted,
+                        shotID: shot.id,
+                        trade: revisedTrade ?? selectedTrade,
+                        activeCaptureKind: retakeContext == nil ? "follow_up_capture" : "retake"
+                    )
+                    appState.scheduleShotMetadataSupabaseWriteIfNeeded(
+                        propertyID: propertyID,
+                        sessionID: sessionID,
+                        shotID: shot.id,
+                        reason: "flagged_issue_updated"
+                    )
+                } catch {
+                    // Keep flagged update flow resilient if metadata persistence fails.
+                }
+            }
             if revisedPriority != nil || revisedTrade != nil {
                 applyFlaggedShotMetadataOverrides(
                     propertyID: propertyID,
@@ -14614,7 +14728,7 @@ extension ContentView {
     }
 
     private func refreshActiveIssues() {
-        guard let propertyID = appState.selectedPropertyID else {
+        guard let propertyID = currentSessionScopedPropertyID else {
             activeObservations = []
             activeSessionShotIDs = []
             flaggedResolvedThumbnailPathByID = [:]
@@ -19429,6 +19543,15 @@ extension ContentView {
 
         private func capturedImageLocalID(for observation: Observation) -> String? {
             guard let linkedID = observation.linkedShotID else { return nil }
+            guard LocalConflictRules.issueLinkedShotIsCurrentSessionCapture(
+                linkedShotID: linkedID,
+                updatedInSessionID: observation.updatedInSessionID,
+                resolvedInSessionID: observation.resolvedInSessionID,
+                currentSessionID: currentSessionID,
+                currentSessionShotIDs: sessionShotIDs
+            ) else {
+                return nil
+            }
             let id = observation.shots.first(where: { $0.id == linkedID })?.imageLocalIdentifier?
                 .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             return id.isEmpty ? nil : id
