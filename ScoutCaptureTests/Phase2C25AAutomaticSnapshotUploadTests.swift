@@ -1373,6 +1373,54 @@ final class Phase2C25AAutomaticSnapshotUploadTests: XCTestCase {
         XCTAssertEqual(reloaded.sessionSnapshotCloudStatus(for: fixture.session)?.tint, .orange)
     }
 
+    func testRetryableQueueItemPreventsFailedStatusDisplay() throws {
+        let fixture = try makeFixture(autoUploadEnabled: false)
+        let snapshotID = UUID()
+        let checkpointKey = "retryable-checkpoint"
+        _ = try fixture.store.upsertSessionSnapshotUploadRetryWorkItem(
+            retryItem(
+                property: fixture.property,
+                session: fixture.session,
+                orgID: fixture.orgID,
+                generatedAt: Date(timeIntervalSinceReferenceDate: 1_000),
+                status: .failed,
+                attemptCount: 1,
+                nextAttemptAt: Date(timeIntervalSinceReferenceDate: 2_000),
+                snapshotID: snapshotID,
+                updatedAt: Date(timeIntervalSinceReferenceDate: 1_005),
+                idempotencyKey: checkpointKey
+            )
+        )
+        _ = try fixture.store.upsertSessionSnapshotUploadStatusRecord(
+            statusRecord(
+                property: fixture.property,
+                session: fixture.session,
+                orgID: fixture.orgID,
+                generatedAt: Date(timeIntervalSinceReferenceDate: 1_000),
+                status: .failed,
+                reason: "transient_remote_unavailable",
+                snapshotID: snapshotID,
+                updatedAt: Date(timeIntervalSinceReferenceDate: 1_010),
+                idempotencyKey: checkpointKey
+            )
+        )
+
+        let reloaded = AppState(
+            localStore: fixture.store,
+            userDefaults: makeDefaults(autoUploadEnabled: true, propertyAllowlist: [fixture.property.id]),
+            environment: localEnvironment(),
+            disableCloudBackupForTests: true
+        )
+
+        XCTAssertEqual(reloaded.sessionSnapshotCloudStatus(for: fixture.session)?.state, .retryScheduled)
+        XCTAssertEqual(
+            reloaded.sessionSnapshotCloudStatus(for: fixture.session)?.accessibilityLabel,
+            "Session snapshot upload retry scheduled"
+        )
+        XCTAssertEqual(reloaded.sessionSnapshotCloudStatus(for: fixture.session)?.symbolName, "arrow.clockwise.icloud")
+        XCTAssertEqual(reloaded.sessionSnapshotCloudStatus(for: fixture.session)?.tint, .orange)
+    }
+
     func testTerminalFailureRestoresFailedCloudState() throws {
         let fixture = try makeFixture(autoUploadEnabled: false)
         _ = try fixture.store.upsertSessionSnapshotUploadRetryWorkItem(

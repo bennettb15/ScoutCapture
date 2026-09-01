@@ -1518,11 +1518,11 @@ struct SessionHubView: View {
         }
         switch status.state {
         case .queued:
-            return ("Upload Queued", .blue)
+            return ("Pending Upload", .blue)
         case .uploading:
             return ("Uploading", .blue)
         case .retryScheduled:
-            return ("Upload Retry", .orange)
+            return ("Retrying Upload", .orange)
         case .failed:
             return ("Upload Failed", .red)
         case .uploaded:
