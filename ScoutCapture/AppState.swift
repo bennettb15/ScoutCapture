@@ -16068,8 +16068,26 @@ final class AppState: ObservableObject {
         records: [LocalStore.SessionSnapshotUploadStatusRecord],
         retryItems: [LocalStore.SessionSnapshotUploadRetryWorkItem]
     ) -> [UUID: SessionSnapshotCloudStatus] {
+        let uploadedRecords = records.filter { $0.status == .uploaded }
+        let activeRetryItems = retryItems.filter {
+            !Self.sessionSnapshotRetryItem($0, isSupersededByUploadedStatusRecords: uploadedRecords)
+        }
         let recordStatuses = records.map { record in
-            SessionSnapshotCloudStatus(
+            if let retryItem = Self.sessionSnapshotRetryItem(for: record, retryItems: activeRetryItems),
+               retryItem.status != .terminalFailed {
+                return SessionSnapshotCloudStatus(
+                    state: Self.cloudState(for: retryItem.status),
+                    snapshotID: retryItem.snapshotID,
+                    organizationID: retryItem.organizationID,
+                    propertyID: retryItem.propertyID,
+                    sessionID: retryItem.sessionID,
+                    triggerSource: retryItem.triggerSource,
+                    reason: record.reason,
+                    generatedAt: retryItem.generatedAt,
+                    updatedAt: max(record.updatedAt, retryItem.updatedAt)
+                )
+            }
+            return SessionSnapshotCloudStatus(
                 state: Self.cloudState(for: record.status),
                 snapshotID: record.snapshotID,
                 organizationID: record.organizationID,
@@ -16081,22 +16099,19 @@ final class AppState: ObservableObject {
                 updatedAt: record.updatedAt
             )
         }
-        let uploadedRecords = records.filter { $0.status == .uploaded }
-        let retryStatuses = retryItems
-            .filter { !Self.sessionSnapshotRetryItem($0, isSupersededByUploadedStatusRecords: uploadedRecords) }
-            .map { item in
-                SessionSnapshotCloudStatus(
-                    state: Self.cloudState(for: item.status),
-                    snapshotID: item.snapshotID,
-                    organizationID: item.organizationID,
-                    propertyID: item.propertyID,
-                    sessionID: item.sessionID,
-                    triggerSource: item.triggerSource,
-                    reason: nil,
-                    generatedAt: item.generatedAt,
-                    updatedAt: item.updatedAt
-                )
-            }
+        let retryStatuses = activeRetryItems.map { item in
+            SessionSnapshotCloudStatus(
+                state: Self.cloudState(for: item.status),
+                snapshotID: item.snapshotID,
+                organizationID: item.organizationID,
+                propertyID: item.propertyID,
+                sessionID: item.sessionID,
+                triggerSource: item.triggerSource,
+                reason: nil,
+                generatedAt: item.generatedAt,
+                updatedAt: item.updatedAt
+            )
+        }
         return (recordStatuses + retryStatuses).reduce(into: [:]) { partial, status in
             guard let existing = partial[status.sessionID] else {
                 partial[status.sessionID] = status
@@ -16105,6 +16120,22 @@ final class AppState: ObservableObject {
             if Self.sessionSnapshotCloudStatus(status, isNewerThan: existing) {
                 partial[status.sessionID] = status
             }
+        }
+    }
+
+    private static func sessionSnapshotRetryItem(
+        for record: LocalStore.SessionSnapshotUploadStatusRecord,
+        retryItems: [LocalStore.SessionSnapshotUploadRetryWorkItem]
+    ) -> LocalStore.SessionSnapshotUploadRetryWorkItem? {
+        guard record.status == .failed else { return nil }
+        return retryItems.first { item in
+            item.organizationID == record.organizationID &&
+            item.propertyID == record.propertyID &&
+            item.sessionID == record.sessionID &&
+            (
+                item.snapshotID == record.snapshotID ||
+                item.idempotencyKey == record.idempotencyKey
+            )
         }
     }
 
