@@ -234,6 +234,14 @@ def display_datetime(value: Any) -> str | None:
     return f"{parsed.strftime('%B')} {parsed.day}, {parsed.year} \u2022 {parsed.strftime('%-I:%M %p')}"
 
 
+def first_parseable_date(*values: Any) -> str | None:
+    for value in values:
+        text = trim(value)
+        if text and parse_date(text):
+            return text
+    return None
+
+
 def month_year(value: Any) -> str | None:
     parsed = local_datetime(value)
     if not parsed:
@@ -1012,6 +1020,7 @@ def compact_entry(entry: dict[str, Any]) -> dict[str, Any]:
         "shot_key",
         "caption",
         "captured_at_utc",
+        "session_date_utc",
         "captured_at_display",
         "flagged_reason",
         "priority",
@@ -1231,6 +1240,40 @@ def previous_shot_metadata(validation_lookup_dir: pathlib.Path | None, previous_
     return session, shot
 
 
+def previous_session_date_source(
+    item: dict[str, Any],
+    previous_session: dict[str, Any] | None,
+    previous_media: dict[str, Any] | None,
+) -> str | None:
+    session = previous_session or {}
+    media = previous_media or {}
+    return first_parseable_date(
+        item.get("previous_session_completed_at_utc"),
+        item.get("previous_session_exported_at_utc"),
+        item.get("previous_session_ended_at_utc"),
+        session.get("completed_at_utc"),
+        session.get("exported_at_utc"),
+        session.get("ended_at_utc"),
+        media.get("session_completed_at_utc"),
+        media.get("session_exported_at_utc"),
+        media.get("session_ended_at_utc"),
+    )
+
+
+def previous_captured_date_source(
+    item: dict[str, Any],
+    previous_shot: dict[str, Any] | None,
+    previous_media: dict[str, Any] | None,
+) -> str | None:
+    shot = previous_shot or {}
+    media = previous_media or {}
+    return first_parseable_date(
+        item.get("previous_captured_at_utc"),
+        shot.get("captured_at_utc"),
+        media.get("captured_at_utc"),
+    )
+
+
 def build_comparison_plan(
     validation: dict[str, Any],
     lookup: MediaLookup,
@@ -1254,9 +1297,11 @@ def build_comparison_plan(
         previous_session_id = trim(item.get("previous_session_id"))
         previous_shot_id = trim(item.get("previous_shot_id"))
         previous_session, previous_shot = previous_shot_metadata(validation_lookup_dir, previous_session_id, previous_shot_id)
-        if previous_shot_id and not previous_shot:
+        previous_session_date = previous_session_date_source(item, previous_session, previous_media)
+        previous_captured_date = previous_captured_date_source(item, previous_shot, previous_media)
+        previous_display_date = previous_session_date or previous_captured_date
+        if previous_shot_id and not previous_shot and not previous_display_date:
             comparison_warnings.append("previous_comparison_metadata_unavailable_in_local_validation_lookup")
-        previous_date_source = (previous_shot or {}).get("captured_at_utc") or (previous_session or {}).get("started_at_utc")
         previous_visual_state = (
             visual_state(previous_shot)
             if previous_shot
@@ -1272,7 +1317,8 @@ def build_comparison_plan(
             "shot_key": (previous_shot or {}).get("shot_key") or current.get("shot_key"),
             "visual_state": previous_visual_state,
             "flagged_reason": (previous_shot or {}).get("flagged_reason"),
-            "captured_at_utc": previous_date_source,
+            "captured_at_utc": previous_captured_date,
+            "session_date_utc": previous_session_date,
         }
         entries.append(
             {
@@ -1290,8 +1336,8 @@ def build_comparison_plan(
                     "caption": caption_identity(previous_stub),
                     "media": previous_media,
                     "media_path": trim(previous_media.get("temporary_prepared_path")) if previous_media else None,
-                    "captured_at_display": display_datetime(previous_date_source) or ("Unknown" if previous_shot_id else "None"),
-                    "month_year": month_year(previous_date_source) or ("Unknown" if previous_shot_id else "None"),
+                    "captured_at_display": display_datetime(previous_display_date) or ("Unknown" if previous_shot_id else "None"),
+                    "month_year": month_year(previous_display_date) or ("Unknown" if previous_shot_id else "None"),
                     "missing_reason": None if previous_media else ("IMAGE UNAVAILABLE" if previous_shot_id else "NO PREVIOUS SESSION IMAGE"),
                 },
                 "source_selection": item,

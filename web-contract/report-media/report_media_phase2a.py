@@ -129,6 +129,9 @@ class MediaItem:
     captured_at_utc: str | None
     is_flagged: bool
     is_resolved_in_session: bool
+    session_completed_at_utc: str | None = None
+    session_exported_at_utc: str | None = None
+    session_ended_at_utc: str | None = None
 
 
 def stable_json(data: Any, pretty: bool) -> str:
@@ -387,6 +390,7 @@ def prepare_image(item: MediaItem, source_path: pathlib.Path, output_path: pathl
 
 def current_media_items(validation: dict[str, Any]) -> list[MediaItem]:
     result = []
+    session = validation.get("inputs", {}).get("session", {})
     for shot in validation["inputs"]["ordered_shots"]:
         media = shot["media"]
         result.append(
@@ -403,6 +407,9 @@ def current_media_items(validation: dict[str, Any]) -> list[MediaItem]:
                 angle_index=safe_int(shot.get("angle_index")),
                 shot_key=shot.get("shot_key"),
                 captured_at_utc=shot.get("captured_at_utc"),
+                session_completed_at_utc=session.get("ended_at_utc"),
+                session_exported_at_utc=session.get("exported_at_utc"),
+                session_ended_at_utc=session.get("ended_at_utc"),
                 is_flagged=bool(shot.get("is_flagged")),
                 is_resolved_in_session=bool(shot.get("is_resolved_in_session")),
             )
@@ -412,6 +419,11 @@ def current_media_items(validation: dict[str, Any]) -> list[MediaItem]:
 
 def previous_media_items(validation: dict[str, Any], client: SupabaseReadClient) -> list[MediaItem]:
     result = []
+    comparison_by_previous_id = {
+        str(item.get("previous_shot_id")).lower(): item
+        for item in validation.get("comparisons", {}).get("items", [])
+        if item.get("previous_shot_id")
+    }
     previous_ids = sorted(
         {
             item.get("previous_shot_id")
@@ -431,6 +443,7 @@ def previous_media_items(validation: dict[str, Any], client: SupabaseReadClient)
         if not rows:
             continue
         row = rows[0]
+        comparison = comparison_by_previous_id.get(str(shot_id).lower()) or {}
         path = row.get("storage_path")
         if not path:
             continue
@@ -447,7 +460,10 @@ def previous_media_items(validation: dict[str, Any], client: SupabaseReadClient)
                 detail_type=row.get("detail_type"),
                 angle_index=safe_int(row.get("angle_index")),
                 shot_key=row.get("shot_key"),
-                captured_at_utc=row.get("captured_at"),
+                captured_at_utc=comparison.get("previous_captured_at_utc") or row.get("captured_at"),
+                session_completed_at_utc=comparison.get("previous_session_completed_at_utc"),
+                session_exported_at_utc=comparison.get("previous_session_exported_at_utc"),
+                session_ended_at_utc=comparison.get("previous_session_ended_at_utc"),
                 is_flagged=bool(row.get("is_flagged")),
                 is_resolved_in_session=(trim(row.get("issue_status")) or "").lower() == "resolved",
             )
@@ -513,6 +529,10 @@ def main() -> int:
                     "source_storage_bucket": item.source_bucket,
                     "source_storage_path": item.source_path,
                     "source_filename": item.source_filename,
+                    "captured_at_utc": item.captured_at_utc,
+                    "session_completed_at_utc": item.session_completed_at_utc,
+                    "session_exported_at_utc": item.session_exported_at_utc,
+                    "session_ended_at_utc": item.session_ended_at_utc,
                     "source_sha256": source_hash,
                     "temporary_source_path": str(local_source),
                     "temporary_prepared_path": str(prepared_path),

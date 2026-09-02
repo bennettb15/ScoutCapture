@@ -30,6 +30,8 @@ assert data["reports"]["flagged_comparison"]["generator_method"] == "generateFla
 assert data["reports"]["flagged_comparison"]["current_flagged_or_resolved_count"] == 1
 item = data["comparisons"]["items"][0]
 assert item["previous_shot_id"] == "50000000-0000-0000-0000-000000000099"
+assert item["previous_session_completed_at_utc"] == "2026-07-20T15:00:00Z"
+assert item["previous_captured_at_utc"] == "2026-07-20T14:22:00Z"
 assert item["previous_media_exists"] is True
 assert data["media"]["missing_count"] == 0
 assert not data["gaps"], data["gaps"]
