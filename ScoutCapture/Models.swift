@@ -1978,6 +1978,7 @@ struct Observation: Codable, Identifiable, Equatable {
     var targetElevation: String?
     var detailType: String?
     var priority: String?
+    var trade: String?
     var currentReason: String?
     var previousReason: String?
     var historyEvents: [ObservationHistoryEvent]
@@ -2003,6 +2004,7 @@ struct Observation: Codable, Identifiable, Equatable {
         targetElevation: String? = nil,
         detailType: String? = nil,
         priority: String? = nil,
+        trade: String? = nil,
         currentReason: String? = nil,
         previousReason: String? = nil,
         historyEvents: [ObservationHistoryEvent] = [],
@@ -2027,6 +2029,7 @@ struct Observation: Codable, Identifiable, Equatable {
         self.targetElevation = targetElevation
         self.detailType = detailType
         self.priority = Observation.normalizedPriority(priority)
+        self.trade = Observation.trimmedNonEmpty(trade)
         self.currentReason = Observation.trimmedNonEmpty(currentReason)
         self.previousReason = Observation.trimmedNonEmpty(previousReason)
         self.historyEvents = historyEvents.sorted { $0.timestamp < $1.timestamp }
@@ -2053,6 +2056,7 @@ struct Observation: Codable, Identifiable, Equatable {
         case targetElevation
         case detailType
         case priority
+        case trade
         case currentReason
         case previousReason
         case historyEvents
@@ -2080,6 +2084,7 @@ struct Observation: Codable, Identifiable, Equatable {
         targetElevation = CanonicalElevation.normalize(try c.decodeIfPresent(String.self, forKey: .targetElevation))
         detailType = try c.decodeIfPresent(String.self, forKey: .detailType)
         priority = Observation.normalizedPriority(try c.decodeIfPresent(String.self, forKey: .priority))
+        trade = Observation.trimmedNonEmpty(try c.decodeIfPresent(String.self, forKey: .trade))
         let decodedNote = try c.decodeIfPresent(String.self, forKey: .note)
         currentReason = Observation.trimmedNonEmpty(
             try c.decodeIfPresent(String.self, forKey: .currentReason)
@@ -2116,6 +2121,7 @@ struct Observation: Codable, Identifiable, Equatable {
         try c.encodeIfPresent(CanonicalElevation.normalize(targetElevation), forKey: .targetElevation)
         try c.encodeIfPresent(detailType, forKey: .detailType)
         try c.encodeIfPresent(Observation.normalizedPriority(priority), forKey: .priority)
+        try c.encodeIfPresent(Observation.trimmedNonEmpty(trade), forKey: .trade)
         try c.encodeIfPresent(Observation.trimmedNonEmpty(currentReason), forKey: .currentReason)
         try c.encodeIfPresent(Observation.trimmedNonEmpty(previousReason), forKey: .previousReason)
         try c.encode(historyEvents.sorted { $0.timestamp < $1.timestamp }, forKey: .historyEvents)
@@ -2193,6 +2199,55 @@ struct Observation: Codable, Identifiable, Equatable {
             }
         })
         return events.sorted { $0.timestamp < $1.timestamp }
+    }
+}
+
+struct PortalPunchlistOperationalOverlay: Equatable {
+    let issueID: UUID?
+    let propertyID: UUID
+    let status: Observation.Status?
+    let priority: String?
+    let trade: String?
+    let updatedAt: Date?
+    let shotID: UUID?
+    let building: String?
+    let targetElevation: String?
+    let detailType: String?
+    let angleIndex: Int?
+    let shotKey: String?
+
+    init(
+        issueID: UUID?,
+        propertyID: UUID,
+        status: Observation.Status? = .active,
+        priority: String? = nil,
+        trade: String? = nil,
+        updatedAt: Date? = nil,
+        shotID: UUID? = nil,
+        building: String? = nil,
+        targetElevation: String? = nil,
+        detailType: String? = nil,
+        angleIndex: Int? = nil,
+        shotKey: String? = nil
+    ) {
+        self.issueID = issueID
+        self.propertyID = propertyID
+        self.status = status
+        self.priority = Observation.normalizedPortalOverlayPriority(priority)
+        self.trade = Observation.trimmedNonEmpty(trade)
+        self.updatedAt = updatedAt
+        self.shotID = shotID
+        self.building = Observation.trimmedNonEmpty(building)
+        self.targetElevation = CanonicalElevation.normalize(targetElevation)
+        self.detailType = Observation.trimmedNonEmpty(detailType)
+        self.angleIndex = angleIndex.map { max(1, $0) }
+        self.shotKey = Observation.trimmedNonEmpty(shotKey)
+    }
+}
+
+extension Observation {
+    static func normalizedPortalOverlayPriority(_ value: String?) -> String? {
+        normalizedPriority(value)
     }
 }
 

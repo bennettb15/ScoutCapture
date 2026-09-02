@@ -10489,6 +10489,7 @@ extension ContentView {
             targetElevation: elevationValue,
             detailType: detailTypeValue,
             priority: normalizedPriority,
+            trade: selectedTrade,
             currentReason: reason,
             historyEvents: [
                 ObservationHistoryEvent(
@@ -14296,7 +14297,7 @@ extension ContentView {
         armedIssueNoteText = Self.observationCurrentReasonText(observation) ?? ""
         detailNote = armedIssueNoteText
         selectedPriority = Self.flaggedPriorityOrDefault(observation.priority)
-        selectedTrade = latestTradeForIssue(propertyID: propertyID, issueID: observation.id) ?? ""
+        selectedTrade = observation.trade ?? latestTradeForIssue(propertyID: propertyID, issueID: observation.id) ?? ""
         isArmedIssueDetailNoteReadOnly = true
         if let referencePath = flaggedReferencePathByID[observation.id],
            !referencePath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -14489,6 +14490,13 @@ extension ContentView {
                 updated.priority = Self.normalizedPriority(revisedPriority)
             } else if updated.priority?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true {
                 updated.priority = Self.flaggedPriorityOrDefault(selectedPriority)
+            }
+            if let revisedTrade {
+                let trade = revisedTrade.trimmingCharacters(in: .whitespacesAndNewlines)
+                updated.trade = trade.isEmpty ? nil : trade
+            } else if updated.trade?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true {
+                let selectedTrade = selectedTrade.trimmingCharacters(in: .whitespacesAndNewlines)
+                updated.trade = selectedTrade.isEmpty ? nil : selectedTrade
             }
             appendObservationHistoryEvent(
                 ObservationHistoryEvent(
@@ -14965,7 +14973,7 @@ extension ContentView {
         armedIssueNoteText = Self.observationCurrentReasonText(observation) ?? ""
         detailNote = armedIssueNoteText
         selectedPriority = Self.flaggedPriorityOrDefault(observation.priority)
-        selectedTrade = latestTradeForIssue(propertyID: observation.propertyID, issueID: observation.id) ?? ""
+        selectedTrade = observation.trade ?? latestTradeForIssue(propertyID: observation.propertyID, issueID: observation.id) ?? ""
         isArmedIssueDetailNoteReadOnly = true
         if let resolvedFlaggedPath = flaggedResolvedThumbnailPathByID[observation.id],
            !resolvedFlaggedPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {

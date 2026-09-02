@@ -708,6 +708,15 @@ final class LocalStore {
         let reason: String
     }
 
+    struct PortalPunchlistOperationalOverlayApplyResult: Equatable {
+        let appliedCount: Int
+        let skippedNoMatchCount: Int
+        let skippedAmbiguousCount: Int
+        let skippedResolvedCount: Int
+
+        var didApply: Bool { appliedCount > 0 }
+    }
+
     private let fileManager: FileManager
     private let encoder: JSONEncoder
     private let decoder: JSONDecoder
@@ -2425,6 +2434,111 @@ final class LocalStore {
         observations.removeAll { $0.id == id }
         try writeObservations(observations, propertyID: propertyID)
         NotificationCenter.default.post(name: .scoutPersistentDataDidChange, object: nil)
+    }
+
+    @discardableResult
+    func applyPortalPunchlistOperationalOverlays(
+        propertyID: UUID,
+        overlays: [PortalPunchlistOperationalOverlay]
+    ) throws -> PortalPunchlistOperationalOverlayApplyResult {
+        try ensurePropertyExists(propertyID)
+        guard !overlays.isEmpty else {
+            return PortalPunchlistOperationalOverlayApplyResult(
+                appliedCount: 0,
+                skippedNoMatchCount: 0,
+                skippedAmbiguousCount: 0,
+                skippedResolvedCount: 0
+            )
+        }
+
+        var observations = try readObservations(propertyID: propertyID)
+        let sessionMetadata = sessionMetadataByIDForOperationalOverlay(propertyID: propertyID)
+        var observationIndexByID = Dictionary(uniqueKeysWithValues: observations.enumerated().map { ($0.element.id, $0.offset) })
+        let locationIndex = portalPunchlistLocationIndex(
+            observations: observations,
+            sessionMetadata: sessionMetadata
+        )
+
+        var appliedCount = 0
+        var skippedNoMatchCount = 0
+        var skippedAmbiguousCount = 0
+        var skippedResolvedCount = 0
+
+        for overlay in overlays {
+            guard overlay.propertyID == propertyID,
+                  overlay.priority != nil || overlay.trade != nil else {
+                continue
+            }
+            guard overlay.status != .resolved else {
+                skippedResolvedCount += 1
+                continue
+            }
+
+            let matchIndex: Int?
+            if let issueID = overlay.issueID {
+                matchIndex = observationIndexByID[issueID]
+            } else if let key = portalPunchlistLocationKey(
+                building: overlay.building,
+                elevation: overlay.targetElevation,
+                detailType: overlay.detailType,
+                angleIndex: overlay.angleIndex,
+                shotKey: overlay.shotKey
+            ) {
+                let matches = Array(locationIndex[key] ?? [])
+                    .compactMap { observationIndexByID[$0] }
+                    .sorted()
+                if matches.count == 1 {
+                    matchIndex = matches[0]
+                } else if matches.count > 1 {
+                    skippedAmbiguousCount += 1
+                    print(
+                        "[PortalPunchlistOverlay] propertyID=\(propertyID.uuidString) " +
+                        "result=skipped reason=ambiguous_location_match key=\(key) matches=\(matches.count)"
+                    )
+                    continue
+                } else {
+                    matchIndex = nil
+                }
+            } else {
+                matchIndex = nil
+            }
+
+            guard let index = matchIndex else {
+                skippedNoMatchCount += 1
+                continue
+            }
+            guard observations[index].status == .active else {
+                skippedResolvedCount += 1
+                continue
+            }
+
+            let before = observations[index]
+            if let priority = overlay.priority {
+                observations[index].priority = priority
+            }
+            if let trade = overlay.trade {
+                observations[index].trade = trade
+            }
+            if let updatedAt = overlay.updatedAt, updatedAt > observations[index].updatedAt {
+                observations[index].updatedAt = updatedAt
+            }
+            if observations[index] != before {
+                observationIndexByID[observations[index].id] = index
+                appliedCount += 1
+            }
+        }
+
+        if appliedCount > 0 {
+            try writeObservations(observations, propertyID: propertyID)
+            NotificationCenter.default.post(name: .scoutPersistentDataDidChange, object: nil)
+        }
+
+        return PortalPunchlistOperationalOverlayApplyResult(
+            appliedCount: appliedCount,
+            skippedNoMatchCount: skippedNoMatchCount,
+            skippedAmbiguousCount: skippedAmbiguousCount,
+            skippedResolvedCount: skippedResolvedCount
+        )
     }
 
     // MARK: - Guided Shots CRUD (per-property)
@@ -4454,6 +4568,7 @@ final class LocalStore {
                 targetElevation: latestMetaShot?.elevation,
                 detailType: latestMetaShot?.detailType,
                 priority: latestMetaShot?.priority,
+                trade: latestMetaShot?.trade,
                 currentReason: trimmedNonEmpty(issue.currentReason) ?? trimmedNonEmpty(issue.detailNote),
                 previousReason: trimmedNonEmpty(issue.previousReason),
                 historyEvents: [],
@@ -4587,6 +4702,7 @@ final class LocalStore {
                 next.targetElevation = latestShot?.elevation ?? next.targetElevation
                 next.detailType = latestShot?.detailType ?? next.detailType
                 next.priority = latestShot?.priority ?? next.priority
+                next.trade = latestShot?.trade ?? next.trade
                 next.currentReason = trimmedNonEmpty(issue?.currentReason) ?? trimmedNonEmpty(issue?.detailNote) ?? trimmedNonEmpty(latestShot?.noteText)
                 next.previousReason = trimmedNonEmpty(issue?.previousReason)
                 next.note = trimmedNonEmpty(issue?.detailNote)
@@ -4618,6 +4734,78 @@ final class LocalStore {
     }
 
     // MARK: - Private Helpers
+
+    private func sessionMetadataByIDForOperationalOverlay(propertyID: UUID) -> [UUID: SessionMetadata] {
+        let sessions = (try? readSessions(propertyID: propertyID)) ?? []
+        return sessions.reduce(into: [UUID: SessionMetadata]()) { partial, session in
+            guard let metadata = try? readOrRecoverSessionMetadata(propertyID: propertyID, sessionID: session.id) else {
+                return
+            }
+            partial[session.id] = metadata
+        }
+    }
+
+    private func portalPunchlistLocationIndex(
+        observations: [Observation],
+        sessionMetadata: [UUID: SessionMetadata]
+    ) -> [String: Set<UUID>] {
+        var index: [String: Set<UUID>] = [:]
+        for observation in observations where observation.status == .active {
+            let shotIDs = Set(([observation.linkedShotID].compactMap { $0 }) + observation.shots.map(\.id))
+            var keys = Set<String>()
+            for metadata in sessionMetadata.values {
+                for shot in metadata.shots {
+                    guard shot.issueID == observation.id || shotIDs.contains(shot.shotID) else { continue }
+                    if let key = portalPunchlistLocationKey(
+                        building: shot.building,
+                        elevation: shot.elevation,
+                        detailType: shot.detailType,
+                        angleIndex: shot.angleIndex,
+                        shotKey: shot.shotKey
+                    ) {
+                        keys.insert(key)
+                    }
+                }
+            }
+            if let key = portalPunchlistLocationKey(
+                building: observation.building,
+                elevation: observation.targetElevation,
+                detailType: observation.detailType,
+                angleIndex: 1,
+                shotKey: nil
+            ) {
+                keys.insert(key)
+            }
+            for key in keys {
+                index[key, default: []].insert(observation.id)
+            }
+        }
+        return index
+    }
+
+    private func portalPunchlistLocationKey(
+        building: String?,
+        elevation: String?,
+        detailType: String?,
+        angleIndex: Int?,
+        shotKey: String?
+    ) -> String? {
+        if let shotKey = trimmedNonEmpty(shotKey)?.lowercased() {
+            return shotKey
+        }
+        guard let building = trimmedNonEmpty(building),
+              let elevation = CanonicalElevation.normalize(elevation),
+              let detailType = trimmedNonEmpty(detailType),
+              let angleIndex else {
+            return nil
+        }
+        return ShotMetadata.makeShotKey(
+            building: building,
+            elevation: elevation,
+            detailType: detailType,
+            angleIndex: max(1, angleIndex)
+        ).lowercased()
+    }
 
     private func createStorageDirectories(baseDirectoryURL: URL) throws {
         if !fileManager.fileExists(atPath: baseDirectoryURL.path) {

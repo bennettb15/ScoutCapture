@@ -6695,6 +6695,8 @@ final class AppState: ObservableObject {
         let shotID: UUID?
         let updateType: String?
         let status: String?
+        let priority: String?
+        let trade: String?
         let updatedAt: Date?
         let deletedAt: Date?
 
@@ -6707,6 +6709,32 @@ final class AppState: ObservableObject {
             case shotID = "shot_id"
             case updateType = "update_type"
             case status
+            case priority
+            case trade
+            case updatedAt = "updated_at"
+            case deletedAt = "deleted_at"
+        }
+    }
+
+    private struct RemotePortalPunchlistObservationRecord: Decodable {
+        let id: UUID
+        let propertyID: UUID?
+        let sessionID: UUID?
+        let shotID: UUID?
+        let status: String?
+        let priority: String?
+        let trade: String?
+        let updatedAt: Date?
+        let deletedAt: Date?
+
+        enum CodingKeys: String, CodingKey {
+            case id
+            case propertyID = "property_id"
+            case sessionID = "session_id"
+            case shotID = "shot_id"
+            case status
+            case priority
+            case trade
             case updatedAt = "updated_at"
             case deletedAt = "deleted_at"
         }
@@ -44092,6 +44120,11 @@ final class AppState: ObservableObject {
                 activeOrganizationID: activeOrganizationID
             )
             applyRemoteShotMetadataRows(remoteShots, propertyID: propertyID, sessionID: latestSession.id)
+            let overlayResult = await applyPortalPunchlistOperationalOverlaysIfAvailable(
+                propertyID: propertyID,
+                activeOrganizationID: activeOrganizationID,
+                remoteShots: remoteShots
+            )
 
             let localMetadata = try? localStore.loadSessionMetadata(propertyID: propertyID, sessionID: latestSession.id)
             let expectedShotIDs = Set(remoteShots.map(\.id))
@@ -44159,6 +44192,8 @@ final class AppState: ObservableObject {
                 "flaggedReferenceCount=\(flaggedReferenceCount) " +
                 "missingMetadataCount=\(missingMetadataCount) " +
                 "missingMediaCount=\(refreshedMissingMediaCount) " +
+                "portalOverlayApplied=\(overlayResult?.appliedCount ?? 0) " +
+                "portalOverlayAmbiguous=\(overlayResult?.skippedAmbiguousCount ?? 0) " +
                 "reason=\(reason) " +
                 "elapsedMs=\(Int(Date().timeIntervalSince(startedAt) * 1000))"
             )
@@ -44171,6 +44206,150 @@ final class AppState: ObservableObject {
             )
             return ReferenceFreshnessResult(hasPendingReferenceState: true, reason: "reference_freshness_check_failed")
         }
+    }
+
+    private func applyPortalPunchlistOperationalOverlaysIfAvailable(
+        propertyID: UUID,
+        activeOrganizationID: UUID,
+        remoteShots: [RemoteShotMetadataRecord]
+    ) async -> LocalStore.PortalPunchlistOperationalOverlayApplyResult? {
+        guard backendFeatureFlags.supabaseEnabled,
+              isOrganizationContextReady,
+              let client = supabaseClient else {
+            return nil
+        }
+        do {
+            async let observationRows: [RemotePortalPunchlistObservationRecord] = client
+                .from("observations")
+                .select("id, property_id, session_id, shot_id, status, priority, trade, updated_at, deleted_at")
+                .eq("org_id", value: activeOrganizationID.uuidString.lowercased())
+                .eq("property_id", value: propertyID.uuidString.lowercased())
+                .is("deleted_at", value: nil)
+                .limit(5_000)
+                .execute()
+                .value
+
+            async let updateRows: [RemoteObservationUpdateReplayRecord] = client
+                .from("observation_updates")
+                .select("id, org_id, property_id, observation_id, session_id, shot_id, update_type, status, priority, trade, updated_at, deleted_at")
+                .eq("org_id", value: activeOrganizationID.uuidString.lowercased())
+                .eq("property_id", value: propertyID.uuidString.lowercased())
+                .is("deleted_at", value: nil)
+                .order("updated_at", ascending: false)
+                .limit(5_000)
+                .execute()
+                .value
+
+            let overlays = Self.portalPunchlistOperationalOverlays(
+                propertyID: propertyID,
+                observations: try await observationRows,
+                updates: try await updateRows,
+                remoteShots: remoteShots
+            )
+            let result = try localStore.applyPortalPunchlistOperationalOverlays(
+                propertyID: propertyID,
+                overlays: overlays
+            )
+            if result.appliedCount > 0 ||
+                result.skippedNoMatchCount > 0 ||
+                result.skippedAmbiguousCount > 0 ||
+                result.skippedResolvedCount > 0 {
+                print(
+                    "[PortalPunchlistOverlay] propertyID=\(propertyID.uuidString) " +
+                    "overlays=\(overlays.count) applied=\(result.appliedCount) " +
+                    "noMatch=\(result.skippedNoMatchCount) ambiguous=\(result.skippedAmbiguousCount) " +
+                    "resolvedSkipped=\(result.skippedResolvedCount)"
+                )
+            }
+            return result
+        } catch {
+            recordDiagnosticsError(error)
+            print(
+                "[PortalPunchlistOverlay] propertyID=\(propertyID.uuidString) " +
+                "result=skipped reason=fetch_or_apply_failed category=\(Self.diagnosticErrorCategory(for: error).rawValue)"
+            )
+            return nil
+        }
+    }
+
+    private nonisolated static func portalPunchlistOperationalOverlays(
+        propertyID: UUID,
+        observations: [RemotePortalPunchlistObservationRecord],
+        updates: [RemoteObservationUpdateReplayRecord],
+        remoteShots: [RemoteShotMetadataRecord]
+    ) -> [PortalPunchlistOperationalOverlay] {
+        let activeObservationRows = observations.filter { row in
+            (row.propertyID == nil || row.propertyID == propertyID) &&
+            row.deletedAt == nil &&
+            normalizedObservationStatus(row.status ?? "active") == "active"
+        }
+        let activeObservationIDs = Set(activeObservationRows.map(\.id))
+        let remoteShotsByID = Dictionary(uniqueKeysWithValues: remoteShots.map { ($0.id, $0) })
+
+        var overlaysByIssueID: [UUID: PortalPunchlistOperationalOverlay] = [:]
+        for observation in activeObservationRows {
+            let shot = observation.shotID.flatMap { remoteShotsByID[$0] } ??
+                remoteShots.first(where: { $0.issueID == observation.id })
+            overlaysByIssueID[observation.id] = PortalPunchlistOperationalOverlay(
+                issueID: observation.id,
+                propertyID: propertyID,
+                status: .active,
+                priority: observation.priority,
+                trade: observation.trade,
+                updatedAt: observation.updatedAt,
+                shotID: observation.shotID,
+                building: shot?.building,
+                targetElevation: shot?.elevation,
+                detailType: shot?.detailType,
+                angleIndex: shot?.angleIndex,
+                shotKey: shot?.shotKey
+            )
+        }
+
+        for update in updates.sorted(by: portalPunchlistUpdateSortAscending) {
+            guard update.deletedAt == nil,
+                  update.propertyID == nil || update.propertyID == propertyID,
+                  normalizedObservationStatus(update.status ?? "active") == "active",
+                  let observationID = update.observationID,
+                  activeObservationIDs.contains(observationID) else {
+                continue
+            }
+            let current = overlaysByIssueID[observationID]
+            let shot = update.shotID.flatMap { remoteShotsByID[$0] } ??
+                current?.shotID.flatMap { remoteShotsByID[$0] } ??
+                remoteShots.first(where: { $0.issueID == observationID })
+            overlaysByIssueID[observationID] = PortalPunchlistOperationalOverlay(
+                issueID: observationID,
+                propertyID: propertyID,
+                status: .active,
+                priority: normalizedReplayText(update.priority) ?? current?.priority,
+                trade: normalizedReplayText(update.trade) ?? current?.trade,
+                updatedAt: update.updatedAt ?? current?.updatedAt,
+                shotID: update.shotID ?? current?.shotID,
+                building: shot?.building ?? current?.building,
+                targetElevation: shot?.elevation ?? current?.targetElevation,
+                detailType: shot?.detailType ?? current?.detailType,
+                angleIndex: shot?.angleIndex ?? current?.angleIndex,
+                shotKey: shot?.shotKey ?? current?.shotKey
+            )
+        }
+
+        return overlaysByIssueID.values.sorted {
+            if ($0.updatedAt ?? .distantPast) != ($1.updatedAt ?? .distantPast) {
+                return ($0.updatedAt ?? .distantPast) < ($1.updatedAt ?? .distantPast)
+            }
+            return ($0.issueID?.uuidString ?? "") < ($1.issueID?.uuidString ?? "")
+        }
+    }
+
+    private nonisolated static func portalPunchlistUpdateSortAscending(
+        _ lhs: RemoteObservationUpdateReplayRecord,
+        _ rhs: RemoteObservationUpdateReplayRecord
+    ) -> Bool {
+        if (lhs.updatedAt ?? .distantPast) != (rhs.updatedAt ?? .distantPast) {
+            return (lhs.updatedAt ?? .distantPast) < (rhs.updatedAt ?? .distantPast)
+        }
+        return lhs.id.uuidString < rhs.id.uuidString
     }
 
     private func fetchLatestFinalizedReferenceSession(
@@ -46828,6 +47007,11 @@ final class AppState: ObservableObject {
                     .execute()
                     .value as [RemoteShotMetadataRecord]
                 applyRemoteShotMetadataRows(rows, propertyID: propertyID, sessionID: session.id)
+                _ = await applyPortalPunchlistOperationalOverlaysIfAvailable(
+                    propertyID: propertyID,
+                    activeOrganizationID: orgID,
+                    remoteShots: rows
+                )
             } catch {
                 recordDiagnosticsError(error)
             }
