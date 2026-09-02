@@ -861,6 +861,40 @@ def body_slots(count: int, include_header: bool = False) -> list[dict[str, dict[
     return slots
 
 
+def comparison_single_photo_layout() -> tuple[dict[str, dict[str, float]], dict[str, float]]:
+    outer_margin = 18.0
+    footer_height = 82.0
+    logo_header_reserve = 34.0
+    photo_stack_vertical_offset = 28.0
+    photo_caption_gap = 10.0
+    metadata_height = 76.0
+    note_height = 14.0
+    note_bottom_padding = 10.0
+    content_top = PAGE_HEIGHT - outer_margin - logo_header_reserve - photo_stack_vertical_offset
+    content_bottom = outer_margin + footer_height - photo_stack_vertical_offset
+    slot_width = PAGE_WIDTH - (outer_margin * 2.0)
+    slot_height = content_top - content_bottom
+    caption_rect = {
+        "x": outer_margin,
+        "y": content_bottom,
+        "width": slot_width,
+        "height": metadata_height,
+    }
+    photo_rect = {
+        "x": outer_margin,
+        "y": caption_rect["y"] + metadata_height + photo_caption_gap,
+        "width": slot_width,
+        "height": slot_height - metadata_height - photo_caption_gap,
+    }
+    note_rect = {
+        "x": outer_margin,
+        "y": content_bottom + note_bottom_padding,
+        "width": slot_width,
+        "height": note_height,
+    }
+    return {"photo_available_rect": photo_rect, "caption_rect": caption_rect}, note_rect
+
+
 def index_page_plans(lines: list[dict[str, Any]], line_offset: float = 0.0) -> list[list[dict[str, Any]]]:
     if not lines:
         return []
@@ -1300,6 +1334,7 @@ def build_comparison_plan(
         previous_session_date = previous_session_date_source(item, previous_session, previous_media)
         previous_captured_date = previous_captured_date_source(item, previous_shot, previous_media)
         previous_display_date = previous_session_date or previous_captured_date
+        has_previous_photo = bool(previous_shot_id or previous_media)
         if previous_shot_id and not previous_shot and not previous_display_date:
             comparison_warnings.append("previous_comparison_metadata_unavailable_in_local_validation_lookup")
         previous_visual_state = (
@@ -1341,6 +1376,7 @@ def build_comparison_plan(
                     "missing_reason": None if previous_media else ("IMAGE UNAVAILABLE" if previous_shot_id else "NO PREVIOUS SESSION IMAGE"),
                 },
                 "source_selection": item,
+                "has_previous_photo": has_previous_photo,
             }
         )
     if not entries:
@@ -1379,9 +1415,16 @@ def build_comparison_plan(
         number += 1
     for entry in entries:
         slots = []
-        for role_name in ["current", "previous"]:
+        has_previous_photo = entry.get("has_previous_photo", True)
+        role_names = ["current", "previous"] if has_previous_photo else ["current"]
+        single_slot: dict[str, dict[str, float]] | None = None
+        note_rect: dict[str, float] | None = None
+        if not has_previous_photo:
+            single_slot, note_rect = comparison_single_photo_layout()
+        two_up_slots = body_slots(2)
+        for index, role_name in enumerate(role_names):
             item = entry[role_name]
-            base = body_slots(2)[0 if role_name == "current" else 1]
+            base = single_slot if single_slot is not None else two_up_slots[index]
             media = item.get("media")
             fitted = aspect_fit_rect(image_size_from_media(media), base["photo_available_rect"]) if image_size_from_media(media) else None
             slots.append(
@@ -1393,7 +1436,11 @@ def build_comparison_plan(
                     "placeholder_reason": item.get("missing_reason") or ("IMAGE UNAVAILABLE" if not media else None),
                 }
             )
-        pages.append({"number": number, "kind": "comparison_photo", "slots": slots})
+        page = {"number": number, "kind": "comparison_photo", "slots": slots}
+        if not has_previous_photo:
+            page["comparison_note"] = "No previous session photo available"
+            page["comparison_note_rect"] = note_rect
+        pages.append(page)
         number += 1
     if comparison_warnings:
         weather = {**weather, "warnings": sorted(set(list(weather.get("warnings") or []) + comparison_warnings))}
@@ -2010,6 +2057,10 @@ def draw_comparison_page(c: canvas.Canvas, plan: dict[str, Any], page: dict[str,
             session_y = top_y - 14
         label = "Current Session" if slot["role"] == "current" else "Previous Session"
         draw_text(c, f"{label}: {entry.get('captured_at_display') or 'Unknown'}", {"x": slot["caption_rect"]["x"], "y": session_y, "width": slot["caption_rect"]["width"], "height": 14}, size=10, align="center")
+    note = trim(page.get("comparison_note"))
+    note_rect = page.get("comparison_note_rect")
+    if note and isinstance(note_rect, dict):
+        draw_text(c, note, note_rect, size=10, fill=Color(0.35, 0.35, 0.35, 1), align="center")
     draw_footer(c, page["number"], plan["session"]["property_address"])
 
 

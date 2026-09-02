@@ -18,17 +18,22 @@ image_path = root / "comparison.jpg"
 Image.new("RGB", (1200, 800), (150, 170, 190)).save(image_path, "JPEG", quality=90)
 image_hash = hashlib.sha256(image_path.read_bytes()).hexdigest()
 
-def validation(path: Path, include_previous_dates: bool) -> None:
+def validation(path: Path, previous_mode: str) -> None:
     comparison = {
         "current_shot_id": "current-shot",
-        "previous_shot_id": "previous-shot",
-        "previous_session_id": "previous-session",
-        "previous_media_exists": True,
-        "selected_match": True,
-        "candidate_count": 1,
+        "previous_media_exists": previous_mode != "none",
+        "selected_match": previous_mode != "none",
+        "candidate_count": 0 if previous_mode == "none" else 1,
         "source": "fixture",
     }
-    if include_previous_dates:
+    if previous_mode != "none":
+        comparison.update(
+            {
+                "previous_shot_id": "previous-shot",
+                "previous_session_id": "previous-session",
+            }
+        )
+    if previous_mode == "with_date":
         comparison.update(
             {
                 "previous_session_completed_at_utc": "2026-08-18T21:30:00Z",
@@ -93,8 +98,9 @@ prepared = {
     ],
 }
 
-validation(root / "with_previous_session_date.json", True)
-validation(root / "without_previous_session_date.json", False)
+validation(root / "with_previous_session_date.json", "with_date")
+validation(root / "without_previous_session_date.json", "unknown_date")
+validation(root / "no_previous_photo.json", "none")
 (root / "prepared.json").write_text(json.dumps(prepared, sort_keys=True, indent=2) + "\n", encoding="utf-8")
 PY
 
@@ -116,6 +122,15 @@ PY
   --logo-svg "$ROOT/web-contract/report-production/assets/ScoutOnlyLogo.svg" \
   --pretty >/dev/null
 
+"$PY" "$ROOT/web-contract/report-renderer/report_renderer_phase2b.py" \
+  --validation-json "$OUT/no_previous_photo.json" \
+  --prepared-media-json "$OUT/prepared.json" \
+  --output-dir "$OUT/no_previous" \
+  --report comparison \
+  --logo-pdf "" \
+  --logo-svg "$ROOT/web-contract/report-production/assets/ScoutOnlyLogo.svg" \
+  --pretty >/dev/null
+
 "$PY" - "$OUT" <<'PY'
 from pathlib import Path
 from pypdf import PdfReader
@@ -125,6 +140,10 @@ import sys
 root = Path(sys.argv[1])
 with_plan = json.loads((root / "with_date" / "comparison" / "report_plan_comparison.json").read_text())
 without_plan = json.loads((root / "without_date" / "comparison" / "report_plan_comparison.json").read_text())
+no_previous_plan = json.loads((root / "no_previous" / "comparison" / "report_plan_comparison.json").read_text())
+
+def comparison_page(plan: dict) -> dict:
+    return next(page for page in plan["pages"] if page["kind"] == "comparison_photo")
 
 def previous_entry(plan: dict) -> dict:
     return next(
@@ -138,10 +157,20 @@ def previous_entry(plan: dict) -> dict:
 assert previous_entry(with_plan)["captured_at_display"] == "August 18, 2026 \u2022 5:30 PM"
 assert previous_entry(with_plan)["session_date_utc"] == "2026-08-18T21:30:00Z"
 assert previous_entry(without_plan)["captured_at_display"] == "Unknown"
+no_previous_page = comparison_page(no_previous_plan)
+assert len(no_previous_page["slots"]) == 1
+assert no_previous_page["slots"][0]["role"] == "current"
+assert no_previous_page["slots"][0]["photo_available_rect"]["height"] > 500
+assert no_previous_page.get("comparison_note") == "No previous session photo available"
 
 pdf = next((root / "with_date" / "comparison").glob("*.pdf"))
 text = "\n".join(page.extract_text() or "" for page in PdfReader(str(pdf)).pages)
 assert "Previous Session: August 18, 2026" in text
 assert "Previous Session: Unknown" not in text
+no_previous_pdf = next((root / "no_previous" / "comparison").glob("*.pdf"))
+no_previous_text = "\n".join(page.extract_text() or "" for page in PdfReader(str(no_previous_pdf)).pages)
+assert "No previous session photo available" in no_previous_text
+assert "NO PREVIOUS SESSION IMAGE" not in no_previous_text
+assert "Previous Session:" not in no_previous_text
 print("prior-session comparison PDF date regression passed")
 PY
