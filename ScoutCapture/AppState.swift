@@ -6740,6 +6740,28 @@ final class AppState: ObservableObject {
         }
     }
 
+    private struct RemotePortalPunchlistActivityRecord: Decodable {
+        let id: UUID
+        let propertyID: UUID?
+        let observationID: UUID?
+        let shotID: UUID?
+        let activityType: String?
+        let toValue: String?
+        let createdAt: Date?
+        let deletedAt: Date?
+
+        enum CodingKeys: String, CodingKey {
+            case id
+            case propertyID = "property_id"
+            case observationID = "observation_id"
+            case shotID = "shot_id"
+            case activityType = "activity_type"
+            case toValue = "to_value"
+            case createdAt = "created_at"
+            case deletedAt = "deleted_at"
+        }
+    }
+
     private struct SupabaseRowUpdatedAtRecord: Decodable {
         let id: UUID
         let updatedAt: Date
@@ -44106,9 +44128,17 @@ final class AppState: ObservableObject {
                 propertyID: propertyID,
                 activeOrganizationID: activeOrganizationID
             ) else {
+                let overlayResult = await applyPortalPunchlistOperationalOverlaysIfAvailable(
+                    propertyID: propertyID,
+                    activeOrganizationID: activeOrganizationID,
+                    remoteShots: []
+                )
                 print(
                     "[ReferenceFreshness] propertyID=\(propertyID.uuidString) " +
-                    "latestFinalizedSessionID=NONE reason=no_finalized_remote_session"
+                    "latestFinalizedSessionID=NONE " +
+                    "portalOverlayApplied=\(overlayResult?.appliedCount ?? 0) " +
+                    "portalOverlayAmbiguous=\(overlayResult?.skippedAmbiguousCount ?? 0) " +
+                    "reason=no_finalized_remote_session"
                 )
                 return ReferenceFreshnessResult(hasPendingReferenceState: false, reason: "no_finalized_reference_session")
             }
@@ -44240,10 +44270,30 @@ final class AppState: ObservableObject {
                 .execute()
                 .value
 
+            async let activityRows: [RemotePortalPunchlistActivityRecord] = client
+                .from("punchlist_activity")
+                .select("id, property_id, observation_id, shot_id, activity_type, to_value, created_at, deleted_at")
+                .eq("org_id", value: activeOrganizationID.uuidString.lowercased())
+                .eq("property_id", value: propertyID.uuidString.lowercased())
+                .is("deleted_at", value: nil)
+                .in("activity_type", values: [
+                    "priority_changed",
+                    "trade_changed",
+                    "status_changed",
+                    "completion_submitted",
+                    "completion_approved",
+                    "completion_rejected"
+                ])
+                .order("created_at", ascending: false)
+                .limit(5_000)
+                .execute()
+                .value
+
             let overlays = Self.portalPunchlistOperationalOverlays(
                 propertyID: propertyID,
                 observations: try await observationRows,
                 updates: try await updateRows,
+                activities: try await activityRows,
                 remoteShots: remoteShots
             )
             let result = try localStore.applyPortalPunchlistOperationalOverlays(
@@ -44276,6 +44326,7 @@ final class AppState: ObservableObject {
         propertyID: UUID,
         observations: [RemotePortalPunchlistObservationRecord],
         updates: [RemoteObservationUpdateReplayRecord],
+        activities: [RemotePortalPunchlistActivityRecord],
         remoteShots: [RemoteShotMetadataRecord]
     ) -> [PortalPunchlistOperationalOverlay] {
         let activeObservationRows = observations.filter { row in
@@ -44334,6 +44385,60 @@ final class AppState: ObservableObject {
             )
         }
 
+        for activity in activities.sorted(by: portalPunchlistActivitySortAscending) {
+            guard activity.deletedAt == nil,
+                  activity.propertyID == nil || activity.propertyID == propertyID,
+                  let observationID = activity.observationID,
+                  activeObservationIDs.contains(observationID) else {
+                continue
+            }
+            let current = overlaysByIssueID[observationID]
+            let shot = activity.shotID.flatMap { remoteShotsByID[$0] } ??
+                current?.shotID.flatMap { remoteShotsByID[$0] } ??
+                remoteShots.first(where: { $0.issueID == observationID })
+            let nextPriority: String?
+            let nextTrade: String?
+            let nextStatus: Observation.Status?
+            switch normalizedReplayText(activity.activityType)?.lowercased() {
+            case "priority_changed":
+                nextPriority = normalizedReplayText(activity.toValue) ?? current?.priority
+                nextTrade = current?.trade
+                nextStatus = current?.status
+            case "trade_changed":
+                nextPriority = current?.priority
+                nextTrade = normalizedReplayText(activity.toValue) ?? current?.trade
+                nextStatus = current?.status
+            case "status_changed":
+                nextPriority = current?.priority
+                nextTrade = current?.trade
+                nextStatus = normalizedObservationStatus(activity.toValue ?? "active") == "active" ? .active : .resolved
+            case "completion_rejected":
+                nextPriority = current?.priority
+                nextTrade = current?.trade
+                nextStatus = .active
+            case "completion_submitted", "completion_approved":
+                nextPriority = current?.priority
+                nextTrade = current?.trade
+                nextStatus = .resolved
+            default:
+                continue
+            }
+            overlaysByIssueID[observationID] = PortalPunchlistOperationalOverlay(
+                issueID: observationID,
+                propertyID: propertyID,
+                status: nextStatus ?? current?.status ?? .active,
+                priority: nextPriority,
+                trade: nextTrade,
+                updatedAt: activity.createdAt ?? current?.updatedAt,
+                shotID: activity.shotID ?? current?.shotID,
+                building: shot?.building ?? current?.building,
+                targetElevation: shot?.elevation ?? current?.targetElevation,
+                detailType: shot?.detailType ?? current?.detailType,
+                angleIndex: shot?.angleIndex ?? current?.angleIndex,
+                shotKey: shot?.shotKey ?? current?.shotKey
+            )
+        }
+
         return overlaysByIssueID.values.sorted {
             if ($0.updatedAt ?? .distantPast) != ($1.updatedAt ?? .distantPast) {
                 return ($0.updatedAt ?? .distantPast) < ($1.updatedAt ?? .distantPast)
@@ -44350,6 +44455,56 @@ final class AppState: ObservableObject {
             return (lhs.updatedAt ?? .distantPast) < (rhs.updatedAt ?? .distantPast)
         }
         return lhs.id.uuidString < rhs.id.uuidString
+    }
+
+    private nonisolated static func portalPunchlistActivitySortAscending(
+        _ lhs: RemotePortalPunchlistActivityRecord,
+        _ rhs: RemotePortalPunchlistActivityRecord
+    ) -> Bool {
+        if (lhs.createdAt ?? .distantPast) != (rhs.createdAt ?? .distantPast) {
+            return (lhs.createdAt ?? .distantPast) < (rhs.createdAt ?? .distantPast)
+        }
+        return lhs.id.uuidString < rhs.id.uuidString
+    }
+
+    nonisolated static func portalPunchlistOperationalOverlaysTestOnly(
+        propertyID: UUID,
+        observationID: UUID,
+        observationStatus: String? = "active",
+        observationPriority: String? = nil,
+        observationTrade: String? = nil,
+        activityRows: [(activityType: String, toValue: String?, createdAt: Date)]
+    ) -> [PortalPunchlistOperationalOverlay] {
+        portalPunchlistOperationalOverlays(
+            propertyID: propertyID,
+            observations: [
+                RemotePortalPunchlistObservationRecord(
+                    id: observationID,
+                    propertyID: propertyID,
+                    sessionID: nil,
+                    shotID: nil,
+                    status: observationStatus,
+                    priority: observationPriority,
+                    trade: observationTrade,
+                    updatedAt: nil,
+                    deletedAt: nil
+                )
+            ],
+            updates: [],
+            activities: activityRows.map { row in
+                RemotePortalPunchlistActivityRecord(
+                    id: UUID(),
+                    propertyID: propertyID,
+                    observationID: observationID,
+                    shotID: nil,
+                    activityType: row.activityType,
+                    toValue: row.toValue,
+                    createdAt: row.createdAt,
+                    deletedAt: nil
+                )
+            },
+            remoteShots: []
+        )
     }
 
     private func fetchLatestFinalizedReferenceSession(

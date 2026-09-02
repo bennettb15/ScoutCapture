@@ -66,6 +66,45 @@ final class ClientPortalPriorityTradeSyncTests: XCTestCase {
         XCTAssertEqual(updated.trade, "Paint")
     }
 
+    func testWebsitePunchlistActivityCriticalPriorityOverridesObservationPriority() throws {
+        let propertyID = UUID()
+        let issueID = UUID()
+
+        let overlays = AppState.portalPunchlistOperationalOverlaysTestOnly(
+            propertyID: propertyID,
+            observationID: issueID,
+            observationPriority: "High",
+            observationTrade: "paint",
+            activityRows: [
+                (activityType: "priority_changed", toValue: "critical", createdAt: newer)
+            ]
+        )
+
+        let overlay = try XCTUnwrap(overlays.first)
+        XCTAssertEqual(overlay.issueID, issueID)
+        XCTAssertEqual(overlay.priority, "Critical")
+        XCTAssertEqual(overlay.trade, "paint")
+    }
+
+    func testWebsitePunchlistActivityHighPriorityCanReplaceCritical() throws {
+        let propertyID = UUID()
+        let issueID = UUID()
+
+        let overlays = AppState.portalPunchlistOperationalOverlaysTestOnly(
+            propertyID: propertyID,
+            observationID: issueID,
+            observationPriority: "Critical",
+            observationTrade: "paint",
+            activityRows: [
+                (activityType: "priority_changed", toValue: "critical", createdAt: older),
+                (activityType: "priority_changed", toValue: "high", createdAt: newer)
+            ]
+        )
+
+        let overlay = try XCTUnwrap(overlays.first)
+        XCTAssertEqual(overlay.priority, "High")
+    }
+
     func testPortalTradeChangeSyncsIntoFutureActiveIssue() throws {
         let fixture = try makeStore()
         let issueID = UUID()
@@ -89,6 +128,25 @@ final class ClientPortalPriorityTradeSyncTests: XCTestCase {
         XCTAssertEqual(result.appliedCount, 1)
         XCTAssertEqual(updated.priority, "Medium")
         XCTAssertEqual(updated.trade, "Electrical")
+    }
+
+    func testWebsitePunchlistActivityTradeOverridesObservationTrade() throws {
+        let propertyID = UUID()
+        let issueID = UUID()
+
+        let overlays = AppState.portalPunchlistOperationalOverlaysTestOnly(
+            propertyID: propertyID,
+            observationID: issueID,
+            observationPriority: "Medium",
+            observationTrade: "paint",
+            activityRows: [
+                (activityType: "trade_changed", toValue: "electrical", createdAt: newer)
+            ]
+        )
+
+        let overlay = try XCTUnwrap(overlays.first)
+        XCTAssertEqual(overlay.priority, "Medium")
+        XCTAssertEqual(overlay.trade, "electrical")
     }
 
     func testNoPortalOverrideKeepsScoutCaptureOriginalValues() throws {
@@ -142,6 +200,35 @@ final class ClientPortalPriorityTradeSyncTests: XCTestCase {
         XCTAssertEqual(updated.status, .resolved)
         XCTAssertEqual(updated.priority, "Medium")
         XCTAssertEqual(updated.trade, "Paint")
+    }
+
+    func testWebsitePunchlistActivityResolvedStatusPreventsPriorityOverlayApply() throws {
+        let fixture = try makeStore()
+        let issueID = UUID()
+        _ = try fixture.store.createObservation(
+            makeObservation(id: issueID, propertyID: fixture.property.id, priority: "High", trade: "Paint")
+        )
+        let overlays = AppState.portalPunchlistOperationalOverlaysTestOnly(
+            propertyID: fixture.property.id,
+            observationID: issueID,
+            observationPriority: "High",
+            observationTrade: "Paint",
+            activityRows: [
+                (activityType: "priority_changed", toValue: "critical", createdAt: older),
+                (activityType: "status_changed", toValue: "resolved", createdAt: newer)
+            ]
+        )
+
+        let result = try fixture.store.applyPortalPunchlistOperationalOverlays(
+            propertyID: fixture.property.id,
+            overlays: overlays
+        )
+
+        let updated = try XCTUnwrap(try fixture.store.fetchObservations(propertyID: fixture.property.id).first)
+        XCTAssertEqual(result.appliedCount, 0)
+        XCTAssertEqual(result.skippedResolvedCount, 1)
+        XCTAssertEqual(updated.status, .active)
+        XCTAssertEqual(updated.priority, "High")
     }
 
     func testMissingIssueIDMatchesStableLocationIdentity() throws {
