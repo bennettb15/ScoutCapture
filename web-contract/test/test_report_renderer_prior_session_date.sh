@@ -158,10 +158,17 @@ assert previous_entry(with_plan)["captured_at_display"] == "August 18, 2026 \u20
 assert previous_entry(with_plan)["session_date_utc"] == "2026-08-18T21:30:00Z"
 assert previous_entry(without_plan)["captured_at_display"] == "Unknown"
 no_previous_page = comparison_page(no_previous_plan)
-assert len(no_previous_page["slots"]) == 1
-assert no_previous_page["slots"][0]["role"] == "current"
-assert no_previous_page["slots"][0]["photo_available_rect"]["height"] > 500
-assert no_previous_page.get("comparison_note") == "No previous session photo available"
+with_previous_page = comparison_page(with_plan)
+assert len(no_previous_page["slots"]) == 2
+assert [slot["role"] for slot in no_previous_page["slots"]] == ["current", "previous"]
+assert no_previous_page["slots"][0]["photo_available_rect"] == with_previous_page["slots"][0]["photo_available_rect"]
+assert no_previous_page["slots"][1]["photo_available_rect"] == with_previous_page["slots"][1]["photo_available_rect"]
+assert no_previous_page["slots"][1]["placeholder_reason"] == "No previous session photo available"
+assert no_previous_page["slots"][1]["image_rect"] is None
+assert "comparison_note" not in no_previous_page
+previous_rect = no_previous_page["slots"][1]["photo_available_rect"]
+current_caption_rect = no_previous_page["slots"][0]["caption_rect"]
+assert previous_rect["y"] + previous_rect["height"] <= current_caption_rect["y"]
 
 pdf = next((root / "with_date" / "comparison").glob("*.pdf"))
 text = "\n".join(page.extract_text() or "" for page in PdfReader(str(pdf)).pages)
@@ -172,5 +179,6 @@ no_previous_text = "\n".join(page.extract_text() or "" for page in PdfReader(str
 assert "No previous session photo available" in no_previous_text
 assert "NO PREVIOUS SESSION IMAGE" not in no_previous_text
 assert "Previous Session:" not in no_previous_text
+assert "Previous Session: Unknown" not in no_previous_text
 print("prior-session comparison PDF date regression passed")
 PY
