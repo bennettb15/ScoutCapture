@@ -43,6 +43,9 @@ item = phase2a.MediaItem(
     angle_index=2,
     shot_key="A2",
     captured_at_utc="2026-08-21T12:00:00Z",
+    session_completed_at_utc=None,
+    session_exported_at_utc=None,
+    session_ended_at_utc=None,
     is_flagged=True,
     is_resolved_in_session=False,
 )
@@ -68,6 +71,9 @@ stamp_text, stamp_warnings = phase2a.make_stamp_text(
         angle_index=1,
         shot_key="A1",
         captured_at_utc="2026-08-24T01:51:00Z",
+        session_completed_at_utc=None,
+        session_exported_at_utc=None,
+        session_ended_at_utc=None,
         is_flagged=False,
         is_resolved_in_session=False,
     )

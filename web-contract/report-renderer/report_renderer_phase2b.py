@@ -234,6 +234,14 @@ def display_datetime(value: Any) -> str | None:
     return f"{parsed.strftime('%B')} {parsed.day}, {parsed.year} \u2022 {parsed.strftime('%-I:%M %p')}"
 
 
+def first_parseable_date(*values: Any) -> str | None:
+    for value in values:
+        text = trim(value)
+        if text and parse_date(text):
+            return text
+    return None
+
+
 def month_year(value: Any) -> str | None:
     parsed = local_datetime(value)
     if not parsed:
@@ -853,6 +861,40 @@ def body_slots(count: int, include_header: bool = False) -> list[dict[str, dict[
     return slots
 
 
+def comparison_single_photo_layout() -> tuple[dict[str, dict[str, float]], dict[str, float]]:
+    outer_margin = 18.0
+    footer_height = 82.0
+    logo_header_reserve = 34.0
+    photo_stack_vertical_offset = 28.0
+    photo_caption_gap = 10.0
+    metadata_height = 76.0
+    note_height = 14.0
+    note_bottom_padding = 10.0
+    content_top = PAGE_HEIGHT - outer_margin - logo_header_reserve - photo_stack_vertical_offset
+    content_bottom = outer_margin + footer_height - photo_stack_vertical_offset
+    slot_width = PAGE_WIDTH - (outer_margin * 2.0)
+    slot_height = content_top - content_bottom
+    caption_rect = {
+        "x": outer_margin,
+        "y": content_bottom,
+        "width": slot_width,
+        "height": metadata_height,
+    }
+    photo_rect = {
+        "x": outer_margin,
+        "y": caption_rect["y"] + metadata_height + photo_caption_gap,
+        "width": slot_width,
+        "height": slot_height - metadata_height - photo_caption_gap,
+    }
+    note_rect = {
+        "x": outer_margin,
+        "y": content_bottom + note_bottom_padding,
+        "width": slot_width,
+        "height": note_height,
+    }
+    return {"photo_available_rect": photo_rect, "caption_rect": caption_rect}, note_rect
+
+
 def index_page_plans(lines: list[dict[str, Any]], line_offset: float = 0.0) -> list[list[dict[str, Any]]]:
     if not lines:
         return []
@@ -1012,6 +1054,7 @@ def compact_entry(entry: dict[str, Any]) -> dict[str, Any]:
         "shot_key",
         "caption",
         "captured_at_utc",
+        "session_date_utc",
         "captured_at_display",
         "flagged_reason",
         "priority",
@@ -1231,6 +1274,40 @@ def previous_shot_metadata(validation_lookup_dir: pathlib.Path | None, previous_
     return session, shot
 
 
+def previous_session_date_source(
+    item: dict[str, Any],
+    previous_session: dict[str, Any] | None,
+    previous_media: dict[str, Any] | None,
+) -> str | None:
+    session = previous_session or {}
+    media = previous_media or {}
+    return first_parseable_date(
+        item.get("previous_session_completed_at_utc"),
+        item.get("previous_session_exported_at_utc"),
+        item.get("previous_session_ended_at_utc"),
+        session.get("completed_at_utc"),
+        session.get("exported_at_utc"),
+        session.get("ended_at_utc"),
+        media.get("session_completed_at_utc"),
+        media.get("session_exported_at_utc"),
+        media.get("session_ended_at_utc"),
+    )
+
+
+def previous_captured_date_source(
+    item: dict[str, Any],
+    previous_shot: dict[str, Any] | None,
+    previous_media: dict[str, Any] | None,
+) -> str | None:
+    shot = previous_shot or {}
+    media = previous_media or {}
+    return first_parseable_date(
+        item.get("previous_captured_at_utc"),
+        shot.get("captured_at_utc"),
+        media.get("captured_at_utc"),
+    )
+
+
 def build_comparison_plan(
     validation: dict[str, Any],
     lookup: MediaLookup,
@@ -1254,9 +1331,12 @@ def build_comparison_plan(
         previous_session_id = trim(item.get("previous_session_id"))
         previous_shot_id = trim(item.get("previous_shot_id"))
         previous_session, previous_shot = previous_shot_metadata(validation_lookup_dir, previous_session_id, previous_shot_id)
-        if previous_shot_id and not previous_shot:
+        previous_session_date = previous_session_date_source(item, previous_session, previous_media)
+        previous_captured_date = previous_captured_date_source(item, previous_shot, previous_media)
+        previous_display_date = previous_session_date or previous_captured_date
+        has_previous_photo = bool(previous_shot_id or previous_media)
+        if previous_shot_id and not previous_shot and not previous_display_date:
             comparison_warnings.append("previous_comparison_metadata_unavailable_in_local_validation_lookup")
-        previous_date_source = (previous_shot or {}).get("captured_at_utc") or (previous_session or {}).get("started_at_utc")
         previous_visual_state = (
             visual_state(previous_shot)
             if previous_shot
@@ -1272,7 +1352,8 @@ def build_comparison_plan(
             "shot_key": (previous_shot or {}).get("shot_key") or current.get("shot_key"),
             "visual_state": previous_visual_state,
             "flagged_reason": (previous_shot or {}).get("flagged_reason"),
-            "captured_at_utc": previous_date_source,
+            "captured_at_utc": previous_captured_date,
+            "session_date_utc": previous_session_date,
         }
         entries.append(
             {
@@ -1290,11 +1371,12 @@ def build_comparison_plan(
                     "caption": caption_identity(previous_stub),
                     "media": previous_media,
                     "media_path": trim(previous_media.get("temporary_prepared_path")) if previous_media else None,
-                    "captured_at_display": display_datetime(previous_date_source) or ("Unknown" if previous_shot_id else "None"),
-                    "month_year": month_year(previous_date_source) or ("Unknown" if previous_shot_id else "None"),
+                    "captured_at_display": display_datetime(previous_display_date) or ("Unknown" if previous_shot_id else "None"),
+                    "month_year": month_year(previous_display_date) or ("Unknown" if previous_shot_id else "None"),
                     "missing_reason": None if previous_media else ("IMAGE UNAVAILABLE" if previous_shot_id else "NO PREVIOUS SESSION IMAGE"),
                 },
                 "source_selection": item,
+                "has_previous_photo": has_previous_photo,
             }
         )
     if not entries:
@@ -1333,9 +1415,16 @@ def build_comparison_plan(
         number += 1
     for entry in entries:
         slots = []
-        for role_name in ["current", "previous"]:
+        has_previous_photo = entry.get("has_previous_photo", True)
+        role_names = ["current", "previous"] if has_previous_photo else ["current"]
+        single_slot: dict[str, dict[str, float]] | None = None
+        note_rect: dict[str, float] | None = None
+        if not has_previous_photo:
+            single_slot, note_rect = comparison_single_photo_layout()
+        two_up_slots = body_slots(2)
+        for index, role_name in enumerate(role_names):
             item = entry[role_name]
-            base = body_slots(2)[0 if role_name == "current" else 1]
+            base = single_slot if single_slot is not None else two_up_slots[index]
             media = item.get("media")
             fitted = aspect_fit_rect(image_size_from_media(media), base["photo_available_rect"]) if image_size_from_media(media) else None
             slots.append(
@@ -1347,7 +1436,11 @@ def build_comparison_plan(
                     "placeholder_reason": item.get("missing_reason") or ("IMAGE UNAVAILABLE" if not media else None),
                 }
             )
-        pages.append({"number": number, "kind": "comparison_photo", "slots": slots})
+        page = {"number": number, "kind": "comparison_photo", "slots": slots}
+        if not has_previous_photo:
+            page["comparison_note"] = "No previous session photo available"
+            page["comparison_note_rect"] = note_rect
+        pages.append(page)
         number += 1
     if comparison_warnings:
         weather = {**weather, "warnings": sorted(set(list(weather.get("warnings") or []) + comparison_warnings))}
@@ -1964,6 +2057,10 @@ def draw_comparison_page(c: canvas.Canvas, plan: dict[str, Any], page: dict[str,
             session_y = top_y - 14
         label = "Current Session" if slot["role"] == "current" else "Previous Session"
         draw_text(c, f"{label}: {entry.get('captured_at_display') or 'Unknown'}", {"x": slot["caption_rect"]["x"], "y": session_y, "width": slot["caption_rect"]["width"], "height": 14}, size=10, align="center")
+    note = trim(page.get("comparison_note"))
+    note_rect = page.get("comparison_note_rect")
+    if note and isinstance(note_rect, dict):
+        draw_text(c, note, note_rect, size=10, fill=Color(0.35, 0.35, 0.35, 1), align="center")
     draw_footer(c, page["number"], plan["session"]["property_address"])
 
 
