@@ -828,6 +828,17 @@ def aspect_fit_rect(image_size: tuple[float, float], container: dict[str, float]
     }
 
 
+def centered_rect_like(reference: dict[str, float], container: dict[str, float]) -> dict[str, float]:
+    width = min(reference["width"], container["width"])
+    height = min(reference["height"], container["height"])
+    return {
+        "x": container["x"] + (container["width"] - width) / 2.0,
+        "y": container["y"] + (container["height"] - height) / 2.0,
+        "width": width,
+        "height": height,
+    }
+
+
 def body_slots(count: int, include_header: bool = False) -> list[dict[str, dict[str, float]]]:
     outer_margin = 18.0
     footer_height = 82.0
@@ -1384,11 +1395,18 @@ def build_comparison_plan(
     for entry in entries:
         slots = []
         two_up_slots = body_slots(2)
+        current_media = entry["current"].get("media")
+        current_image_size = image_size_from_media(current_media)
+        current_frame = aspect_fit_rect(current_image_size, two_up_slots[0]["photo_available_rect"]) if current_image_size else None
         for index, role_name in enumerate(["current", "previous"]):
             item = entry[role_name]
             base = two_up_slots[index]
             media = item.get("media")
             fitted = aspect_fit_rect(image_size_from_media(media), base["photo_available_rect"]) if image_size_from_media(media) else None
+            if role_name == "current":
+                fitted = current_frame
+            elif not entry.get("has_previous_photo") and not media and current_frame:
+                fitted = centered_rect_like(current_frame, base["photo_available_rect"])
             slots.append(
                 {
                     **base,
@@ -1700,15 +1718,19 @@ def draw_image_slot(c: canvas.Canvas, image_path: str | None, rect: dict[str, fl
     c.restoreState()
     placeholder_text = placeholder or "IMAGE UNAVAILABLE"
     if placeholder_text == "No previous session photo available":
-        draw_text(
-            c,
-            placeholder_text,
-            {"x": box["x"], "y": box["y"] + box["height"] / 2.0 - 7, "width": box["width"], "height": 14},
-            "Helvetica",
-            11,
-            fill=Color(0.35, 0.35, 0.35, 1),
-            align="center",
-        )
+        font = "Helvetica"
+        size = 11.0
+        leading = size * 1.2
+        lines = wrap_lines(placeholder_text, font, size, max(1.0, box["width"] - 24.0))
+        block_h = leading * len(lines)
+        y = box["y"] + box["height"] / 2.0 + block_h / 2.0 - size
+        c.saveState()
+        c.setFont(font, size)
+        c.setFillColor(Color(0.35, 0.35, 0.35, 1))
+        for line in lines:
+            c.drawCentredString(box["x"] + box["width"] / 2.0, y, line)
+            y -= leading
+        c.restoreState()
         return
     words = placeholder_text.replace("_", " ").replace("-", " ").upper().split()
     text = "\n".join(words)

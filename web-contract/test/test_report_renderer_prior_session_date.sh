@@ -135,6 +135,7 @@ PY
 from pathlib import Path
 from pypdf import PdfReader
 import json
+import math
 import sys
 
 root = Path(sys.argv[1])
@@ -164,11 +165,18 @@ assert [slot["role"] for slot in no_previous_page["slots"]] == ["current", "prev
 assert no_previous_page["slots"][0]["photo_available_rect"] == with_previous_page["slots"][0]["photo_available_rect"]
 assert no_previous_page["slots"][1]["photo_available_rect"] == with_previous_page["slots"][1]["photo_available_rect"]
 assert no_previous_page["slots"][1]["placeholder_reason"] == "No previous session photo available"
-assert no_previous_page["slots"][1]["image_rect"] is None
+current_frame = no_previous_page["slots"][0]["image_rect"]
+placeholder_frame = no_previous_page["slots"][1]["image_rect"]
+assert placeholder_frame is not None
+assert math.isclose(placeholder_frame["width"], current_frame["width"])
+assert math.isclose(placeholder_frame["height"], current_frame["height"])
+assert math.isclose(placeholder_frame["x"], current_frame["x"])
 assert "comparison_note" not in no_previous_page
 previous_rect = no_previous_page["slots"][1]["photo_available_rect"]
+assert placeholder_frame["width"] < previous_rect["width"]
+assert math.isclose(placeholder_frame["y"], previous_rect["y"] + (previous_rect["height"] - placeholder_frame["height"]) / 2.0)
 current_caption_rect = no_previous_page["slots"][0]["caption_rect"]
-assert previous_rect["y"] + previous_rect["height"] <= current_caption_rect["y"]
+assert placeholder_frame["y"] + placeholder_frame["height"] <= current_caption_rect["y"]
 
 pdf = next((root / "with_date" / "comparison").glob("*.pdf"))
 text = "\n".join(page.extract_text() or "" for page in PdfReader(str(pdf)).pages)
@@ -176,7 +184,8 @@ assert "Previous Session: August 18, 2026" in text
 assert "Previous Session: Unknown" not in text
 no_previous_pdf = next((root / "no_previous" / "comparison").glob("*.pdf"))
 no_previous_text = "\n".join(page.extract_text() or "" for page in PdfReader(str(no_previous_pdf)).pages)
-assert "No previous session photo available" in no_previous_text
+no_previous_text_normalized = " ".join(no_previous_text.split())
+assert "No previous session photo available" in no_previous_text_normalized
 assert "NO PREVIOUS SESSION IMAGE" not in no_previous_text
 assert "Previous Session:" not in no_previous_text
 assert "Previous Session: Unknown" not in no_previous_text
