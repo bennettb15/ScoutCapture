@@ -41,6 +41,78 @@ final class ClientPortalPriorityTradeSyncTests: XCTestCase {
         )
     }
 
+    private func makeCompletedFlaggedSessionMetadata(
+        propertyID: UUID,
+        sessionID: UUID,
+        issueID: UUID,
+        shotID: UUID = UUID(),
+        priority: String?,
+        trade: String?,
+        issueStatus: String = "active"
+    ) -> SessionMetadata {
+        let shot = ShotMetadata(
+            shotID: shotID,
+            propertyID: propertyID,
+            sessionID: sessionID,
+            createdAt: older,
+            updatedAt: older,
+            building: "B1",
+            elevation: "North",
+            detailType: "Window",
+            angleIndex: 1,
+            trade: trade,
+            priority: priority,
+            shotKey: "b1-north-window-1",
+            isGuided: false,
+            isFlagged: true,
+            issueID: issueID,
+            issueStatus: issueStatus,
+            noteText: "Cracked pane",
+            noteCategory: "general",
+            originalFilename: "flagged.jpg",
+            originalRelativePath: "Originals/flagged.jpg",
+            originalByteSize: 123,
+            stampedFilename: nil,
+            stampedRelativePath: nil,
+            captureMode: nil,
+            lens: nil,
+            exifOrientation: nil,
+            latitude: nil,
+            longitude: nil,
+            accuracyMeters: nil,
+            imageWidth: nil,
+            imageHeight: nil
+        )
+        let issue = IssueMetadata(
+            issueID: issueID,
+            issueStatus: issueStatus,
+            currentReason: "Cracked pane",
+            firstSeenAt: older,
+            lastSeenAt: older,
+            lastCaptureSessionId: sessionID,
+            detailNote: "Cracked pane",
+            shotKey: shot.shotKey
+        )
+        return SessionMetadata(
+            schemaVersion: 12,
+            propertyID: propertyID,
+            sessionID: sessionID,
+            propertyNameAtCapture: "Portal Overlay Property",
+            propertyNameAtExport: nil,
+            startedAt: older,
+            endedAt: newer,
+            status: .completed,
+            isBaselineSession: false,
+            exportedAt: newer,
+            isSealed: true,
+            appVersion: "test-app",
+            deviceModel: "test-device",
+            osVersion: "test-os",
+            shots: [shot],
+            issues: [issue]
+        )
+    }
+
     func testPortalPriorityChangeSyncsIntoFutureActiveIssue() throws {
         let fixture = try makeStore()
         let issueID = UUID()
@@ -155,6 +227,12 @@ final class ClientPortalPriorityTradeSyncTests: XCTestCase {
         XCTAssertEqual(options, ["HVAC"])
     }
 
+    func testTradeOptionsNormalizeLandscapingAndHVACCasing() {
+        let options = ContentView.canonicalTradeOptions(["landscaping", "HVAC", "hvac"])
+
+        XCTAssertEqual(options, ["Landscaping", "HVAC"])
+    }
+
     func testPortalSyncedBuiltinTradePersistsCanonicalCasing() throws {
         let fixture = try makeStore()
         let issueID = UUID()
@@ -261,6 +339,92 @@ final class ClientPortalPriorityTradeSyncTests: XCTestCase {
         let updated = try XCTUnwrap(try fixture.store.fetchObservations(propertyID: fixture.property.id).first)
         XCTAssertEqual(result.appliedCount, 1)
         XCTAssertEqual(updated.status, .active)
+        XCTAssertEqual(updated.priority, "Critical")
+        XCTAssertEqual(updated.trade, "Landscaping")
+    }
+
+    func testPortalPriorityRemainsAfterDelayedSnapshotReferenceMerge() throws {
+        let fixture = try makeStore()
+        let sessionID = UUID()
+        let issueID = UUID()
+        _ = try fixture.store.upsertSession(
+            Session(
+                id: sessionID,
+                propertyID: fixture.property.id,
+                startedAt: older,
+                status: .completed,
+                endedAt: newer,
+                exportedAt: newer,
+                isSealed: true
+            )
+        )
+        _ = try fixture.store.createObservation(
+            makeObservation(
+                id: issueID,
+                propertyID: fixture.property.id,
+                priority: "Critical",
+                trade: "Landscaping"
+            )
+        )
+        let olderSnapshotMetadata = makeCompletedFlaggedSessionMetadata(
+            propertyID: fixture.property.id,
+            sessionID: sessionID,
+            issueID: issueID,
+            priority: "High",
+            trade: "HVAC"
+        )
+
+        try fixture.store.mergeRemoteFlaggedReferenceObservations(
+            propertyID: fixture.property.id,
+            sessionID: sessionID,
+            metadata: olderSnapshotMetadata
+        )
+
+        let updated = try XCTUnwrap(try fixture.store.fetchObservations(propertyID: fixture.property.id).first)
+        XCTAssertEqual(updated.status, .active)
+        XCTAssertEqual(updated.priority, "Critical")
+        XCTAssertEqual(updated.trade, "Landscaping")
+    }
+
+    func testOlderLocalPackagePriorityCannotOverwriteNewerPortalPriority() throws {
+        let fixture = try makeStore()
+        let sessionID = UUID()
+        let issueID = UUID()
+        _ = try fixture.store.upsertSession(Session(id: sessionID, propertyID: fixture.property.id))
+        _ = try fixture.store.createObservation(
+            makeObservation(
+                id: issueID,
+                propertyID: fixture.property.id,
+                priority: "High",
+                trade: "HVAC"
+            )
+        )
+
+        _ = try fixture.store.applyPortalPunchlistOperationalOverlays(
+            propertyID: fixture.property.id,
+            overlays: [
+                PortalPunchlistOperationalOverlay(
+                    issueID: issueID,
+                    propertyID: fixture.property.id,
+                    priority: "Critical",
+                    trade: "landscaping",
+                    updatedAt: newer
+                )
+            ]
+        )
+        try fixture.store.mergeRemoteFlaggedReferenceObservations(
+            propertyID: fixture.property.id,
+            sessionID: sessionID,
+            metadata: makeCompletedFlaggedSessionMetadata(
+                propertyID: fixture.property.id,
+                sessionID: sessionID,
+                issueID: issueID,
+                priority: "High",
+                trade: "HVAC"
+            )
+        )
+
+        let updated = try XCTUnwrap(try fixture.store.fetchObservations(propertyID: fixture.property.id).first)
         XCTAssertEqual(updated.priority, "Critical")
         XCTAssertEqual(updated.trade, "Landscaping")
     }

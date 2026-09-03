@@ -3738,6 +3738,7 @@ struct ContentView: View {
         "Electrical",
         "Plumbing",
         "HVAC",
+        "Landscaping",
         "Interior Finish"
     ]
     private static let priorityOptions: [String] = ["Low", "Medium", "High", "Critical"]

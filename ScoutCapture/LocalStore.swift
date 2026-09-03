@@ -2471,15 +2471,6 @@ final class LocalStore {
             }
             guard overlay.status != .resolved else {
                 skippedResolvedCount += 1
-#if DEBUG
-                print(
-                    "[PortalPunchlistOverlay] propertyID=\(propertyID.uuidString) " +
-                    "result=skipped reason=remote_resolved issueID=\(overlay.issueID?.uuidString ?? "none") " +
-                    "shotID=\(overlay.shotID?.uuidString ?? "none") updatedAt=\(overlay.updatedAt?.description ?? "nil") " +
-                    "overlayPriority=\(Self.diagnosticOverlayValue(overlay.priority)) " +
-                    "overlayTrade=\(Self.diagnosticOverlayValue(overlay.trade))"
-                )
-#endif
                 continue
             }
 
@@ -2571,16 +2562,6 @@ final class LocalStore {
                     "newTrade=\(Self.diagnosticOverlayValue(observations[index].trade)) persisted=true"
                 )
 #endif
-            } else {
-#if DEBUG
-                print(
-                    "[PortalPunchlistOverlay] propertyID=\(propertyID.uuidString) " +
-                    "result=unchanged match=\(matchMethod) issueID=\(observations[index].id.uuidString) " +
-                    "remoteIssueID=\(overlay.issueID?.uuidString ?? "none") key=\(locationKey ?? "none") " +
-                    "priority=\(Self.diagnosticOverlayValue(observations[index].priority)) " +
-                    "trade=\(Self.diagnosticOverlayValue(observations[index].trade)) persisted=false"
-                )
-#endif
             }
         }
 
@@ -2614,6 +2595,7 @@ final class LocalStore {
         "Electrical",
         "Plumbing",
         "HVAC",
+        "Landscaping",
         "Interior Finish"
     ]
 
@@ -4802,8 +4784,20 @@ final class LocalStore {
                 next.building = latestShot?.building ?? next.building
                 next.targetElevation = latestShot?.elevation ?? next.targetElevation
                 next.detailType = latestShot?.detailType ?? next.detailType
-                next.priority = latestShot?.priority ?? next.priority
-                next.trade = latestShot?.trade ?? next.trade
+                let shouldPreserveActiveOperationalMetadata = observationsByID[issueID]?.status == .active && status == .active
+                if shouldPreserveActiveOperationalMetadata {
+                    if trimmedNonEmpty(next.priority) == nil {
+                        next.priority = latestShot?.priority ?? next.priority
+                    }
+                    if trimmedNonEmpty(next.trade) == nil {
+                        next.trade = latestShot?.trade.map { Self.canonicalTradeLabel($0) } ?? next.trade
+                    } else if let trade = next.trade {
+                        next.trade = Self.canonicalTradeLabel(trade)
+                    }
+                } else {
+                    next.priority = latestShot?.priority ?? next.priority
+                    next.trade = latestShot?.trade.map { Self.canonicalTradeLabel($0) } ?? next.trade
+                }
                 next.currentReason = trimmedNonEmpty(issue?.currentReason) ?? trimmedNonEmpty(issue?.detailNote) ?? trimmedNonEmpty(latestShot?.noteText)
                 next.previousReason = trimmedNonEmpty(issue?.previousReason)
                 next.note = trimmedNonEmpty(issue?.detailNote)

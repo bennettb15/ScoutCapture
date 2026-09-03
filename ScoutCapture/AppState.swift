@@ -44338,15 +44338,6 @@ final class AppState: ObservableObject {
                 "updates=\(updateRows.count) activities=\(activityRows.count) " +
                 "activityTypes=\(Self.portalPunchlistActivityTypeCountsDescription(activityRows))"
             )
-#if DEBUG
-            let activityTimeline = Self.portalPunchlistActivityTimelineDescription(activityRows)
-            if activityTimeline != "none" {
-                print(
-                    "[PortalPunchlistOverlay] propertyID=\(propertyID.uuidString) " +
-                    "activityTimeline=\(activityTimeline)"
-                )
-            }
-#endif
 
             let overlays = Self.portalPunchlistOperationalOverlays(
                 propertyID: propertyID,
@@ -44390,41 +44381,6 @@ final class AppState: ObservableObject {
         }
         guard !counts.isEmpty else { return "none" }
         return counts.keys.sorted().map { "\($0):\(counts[$0, default: 0])" }.joined(separator: ",")
-    }
-
-    private nonisolated static func portalPunchlistActivityTimelineDescription(
-        _ activities: [RemotePortalPunchlistActivityRecord],
-        limit: Int = 12
-    ) -> String {
-        let interesting = Set([
-            "priority_changed",
-            "trade_changed",
-            "status_changed",
-            "completion_submitted",
-            "completion_approved",
-            "completion_rejected"
-        ])
-        let rows = activities
-            .filter { activity in
-                guard let type = normalizedReplayText(activity.activityType)?.lowercased() else { return false }
-                return interesting.contains(type)
-            }
-            .sorted { lhs, rhs in
-                if (lhs.createdAt ?? .distantPast) != (rhs.createdAt ?? .distantPast) {
-                    return (lhs.createdAt ?? .distantPast) > (rhs.createdAt ?? .distantPast)
-                }
-                return lhs.id.uuidString < rhs.id.uuidString
-            }
-            .prefix(max(1, limit))
-        guard !rows.isEmpty else { return "none" }
-        return rows.map { activity in
-            let type = normalizedReplayText(activity.activityType)?.lowercased() ?? "unknown"
-            let value = normalizedReplayText(activity.toValue) ?? "none"
-            let issueID = activity.observationID?.uuidString ?? "none"
-            let shotID = activity.shotID?.uuidString ?? "none"
-            let createdAt = activity.createdAt.map { ISO8601DateFormatter().string(from: $0) } ?? "nil"
-            return "\(createdAt)|\(type)|issue=\(issueID)|shot=\(shotID)|to=\(value)"
-        }.joined(separator: ";")
     }
 
     @discardableResult
