@@ -223,6 +223,48 @@ final class ClientPortalPriorityTradeSyncTests: XCTestCase {
         XCTAssertEqual(restored, "Plumbing")
     }
 
+    func testNewerPortalActivityAfterCompletionOverridesPriorSyncedValues() throws {
+        let fixture = try makeStore()
+        let issueID = UUID()
+        _ = try fixture.store.createObservation(
+            makeObservation(
+                id: issueID,
+                propertyID: fixture.property.id,
+                priority: "High",
+                trade: "HVAC",
+                building: "B1",
+                elevation: "North",
+                detailType: "Window"
+            )
+        )
+        let completionTime = Date(timeIntervalSinceReferenceDate: 2_500)
+        let postCompletionPriorityChange = Date(timeIntervalSinceReferenceDate: 3_000)
+        let postCompletionTradeChange = Date(timeIntervalSinceReferenceDate: 3_100)
+
+        let overlays = AppState.portalPunchlistOperationalOverlaysTestOnly(
+            propertyID: fixture.property.id,
+            observationID: issueID,
+            observationPriority: "High",
+            observationTrade: "HVAC",
+            activityRows: [
+                (activityType: "completion_submitted", toValue: nil, createdAt: completionTime),
+                (activityType: "priority_changed", toValue: "critical", createdAt: postCompletionPriorityChange),
+                (activityType: "trade_changed", toValue: "Landscaping", createdAt: postCompletionTradeChange)
+            ]
+        )
+
+        let result = try fixture.store.applyPortalPunchlistOperationalOverlays(
+            propertyID: fixture.property.id,
+            overlays: overlays
+        )
+
+        let updated = try XCTUnwrap(try fixture.store.fetchObservations(propertyID: fixture.property.id).first)
+        XCTAssertEqual(result.appliedCount, 1)
+        XCTAssertEqual(updated.status, .active)
+        XCTAssertEqual(updated.priority, "Critical")
+        XCTAssertEqual(updated.trade, "Landscaping")
+    }
+
     func testNoPortalOverrideKeepsScoutCaptureOriginalValues() throws {
         let fixture = try makeStore()
         let issueID = UUID()

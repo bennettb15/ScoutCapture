@@ -2471,6 +2471,15 @@ final class LocalStore {
             }
             guard overlay.status != .resolved else {
                 skippedResolvedCount += 1
+#if DEBUG
+                print(
+                    "[PortalPunchlistOverlay] propertyID=\(propertyID.uuidString) " +
+                    "result=skipped reason=remote_resolved issueID=\(overlay.issueID?.uuidString ?? "none") " +
+                    "shotID=\(overlay.shotID?.uuidString ?? "none") updatedAt=\(overlay.updatedAt?.description ?? "nil") " +
+                    "overlayPriority=\(Self.diagnosticOverlayValue(overlay.priority)) " +
+                    "overlayTrade=\(Self.diagnosticOverlayValue(overlay.trade))"
+                )
+#endif
                 continue
             }
 
@@ -2560,6 +2569,16 @@ final class LocalStore {
                     "newPriority=\(Self.diagnosticOverlayValue(observations[index].priority)) " +
                     "oldTrade=\(Self.diagnosticOverlayValue(before.trade)) " +
                     "newTrade=\(Self.diagnosticOverlayValue(observations[index].trade)) persisted=true"
+                )
+#endif
+            } else {
+#if DEBUG
+                print(
+                    "[PortalPunchlistOverlay] propertyID=\(propertyID.uuidString) " +
+                    "result=unchanged match=\(matchMethod) issueID=\(observations[index].id.uuidString) " +
+                    "remoteIssueID=\(overlay.issueID?.uuidString ?? "none") key=\(locationKey ?? "none") " +
+                    "priority=\(Self.diagnosticOverlayValue(observations[index].priority)) " +
+                    "trade=\(Self.diagnosticOverlayValue(observations[index].trade)) persisted=false"
                 )
 #endif
             }
