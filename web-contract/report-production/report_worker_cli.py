@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Manual allowlisted ScoutCapture report package worker.
+"""ScoutCapture report package worker.
 
 This is a production-style orchestration wrapper for local/dev validation. It
 does not schedule work and it refuses non-local Supabase URLs unless explicit
@@ -63,7 +63,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--poll-once",
         action="store_true",
-        help="Local/dev proof mode: find allowlisted sealed completed snapshots missing a ready package and process them once.",
+        help="Find sealed completed snapshots missing a ready package and process them once. Allowlist flags narrow scope when supplied.",
     )
     parser.add_argument(
         "--poll-dry-run",
@@ -227,7 +227,8 @@ def execution_environment(url: str, args: argparse.Namespace) -> str:
         raise WorkerError("--expected-project-ref is required with --allow-remote-validation.")
     if expected_ref != project_ref:
         raise WorkerError("--expected-project-ref does not match SUPABASE_URL project ref.")
-    if not args.allow_session_id and not args.allow_org_property and not args.allow_org_id:
+    has_allowlist = bool(args.allow_session_id or args.allow_org_property or args.allow_org_id)
+    if not args.poll_once and not has_allowlist:
         raise WorkerError("Remote validation requires at least one --allow-session-id, --allow-org-property, or --allow-org-id.")
     if args.session_id and args.session_id.lower() not in allowed_session_ids(args):
         raise WorkerError("Remote validation --session-id must be explicitly included in --allow-session-id.")
@@ -639,6 +640,7 @@ def snapshot_metadata(client: SupabaseServiceClient, snapshot_id: str) -> dict[s
             "select": "id,org_id,property_id,session_id,snapshot_kind,session_status,is_sealed,raw_session_json_sha256,snapshot_payload_sha256",
             "id": f"eq.{snapshot_id}",
             "snapshot_kind": "eq.completed",
+            "session_status": "eq.completed",
             "is_sealed": "eq.true",
             "deleted_at": "is.null",
             "limit": "1",
@@ -1188,6 +1190,8 @@ def snapshot_is_allowlisted(
     allowed_orgs: set[str],
     allowed_pairs: set[tuple[str, str]],
 ) -> bool:
+    if not allowed_sessions and not allowed_orgs and not allowed_pairs:
+        return True
     session_id = str(snapshot.get("session_id") or "").lower()
     org_id = str(snapshot.get("org_id") or "").lower()
     property_id = str(snapshot.get("property_id") or "").lower()
@@ -1396,6 +1400,7 @@ def discover_poll_snapshots(client: SupabaseServiceClient) -> list[dict[str, Any
         {
             "select": "id,org_id,property_id,session_id,snapshot_kind,session_status,is_sealed,created_at",
             "snapshot_kind": "eq.completed",
+            "session_status": "eq.completed",
             "is_sealed": "eq.true",
             "deleted_at": "is.null",
             "order": "created_at.asc",
@@ -1670,8 +1675,6 @@ def run_poll_once(
     allowed_sessions = allowed_session_ids(args)
     allowed_orgs = allowed_org_ids(args)
     allowed_pairs = allowed_org_properties(args)
-    if not allowed_sessions and not allowed_orgs and not allowed_pairs:
-        raise WorkerError("--poll-once requires at least one --allow-session-id, --allow-org-id, or --allow-org-property.")
 
     discovered = discover_poll_snapshots(client)
     latest_snapshots, superseded_snapshots = latest_snapshots_per_session(discovered)

@@ -1,7 +1,6 @@
 const DEFAULT_REPOSITORY = "bennettb15/ScoutCapture";
 const DEFAULT_WORKFLOW = "report-package-worker.yml";
 const DEFAULT_REF = "main";
-const DEFAULT_ALLOWED_ORG_ID = "d4ba94ff-25e1-4072-aa79-9a548fcb3008";
 
 type SnapshotRecord = {
   id?: unknown;
@@ -71,6 +70,11 @@ function skip(reason: string, extra: Record<string, unknown> = {}): Response {
   return jsonResponse(202, { ok: true, dispatched: false, reason, ...extra });
 }
 
+function reject(status: number, error: string, extra: Record<string, unknown> = {}): Response {
+  console.warn(JSON.stringify({ event: "report_package_dispatch_rejected", reason: error, ...extra }));
+  return jsonResponse(status, { ok: false, error, ...extra });
+}
+
 Deno.serve(async (request: Request): Promise<Response> => {
   if (request.method !== "POST") {
     return jsonResponse(405, { ok: false, error: "method_not_allowed" });
@@ -105,21 +109,16 @@ Deno.serve(async (request: Request): Promise<Response> => {
   const sessionStatus = lowerString(record.session_status);
 
   const logBase = { snapshot_id: snapshotId, session_id: sessionId, org_id: orgId, property_id: propertyId };
-  if (eventType && eventType !== "insert") return skip("not_insert", logBase);
-  if (schema && schema !== "public") return skip("not_public_schema", logBase);
-  if (table && table !== "session_snapshots") return skip("not_session_snapshots", logBase);
-  if (!isUuid(snapshotId) || !isUuid(sessionId)) {
-    return jsonResponse(400, { ok: false, error: "invalid_snapshot_or_session_id", ...logBase });
+  if (eventType !== "insert") return skip("not_insert", { ...logBase, event_type: eventType });
+  if (schema !== "public") return skip("not_public_schema", { ...logBase, schema });
+  if (table !== "session_snapshots") return skip("not_session_snapshots", { ...logBase, table });
+  if (!isUuid(snapshotId) || !isUuid(sessionId) || !isUuid(orgId) || !isUuid(propertyId)) {
+    return reject(400, "invalid_snapshot_org_property_or_session_id", logBase);
   }
   if (snapshotKind !== "completed") return skip("not_completed_snapshot", { ...logBase, snapshot_kind: snapshotKind });
   if (sessionStatus !== "completed") return skip("session_not_completed", { ...logBase, session_status: sessionStatus });
   if (!booleanValue(record.is_sealed)) return skip("snapshot_not_sealed", logBase);
   if (record.deleted_at !== null && record.deleted_at !== undefined) return skip("snapshot_deleted", logBase);
-
-  const allowedOrgId = env("REPORT_PACKAGE_TRIGGER_ALLOWED_ORG_ID", DEFAULT_ALLOWED_ORG_ID).toLowerCase();
-  if (orgId !== allowedOrgId) {
-    return skip("not_allowlisted", logBase);
-  }
 
   const token = env("GITHUB_REPORT_WORKER_TOKEN");
   if (!token) {

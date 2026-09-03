@@ -1,4 +1,4 @@
--- Optional production-validation trigger for Test Org only.
+-- Optional report package dispatch trigger for completed sealed snapshots.
 -- Prefer creating this from the Supabase Dashboard Database Webhooks UI. This
 -- SQL form matches Supabase's documented `supabase_functions.http_request`
 -- webhook helper, which uses pg_net asynchronously.
@@ -13,8 +13,9 @@
 
 drop trigger if exists scoutcapture_dispatch_qa95_report_package_on_snapshot on public.session_snapshots;
 drop trigger if exists scoutcapture_dispatch_test_org_report_package_on_snapshot on public.session_snapshots;
+drop trigger if exists scoutcapture_dispatch_report_package_on_snapshot on public.session_snapshots;
 
-create trigger scoutcapture_dispatch_test_org_report_package_on_snapshot
+create trigger scoutcapture_dispatch_report_package_on_snapshot
 after insert on public.session_snapshots
 for each row
 when (
@@ -22,7 +23,6 @@ when (
   and new.session_status = 'completed'
   and coalesce(new.is_sealed, false) is true
   and new.deleted_at is null
-  and lower(new.org_id::text) = 'd4ba94ff-25e1-4072-aa79-9a548fcb3008'
 )
 execute function supabase_functions.http_request(
   'https://chlvazmtucoszicehtnm.functions.supabase.co/report-package-dispatch',
