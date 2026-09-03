@@ -852,9 +852,11 @@ final class ClientPortalPriorityTradeSyncTests: XCTestCase {
                     status: .active,
                     linkedShotID: nil,
                     shotIDs: [],
+                    historicalShotIDs: [],
                     building: "B1",
                     targetElevation: "North",
-                    detailType: "Window"
+                    detailType: "Window",
+                    angleIndex: nil
                 )
             ],
             activityRows: [
@@ -901,9 +903,11 @@ final class ClientPortalPriorityTradeSyncTests: XCTestCase {
                     status: .active,
                     linkedShotID: nil,
                     shotIDs: [],
+                    historicalShotIDs: [],
                     building: "B1",
                     targetElevation: "North",
-                    detailType: "Window"
+                    detailType: "Window",
+                    angleIndex: nil
                 ),
                 (
                     id: secondLocalIssueID,
@@ -911,9 +915,11 @@ final class ClientPortalPriorityTradeSyncTests: XCTestCase {
                     status: .active,
                     linkedShotID: nil,
                     shotIDs: [],
+                    historicalShotIDs: [],
                     building: "B1",
                     targetElevation: "North",
-                    detailType: "Window"
+                    detailType: "Window",
+                    angleIndex: nil
                 )
             ],
             activityRows: [
@@ -959,9 +965,11 @@ final class ClientPortalPriorityTradeSyncTests: XCTestCase {
                     status: .active,
                     linkedShotID: nil,
                     shotIDs: [],
+                    historicalShotIDs: [],
                     building: "B2",
                     targetElevation: "South",
-                    detailType: "Door"
+                    detailType: "Door",
+                    angleIndex: nil
                 ),
                 (
                     id: locationLocalIssueID,
@@ -969,9 +977,11 @@ final class ClientPortalPriorityTradeSyncTests: XCTestCase {
                     status: .active,
                     linkedShotID: nil,
                     shotIDs: [],
+                    historicalShotIDs: [],
                     building: "B1",
                     targetElevation: "North",
-                    detailType: "Window"
+                    detailType: "Window",
+                    angleIndex: nil
                 )
             ],
             activityRows: [
@@ -1000,5 +1010,93 @@ final class ClientPortalPriorityTradeSyncTests: XCTestCase {
 
         XCTAssertEqual(notes[exactLocalIssueID]?.map(\.note), ["Exact issue note."])
         XCTAssertNil(notes[locationLocalIssueID])
+    }
+
+    func testPortalNotesMatchPersistedFlaggedAngleLocationWhenIssueIDDiffers() {
+        let propertyID = UUID()
+        let localIssueID = UUID()
+        let remoteIssueID = UUID()
+        let remoteShotID = UUID()
+
+        let notes = AppState.portalPunchlistNotesByIssueIDTestOnly(
+            propertyID: propertyID,
+            localIssueRows: [
+                (
+                    id: localIssueID,
+                    propertyID: propertyID,
+                    status: .active,
+                    linkedShotID: nil,
+                    shotIDs: [],
+                    historicalShotIDs: [],
+                    building: "B1",
+                    targetElevation: "North",
+                    detailType: "Overview",
+                    angleIndex: 2
+                )
+            ],
+            activityRows: [
+                makePortalActivityRowWithShotID(
+                    propertyID: propertyID,
+                    observationID: remoteIssueID,
+                    shotID: remoteShotID,
+                    activityType: "note_added",
+                    note: "Angle two note.",
+                    createdAt: newer
+                )
+            ],
+            remoteShotRows: [
+                (
+                    id: remoteShotID,
+                    issueID: remoteIssueID,
+                    propertyID: propertyID,
+                    building: "B1",
+                    elevation: "North",
+                    detailType: "Overview",
+                    angleIndex: 2,
+                    shotKey: nil
+                )
+            ]
+        )
+
+        XCTAssertEqual(notes[localIssueID]?.map(\.note), ["Angle two note."])
+    }
+
+    func testPortalNotesMatchHistoricalShotIDWhenLinkedShotHasMovedForward() {
+        let propertyID = UUID()
+        let localIssueID = UUID()
+        let remoteIssueID = UUID()
+        let oldIssueShotID = UUID()
+        let currentLinkedShotID = UUID()
+
+        let notes = AppState.portalPunchlistNotesByIssueIDTestOnly(
+            propertyID: propertyID,
+            localIssueRows: [
+                (
+                    id: localIssueID,
+                    propertyID: propertyID,
+                    status: .active,
+                    linkedShotID: currentLinkedShotID,
+                    shotIDs: [currentLinkedShotID],
+                    historicalShotIDs: [oldIssueShotID],
+                    building: "B1",
+                    targetElevation: "North",
+                    detailType: "Overview",
+                    angleIndex: 2
+                )
+            ],
+            activityRows: [
+                makePortalActivityRowWithShotID(
+                    propertyID: propertyID,
+                    observationID: remoteIssueID,
+                    shotID: oldIssueShotID,
+                    activityType: "note_added",
+                    note: "Historical shot note.",
+                    createdAt: newer
+                )
+            ],
+            remoteShotRows: []
+        )
+
+        XCTAssertEqual(notes[localIssueID]?.map(\.note), ["Historical shot note."])
     }
 }

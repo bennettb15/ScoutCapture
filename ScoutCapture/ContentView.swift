@@ -6927,7 +6927,7 @@ struct ContentView: View {
                     detailType: detailType
                 )
             },
-            loadPortalNotes: { observations in
+            loadPortalNotes: { observations, angleIndexByIssueID in
                 guard let propertyID = appState.selectedPropertyID,
                       let activeOrganizationID = appState.activeOrganizationID else {
                     return [:]
@@ -6935,7 +6935,8 @@ struct ContentView: View {
                 return await appState.fetchPortalPunchlistNotes(
                     propertyID: propertyID,
                     activeOrganizationID: activeOrganizationID,
-                    observations: observations
+                    observations: observations,
+                    angleIndexByIssueID: angleIndexByIssueID
                 )
             }
         )
@@ -19492,7 +19493,7 @@ extension ContentView {
         let onSelectIssue: (Observation) -> Void
         let onRetakeIssue: (Observation) -> Void
         let onReclassifyIssue: (Observation, String, String, String) -> Void
-        let loadPortalNotes: ([Observation]) async -> [UUID: [PortalPunchlistNote]]
+        let loadPortalNotes: ([Observation], [UUID: Int]) async -> [UUID: [PortalPunchlistNote]]
         @State private var lastValidOrientation: UIDeviceOrientation = .portrait
         @State private var reclassifyTargetObservation: Observation? = nil
         @State private var historyTargetObservation: Observation? = nil
@@ -19665,6 +19666,7 @@ extension ContentView {
                         PortalIssueNotesSheet(
                             observation: target,
                             resolvedThumbnailPath: resolvedThumbnailPathByID[target.id],
+                            angleIndex: angleIndexByIssueID[target.id],
                             cache: cache,
                             loadPortalNotes: loadPortalNotes
                         )
@@ -19794,7 +19796,7 @@ extension ContentView {
                 portalNoteCountByIssueID = [:]
                 return
             }
-            let notesByIssueID = await loadPortalNotes(observations)
+            let notesByIssueID = await loadPortalNotes(observations, angleIndexByIssueID)
             guard !Task.isCancelled else { return }
             portalNoteCountByIssueID = notesByIssueID.reduce(into: [UUID: Int]()) { partial, item in
                 let count = item.value.count
@@ -20007,8 +20009,9 @@ extension ContentView {
             @Environment(\.dismiss) private var dismiss
             let observation: Observation
             let resolvedThumbnailPath: String?
+            let angleIndex: Int?
             let cache: AssetImageCache
-            let loadPortalNotes: ([Observation]) async -> [UUID: [PortalPunchlistNote]]
+            let loadPortalNotes: ([Observation], [UUID: Int]) async -> [UUID: [PortalPunchlistNote]]
 
             @State private var notes: [PortalPunchlistNote]? = nil
 
@@ -20049,7 +20052,8 @@ extension ContentView {
                     }
                 }
                 .task(id: observation.id) {
-                    let loaded = await loadPortalNotes([observation])
+                    let angleMap = angleIndex.map { [observation.id: $0] } ?? [:]
+                    let loaded = await loadPortalNotes([observation], angleMap)
                     guard !Task.isCancelled else { return }
                     notes = loaded[observation.id] ?? []
                 }

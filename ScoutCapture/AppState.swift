@@ -6791,9 +6791,11 @@ final class AppState: ObservableObject {
         let status: Observation.Status
         let linkedShotID: UUID?
         let shotIDs: Set<UUID>
+        let historicalShotIDs: Set<UUID>
         let building: String?
         let targetElevation: String?
         let detailType: String?
+        let angleIndex: Int?
     }
 
     private struct PortalPunchlistRemoteShotIdentity: Equatable {
@@ -44498,9 +44500,11 @@ final class AppState: ObservableObject {
                 status: .active,
                 linkedShotID: nil,
                 shotIDs: [],
+                historicalShotIDs: [],
                 building: nil,
                 targetElevation: nil,
-                detailType: nil
+                detailType: nil,
+                angleIndex: nil
             )
         }
         return await fetchPortalPunchlistNotes(
@@ -44513,7 +44517,8 @@ final class AppState: ObservableObject {
     func fetchPortalPunchlistNotes(
         propertyID: UUID,
         activeOrganizationID: UUID,
-        observations: [Observation]
+        observations: [Observation],
+        angleIndexByIssueID: [UUID: Int] = [:]
     ) async -> [UUID: [PortalPunchlistNote]] {
         let localIssues = observations.map { observation in
             PortalPunchlistLocalIssueRecord(
@@ -44522,9 +44527,11 @@ final class AppState: ObservableObject {
                 status: observation.status,
                 linkedShotID: observation.linkedShotID,
                 shotIDs: Set(observation.shots.map(\.id)),
+                historicalShotIDs: Set(observation.historyEvents.compactMap(\.shotID)),
                 building: observation.building,
                 targetElevation: observation.targetElevation,
-                detailType: observation.detailType
+                detailType: observation.detailType,
+                angleIndex: angleIndexByIssueID[observation.id].map { max(1, $0) }
             )
         }
         return await fetchPortalPunchlistNotes(
@@ -44778,9 +44785,11 @@ final class AppState: ObservableObject {
                 status: .active,
                 linkedShotID: nil,
                 shotIDs: [],
+                historicalShotIDs: [],
                 building: nil,
                 targetElevation: nil,
-                detailType: nil
+                detailType: nil,
+                angleIndex: nil
             )
         }
         return portalPunchlistNotesByIssueID(
@@ -44931,8 +44940,21 @@ final class AppState: ObservableObject {
             ) {
                 keys.insert(key)
             }
-            if let linkedShotID = issue.linkedShotID, issue.shotIDs.contains(linkedShotID) {
+            if let angleIndex = issue.angleIndex,
+               let key = portalPunchlistLocationKey(
+                building: issue.building,
+                elevation: issue.targetElevation,
+                detailType: issue.detailType,
+                angleIndex: angleIndex,
+                shotKey: nil
+               ) {
+                keys.insert(key)
+            }
+            if let linkedShotID = issue.linkedShotID {
                 keys.insert(linkedShotID.uuidString.lowercased())
+            }
+            for shotID in issue.shotIDs.union(issue.historicalShotIDs) {
+                keys.insert(shotID.uuidString.lowercased())
             }
             for key in keys {
                 index[key, default: []].insert(issue.id)
@@ -45121,9 +45143,11 @@ final class AppState: ObservableObject {
                 status: Observation.Status.active,
                 linkedShotID: Optional<UUID>.none,
                 shotIDs: Set<UUID>(),
+                historicalShotIDs: Set<UUID>(),
                 building: Optional<String>.none,
                 targetElevation: Optional<String>.none,
-                detailType: Optional<String>.none
+                detailType: Optional<String>.none,
+                angleIndex: Optional<Int>.none
             )
         }
         return portalPunchlistNotesByIssueIDTestOnly(
@@ -45154,9 +45178,11 @@ final class AppState: ObservableObject {
             status: Observation.Status,
             linkedShotID: UUID?,
             shotIDs: Set<UUID>,
+            historicalShotIDs: Set<UUID>,
             building: String?,
             targetElevation: String?,
-            detailType: String?
+            detailType: String?,
+            angleIndex: Int?
         )],
         activityRows: [(
             id: UUID,
@@ -45189,9 +45215,11 @@ final class AppState: ObservableObject {
                     status: row.status,
                     linkedShotID: row.linkedShotID,
                     shotIDs: row.shotIDs,
+                    historicalShotIDs: row.historicalShotIDs,
                     building: row.building,
                     targetElevation: row.targetElevation,
-                    detailType: row.detailType
+                    detailType: row.detailType,
+                    angleIndex: row.angleIndex
                 )
             },
             activities: activityRows.map { row in
