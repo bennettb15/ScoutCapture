@@ -2539,7 +2539,11 @@ final class LocalStore {
                 observations[index].priority = priority
             }
             if let trade = overlay.trade {
-                observations[index].trade = trade
+                let canonicalTrade = Self.canonicalTradeLabel(
+                    trade,
+                    preferredLabels: [before.trade].compactMap { $0 }
+                )
+                observations[index].trade = canonicalTrade.isEmpty ? nil : canonicalTrade
             }
             if let updatedAt = overlay.updatedAt, updatedAt > observations[index].updatedAt {
                 observations[index].updatedAt = updatedAt
@@ -2577,6 +2581,46 @@ final class LocalStore {
     private static func diagnosticOverlayValue(_ value: String?) -> String {
         let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         return trimmed.isEmpty ? "none" : trimmed.replacingOccurrences(of: " ", with: "_")
+    }
+
+    private static let defaultTradeLabelsForPortalOverlays: [String] = [
+        "Masonry",
+        "Roofing",
+        "Siding",
+        "Windows",
+        "Doors",
+        "Stucco",
+        "Foundation",
+        "Framing",
+        "Electrical",
+        "Plumbing",
+        "HVAC",
+        "Interior Finish"
+    ]
+
+    private static func canonicalTradeKey(_ value: String?) -> String {
+        (value ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            .lowercased()
+    }
+
+    private static func canonicalTradeLabel(
+        _ value: String?,
+        preferredLabels: [String] = []
+    ) -> String {
+        let trimmed = (value ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+        let key = canonicalTradeKey(trimmed)
+        guard !key.isEmpty else { return "" }
+        if let builtIn = defaultTradeLabelsForPortalOverlays.first(where: { canonicalTradeKey($0) == key }) {
+            return builtIn
+        }
+        if let preferred = preferredLabels.first(where: { canonicalTradeKey($0) == key }) {
+            return preferred.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        return trimmed
     }
 
     // MARK: - Guided Shots CRUD (per-property)

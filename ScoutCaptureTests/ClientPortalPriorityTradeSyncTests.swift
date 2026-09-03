@@ -149,6 +149,80 @@ final class ClientPortalPriorityTradeSyncTests: XCTestCase {
         XCTAssertEqual(overlay.trade, "electrical")
     }
 
+    func testTradeOptionsDeduplicateCaseAndPreferBuiltinCanonicalCasing() {
+        let options = ContentView.canonicalTradeOptions(["HVAC", "hvac", "  Hvac  "])
+
+        XCTAssertEqual(options, ["HVAC"])
+    }
+
+    func testPortalSyncedBuiltinTradePersistsCanonicalCasing() throws {
+        let fixture = try makeStore()
+        let issueID = UUID()
+        _ = try fixture.store.createObservation(
+            makeObservation(id: issueID, propertyID: fixture.property.id, trade: "Paint")
+        )
+
+        _ = try fixture.store.applyPortalPunchlistOperationalOverlays(
+            propertyID: fixture.property.id,
+            overlays: [
+                PortalPunchlistOperationalOverlay(
+                    issueID: issueID,
+                    propertyID: fixture.property.id,
+                    trade: "hvac",
+                    updatedAt: newer
+                )
+            ]
+        )
+
+        let updated = try XCTUnwrap(try fixture.store.fetchObservations(propertyID: fixture.property.id).first)
+        XCTAssertEqual(updated.trade, "HVAC")
+    }
+
+    func testPortalSyncedBuiltinTradeCorrectsPriorLowercaseLocalCasing() throws {
+        let fixture = try makeStore()
+        let issueID = UUID()
+        _ = try fixture.store.createObservation(
+            makeObservation(id: issueID, propertyID: fixture.property.id, trade: "hvac")
+        )
+
+        _ = try fixture.store.applyPortalPunchlistOperationalOverlays(
+            propertyID: fixture.property.id,
+            overlays: [
+                PortalPunchlistOperationalOverlay(
+                    issueID: issueID,
+                    propertyID: fixture.property.id,
+                    trade: "hvac",
+                    updatedAt: newer
+                )
+            ]
+        )
+
+        let updated = try XCTUnwrap(try fixture.store.fetchObservations(propertyID: fixture.property.id).first)
+        XCTAssertEqual(updated.trade, "HVAC")
+    }
+
+    func testArmedIssueTradeRestoresPreviousStickyTradeWhenNotManuallyChanged() {
+        let restored = ContentView.restoredStickyTradeAfterClearingArmedIssueScope(
+            currentTrade: "hvac",
+            previousStickyTrade: "Roofing",
+            armedIssueTradeManuallyChanged: false,
+            preferredOptions: ["Roofing", "HVAC"]
+        )
+
+        XCTAssertEqual(restored, "Roofing")
+    }
+
+    func testManualTradeChangeWhileArmedRemainsSticky() {
+        let restored = ContentView.restoredStickyTradeAfterClearingArmedIssueScope(
+            currentTrade: "plumbing",
+            previousStickyTrade: "Roofing",
+            armedIssueTradeManuallyChanged: true,
+            preferredOptions: ["Roofing", "Plumbing"]
+        )
+
+        XCTAssertEqual(restored, "Plumbing")
+    }
+
     func testNoPortalOverrideKeepsScoutCaptureOriginalValues() throws {
         let fixture = try makeStore()
         let issueID = UUID()

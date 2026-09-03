@@ -3646,6 +3646,9 @@ struct ContentView: View {
     @State private var tradeOptions: [String] = ContentView.defaultTradeOptions
     @State private var selectedBuilding: String = "B1"
     @State private var selectedTrade: String = ""
+    @State private var armedIssueScopedTrade: String? = nil
+    @State private var preArmedStickyTrade: String? = nil
+    @State private var armedIssueTradeManuallyChanged: Bool = false
     @State private var selectedPriority: String = ""
     @State private var showActiveIssuesSheet: Bool = false
     @State private var activeObservations: [Observation] = []
@@ -3703,6 +3706,7 @@ struct ContentView: View {
     @State private var draftUpdatedObservation: String = ""
     @State private var draftUpdatedPriority: String = ""
     @State private var draftUpdatedTrade: String = ""
+    @State private var draftUpdatedTradeManuallyChanged: Bool = false
     @State private var resolutionTargetObservation: Observation? = nil
     @State private var resolutionCapturedShot: Shot? = nil
     @State private var resolutionCapturedPhotoRef: String? = nil
@@ -3738,6 +3742,54 @@ struct ContentView: View {
     ]
     private static let priorityOptions: [String] = ["Low", "Medium", "High", "Critical"]
     private static let defaultFlaggedPriority = "Low"
+
+    static func tradeKey(_ value: String?) -> String {
+        (value ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            .lowercased()
+    }
+
+    static func canonicalTradeLabel(_ value: String?, preferredOptions: [String] = []) -> String {
+        let trimmed = (value ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+        let key = tradeKey(trimmed)
+        guard !key.isEmpty else { return "" }
+        if let builtIn = defaultTradeOptions.first(where: { tradeKey($0) == key }) {
+            return builtIn
+        }
+        if let preferred = preferredOptions.first(where: { tradeKey($0) == key }) {
+            return preferred.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        return trimmed
+    }
+
+    static func canonicalTradeOptions(_ values: [String], selectedTrade: String? = nil) -> [String] {
+        var output: [String] = []
+        var seen: Set<String> = []
+        func append(_ raw: String?) {
+            let canonical = canonicalTradeLabel(raw, preferredOptions: output)
+            let key = tradeKey(canonical)
+            guard !key.isEmpty, seen.insert(key).inserted else { return }
+            output.append(canonical)
+        }
+        values.forEach { append($0) }
+        append(selectedTrade)
+        return output
+    }
+
+    static func restoredStickyTradeAfterClearingArmedIssueScope(
+        currentTrade: String?,
+        previousStickyTrade: String?,
+        armedIssueTradeManuallyChanged: Bool,
+        preferredOptions: [String] = []
+    ) -> String {
+        if armedIssueTradeManuallyChanged {
+            return canonicalTradeLabel(currentTrade, preferredOptions: preferredOptions)
+        }
+        return canonicalTradeLabel(previousStickyTrade, preferredOptions: preferredOptions)
+    }
 
     private static func normalizedPriority(_ value: String?) -> String {
         let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
@@ -5863,28 +5915,37 @@ struct ContentView: View {
     private func loadTradeOptions() {
         guard let data = UserDefaults.standard.data(forKey: tradeOptionsDefaultsKey),
               let decoded = try? JSONDecoder().decode([String].self, from: data) else {
+            tradeOptions = Self.canonicalTradeOptions(tradeOptions, selectedTrade: selectedTrade)
             return
         }
-        let cleaned = decoded
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty }
+        let cleaned = Self.canonicalTradeOptions(decoded, selectedTrade: selectedTrade)
         if !cleaned.isEmpty {
             tradeOptions = cleaned
         }
+        if !selectedTrade.isEmpty {
+            let canonical = Self.canonicalTradeLabel(selectedTrade, preferredOptions: tradeOptions)
+            if !canonical.isEmpty, selectedTrade != canonical {
+                selectedTrade = canonical
+            }
+        }
         if !selectedTrade.isEmpty,
-           tradeOptions.contains(selectedTrade) == false {
+           tradeOptions.contains(where: { Self.tradeKey($0) == Self.tradeKey(selectedTrade) }) == false {
             selectedTrade = ""
         }
     }
 
     private func persistTradeOptions() {
-        let cleaned = tradeOptions
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty }
+        let cleaned = Self.canonicalTradeOptions(tradeOptions, selectedTrade: selectedTrade)
         let final = cleaned.isEmpty ? Self.defaultTradeOptions : cleaned
         tradeOptions = final
+        if !selectedTrade.isEmpty {
+            let canonical = Self.canonicalTradeLabel(selectedTrade, preferredOptions: tradeOptions)
+            if !canonical.isEmpty, selectedTrade != canonical {
+                selectedTrade = canonical
+            }
+        }
         if !selectedTrade.isEmpty,
-           tradeOptions.contains(selectedTrade) == false {
+           tradeOptions.contains(where: { Self.tradeKey($0) == Self.tradeKey(selectedTrade) }) == false {
             selectedTrade = ""
         }
         if let data = try? JSONEncoder().encode(final) {
@@ -6450,7 +6511,7 @@ struct ContentView: View {
             }) {
                 ManageTradesSheet(
                     options: $tradeOptions,
-                    selectedTrade: $selectedTrade,
+                    selectedTrade: selectedTradeBinding(),
                     onClose: {
                         showManageTradesSheet = false
                     }
@@ -6567,9 +6628,9 @@ struct ContentView: View {
                     detailType: currentDetailType,
                     existingNote: detailNote,
                     isNoteEditable: !isArmedIssueDetailNoteReadOnly,
-                    tradeOptions: tradeOptions,
+                    tradeOptions: tradePickerOptions,
                     priorityOptions: Self.priorityOptions,
-                    selectedTrade: $selectedTrade,
+                    selectedTrade: selectedTradeBinding(),
                     selectedPriority: $selectedPriority,
                     onCancel: {
                         showDetailOverlay = false
@@ -6842,6 +6903,7 @@ struct ContentView: View {
             angleIndexByIssueID: flaggedAngleIndexByID,
             allowReferenceFallback: shouldAllowChecklistReferenceFallback,
             captureProfile: captureProfile,
+            tradeOptions: tradeOptions,
             buildingOptions: $buildingOptions,
             detailTypesModel: detailTypesModel,
             buildingCodeForOption: buildingCode(from:),
@@ -7171,7 +7233,7 @@ struct ContentView: View {
                     x: 0,
                     y: 0
                 )
-            let tradeTrimmed = selectedTrade.trimmingCharacters(in: .whitespacesAndNewlines)
+            let tradeTrimmed = Self.canonicalTradeLabel(selectedTrade, preferredOptions: tradeOptions)
             if !tradeTrimmed.isEmpty {
                 separatorToken()
                 Text(tradeTrimmed)
@@ -7570,10 +7632,49 @@ struct ContentView: View {
 
     private var tradePickerOptions: [String] {
         let current = selectedTrade.trimmingCharacters(in: .whitespacesAndNewlines)
-        if current.isEmpty || tradeOptions.contains(current) {
-            return tradeOptions
+        return Self.canonicalTradeOptions(tradeOptions, selectedTrade: current)
+    }
+
+    private func setSelectedTrade(_ rawValue: String, manual: Bool) {
+        let canonical = Self.canonicalTradeLabel(rawValue, preferredOptions: tradeOptions)
+        selectedTrade = canonical
+        if manual, armedIssueScopedTrade != nil {
+            armedIssueTradeManuallyChanged = true
         }
-        return tradeOptions + [current]
+    }
+
+    private func selectedTradeBinding() -> Binding<String> {
+        Binding(
+            get: { selectedTrade },
+            set: { setSelectedTrade($0, manual: true) }
+        )
+    }
+
+    private func armIssueScopedTrade(_ rawValue: String?) {
+        let canonical = Self.canonicalTradeLabel(rawValue, preferredOptions: tradeOptions)
+        guard !canonical.isEmpty else {
+            clearArmedIssueTradeScope()
+            return
+        }
+        if armedIssueScopedTrade == nil {
+            preArmedStickyTrade = selectedTrade
+        }
+        armedIssueScopedTrade = canonical
+        armedIssueTradeManuallyChanged = false
+        selectedTrade = canonical
+    }
+
+    private func clearArmedIssueTradeScope() {
+        guard armedIssueScopedTrade != nil || preArmedStickyTrade != nil else { return }
+        selectedTrade = Self.restoredStickyTradeAfterClearingArmedIssueScope(
+            currentTrade: selectedTrade,
+            previousStickyTrade: preArmedStickyTrade,
+            armedIssueTradeManuallyChanged: armedIssueTradeManuallyChanged,
+            preferredOptions: tradeOptions
+        )
+        armedIssueScopedTrade = nil
+        preArmedStickyTrade = nil
+        armedIssueTradeManuallyChanged = false
     }
 
     private var buildingSelectionLabel: String {
@@ -7655,7 +7756,9 @@ struct ContentView: View {
 
                     metadataSelectorRow(
                         title: "Trade",
-                        value: selectedTrade.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "None" : selectedTrade,
+                        value: Self.canonicalTradeLabel(selectedTrade, preferredOptions: tradeOptions).isEmpty
+                            ? "None"
+                            : Self.canonicalTradeLabel(selectedTrade, preferredOptions: tradeOptions),
                         context: makeTradeSelectionContext(),
                         titleColor: .blue,
                         manageDestination: .trades
@@ -7884,7 +7987,7 @@ struct ContentView: View {
         case .detailType:
             detailTypesModel.setSelected(value, for: locationMode, profile: captureProfile)
         case .trade:
-            selectedTrade = value
+            setSelectedTrade(value, manual: true)
         }
         metadataSelectionContext = nil
         scheduleHudAngleIndexRefresh()
@@ -8463,10 +8566,12 @@ struct ContentView: View {
                         Menu {
                             Button("None") {
                                 draftUpdatedTrade = ""
+                                draftUpdatedTradeManuallyChanged = true
                             }
-                            ForEach(tradeOptions, id: \.self) { option in
+                            ForEach(tradePickerOptions, id: \.self) { option in
                                 Button(option) {
                                     draftUpdatedTrade = option
+                                    draftUpdatedTradeManuallyChanged = true
                                 }
                             }
                         } label: {
@@ -10270,7 +10375,7 @@ extension ContentView {
             )
             let captureLocation = locationManager.lastLocation
             let capturedExifOrientationRaw = capturedExifOrientationRawAtShutter
-            let captureTrade = selectedTrade.trimmingCharacters(in: .whitespacesAndNewlines)
+            let captureTrade = Self.canonicalTradeLabel(selectedTrade, preferredOptions: tradeOptions)
             let capturePriority = Self.normalizedPriority(selectedPriority)
             print("[SavePhoto] capture orientation device=\(captureDeviceOrientationAtShutter.rawValue) exifRaw=\(capturedExifOrientationRaw)")
             let captureMetadataContext = ReportLibraryModel.EmbeddedMetadataContext(
@@ -10492,7 +10597,7 @@ extension ContentView {
             targetElevation: elevationValue,
             detailType: detailTypeValue,
             priority: normalizedPriority,
-            trade: selectedTrade,
+            trade: Self.canonicalTradeLabel(selectedTrade, preferredOptions: tradeOptions),
             currentReason: reason,
             historyEvents: [
                 ObservationHistoryEvent(
@@ -10528,7 +10633,7 @@ extension ContentView {
                 var payload: [String: Any] = [:]
                 payload["is_flagged"] = true
                 payload["priority"] = normalizedPriority
-                let trade = selectedTrade.trimmingCharacters(in: .whitespacesAndNewlines)
+                let trade = Self.canonicalTradeLabel(selectedTrade, preferredOptions: tradeOptions)
                 if !trade.isEmpty {
                     payload["trade"] = trade
                 }
@@ -10591,7 +10696,7 @@ extension ContentView {
         var captureKind: String?
         var firstCaptureKind: String?
         var noteValue = noteText.isEmpty ? nil : noteText
-        let tradeValue = selectedTrade.trimmingCharacters(in: .whitespacesAndNewlines)
+        let tradeValue = Self.canonicalTradeLabel(selectedTrade, preferredOptions: tradeOptions)
         var hasLockedAngleIndex = false
         if let reservedAngleIndexAtCapture {
             angleIndexValue = max(1, reservedAngleIndexAtCapture)
@@ -10847,7 +10952,10 @@ extension ContentView {
             for shot in metadata.shots where shot.issueID == issueID {
                 let trimmedTrade = shot.trade?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
                 guard !trimmedTrade.isEmpty else { continue }
-                let candidate = (updatedAt: shot.updatedAt, trade: trimmedTrade)
+                let candidate = (
+                    updatedAt: shot.updatedAt,
+                    trade: Self.canonicalTradeLabel(trimmedTrade, preferredOptions: tradeOptions)
+                )
                 if let current = best {
                     if candidate.updatedAt > current.updatedAt {
                         best = candidate
@@ -14197,7 +14305,9 @@ extension ContentView {
         }
         flaggedActionTargetObservation = updated
         selectedPriority = Self.flaggedPriorityOrDefault(updated.priority)
-        selectedTrade = updated.trade ?? latestTradeForIssue(propertyID: propertyID, issueID: updated.id) ?? ""
+        if !armedIssueTradeManuallyChanged {
+            armIssueScopedTrade(updated.trade ?? latestTradeForIssue(propertyID: propertyID, issueID: updated.id))
+        }
     }
 
     private func clearPendingFlaggedDecision() {
@@ -14210,10 +14320,12 @@ extension ContentView {
         draftUpdatedObservation = ""
         draftUpdatedPriority = ""
         draftUpdatedTrade = ""
+        draftUpdatedTradeManuallyChanged = false
         showArmedReferenceMenu = false
     }
 
     private func clearArmedIssueState() {
+        clearArmedIssueTradeScope()
         armedUpdateObservationID = nil
         armedIssueNoteText = ""
         armedIssueRevisedObservationText = nil
@@ -14316,7 +14428,7 @@ extension ContentView {
         armedIssueNoteText = Self.observationCurrentReasonText(observation) ?? ""
         detailNote = armedIssueNoteText
         selectedPriority = Self.flaggedPriorityOrDefault(observation.priority)
-        selectedTrade = observation.trade ?? latestTradeForIssue(propertyID: propertyID, issueID: observation.id) ?? ""
+        armIssueScopedTrade(observation.trade ?? latestTradeForIssue(propertyID: propertyID, issueID: observation.id))
         isArmedIssueDetailNoteReadOnly = true
         if let referencePath = flaggedReferencePathByID[observation.id],
            !referencePath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -14369,7 +14481,8 @@ extension ContentView {
         showFlaggedUpdatedObservationInput = true
         draftUpdatedObservation = ""
         draftUpdatedPriority = Self.flaggedPriorityOrDefault(selectedPriority)
-        draftUpdatedTrade = selectedTrade.trimmingCharacters(in: .whitespacesAndNewlines)
+        draftUpdatedTrade = Self.canonicalTradeLabel(selectedTrade, preferredOptions: tradeOptions)
+        draftUpdatedTradeManuallyChanged = false
     }
 
     private func commitFlaggedUpdatedObservationAndArm() {
@@ -14377,7 +14490,9 @@ extension ContentView {
         guard !revised.isEmpty else { return }
         let revisedPriority = Self.normalizedPriority(draftUpdatedPriority)
         guard !revisedPriority.isEmpty else { return }
-        let revisedTrade = draftUpdatedTrade.trimmingCharacters(in: .whitespacesAndNewlines)
+        let revisedTrade = draftUpdatedTradeManuallyChanged
+            ? Self.canonicalTradeLabel(draftUpdatedTrade, preferredOptions: tradeOptions)
+            : nil
 
         if containsMeasurementIndicator(in: revised) {
             showFlaggedActionToastNow("Reminder: SCOUT records visual observations only.")
@@ -14447,7 +14562,7 @@ extension ContentView {
                         sessionID: sessionID,
                         observation: persisted,
                         shotID: shot.id,
-                        trade: selectedTrade,
+                        trade: Self.canonicalTradeLabel(selectedTrade, preferredOptions: tradeOptions),
                         activeCaptureKind: retakeContext == nil ? "follow_up_capture" : "retake"
                     )
                     appState.scheduleShotMetadataSupabaseWriteIfNeeded(
@@ -14514,7 +14629,7 @@ extension ContentView {
                 let trade = revisedTrade.trimmingCharacters(in: .whitespacesAndNewlines)
                 updated.trade = trade.isEmpty ? nil : trade
             } else if updated.trade?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true {
-                let selectedTrade = selectedTrade.trimmingCharacters(in: .whitespacesAndNewlines)
+                let selectedTrade = Self.canonicalTradeLabel(selectedTrade, preferredOptions: tradeOptions)
                 updated.trade = selectedTrade.isEmpty ? nil : selectedTrade
             }
             appendObservationHistoryEvent(
@@ -14585,7 +14700,7 @@ extension ContentView {
                         sessionID: sessionID,
                         observation: persisted,
                         shotID: shot.id,
-                        trade: revisedTrade ?? selectedTrade,
+                        trade: revisedTrade ?? Self.canonicalTradeLabel(selectedTrade, preferredOptions: tradeOptions),
                         activeCaptureKind: retakeContext == nil ? "follow_up_capture" : "retake"
                     )
                     appState.scheduleShotMetadataSupabaseWriteIfNeeded(
@@ -14599,6 +14714,9 @@ extension ContentView {
                 }
             }
             if revisedPriority != nil || revisedTrade != nil {
+                if revisedTrade != nil {
+                    armedIssueTradeManuallyChanged = true
+                }
                 applyFlaggedShotMetadataOverrides(
                     propertyID: propertyID,
                     sessionID: appState.currentSession?.id,
@@ -14607,7 +14725,7 @@ extension ContentView {
                     trade: revisedTrade ?? ""
                 )
                 selectedPriority = Self.normalizedPriority(revisedPriority ?? "")
-                selectedTrade = revisedTrade ?? ""
+                setSelectedTrade(revisedTrade ?? "", manual: revisedTrade != nil)
             }
             let note = Self.observationCurrentReasonText(updated) ?? ""
             if note.isEmpty {
@@ -14665,7 +14783,7 @@ extension ContentView {
                         sessionID: sessionID,
                         observation: persisted,
                         shotID: shotID,
-                        trade: selectedTrade,
+                        trade: Self.canonicalTradeLabel(selectedTrade, preferredOptions: tradeOptions),
                         activeCaptureKind: "follow_up_capture"
                     )
                     appState.scheduleShotMetadataSupabaseWriteIfNeeded(
@@ -14992,7 +15110,7 @@ extension ContentView {
         armedIssueNoteText = Self.observationCurrentReasonText(observation) ?? ""
         detailNote = armedIssueNoteText
         selectedPriority = Self.flaggedPriorityOrDefault(observation.priority)
-        selectedTrade = observation.trade ?? latestTradeForIssue(propertyID: observation.propertyID, issueID: observation.id) ?? ""
+        armIssueScopedTrade(observation.trade ?? latestTradeForIssue(propertyID: observation.propertyID, issueID: observation.id))
         isArmedIssueDetailNoteReadOnly = true
         if let resolvedFlaggedPath = flaggedResolvedThumbnailPathByID[observation.id],
            !resolvedFlaggedPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -15084,7 +15202,7 @@ extension ContentView {
                         sessionID: sessionID,
                         observation: persisted,
                         shotID: shot.id,
-                        trade: selectedTrade,
+                        trade: Self.canonicalTradeLabel(selectedTrade, preferredOptions: tradeOptions),
                         activeCaptureKind: "follow_up_capture"
                     )
                     appState.scheduleShotMetadataSupabaseWriteIfNeeded(
@@ -19352,6 +19470,7 @@ extension ContentView {
         let angleIndexByIssueID: [UUID: Int]
         let allowReferenceFallback: Bool
         let captureProfile: CaptureProfile
+        let tradeOptions: [String]
         @Binding var buildingOptions: [String]
         @ObservedObject var detailTypesModel: DetailTypesModel
         let buildingCodeForOption: (String) -> String
@@ -19424,6 +19543,7 @@ extension ContentView {
                                     currentSessionID: currentSessionID,
                                     resolvedThumbnailPath: resolvedThumbnailPathByID[observation.id],
                                     angleIndex: angleIndexByIssueID[observation.id],
+                                    tradeOptions: tradeOptions,
                                     cache: cache,
                                     hasReferenceImage: referenceImageLocalID(for: observation) != nil,
                                     hasCapturedImage: capturedImageLocalID(for: observation) != nil,
@@ -19513,7 +19633,7 @@ extension ContentView {
                         )
                     }
                     .sheet(item: $historyTargetObservation) { target in
-                        FlaggedHistorySheet(observation: target)
+                        FlaggedHistorySheet(observation: target, tradeOptions: tradeOptions)
                     }
                     .overlay(alignment: .top) {
                         if let inlineToastText {
@@ -19696,6 +19816,7 @@ extension ContentView {
         private struct FlaggedHistorySheet: View {
             @Environment(\.dismiss) private var dismiss
             let observation: Observation
+            let tradeOptions: [String]
 
             private var rawEvents: [ObservationHistoryEvent] {
                 observation.historyEvents.sorted { lhs, rhs in
@@ -19704,6 +19825,14 @@ extension ContentView {
                     }
                     return lhs.timestamp < rhs.timestamp
                 }
+            }
+
+            private var normalizedPriority: String {
+                ContentView.normalizedPriority(observation.priority)
+            }
+
+            private var normalizedTrade: String {
+                ContentView.canonicalTradeLabel(observation.trade, preferredOptions: tradeOptions)
             }
 
             private var events: [FlaggedHistoryDisplayEvent] {
@@ -19752,6 +19881,20 @@ extension ContentView {
             var body: some View {
                 NavigationStack {
                     List {
+                        if !normalizedPriority.isEmpty || !normalizedTrade.isEmpty {
+                            Section("Details") {
+                                HStack(spacing: 12) {
+                                    if !normalizedPriority.isEmpty {
+                                        Label(normalizedPriority, systemImage: "exclamationmark.circle.fill")
+                                    }
+                                    if !normalizedTrade.isEmpty {
+                                        Label(normalizedTrade, systemImage: "wrench.adjustable")
+                                    }
+                                }
+                                .font(.system(size: 14, weight: .medium))
+                            }
+                        }
+
                         if let currentReason = ContentView.observationCurrentReasonText(observation) {
                             Section("Current Reason") {
                                 Text(currentReason)
@@ -19812,6 +19955,7 @@ extension ContentView {
             let currentSessionID: UUID?
             let resolvedThumbnailPath: String?
             let angleIndex: Int?
+            let tradeOptions: [String]
             let cache: AssetImageCache
             let hasReferenceImage: Bool
             let hasCapturedImage: Bool
@@ -19886,6 +20030,10 @@ extension ContentView {
                 ContentView.normalizedPriority(observation.priority)
             }
 
+            private var normalizedTrade: String {
+                ContentView.canonicalTradeLabel(observation.trade, preferredOptions: tradeOptions)
+            }
+
             var body: some View {
                 HStack(spacing: 12) {
                     thumbnailView
@@ -19900,15 +20048,28 @@ extension ContentView {
                             .font(.system(size: 12, weight: .medium))
                             .foregroundColor(statusColor)
 
-                        if !normalizedPriority.isEmpty {
-                            HStack(spacing: 6) {
-                                Circle()
-                                    .fill(ContentView.priorityColor(normalizedPriority))
-                                    .frame(width: 8, height: 8)
-                                Text(normalizedPriority)
-                                    .font(.system(size: 12, weight: .semibold))
-                                    .foregroundColor(.white.opacity(0.92))
+                        if !normalizedPriority.isEmpty || !normalizedTrade.isEmpty {
+                            HStack(spacing: 8) {
+                                if !normalizedPriority.isEmpty {
+                                    HStack(spacing: 6) {
+                                        Circle()
+                                            .fill(ContentView.priorityColor(normalizedPriority))
+                                            .frame(width: 8, height: 8)
+                                        Text(normalizedPriority)
+                                    }
+                                }
+                                if !normalizedTrade.isEmpty {
+                                    HStack(spacing: 5) {
+                                        Image(systemName: "wrench.adjustable")
+                                            .font(.system(size: 11, weight: .semibold))
+                                        Text(normalizedTrade)
+                                            .lineLimit(1)
+                                            .minimumScaleFactor(0.75)
+                                    }
+                                }
                             }
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundColor(.white.opacity(0.92))
                         }
 
                         Text("\(Text("Reason: ").font(.system(size: 12, weight: .semibold)))\(Text(reasonText).font(.system(size: 12, weight: .regular)))")
@@ -20935,11 +21096,16 @@ extension ContentView {
                     .padding(.bottom, 4)
                 }
                 .onDisappear {
-                    let cleaned = options
-                        .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-                        .filter { !$0.isEmpty }
+                    let cleaned = ContentView.canonicalTradeOptions(options, selectedTrade: selectedTrade)
                     options = cleaned.isEmpty ? ContentView.defaultTradeOptions : cleaned
-                    if !selectedTrade.isEmpty, options.contains(selectedTrade) == false {
+                    if !selectedTrade.isEmpty {
+                        let canonical = ContentView.canonicalTradeLabel(selectedTrade, preferredOptions: options)
+                        if !canonical.isEmpty {
+                            selectedTrade = canonical
+                        }
+                    }
+                    if !selectedTrade.isEmpty,
+                       options.contains(where: { ContentView.tradeKey($0) == ContentView.tradeKey(selectedTrade) }) == false {
                         selectedTrade = ""
                     }
                 }
