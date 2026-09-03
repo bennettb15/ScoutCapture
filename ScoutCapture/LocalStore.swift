@@ -2474,21 +2474,26 @@ final class LocalStore {
                 continue
             }
 
-            let matchIndex: Int?
-            if let issueID = overlay.issueID {
-                matchIndex = observationIndexByID[issueID]
-            } else if let key = portalPunchlistLocationKey(
+            let locationKey = portalPunchlistLocationKey(
                 building: overlay.building,
                 elevation: overlay.targetElevation,
                 detailType: overlay.detailType,
                 angleIndex: overlay.angleIndex,
                 shotKey: overlay.shotKey
-            ) {
+            )
+            let matchIndex: Int?
+            let matchMethod: String
+            if let issueID = overlay.issueID,
+               let index = observationIndexByID[issueID] {
+                matchIndex = index
+                matchMethod = "issue_id"
+            } else if let key = locationKey {
                 let matches = Array(locationIndex[key] ?? [])
                     .compactMap { observationIndexByID[$0] }
                     .sorted()
                 if matches.count == 1 {
                     matchIndex = matches[0]
+                    matchMethod = overlay.issueID == nil ? "location" : "location_after_issue_id_miss"
                 } else if matches.count > 1 {
                     skippedAmbiguousCount += 1
                     print(
@@ -2498,17 +2503,34 @@ final class LocalStore {
                     continue
                 } else {
                     matchIndex = nil
+                    matchMethod = "none"
                 }
             } else {
                 matchIndex = nil
+                matchMethod = "none"
             }
 
             guard let index = matchIndex else {
                 skippedNoMatchCount += 1
+#if DEBUG
+                print(
+                    "[PortalPunchlistOverlay] propertyID=\(propertyID.uuidString) " +
+                    "result=skipped reason=no_match issueID=\(overlay.issueID?.uuidString ?? "none") " +
+                    "key=\(locationKey ?? "none") overlayPriority=\(Self.diagnosticOverlayValue(overlay.priority)) " +
+                    "overlayTrade=\(Self.diagnosticOverlayValue(overlay.trade))"
+                )
+#endif
                 continue
             }
             guard observations[index].status == .active else {
                 skippedResolvedCount += 1
+#if DEBUG
+                print(
+                    "[PortalPunchlistOverlay] propertyID=\(propertyID.uuidString) " +
+                    "result=skipped reason=local_resolved issueID=\(observations[index].id.uuidString) " +
+                    "match=\(matchMethod) key=\(locationKey ?? "none")"
+                )
+#endif
                 continue
             }
 
@@ -2525,6 +2547,17 @@ final class LocalStore {
             if observations[index] != before {
                 observationIndexByID[observations[index].id] = index
                 appliedCount += 1
+#if DEBUG
+                print(
+                    "[PortalPunchlistOverlay] propertyID=\(propertyID.uuidString) " +
+                    "result=applied match=\(matchMethod) issueID=\(observations[index].id.uuidString) " +
+                    "remoteIssueID=\(overlay.issueID?.uuidString ?? "none") key=\(locationKey ?? "none") " +
+                    "oldPriority=\(Self.diagnosticOverlayValue(before.priority)) " +
+                    "newPriority=\(Self.diagnosticOverlayValue(observations[index].priority)) " +
+                    "oldTrade=\(Self.diagnosticOverlayValue(before.trade)) " +
+                    "newTrade=\(Self.diagnosticOverlayValue(observations[index].trade)) persisted=true"
+                )
+#endif
             }
         }
 
@@ -2539,6 +2572,11 @@ final class LocalStore {
             skippedAmbiguousCount: skippedAmbiguousCount,
             skippedResolvedCount: skippedResolvedCount
         )
+    }
+
+    private static func diagnosticOverlayValue(_ value: String?) -> String {
+        let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return trimmed.isEmpty ? "none" : trimmed.replacingOccurrences(of: " ", with: "_")
     }
 
     // MARK: - Guided Shots CRUD (per-property)

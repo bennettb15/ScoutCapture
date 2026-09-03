@@ -6544,6 +6544,9 @@ struct ContentView: View {
             .onReceive(NotificationCenter.default.publisher(for: .scoutClearLocalUICache)) { _ in
                 handleLocalCacheClearSignal()
             }
+            .onReceive(NotificationCenter.default.publisher(for: .scoutPersistentDataDidChange)) { _ in
+                refreshVisibleIssueStateAfterPersistentDataChange()
+            }
             .onChange(of: showMetadataFilterSheet) { wasShown, isShown in
                 guard wasShown, !isShown else { return }
                 deferCameraOverlayWork {
@@ -14179,6 +14182,22 @@ extension ContentView {
         showFlaggedUpdatedObservationInput = false
         draftUpdatedObservation = ""
         return true
+    }
+
+    private func refreshVisibleIssueStateAfterPersistentDataChange() {
+        guard currentSessionScopedPropertyID != nil else { return }
+        refreshActiveIssues()
+        guard !showDetailOverlay,
+              !showFlaggedUpdatedObservationInput,
+              let armedID = armedUpdateObservationID,
+              let propertyID = appState.selectedPropertyID,
+              let updated = (try? localStore.fetchObservations(propertyID: propertyID))?
+                .first(where: { $0.id == armedID }) else {
+            return
+        }
+        flaggedActionTargetObservation = updated
+        selectedPriority = Self.flaggedPriorityOrDefault(updated.priority)
+        selectedTrade = updated.trade ?? latestTradeForIssue(propertyID: propertyID, issueID: updated.id) ?? ""
     }
 
     private func clearPendingFlaggedDecision() {

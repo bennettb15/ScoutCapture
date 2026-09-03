@@ -43860,6 +43860,10 @@ final class AppState: ObservableObject {
         )
 
         Task { [weak self] in
+            await self?.syncPortalPunchlistOperationalOverlaysForPropertyOpen(
+                propertyID: propertyID,
+                activeOrganizationID: activeOrganizationID
+            )
             await self?.performPropertyOpenFreshnessCheck(
                 propertyID: propertyID,
                 activeOrganizationID: activeOrganizationID
@@ -44244,56 +44248,96 @@ final class AppState: ObservableObject {
         remoteShots: [RemoteShotMetadataRecord]
     ) async -> LocalStore.PortalPunchlistOperationalOverlayApplyResult? {
         guard backendFeatureFlags.supabaseEnabled,
-              isOrganizationContextReady,
               let client = supabaseClient else {
+            print(
+                "[PortalPunchlistOverlay] propertyID=\(propertyID.uuidString) " +
+                "result=skipped reason=fetch_prereq_failed"
+            )
             return nil
         }
         do {
-            async let observationRows: [RemotePortalPunchlistObservationRecord] = client
-                .from("observations")
-                .select("id, property_id, session_id, shot_id, status, priority, trade, updated_at, deleted_at")
-                .eq("org_id", value: activeOrganizationID.uuidString.lowercased())
-                .eq("property_id", value: propertyID.uuidString.lowercased())
-                .is("deleted_at", value: nil)
-                .limit(5_000)
-                .execute()
-                .value
+            let observationRows: [RemotePortalPunchlistObservationRecord]
+            do {
+                observationRows = try await client
+                    .from("observations")
+                    .select("id, property_id, session_id, shot_id, status, priority, trade, updated_at, deleted_at")
+                    .eq("org_id", value: activeOrganizationID.uuidString.lowercased())
+                    .eq("property_id", value: propertyID.uuidString.lowercased())
+                    .is("deleted_at", value: nil)
+                    .limit(5_000)
+                    .execute()
+                    .value
+            } catch {
+                recordDiagnosticsError(error)
+                print(
+                    "[PortalPunchlistOverlay] propertyID=\(propertyID.uuidString) " +
+                    "source=observations result=failed category=\(Self.diagnosticErrorCategory(for: error).rawValue)"
+                )
+                return nil
+            }
 
-            async let updateRows: [RemoteObservationUpdateReplayRecord] = client
-                .from("observation_updates")
-                .select("id, org_id, property_id, observation_id, session_id, shot_id, update_type, status, priority, trade, updated_at, deleted_at")
-                .eq("org_id", value: activeOrganizationID.uuidString.lowercased())
-                .eq("property_id", value: propertyID.uuidString.lowercased())
-                .is("deleted_at", value: nil)
-                .order("updated_at", ascending: false)
-                .limit(5_000)
-                .execute()
-                .value
+            let updateRows: [RemoteObservationUpdateReplayRecord]
+            do {
+                updateRows = try await client
+                    .from("observation_updates")
+                    .select("id, org_id, property_id, observation_id, session_id, shot_id, update_type, status, priority, trade, updated_at, deleted_at")
+                    .eq("org_id", value: activeOrganizationID.uuidString.lowercased())
+                    .eq("property_id", value: propertyID.uuidString.lowercased())
+                    .is("deleted_at", value: nil)
+                    .order("updated_at", ascending: false)
+                    .limit(5_000)
+                    .execute()
+                    .value
+            } catch {
+                recordDiagnosticsError(error)
+                print(
+                    "[PortalPunchlistOverlay] propertyID=\(propertyID.uuidString) " +
+                    "source=observation_updates result=failed category=\(Self.diagnosticErrorCategory(for: error).rawValue)"
+                )
+                return nil
+            }
 
-            async let activityRows: [RemotePortalPunchlistActivityRecord] = client
-                .from("punchlist_activity")
-                .select("id, property_id, observation_id, shot_id, activity_type, to_value, created_at, deleted_at")
-                .eq("org_id", value: activeOrganizationID.uuidString.lowercased())
-                .eq("property_id", value: propertyID.uuidString.lowercased())
-                .is("deleted_at", value: nil)
-                .in("activity_type", values: [
-                    "priority_changed",
-                    "trade_changed",
-                    "status_changed",
-                    "completion_submitted",
-                    "completion_approved",
-                    "completion_rejected"
-                ])
-                .order("created_at", ascending: false)
-                .limit(5_000)
-                .execute()
-                .value
+            let activityRows: [RemotePortalPunchlistActivityRecord]
+            do {
+                activityRows = try await client
+                    .from("punchlist_activity")
+                    .select("id, property_id, observation_id, shot_id, activity_type, to_value, created_at, deleted_at")
+                    .eq("org_id", value: activeOrganizationID.uuidString.lowercased())
+                    .eq("property_id", value: propertyID.uuidString.lowercased())
+                    .is("deleted_at", value: nil)
+                    .in("activity_type", values: [
+                        "priority_changed",
+                        "trade_changed",
+                        "status_changed",
+                        "completion_submitted",
+                        "completion_approved",
+                        "completion_rejected"
+                    ])
+                    .order("created_at", ascending: false)
+                    .limit(5_000)
+                    .execute()
+                    .value
+            } catch {
+                recordDiagnosticsError(error)
+                print(
+                    "[PortalPunchlistOverlay] propertyID=\(propertyID.uuidString) " +
+                    "source=punchlist_activity result=failed category=\(Self.diagnosticErrorCategory(for: error).rawValue)"
+                )
+                return nil
+            }
+
+            print(
+                "[PortalPunchlistOverlay] propertyID=\(propertyID.uuidString) " +
+                "source=remote_counts observations=\(observationRows.count) " +
+                "updates=\(updateRows.count) activities=\(activityRows.count) " +
+                "activityTypes=\(Self.portalPunchlistActivityTypeCountsDescription(activityRows))"
+            )
 
             let overlays = Self.portalPunchlistOperationalOverlays(
                 propertyID: propertyID,
-                observations: try await observationRows,
-                updates: try await updateRows,
-                activities: try await activityRows,
+                observations: observationRows,
+                updates: updateRows,
+                activities: activityRows,
                 remoteShots: remoteShots
             )
             let result = try localStore.applyPortalPunchlistOperationalOverlays(
@@ -44316,10 +44360,98 @@ final class AppState: ObservableObject {
             recordDiagnosticsError(error)
             print(
                 "[PortalPunchlistOverlay] propertyID=\(propertyID.uuidString) " +
-                "result=skipped reason=fetch_or_apply_failed category=\(Self.diagnosticErrorCategory(for: error).rawValue)"
+                "result=skipped reason=apply_failed category=\(Self.diagnosticErrorCategory(for: error).rawValue)"
             )
             return nil
         }
+    }
+
+    private nonisolated static func portalPunchlistActivityTypeCountsDescription(
+        _ activities: [RemotePortalPunchlistActivityRecord]
+    ) -> String {
+        let counts = activities.reduce(into: [String: Int]()) { partial, activity in
+            let key = normalizedReplayText(activity.activityType)?.lowercased() ?? "unknown"
+            partial[key, default: 0] += 1
+        }
+        guard !counts.isEmpty else { return "none" }
+        return counts.keys.sorted().map { "\($0):\(counts[$0, default: 0])" }.joined(separator: ",")
+    }
+
+    @discardableResult
+    func syncPortalPunchlistOperationalOverlaysForPropertyOpen(
+        propertyID: UUID,
+        activeOrganizationID: UUID
+    ) async -> LocalStore.PortalPunchlistOperationalOverlayApplyResult? {
+        let startedAt = Date()
+        guard backendFeatureFlags.supabaseEnabled,
+              canAccessProperty(propertyID),
+              canAccessOrganization(activeOrganizationID),
+              supabaseClient != nil else {
+            print(
+                "[PortalPunchlistOverlay] propertyID=\(propertyID.uuidString) " +
+                "result=skipped reason=property_open_prereq_failed"
+            )
+            return nil
+        }
+        print(
+            "[PortalPunchlistOverlay] propertyID=\(propertyID.uuidString) " +
+            "orgID=\(activeOrganizationID.uuidString) trigger=property_open fetch=starting"
+        )
+        let remoteShots: [RemoteShotMetadataRecord]
+        do {
+            remoteShots = try await fetchRemotePortalPunchlistShotMetadataRows(
+                propertyID: propertyID,
+                activeOrganizationID: activeOrganizationID
+            )
+        } catch {
+            recordDiagnosticsError(error)
+            remoteShots = []
+            print(
+                "[PortalPunchlistOverlay] propertyID=\(propertyID.uuidString) " +
+                "source=shots result=failed category=\(Self.diagnosticErrorCategory(for: error).rawValue)"
+            )
+        }
+        let result = await applyPortalPunchlistOperationalOverlaysIfAvailable(
+            propertyID: propertyID,
+            activeOrganizationID: activeOrganizationID,
+            remoteShots: remoteShots
+        )
+        if let result,
+           result.appliedCount > 0 {
+            await MainActor.run {
+                self.reloadSessionCache(for: propertyID)
+                self.schedulePersistentDataCacheRefresh(reason: "portal_punchlist_overlay_applied")
+            }
+        }
+        print(
+            "[PortalPunchlistOverlay] propertyID=\(propertyID.uuidString) " +
+            "trigger=property_open remoteShotCount=\(remoteShots.count) " +
+            "applied=\(result?.appliedCount ?? 0) " +
+            "noMatch=\(result?.skippedNoMatchCount ?? 0) " +
+            "ambiguous=\(result?.skippedAmbiguousCount ?? 0) " +
+            "resolvedSkipped=\(result?.skippedResolvedCount ?? 0) " +
+            "elapsedMs=\(Int(Date().timeIntervalSince(startedAt) * 1000))"
+        )
+        return result
+    }
+
+    private func fetchRemotePortalPunchlistShotMetadataRows(
+        propertyID: UUID,
+        activeOrganizationID: UUID
+    ) async throws -> [RemoteShotMetadataRecord] {
+        guard let client = supabaseClient else {
+            throw RemotePropertyFetchError.missingClient
+        }
+        return try await client
+            .from("shots")
+            .select("id, org_id, property_id, session_id, created_at, updated_at, updated_by, revision, deleted_at, building, elevation, detail_type, angle_index, shot_key, logical_shot_identity, capture_kind, first_capture_kind, is_guided, is_flagged, issue_id, issue_status, trade, reason, priority, capture_mode, lens, latitude, longitude, accuracy_meters, image_width, image_height, lifecycle_state, retired_at, retired_reason, retired_by, superseded_by_shot_id, supersedes_shot_id, replacement_reason, hidden_from_reports, hidden_from_gallery, lifecycle_updated_at, storage_bucket, storage_path, checksum_sha256, byte_size, upload_state, upload_attempts, last_upload_error")
+            .eq("org_id", value: activeOrganizationID.uuidString.lowercased())
+            .eq("property_id", value: propertyID.uuidString.lowercased())
+            .is("deleted_at", value: nil)
+            .order("updated_at", ascending: false)
+            .limit(5_000)
+            .execute()
+            .value
     }
 
     private nonisolated static func portalPunchlistOperationalOverlays(

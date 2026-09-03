@@ -260,6 +260,37 @@ final class ClientPortalPriorityTradeSyncTests: XCTestCase {
         XCTAssertEqual(updated.trade, "Electrical")
     }
 
+    func testIssueIDMissCanMatchUniqueStableLocationIdentity() throws {
+        let fixture = try makeStore()
+        let localIssueID = UUID()
+        _ = try fixture.store.createObservation(
+            makeObservation(id: localIssueID, propertyID: fixture.property.id, priority: "High", trade: "Paint")
+        )
+
+        let result = try fixture.store.applyPortalPunchlistOperationalOverlays(
+            propertyID: fixture.property.id,
+            overlays: [
+                PortalPunchlistOperationalOverlay(
+                    issueID: UUID(),
+                    propertyID: fixture.property.id,
+                    priority: "Critical",
+                    trade: "Electrical",
+                    updatedAt: newer,
+                    building: "B1",
+                    targetElevation: "North",
+                    detailType: "Window",
+                    angleIndex: 1
+                )
+            ]
+        )
+
+        let updated = try XCTUnwrap(try fixture.store.fetchObservations(propertyID: fixture.property.id).first)
+        XCTAssertEqual(updated.id, localIssueID)
+        XCTAssertEqual(result.appliedCount, 1)
+        XCTAssertEqual(updated.priority, "Critical")
+        XCTAssertEqual(updated.trade, "Electrical")
+    }
+
     func testAmbiguousLocationMatchDoesNotOverwriteLocalMetadata() throws {
         let fixture = try makeStore()
         _ = try fixture.store.createObservation(
