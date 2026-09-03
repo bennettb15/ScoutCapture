@@ -6927,15 +6927,15 @@ struct ContentView: View {
                     detailType: detailType
                 )
             },
-            loadPortalNotes: { issueIDs in
+            loadPortalNotes: { observations in
                 guard let propertyID = appState.selectedPropertyID,
                       let activeOrganizationID = appState.activeOrganizationID else {
                     return [:]
                 }
-                return await appState.fetchPortalPunchlistNotesByIssueID(
+                return await appState.fetchPortalPunchlistNotes(
                     propertyID: propertyID,
                     activeOrganizationID: activeOrganizationID,
-                    issueIDs: issueIDs
+                    observations: observations
                 )
             }
         )
@@ -19492,7 +19492,7 @@ extension ContentView {
         let onSelectIssue: (Observation) -> Void
         let onRetakeIssue: (Observation) -> Void
         let onReclassifyIssue: (Observation, String, String, String) -> Void
-        let loadPortalNotes: (Set<UUID>) async -> [UUID: [PortalPunchlistNote]]
+        let loadPortalNotes: ([Observation]) async -> [UUID: [PortalPunchlistNote]]
         @State private var lastValidOrientation: UIDeviceOrientation = .portrait
         @State private var reclassifyTargetObservation: Observation? = nil
         @State private var historyTargetObservation: Observation? = nil
@@ -19794,7 +19794,7 @@ extension ContentView {
                 portalNoteCountByIssueID = [:]
                 return
             }
-            let notesByIssueID = await loadPortalNotes(issueIDs)
+            let notesByIssueID = await loadPortalNotes(observations)
             guard !Task.isCancelled else { return }
             portalNoteCountByIssueID = notesByIssueID.reduce(into: [UUID: Int]()) { partial, item in
                 let count = item.value.count
@@ -20008,7 +20008,7 @@ extension ContentView {
             let observation: Observation
             let resolvedThumbnailPath: String?
             let cache: AssetImageCache
-            let loadPortalNotes: (Set<UUID>) async -> [UUID: [PortalPunchlistNote]]
+            let loadPortalNotes: ([Observation]) async -> [UUID: [PortalPunchlistNote]]
 
             @State private var notes: [PortalPunchlistNote]? = nil
 
@@ -20049,7 +20049,7 @@ extension ContentView {
                     }
                 }
                 .task(id: observation.id) {
-                    let loaded = await loadPortalNotes([observation.id])
+                    let loaded = await loadPortalNotes([observation])
                     guard !Task.isCancelled else { return }
                     notes = loaded[observation.id] ?? []
                 }

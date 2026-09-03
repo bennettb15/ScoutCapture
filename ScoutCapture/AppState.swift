@@ -6785,6 +6785,28 @@ final class AppState: ObservableObject {
         }
     }
 
+    private struct PortalPunchlistLocalIssueRecord: Equatable {
+        let id: UUID
+        let propertyID: UUID
+        let status: Observation.Status
+        let linkedShotID: UUID?
+        let shotIDs: Set<UUID>
+        let building: String?
+        let targetElevation: String?
+        let detailType: String?
+    }
+
+    private struct PortalPunchlistRemoteShotIdentity: Equatable {
+        let id: UUID
+        let issueID: UUID?
+        let propertyID: UUID?
+        let building: String?
+        let elevation: String?
+        let detailType: String?
+        let angleIndex: Int?
+        let shotKey: String?
+    }
+
     private struct SupabaseRowUpdatedAtRecord: Decodable {
         let id: UUID
         let updatedAt: Date
@@ -44469,16 +44491,70 @@ final class AppState: ObservableObject {
         activeOrganizationID: UUID,
         issueIDs: Set<UUID>
     ) async -> [UUID: [PortalPunchlistNote]] {
+        let localIssues = issueIDs.map {
+            PortalPunchlistLocalIssueRecord(
+                id: $0,
+                propertyID: propertyID,
+                status: .active,
+                linkedShotID: nil,
+                shotIDs: [],
+                building: nil,
+                targetElevation: nil,
+                detailType: nil
+            )
+        }
+        return await fetchPortalPunchlistNotes(
+            propertyID: propertyID,
+            activeOrganizationID: activeOrganizationID,
+            localIssues: localIssues
+        )
+    }
+
+    func fetchPortalPunchlistNotes(
+        propertyID: UUID,
+        activeOrganizationID: UUID,
+        observations: [Observation]
+    ) async -> [UUID: [PortalPunchlistNote]] {
+        let localIssues = observations.map { observation in
+            PortalPunchlistLocalIssueRecord(
+                id: observation.id,
+                propertyID: observation.propertyID,
+                status: observation.status,
+                linkedShotID: observation.linkedShotID,
+                shotIDs: Set(observation.shots.map(\.id)),
+                building: observation.building,
+                targetElevation: observation.targetElevation,
+                detailType: observation.detailType
+            )
+        }
+        return await fetchPortalPunchlistNotes(
+            propertyID: propertyID,
+            activeOrganizationID: activeOrganizationID,
+            localIssues: localIssues
+        )
+    }
+
+    private func fetchPortalPunchlistNotes(
+        propertyID: UUID,
+        activeOrganizationID: UUID,
+        localIssues: [PortalPunchlistLocalIssueRecord]
+    ) async -> [UUID: [PortalPunchlistNote]] {
+        let issueIDs = Set(localIssues.map(\.id))
         guard backendFeatureFlags.supabaseEnabled,
               canAccessProperty(propertyID),
               canAccessOrganization(activeOrganizationID),
               supabaseClient != nil,
-              !issueIDs.isEmpty else {
+              !localIssues.isEmpty else {
             return [:]
         }
 
         let startedAt = Date()
-        let sortedIssueIDs = issueIDs.sorted { $0.uuidString < $1.uuidString }
+#if DEBUG
+        print(
+            "[PortalPunchlistNotes] propertyID=\(propertyID.uuidString) " +
+            "result=started activeIssueCount=\(localIssues.count)"
+        )
+#endif
         do {
             guard let client = supabaseClient else { return [:] }
             let activityRows: [RemotePortalPunchlistActivityRecord] = try await client
@@ -44486,7 +44562,6 @@ final class AppState: ObservableObject {
                 .select("id, org_id, property_id, observation_id, shot_id, activity_type, from_value, to_value, note, created_by, created_at, deleted_at")
                 .eq("org_id", value: activeOrganizationID.uuidString.lowercased())
                 .eq("property_id", value: propertyID.uuidString.lowercased())
-                .in("observation_id", values: sortedIssueIDs)
                 .is("deleted_at", value: nil)
                 .in("activity_type", values: [
                     "note_added",
@@ -44497,15 +44572,44 @@ final class AppState: ObservableObject {
                 .limit(5_000)
                 .execute()
                 .value
+            let remoteShots: [RemoteShotMetadataRecord]
+            do {
+                remoteShots = try await fetchRemotePortalPunchlistShotMetadataRows(
+                    propertyID: propertyID,
+                    activeOrganizationID: activeOrganizationID
+                )
+            } catch {
+                recordDiagnosticsError(error)
+                remoteShots = []
+#if DEBUG
+                print(
+                    "[PortalPunchlistNotes] propertyID=\(propertyID.uuidString) " +
+                    "source=shots result=failed category=\(Self.diagnosticErrorCategory(for: error).rawValue)"
+                )
+#endif
+            }
             let notesByIssueID = Self.portalPunchlistNotesByIssueID(
                 propertyID: propertyID,
-                issueIDs: issueIDs,
-                activities: activityRows
+                localIssues: localIssues,
+                activities: activityRows,
+                remoteShots: remoteShots.map { shot in
+                    PortalPunchlistRemoteShotIdentity(
+                        id: shot.id,
+                        issueID: shot.issueID,
+                        propertyID: shot.propertyID,
+                        building: shot.building,
+                        elevation: shot.elevation,
+                        detailType: shot.detailType,
+                        angleIndex: shot.angleIndex,
+                        shotKey: shot.shotKey
+                    )
+                }
             )
             let totalNotes = notesByIssueID.values.reduce(0) { $0 + $1.count }
             print(
                 "[PortalPunchlistNotes] propertyID=\(propertyID.uuidString) " +
-                "issueCount=\(issueIDs.count) notes=\(totalNotes) " +
+                "issueCount=\(issueIDs.count) activityRows=\(activityRows.count) " +
+                "remoteShotRows=\(remoteShots.count) notes=\(totalNotes) " +
                 "elapsedMs=\(Int(Date().timeIntervalSince(startedAt) * 1000))"
             )
             return notesByIssueID
@@ -44667,12 +44771,42 @@ final class AppState: ObservableObject {
         issueIDs: Set<UUID>,
         activities: [RemotePortalPunchlistActivityRecord]
     ) -> [UUID: [PortalPunchlistNote]] {
-        guard !issueIDs.isEmpty else { return [:] }
+        let localIssues = issueIDs.map {
+            PortalPunchlistLocalIssueRecord(
+                id: $0,
+                propertyID: propertyID,
+                status: .active,
+                linkedShotID: nil,
+                shotIDs: [],
+                building: nil,
+                targetElevation: nil,
+                detailType: nil
+            )
+        }
+        return portalPunchlistNotesByIssueID(
+            propertyID: propertyID,
+            localIssues: localIssues,
+            activities: activities,
+            remoteShots: []
+        )
+    }
 
+    private nonisolated static func portalPunchlistNotesByIssueID(
+        propertyID: UUID,
+        localIssues: [PortalPunchlistLocalIssueRecord],
+        activities: [RemotePortalPunchlistActivityRecord],
+        remoteShots: [PortalPunchlistRemoteShotIdentity]
+    ) -> [UUID: [PortalPunchlistNote]] {
+        let activeIssues = localIssues.filter { $0.propertyID == propertyID && $0.status == .active }
+        guard !activeIssues.isEmpty else { return [:] }
+
+        let issueByID = Dictionary(uniqueKeysWithValues: activeIssues.map { ($0.id, $0) })
+        let remoteShotsByID = Dictionary(uniqueKeysWithValues: remoteShots.map { ($0.id, $0) })
+        let locationIndex = portalPunchlistLocalIssueLocationIndex(activeIssues)
         let candidates = activities.filter { activity in
             activity.deletedAt == nil &&
             (activity.propertyID == nil || activity.propertyID == propertyID) &&
-            activity.observationID.map { issueIDs.contains($0) } == true
+            activity.observationID != nil
         }
         let approvedCompletionSubmissionIDs = Set(
             candidates.compactMap { activity -> String? in
@@ -44685,8 +44819,12 @@ final class AppState: ObservableObject {
         let displayCandidates = candidates.sorted(by: portalPunchlistActivitySortDescending)
 
         var notesByIssueID: [UUID: [PortalPunchlistNote]] = [:]
+        var exactMatchCount = 0
+        var locationMatchCount = 0
+        var skippedNoMatchCount = 0
+        var skippedAmbiguousCount = 0
         for activity in displayCandidates {
-            guard let issueID = activity.observationID,
+            guard let remoteIssueID = activity.observationID,
                   let type = normalizedReplayText(activity.activityType)?.lowercased(),
                   let note = normalizedReplayText(activity.note) else {
                 continue
@@ -44707,11 +44845,57 @@ final class AppState: ObservableObject {
                 continue
             }
 
-            notesByIssueID[issueID, default: []].append(
+            let match: (issueID: UUID, method: String)?
+            if issueByID[remoteIssueID] != nil {
+                match = (remoteIssueID, "issue_id")
+            } else {
+                let locationKeys = portalPunchlistRemoteActivityLocationKeys(
+                    propertyID: propertyID,
+                    activity,
+                    remoteShotsByID: remoteShotsByID,
+                    remoteShots: remoteShots
+                )
+                let matches = Array(Set(locationKeys.flatMap { locationIndex[$0] ?? [] }))
+                    .sorted { $0.uuidString < $1.uuidString }
+                if matches.count == 1 {
+                    match = (matches[0], "location_after_issue_id_miss")
+                } else {
+                    let joinedLocationKeys = locationKeys.sorted().joined(separator: ",")
+                    if matches.count > 1 {
+                        skippedAmbiguousCount += 1
+#if DEBUG
+                        print(
+                            "[PortalPunchlistNotes] propertyID=\(propertyID.uuidString) " +
+                            "result=skipped reason=ambiguous_location_match keys=\(joinedLocationKeys) " +
+                            "remoteIssueID=\(remoteIssueID.uuidString) matches=\(matches.count)"
+                        )
+#endif
+                    } else {
+                        skippedNoMatchCount += 1
+#if DEBUG
+                        print(
+                            "[PortalPunchlistNotes] propertyID=\(propertyID.uuidString) " +
+                            "result=skipped reason=no_match remoteIssueID=\(remoteIssueID.uuidString) " +
+                            "keys=\(joinedLocationKeys)"
+                        )
+#endif
+                    }
+                    match = nil
+                }
+            }
+
+            guard let match else { continue }
+            if match.method == "issue_id" {
+                exactMatchCount += 1
+            } else {
+                locationMatchCount += 1
+            }
+
+            notesByIssueID[match.issueID, default: []].append(
                 PortalPunchlistNote(
                     id: noteID,
                     sourceActivityID: activity.id,
-                    issueID: issueID,
+                    issueID: match.issueID,
                     propertyID: propertyID,
                     activityType: type,
                     note: note,
@@ -44720,7 +44904,120 @@ final class AppState: ObservableObject {
                 )
             )
         }
+#if DEBUG
+        let totalNotes = notesByIssueID.values.reduce(0) { $0 + $1.count }
+        print(
+            "[PortalPunchlistNotes] propertyID=\(propertyID.uuidString) " +
+            "matchedNotes=\(totalNotes) exact=\(exactMatchCount) " +
+            "location=\(locationMatchCount) noMatch=\(skippedNoMatchCount) " +
+            "ambiguous=\(skippedAmbiguousCount)"
+        )
+#endif
         return notesByIssueID
+    }
+
+    private nonisolated static func portalPunchlistLocalIssueLocationIndex(
+        _ localIssues: [PortalPunchlistLocalIssueRecord]
+    ) -> [String: Set<UUID>] {
+        var index: [String: Set<UUID>] = [:]
+        for issue in localIssues {
+            var keys = Set<String>()
+            if let key = portalPunchlistLocationKey(
+                building: issue.building,
+                elevation: issue.targetElevation,
+                detailType: issue.detailType,
+                angleIndex: 1,
+                shotKey: nil
+            ) {
+                keys.insert(key)
+            }
+            if let linkedShotID = issue.linkedShotID, issue.shotIDs.contains(linkedShotID) {
+                keys.insert(linkedShotID.uuidString.lowercased())
+            }
+            for key in keys {
+                index[key, default: []].insert(issue.id)
+            }
+        }
+        return index
+    }
+
+    private nonisolated static func portalPunchlistRemoteActivityLocationKeys(
+        propertyID: UUID,
+        _ activity: RemotePortalPunchlistActivityRecord,
+        remoteShotsByID: [UUID: PortalPunchlistRemoteShotIdentity],
+        remoteShots: [PortalPunchlistRemoteShotIdentity]
+    ) -> Set<String> {
+        var keys = Set<String>()
+        if let shotID = activity.shotID {
+            keys.insert(shotID.uuidString.lowercased())
+        }
+        let shot = (activity.shotID.flatMap { remoteShotsByID[$0] } ??
+            activity.observationID.flatMap { observationID in
+                remoteShots.first(where: { $0.issueID == observationID })
+            })
+            .flatMap { shot in
+                shot.propertyID == nil || shot.propertyID == propertyID ? shot : nil
+            }
+        if let key = portalPunchlistLocationKey(
+            building: shot?.building,
+            elevation: shot?.elevation,
+            detailType: shot?.detailType,
+            angleIndex: shot?.angleIndex,
+            shotKey: shot?.shotKey
+        ) {
+            keys.insert(key)
+        }
+        return keys
+    }
+
+    private nonisolated static func portalPunchlistLocationKey(
+        building: String?,
+        elevation: String?,
+        detailType: String?,
+        angleIndex: Int?,
+        shotKey: String?
+    ) -> String? {
+        if let shotKey = normalizedReplayText(shotKey)?.lowercased() {
+            return shotKey
+        }
+        guard let building = normalizedReplayText(building),
+              let elevation = portalPunchlistNormalizeElevation(elevation),
+              let detailType = normalizedReplayText(detailType),
+              let angleIndex else {
+            return nil
+        }
+        return portalPunchlistShotKey(
+            building: building,
+            elevation: elevation,
+            detailType: detailType,
+            angleIndex: max(1, angleIndex)
+        )
+    }
+
+    private nonisolated static func portalPunchlistNormalizeElevation(_ value: String?) -> String? {
+        guard let value else { return nil }
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        let lowered = trimmed.lowercased()
+        if lowered == "north elevation" || lowered == "north" { return "North" }
+        if lowered == "south elevation" || lowered == "south" { return "South" }
+        if lowered == "east elevation" || lowered == "east" { return "East" }
+        if lowered == "west elevation" || lowered == "west" { return "West" }
+        return trimmed
+    }
+
+    private nonisolated static func portalPunchlistShotKey(
+        building: String,
+        elevation: String,
+        detailType: String,
+        angleIndex: Int
+    ) -> String {
+        [
+            building.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
+            elevation.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
+            detailType.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
+            String(max(1, angleIndex))
+        ].joined(separator: "|")
     }
 
     private nonisolated static func portalPunchlistCompletionSubmissionGroupID(
@@ -44817,16 +45114,93 @@ final class AppState: ObservableObject {
             deletedAt: Date?
         )]
     ) -> [UUID: [PortalPunchlistNote]] {
+        let localIssues = issueIDs.map {
+            (
+                id: $0,
+                propertyID: propertyID,
+                status: Observation.Status.active,
+                linkedShotID: Optional<UUID>.none,
+                shotIDs: Set<UUID>(),
+                building: Optional<String>.none,
+                targetElevation: Optional<String>.none,
+                detailType: Optional<String>.none
+            )
+        }
+        return portalPunchlistNotesByIssueIDTestOnly(
+            propertyID: propertyID,
+            localIssueRows: localIssues,
+            activityRows: activityRows.map { row in
+                (
+                    id: row.id,
+                    propertyID: row.propertyID,
+                    observationID: row.observationID,
+                    shotID: Optional<UUID>.none,
+                    activityType: row.activityType,
+                    fromValue: row.fromValue,
+                    note: row.note,
+                    createdAt: row.createdAt,
+                    deletedAt: row.deletedAt
+                )
+            },
+            remoteShotRows: []
+        )
+    }
+
+    nonisolated static func portalPunchlistNotesByIssueIDTestOnly(
+        propertyID: UUID,
+        localIssueRows: [(
+            id: UUID,
+            propertyID: UUID,
+            status: Observation.Status,
+            linkedShotID: UUID?,
+            shotIDs: Set<UUID>,
+            building: String?,
+            targetElevation: String?,
+            detailType: String?
+        )],
+        activityRows: [(
+            id: UUID,
+            propertyID: UUID?,
+            observationID: UUID?,
+            shotID: UUID?,
+            activityType: String,
+            fromValue: String?,
+            note: String?,
+            createdAt: Date,
+            deletedAt: Date?
+        )],
+        remoteShotRows: [(
+            id: UUID,
+            issueID: UUID?,
+            propertyID: UUID?,
+            building: String?,
+            elevation: String?,
+            detailType: String?,
+            angleIndex: Int?,
+            shotKey: String?
+        )]
+    ) -> [UUID: [PortalPunchlistNote]] {
         portalPunchlistNotesByIssueID(
             propertyID: propertyID,
-            issueIDs: issueIDs,
+            localIssues: localIssueRows.map { row in
+                PortalPunchlistLocalIssueRecord(
+                    id: row.id,
+                    propertyID: row.propertyID,
+                    status: row.status,
+                    linkedShotID: row.linkedShotID,
+                    shotIDs: row.shotIDs,
+                    building: row.building,
+                    targetElevation: row.targetElevation,
+                    detailType: row.detailType
+                )
+            },
             activities: activityRows.map { row in
                 RemotePortalPunchlistActivityRecord(
                     id: row.id,
                     orgID: nil,
                     propertyID: row.propertyID,
                     observationID: row.observationID,
-                    shotID: nil,
+                    shotID: row.shotID,
                     activityType: row.activityType,
                     fromValue: row.fromValue,
                     toValue: nil,
@@ -44834,6 +45208,18 @@ final class AppState: ObservableObject {
                     createdBy: nil,
                     createdAt: row.createdAt,
                     deletedAt: row.deletedAt
+                )
+            },
+            remoteShots: remoteShotRows.map { row in
+                PortalPunchlistRemoteShotIdentity(
+                    id: row.id,
+                    issueID: row.issueID,
+                    propertyID: row.propertyID,
+                    building: row.building,
+                    elevation: row.elevation,
+                    detailType: row.detailType,
+                    angleIndex: row.angleIndex,
+                    shotKey: row.shotKey
                 )
             }
         )

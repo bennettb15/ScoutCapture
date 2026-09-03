@@ -39,6 +39,40 @@ final class ClientPortalPriorityTradeSyncTests: XCTestCase {
         )
     }
 
+    private func makePortalActivityRowWithShotID(
+        id: UUID = UUID(),
+        propertyID: UUID?,
+        observationID: UUID?,
+        shotID: UUID?,
+        activityType: String,
+        fromValue: String? = nil,
+        note: String? = nil,
+        createdAt: Date,
+        deletedAt: Date? = nil
+    ) -> (
+        id: UUID,
+        propertyID: UUID?,
+        observationID: UUID?,
+        shotID: UUID?,
+        activityType: String,
+        fromValue: String?,
+        note: String?,
+        createdAt: Date,
+        deletedAt: Date?
+    ) {
+        (
+            id: id,
+            propertyID: propertyID,
+            observationID: observationID,
+            shotID: shotID,
+            activityType: activityType,
+            fromValue: fromValue,
+            note: note,
+            createdAt: createdAt,
+            deletedAt: deletedAt
+        )
+    }
+
     private func makeStore() throws -> (store: LocalStore, property: Property) {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("ScoutCapture-PortalOverlay-\(UUID().uuidString)", isDirectory: true)
@@ -801,5 +835,170 @@ final class ClientPortalPriorityTradeSyncTests: XCTestCase {
 
         XCTAssertEqual(notes[issueID]?.map(\.note), ["Visible note"])
         XCTAssertNil(notes[otherIssueID])
+    }
+
+    func testPortalNotesMatchUniqueStableLocationWhenIssueIDDiffers() {
+        let propertyID = UUID()
+        let localIssueID = UUID()
+        let remoteIssueID = UUID()
+        let remoteShotID = UUID()
+
+        let notes = AppState.portalPunchlistNotesByIssueIDTestOnly(
+            propertyID: propertyID,
+            localIssueRows: [
+                (
+                    id: localIssueID,
+                    propertyID: propertyID,
+                    status: .active,
+                    linkedShotID: nil,
+                    shotIDs: [],
+                    building: "B1",
+                    targetElevation: "North",
+                    detailType: "Window"
+                )
+            ],
+            activityRows: [
+                makePortalActivityRowWithShotID(
+                    propertyID: propertyID,
+                    observationID: remoteIssueID,
+                    shotID: remoteShotID,
+                    activityType: "note_added",
+                    note: "Website note on remote issue.",
+                    createdAt: newer
+                )
+            ],
+            remoteShotRows: [
+                (
+                    id: remoteShotID,
+                    issueID: remoteIssueID,
+                    propertyID: propertyID,
+                    building: "B1",
+                    elevation: "North",
+                    detailType: "Window",
+                    angleIndex: 1,
+                    shotKey: nil
+                )
+            ]
+        )
+
+        XCTAssertEqual(notes[localIssueID]?.map(\.note), ["Website note on remote issue."])
+        XCTAssertNil(notes[remoteIssueID])
+    }
+
+    func testPortalNotesDoNotUseAmbiguousStableLocationFallback() {
+        let propertyID = UUID()
+        let firstLocalIssueID = UUID()
+        let secondLocalIssueID = UUID()
+        let remoteIssueID = UUID()
+        let remoteShotID = UUID()
+
+        let notes = AppState.portalPunchlistNotesByIssueIDTestOnly(
+            propertyID: propertyID,
+            localIssueRows: [
+                (
+                    id: firstLocalIssueID,
+                    propertyID: propertyID,
+                    status: .active,
+                    linkedShotID: nil,
+                    shotIDs: [],
+                    building: "B1",
+                    targetElevation: "North",
+                    detailType: "Window"
+                ),
+                (
+                    id: secondLocalIssueID,
+                    propertyID: propertyID,
+                    status: .active,
+                    linkedShotID: nil,
+                    shotIDs: [],
+                    building: "B1",
+                    targetElevation: "North",
+                    detailType: "Window"
+                )
+            ],
+            activityRows: [
+                makePortalActivityRowWithShotID(
+                    propertyID: propertyID,
+                    observationID: remoteIssueID,
+                    shotID: remoteShotID,
+                    activityType: "note_added",
+                    note: "Ambiguous note.",
+                    createdAt: newer
+                )
+            ],
+            remoteShotRows: [
+                (
+                    id: remoteShotID,
+                    issueID: remoteIssueID,
+                    propertyID: propertyID,
+                    building: "B1",
+                    elevation: "North",
+                    detailType: "Window",
+                    angleIndex: 1,
+                    shotKey: nil
+                )
+            ]
+        )
+
+        XCTAssertNil(notes[firstLocalIssueID])
+        XCTAssertNil(notes[secondLocalIssueID])
+    }
+
+    func testPortalNotesPreferExactIssueIDOverLocationFallback() {
+        let propertyID = UUID()
+        let exactLocalIssueID = UUID()
+        let locationLocalIssueID = UUID()
+        let remoteShotID = UUID()
+
+        let notes = AppState.portalPunchlistNotesByIssueIDTestOnly(
+            propertyID: propertyID,
+            localIssueRows: [
+                (
+                    id: exactLocalIssueID,
+                    propertyID: propertyID,
+                    status: .active,
+                    linkedShotID: nil,
+                    shotIDs: [],
+                    building: "B2",
+                    targetElevation: "South",
+                    detailType: "Door"
+                ),
+                (
+                    id: locationLocalIssueID,
+                    propertyID: propertyID,
+                    status: .active,
+                    linkedShotID: nil,
+                    shotIDs: [],
+                    building: "B1",
+                    targetElevation: "North",
+                    detailType: "Window"
+                )
+            ],
+            activityRows: [
+                makePortalActivityRowWithShotID(
+                    propertyID: propertyID,
+                    observationID: exactLocalIssueID,
+                    shotID: remoteShotID,
+                    activityType: "note_added",
+                    note: "Exact issue note.",
+                    createdAt: newer
+                )
+            ],
+            remoteShotRows: [
+                (
+                    id: remoteShotID,
+                    issueID: exactLocalIssueID,
+                    propertyID: propertyID,
+                    building: "B1",
+                    elevation: "North",
+                    detailType: "Window",
+                    angleIndex: 1,
+                    shotKey: nil
+                )
+            ]
+        )
+
+        XCTAssertEqual(notes[exactLocalIssueID]?.map(\.note), ["Exact issue note."])
+        XCTAssertNil(notes[locationLocalIssueID])
     }
 }
