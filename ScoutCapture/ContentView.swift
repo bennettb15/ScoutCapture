@@ -6926,6 +6926,17 @@ struct ContentView: View {
                     elevation: elevation,
                     detailType: detailType
                 )
+            },
+            loadPortalNotes: { issueIDs in
+                guard let propertyID = appState.selectedPropertyID,
+                      let activeOrganizationID = appState.activeOrganizationID else {
+                    return [:]
+                }
+                return await appState.fetchPortalPunchlistNotesByIssueID(
+                    propertyID: propertyID,
+                    activeOrganizationID: activeOrganizationID,
+                    issueIDs: issueIDs
+                )
             }
         )
     }
@@ -19481,9 +19492,12 @@ extension ContentView {
         let onSelectIssue: (Observation) -> Void
         let onRetakeIssue: (Observation) -> Void
         let onReclassifyIssue: (Observation, String, String, String) -> Void
+        let loadPortalNotes: (Set<UUID>) async -> [UUID: [PortalPunchlistNote]]
         @State private var lastValidOrientation: UIDeviceOrientation = .portrait
         @State private var reclassifyTargetObservation: Observation? = nil
         @State private var historyTargetObservation: Observation? = nil
+        @State private var portalNotesTargetObservation: Observation? = nil
+        @State private var portalNoteCountByIssueID: [UUID: Int] = [:]
         @State private var flaggedViewerState: FlaggedViewerState? = nil
         @State private var inlineToastText: String? = nil
         @State private var inlineToastToken: Int = 0
@@ -19513,6 +19527,13 @@ extension ContentView {
             default:
                 return 0
             }
+        }
+
+        private var issueIDSignature: String {
+            observations
+                .map { $0.id.uuidString }
+                .sorted()
+                .joined(separator: "|")
         }
 
         var body: some View {
@@ -19546,6 +19567,7 @@ extension ContentView {
                                     angleIndex: angleIndexByIssueID[observation.id],
                                     tradeOptions: tradeOptions,
                                     cache: cache,
+                                    portalNoteCount: portalNoteCountByIssueID[observation.id, default: 0],
                                     hasReferenceImage: referenceImageLocalID(for: observation) != nil,
                                     hasCapturedImage: capturedImageLocalID(for: observation) != nil,
                                     canRetake: canRetakeObservation(observation),
@@ -19572,6 +19594,9 @@ extension ContentView {
                                     },
                                     onTapHistory: {
                                         historyTargetObservation = observation
+                                    },
+                                    onTapPortalNotes: {
+                                        portalNotesTargetObservation = observation
                                     }
                                 )
                             }
@@ -19636,6 +19661,14 @@ extension ContentView {
                     .sheet(item: $historyTargetObservation) { target in
                         FlaggedHistorySheet(observation: target, tradeOptions: tradeOptions)
                     }
+                    .sheet(item: $portalNotesTargetObservation) { target in
+                        PortalIssueNotesSheet(
+                            observation: target,
+                            resolvedThumbnailPath: resolvedThumbnailPathByID[target.id],
+                            cache: cache,
+                            loadPortalNotes: loadPortalNotes
+                        )
+                    }
                     .overlay(alignment: .top) {
                         if let inlineToastText {
                             Text(inlineToastText)
@@ -19667,6 +19700,9 @@ extension ContentView {
                 }
                 .onDisappear {
                     UIDevice.current.endGeneratingDeviceOrientationNotifications()
+                }
+                .task(id: issueIDSignature) {
+                    await refreshPortalNoteCounts()
                 }
             }
             .fullScreenCover(item: $flaggedViewerState) { state in
@@ -19750,6 +19786,22 @@ extension ContentView {
             return observation.sessionID
                 ?? observation.updatedInSessionID
                 ?? currentSessionID
+        }
+
+        private func refreshPortalNoteCounts() async {
+            let issueIDs = Set(observations.map(\.id))
+            guard !issueIDs.isEmpty else {
+                portalNoteCountByIssueID = [:]
+                return
+            }
+            let notesByIssueID = await loadPortalNotes(issueIDs)
+            guard !Task.isCancelled else { return }
+            portalNoteCountByIssueID = notesByIssueID.reduce(into: [UUID: Int]()) { partial, item in
+                let count = item.value.count
+                if count > 0 {
+                    partial[item.key] = count
+                }
+            }
         }
 
         private func showInlineToast(_ text: String) {
@@ -19951,6 +20003,187 @@ extension ContentView {
             }
         }
 
+        private struct PortalIssueNotesSheet: View {
+            @Environment(\.dismiss) private var dismiss
+            let observation: Observation
+            let resolvedThumbnailPath: String?
+            let cache: AssetImageCache
+            let loadPortalNotes: (Set<UUID>) async -> [UUID: [PortalPunchlistNote]]
+
+            @State private var notes: [PortalPunchlistNote]? = nil
+
+            private var title: String {
+                let composed = ContentView.conciseContextLabel(
+                    building: observation.building,
+                    elevation: observation.targetElevation,
+                    detailType: observation.detailType
+                )
+                return composed.isEmpty ? "Portal Notes" : composed
+            }
+
+            var body: some View {
+                NavigationStack {
+                    GeometryReader { geo in
+                        VStack(spacing: 0) {
+                            PortalIssuePhotoPreview(
+                                imagePath: resolvedThumbnailPath,
+                                cache: cache
+                            )
+                            .frame(height: geo.size.height * 0.48)
+                            .frame(maxWidth: .infinity)
+                            .background(Color.black)
+
+                            notesContent
+                                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                                .background(Color(uiColor: .secondarySystemGroupedBackground))
+                        }
+                    }
+                    .navigationTitle(title)
+                    .navigationBarTitleDisplayMode(.inline)
+                    .toolbar {
+                        ToolbarItem(placement: .topBarTrailing) {
+                            Button("Done") {
+                                dismiss()
+                            }
+                        }
+                    }
+                }
+                .task(id: observation.id) {
+                    let loaded = await loadPortalNotes([observation.id])
+                    guard !Task.isCancelled else { return }
+                    notes = loaded[observation.id] ?? []
+                }
+            }
+
+            @ViewBuilder
+            private var notesContent: some View {
+                if let notes {
+                    if notes.isEmpty {
+                        VStack(spacing: 10) {
+                            Image(systemName: "note.text")
+                                .font(.system(size: 24, weight: .medium))
+                                .foregroundColor(.secondary)
+                            Text("No portal notes")
+                                .font(.system(size: 14, weight: .medium))
+                                .foregroundColor(.secondary)
+                        }
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    } else {
+                        ScrollView {
+                            LazyVStack(alignment: .leading, spacing: 10) {
+                                ForEach(notes) { note in
+                                    VStack(alignment: .leading, spacing: 7) {
+                                        HStack(alignment: .firstTextBaseline, spacing: 8) {
+                                            Label(
+                                                note.isCompletionNote ? "Completion Note" : "Portal Note",
+                                                systemImage: note.isCompletionNote ? "checkmark.seal" : "note.text"
+                                            )
+                                            .font(.system(size: 12, weight: .semibold))
+                                            .foregroundColor(.secondary)
+
+                                            Spacer(minLength: 0)
+
+                                            if let createdAt = note.createdAt {
+                                                Text(ContentView.formatObservationHistoryTimestamp(createdAt))
+                                                    .font(.system(size: 12, weight: .medium))
+                                                    .foregroundColor(.secondary)
+                                            }
+                                        }
+
+                                        Text(note.note)
+                                            .font(.system(size: 15, weight: .regular))
+                                            .foregroundColor(.primary)
+                                            .fixedSize(horizontal: false, vertical: true)
+                                    }
+                                    .padding(12)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .background(Color(uiColor: .secondarySystemBackground))
+                                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                                    .overlay(
+                                        RoundedRectangle(cornerRadius: 8)
+                                            .stroke(Color.primary.opacity(0.08), lineWidth: 1)
+                                    )
+                                }
+                            }
+                            .padding(14)
+                        }
+                        .scrollIndicators(.visible)
+                    }
+                } else {
+                    VStack(spacing: 10) {
+                        ProgressView()
+                        Text("Loading notes")
+                            .font(.system(size: 14, weight: .medium))
+                            .foregroundColor(.secondary)
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
+            }
+        }
+
+        private struct PortalIssuePhotoPreview: View {
+            let imagePath: String?
+            let cache: AssetImageCache
+            @State private var image: UIImage? = nil
+            @State private var loadedPath: String = ""
+            @State private var isLoading: Bool = false
+
+            var body: some View {
+                ZStack {
+                    Color.black
+                    if let image {
+                        Image(uiImage: image)
+                            .resizable()
+                            .scaledToFit()
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    } else if isLoading {
+                        ProgressView()
+                            .progressViewStyle(.circular)
+                            .tint(.white.opacity(0.9))
+                    } else {
+                        VStack(spacing: 8) {
+                            Image(systemName: "photo")
+                                .font(.system(size: 28, weight: .medium))
+                            Text("No photo preview")
+                                .font(.system(size: 13, weight: .medium))
+                        }
+                        .foregroundColor(.white.opacity(0.58))
+                    }
+                }
+                .onAppear { loadImageIfNeeded() }
+                .onChange(of: imagePath ?? "") { _, _ in
+                    loadedPath = ""
+                    image = nil
+                    loadImageIfNeeded()
+                }
+            }
+
+            private func loadImageIfNeeded() {
+                let path = imagePath?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                guard !path.isEmpty else {
+                    image = nil
+                    loadedPath = ""
+                    isLoading = false
+                    return
+                }
+                guard path != loadedPath || (image == nil && !isLoading) else { return }
+                loadedPath = path
+
+                guard let asset = ContentView.reportAsset(from: path) else {
+                    isLoading = false
+                    return
+                }
+                isLoading = true
+                cache.requestFull(for: asset) { loadedImage in
+                    DispatchQueue.main.async {
+                        guard self.loadedPath == path else { return }
+                        self.image = loadedImage
+                        self.isLoading = false
+                    }
+                }
+            }
+        }
+
         private struct FlaggedIssueRow: View {
             let observation: Observation
             let currentSessionID: UUID?
@@ -19958,6 +20191,7 @@ extension ContentView {
             let angleIndex: Int?
             let tradeOptions: [String]
             let cache: AssetImageCache
+            let portalNoteCount: Int
             let hasReferenceImage: Bool
             let hasCapturedImage: Bool
             let canRetake: Bool
@@ -19967,6 +20201,7 @@ extension ContentView {
             let onTapViewCapturedImage: () -> Void
             let onTapReclassify: () -> Void
             let onTapHistory: () -> Void
+            let onTapPortalNotes: () -> Void
 
             @State private var thumbnail: UIImage? = nil
             @State private var loadedID: String = ""
@@ -20079,6 +20314,38 @@ extension ContentView {
                     }
 
                     Spacer(minLength: 0)
+
+                    if portalNoteCount > 0 {
+                        Button(action: onTapPortalNotes) {
+                            ZStack(alignment: .topTrailing) {
+                                Image(systemName: "note.text")
+                                    .font(.system(size: 18, weight: .semibold))
+                                    .foregroundColor(.white.opacity(0.92))
+                                    .frame(width: 38, height: 38)
+                                    .background(Color.white.opacity(0.10))
+                                    .clipShape(Circle())
+                                    .overlay(
+                                        Circle()
+                                            .stroke(Color.white.opacity(0.14), lineWidth: 1)
+                                    )
+
+                                Text(portalNoteCount > 99 ? "99+" : "\(portalNoteCount)")
+                                    .font(.system(size: 10, weight: .bold))
+                                    .foregroundColor(.white)
+                                    .lineLimit(1)
+                                    .minimumScaleFactor(0.65)
+                                    .frame(minWidth: 17, minHeight: 17)
+                                    .padding(.horizontal, portalNoteCount > 9 ? 3 : 0)
+                                    .background(Color.orange)
+                                    .clipShape(Capsule())
+                                    .offset(x: 5, y: -5)
+                            }
+                            .frame(width: 46, height: 46)
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("Portal notes")
+                        .accessibilityValue("\(portalNoteCount)")
+                    }
                 }
                 .padding(.horizontal, 12)
                 .padding(.vertical, 10)

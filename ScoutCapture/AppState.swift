@@ -585,6 +585,21 @@ enum AuthenticationFlowResult: Equatable {
     case requiresEmailConfirmation
 }
 
+struct PortalPunchlistNote: Identifiable, Equatable {
+    let id: String
+    let sourceActivityID: UUID
+    let issueID: UUID
+    let propertyID: UUID
+    let activityType: String
+    let note: String
+    let createdBy: UUID?
+    let createdAt: Date?
+
+    var isCompletionNote: Bool {
+        activityType == "completion_submitted"
+    }
+}
+
 private enum AppStateTestEnvironment {
     static var isRunningUnderXCTest: Bool {
         ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
@@ -6742,21 +6757,29 @@ final class AppState: ObservableObject {
 
     private struct RemotePortalPunchlistActivityRecord: Decodable {
         let id: UUID
+        let orgID: UUID?
         let propertyID: UUID?
         let observationID: UUID?
         let shotID: UUID?
         let activityType: String?
+        let fromValue: String?
         let toValue: String?
+        let note: String?
+        let createdBy: UUID?
         let createdAt: Date?
         let deletedAt: Date?
 
         enum CodingKeys: String, CodingKey {
             case id
+            case orgID = "org_id"
             case propertyID = "property_id"
             case observationID = "observation_id"
             case shotID = "shot_id"
             case activityType = "activity_type"
+            case fromValue = "from_value"
             case toValue = "to_value"
+            case note
+            case createdBy = "created_by"
             case createdAt = "created_at"
             case deletedAt = "deleted_at"
         }
@@ -44441,6 +44464,61 @@ final class AppState: ObservableObject {
         return result
     }
 
+    func fetchPortalPunchlistNotesByIssueID(
+        propertyID: UUID,
+        activeOrganizationID: UUID,
+        issueIDs: Set<UUID>
+    ) async -> [UUID: [PortalPunchlistNote]] {
+        guard backendFeatureFlags.supabaseEnabled,
+              canAccessProperty(propertyID),
+              canAccessOrganization(activeOrganizationID),
+              supabaseClient != nil,
+              !issueIDs.isEmpty else {
+            return [:]
+        }
+
+        let startedAt = Date()
+        let sortedIssueIDs = issueIDs.sorted { $0.uuidString < $1.uuidString }
+        do {
+            guard let client = supabaseClient else { return [:] }
+            let activityRows: [RemotePortalPunchlistActivityRecord] = try await client
+                .from("punchlist_activity")
+                .select("id, org_id, property_id, observation_id, shot_id, activity_type, from_value, to_value, note, created_by, created_at, deleted_at")
+                .eq("org_id", value: activeOrganizationID.uuidString.lowercased())
+                .eq("property_id", value: propertyID.uuidString.lowercased())
+                .in("observation_id", values: sortedIssueIDs)
+                .is("deleted_at", value: nil)
+                .in("activity_type", values: [
+                    "note_added",
+                    "completion_submitted",
+                    "completion_approved"
+                ])
+                .order("created_at", ascending: false)
+                .limit(5_000)
+                .execute()
+                .value
+            let notesByIssueID = Self.portalPunchlistNotesByIssueID(
+                propertyID: propertyID,
+                issueIDs: issueIDs,
+                activities: activityRows
+            )
+            let totalNotes = notesByIssueID.values.reduce(0) { $0 + $1.count }
+            print(
+                "[PortalPunchlistNotes] propertyID=\(propertyID.uuidString) " +
+                "issueCount=\(issueIDs.count) notes=\(totalNotes) " +
+                "elapsedMs=\(Int(Date().timeIntervalSince(startedAt) * 1000))"
+            )
+            return notesByIssueID
+        } catch {
+            recordDiagnosticsError(error)
+            print(
+                "[PortalPunchlistNotes] propertyID=\(propertyID.uuidString) " +
+                "result=failed category=\(Self.diagnosticErrorCategory(for: error).rawValue)"
+            )
+            return [:]
+        }
+    }
+
     private func fetchRemotePortalPunchlistShotMetadataRows(
         propertyID: UUID,
         activeOrganizationID: UUID
@@ -44584,6 +44662,73 @@ final class AppState: ObservableObject {
         }
     }
 
+    private nonisolated static func portalPunchlistNotesByIssueID(
+        propertyID: UUID,
+        issueIDs: Set<UUID>,
+        activities: [RemotePortalPunchlistActivityRecord]
+    ) -> [UUID: [PortalPunchlistNote]] {
+        guard !issueIDs.isEmpty else { return [:] }
+
+        let candidates = activities.filter { activity in
+            activity.deletedAt == nil &&
+            (activity.propertyID == nil || activity.propertyID == propertyID) &&
+            activity.observationID.map { issueIDs.contains($0) } == true
+        }
+        let approvedCompletionSubmissionIDs = Set(
+            candidates.compactMap { activity -> String? in
+                guard normalizedReplayText(activity.activityType)?.lowercased() == "completion_approved" else {
+                    return nil
+                }
+                return normalizedReplayText(activity.fromValue)?.lowercased()
+            }
+        )
+        let displayCandidates = candidates.sorted(by: portalPunchlistActivitySortDescending)
+
+        var notesByIssueID: [UUID: [PortalPunchlistNote]] = [:]
+        for activity in displayCandidates {
+            guard let issueID = activity.observationID,
+                  let type = normalizedReplayText(activity.activityType)?.lowercased(),
+                  let note = normalizedReplayText(activity.note) else {
+                continue
+            }
+
+            let noteID: String
+            switch type {
+            case "note_added":
+                noteID = activity.id.uuidString
+            case "completion_submitted":
+                let groupID = portalPunchlistCompletionSubmissionGroupID(activity)
+                guard approvedCompletionSubmissionIDs.contains(activity.id.uuidString.lowercased()) ||
+                        approvedCompletionSubmissionIDs.contains(groupID) else {
+                    continue
+                }
+                noteID = "\(activity.id.uuidString):completion-note"
+            default:
+                continue
+            }
+
+            notesByIssueID[issueID, default: []].append(
+                PortalPunchlistNote(
+                    id: noteID,
+                    sourceActivityID: activity.id,
+                    issueID: issueID,
+                    propertyID: propertyID,
+                    activityType: type,
+                    note: note,
+                    createdBy: activity.createdBy,
+                    createdAt: activity.createdAt
+                )
+            )
+        }
+        return notesByIssueID
+    }
+
+    private nonisolated static func portalPunchlistCompletionSubmissionGroupID(
+        _ activity: RemotePortalPunchlistActivityRecord
+    ) -> String {
+        normalizedReplayText(activity.fromValue)?.lowercased() ?? activity.id.uuidString.lowercased()
+    }
+
     private nonisolated static func portalPunchlistUpdateSortAscending(
         _ lhs: RemoteObservationUpdateReplayRecord,
         _ rhs: RemoteObservationUpdateReplayRecord
@@ -44592,6 +44737,16 @@ final class AppState: ObservableObject {
             return (lhs.updatedAt ?? .distantPast) < (rhs.updatedAt ?? .distantPast)
         }
         return lhs.id.uuidString < rhs.id.uuidString
+    }
+
+    private nonisolated static func portalPunchlistActivitySortDescending(
+        _ lhs: RemotePortalPunchlistActivityRecord,
+        _ rhs: RemotePortalPunchlistActivityRecord
+    ) -> Bool {
+        if (lhs.createdAt ?? .distantPast) != (rhs.createdAt ?? .distantPast) {
+            return (lhs.createdAt ?? .distantPast) > (rhs.createdAt ?? .distantPast)
+        }
+        return lhs.id.uuidString > rhs.id.uuidString
     }
 
     private nonisolated static func portalPunchlistActivitySortAscending(
@@ -44631,16 +44786,56 @@ final class AppState: ObservableObject {
             activities: activityRows.map { row in
                 RemotePortalPunchlistActivityRecord(
                     id: UUID(),
+                    orgID: nil,
                     propertyID: propertyID,
                     observationID: observationID,
                     shotID: nil,
                     activityType: row.activityType,
+                    fromValue: nil,
                     toValue: row.toValue,
+                    note: nil,
+                    createdBy: nil,
                     createdAt: row.createdAt,
                     deletedAt: nil
                 )
             },
             remoteShots: []
+        )
+    }
+
+    nonisolated static func portalPunchlistNotesByIssueIDTestOnly(
+        propertyID: UUID,
+        issueIDs: Set<UUID>,
+        activityRows: [(
+            id: UUID,
+            propertyID: UUID?,
+            observationID: UUID?,
+            activityType: String,
+            fromValue: String?,
+            note: String?,
+            createdAt: Date,
+            deletedAt: Date?
+        )]
+    ) -> [UUID: [PortalPunchlistNote]] {
+        portalPunchlistNotesByIssueID(
+            propertyID: propertyID,
+            issueIDs: issueIDs,
+            activities: activityRows.map { row in
+                RemotePortalPunchlistActivityRecord(
+                    id: row.id,
+                    orgID: nil,
+                    propertyID: row.propertyID,
+                    observationID: row.observationID,
+                    shotID: nil,
+                    activityType: row.activityType,
+                    fromValue: row.fromValue,
+                    toValue: nil,
+                    note: row.note,
+                    createdBy: nil,
+                    createdAt: row.createdAt,
+                    deletedAt: row.deletedAt
+                )
+            }
         )
     }
 

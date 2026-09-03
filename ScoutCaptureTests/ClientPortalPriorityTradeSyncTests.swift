@@ -4,6 +4,40 @@ import XCTest
 final class ClientPortalPriorityTradeSyncTests: XCTestCase {
     private let older = Date(timeIntervalSinceReferenceDate: 1_000)
     private let newer = Date(timeIntervalSinceReferenceDate: 2_000)
+    private let newest = Date(timeIntervalSinceReferenceDate: 3_000)
+
+    private typealias PortalActivityRow = (
+        id: UUID,
+        propertyID: UUID?,
+        observationID: UUID?,
+        activityType: String,
+        fromValue: String?,
+        note: String?,
+        createdAt: Date,
+        deletedAt: Date?
+    )
+
+    private func makePortalActivityRow(
+        id: UUID = UUID(),
+        propertyID: UUID?,
+        observationID: UUID?,
+        activityType: String,
+        fromValue: String? = nil,
+        note: String? = nil,
+        createdAt: Date,
+        deletedAt: Date? = nil
+    ) -> PortalActivityRow {
+        (
+            id: id,
+            propertyID: propertyID,
+            observationID: observationID,
+            activityType: activityType,
+            fromValue: fromValue,
+            note: note,
+            createdAt: createdAt,
+            deletedAt: deletedAt
+        )
+    }
 
     private func makeStore() throws -> (store: LocalStore, property: Property) {
         let root = FileManager.default.temporaryDirectory
@@ -602,5 +636,170 @@ final class ClientPortalPriorityTradeSyncTests: XCTestCase {
         XCTAssertEqual(result.skippedAmbiguousCount, 1)
         XCTAssertEqual(Set(observations.compactMap(\.priority)), Set(["Low", "High"]))
         XCTAssertEqual(Set(observations.compactMap(\.trade)), Set(["Paint", "Carpentry"]))
+    }
+
+    func testActiveIssueWithNoPortalNotesProducesNoNoteCount() {
+        let propertyID = UUID()
+        let issueID = UUID()
+
+        let notes = AppState.portalPunchlistNotesByIssueIDTestOnly(
+            propertyID: propertyID,
+            issueIDs: [issueID],
+            activityRows: []
+        )
+
+        XCTAssertNil(notes[issueID])
+    }
+
+    func testActiveIssueWithOnePortalNoteProducesIconCount() {
+        let propertyID = UUID()
+        let issueID = UUID()
+
+        let notes = AppState.portalPunchlistNotesByIssueIDTestOnly(
+            propertyID: propertyID,
+            issueIDs: [issueID],
+            activityRows: [
+                makePortalActivityRow(
+                    propertyID: propertyID,
+                    observationID: issueID,
+                    activityType: "note_added",
+                    note: "Please review this window.",
+                    createdAt: older
+                )
+            ]
+        )
+
+        XCTAssertEqual(notes[issueID]?.count, 1)
+        XCTAssertEqual(notes[issueID]?.first?.note, "Please review this window.")
+    }
+
+    func testMultiplePortalNotesUseNewestFirstOrder() {
+        let propertyID = UUID()
+        let issueID = UUID()
+
+        let notes = AppState.portalPunchlistNotesByIssueIDTestOnly(
+            propertyID: propertyID,
+            issueIDs: [issueID],
+            activityRows: [
+                makePortalActivityRow(
+                    propertyID: propertyID,
+                    observationID: issueID,
+                    activityType: "note_added",
+                    note: "Older note",
+                    createdAt: older
+                ),
+                makePortalActivityRow(
+                    propertyID: propertyID,
+                    observationID: issueID,
+                    activityType: "note_added",
+                    note: "Newer note",
+                    createdAt: newest
+                )
+            ]
+        )
+
+        XCTAssertEqual(notes[issueID]?.map(\.note), ["Newer note", "Older note"])
+    }
+
+    func testRejectedCompletionNoteIsExcludedFromPortalNotes() {
+        let propertyID = UUID()
+        let issueID = UUID()
+        let submissionID = UUID()
+
+        let notes = AppState.portalPunchlistNotesByIssueIDTestOnly(
+            propertyID: propertyID,
+            issueIDs: [issueID],
+            activityRows: [
+                makePortalActivityRow(
+                    id: submissionID,
+                    propertyID: propertyID,
+                    observationID: issueID,
+                    activityType: "completion_submitted",
+                    note: "Completion needs review.",
+                    createdAt: older
+                ),
+                makePortalActivityRow(
+                    propertyID: propertyID,
+                    observationID: issueID,
+                    activityType: "completion_rejected",
+                    fromValue: submissionID.uuidString,
+                    note: "Rejected.",
+                    createdAt: newer
+                )
+            ]
+        )
+
+        XCTAssertNil(notes[issueID])
+    }
+
+    func testApprovedCompletionSubmissionNoteIsIncludedInPortalNotes() {
+        let propertyID = UUID()
+        let issueID = UUID()
+        let submissionID = UUID()
+
+        let notes = AppState.portalPunchlistNotesByIssueIDTestOnly(
+            propertyID: propertyID,
+            issueIDs: [issueID],
+            activityRows: [
+                makePortalActivityRow(
+                    id: submissionID,
+                    propertyID: propertyID,
+                    observationID: issueID,
+                    activityType: "completion_submitted",
+                    note: "Completed with new sealant.",
+                    createdAt: older
+                ),
+                makePortalActivityRow(
+                    propertyID: propertyID,
+                    observationID: issueID,
+                    activityType: "completion_approved",
+                    fromValue: submissionID.uuidString,
+                    note: "Approved.",
+                    createdAt: newer
+                )
+            ]
+        )
+
+        XCTAssertEqual(notes[issueID]?.count, 1)
+        XCTAssertEqual(notes[issueID]?.first?.note, "Completed with new sealant.")
+        XCTAssertEqual(notes[issueID]?.first?.isCompletionNote, true)
+    }
+
+    func testUnrelatedIssueAndPropertyNotesDoNotAppear() {
+        let propertyID = UUID()
+        let otherPropertyID = UUID()
+        let issueID = UUID()
+        let otherIssueID = UUID()
+
+        let notes = AppState.portalPunchlistNotesByIssueIDTestOnly(
+            propertyID: propertyID,
+            issueIDs: [issueID],
+            activityRows: [
+                makePortalActivityRow(
+                    propertyID: propertyID,
+                    observationID: issueID,
+                    activityType: "note_added",
+                    note: "Visible note",
+                    createdAt: newest
+                ),
+                makePortalActivityRow(
+                    propertyID: propertyID,
+                    observationID: otherIssueID,
+                    activityType: "note_added",
+                    note: "Wrong issue",
+                    createdAt: newer
+                ),
+                makePortalActivityRow(
+                    propertyID: otherPropertyID,
+                    observationID: issueID,
+                    activityType: "note_added",
+                    note: "Wrong property",
+                    createdAt: older
+                )
+            ]
+        )
+
+        XCTAssertEqual(notes[issueID]?.map(\.note), ["Visible note"])
+        XCTAssertNil(notes[otherIssueID])
     }
 }
