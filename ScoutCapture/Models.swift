@@ -17,7 +17,7 @@ enum OriginalPhotoFormat {
 }
 
 enum CanonicalElevation {
-    static func normalize(_ value: String?) -> String? {
+    nonisolated static func normalize(_ value: String?) -> String? {
         guard let value else { return nil }
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }
@@ -382,7 +382,7 @@ struct SessionMetadata: Codable {
         try c.encode(guidedShots, forKey: .guidedShots)
     }
 
-    static func trimmedNonEmpty(_ value: String?) -> String? {
+    nonisolated static func trimmedNonEmpty(_ value: String?) -> String? {
         guard let value else { return nil }
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? nil : trimmed
@@ -1228,7 +1228,7 @@ struct IssueMetadata: Codable, Identifiable, Equatable {
         } else if let raw = try c.decodeIfPresent(String.self, forKey: .status) {
             issueStatus = IssueMetadata.normalizedStatus(raw)
         } else if let legacyStatus = try c.decodeIfPresent(Observation.Status.self, forKey: .status) {
-            issueStatus = legacyStatus == .resolved ? "resolved" : "active"
+            issueStatus = legacyStatus.issueStatusValue
         } else {
             issueStatus = "active"
         }
@@ -1288,8 +1288,7 @@ struct IssueMetadata: Codable, Identifiable, Equatable {
     }
 
     private static func normalizedStatus(_ value: String) -> String {
-        let lowered = value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        return lowered == "resolved" ? "resolved" : "active"
+        Observation.Status.status(from: value).issueStatusValue
     }
 
     private var issueName: String? {
@@ -1959,7 +1958,57 @@ struct GuidedShot: Codable, Identifiable, Equatable {
 struct Observation: Codable, Identifiable, Equatable {
     enum Status: String, Codable, CaseIterable {
         case active = "Active"
+        case resolutionRequired = "Resolution Required"
+        case pendingReview = "Pending Review"
         case resolved = "Resolved"
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.singleValueContainer()
+            let raw = try container.decode(String.self)
+            self = Status.status(from: raw)
+        }
+
+        func encode(to encoder: Encoder) throws {
+            var container = encoder.singleValueContainer()
+            try container.encode(rawValue)
+        }
+
+        nonisolated static func status(from value: String?) -> Status {
+            let normalized = (value ?? "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .replacingOccurrences(of: "-", with: "_")
+                .replacingOccurrences(of: " ", with: "_")
+                .lowercased()
+            switch normalized {
+            case "resolved":
+                return .resolved
+            case "resolution_required", "verification_required", "field_verification_required":
+                return .resolutionRequired
+            case "pending_review", "pending":
+                return .pendingReview
+            case "rejected", "open", "active":
+                return .active
+            default:
+                return .active
+            }
+        }
+
+        nonisolated var issueStatusValue: String {
+            switch self {
+            case .active:
+                return "active"
+            case .resolutionRequired:
+                return "resolution_required"
+            case .pendingReview:
+                return "pending_review"
+            case .resolved:
+                return "resolved"
+            }
+        }
+
+        nonisolated var isActiveFieldWork: Bool {
+            self == .active
+        }
     }
 
     let id: UUID
@@ -1987,7 +2036,7 @@ struct Observation: Codable, Identifiable, Equatable {
     var shots: [Shot]
     var guidedShots: [GuidedShot]
 
-    init(
+    nonisolated init(
         id: UUID = UUID(),
         propertyID: UUID,
         sessionID: UUID? = nil,
@@ -2131,16 +2180,16 @@ struct Observation: Codable, Identifiable, Equatable {
         try c.encode(guidedShots, forKey: .guidedShots)
     }
 
-    static func trimmedNonEmpty(_ value: String?) -> String? {
+    nonisolated static func trimmedNonEmpty(_ value: String?) -> String? {
         let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         return trimmed.isEmpty ? nil : trimmed
     }
 
-    static func inferredCurrentReason(note: String?, statement: String) -> String? {
+    nonisolated static func inferredCurrentReason(note: String?, statement: String) -> String? {
         trimmedNonEmpty(note) ?? trimmedNonEmpty(statement)
     }
 
-    private static func normalizedPriority(_ value: String?) -> String? {
+    private nonisolated static func normalizedPriority(_ value: String?) -> String? {
         let trimmed = trimmedNonEmpty(value)
         switch trimmed?.lowercased() {
         case "low":
@@ -2215,8 +2264,9 @@ struct PortalPunchlistOperationalOverlay: Equatable {
     let detailType: String?
     let angleIndex: Int?
     let shotKey: String?
+    let reopensResolved: Bool
 
-    init(
+    nonisolated init(
         issueID: UUID?,
         propertyID: UUID,
         status: Observation.Status? = .active,
@@ -2228,7 +2278,8 @@ struct PortalPunchlistOperationalOverlay: Equatable {
         targetElevation: String? = nil,
         detailType: String? = nil,
         angleIndex: Int? = nil,
-        shotKey: String? = nil
+        shotKey: String? = nil,
+        reopensResolved: Bool = false
     ) {
         self.issueID = issueID
         self.propertyID = propertyID
@@ -2242,11 +2293,12 @@ struct PortalPunchlistOperationalOverlay: Equatable {
         self.detailType = Observation.trimmedNonEmpty(detailType)
         self.angleIndex = angleIndex.map { max(1, $0) }
         self.shotKey = Observation.trimmedNonEmpty(shotKey)
+        self.reopensResolved = reopensResolved
     }
 }
 
 extension Observation {
-    static func normalizedPortalOverlayPriority(_ value: String?) -> String? {
+    nonisolated static func normalizedPortalOverlayPriority(_ value: String?) -> String? {
         normalizedPriority(value)
     }
 }
@@ -2285,6 +2337,7 @@ struct ObservationHistoryEvent: Codable, Identifiable, Equatable {
         case retake
         case reclassified
         case resolved
+        case pendingReview = "pending_review"
         case reopened
         case reasonUpdated = "reason_updated"
         case titleUpdated = "title_updated"

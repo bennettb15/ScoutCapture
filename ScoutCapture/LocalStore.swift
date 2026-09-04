@@ -2466,11 +2466,7 @@ final class LocalStore {
 
         for overlay in overlays {
             guard overlay.propertyID == propertyID,
-                  overlay.priority != nil || overlay.trade != nil else {
-                continue
-            }
-            guard overlay.status != .resolved else {
-                skippedResolvedCount += 1
+                  overlay.status != nil || overlay.priority != nil || overlay.trade != nil else {
                 continue
             }
 
@@ -2522,7 +2518,7 @@ final class LocalStore {
 #endif
                 continue
             }
-            guard observations[index].status == .active else {
+            guard observations[index].status != .resolved || overlay.reopensResolved else {
                 skippedResolvedCount += 1
 #if DEBUG
                 print(
@@ -2535,6 +2531,27 @@ final class LocalStore {
             }
 
             let before = observations[index]
+            if let status = overlay.status,
+               observations[index].status != .resolutionRequired,
+               shouldApplyPortalPunchlistStatusOverlay(
+                status,
+                updatedAt: overlay.updatedAt,
+                to: observations[index]
+               ) {
+                observations[index].status = status
+                switch status {
+                case .active:
+                    observations[index].resolvedInSessionID = nil
+                case .resolutionRequired:
+                    observations[index].resolvedInSessionID = nil
+                case .pendingReview:
+                    break
+                case .resolved:
+                    observations[index].resolvedInSessionID =
+                        observations[index].resolvedInSessionID ??
+                        observations[index].updatedInSessionID
+                }
+            }
             if let priority = overlay.priority {
                 observations[index].priority = priority
             }
@@ -2581,6 +2598,41 @@ final class LocalStore {
     private static func diagnosticOverlayValue(_ value: String?) -> String {
         let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         return trimmed.isEmpty ? "none" : trimmed.replacingOccurrences(of: " ", with: "_")
+    }
+
+    private func shouldApplyPortalPunchlistStatusOverlay(
+        _ status: Observation.Status,
+        updatedAt: Date?,
+        to observation: Observation
+    ) -> Bool {
+        guard observation.status != status else { return false }
+        guard let updatedAt else { return true }
+        return updatedAt > observation.updatedAt
+    }
+
+    private func preservedResolutionRequiredStatus(
+        existing: Observation?,
+        incoming: Observation.Status,
+        representsResolvedDocumentation: Bool
+    ) -> Observation.Status {
+        if isTerminalResolvedSupportingDocumentation(existing),
+           incoming != .resolved {
+            return .resolved
+        }
+        guard existing?.status == .resolutionRequired else { return incoming }
+        return representsResolvedDocumentation ? .resolved : .resolutionRequired
+    }
+
+    private func isTerminalResolvedSupportingDocumentation(_ observation: Observation?) -> Bool {
+        guard let observation,
+              observation.status == .resolved else {
+            return false
+        }
+        return observation.historyEvents.contains { event in
+            event.kind == .resolved &&
+                event.beforeValue == Observation.Status.resolutionRequired.issueStatusValue &&
+                event.afterValue == Observation.Status.resolved.issueStatusValue
+        }
     }
 
     private static let defaultTradeLabelsForPortalOverlays: [String] = [
@@ -3257,12 +3309,13 @@ final class LocalStore {
         let normalizedPriority = normalizedSessionPriority(observation.priority)
         let normalizedTrade = trimmedNonEmpty(trade)
         let isResolved = observation.status == .resolved
-        let issueStatus = isResolved ? "resolved" : "active"
+        let isActiveFieldWork = observation.status.isActiveFieldWork
+        let issueStatus = observation.status.issueStatusValue
         let captureKindForActiveUpdate = trimmedNonEmpty(activeCaptureKind) ?? "follow_up_capture"
 
         var syncedShot: ShotMetadata?
         if let shotIndex = metadata.shots.firstIndex(where: { $0.shotID == shotID }) {
-            metadata.shots[shotIndex].isFlagged = !isResolved
+            metadata.shots[shotIndex].isFlagged = isActiveFieldWork
             metadata.shots[shotIndex].issueID = observation.id
             metadata.shots[shotIndex].issueStatus = issueStatus
             if let reason {
@@ -3270,7 +3323,7 @@ final class LocalStore {
             }
             metadata.shots[shotIndex].priority = normalizedPriority
             metadata.shots[shotIndex].trade = normalizedTrade
-            if isResolved {
+            if isResolved || observation.status == .pendingReview {
                 metadata.shots[shotIndex].captureKind = "resolved_capture"
             } else if trimmedNonEmpty(metadata.shots[shotIndex].captureKind) == "resolved_capture" {
                 metadata.shots[shotIndex].captureKind = captureKindForActiveUpdate
@@ -3289,7 +3342,7 @@ final class LocalStore {
             observation: observation,
             syncedShot: syncedShot,
             updatedAt: updatedAt,
-            isResolved: isResolved
+            isResolved: isResolved || observation.status == .pendingReview
         )
 
         let issue = IssueMetadata(
@@ -4598,6 +4651,8 @@ final class LocalStore {
         }
 
         // Authoritative restore: property-level observation store is replaced by snapshot-derived issues.
+        let existingObservations = (try? readObservations(propertyID: propertyID)) ?? []
+        let existingObservationsByID = Dictionary(uniqueKeysWithValues: existingObservations.map { ($0.id, $0) })
         var mergedByID: [UUID: Observation] = [:]
 
         func shotPath(for shot: ShotMetadata) -> String {
@@ -4629,10 +4684,21 @@ final class LocalStore {
 
             let linkedShot = currentMetaShot?.shotID ?? shots.last?.id
             let latestMetaShot = currentMetaShot
-            let status: Observation.Status = issue.issueStatus.lowercased() == "resolved" ? .resolved : .active
+            let snapshotStatus = Observation.Status.status(from: issue.issueStatus)
             let createdAt = issue.firstSeenAt ?? issue.lastSeenAt ?? metadata.startedAt
             let updatedAt = issue.lastSeenAt ?? issue.resolvedAt ?? createdAt
             let effectiveSessionID = issue.lastCaptureSessionId ?? fallbackSessionID
+            let existing = existingObservationsByID[issue.issueID]
+            if isTerminalResolvedSupportingDocumentation(existing),
+               snapshotStatus != .resolved {
+                return existing!
+            }
+            let status = preservedResolutionRequiredStatus(
+                existing: existing,
+                incoming: snapshotStatus,
+                representsResolvedDocumentation: snapshotStatus == .resolved &&
+                    (issue.lastCaptureSessionId == sessionID || issue.resolvedAt != nil)
+            )
 
             return Observation(
                 id: issue.issueID,
@@ -4758,18 +4824,27 @@ final class LocalStore {
                         note: shot.noteText
                     )
                 }
-                let status: Observation.Status = (issue?.issueStatus.lowercased() == "resolved") ? .resolved : .active
-                var next = observationsByID[issueID] ?? Observation(
-                    id: issueID,
-                    propertyID: propertyID,
+            let metadataStatus = Observation.Status.status(from: issue?.issueStatus)
+            if isTerminalResolvedSupportingDocumentation(observationsByID[issueID]),
+               metadataStatus != .resolved {
+                continue
+            }
+            var next = observationsByID[issueID] ?? Observation(
+                id: issueID,
+                propertyID: propertyID,
                     sessionID: sessionID,
                     createdAt: createdAt,
                     updatedAt: updatedAt,
                     statement: trimmedNonEmpty(issue?.detailNote) ?? "",
-                    status: status
+                    status: metadataStatus
                 )
-                let resolvedByThisSnapshot = status == .resolved &&
+                let resolvedByThisSnapshot = metadataStatus == .resolved &&
                     (issue?.lastCaptureSessionId == sessionID || issue?.resolvedAt != nil)
+                let status = preservedResolutionRequiredStatus(
+                    existing: observationsByID[issueID],
+                    incoming: metadataStatus,
+                    representsResolvedDocumentation: resolvedByThisSnapshot
+                )
                 if next.updatedAt > updatedAt,
                    next.updatedInSessionID != sessionID,
                    next.resolvedInSessionID != sessionID,
@@ -6714,7 +6789,7 @@ final class LocalStore {
             let exportedHistoryEvents = observation.historyEvents.map { exportHistoryEvent($0, observation: observation) }
             let issue = IssueMetadata(
                 issueID: observation.id,
-                issueStatus: observation.status == .resolved ? "resolved" : "active",
+                issueStatus: observation.status.issueStatusValue,
                 currentReason: Observation.inferredCurrentReason(
                     note: observation.currentReason ?? observation.note,
                     statement: observation.statement
@@ -6758,6 +6833,8 @@ final class LocalStore {
             type = "reclassify"
         case .resolved:
             type = "resolve"
+        case .pendingReview:
+            type = "pending_review"
         case .reopened:
             type = "reopened"
         case .reasonUpdated:

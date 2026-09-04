@@ -109,6 +109,47 @@ final class ClientPortalPriorityTradeSyncTests: XCTestCase {
         )
     }
 
+    private func makeCompletedResolutionRequiredObservation(
+        id: UUID,
+        propertyID: UUID,
+        sessionID: UUID,
+        shotID: UUID = UUID()
+    ) -> Observation {
+        var observation = makeObservation(
+            id: id,
+            propertyID: propertyID,
+            status: .resolved,
+            priority: "Medium",
+            trade: "Paint"
+        )
+        observation.updatedAt = newest
+        observation.linkedShotID = shotID
+        observation.resolutionPhotoRef = "/tmp/resolution-supporting.jpg"
+        observation.resolutionStatement = "Condition no longer visibly present at time of documentation."
+        observation.updatedInSessionID = sessionID
+        observation.resolvedInSessionID = sessionID
+        observation.shots = [
+            Shot(
+                id: shotID,
+                capturedAt: newest,
+                imageLocalIdentifier: "/tmp/resolution-supporting.jpg",
+                note: "Resolved visually"
+            )
+        ]
+        observation.historyEvents = [
+            ObservationHistoryEvent(
+                timestamp: newest,
+                sessionID: sessionID,
+                kind: .resolved,
+                beforeValue: Observation.Status.resolutionRequired.issueStatusValue,
+                afterValue: Observation.Status.resolved.issueStatusValue,
+                field: "status",
+                shotID: shotID
+            )
+        ]
+        return observation
+    }
+
     private func makeCompletedFlaggedSessionMetadata(
         propertyID: UUID,
         sessionID: UUID,
@@ -573,10 +614,441 @@ final class ClientPortalPriorityTradeSyncTests: XCTestCase {
         )
 
         let updated = try XCTUnwrap(try fixture.store.fetchObservations(propertyID: fixture.property.id).first)
-        XCTAssertEqual(result.appliedCount, 0)
-        XCTAssertEqual(result.skippedResolvedCount, 1)
+        XCTAssertEqual(result.appliedCount, 1)
+        XCTAssertEqual(updated.status, .resolutionRequired)
+        XCTAssertEqual(updated.priority, "Critical")
+    }
+
+    func testPortalResolvedBecomesResolutionRequiredNotActive() throws {
+        let fixture = try makeStore()
+        let issueID = UUID()
+        _ = try fixture.store.createObservation(
+            makeObservation(id: issueID, propertyID: fixture.property.id, priority: "High", trade: "Paint")
+        )
+
+        let overlays = AppState.portalPunchlistOperationalOverlaysTestOnly(
+            propertyID: fixture.property.id,
+            observationID: issueID,
+            observationStatus: "resolved",
+            observationPriority: "Critical",
+            observationTrade: "Electrical",
+            activityRows: []
+        )
+
+        let result = try fixture.store.applyPortalPunchlistOperationalOverlays(
+            propertyID: fixture.property.id,
+            overlays: overlays
+        )
+
+        let updated = try XCTUnwrap(try fixture.store.fetchObservations(propertyID: fixture.property.id).first)
+        XCTAssertEqual(result.appliedCount, 1)
+        XCTAssertEqual(updated.status, .resolutionRequired)
+        XCTAssertEqual(updated.priority, "Critical")
+        XCTAssertEqual(updated.trade, "Electrical")
+        XCTAssertEqual([updated].filter { $0.status == .active }.count, 0)
+        XCTAssertEqual([updated].filter { $0.status == .resolutionRequired }.count, 1)
+    }
+
+    func testPortalOverlayDoesNotReopenResolutionRequiredIssue() throws {
+        let fixture = try makeStore()
+        let issueID = UUID()
+        _ = try fixture.store.createObservation(
+            makeObservation(id: issueID, propertyID: fixture.property.id, status: .resolutionRequired, priority: "High", trade: "Paint")
+        )
+
+        let result = try fixture.store.applyPortalPunchlistOperationalOverlays(
+            propertyID: fixture.property.id,
+            overlays: [
+                PortalPunchlistOperationalOverlay(
+                    issueID: issueID,
+                    propertyID: fixture.property.id,
+                    status: .active,
+                    priority: "Critical",
+                    trade: "Electrical",
+                    updatedAt: newer
+                )
+            ]
+        )
+
+        let updated = try XCTUnwrap(try fixture.store.fetchObservations(propertyID: fixture.property.id).first)
+        XCTAssertEqual(result.appliedCount, 1)
+        XCTAssertEqual(updated.status, .resolutionRequired)
+        XCTAssertEqual(updated.priority, "Critical")
+        XCTAssertEqual(updated.trade, "Electrical")
+    }
+
+    func testRemoteFlaggedMetadataDoesNotReopenResolutionRequiredIssue() throws {
+        let fixture = try makeStore()
+        let sessionID = UUID()
+        let issueID = UUID()
+        let shotID = UUID()
+        _ = try fixture.store.upsertSession(Session(id: sessionID, propertyID: fixture.property.id))
+        _ = try fixture.store.createObservation(
+            makeObservation(id: issueID, propertyID: fixture.property.id, status: .resolutionRequired, priority: "High", trade: "Paint")
+        )
+        let metadata = makeCompletedFlaggedSessionMetadata(
+            propertyID: fixture.property.id,
+            sessionID: sessionID,
+            issueID: issueID,
+            shotID: shotID,
+            priority: "Critical",
+            trade: "Electrical",
+            issueStatus: "active"
+        )
+        try fixture.store.saveSessionMetadataAtomically(
+            propertyID: fixture.property.id,
+            sessionID: sessionID,
+            metadata: metadata
+        )
+
+        try fixture.store.mergeRemoteFlaggedReferenceObservations(
+            propertyID: fixture.property.id,
+            sessionID: sessionID,
+            metadata: metadata
+        )
+
+        let updated = try XCTUnwrap(try fixture.store.fetchObservations(propertyID: fixture.property.id).first)
+        XCTAssertEqual(updated.status, .resolutionRequired)
+        XCTAssertEqual(updated.priority, "Critical")
+        XCTAssertEqual(updated.trade, "Electrical")
+    }
+
+    func testRemoteFlaggedMetadataDoesNotReopenCompletedResolutionRequiredDocumentation() throws {
+        let fixture = try makeStore()
+        let resolutionSessionID = UUID()
+        let staleSessionID = UUID()
+        let issueID = UUID()
+        let staleShotID = UUID()
+        _ = try fixture.store.upsertSession(Session(id: resolutionSessionID, propertyID: fixture.property.id))
+        _ = try fixture.store.upsertSession(Session(id: staleSessionID, propertyID: fixture.property.id))
+        let completed = makeCompletedResolutionRequiredObservation(
+            id: issueID,
+            propertyID: fixture.property.id,
+            sessionID: resolutionSessionID
+        )
+        _ = try fixture.store.createObservation(completed)
+        let metadata = makeCompletedFlaggedSessionMetadata(
+            propertyID: fixture.property.id,
+            sessionID: staleSessionID,
+            issueID: issueID,
+            shotID: staleShotID,
+            priority: "Critical",
+            trade: "Electrical",
+            issueStatus: "active"
+        )
+        try fixture.store.saveSessionMetadataAtomically(
+            propertyID: fixture.property.id,
+            sessionID: staleSessionID,
+            metadata: metadata
+        )
+
+        try fixture.store.mergeRemoteFlaggedReferenceObservations(
+            propertyID: fixture.property.id,
+            sessionID: staleSessionID,
+            metadata: metadata
+        )
+
+        let updated = try XCTUnwrap(try fixture.store.fetchObservations(propertyID: fixture.property.id).first)
+        XCTAssertEqual(updated.status, .resolved)
+        XCTAssertEqual(updated.resolvedInSessionID, resolutionSessionID)
+        XCTAssertEqual(updated.linkedShotID, completed.linkedShotID)
+        XCTAssertEqual(updated.resolutionPhotoRef, completed.resolutionPhotoRef)
+        XCTAssertEqual([updated].filter { $0.status == .active }.count, 0)
+        XCTAssertEqual([updated].filter { $0.status == .resolutionRequired }.count, 0)
+    }
+
+    func testGenericObservationUpdateDoesNotReopenCompletedResolutionRequiredDocumentationWithoutReopenEvent() throws {
+        let fixture = try makeStore()
+        let resolutionSessionID = UUID()
+        let issueID = UUID()
+        let completed = makeCompletedResolutionRequiredObservation(
+            id: issueID,
+            propertyID: fixture.property.id,
+            sessionID: resolutionSessionID
+        )
+        _ = try fixture.store.createObservation(completed)
+
+        var staleIncoming = completed
+        staleIncoming.status = .active
+        staleIncoming.updatedAt = newest.addingTimeInterval(1_000)
+        staleIncoming.resolvedInSessionID = nil
+        staleIncoming.resolutionPhotoRef = nil
+        staleIncoming.resolutionStatement = nil
+        staleIncoming.linkedShotID = UUID()
+        staleIncoming.shots = []
+
+        _ = try fixture.store.updateObservation(staleIncoming)
+
+        let updated = try XCTUnwrap(try fixture.store.fetchObservations(propertyID: fixture.property.id).first)
+        XCTAssertEqual(updated.status, .resolved)
+        XCTAssertEqual(updated.resolvedInSessionID, resolutionSessionID)
+        XCTAssertEqual(updated.linkedShotID, completed.linkedShotID)
+        XCTAssertEqual(updated.resolutionPhotoRef, completed.resolutionPhotoRef)
+        XCTAssertEqual([updated].filter { $0.status == .active }.count, 0)
+        XCTAssertEqual([updated].filter { $0.status == .resolutionRequired }.count, 0)
+    }
+
+    func testPortalStatusChangedActiveReopensCompletedResolutionRequiredDocumentation() throws {
+        let fixture = try makeStore()
+        let resolutionSessionID = UUID()
+        let issueID = UUID()
+        let completed = makeCompletedResolutionRequiredObservation(
+            id: issueID,
+            propertyID: fixture.property.id,
+            sessionID: resolutionSessionID
+        )
+        _ = try fixture.store.createObservation(completed)
+        let overlays = AppState.portalPunchlistOperationalOverlaysTestOnly(
+            propertyID: fixture.property.id,
+            observationID: issueID,
+            observationStatus: "resolved",
+            activityRows: [
+                (activityType: "status_changed", toValue: "active", createdAt: newest.addingTimeInterval(10))
+            ]
+        )
+
+        _ = try fixture.store.applyPortalPunchlistOperationalOverlays(
+            propertyID: fixture.property.id,
+            overlays: overlays
+        )
+
+        let updated = try XCTUnwrap(try fixture.store.fetchObservations(propertyID: fixture.property.id).first)
         XCTAssertEqual(updated.status, .active)
-        XCTAssertEqual(updated.priority, "High")
+        XCTAssertNil(updated.resolvedInSessionID)
+    }
+
+    func testResolutionRequiredAndActiveCountsAreSeparate() throws {
+        let fixture = try makeStore()
+        _ = try fixture.store.createObservation(
+            makeObservation(id: UUID(), propertyID: fixture.property.id, status: .active)
+        )
+        _ = try fixture.store.createObservation(
+            makeObservation(id: UUID(), propertyID: fixture.property.id, status: .resolutionRequired)
+        )
+        _ = try fixture.store.createObservation(
+            makeObservation(id: UUID(), propertyID: fixture.property.id, status: .pendingReview)
+        )
+        _ = try fixture.store.createObservation(
+            makeObservation(id: UUID(), propertyID: fixture.property.id, status: .resolved)
+        )
+
+        let observations = try fixture.store.fetchObservations(propertyID: fixture.property.id)
+
+        XCTAssertEqual(observations.filter { $0.status == .active }.count, 1)
+        XCTAssertEqual(observations.filter { $0.status == .resolutionRequired }.count, 1)
+    }
+
+    func testActiveIssueBehaviorIsUnchangedWithoutPortalResolvedState() throws {
+        let fixture = try makeStore()
+        let issueID = UUID()
+        _ = try fixture.store.createObservation(
+            makeObservation(id: issueID, propertyID: fixture.property.id, status: .active, priority: "High", trade: "Paint")
+        )
+
+        let result = try fixture.store.applyPortalPunchlistOperationalOverlays(
+            propertyID: fixture.property.id,
+            overlays: [
+                PortalPunchlistOperationalOverlay(
+                    issueID: issueID,
+                    propertyID: fixture.property.id,
+                    status: .active,
+                    priority: "Critical",
+                    trade: "Electrical",
+                    updatedAt: newer
+                )
+            ]
+        )
+
+        let updated = try XCTUnwrap(try fixture.store.fetchObservations(propertyID: fixture.property.id).first)
+        XCTAssertEqual(result.appliedCount, 1)
+        XCTAssertEqual(updated.status, .active)
+        XCTAssertEqual(updated.priority, "Critical")
+        XCTAssertEqual(updated.trade, "Electrical")
+        XCTAssertEqual([updated].filter { $0.status == .active }.count, 1)
+        XCTAssertEqual([updated].filter { $0.status == .resolutionRequired }.count, 0)
+    }
+
+    func testResolutionRequiredCaptureSyncsResolvedSupportingMetadata() throws {
+        let fixture = try makeStore()
+        let sessionID = UUID()
+        let issueID = UUID()
+        let resolutionShotID = UUID()
+        _ = try fixture.store.upsertSession(Session(id: sessionID, propertyID: fixture.property.id))
+        var metadata = makeCompletedFlaggedSessionMetadata(
+            propertyID: fixture.property.id,
+            sessionID: sessionID,
+            issueID: issueID,
+            shotID: resolutionShotID,
+            priority: "Medium",
+            trade: "Paint"
+        )
+        metadata.status = .draft
+        try fixture.store.saveSessionMetadataAtomically(
+            propertyID: fixture.property.id,
+            sessionID: sessionID,
+            metadata: metadata
+        )
+        let resolutionShot = Shot(
+            id: resolutionShotID,
+            capturedAt: newest,
+            imageLocalIdentifier: "/tmp/resolution.jpg",
+            note: "Resolved visually"
+        )
+        var observation = makeObservation(
+            id: issueID,
+            propertyID: fixture.property.id,
+            status: .resolved,
+            priority: "Medium",
+            trade: "Paint"
+        )
+        observation.linkedShotID = resolutionShotID
+        observation.shots = [resolutionShot]
+        observation.resolutionPhotoRef = "/tmp/resolution.jpg"
+        observation.resolutionStatement = "Condition no longer visibly present."
+        observation.updatedInSessionID = sessionID
+        observation.resolvedInSessionID = sessionID
+        _ = try fixture.store.createObservation(observation)
+
+        _ = try fixture.store.syncFlaggedObservationUpdateToSessionMetadata(
+            propertyID: fixture.property.id,
+            sessionID: sessionID,
+            observation: observation,
+            shotID: resolutionShotID,
+            trade: "Paint",
+            activeCaptureKind: "follow_up_capture",
+            updatedAt: newest
+        )
+
+        let reloaded = try fixture.store.loadSessionMetadata(propertyID: fixture.property.id, sessionID: sessionID)
+        let shot = try XCTUnwrap(reloaded.shots.first(where: { $0.shotID == resolutionShotID }))
+        let issue = try XCTUnwrap(reloaded.issues.first(where: { $0.issueID == issueID }))
+        XCTAssertEqual(shot.issueStatus, "resolved")
+        XCTAssertEqual(shot.captureKind, "resolved_capture")
+        XCTAssertFalse(shot.isFlagged)
+        XCTAssertEqual(issue.issueStatus, "resolved")
+        XCTAssertNotNil(issue.resolvedAt)
+        XCTAssertEqual(issue.lastCaptureSessionId, sessionID)
+    }
+
+    func testResolvedSupportingDocumentationReplaysObservationForPortalEvidence() throws {
+        let propertyID = UUID()
+        let sessionID = UUID()
+        let orgID = UUID()
+        let issueID = UUID()
+        let shotID = UUID()
+        var metadata = makeCompletedFlaggedSessionMetadata(
+            propertyID: propertyID,
+            sessionID: sessionID,
+            issueID: issueID,
+            shotID: shotID,
+            priority: "Medium",
+            trade: "Paint",
+            issueStatus: "resolved"
+        )
+        metadata.issues[0].resolvedAt = newest
+
+        let rows = AppState.normalizedObservationReplayRows(
+            orgID: orgID,
+            propertyID: propertyID,
+            sessionID: sessionID,
+            metadata: metadata
+        )
+
+        let row = try XCTUnwrap(rows.first(where: { $0.id == issueID }))
+        XCTAssertEqual(row.status, "resolved")
+        XCTAssertEqual(row.shotID, shotID)
+        XCTAssertEqual(row.updatedAt, newest)
+    }
+
+    func testCompletionApprovalFullyResolvesPendingReviewAndRemovesCarryForwardState() throws {
+        let fixture = try makeStore()
+        let issueID = UUID()
+        _ = try fixture.store.createObservation(
+            makeObservation(id: issueID, propertyID: fixture.property.id, status: .pendingReview)
+        )
+
+        let overlays = AppState.portalPunchlistOperationalOverlaysTestOnly(
+            propertyID: fixture.property.id,
+            observationID: issueID,
+            observationStatus: "pending_review",
+            activityRows: [
+                (activityType: "completion_approved", toValue: nil, createdAt: newest)
+            ]
+        )
+
+        _ = try fixture.store.applyPortalPunchlistOperationalOverlays(
+            propertyID: fixture.property.id,
+            overlays: overlays
+        )
+
+        let updated = try XCTUnwrap(try fixture.store.fetchObservations(propertyID: fixture.property.id).first)
+        XCTAssertEqual(updated.status, .resolved)
+        XCTAssertEqual([updated].filter { $0.status == .active }.count, 0)
+        XCTAssertEqual([updated].filter { $0.status == .resolutionRequired }.count, 0)
+    }
+
+    func testCompletionRejectionReturnsPendingReviewToActiveAndRetainsResolutionEvidence() throws {
+        let fixture = try makeStore()
+        let issueID = UUID()
+        let resolutionShotID = UUID()
+        var observation = makeObservation(id: issueID, propertyID: fixture.property.id, status: .pendingReview)
+        observation.linkedShotID = resolutionShotID
+        observation.resolutionPhotoRef = "/tmp/rejected-resolution.jpg"
+        observation.shots = [
+            Shot(id: UUID(), capturedAt: older, imageLocalIdentifier: "/tmp/original.jpg", note: nil),
+            Shot(id: resolutionShotID, capturedAt: newest, imageLocalIdentifier: "/tmp/rejected-resolution.jpg", note: nil)
+        ]
+        _ = try fixture.store.createObservation(observation)
+
+        let overlays = AppState.portalPunchlistOperationalOverlaysTestOnly(
+            propertyID: fixture.property.id,
+            observationID: issueID,
+            observationStatus: "pending_review",
+            activityRows: [
+                (activityType: "completion_rejected", toValue: nil, createdAt: newest.addingTimeInterval(10))
+            ]
+        )
+
+        _ = try fixture.store.applyPortalPunchlistOperationalOverlays(
+            propertyID: fixture.property.id,
+            overlays: overlays
+        )
+
+        let updated = try XCTUnwrap(try fixture.store.fetchObservations(propertyID: fixture.property.id).first)
+        XCTAssertEqual(updated.status, .active)
+        XCTAssertEqual(updated.linkedShotID, resolutionShotID)
+        XCTAssertEqual(updated.resolutionPhotoRef, "/tmp/rejected-resolution.jpg")
+        XCTAssertTrue(updated.shots.contains(where: { $0.id == resolutionShotID }))
+    }
+
+    func testReopenAsActiveIsNotOverwrittenByStalePortalResolvedOverlay() throws {
+        let fixture = try makeStore()
+        let issueID = UUID()
+        _ = try fixture.store.createObservation(
+            makeObservation(id: issueID, propertyID: fixture.property.id, status: .active)
+        )
+        let staleResolvedOverlay = PortalPunchlistOperationalOverlay(
+            issueID: issueID,
+            propertyID: fixture.property.id,
+            status: .resolutionRequired,
+            updatedAt: newer
+        )
+        _ = try fixture.store.applyPortalPunchlistOperationalOverlays(
+            propertyID: fixture.property.id,
+            overlays: [staleResolvedOverlay]
+        )
+        var reopened = try XCTUnwrap(try fixture.store.fetchObservations(propertyID: fixture.property.id).first)
+        XCTAssertEqual(reopened.status, .resolutionRequired)
+        reopened.status = .active
+        _ = try fixture.store.updateObservation(reopened)
+
+        _ = try fixture.store.applyPortalPunchlistOperationalOverlays(
+            propertyID: fixture.property.id,
+            overlays: [staleResolvedOverlay]
+        )
+
+        let updated = try XCTUnwrap(try fixture.store.fetchObservations(propertyID: fixture.property.id).first)
+        XCTAssertEqual(updated.status, .active)
     }
 
     func testMissingIssueIDMatchesStableLocationIdentity() throws {

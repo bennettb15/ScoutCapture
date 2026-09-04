@@ -3651,10 +3651,15 @@ struct ContentView: View {
     @State private var armedIssueTradeManuallyChanged: Bool = false
     @State private var selectedPriority: String = ""
     @State private var showActiveIssuesSheet: Bool = false
+    @State private var showResolutionRequiredSheet: Bool = false
+    @State private var activeIssuesSheetHydrating: Bool = false
+    @State private var resolutionRequiredSheetHydrating: Bool = false
     @State private var activeObservations: [Observation] = []
+    @State private var resolutionRequiredObservations: [Observation] = []
     @State private var activeSessionShotIDs: Set<UUID> = []
     @State private var carryoverIssueBadgeCount: Int = 0
     @State private var flaggedPendingCaptureCount: Int = 0
+    @State private var isFinalizingCapturePersistence: Bool = false
     @State private var showCoreElevationChecklist: Bool = false
     @State private var coreElevationChecklistRowsSnapshot: [CoreElevationChecklistRowState] =
         CoreElevationChecklistCategory.allCases.map { CoreElevationChecklistRowState(category: $0, count: 0) }
@@ -3848,6 +3853,7 @@ struct ContentView: View {
     private enum CaptureIntent {
         case guided(UUID)
         case flagged(UUID)
+        case resolution(UUID)
         case retake(UUID)
         case free
     }
@@ -3965,6 +3971,11 @@ struct ContentView: View {
         guidedRemainingForCompass > 0
     }
 
+    private var isPortalPunchlistOperationalReconciliationInProgress: Bool {
+        guard let propertyID = currentSessionScopedPropertyID else { return false }
+        return appState.propertyOpenFreshness(for: propertyID)?.status == .checkingCloudStatus
+    }
+
     private func persistedBaselineState(propertyID: UUID) -> (baselineSessionID: UUID?, hasBaseline: Bool) {
         let persistedProperty = (try? localStore.fetchProperties().first(where: { $0.id == propertyID }))
         var baselineSessionID = persistedProperty?.baselineSessionID
@@ -4001,6 +4012,8 @@ struct ContentView: View {
             return "guided"
         case .flagged:
             return "flagged"
+        case .resolution:
+            return "resolution"
         case .retake:
             return "retake"
         case .free:
@@ -5387,6 +5400,8 @@ struct ContentView: View {
             return "Reclassified"
         case .resolved:
             return "Resolved"
+        case .pendingReview:
+            return "Pending Review"
         case .reopened:
             return "Reopened"
         case .reasonUpdated:
@@ -5738,7 +5753,7 @@ struct ContentView: View {
     }
 
     private var isCaptureTargetArmed: Bool {
-        armedGuidedShotID != nil || armedUpdateObservationID != nil
+        armedGuidedShotID != nil || armedUpdateObservationID != nil || resolutionTargetObservation != nil
     }
 
     private var isMetadataFilterAvailable: Bool {
@@ -6404,10 +6419,15 @@ struct ContentView: View {
     }
 
     private func presentGuidedChecklist() {
+        ensureReferenceResolutionReady()
+        let snapshot = guidedSessionCountSnapshot()
+        guard snapshot.remaining > 0 else {
+            showFlaggedActionToastNow("No guided photos")
+            verboseLog("[GuidedCount] opened empty guidedRemaining=0")
+            return
+        }
         showGuidedChecklist = true
         deferCameraOverlayWork {
-            ensureReferenceResolutionReady()
-            let snapshot = guidedSessionCountSnapshot()
             let sessionIDText = appState.currentSession?.id.uuidString ?? "NONE"
             verboseLog("[GuidedCount] session=\(sessionIDText) guidedTotal=\(snapshot.total) capturedForSession=\(snapshot.captured) remaining=\(snapshot.remaining)")
             let liveGuidedCount = guidedRemainingForCompass
@@ -6424,19 +6444,39 @@ struct ContentView: View {
 
     private func scheduleActiveIssuesOpenRefresh() {
         activeIssuesOpenRefreshWorkItem?.cancel()
+        if showActiveIssuesSheet {
+            activeIssuesSheetHydrating = true
+        }
+        if showResolutionRequiredSheet {
+            resolutionRequiredSheetHydrating = true
+        }
         let item = DispatchWorkItem {
-            guard showActiveIssuesSheet else { return }
+            guard showActiveIssuesSheet || showResolutionRequiredSheet else { return }
             ensureReferenceResolutionReady()
             refreshActiveIssues()
+            if showActiveIssuesSheet {
+                activeIssuesSheetHydrating = false
+            }
+            if showResolutionRequiredSheet {
+                resolutionRequiredSheetHydrating = false
+            }
         }
         activeIssuesOpenRefreshWorkItem = item
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.65, execute: item)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.08, execute: item)
     }
 
     private func dismissActiveIssuesSheet() {
         activeIssuesOpenRefreshWorkItem?.cancel()
         activeIssuesOpenRefreshWorkItem = nil
+        activeIssuesSheetHydrating = false
         showActiveIssuesSheet = false
+    }
+
+    private func dismissResolutionRequiredSheet() {
+        activeIssuesOpenRefreshWorkItem?.cancel()
+        activeIssuesOpenRefreshWorkItem = nil
+        resolutionRequiredSheetHydrating = false
+        showResolutionRequiredSheet = false
     }
 
     private func presentActiveIssuesOrToast(hasIssuesBadge: Bool) {
@@ -6446,17 +6486,37 @@ struct ContentView: View {
             return
         }
 
-        deferCameraOverlayWork {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) {
             ensureReferenceResolutionReady()
             refreshActiveIssues()
             if !activeObservations.isEmpty {
                 showActiveIssuesSheet = true
-            } else {
-                showNoFlaggedIssuesToast = true
-                DispatchQueue.main.asyncAfter(deadline: .now() + 1.8) {
-                    showNoFlaggedIssuesToast = false
-                }
+                scheduleActiveIssuesOpenRefresh()
+                return
             }
+            showNoFlaggedIssuesToast = true
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.8) {
+                showNoFlaggedIssuesToast = false
+            }
+        }
+    }
+
+    private func presentResolutionRequiredOrToast() {
+        if !resolutionRequiredObservations.isEmpty {
+            showResolutionRequiredSheet = true
+            scheduleActiveIssuesOpenRefresh()
+            return
+        }
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) {
+            ensureReferenceResolutionReady()
+            refreshActiveIssues()
+            if !resolutionRequiredObservations.isEmpty {
+                showResolutionRequiredSheet = true
+                scheduleActiveIssuesOpenRefresh()
+                return
+            }
+            showFlaggedActionToastNow("No resolution required")
         }
     }
 
@@ -6564,6 +6624,9 @@ struct ContentView: View {
             }
             .fullScreenCover(isPresented: $showActiveIssuesSheet) {
                 activeIssuesSheetView
+            }
+            .fullScreenCover(isPresented: $showResolutionRequiredSheet) {
+                resolutionRequiredSheetView
             }
             .fullScreenCover(isPresented: $showGuidedChecklist) {
                 guidedChecklistSheetView
@@ -6778,6 +6841,10 @@ struct ContentView: View {
                 refreshCoreElevationChecklistSnapshot()
                 scheduleHudAngleIndexRefresh()
             }
+            .onChange(of: propertyOpenFreshnessHUDSnapshot?.status) { _, _ in
+                refreshActiveIssues()
+                scheduleHudAngleIndexRefresh()
+            }
             .onChange(of: detailNote) { _, _ in
                 camera.updateDetailNoteActive(hasDetailNote)
             }
@@ -6896,7 +6963,9 @@ struct ContentView: View {
 
     private var activeIssuesSheetView: some View {
         ActiveIssuesSheet(
+            mode: .activeIssues,
             observations: activeObservations,
+            isHydrating: activeIssuesSheetHydrating,
             currentSessionID: appState.currentSession?.id,
             sessionShotIDs: activeSessionShotIDs,
             resolvedThumbnailPathByID: flaggedResolvedThumbnailPathByID,
@@ -6926,6 +6995,59 @@ struct ContentView: View {
                     elevation: elevation,
                     detailType: detailType
                 )
+            },
+            loadPortalNotes: { observations, angleIndexByIssueID in
+                guard let propertyID = appState.selectedPropertyID,
+                      let activeOrganizationID = appState.activeOrganizationID else {
+                    return [:]
+                }
+                return await appState.fetchPortalPunchlistNotes(
+                    propertyID: propertyID,
+                    activeOrganizationID: activeOrganizationID,
+                    observations: observations,
+                    angleIndexByIssueID: angleIndexByIssueID
+                )
+            }
+        )
+    }
+
+    private var resolutionRequiredSheetView: some View {
+        ActiveIssuesSheet(
+            mode: .resolutionRequired,
+            observations: resolutionRequiredObservations,
+            isHydrating: resolutionRequiredSheetHydrating,
+            currentSessionID: appState.currentSession?.id,
+            sessionShotIDs: activeSessionShotIDs,
+            resolvedThumbnailPathByID: flaggedResolvedThumbnailPathByID,
+            referencePathByID: flaggedReferencePathByID,
+            angleIndexByIssueID: flaggedAngleIndexByID,
+            allowReferenceFallback: shouldAllowChecklistReferenceFallback,
+            captureProfile: captureProfile,
+            tradeOptions: tradeOptions,
+            buildingOptions: $buildingOptions,
+            detailTypesModel: detailTypesModel,
+            buildingCodeForOption: buildingCode(from:),
+            buildingDisplayNameForOption: buildingDisplayName(for:),
+            cache: imageCache,
+            onClose: {
+                dismissResolutionRequiredSheet()
+            },
+            onSelectIssue: { observation in
+                beginResolutionRequiredCapture(observation)
+            },
+            onRetakeIssue: { observation in
+                beginResolutionRequiredCapture(observation)
+            },
+            onReclassifyIssue: { observation, building, elevation, detailType in
+                reclassifyObservation(
+                    observation,
+                    building: building,
+                    elevation: elevation,
+                    detailType: detailType
+                )
+            },
+            onReopenIssue: { observation in
+                reopenResolutionRequiredIssue(observation)
             },
             loadPortalNotes: { observations, angleIndexByIssueID in
                 guard let propertyID = appState.selectedPropertyID,
@@ -8214,6 +8336,7 @@ struct ContentView: View {
 
             if hasDetailNote &&
                 armedUpdateObservationID == nil &&
+                resolutionTargetObservation == nil &&
                 !showFlaggedActionPrimaryChoice &&
                 !showFlaggedUpdateCommentChoice &&
                 !showFlaggedUpdatedObservationInput {
@@ -9585,10 +9708,10 @@ extension ContentView {
             return trimmed.isEmpty ? nil : trimmed
         }
 
-        guard let flaggedID = armedUpdateObservationID,
+        guard let issueID = armedUpdateObservationID ?? resolutionTargetObservation?.id,
               let propertyID = appState.selectedPropertyID,
               let observations = try? localStore.fetchObservations(propertyID: propertyID),
-              let observation = observations.first(where: { $0.id == flaggedID }) else {
+              let observation = observations.first(where: { $0.id == issueID }) else {
             return nil
         }
 
@@ -9596,6 +9719,9 @@ extension ContentView {
         let raw = isCaptured
             ? capturedImageLocalIdentifierForCurrentSession(observation)
             : {
+                if let armedReference = guidedReferenceAssetLocalID {
+                    return armedReference
+                }
                 if let resolved = flaggedReferencePathByID[observation.id] {
                     return resolved
                 }
@@ -9614,10 +9740,10 @@ extension ContentView {
                 detailType: guided.detailType
             )
         }
-        if let flaggedID = armedUpdateObservationID,
+        if let issueID = armedUpdateObservationID ?? resolutionTargetObservation?.id,
            let propertyID = appState.selectedPropertyID,
            let observations = try? localStore.fetchObservations(propertyID: propertyID),
-           let observation = observations.first(where: { $0.id == flaggedID }) {
+           let observation = observations.first(where: { $0.id == issueID }) {
             return Self.conciseContextLabel(
                 building: observation.building,
                 elevation: observation.targetElevation,
@@ -9631,10 +9757,10 @@ extension ContentView {
         guard let localID = armedReferenceImageLocalIdentifier(isCaptured: isCaptured) else { return }
         var metadataPropertyID: UUID? = appState.selectedPropertyID
         var metadataSessionID: UUID? = appState.currentSession?.id
-        if let flaggedID = armedUpdateObservationID,
+        if let issueID = armedUpdateObservationID ?? resolutionTargetObservation?.id,
            let propertyID = appState.selectedPropertyID,
            let observations = try? localStore.fetchObservations(propertyID: propertyID),
-           let observation = observations.first(where: { $0.id == flaggedID }) {
+           let observation = observations.first(where: { $0.id == issueID }) {
             metadataPropertyID = observation.propertyID
             metadataSessionID = flaggedMetadataSessionID(for: observation, isCaptured: isCaptured)
         }
@@ -9698,6 +9824,8 @@ extension ContentView {
 
     private func topLeftPreviewPlaceholders() -> some View {
         VStack(spacing: 2) {
+            resolutionRequiredFlagButton()
+
             activeIssuesFlagButton()
 
             guidedCompassButton {
@@ -9710,6 +9838,41 @@ extension ContentView {
                 presentCoreElevationChecklist()
             }
         }
+    }
+
+    private func resolutionRequiredFlagButton() -> some View {
+        let hitArea: CGFloat = 44
+        let symbolSize: CGFloat = 22
+        let count = resolutionRequiredObservations.count
+        let hasItems = count > 0
+
+        return Button(action: {
+            fireQuickButtonHaptic()
+            presentResolutionRequiredOrToast()
+        }) {
+            ZStack(alignment: .topTrailing) {
+                Image(systemName: "flag.checkered")
+                    .font(.system(size: symbolSize, weight: .medium))
+                    .foregroundColor(hasItems ? .green : .white)
+
+                if hasItems {
+                    Text("\(count)")
+                        .font(.system(size: 11, weight: .bold))
+                        .foregroundColor(.black)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.75)
+                        .frame(minWidth: 20, minHeight: 20)
+                        .background(Color.white)
+                        .clipShape(Circle())
+                        .offset(x: 6, y: -6)
+                }
+            }
+            .rotationEffect(bottomGlyphRotationAngle)
+            .frame(width: hitArea, height: hitArea)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .frame(width: hitArea, height: hitArea)
     }
 
     private func activeIssuesFlagButton() -> some View {
@@ -10253,12 +10416,12 @@ extension ContentView {
             return lastValidDeviceOrientation
         }
     }
-    
+
     private func capture() {
         let noteAtCapture = detailNote.trimmingCharacters(in: .whitespacesAndNewlines)
         let isFlaggedCaptureIntent: Bool = {
             switch currentCaptureIntent {
-            case .flagged:
+            case .flagged, .resolution:
                 return true
             case .retake:
                 return armedUpdateObservationID != nil
@@ -10294,7 +10457,7 @@ extension ContentView {
         }()
         let armedFlaggedIDAtCapture: UUID? = {
             switch captureIntent {
-            case .flagged(let flaggedID):
+            case .flagged(let flaggedID), .resolution(let flaggedID):
                 return flaggedID
             case .retake:
                 return armedUpdateObservationID
@@ -10435,6 +10598,8 @@ extension ContentView {
                         pendingCaptureSaveCount -= 1
                     }
                     if success {
+                        isFinalizingCapturePersistence = true
+                        defer { isFinalizingCapturePersistence = false }
                         let wasGuidedRetakeCapture = (activeRetakeContext != nil)
                         let retakeExistingFilename = activeRetakeContext?.existingOriginalFilename
                         let shot = Shot(
@@ -10456,7 +10621,7 @@ extension ContentView {
                         }()
                         let shouldApplyFlaggedRoute: Bool = {
                             switch captureIntent {
-                            case .flagged:
+                            case .flagged, .resolution:
                                 return true
                             case .retake:
                                 return armedFlaggedIDAtCapture != nil
@@ -10475,7 +10640,7 @@ extension ContentView {
                         let didApplyIssueUpdate = shouldApplyFlaggedRoute
                             ? applyArmedIssueCaptureIfNeeded(with: shot)
                             : false
-                        let didQueueResolution = shouldApplyFlaggedRoute
+                        let didQueueResolution = shouldApplyFlaggedRoute && !didApplyIssueUpdate
                             ? queueResolutionCaptureIfNeeded(with: shot, data: data)
                             : false
                         var createdObservationID: UUID? = nil
@@ -10534,7 +10699,7 @@ extension ContentView {
                             flaggedObservationIDAtCapture: armedFlaggedIDAtCapture,
                             isGuidedHint: captureIsGuided,
                             isFlaggedHint: captureIsFlagged,
-                            issueIDHint: createdObservationID ?? flaggedActionTargetObservation?.id,
+                            issueIDHint: createdObservationID ?? flaggedActionTargetObservation?.id ?? resolutionTargetObservation?.id,
                             createdFlaggedObservationID: createdObservationID,
                             priorityAtCapture: capturePriority,
                             capturedExifOrientation: Int(capturedExifOrientationRawAtShutter),
@@ -10545,14 +10710,11 @@ extension ContentView {
                                 reportLibrary.reloadSessionAssets(propertyID: propertyID, sessionID: sessionID)
                             }
                         }
-                        if captureIsFlagged {
-                            refreshActiveIssues()
-                            if didApplyGuidedShot {
-                                refreshGuidedShots()
-                            }
-                        } else {
-                            refreshReferenceSetsAndPendingCounts()
-                        }
+                        updateImmediatePostCaptureBadges(
+                            shot: shot,
+                            guidedIDAtCapture: armedGuidedIDAtCapture,
+                            captureIsFlagged: captureIsFlagged
+                        )
                         scheduleHudAngleIndexRefresh()
                         if wasGuidedRetakeCapture {
                             refreshUIAfterRetakeSuccess(
@@ -10634,8 +10796,17 @@ extension ContentView {
 
         do {
             let created = try localStore.createObservation(observation)
-            refreshActiveIssues()
-            refreshReferenceSetsAndPendingCounts()
+            activeObservations.append(created)
+            activeObservations.sort { lhs, rhs in
+                if lhs.createdAt != rhs.createdAt {
+                    return lhs.createdAt < rhs.createdAt
+                }
+                if lhs.updatedAt != rhs.updatedAt {
+                    return lhs.updatedAt < rhs.updatedAt
+                }
+                return lhs.id.uuidString < rhs.id.uuidString
+            }
+            reportLibrary.setActiveIssueCount(activeObservations.filter { $0.status == .active }.count)
             detailNote = ""
             selectedPriority = ""
             isArmedIssueDetailNoteReadOnly = false
@@ -10667,6 +10838,21 @@ extension ContentView {
         } catch {
             // Keep capture UX resilient if local observation persistence fails.
             return nil
+        }
+    }
+
+    private func updateImmediatePostCaptureBadges(
+        shot: Shot,
+        guidedIDAtCapture: UUID?,
+        captureIsFlagged: Bool
+    ) {
+        activeSessionShotIDs.insert(shot.id)
+        if let guidedID = guidedIDAtCapture,
+           let guidedShot = guidedShots.first(where: { $0.id == guidedID }) {
+            guidedUpdatedKeysThisSession.insert(guidedKey(for: guidedShot))
+        }
+        if captureIsFlagged {
+            reportLibrary.setActiveIssueCount(activeObservations.filter { $0.status == .active }.count)
         }
     }
 
@@ -10755,23 +10941,27 @@ extension ContentView {
             }
             let isNewFlaggedIssueCapture = createdFlaggedObservationID == observation.id
             if observation.status == .resolved || observation.resolvedInSessionID == session.id {
-                issueStatus = "resolved"
+                issueStatus = Observation.Status.resolved.issueStatusValue
+                captureKind = "resolved_capture"
+                firstCaptureKind = "captured"
+            } else if observation.status == .pendingReview {
+                issueStatus = Observation.Status.pendingReview.issueStatusValue
                 captureKind = "resolved_capture"
                 firstCaptureKind = "captured"
             } else if isNewFlaggedIssueCapture {
-                issueStatus = "active"
+                issueStatus = Observation.Status.active.issueStatusValue
                 captureKind = "captured"
                 firstCaptureKind = "captured"
             } else if retakeContext != nil {
-                issueStatus = "active"
+                issueStatus = Observation.Status.active.issueStatusValue
                 captureKind = "retake"
                 firstCaptureKind = "captured"
             } else if observation.updatedInSessionID == session.id {
-                issueStatus = "active"
+                issueStatus = Observation.Status.active.issueStatusValue
                 captureKind = "follow_up_capture"
                 firstCaptureKind = "captured"
             } else {
-                issueStatus = "active"
+                issueStatus = observation.status.issueStatusValue
                 captureKind = "reference"
                 firstCaptureKind = "captured"
             }
@@ -11119,6 +11309,7 @@ extension ContentView {
         guidedResolvedThumbnailPathByID = [:]
         guidedReferencePathByID = [:]
         activeObservations = []
+        resolutionRequiredObservations = []
         activeSessionShotIDs = []
         flaggedResolvedThumbnailPathByID = [:]
         flaggedReferencePathByID = [:]
@@ -11990,7 +12181,7 @@ extension ContentView {
                     angleIndex: assignedAngle,
                     isGuided: false,
                     issueID: updated.id,
-                    issueStatus: updated.status == .resolved ? "resolved" : "active",
+                    issueStatus: updated.status.issueStatusValue,
                     captureKind: "reclassified"
                 )
             }
@@ -14307,6 +14498,7 @@ extension ContentView {
 
     private func refreshVisibleIssueStateAfterPersistentDataChange() {
         guard currentSessionScopedPropertyID != nil else { return }
+        guard !isFinalizingCapturePersistence else { return }
         refreshActiveIssues()
         guard !showDetailOverlay,
               !showFlaggedUpdatedObservationInput,
@@ -14533,6 +14725,11 @@ extension ContentView {
                 finalizeArmedIssueCaptureAfterDecision()
                 return
             }
+            guard existing.status != .resolutionRequired else {
+                finalizeArmedIssueCaptureAfterDecision()
+                refreshActiveIssues()
+                return
+            }
 
             var updated = existing
             updated.status = .resolved
@@ -14558,7 +14755,7 @@ extension ContentView {
                 ObservationHistoryEvent(
                     timestamp: Date(),
                     sessionID: appState.currentSession?.id,
-                    kind: .resolved,
+                    kind: .pendingReview,
                     beforeValue: "active",
                     afterValue: "resolved",
                     field: "status",
@@ -14582,7 +14779,7 @@ extension ContentView {
                         propertyID: propertyID,
                         sessionID: sessionID,
                         shotID: shot.id,
-                        reason: "flagged_issue_resolved"
+                        reason: "flagged_issue_pending_review"
                     )
                 } catch {
                     // Keep the capture decision flow resilient; the observation itself has already been saved.
@@ -14609,6 +14806,11 @@ extension ContentView {
             let observations = try localStore.fetchObservations(propertyID: propertyID)
             guard let existing = observations.first(where: { $0.id == targetID }) else {
                 finalizeArmedIssueCaptureAfterDecision()
+                return
+            }
+            guard existing.status != .resolutionRequired else {
+                finalizeArmedIssueCaptureAfterDecision()
+                refreshActiveIssues()
                 return
             }
 
@@ -14888,6 +15090,7 @@ extension ContentView {
     private func refreshActiveIssues() {
         guard let propertyID = currentSessionScopedPropertyID else {
             activeObservations = []
+            resolutionRequiredObservations = []
             activeSessionShotIDs = []
             flaggedResolvedThumbnailPathByID = [:]
             flaggedReferencePathByID = [:]
@@ -14902,22 +15105,30 @@ extension ContentView {
         }
 
         let activeSessionID = appState.currentSession?.id
+        let activeSessionStart = appState.currentSession?.startedAt
         if !allowReferenceThumbnailResolution {
             activeSessionShotIDs = sessionShotIDsForActiveSession(propertyID: propertyID, sessionID: activeSessionID)
             do {
                 let observations = try localStore.fetchObservations(propertyID: propertyID)
                 activeObservations = observations
                     .filter { observation in
-                        if observation.status == .active {
-                            return true
-                        }
-                        if observation.status == .resolved,
-                           let activeSessionID,
-                           observation.resolvedInSessionID == activeSessionID {
-                            return true
-                        }
-                        return false
+                        shouldShowObservationInActiveIssues(
+                            observation,
+                            currentSessionID: activeSessionID,
+                            currentSessionStart: activeSessionStart
+                        )
                     }
+                    .sorted { lhs, rhs in
+                        if lhs.createdAt != rhs.createdAt {
+                            return lhs.createdAt < rhs.createdAt
+                        }
+                        if lhs.updatedAt != rhs.updatedAt {
+                            return lhs.updatedAt < rhs.updatedAt
+                        }
+                        return lhs.id.uuidString < rhs.id.uuidString
+                    }
+                resolutionRequiredObservations = observations
+                    .filter { $0.status == .resolutionRequired }
                     .sorted { lhs, rhs in
                         if lhs.createdAt != rhs.createdAt {
                             return lhs.createdAt < rhs.createdAt
@@ -14929,6 +15140,7 @@ extension ContentView {
                     }
             } catch {
                 activeObservations = []
+                resolutionRequiredObservations = []
             }
             flaggedResolvedThumbnailPathByID = [:]
             flaggedReferencePathByID = [:]
@@ -14938,7 +15150,7 @@ extension ContentView {
                 propertyID: propertyID,
                 sessionID: activeSessionID
             )
-            reportLibrary.setActiveIssueCount(activeObservations.count)
+            reportLibrary.setActiveIssueCount(activeObservations.filter { $0.status == .active }.count)
             verboseLog(
                 "[FlaggedData] deferred sessionID=\(activeSessionID?.uuidString ?? "NONE") " +
                 "flaggedCount=\(activeObservations.count) sessionShotsCount=\(activeSessionShotIDs.count)"
@@ -14956,20 +15168,28 @@ extension ContentView {
         do {
             let observations = try localStore.fetchObservations(propertyID: propertyID)
             let currentSessionID = activeSessionID
-            let currentSessionStart = appState.currentSession?.startedAt
+            let currentSessionStart = activeSessionStart
 
             activeObservations = observations
                 .filter { observation in
-                    if observation.status == .active {
-                        return true
-                    }
-                    if observation.status == .resolved,
-                       let currentSessionID,
-                       observation.resolvedInSessionID == currentSessionID {
-                        return true
-                    }
-                    return false
+                    shouldShowObservationInActiveIssues(
+                        observation,
+                        currentSessionID: currentSessionID,
+                        currentSessionStart: currentSessionStart
+                    )
                 }
+                .sorted { lhs, rhs in
+                    if lhs.createdAt != rhs.createdAt {
+                        return lhs.createdAt < rhs.createdAt
+                    }
+                    if lhs.updatedAt != rhs.updatedAt {
+                        return lhs.updatedAt < rhs.updatedAt
+                    }
+                    return lhs.id.uuidString < rhs.id.uuidString
+                }
+
+            resolutionRequiredObservations = observations
+                .filter { $0.status == .resolutionRequired }
                 .sorted { lhs, rhs in
                     if lhs.createdAt != rhs.createdAt {
                         return lhs.createdAt < rhs.createdAt
@@ -14993,7 +15213,7 @@ extension ContentView {
                     metadataCache[currentSessionID] = currentSessionMetadata
                 }
 
-                for observation in activeObservations {
+                for observation in activeObservations + resolutionRequiredObservations {
                     let resolved = resolveFlaggedThumbnailForDisplay(
                         propertyID: propertyID,
                         currentSession: currentSession,
@@ -15033,7 +15253,7 @@ extension ContentView {
                     propertyID: propertyID,
                     currentSession: currentSession,
                     baselineSessionID: baselineState.baselineSessionID,
-                    observations: activeObservations,
+                    observations: activeObservations + resolutionRequiredObservations,
                     currentSessionMetadata: currentSessionMetadata,
                     orderedSessions: orderedSessions,
                     metadataCache: &metadataCache
@@ -15057,7 +15277,7 @@ extension ContentView {
                 propertyID: propertyID,
                 sessionID: activeSessionID
             )
-            reportLibrary.setActiveIssueCount(activeObservations.count)
+            reportLibrary.setActiveIssueCount(activeObservations.filter { $0.status == .active }.count)
             verboseLog(
                 "[FlaggedData] using sessionID=\(activeSessionID?.uuidString ?? "NONE") " +
                 "flaggedCount=\(activeObservations.count) " +
@@ -15070,6 +15290,7 @@ extension ContentView {
             )
         } catch {
             activeObservations = []
+            resolutionRequiredObservations = []
             flaggedResolvedThumbnailPathByID = [:]
             flaggedReferencePathByID = [:]
             flaggedAngleIndexByID = [:]
@@ -15086,6 +15307,51 @@ extension ContentView {
                 "guidedPending=\(guidedRemainingForCompass) flaggedPending=\(flaggedPendingCaptureCount) carryoverIssues=0"
             )
         }
+    }
+
+    private func shouldShowObservationInActiveIssues(
+        _ observation: Observation,
+        currentSessionID: UUID?,
+        currentSessionStart: Date?
+    ) -> Bool {
+        if observation.status == .active {
+            guard !shouldTemporarilyHideCarryoverActiveIssueDuringPortalReconciliation(
+                observation,
+                currentSessionID: currentSessionID,
+                currentSessionStart: currentSessionStart
+            ) else {
+                return false
+            }
+            return true
+        }
+        if observation.status == .resolved,
+           let currentSessionID,
+           observation.resolvedInSessionID == currentSessionID {
+            if observation.historyEvents.contains(where: { event in
+                event.sessionID == currentSessionID &&
+                event.kind == .resolved &&
+                event.beforeValue == Observation.Status.resolutionRequired.issueStatusValue
+            }) {
+                return false
+            }
+            return true
+        }
+        return false
+    }
+
+    private func shouldTemporarilyHideCarryoverActiveIssueDuringPortalReconciliation(
+        _ observation: Observation,
+        currentSessionID: UUID?,
+        currentSessionStart: Date?
+    ) -> Bool {
+        guard isPortalPunchlistOperationalReconciliationInProgress else { return false }
+        guard let currentSessionStart else { return false }
+        if observation.createdAt >= currentSessionStart { return false }
+        if let currentSessionID,
+           observation.updatedInSessionID == currentSessionID {
+            return false
+        }
+        return true
     }
 
     private func suppressVisibleGuidedShotsForLoadedActiveObservations(
@@ -15151,12 +15417,42 @@ extension ContentView {
         armIssueUpdate(observation, revisedObservationText: nil)
     }
 
+    private func beginResolutionRequiredCapture(_ observation: Observation) {
+        enterResolutionMode(observation)
+    }
+
     private func enterResolutionMode(_ observation: Observation) {
         dismissActiveIssuesSheet()
+        dismissResolutionRequiredSheet()
+        resetSelectionForSwitch()
         armedUpdateObservationID = nil
+        flaggedActionTargetObservation = observation
         resolutionTargetObservation = observation
-        setCaptureIntent(.flagged(observation.id))
         resetResolutionCapturePreview()
+        if let building = observation.building?.trimmingCharacters(in: .whitespacesAndNewlines), !building.isEmpty {
+            selectedBuilding = buildingCode(from: building)
+        }
+        if let targetElevation = observation.targetElevation?.trimmingCharacters(in: .whitespacesAndNewlines), !targetElevation.isEmpty {
+            elevation = targetElevation
+        }
+        if let detail = observation.detailType?.trimmingCharacters(in: .whitespacesAndNewlines), !detail.isEmpty {
+            detailTypesModel.setSelected(detail, for: locationMode, profile: captureProfile)
+        }
+        armedIssueNoteText = Self.observationCurrentReasonText(observation) ?? ""
+        detailNote = armedIssueNoteText
+        selectedPriority = Self.flaggedPriorityOrDefault(observation.priority)
+        armIssueScopedTrade(observation.trade ?? latestTradeForIssue(propertyID: observation.propertyID, issueID: observation.id))
+        isArmedIssueDetailNoteReadOnly = true
+        if let resolvedFlaggedPath = flaggedResolvedThumbnailPathByID[observation.id],
+           !resolvedFlaggedPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            loadGuidedReferenceThumbnail(referencePath: resolvedFlaggedPath, localIdentifier: nil)
+        } else {
+            let sortedShots = observation.shots.sorted { $0.capturedAt < $1.capturedAt }
+            let referenceLocalID = sortedShots.first?.imageLocalIdentifier
+            loadGuidedReferenceThumbnail(referencePath: nil, localIdentifier: referenceLocalID)
+        }
+        showGuidedAlignmentOverlay = false
+        setCaptureIntent(.resolution(observation.id))
         showResolutionModeToast = true
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.8) {
             showResolutionModeToast = false
@@ -15200,8 +15496,8 @@ extension ContentView {
                     timestamp: Date(),
                     sessionID: appState.currentSession?.id,
                     kind: .resolved,
-                    beforeValue: "active",
-                    afterValue: "resolved",
+                    beforeValue: existing.status.issueStatusValue,
+                    afterValue: Observation.Status.resolved.issueStatusValue,
                     field: "status",
                     shotID: shot.id
                 ),
@@ -15231,10 +15527,112 @@ extension ContentView {
 
             resolutionTargetObservation = nil
             resetResolutionCapturePreview()
-            showFlaggedActionToastNow("Issue resolved")
+            clearFlaggedArming()
+            currentCaptureIntent = .free
+            showFlaggedActionToastNow("Resolution documented")
             refreshActiveIssues()
         } catch {
             // Keep UI responsive if persistence fails.
+        }
+    }
+
+    private func reopenResolutionRequiredIssue(_ observation: Observation) {
+        guard let propertyID = appState.selectedPropertyID else { return }
+        let sessionID = appState.currentSession?.id
+        let previousActiveObservations = activeObservations
+        let previousResolutionRequiredObservations = resolutionRequiredObservations
+        let reopenEvent = ObservationHistoryEvent(
+            timestamp: Date(),
+            sessionID: sessionID,
+            kind: .reopened,
+            beforeValue: observation.status.issueStatusValue,
+            afterValue: Observation.Status.active.issueStatusValue,
+            field: "status",
+            shotID: observation.linkedShotID
+        )
+
+        var optimistic = observation
+        optimistic.status = .active
+        optimistic.resolvedInSessionID = nil
+        optimistic.updatedInSessionID = sessionID
+        appendObservationHistoryEvent(reopenEvent, to: &optimistic)
+
+        resolutionRequiredObservations.removeAll { $0.id == observation.id }
+        if let activeIndex = activeObservations.firstIndex(where: { $0.id == observation.id }) {
+            activeObservations[activeIndex] = optimistic
+        } else {
+            activeObservations.append(optimistic)
+        }
+        activeObservations.sort { lhs, rhs in
+            if lhs.createdAt != rhs.createdAt {
+                return lhs.createdAt < rhs.createdAt
+            }
+            if lhs.updatedAt != rhs.updatedAt {
+                return lhs.updatedAt < rhs.updatedAt
+            }
+            return lhs.id.uuidString < rhs.id.uuidString
+        }
+        flaggedReferenceIDs.insert(observation.id)
+        flaggedUpdatedIDsThisSession.remove(observation.id)
+        flaggedPendingCaptureCount = max(0, flaggedReferenceIDs.subtracting(flaggedUpdatedIDsThisSession).count)
+        reportLibrary.setActiveIssueCount(activeObservations.filter { $0.status == .active }.count)
+        showFlaggedActionToastNow("Issue reopened")
+
+        let store = localStore
+        let state = appState
+        let library = reportLibrary
+        DispatchQueue.global(qos: .userInitiated).async {
+            let persisted: Observation
+            do {
+                let observations = try store.fetchObservations(propertyID: propertyID)
+                guard let existing = observations.first(where: { $0.id == observation.id }) else {
+                    throw NSError(
+                        domain: "ScoutCapture.Reopen",
+                        code: 1,
+                        userInfo: [NSLocalizedDescriptionKey: "Issue no longer exists locally."]
+                    )
+                }
+                var updated = existing
+                updated.status = .active
+                updated.resolvedInSessionID = nil
+                updated.updatedInSessionID = sessionID
+                updated.historyEvents.append(reopenEvent)
+                updated.historyEvents.sort { $0.timestamp < $1.timestamp }
+
+                persisted = try store.updateObservation(updated)
+                if let sessionID,
+                   let shotID = persisted.linkedShotID {
+                    _ = try store.syncFlaggedObservationUpdateToSessionMetadata(
+                        propertyID: propertyID,
+                        sessionID: sessionID,
+                        observation: persisted,
+                        shotID: shotID,
+                        trade: persisted.trade,
+                        activeCaptureKind: "follow_up_capture"
+                    )
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    activeObservations = previousActiveObservations
+                    resolutionRequiredObservations = previousResolutionRequiredObservations
+                    refreshReferenceSetsAndPendingCounts()
+                    library.setActiveIssueCount(activeObservations.filter { $0.status == .active }.count)
+                    showFlaggedActionToastNow("Reopen failed. Try again.")
+                }
+                return
+            }
+
+            if let sessionID,
+               let shotID = persisted.linkedShotID {
+                DispatchQueue.main.async {
+                    state.scheduleShotMetadataSupabaseWriteIfNeeded(
+                        propertyID: propertyID,
+                        sessionID: sessionID,
+                        shotID: shotID,
+                        reason: "flagged_issue_reopened"
+                    )
+                }
+            }
         }
     }
     
@@ -16669,7 +17067,8 @@ extension ContentView {
                                 toRemoveObservationIDs.insert(observations[idx].id)
                                 continue
                             }
-                            if removedLinked || wasCurrentSessionFlagUpdate {
+                            if observations[idx].status != .resolutionRequired &&
+                                (removedLinked || wasCurrentSessionFlagUpdate) {
                                 observations[idx].status = .active
                                 observations[idx].resolvedInSessionID = nil
                                 observations[idx].updatedInSessionID = nil
@@ -19473,9 +19872,43 @@ extension ContentView {
     }
 
     private struct ActiveIssuesSheet: View {
+        enum Mode {
+            case activeIssues
+            case resolutionRequired
+
+            var title: String {
+                switch self {
+                case .activeIssues:
+                    return "Active Issues"
+                case .resolutionRequired:
+                    return "Resolution Required"
+                }
+            }
+
+            var emptyIcon: String {
+                switch self {
+                case .activeIssues:
+                    return "flag.slash"
+                case .resolutionRequired:
+                    return "flag.checkered"
+                }
+            }
+
+            var emptyText: String {
+                switch self {
+                case .activeIssues:
+                    return "No active issues"
+                case .resolutionRequired:
+                    return "No resolution required"
+                }
+            }
+        }
+
         @Environment(\.dismiss) private var dismiss
         @Environment(\.colorScheme) private var colorScheme
+        let mode: Mode
         let observations: [Observation]
+        let isHydrating: Bool
         let currentSessionID: UUID?
         let sessionShotIDs: Set<UUID>
         let resolvedThumbnailPathByID: [UUID: String]
@@ -19493,11 +19926,13 @@ extension ContentView {
         let onSelectIssue: (Observation) -> Void
         let onRetakeIssue: (Observation) -> Void
         let onReclassifyIssue: (Observation, String, String, String) -> Void
+        var onReopenIssue: ((Observation) -> Void)? = nil
         let loadPortalNotes: ([Observation], [UUID: Int]) async -> [UUID: [PortalPunchlistNote]]
         @State private var lastValidOrientation: UIDeviceOrientation = .portrait
         @State private var reclassifyTargetObservation: Observation? = nil
         @State private var historyTargetObservation: Observation? = nil
         @State private var portalNotesTargetObservation: Observation? = nil
+        @State private var reopenConfirmationTargetObservation: Observation? = nil
         @State private var portalNoteCountByIssueID: [UUID: Int] = [:]
         @State private var flaggedViewerState: FlaggedViewerState? = nil
         @State private var inlineToastText: String? = nil
@@ -19549,12 +19984,22 @@ extension ContentView {
                         Color(uiColor: .secondarySystemGroupedBackground)
                             .ignoresSafeArea()
 
-                        if observations.isEmpty {
+                        if observations.isEmpty && isHydrating {
                             VStack(spacing: 10) {
-                                Image(systemName: "flag.slash")
+                                ProgressView()
+                                    .progressViewStyle(.circular)
+                                    .tint(.secondary)
+                                Text("Loading")
+                                    .font(.system(size: 15, weight: .medium))
+                                    .foregroundColor(.secondary)
+                            }
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        } else if observations.isEmpty {
+                            VStack(spacing: 10) {
+                                Image(systemName: mode.emptyIcon)
                                     .font(.system(size: 28, weight: .medium))
                                     .foregroundColor(.secondary)
-                                Text("No active issues")
+                                Text(mode.emptyText)
                                     .font(.system(size: 16, weight: .medium))
                                     .foregroundColor(.secondary)
                             }
@@ -19567,6 +20012,7 @@ extension ContentView {
                                     resolvedThumbnailPath: resolvedThumbnailPathByID[observation.id],
                                     angleIndex: angleIndexByIssueID[observation.id],
                                     tradeOptions: tradeOptions,
+                                    mode: mode,
                                     cache: cache,
                                     portalNoteCount: portalNoteCountByIssueID[observation.id, default: 0],
                                     hasReferenceImage: referenceImageLocalID(for: observation) != nil,
@@ -19593,6 +20039,9 @@ extension ContentView {
                                     onTapReclassify: {
                                         reclassifyTargetObservation = observation
                                     },
+                                    onTapReopen: {
+                                        reopenConfirmationTargetObservation = observation
+                                    },
                                     onTapHistory: {
                                         historyTargetObservation = observation
                                     },
@@ -19607,10 +20056,22 @@ extension ContentView {
                             .background(Color.clear)
                         }
                     }
+                    .overlay(alignment: .top) {
+                        if isHydrating && !observations.isEmpty {
+                            ProgressView()
+                                .progressViewStyle(.circular)
+                                .tint(.secondary)
+                                .scaleEffect(0.82)
+                                .padding(8)
+                                .background(.thinMaterial)
+                                .clipShape(Circle())
+                                .padding(.top, 66)
+                        }
+                    }
                     .toolbar(.hidden, for: .navigationBar)
                     .safeAreaInset(edge: .top, spacing: 0) {
                         ZStack {
-                            Text("Active Issues")
+                            Text(mode.title)
                                 .font(.system(size: 18, weight: .medium))
                                 .foregroundColor(theme.label)
                                 .minimumScaleFactor(0.75)
@@ -19671,6 +20132,21 @@ extension ContentView {
                             loadPortalNotes: loadPortalNotes
                         )
                     }
+                    .alert("Reopen Issue?", isPresented: reopenConfirmationBinding) {
+                        Button("Cancel", role: .cancel) {
+                            reopenConfirmationTargetObservation = nil
+                        }
+                        Button("Reopen") {
+                            guard let target = reopenConfirmationTargetObservation else { return }
+                            reopenConfirmationTargetObservation = nil
+                            closeImmediately()
+                            DispatchQueue.main.async {
+                                onReopenIssue?(target)
+                            }
+                        }
+                    } message: {
+                        Text("This will move the item back to Active Issues.")
+                    }
                     .overlay(alignment: .top) {
                         if let inlineToastText {
                             Text(inlineToastText)
@@ -19704,6 +20180,8 @@ extension ContentView {
                     UIDevice.current.endGeneratingDeviceOrientationNotifications()
                 }
                 .task(id: issueIDSignature) {
+                    try? await Task.sleep(nanoseconds: 250_000_000)
+                    guard !Task.isCancelled else { return }
                     await refreshPortalNoteCounts()
                 }
             }
@@ -19719,6 +20197,17 @@ extension ContentView {
                     viewerToken: state.viewerToken
                 )
             }
+        }
+
+        private var reopenConfirmationBinding: Binding<Bool> {
+            Binding(
+                get: { reopenConfirmationTargetObservation != nil },
+                set: { isPresented in
+                    if !isPresented {
+                        reopenConfirmationTargetObservation = nil
+                    }
+                }
+            )
         }
 
         private func referenceImageLocalID(for observation: Observation) -> String? {
@@ -20194,6 +20683,7 @@ extension ContentView {
             let resolvedThumbnailPath: String?
             let angleIndex: Int?
             let tradeOptions: [String]
+            let mode: ActiveIssuesSheet.Mode
             let cache: AssetImageCache
             let portalNoteCount: Int
             let hasReferenceImage: Bool
@@ -20204,6 +20694,7 @@ extension ContentView {
             let onTapViewReferenceImage: () -> Void
             let onTapViewCapturedImage: () -> Void
             let onTapReclassify: () -> Void
+            let onTapReopen: () -> Void
             let onTapHistory: () -> Void
             let onTapPortalNotes: () -> Void
 
@@ -20230,6 +20721,12 @@ extension ContentView {
                     $0.kind == .captured || $0.kind == .retake
                 }
                 let hasCurrentSessionReclassifyEvent = currentSessionEvents.contains { $0.kind == .reclassified }
+                if observation.status == .resolutionRequired {
+                    return "Resolution Required\(angleSuffix)"
+                }
+                if observation.status == .pendingReview {
+                    return "Pending Review\(angleSuffix)"
+                }
                 if observation.resolvedInSessionID == currentSessionID {
                     return "Resolved\(angleSuffix)"
                 }
@@ -20249,6 +20746,12 @@ extension ContentView {
             }
 
             private var statusColor: Color {
+                if observation.status == .resolutionRequired {
+                    return .green
+                }
+                if observation.status == .pendingReview {
+                    return .blue
+                }
                 if observation.resolvedInSessionID == currentSessionID {
                     return .green
                 }
@@ -20319,36 +20822,15 @@ extension ContentView {
 
                     Spacer(minLength: 0)
 
-                    if portalNoteCount > 0 {
-                        Button(action: onTapPortalNotes) {
-                            ZStack(alignment: .topTrailing) {
-                                Image(systemName: "note.text")
-                                    .font(.system(size: 18, weight: .semibold))
-                                    .foregroundColor(.white.opacity(0.92))
-                                    .frame(width: 38, height: 38)
-                                    .background(Color.white.opacity(0.10))
-                                    .clipShape(Circle())
-                                    .overlay(
-                                        Circle()
-                                            .stroke(Color.white.opacity(0.14), lineWidth: 1)
-                                    )
-
-                                Text(portalNoteCount > 99 ? "99+" : "\(portalNoteCount)")
-                                    .font(.system(size: 10, weight: .bold))
-                                    .foregroundColor(.white)
-                                    .lineLimit(1)
-                                    .minimumScaleFactor(0.65)
-                                    .frame(minWidth: 17, minHeight: 17)
-                                    .padding(.horizontal, portalNoteCount > 9 ? 3 : 0)
-                                    .background(Color.orange)
-                                    .clipShape(Capsule())
-                                    .offset(x: 5, y: -5)
+                    if mode == .resolutionRequired {
+                        VStack(spacing: 6) {
+                            if portalNoteCount > 0 {
+                                portalNotesButton
                             }
-                            .frame(width: 46, height: 46)
+                            reopenButton
                         }
-                        .buttonStyle(.plain)
-                        .accessibilityLabel("Portal notes")
-                        .accessibilityValue("\(portalNoteCount)")
+                    } else if portalNoteCount > 0 {
+                        portalNotesButton
                     }
                 }
                 .padding(.horizontal, 12)
@@ -20363,8 +20845,8 @@ extension ContentView {
                 .listRowInsets(EdgeInsets(top: 6, leading: 12, bottom: 6, trailing: 12))
                 .listRowBackground(Color.clear)
                 .onTapGesture {
-                    guard observation.status == .active else { return }
-                    guard !canRetake else { return }
+                    guard observation.status == .active || observation.status == .resolutionRequired else { return }
+                    guard mode == .resolutionRequired || !canRetake else { return }
                     onTapRow()
                 }
                 .swipeActions(edge: .leading, allowsFullSwipe: false) {
@@ -20381,9 +20863,25 @@ extension ContentView {
                         Label("Reclassify", systemImage: "arrow.triangle.2.circlepath")
                     }
                     .tint(.mint)
+
+                    if mode == .resolutionRequired {
+                        Button {
+                            onTapReopen()
+                        } label: {
+                            Label("Reopen as Active", systemImage: "arrow.uturn.backward")
+                        }
+                        .tint(.orange)
+                    }
                 }
                 .swipeActions(edge: .trailing, allowsFullSwipe: false) {
-                    if canRetake {
+                    if mode == .resolutionRequired {
+                        Button {
+                            onTapRow()
+                        } label: {
+                            Label("Capture Resolution Photo", systemImage: "camera")
+                        }
+                        .tint(.green)
+                    } else if canRetake {
                         Button {
                             onTapRetake()
                         } label: {
@@ -20433,6 +20931,52 @@ extension ContentView {
                     thumbnail = nil
                     loadThumbnailIfNeeded()
                 }
+            }
+
+            private var reopenButton: some View {
+                Button(action: onTapReopen) {
+                    Text("Reopen")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundColor(.orange)
+                        .lineLimit(1)
+                        .padding(.horizontal, 9)
+                        .frame(height: 28)
+                        .background(Color.orange.opacity(0.13))
+                        .clipShape(Capsule())
+                }
+                .buttonStyle(.plain)
+            }
+
+            private var portalNotesButton: some View {
+                Button(action: onTapPortalNotes) {
+                    ZStack(alignment: .topTrailing) {
+                        Image(systemName: "note.text")
+                            .font(.system(size: 18, weight: .semibold))
+                            .foregroundColor(.white.opacity(0.92))
+                            .frame(width: 38, height: 38)
+                            .background(Color.white.opacity(0.10))
+                            .clipShape(Circle())
+                            .overlay(
+                                Circle()
+                                    .stroke(Color.white.opacity(0.14), lineWidth: 1)
+                            )
+
+                        Text(portalNoteCount > 99 ? "99+" : "\(portalNoteCount)")
+                            .font(.system(size: 10, weight: .bold))
+                            .foregroundColor(.white)
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.65)
+                            .frame(minWidth: 17, minHeight: 17)
+                            .padding(.horizontal, portalNoteCount > 9 ? 3 : 0)
+                            .background(Color.orange)
+                            .clipShape(Capsule())
+                            .offset(x: 5, y: -5)
+                    }
+                    .frame(width: 46, height: 46)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Portal notes")
+                .accessibilityValue("\(portalNoteCount)")
             }
 
             private var thumbnailView: some View {

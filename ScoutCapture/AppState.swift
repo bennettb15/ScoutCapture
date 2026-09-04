@@ -26179,7 +26179,8 @@ final class AppState: ObservableObject {
         }
         var seen = Set<UUID>()
         return metadata.issues.filter {
-            normalizedObservationStatus($0.issueStatus) == "active"
+            let status = normalizedObservationStatus($0.issueStatus)
+            return status == "active" || status == "pending_review" || status == "resolved"
         }.compactMap { issue -> NormalizedObservationReplayRow? in
             guard seen.insert(issue.issueID).inserted else { return nil }
             let linkedShot = shotsByIssueID[issue.issueID] ??
@@ -26190,7 +26191,8 @@ final class AppState: ObservableObject {
             let detail = normalizedReplayText(issue.detailNote) ??
                 normalizedReplayText(issue.currentReason)
             let createdAt = issue.firstSeenAt ?? linkedShot?.createdAt ?? metadata.startedAt
-            let updatedAt = issue.lastSeenAt ??
+            let updatedAt = issue.resolvedAt ??
+                issue.lastSeenAt ??
                 linkedShot?.updatedAt ??
                 issue.firstSeenAt ??
                 metadata.endedAt ??
@@ -26269,6 +26271,8 @@ final class AppState: ObservableObject {
             let updateType: String
             if status == "resolved" {
                 updateType = "resolved"
+            } else if status == "pending_review" {
+                updateType = "completion_submitted"
             } else if normalizedReplayText(linkedShot?.captureKind)?.lowercased() == "reference" ||
                         (issue.firstSeenAt.map { $0 < metadata.startedAt } ?? false) {
                 updateType = "carried_forward"
@@ -26834,7 +26838,24 @@ final class AppState: ObservableObject {
     }
 
     private nonisolated static func normalizedObservationStatus(_ value: String) -> String {
-        value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "resolved" ? "resolved" : "active"
+        Observation.Status.status(from: value).issueStatusValue
+    }
+
+    private nonisolated static func portalPunchlistOperationalStatus(from value: String?) -> Observation.Status {
+        let normalized = normalizedReplayText(value)?
+            .replacingOccurrences(of: "-", with: "_")
+            .replacingOccurrences(of: " ", with: "_")
+            .lowercased()
+        switch normalized {
+        case "resolved":
+            return .resolutionRequired
+        case "pending_review", "pending":
+            return .pendingReview
+        case "rejected", "open", "active":
+            return .active
+        default:
+            return .active
+        }
     }
 
     nonisolated static func executeNormalizedBackfillReplayTestOnly(
@@ -43815,6 +43836,7 @@ final class AppState: ObservableObject {
     func selectProperty(id: UUID) {
         selectedPropertyID = id
         markPropertyActivated(id: id)
+        beginPropertyOpenFreshnessCheck(propertyID: id)
     }
 
     func propertyOpenFreshness(for propertyID: UUID) -> PropertyOpenFreshnessSnapshot? {
@@ -44670,7 +44692,7 @@ final class AppState: ObservableObject {
             overlaysByIssueID[observation.id] = PortalPunchlistOperationalOverlay(
                 issueID: observation.id,
                 propertyID: propertyID,
-                status: normalizedObservationStatus(observation.status ?? "active") == "active" ? .active : .resolved,
+                status: portalPunchlistOperationalStatus(from: observation.status),
                 priority: observation.priority,
                 trade: observation.trade,
                 updatedAt: observation.updatedAt,
@@ -44694,7 +44716,7 @@ final class AppState: ObservableObject {
             let shot = update.shotID.flatMap { remoteShotsByID[$0] } ??
                 current?.shotID.flatMap { remoteShotsByID[$0] } ??
                 remoteShots.first(where: { $0.issueID == observationID })
-            let updateStatus = update.status.map { normalizedObservationStatus($0) == "active" ? Observation.Status.active : .resolved }
+            let updateStatus = update.status.map { portalPunchlistOperationalStatus(from: $0) }
             overlaysByIssueID[observationID] = PortalPunchlistOperationalOverlay(
                 issueID: observationID,
                 propertyID: propertyID,
@@ -44725,7 +44747,9 @@ final class AppState: ObservableObject {
             let nextPriority: String?
             let nextTrade: String?
             let nextStatus: Observation.Status?
-            switch normalizedReplayText(activity.activityType)?.lowercased() {
+            let activityType = normalizedReplayText(activity.activityType)?.lowercased()
+            var reopensResolved = activityType == "completion_rejected"
+            switch activityType {
             case "priority_changed":
                 nextPriority = normalizedReplayText(activity.toValue) ?? current?.priority
                 nextTrade = current?.trade
@@ -44737,15 +44761,23 @@ final class AppState: ObservableObject {
             case "status_changed":
                 nextPriority = current?.priority
                 nextTrade = current?.trade
-                nextStatus = normalizedObservationStatus(activity.toValue ?? "active") == "active" ? .active : .resolved
+                let statusChange = portalPunchlistOperationalStatus(from: activity.toValue)
+                nextStatus = (current?.status == .resolved && statusChange == .resolutionRequired)
+                    ? .resolved
+                    : statusChange
+                reopensResolved = statusChange == .active
             case "completion_rejected":
                 nextPriority = current?.priority
                 nextTrade = current?.trade
-                nextStatus = current?.status
-            case "completion_submitted", "completion_approved":
+                nextStatus = .active
+            case "completion_submitted":
                 nextPriority = current?.priority
                 nextTrade = current?.trade
-                nextStatus = current?.status
+                nextStatus = .pendingReview
+            case "completion_approved":
+                nextPriority = current?.priority
+                nextTrade = current?.trade
+                nextStatus = .resolved
             default:
                 continue
             }
@@ -44761,7 +44793,8 @@ final class AppState: ObservableObject {
                 targetElevation: shot?.elevation ?? current?.targetElevation,
                 detailType: shot?.detailType ?? current?.detailType,
                 angleIndex: shot?.angleIndex ?? current?.angleIndex,
-                shotKey: shot?.shotKey ?? current?.shotKey
+                shotKey: shot?.shotKey ?? current?.shotKey,
+                reopensResolved: reopensResolved
             )
         }
 
@@ -44806,7 +44839,10 @@ final class AppState: ObservableObject {
         activities: [RemotePortalPunchlistActivityRecord],
         remoteShots: [PortalPunchlistRemoteShotIdentity]
     ) -> [UUID: [PortalPunchlistNote]] {
-        let activeIssues = localIssues.filter { $0.propertyID == propertyID && $0.status == .active }
+        let activeIssues = localIssues.filter {
+            $0.propertyID == propertyID &&
+                ($0.status == .active || $0.status == .resolutionRequired)
+        }
         guard !activeIssues.isEmpty else { return [:] }
 
         let issueByID = Dictionary(uniqueKeysWithValues: activeIssues.map { ($0.id, $0) })

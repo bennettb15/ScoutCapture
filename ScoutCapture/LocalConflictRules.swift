@@ -81,16 +81,16 @@ enum LocalConflictRules {
             return lhsIsLinked
         }
 
-        if lhs.isFlagged != rhs.isFlagged {
-            return lhs.isFlagged
-        }
-
         if lhs.updatedAt != rhs.updatedAt {
             return lhs.updatedAt > rhs.updatedAt
         }
 
         if lhs.createdAt != rhs.createdAt {
             return lhs.createdAt > rhs.createdAt
+        }
+
+        if lhs.isFlagged != rhs.isFlagged {
+            return lhs.isFlagged
         }
 
         return lhs.shotID.uuidString < rhs.shotID.uuidString
@@ -492,11 +492,28 @@ enum LocalConflictRules {
         current: Observation,
         incoming: Observation
     ) -> Observation {
+        let terminalResolvedSupportingDocumentation =
+            observationIsTerminalResolvedSupportingDocumentation(current)
+        let incomingExplicitlyReopens = incoming.historyEvents.contains { event in
+            event.kind == .reopened &&
+                event.afterValue == Observation.Status.active.issueStatusValue
+        }
         let incomingWins = incoming.updatedAt > current.updatedAt
         var merged = incomingWins ? incoming : current
 
         merged.updatedAt = max(current.updatedAt, incoming.updatedAt)
-        merged.status = incomingWins ? incoming.status : current.status
+        if terminalResolvedSupportingDocumentation,
+           incoming.status != .resolved,
+           !incomingExplicitlyReopens {
+            merged.status = .resolved
+            merged.resolvedInSessionID = current.resolvedInSessionID
+            merged.resolutionPhotoRef = current.resolutionPhotoRef
+            merged.resolutionStatement = current.resolutionStatement
+            merged.linkedShotID = current.linkedShotID
+            merged.shots = current.shots
+        } else {
+            merged.status = incomingWins ? incoming.status : current.status
+        }
         merged.historyEvents = normalizeObservationHistoryEventsAppendOnly(
             current.historyEvents + incoming.historyEvents
         )
@@ -504,6 +521,15 @@ enum LocalConflictRules {
             current.updateHistory + incoming.updateHistory
         )
         return merged
+    }
+
+    private static func observationIsTerminalResolvedSupportingDocumentation(_ observation: Observation) -> Bool {
+        guard observation.status == .resolved else { return false }
+        return observation.historyEvents.contains { event in
+            event.kind == .resolved &&
+                event.beforeValue == Observation.Status.resolutionRequired.issueStatusValue &&
+                event.afterValue == Observation.Status.resolved.issueStatusValue
+        }
     }
 
     static func normalizeObservations(_ observations: [Observation]) -> [Observation] {
