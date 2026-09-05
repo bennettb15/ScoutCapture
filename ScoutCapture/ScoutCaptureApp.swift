@@ -12526,7 +12526,7 @@ struct PropertySessionView: View {
         ZStack {
             if showCameraContent {
                 ContentView(onExitToHub: {
-                    dismiss()
+                    exitCaptureScreen()
                 })
                 .transition(.opacity)
             } else {
@@ -12591,7 +12591,7 @@ struct PropertySessionView: View {
                     requestID: request.id,
                     propertyID: request.propertyID
                 )
-                dismiss()
+                exitCaptureScreen()
             }
     }
 
@@ -12626,7 +12626,7 @@ struct PropertySessionView: View {
                         .buttonStyle(.plain)
 
                         Button {
-                            dismiss()
+                            exitCaptureScreen()
                         } label: {
                             Text("Back")
                                 .font(.system(size: 16, weight: .semibold))
@@ -12670,7 +12670,9 @@ struct PropertySessionView: View {
                         Button {
                             Task {
                                 await appState.releaseCurrentSessionCoordinationLockIfOwned()
-                                dismiss()
+                                await MainActor.run {
+                                    exitCaptureScreen()
+                                }
                             }
                         } label: {
                             Text("Back")
@@ -12826,10 +12828,15 @@ struct PropertySessionView: View {
             sessionEntryBlock = nil
             isCheckingSessionCoordination = false
             onPendingExportRecovered(recovery.property, recovery.session)
-            dismiss()
+            exitCaptureScreen()
             return
         }
         beginSessionCoordinationFlow(forceClaim: true)
+    }
+
+    private func exitCaptureScreen() {
+        camera.stopPreviewAsync()
+        dismiss()
     }
 
     private func lockMessage(for block: AppState.SessionEntryCoordinationBlock) -> String {

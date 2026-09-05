@@ -304,7 +304,7 @@ final class CameraManager: NSObject, ObservableObject {
     // All AVCaptureSession work must run on a dedicated queue.
     private let sessionQueue = DispatchQueue(label: "ScoutCapture.CameraSession")
     private var isSessionConfigured = false
-    private var shouldResumeRunningOnActive = false
+    private var isPreviewDesired = false
     private var videoDevice: AVCaptureDevice?
     private var defaultFormatByDeviceID: [String: AVCaptureDevice.Format] = [:]
     private let photoOutput = AVCapturePhotoOutput()
@@ -356,7 +356,6 @@ final class CameraManager: NSObject, ObservableObject {
     @objc private func appWillResignActive() {
         sessionQueue.async { [weak self] in
             guard let self else { return }
-            self.shouldResumeRunningOnActive = self.session.isRunning
             if self.session.isRunning {
                 self.session.stopRunning()
             }
@@ -368,10 +367,10 @@ final class CameraManager: NSObject, ObservableObject {
     }
 
     @objc private func appDidBecomeActive() {
-        // Some lifecycle paths (for example screenshot transitions) can leave
-        // shouldResumeRunningOnActive stale while the session is actually stopped.
-        // Always attempt to ensure preview is running when we become active.
-        ensurePreviewRunningAsync()
+        sessionQueue.async { [weak self] in
+            guard let self, self.isPreviewDesired else { return }
+            self.ensurePreviewRunningAsync()
+        }
     }
     
     deinit {
@@ -784,6 +783,7 @@ final class CameraManager: NSObject, ObservableObject {
     func ensurePreviewRunningAsync() {
         sessionQueue.async { [weak self] in
             guard let self else { return }
+            self.isPreviewDesired = true
 
             if !self.isSessionConfigured {
                 self.configureSession()
@@ -827,6 +827,22 @@ final class CameraManager: NSObject, ObservableObject {
 
             DispatchQueue.main.async {
                 self.isPreviewRunning = self.session.isRunning
+                self.isStartingPreview = false
+            }
+        }
+    }
+
+    func stopPreviewAsync() {
+        sessionQueue.async { [weak self] in
+            guard let self else { return }
+            self.isPreviewDesired = false
+
+            if self.session.isRunning {
+                self.session.stopRunning()
+            }
+
+            DispatchQueue.main.async {
+                self.isPreviewRunning = false
                 self.isStartingPreview = false
             }
         }
