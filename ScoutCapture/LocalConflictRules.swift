@@ -199,7 +199,10 @@ enum LocalConflictRules {
             return false
         }
         let issueStatus = trimmedNonEmpty(shot.issueStatus)?.lowercased()
-        if issueStatus == "active" || issueStatus == "resolved" {
+        if issueStatus == "active" ||
+            issueStatus == "resolved" ||
+            issueStatus == "pending_review" ||
+            issueStatus == "resolution_required" {
             return false
         }
         let captureKind = trimmedNonEmpty(shot.captureKind)?.lowercased()
@@ -410,7 +413,9 @@ enum LocalConflictRules {
     ) -> Bool {
         guard shot.isGuided, !shotMetadataIsOrdinaryGuidedWork(shot) else { return false }
         let issueStatus = trimmedNonEmpty(shot.issueStatus)?.lowercased()
-        if issueStatus == "resolved" {
+        if issueStatus == "resolved" ||
+            issueStatus == "pending_review" ||
+            issueStatus == "resolution_required" {
             return includeResolved && shot.issueID != nil
         }
         return shot.isFlagged || shot.issueID != nil || issueStatus == "active"
@@ -498,6 +503,16 @@ enum LocalConflictRules {
             event.kind == .reopened &&
                 event.afterValue == Observation.Status.active.issueStatusValue
         }
+        let incomingExplicitlyRejectsCompletion = incoming.historyEvents.contains { event in
+            event.kind == .reopened &&
+                event.beforeValue == Observation.Status.pendingReview.issueStatusValue &&
+                event.afterValue == Observation.Status.active.issueStatusValue
+        }
+        let currentExplicitlyRejectedPendingReview = current.historyEvents.contains { event in
+            event.kind == .reopened &&
+                event.beforeValue == Observation.Status.pendingReview.issueStatusValue &&
+                event.afterValue == Observation.Status.active.issueStatusValue
+        }
         let incomingWins = incoming.updatedAt > current.updatedAt
         var merged = incomingWins ? incoming : current
 
@@ -506,6 +521,25 @@ enum LocalConflictRules {
            incoming.status != .resolved,
            !incomingExplicitlyReopens {
             merged.status = .resolved
+            merged.resolvedInSessionID = current.resolvedInSessionID
+            merged.resolutionPhotoRef = current.resolutionPhotoRef
+            merged.resolutionStatement = current.resolutionStatement
+            merged.linkedShotID = current.linkedShotID
+            merged.shots = current.shots
+        } else if current.status == .active,
+                  incoming.status == .pendingReview,
+                  currentExplicitlyRejectedPendingReview {
+            merged.status = .active
+            merged.resolvedInSessionID = nil
+            merged.resolutionPhotoRef = nil
+            merged.resolutionStatement = nil
+            merged.linkedShotID = current.linkedShotID
+            merged.shots = current.shots
+        } else if current.status == .pendingReview,
+                  incoming.status == .active,
+                  !incomingExplicitlyReopens,
+                  !incomingExplicitlyRejectsCompletion {
+            merged.status = .pendingReview
             merged.resolvedInSessionID = current.resolvedInSessionID
             merged.resolutionPhotoRef = current.resolutionPhotoRef
             merged.resolutionStatement = current.resolutionStatement
@@ -543,24 +577,22 @@ enum LocalConflictRules {
     }
 
     private static func applyResolvedObservationPrecedence(_ observations: [Observation]) -> [Observation] {
-        let latestResolvedByKey = observations.reduce(into: [String: Observation]()) { partial, observation in
-            guard observation.status == .resolved,
-                  let key = observationLocationIdentityKey(observation) else {
+        let latestResolvedByIssueID = observations.reduce(into: [UUID: Observation]()) { partial, observation in
+            guard observation.status == .resolved else {
                 return
             }
-            guard let existing = partial[key],
+            guard let existing = partial[observation.id],
                   observation.updatedAt <= existing.updatedAt else {
-                partial[key] = observation
+                partial[observation.id] = observation
                 return
             }
         }
 
-        guard !latestResolvedByKey.isEmpty else { return observations }
+        guard !latestResolvedByIssueID.isEmpty else { return observations }
 
         return observations.map { observation in
             guard observation.status == .active,
-                  let key = observationLocationIdentityKey(observation),
-                  let resolved = latestResolvedByKey[key],
+                  let resolved = latestResolvedByIssueID[observation.id],
                   resolved.updatedAt >= observation.updatedAt else {
                 return observation
             }
@@ -573,18 +605,6 @@ enum LocalConflictRules {
             suppressed.resolutionStatement = resolved.resolutionStatement ?? observation.resolutionStatement
             return suppressed
         }
-    }
-
-    private static func observationLocationIdentityKey(_ observation: Observation) -> String? {
-        let normalizedBuilding = normalizedGuidedPart(observation.building)
-        let normalizedElevation = normalizedGuidedPart(CanonicalElevation.normalize(observation.targetElevation) ?? observation.targetElevation)
-        let normalizedDetail = normalizedGuidedPart(observation.detailType)
-        guard !normalizedBuilding.isEmpty,
-              !normalizedElevation.isEmpty,
-              !normalizedDetail.isEmpty else {
-            return nil
-        }
-        return [normalizedBuilding, normalizedElevation, normalizedDetail].joined(separator: "|")
     }
 
     static func normalizeObservationHistoryEventsAppendOnly(

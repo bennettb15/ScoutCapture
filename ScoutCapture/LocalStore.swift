@@ -2541,6 +2541,21 @@ final class LocalStore {
                 observations[index].status = status
                 switch status {
                 case .active:
+                    if before.status == .pendingReview {
+                        observations[index].resolutionPhotoRef = nil
+                        observations[index].resolutionStatement = nil
+                        observations[index].historyEvents.append(
+                            ObservationHistoryEvent(
+                                timestamp: overlay.updatedAt ?? Date(),
+                                sessionID: nil,
+                                kind: .reopened,
+                                beforeValue: Observation.Status.pendingReview.issueStatusValue,
+                                afterValue: Observation.Status.active.issueStatusValue,
+                                field: "status",
+                                shotID: overlay.shotID ?? before.linkedShotID
+                            )
+                        )
+                    }
                     observations[index].resolvedInSessionID = nil
                 case .resolutionRequired:
                     observations[index].resolvedInSessionID = nil
@@ -2610,7 +2625,7 @@ final class LocalStore {
         return updatedAt > observation.updatedAt
     }
 
-    private func preservedResolutionRequiredStatus(
+    private func preservedLocalWorkflowStatus(
         existing: Observation?,
         incoming: Observation.Status,
         representsResolvedDocumentation: Bool
@@ -2619,8 +2634,52 @@ final class LocalStore {
            incoming != .resolved {
             return .resolved
         }
+        if existing?.status == .pendingReview,
+           incoming == .active {
+            return .pendingReview
+        }
+        if shouldPreservePortalRejectedActive(existing: existing, incoming: incoming) {
+            return .active
+        }
         guard existing?.status == .resolutionRequired else { return incoming }
         return representsResolvedDocumentation ? .resolved : .resolutionRequired
+    }
+
+    private func shouldPreservePortalRejectedActive(
+        existing: Observation?,
+        incoming: Observation.Status
+    ) -> Bool {
+        existing?.status == .active &&
+            incoming == .pendingReview &&
+            observationHasPortalRejectedPendingReviewReopen(existing)
+    }
+
+    private func observationHasPortalRejectedPendingReviewReopen(_ observation: Observation?) -> Bool {
+        guard let observation else { return false }
+        return observation.historyEvents.contains { event in
+            event.kind == .reopened &&
+                event.beforeValue == Observation.Status.pendingReview.issueStatusValue &&
+                event.afterValue == Observation.Status.active.issueStatusValue
+        }
+    }
+
+    private func mergedObservationShots(
+        existing: [Shot],
+        incoming: [Shot]
+    ) -> [Shot] {
+        var byID: [UUID: Shot] = [:]
+        for shot in existing {
+            byID[shot.id] = shot
+        }
+        for shot in incoming {
+            byID[shot.id] = shot
+        }
+        return byID.values.sorted {
+            if $0.capturedAt != $1.capturedAt {
+                return $0.capturedAt < $1.capturedAt
+            }
+            return $0.id.uuidString < $1.id.uuidString
+        }
     }
 
     private func isTerminalResolvedSupportingDocumentation(_ observation: Observation?) -> Bool {
@@ -2956,7 +3015,9 @@ final class LocalStore {
             return false
         }
         let issueStatus = trimmedNonEmpty(shot.issueStatus)?.lowercased()
-        if issueStatus == "resolved" {
+        if issueStatus == "resolved" ||
+            issueStatus == "pending_review" ||
+            issueStatus == "resolution_required" {
             return false
         }
         return shot.isFlagged || shot.issueID != nil || issueStatus == "active"
@@ -4644,7 +4705,9 @@ final class LocalStore {
             let captureKind = trimmedNonEmpty(shot.captureKind)?.lowercased()
             return shot.isFlagged ||
                 issueStatus == "resolved" ||
+                issueStatus == "pending_review" ||
                 shotStatus == "resolved" ||
+                shotStatus == "pending_review" ||
                 captureKind == "resolved_capture"
         }) { shot in
             shot.issueID!
@@ -4682,18 +4745,27 @@ final class LocalStore {
                     )
                 }
 
-            let linkedShot = currentMetaShot?.shotID ?? shots.last?.id
-            let latestMetaShot = currentMetaShot
             let snapshotStatus = Observation.Status.status(from: issue.issueStatus)
+            let existing = existingObservationsByID[issue.issueID]
+            let preservePortalRejectedActive = shouldPreservePortalRejectedActive(
+                existing: existing,
+                incoming: snapshotStatus
+            )
+            let linkedShot = preservePortalRejectedActive
+                ? existing?.linkedShotID
+                : currentMetaShot?.shotID ?? shots.last?.id
+            let latestMetaShot = currentMetaShot
             let createdAt = issue.firstSeenAt ?? issue.lastSeenAt ?? metadata.startedAt
             let updatedAt = issue.lastSeenAt ?? issue.resolvedAt ?? createdAt
+            let observationUpdatedAt = preservePortalRejectedActive
+                ? max(existing?.updatedAt ?? updatedAt, updatedAt)
+                : updatedAt
             let effectiveSessionID = issue.lastCaptureSessionId ?? fallbackSessionID
-            let existing = existingObservationsByID[issue.issueID]
             if isTerminalResolvedSupportingDocumentation(existing),
                snapshotStatus != .resolved {
                 return existing!
             }
-            let status = preservedResolutionRequiredStatus(
+            let status = preservedLocalWorkflowStatus(
                 existing: existing,
                 incoming: snapshotStatus,
                 representsResolvedDocumentation: snapshotStatus == .resolved &&
@@ -4705,14 +4777,14 @@ final class LocalStore {
                 propertyID: propertyID,
                 sessionID: effectiveSessionID,
                 createdAt: createdAt,
-                updatedAt: updatedAt,
+                updatedAt: observationUpdatedAt,
                 statement: trimmedNonEmpty(issue.detailNote) ?? "",
                 status: status,
                 linkedShotID: linkedShot,
                 resolutionPhotoRef: nil,
                 resolutionStatement: nil,
                 updatedInSessionID: effectiveSessionID,
-                resolvedInSessionID: status == .resolved ? effectiveSessionID : nil,
+                resolvedInSessionID: status == .resolved || status == .pendingReview ? effectiveSessionID : nil,
                 building: latestMetaShot?.building,
                 targetElevation: latestMetaShot?.elevation,
                 detailType: latestMetaShot?.detailType,
@@ -4720,10 +4792,12 @@ final class LocalStore {
                 trade: latestMetaShot?.trade,
                 currentReason: trimmedNonEmpty(issue.currentReason) ?? trimmedNonEmpty(issue.detailNote),
                 previousReason: trimmedNonEmpty(issue.previousReason),
-                historyEvents: [],
+                historyEvents: preservePortalRejectedActive ? (existing?.historyEvents ?? []) : [],
                 updateHistory: [],
                 note: trimmedNonEmpty(issue.detailNote),
-                shots: shots,
+                shots: preservePortalRejectedActive
+                    ? mergedObservationShots(existing: existing?.shots ?? [], incoming: shots)
+                    : shots,
                 guidedShots: []
             )
         }
@@ -4782,7 +4856,9 @@ final class LocalStore {
                 let captureKind = trimmedNonEmpty(shot.captureKind)?.lowercased()
                 return shot.isFlagged ||
                     issueStatus == "resolved" ||
+                    issueStatus == "pending_review" ||
                     shotStatus == "resolved" ||
+                    shotStatus == "pending_review" ||
                     captureKind == "resolved_capture"
             }) { shot in
                 shot.issueID!
@@ -4824,14 +4900,19 @@ final class LocalStore {
                         note: shot.noteText
                     )
                 }
-            let metadataStatus = Observation.Status.status(from: issue?.issueStatus)
-            if isTerminalResolvedSupportingDocumentation(observationsByID[issueID]),
-               metadataStatus != .resolved {
-                continue
-            }
-            var next = observationsByID[issueID] ?? Observation(
-                id: issueID,
-                propertyID: propertyID,
+                let metadataStatus = Observation.Status.status(from: issue?.issueStatus)
+                let existing = observationsByID[issueID]
+                let preservePortalRejectedActive = shouldPreservePortalRejectedActive(
+                    existing: existing,
+                    incoming: metadataStatus
+                )
+                if isTerminalResolvedSupportingDocumentation(existing),
+                   metadataStatus != .resolved {
+                    continue
+                }
+                var next = existing ?? Observation(
+                    id: issueID,
+                    propertyID: propertyID,
                     sessionID: sessionID,
                     createdAt: createdAt,
                     updatedAt: updatedAt,
@@ -4840,7 +4921,7 @@ final class LocalStore {
                 )
                 let resolvedByThisSnapshot = metadataStatus == .resolved &&
                     (issue?.lastCaptureSessionId == sessionID || issue?.resolvedAt != nil)
-                let status = preservedResolutionRequiredStatus(
+                let status = preservedLocalWorkflowStatus(
                     existing: observationsByID[issueID],
                     incoming: metadataStatus,
                     representsResolvedDocumentation: resolvedByThisSnapshot
@@ -4853,9 +4934,13 @@ final class LocalStore {
                 }
                 next.updatedAt = max(next.updatedAt, updatedAt)
                 next.status = status
-                next.linkedShotID = shots.last?.id ?? next.linkedShotID
+                if !preservePortalRejectedActive {
+                    next.linkedShotID = shots.last?.id ?? next.linkedShotID
+                }
                 next.updatedInSessionID = issue?.lastCaptureSessionId ?? sessionID
-                next.resolvedInSessionID = status == .resolved ? (issue?.lastCaptureSessionId ?? sessionID) : nil
+                next.resolvedInSessionID = status == .resolved || status == .pendingReview
+                    ? (issue?.lastCaptureSessionId ?? sessionID)
+                    : nil
                 next.building = latestShot?.building ?? next.building
                 next.targetElevation = latestShot?.elevation ?? next.targetElevation
                 next.detailType = latestShot?.detailType ?? next.detailType
@@ -4877,7 +4962,9 @@ final class LocalStore {
                 next.previousReason = trimmedNonEmpty(issue?.previousReason)
                 next.note = trimmedNonEmpty(issue?.detailNote)
                 if !shots.isEmpty {
-                    next.shots = shots
+                    next.shots = preservePortalRejectedActive
+                        ? mergedObservationShots(existing: next.shots, incoming: shots)
+                        : shots
                 }
                 observationsByID[issueID] = next
                 didMutate = true
@@ -4920,7 +5007,7 @@ final class LocalStore {
         sessionMetadata: [UUID: SessionMetadata]
     ) -> [String: Set<UUID>] {
         var index: [String: Set<UUID>] = [:]
-        for observation in observations where observation.status == .active {
+        for observation in observations where observation.status == .active || observation.status == .pendingReview {
             let shotIDs = Set(([observation.linkedShotID].compactMap { $0 }) + observation.shots.map(\.id))
             var keys = Set<String>()
             for metadata in sessionMetadata.values {
@@ -6503,6 +6590,17 @@ final class LocalStore {
                 angleIndex: shot.angleIndex
             )
             : shot.shotKey
+        let normalizedIssueStatus = trimmedNonEmpty(shot.issueStatus)?.lowercased()
+        let normalizedCaptureKind = trimmedNonEmpty(shot.captureKind)
+        let resolvedCaptureKind = normalizedCaptureKind ?? {
+            switch normalizedIssueStatus {
+            case Observation.Status.resolved.issueStatusValue,
+                 Observation.Status.pendingReview.issueStatusValue:
+                return "resolved_capture"
+            default:
+                return nil
+            }
+        }()
         let normalizedStampedFilename = shot.stampedFilename.map { URL(fileURLWithPath: $0).lastPathComponent }
         let normalizedStampedPath: String?
         if let stamped = shot.stampedRelativePath?.trimmingCharacters(in: .whitespacesAndNewlines), !stamped.isEmpty {
@@ -6530,10 +6628,10 @@ final class LocalStore {
             isFlagged: shot.isFlagged,
             issueID: shot.issueID,
             issueStatus: shot.issueStatus,
-            captureKind: shot.captureKind,
+            captureKind: resolvedCaptureKind,
             firstCaptureKind: normalizedFirstCaptureKind(
                 shot.firstCaptureKind,
-                captureKind: shot.captureKind,
+                captureKind: resolvedCaptureKind,
                 isFlagged: shot.isFlagged
             ),
             noteText: shot.noteText,

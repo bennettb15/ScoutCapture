@@ -14732,7 +14732,7 @@ extension ContentView {
             }
 
             var updated = existing
-            updated.status = .resolved
+            updated.status = .pendingReview
             if updated.priority?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true {
                 updated.priority = Self.flaggedPriorityOrDefault(selectedPriority)
             }
@@ -14757,7 +14757,7 @@ extension ContentView {
                     sessionID: appState.currentSession?.id,
                     kind: .pendingReview,
                     beforeValue: "active",
-                    afterValue: "resolved",
+                    afterValue: Observation.Status.pendingReview.issueStatusValue,
                     field: "status",
                     shotID: shot.id
                 ),
@@ -14785,7 +14785,7 @@ extension ContentView {
                     // Keep the capture decision flow resilient; the observation itself has already been saved.
                 }
             }
-            showFlaggedActionToastNow("Issue resolved")
+            showFlaggedActionToastNow("Issue submitted for review")
             finalizeArmedIssueCaptureAfterDecision()
             refreshActiveIssues()
         } catch {
@@ -14970,7 +14970,7 @@ extension ContentView {
             guard let existing = observations.first(where: { $0.id == observation.id }) else { return }
 
             var updated = existing
-            updated.status = .resolved
+            updated.status = .pendingReview
             updated.updatedInSessionID = appState.currentSession?.id
             updated.resolvedInSessionID = appState.currentSession?.id
             if updated.resolutionStatement?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true {
@@ -14980,9 +14980,9 @@ extension ContentView {
                 ObservationHistoryEvent(
                     timestamp: Date(),
                     sessionID: appState.currentSession?.id,
-                    kind: .resolved,
+                    kind: .pendingReview,
                     beforeValue: "active",
-                    afterValue: "resolved",
+                    afterValue: Observation.Status.pendingReview.issueStatusValue,
                     field: "status",
                     shotID: updated.linkedShotID
                 ),
@@ -15005,13 +15005,13 @@ extension ContentView {
                         propertyID: propertyID,
                         sessionID: sessionID,
                         shotID: shotID,
-                        reason: "flagged_issue_resolved"
+                        reason: "flagged_issue_pending_review"
                     )
                 } catch {
                     // Keep checklist resolution resilient; the observation itself has already been saved.
                 }
             }
-            showFlaggedActionToastNow("Issue resolved")
+            showFlaggedActionToastNow("Issue submitted for review")
             refreshActiveIssues()
         } catch {
             // Keep UI responsive if persistence fails.

@@ -853,10 +853,11 @@ final class Phase2C11LocalConflictRulesTests: XCTestCase {
         XCTAssertEqual(reconciled.updateHistory.count, 1)
     }
 
-    func testObservationNormalizerSuppressesOlderActiveDuplicateWhenNewerResolvedMatchesLocation() throws {
+    func testObservationNormalizerSuppressesOlderActiveDuplicateWhenNewerResolvedMatchesSameIssue() throws {
         let resolvedSessionID = UUID()
+        let issueID = UUID()
         let staleActive = Observation(
-            id: UUID(),
+            id: issueID,
             propertyID: UUID(),
             sessionID: UUID(),
             createdAt: Date(timeIntervalSinceReferenceDate: 100),
@@ -872,7 +873,7 @@ final class Phase2C11LocalConflictRulesTests: XCTestCase {
             note: "Stale active issue"
         )
         let resolved = Observation(
-            id: UUID(),
+            id: issueID,
             propertyID: staleActive.propertyID,
             sessionID: resolvedSessionID,
             createdAt: Date(timeIntervalSinceReferenceDate: 90),
@@ -2693,5 +2694,26 @@ final class Phase2C11LocalConflictRulesTests: XCTestCase {
         XCTAssertEqual(reloadedObservation.currentReason, "Resolved reason")
         XCTAssertEqual(reloadedObservation.priority, "Low")
         XCTAssertEqual(reloadedObservation.updatedAt, Date(timeIntervalSinceReferenceDate: 200))
+    }
+
+    func testPendingReviewMetadataShotIsNotActiveFlaggedGuidedIssue() {
+        let issueID = UUID()
+        let shot = makeShot(
+            updatedAt: Date(timeIntervalSinceReferenceDate: 120),
+            originalRelativePath: "Originals/pending-review.jpg",
+            isGuided: true,
+            isFlagged: true,
+            issueID: issueID,
+            issueStatus: Observation.Status.pendingReview.issueStatusValue,
+            captureKind: "resolved_capture"
+        )
+
+        XCTAssertFalse(LocalConflictRules.metadataShotRepresentsFlaggedGuidedIssue(shot))
+        XCTAssertTrue(
+            LocalConflictRules.metadataShotRepresentsFlaggedGuidedIssue(
+                shot,
+                includeResolved: true
+            )
+        )
     }
 }
