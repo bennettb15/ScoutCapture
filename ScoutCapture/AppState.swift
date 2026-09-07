@@ -292,7 +292,8 @@ struct BackendFeatureFlags {
         allowSessionSnapshotEnvironmentOverride: Bool = false,
         allowSessionSnapshotKillSwitchEnvironmentOverride: Bool = false
     ) -> BackendFeatureFlags {
-        BackendFeatureFlags(
+        let preferSessionSnapshotBundleConfiguration = Self.preferSessionSnapshotBundleConfiguration(bundle: bundle)
+        return BackendFeatureFlags(
             supabaseEnabled: Self.boolValue(for: "supabase_enabled", bundle: bundle, userDefaults: userDefaults),
             shadowWriteEnabled: Self.boolValue(for: "shadow_write_enabled", bundle: bundle, userDefaults: userDefaults),
             supabaseReadEnabled: Self.boolValue(for: "supabase_read_enabled", bundle: bundle, userDefaults: userDefaults),
@@ -304,39 +305,45 @@ struct BackendFeatureFlags {
                 bundle: bundle,
                 userDefaults: userDefaults,
                 environment: environment,
-                allowEnvironmentOverride: allowSessionSnapshotEnvironmentOverride
+                allowEnvironmentOverride: allowSessionSnapshotEnvironmentOverride,
+                preferBundleConfiguration: preferSessionSnapshotBundleConfiguration
             ),
             sessionSnapshotAutoUploadEnabled: Self.sessionSnapshotAutoUploadValue(
                 bundle: bundle,
                 userDefaults: userDefaults,
-                environment: environment
+                environment: environment,
+                preferBundleConfiguration: preferSessionSnapshotBundleConfiguration
             ),
             sessionSnapshotProductionAutoUploadTargetEnabled: Self.boolValue(
                 for: "session_snapshot_production_auto_upload_target_enabled",
                 environmentKey: "SCOUTCAPTURE_SESSION_SNAPSHOT_PRODUCTION_AUTO_UPLOAD_TARGET_ENABLED",
                 bundle: bundle,
                 userDefaults: userDefaults,
-                environment: environment
+                environment: environment,
+                preferBundleValueOverUserDefaults: preferSessionSnapshotBundleConfiguration
             ),
             sessionSnapshotAutoUploadKillSwitch: Self.sessionSnapshotAutoUploadKillSwitchValue(
                 bundle: bundle,
                 userDefaults: userDefaults,
                 environment: environment,
-                allowEnvironmentOverride: allowSessionSnapshotKillSwitchEnvironmentOverride
+                allowEnvironmentOverride: allowSessionSnapshotKillSwitchEnvironmentOverride,
+                preferBundleConfiguration: preferSessionSnapshotBundleConfiguration
             ),
             sessionSnapshotAutoUploadOrgAllowlist: Self.uuidAllowlistValue(
                 for: "session_snapshot_auto_upload_org_allowlist",
                 environmentKey: "SCOUTCAPTURE_SESSION_SNAPSHOT_AUTO_UPLOAD_ORG_ALLOWLIST",
                 bundle: bundle,
                 userDefaults: userDefaults,
-                environment: environment
+                environment: environment,
+                preferBundleValueOverUserDefaults: preferSessionSnapshotBundleConfiguration
             ),
             sessionSnapshotAutoUploadPropertyAllowlist: Self.uuidAllowlistValue(
                 for: "session_snapshot_auto_upload_property_allowlist",
                 environmentKey: "SCOUTCAPTURE_SESSION_SNAPSHOT_AUTO_UPLOAD_PROPERTY_ALLOWLIST",
                 bundle: bundle,
                 userDefaults: userDefaults,
-                environment: environment
+                environment: environment,
+                preferBundleValueOverUserDefaults: preferSessionSnapshotBundleConfiguration
             )
         )
     }
@@ -349,12 +356,14 @@ struct BackendFeatureFlags {
         bundle: Bundle,
         userDefaults: UserDefaults,
         environment: [String: String],
-        allowEnvironmentOverride: Bool
+        allowEnvironmentOverride: Bool,
+        preferBundleConfiguration: Bool
     ) -> Bool {
         let configuredValue = Self.boolValue(
             for: "session_snapshot_shadow_write_enabled",
             bundle: bundle,
-            userDefaults: userDefaults
+            userDefaults: userDefaults,
+            preferBundleValueOverUserDefaults: preferBundleConfiguration
         )
 
         #if DEBUG
@@ -381,12 +390,14 @@ struct BackendFeatureFlags {
     private static func sessionSnapshotAutoUploadValue(
         bundle: Bundle,
         userDefaults: UserDefaults,
-        environment: [String: String]
+        environment: [String: String],
+        preferBundleConfiguration: Bool
     ) -> Bool {
         let configuredValue = Self.boolValue(
             for: "session_snapshot_auto_upload_enabled",
             bundle: bundle,
-            userDefaults: userDefaults
+            userDefaults: userDefaults,
+            preferBundleValueOverUserDefaults: preferBundleConfiguration
         )
 
         guard let rawOverride = environment["SCOUTCAPTURE_SESSION_SNAPSHOT_AUTO_UPLOAD_ENABLED"] else {
@@ -407,12 +418,14 @@ struct BackendFeatureFlags {
         bundle: Bundle,
         userDefaults: UserDefaults,
         environment: [String: String],
-        allowEnvironmentOverride: Bool
+        allowEnvironmentOverride: Bool,
+        preferBundleConfiguration: Bool
     ) -> Bool {
         let configuredValue = Self.boolValue(
             for: "session_snapshot_auto_upload_kill_switch",
             bundle: bundle,
-            userDefaults: userDefaults
+            userDefaults: userDefaults,
+            preferBundleValueOverUserDefaults: preferBundleConfiguration
         )
 
         guard allowEnvironmentOverride else { return configuredValue }
@@ -452,10 +465,15 @@ struct BackendFeatureFlags {
         environmentKey: String,
         bundle: Bundle,
         userDefaults: UserDefaults,
-        environment: [String: String]
+        environment: [String: String],
+        preferBundleValueOverUserDefaults: Bool = false
     ) -> Set<UUID> {
         if let rawValue = environment[environmentKey] {
             return Self.uuidSet(from: rawValue)
+        }
+        if preferBundleValueOverUserDefaults,
+           let bundleValue = Self.uuidAllowlistBundleValue(for: key, bundle: bundle) {
+            return bundleValue
         }
         if let rawValue = userDefaults.string(forKey: key) {
             return Self.uuidSet(from: rawValue)
@@ -463,13 +481,17 @@ struct BackendFeatureFlags {
         if let rawValues = userDefaults.array(forKey: key) as? [String] {
             return Set(rawValues.compactMap { UUID(uuidString: $0.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)) })
         }
+        return Self.uuidAllowlistBundleValue(for: key, bundle: bundle) ?? []
+    }
+
+    private static func uuidAllowlistBundleValue(for key: String, bundle: Bundle) -> Set<UUID>? {
         if let rawValue = bundle.object(forInfoDictionaryKey: key) as? String {
             return Self.uuidSet(from: rawValue)
         }
         if let rawValues = bundle.object(forInfoDictionaryKey: key) as? [String] {
             return Set(rawValues.compactMap { UUID(uuidString: $0.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)) })
         }
-        return []
+        return nil
     }
 
     private static func uuidSet(from rawValue: String) -> Set<UUID> {
@@ -487,7 +509,8 @@ struct BackendFeatureFlags {
         environmentKey: String,
         bundle: Bundle,
         userDefaults: UserDefaults,
-        environment: [String: String]
+        environment: [String: String],
+        preferBundleValueOverUserDefaults: Bool = false
     ) -> Bool {
         if let rawValue = environment[environmentKey]?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
             switch rawValue {
@@ -499,18 +522,33 @@ struct BackendFeatureFlags {
                 break
             }
         }
-        return Self.boolValue(for: key, bundle: bundle, userDefaults: userDefaults)
+        return Self.boolValue(
+            for: key,
+            bundle: bundle,
+            userDefaults: userDefaults,
+            preferBundleValueOverUserDefaults: preferBundleValueOverUserDefaults
+        )
     }
 
     private static func boolValue(
         for key: String,
         bundle: Bundle,
-        userDefaults: UserDefaults
+        userDefaults: UserDefaults,
+        preferBundleValueOverUserDefaults: Bool = false
     ) -> Bool {
+        if preferBundleValueOverUserDefaults,
+           let bundleValue = Self.boolBundleValue(for: key, bundle: bundle) {
+            return bundleValue
+        }
+
         if userDefaults.object(forKey: key) != nil {
             return userDefaults.bool(forKey: key)
         }
 
+        return Self.boolBundleValue(for: key, bundle: bundle) ?? false
+    }
+
+    private static func boolBundleValue(for key: String, bundle: Bundle) -> Bool? {
         if let number = bundle.object(forInfoDictionaryKey: key) as? NSNumber {
             return number.boolValue
         }
@@ -524,7 +562,14 @@ struct BackendFeatureFlags {
             }
         }
 
-        return false
+        return nil
+    }
+
+    private static func preferSessionSnapshotBundleConfiguration(bundle: Bundle) -> Bool {
+        boolBundleValue(
+            for: "session_snapshot_production_auto_upload_target_enabled",
+            bundle: bundle
+        ) == true
     }
 }
 

@@ -2317,6 +2317,45 @@ final class Phase2C25AAutomaticSnapshotUploadTests: XCTestCase {
         XCTAssertFalse(appState.backendFeatureFlags.supabaseReadEnabled)
     }
 
+    func testProductionReleaseConfigIgnoresStaleLocalSnapshotDefaults() async throws {
+        var insertCount = 0
+        let fixture = try makeFixture(autoUploadEnabled: false)
+        let staleDefaults = makeDefaults(
+            shadowWriteEnabled: false,
+            autoUploadEnabled: false,
+            productionAutoUploadTargetEnabled: false,
+            orgAllowlist: [UUID()],
+            propertyAllowlist: [UUID()]
+        )
+        staleDefaults.set(true, forKey: "session_snapshot_auto_upload_kill_switch")
+        let appState = AppState(
+            localStore: fixture.store,
+            userDefaults: staleDefaults,
+            environment: [:],
+            bundle: productionReleaseConfigBundle(),
+            sessionSnapshotStorageUploadOverride: { _ in },
+            sessionSnapshotRowInsertOverride: { _ in insertCount += 1 },
+            disableCloudBackupForTests: true
+        )
+        configureAuthenticatedContext(appState, orgID: fixture.orgID)
+
+        let result = await appState.attemptAutomaticSessionSnapshotUploadForCompletedSealedCheckpoint(
+            session: fixture.session,
+            triggerSource: "sealCurrentSessionForExportLater"
+        )
+
+        XCTAssertEqual(result?.outcome, .succeeded)
+        XCTAssertEqual(insertCount, 1)
+        XCTAssertTrue(appState.backendFeatureFlags.sessionSnapshotAutoUploadEnabled)
+        XCTAssertTrue(appState.backendFeatureFlags.sessionSnapshotProductionAutoUploadTargetEnabled)
+        XCTAssertTrue(appState.backendFeatureFlags.sessionSnapshotShadowWriteEnabled)
+        XCTAssertFalse(appState.backendFeatureFlags.sessionSnapshotAutoUploadKillSwitch)
+        XCTAssertTrue(appState.backendFeatureFlags.sessionSnapshotAutoUploadOrgAllowlist.isEmpty)
+        XCTAssertTrue(appState.backendFeatureFlags.sessionSnapshotAutoUploadPropertyAllowlist.isEmpty)
+        XCTAssertEqual(appState.localDiagnostics.sessionSnapshotUpload.lastAutoUploadOutcome, "succeeded")
+        XCTAssertEqual(appState.sessionSnapshotCloudStatus(for: fixture.session)?.state, .uploaded)
+    }
+
     func testNonProductionEmptyAllowlistStillBlocksAutoUpload() async throws {
         var attemptedStorageUpload = false
         let fixture = try makeFixture(autoUploadEnabled: false)
