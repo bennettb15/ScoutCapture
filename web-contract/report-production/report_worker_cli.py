@@ -544,7 +544,10 @@ def report_ready_idempotency_key(package_id: str, recipient_user_id: str) -> str
 
 
 def reports_portal_link(base_url: str, package: dict[str, Any]) -> str:
-    base = base_url.strip()
+    base = base_url.strip().rstrip("/")
+    parsed = urllib.parse.urlparse(base)
+    if parsed.path.rstrip("/") != "/reports":
+        base = f"{base}/reports"
     query = urllib.parse.urlencode(
         {
             "orgId": str(package.get("org_id") or ""),

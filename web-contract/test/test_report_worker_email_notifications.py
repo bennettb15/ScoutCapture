@@ -308,6 +308,24 @@ class ReportWorkerEmailNotificationTests(unittest.TestCase):
         self.assertEqual("message-1", notification["provider_message_id"])
         self.assertEqual(1, len(sender.sent))
 
+    def test_reports_portal_link_uses_reports_path(self) -> None:
+        self.assertEqual(
+            "https://scoutclear.com/reports?"
+            "orgId=00000000-0000-0000-0000-000000000001&"
+            "propertyId=10000000-0000-0000-0000-000000000001&"
+            "sessionId=20000000-0000-0000-0000-000000000001&"
+            "packageId=40000000-0000-0000-0000-000000000001",
+            worker.reports_portal_link("https://scoutclear.com", package()),
+        )
+        self.assertEqual(
+            "https://scoutclear.com/reports?"
+            "orgId=00000000-0000-0000-0000-000000000001&"
+            "propertyId=10000000-0000-0000-0000-000000000001&"
+            "sessionId=20000000-0000-0000-0000-000000000001&"
+            "packageId=40000000-0000-0000-0000-000000000001",
+            worker.reports_portal_link("https://scoutclear.com/reports", package()),
+        )
+
     def test_resend_request_sets_worker_user_agent_and_idempotency_key(self) -> None:
         captured: dict[str, Any] = {}
 
@@ -354,6 +372,8 @@ class ReportWorkerEmailNotificationTests(unittest.TestCase):
         self.assertEqual(worker.REPORT_READY_RESEND_USER_AGENT, captured["headers"]["User-agent"])
         self.assertEqual("report-package-ready-idempotency-key", captured["headers"]["Idempotency-key"])
         self.assertEqual(["recipient@example.test"], captured["payload"]["to"])
+        self.assertIn("https://reports.example.test/reports?", captured["payload"]["text"])
+        self.assertIn('href="https://reports.example.test/reports?', captured["payload"]["html"])
 
 
 if __name__ == "__main__":
