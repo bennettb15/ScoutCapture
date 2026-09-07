@@ -33,6 +33,9 @@ MEDIA_PREPARER_VERSION = "phase2a-shadow-media-prep-2-local-date"
 STAMPED_ZIP_EXPORT_VERSION = "stamped-zip-export-2-friendly-filename"
 ORIGINAL_JPG_PREVIEW_VERSION = "original-jpg-preview-1"
 REPORT_CONTRACT_VERSION = "phase1-report-input-1"
+REPORT_READY_NOTIFICATION_TYPE = "report_package_ready"
+REPORT_READY_NOTIFICATION_ROLES = ("owner", "manager", "field", "viewer")
+REPORT_READY_NOTIFICATION_TABLE = "report_package_email_notifications"
 PACKAGED_LOGO_SVG = pathlib.Path("web-contract/report-production/assets/ScoutOnlyLogo.svg")
 DISABLED_LOGO_PDF = pathlib.Path("web-contract/report-production/assets/ScoutLogoBlue.pdf")
 REPORT_TYPE_MAP = {
@@ -418,6 +421,23 @@ class SupabaseServiceClient:
             raise WorkerError(f"Insert into {table} returned no row.")
         return rows[0]
 
+    def insert_ignore(self, table: str, rows: list[dict[str, Any]], on_conflict: str) -> list[dict[str, Any]]:
+        if not rows:
+            return []
+        encoded = urllib.parse.urlencode({"on_conflict": on_conflict}, safe=",")
+        data = json.dumps(rows, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        value = self.request(
+            "POST",
+            f"{self.url}/rest/v1/{table}?{encoded}",
+            body=data,
+            headers={
+                "Accept": "application/json",
+                "Content-Type": "application/json",
+                "Prefer": "resolution=ignore-duplicates,return=representation",
+            },
+        )
+        return json.loads(value.decode("utf-8"))
+
     def patch(self, table: str, query: dict[str, str], row: dict[str, Any]) -> list[dict[str, Any]]:
         encoded = urllib.parse.urlencode(query, safe="(),.*")
         data = json.dumps(row, sort_keys=True, separators=(",", ":")).encode("utf-8")
@@ -491,6 +511,426 @@ def report_date(validation: dict[str, Any]) -> str:
         except ValueError:
             pass
     return dt.datetime.now().strftime("%m/%d/%Y")
+
+
+def format_session_datetime(value: Any) -> str | None:
+    if not value:
+        return None
+    try:
+        parsed = dt.datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return str(value)
+    return parsed.astimezone(dt.timezone.utc).strftime("%b %d, %Y at %H:%M UTC")
+
+
+def normalize_email(value: Any) -> str:
+    return str(value or "").strip().lower()
+
+
+def html_escape(value: Any) -> str:
+    text = str(value or "")
+    return (
+        text.replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace('"', "&quot;")
+        .replace("'", "&#x27;")
+    )
+
+
+def report_ready_idempotency_key(package_id: str, recipient_user_id: str) -> str:
+    return f"{REPORT_READY_NOTIFICATION_TYPE}:{str(package_id).lower()}:{str(recipient_user_id).lower()}"
+
+
+def reports_portal_link(base_url: str, package: dict[str, Any]) -> str:
+    base = base_url.strip()
+    query = urllib.parse.urlencode(
+        {
+            "orgId": str(package.get("org_id") or ""),
+            "propertyId": str(package.get("property_id") or ""),
+            "sessionId": str(package.get("session_id") or ""),
+            "packageId": str(package.get("id") or ""),
+        }
+    )
+    separator = "&" if "?" in base else "?"
+    return f"{base}{separator}{query}"
+
+
+def property_address_from_row(row: dict[str, Any]) -> str:
+    parts = [
+        row.get("address_line1"),
+        row.get("address_line2"),
+        row.get("city"),
+        row.get("state"),
+        row.get("postal_code"),
+    ]
+    return ", ".join(str(part).strip() for part in parts if str(part or "").strip())
+
+
+def report_ready_email_context(
+    client: SupabaseServiceClient,
+    package: dict[str, Any],
+    validation: dict[str, Any],
+) -> dict[str, str | None]:
+    session = (validation.get("inputs") or {}).get("session") or {}
+    property_name = str(session.get("property_name") or "").strip()
+    property_address = str(session.get("property_address") or "").strip()
+    session_datetime = format_session_datetime(
+        session.get("ended_at_utc")
+        or session.get("started_at_utc")
+        or package.get("session_completed_at")
+        or package.get("completed_at")
+    )
+
+    if not property_name or not property_address:
+        rows = client.select(
+            "properties",
+            {
+                "select": "id,name,address_line1,address_line2,city,state,postal_code",
+                "id": f"eq.{package['property_id']}",
+                "org_id": f"eq.{package['org_id']}",
+                "deleted_at": "is.null",
+                "limit": "1",
+            },
+        )
+        if rows:
+            property_name = property_name or str(rows[0].get("name") or "").strip()
+            property_address = property_address or property_address_from_row(rows[0])
+
+    return {
+        "property_name": property_name or "Scout report",
+        "property_address": property_address or None,
+        "session_datetime": session_datetime,
+    }
+
+
+def eligible_report_ready_recipients(
+    client: SupabaseServiceClient,
+    package: dict[str, Any],
+) -> list[dict[str, Any]]:
+    org_id = str(package["org_id"])
+    property_id = str(package["property_id"])
+    memberships = client.select(
+        "org_memberships",
+        {
+            "select": "user_id,role,access_scope",
+            "org_id": f"eq.{org_id}",
+            "role": f"in.({','.join(REPORT_READY_NOTIFICATION_ROLES)})",
+            "deleted_at": "is.null",
+        },
+    )
+    if not memberships:
+        return []
+
+    user_ids = sorted({str(row.get("user_id") or "") for row in memberships if row.get("user_id")})
+    if not user_ids:
+        return []
+
+    profiles = client.select(
+        "users_profile",
+        {
+            "select": "id,email,full_name",
+            "id": f"in.({','.join(user_ids)})",
+            "deleted_at": "is.null",
+        },
+    )
+    profiles_by_id = {str(row.get("id")): row for row in profiles}
+
+    property_scoped_user_ids = sorted(
+        {
+            str(row.get("user_id"))
+            for row in memberships
+            if str(row.get("role") or "") != "owner"
+            and str(row.get("access_scope") or "org") == "property"
+            and row.get("user_id")
+        }
+    )
+    property_grants: set[str] = set()
+    if property_scoped_user_ids:
+        grants = client.select(
+            "property_access_grants",
+            {
+                "select": "user_id",
+                "org_id": f"eq.{org_id}",
+                "property_id": f"eq.{property_id}",
+                "user_id": f"in.({','.join(property_scoped_user_ids)})",
+                "deleted_at": "is.null",
+            },
+        )
+        property_grants = {str(row.get("user_id")) for row in grants if row.get("user_id")}
+
+    recipients = []
+    seen_emails: set[str] = set()
+    for membership in memberships:
+        user_id = str(membership.get("user_id") or "")
+        role = str(membership.get("role") or "")
+        access_scope = str(membership.get("access_scope") or "org")
+        if role != "owner" and access_scope == "property" and user_id not in property_grants:
+            continue
+        profile = profiles_by_id.get(user_id)
+        if not profile:
+            continue
+        email = normalize_email(profile.get("email"))
+        if not email or email in seen_emails:
+            continue
+        seen_emails.add(email)
+        recipients.append(
+            {
+                "user_id": user_id,
+                "email": email,
+                "full_name": profile.get("full_name"),
+                "role": role,
+                "access_scope": access_scope,
+            }
+        )
+    return recipients
+
+
+class ResendEmailClient:
+    def __init__(self, api_key: str, from_email: str, portal_base_url: str, reply_to: str | None = None) -> None:
+        self.api_key = api_key
+        self.from_email = from_email
+        self.portal_base_url = portal_base_url
+        self.reply_to = reply_to
+
+    @classmethod
+    def from_env(cls) -> "ResendEmailClient":
+        api_key = os.environ.get("RESEND_API_KEY", "").strip()
+        from_email = os.environ.get("REPORT_EMAIL_FROM", "").strip()
+        portal_base_url = os.environ.get("REPORTS_PORTAL_BASE_URL", "").strip()
+        missing = [
+            name
+            for name, value in [
+                ("RESEND_API_KEY", api_key),
+                ("REPORT_EMAIL_FROM", from_email),
+                ("REPORTS_PORTAL_BASE_URL", portal_base_url),
+            ]
+            if not value
+        ]
+        if missing:
+            raise WorkerError(f"Report email configuration missing: {', '.join(missing)}.")
+        return cls(api_key, from_email, portal_base_url, os.environ.get("REPORT_EMAIL_REPLY_TO", "").strip() or None)
+
+    def send(self, recipient: dict[str, Any], context: dict[str, str | None], package: dict[str, Any], idempotency_key: str) -> str:
+        property_name = context["property_name"] or "Scout report"
+        property_address = context.get("property_address")
+        session_datetime = context.get("session_datetime")
+        portal_link = reports_portal_link(self.portal_base_url, package)
+        subject = f"New Scout report ready: {property_name}"
+
+        text_lines = [
+            f"New Scout report ready: {property_name}",
+        ]
+        if property_address:
+            text_lines.append(f"Address: {property_address}")
+        if session_datetime:
+            text_lines.append(f"Session: {session_datetime}")
+        text_lines.extend(
+            [
+                "",
+                "Reports and photos are ready in the Scout Reports portal.",
+                f"Open Reports portal: {portal_link}",
+            ]
+        )
+        html_lines = [
+            f"<p>New Scout reports and photos are ready for <strong>{html_escape(property_name)}</strong>.</p>",
+        ]
+        if property_address:
+            html_lines.append(f"<p><strong>Address:</strong> {html_escape(property_address)}</p>")
+        if session_datetime:
+            html_lines.append(f"<p><strong>Session:</strong> {html_escape(session_datetime)}</p>")
+        html_lines.append(f'<p><a href="{html_escape(portal_link)}">Open Reports portal</a></p>')
+
+        payload: dict[str, Any] = {
+            "from": self.from_email,
+            "to": [recipient["email"]],
+            "subject": subject,
+            "text": "\n".join(text_lines),
+            "html": "\n".join(html_lines),
+        }
+        if self.reply_to:
+            payload["reply_to"] = self.reply_to
+
+        data = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        request = urllib.request.Request("https://api.resend.com/emails", data=data, method="POST")
+        request.add_header("Authorization", f"Bearer {self.api_key}")
+        request.add_header("Content-Type", "application/json")
+        request.add_header("Accept", "application/json")
+        request.add_header("Idempotency-Key", idempotency_key)
+        try:
+            with urllib.request.urlopen(request, timeout=30) as response:
+                body = response.read()
+        except urllib.error.HTTPError as error:
+            detail = error.read().decode("utf-8", errors="replace")
+            raise WorkerError(f"Resend email request failed: {error.code} {detail}") from error
+        result = json.loads(body.decode("utf-8"))
+        message_id = result.get("id")
+        if not message_id:
+            raise WorkerError("Resend email response did not include a message id.")
+        return str(message_id)
+
+
+def enqueue_report_ready_notifications(
+    client: SupabaseServiceClient,
+    package: dict[str, Any],
+    recipients: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    rows = []
+    for recipient in recipients:
+        rows.append(
+            {
+                "org_id": package["org_id"],
+                "property_id": package["property_id"],
+                "session_id": package["session_id"],
+                "snapshot_id": package["snapshot_id"],
+                "package_id": package["id"],
+                "notification_type": REPORT_READY_NOTIFICATION_TYPE,
+                "recipient_user_id": recipient["user_id"],
+                "recipient_email": recipient["email"],
+                "recipient_name": recipient.get("full_name"),
+                "recipient_role": recipient.get("role"),
+                "status": "pending",
+                "provider": "resend",
+                "idempotency_key": report_ready_idempotency_key(package["id"], recipient["user_id"]),
+            }
+        )
+    return client.insert_ignore(
+        REPORT_READY_NOTIFICATION_TABLE,
+        rows,
+        "package_id,notification_type,recipient_user_id",
+    )
+
+
+def pending_report_ready_notifications(client: SupabaseServiceClient, package_id: str) -> list[dict[str, Any]]:
+    return client.select(
+        REPORT_READY_NOTIFICATION_TABLE,
+        {
+            "select": "*",
+            "package_id": f"eq.{package_id}",
+            "notification_type": f"eq.{REPORT_READY_NOTIFICATION_TYPE}",
+            "status": "in.(pending,failed)",
+        },
+    )
+
+
+def send_report_ready_notifications(
+    client: SupabaseServiceClient,
+    package: dict[str, Any],
+    validation: dict[str, Any],
+    email_client: Any | None = None,
+) -> dict[str, Any]:
+    summary: dict[str, Any] = {
+        "enabled": True,
+        "recipient_count": 0,
+        "inserted_count": 0,
+        "pending_count": 0,
+        "sent_count": 0,
+        "failed_count": 0,
+        "skipped_count": 0,
+        "error": None,
+    }
+    if package.get("status") != "ready":
+        summary["enabled"] = False
+        summary["error"] = "package_not_ready"
+        return summary
+
+    try:
+        recipients = eligible_report_ready_recipients(client, package)
+        summary["recipient_count"] = len(recipients)
+        inserted = enqueue_report_ready_notifications(client, package, recipients)
+        summary["inserted_count"] = len(inserted)
+        pending = pending_report_ready_notifications(client, str(package["id"]))
+        summary["pending_count"] = len(pending)
+        if not pending:
+            return summary
+
+        eligible_user_ids = {recipient["user_id"] for recipient in recipients}
+        context = report_ready_email_context(client, package, validation)
+        try:
+            sender = email_client or ResendEmailClient.from_env()
+        except Exception as error:
+            message = str(error)[:2000]
+            for notification in pending:
+                client.patch(
+                    REPORT_READY_NOTIFICATION_TABLE,
+                    {"id": f"eq.{notification['id']}"},
+                    {
+                        "status": "failed",
+                        "last_error": message,
+                        "last_attempted_at": safe_iso_now(),
+                    },
+                )
+                summary["failed_count"] += 1
+            summary["error"] = message
+            return summary
+
+        for notification in pending:
+            notification_id = str(notification["id"])
+            recipient_user_id = str(notification.get("recipient_user_id") or "")
+            if recipient_user_id not in eligible_user_ids:
+                client.patch(
+                    REPORT_READY_NOTIFICATION_TABLE,
+                    {"id": f"eq.{notification_id}"},
+                    {
+                        "status": "skipped",
+                        "last_error": "recipient_no_longer_has_property_access",
+                        "last_attempted_at": safe_iso_now(),
+                    },
+                )
+                summary["skipped_count"] += 1
+                continue
+
+            attempt_count = int(notification.get("attempt_count") or 0) + 1
+            attempted_at = safe_iso_now()
+            client.patch(
+                REPORT_READY_NOTIFICATION_TABLE,
+                {"id": f"eq.{notification_id}"},
+                {
+                    "status": "sending",
+                    "attempt_count": attempt_count,
+                    "last_attempted_at": attempted_at,
+                    "last_error": None,
+                },
+            )
+            recipient = {
+                "email": normalize_email(notification.get("recipient_email")),
+                "full_name": notification.get("recipient_name"),
+            }
+            try:
+                provider_message_id = sender.send(
+                    recipient,
+                    context,
+                    package,
+                    str(notification["idempotency_key"]),
+                )
+            except Exception as error:
+                client.patch(
+                    REPORT_READY_NOTIFICATION_TABLE,
+                    {"id": f"eq.{notification_id}"},
+                    {
+                        "status": "failed",
+                        "last_error": str(error)[:2000],
+                    },
+                )
+                summary["failed_count"] += 1
+                continue
+
+            client.patch(
+                REPORT_READY_NOTIFICATION_TABLE,
+                {"id": f"eq.{notification_id}"},
+                {
+                    "status": "sent",
+                    "provider_message_id": provider_message_id,
+                    "sent_at": safe_iso_now(),
+                    "last_error": None,
+                },
+            )
+            summary["sent_count"] += 1
+        return summary
+    except Exception as error:
+        summary["error"] = str(error)[:2000]
+        summary["failed_count"] = max(int(summary["failed_count"]), 1)
+        return summary
 
 
 def path_for_pdf(org_id: str, property_id: str, session_id: str, package_id: str, report_type: str) -> str:
@@ -1627,6 +2067,7 @@ def process_session(
 
         candidates = retention_candidates(client, package["property_id"])
         retention = apply_retention(client, candidates, args.retention_mode)
+        email_notifications = send_report_ready_notifications(client, package, validation)
     except Exception as error:
         client.patch(
             "report_packages",
@@ -1661,9 +2102,10 @@ def process_session(
             "candidate_count": len(candidates),
             "actions": retention,
         },
+        "email_notifications": email_notifications,
     }
     write_json(summary_path, summary, args.pretty)
-    print(stable_json({"ok": True, "session_id": session_id, "package_id": package["id"], "package_action": package_action, "uploaded_files": uploaded_files, "skipped_reports": summary["skipped_reports"], "retention": summary["retention"], "summary_path": str(summary_path)}, True))
+    print(stable_json({"ok": True, "session_id": session_id, "package_id": package["id"], "package_action": package_action, "uploaded_files": uploaded_files, "skipped_reports": summary["skipped_reports"], "retention": summary["retention"], "email_notifications": email_notifications, "summary_path": str(summary_path)}, True))
     return summary
 
 

@@ -35,6 +35,10 @@ jobs:
     env:
       SUPABASE_URL: ${{ secrets.SCOUT_DEV_SUPABASE_URL }}
       SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SCOUT_DEV_SUPABASE_SERVICE_ROLE_KEY }}
+      RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+      REPORT_EMAIL_FROM: ${{ secrets.REPORT_EMAIL_FROM }}
+      REPORTS_PORTAL_BASE_URL: ${{ secrets.REPORTS_PORTAL_BASE_URL }}
+      REPORT_EMAIL_REPLY_TO: ${{ secrets.REPORT_EMAIL_REPLY_TO }}
       REPORT_WORKER_SESSION_ID: ${{ inputs.session_id || '' }}
       REPORT_WORKER_SNAPSHOT_ID: ${{ inputs.snapshot_id || '' }}
       REPORT_WORKER_TRIGGER_SOURCE: ${{ inputs.trigger_source || github.event_name }}
@@ -80,5 +84,9 @@ jobs:
           docker run --rm \
             -e SUPABASE_URL \
             -e SUPABASE_SERVICE_ROLE_KEY \
+            -e RESEND_API_KEY \
+            -e REPORT_EMAIL_FROM \
+            -e REPORTS_PORTAL_BASE_URL \
+            -e REPORT_EMAIL_REPLY_TO \
             scoutcapture-report-worker:report-package \
               "${worker_args[@]}"
