@@ -36,6 +36,7 @@ REPORT_CONTRACT_VERSION = "phase1-report-input-1"
 REPORT_READY_NOTIFICATION_TYPE = "report_package_ready"
 REPORT_READY_NOTIFICATION_ROLES = ("owner", "manager", "field", "viewer")
 REPORT_READY_NOTIFICATION_TABLE = "report_package_email_notifications"
+REPORT_READY_RESEND_USER_AGENT = "ScoutCaptureReportWorker/1.0 (+https://scoutclear.com)"
 PACKAGED_LOGO_SVG = pathlib.Path("web-contract/report-production/assets/ScoutOnlyLogo.svg")
 DISABLED_LOGO_PDF = pathlib.Path("web-contract/report-production/assets/ScoutLogoBlue.pdf")
 REPORT_TYPE_MAP = {
@@ -757,6 +758,7 @@ class ResendEmailClient:
         request.add_header("Content-Type", "application/json")
         request.add_header("Accept", "application/json")
         request.add_header("Idempotency-Key", idempotency_key)
+        request.add_header("User-Agent", REPORT_READY_RESEND_USER_AGENT)
         try:
             with urllib.request.urlopen(request, timeout=30) as response:
                 body = response.read()
@@ -811,6 +813,27 @@ def pending_report_ready_notifications(client: SupabaseServiceClient, package_id
             "status": "in.(pending,failed)",
         },
     )
+
+
+def pending_report_ready_notification_package_ids(client: SupabaseServiceClient, limit: int = 25) -> list[str]:
+    rows = client.select(
+        REPORT_READY_NOTIFICATION_TABLE,
+        {
+            "select": "package_id",
+            "notification_type": f"eq.{REPORT_READY_NOTIFICATION_TYPE}",
+            "status": "in.(pending,failed)",
+            "order": "created_at.asc",
+            "limit": str(limit),
+        },
+    )
+    package_ids = []
+    seen: set[str] = set()
+    for row in rows:
+        package_id = str(row.get("package_id") or "")
+        if package_id and package_id not in seen:
+            seen.add(package_id)
+            package_ids.append(package_id)
+    return package_ids
 
 
 def send_report_ready_notifications(
@@ -931,6 +954,36 @@ def send_report_ready_notifications(
         summary["error"] = str(error)[:2000]
         summary["failed_count"] = max(int(summary["failed_count"]), 1)
         return summary
+
+
+def drain_report_ready_notifications(
+    client: SupabaseServiceClient,
+    email_client: Any | None = None,
+) -> dict[str, Any]:
+    summary: dict[str, Any] = {
+        "ok": True,
+        "package_count": 0,
+        "packages": [],
+    }
+    package_ids = pending_report_ready_notification_package_ids(client)
+    summary["package_count"] = len(package_ids)
+    for package_id in package_ids:
+        rows = client.select(
+            "report_packages",
+            {
+                "select": "*",
+                "id": f"eq.{package_id}",
+                "status": "eq.ready",
+                "deleted_at": "is.null",
+                "limit": "1",
+            },
+        )
+        if not rows:
+            summary["packages"].append({"package_id": package_id, "skipped": "package_not_ready"})
+            continue
+        email_summary = send_report_ready_notifications(client, rows[0], {"inputs": {"session": {}}}, email_client)
+        summary["packages"].append({"package_id": package_id, "email_notifications": email_summary})
+    return summary
 
 
 def path_for_pdf(org_id: str, property_id: str, session_id: str, package_id: str, report_type: str) -> str:
@@ -1509,6 +1562,7 @@ def run_stamped_zip_poll_once(
         "processed": [],
         "skipped": [],
         "would_process": [],
+        "email_notification_retry": None,
     }
 
     for export_row in discovered:
@@ -2183,6 +2237,9 @@ def run_poll_once(
                 "retention": result["retention"],
             }
         )
+
+    if not args.poll_dry_run:
+        poll_summary["email_notification_retry"] = drain_report_ready_notifications(client)
 
     output_path = pathlib.Path(args.output_dir).resolve() / "poll_once_summary.json"
     write_json(output_path, poll_summary, args.pretty)

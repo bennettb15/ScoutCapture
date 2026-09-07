@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import pathlib
 import unittest
 from typing import Any
@@ -44,6 +45,7 @@ class FakeSupabaseClient:
                     "deleted_at": None,
                 }
             ],
+            "report_packages": [],
             worker.REPORT_READY_NOTIFICATION_TABLE: [],
         }
 
@@ -268,6 +270,90 @@ class ReportWorkerEmailNotificationTests(unittest.TestCase):
         self.assertEqual(1, summary["failed_count"])
         self.assertEqual("failed", notifications[0]["status"])
         self.assertIn("forced email failure", notifications[0]["last_error"])
+
+    def test_drain_retries_failed_notification_for_ready_package(self) -> None:
+        client = FakeSupabaseClient()
+        client.add_profile("field-user", "field@example.test")
+        client.add_membership("field-user", "field")
+        client.tables["report_packages"].append(package())
+        client.tables[worker.REPORT_READY_NOTIFICATION_TABLE].append(
+            {
+                "id": "notification-1",
+                "org_id": ORG_ID,
+                "property_id": PROPERTY_ID,
+                "session_id": SESSION_ID,
+                "snapshot_id": SNAPSHOT_ID,
+                "package_id": PACKAGE_ID,
+                "notification_type": worker.REPORT_READY_NOTIFICATION_TYPE,
+                "recipient_user_id": "field-user",
+                "recipient_email": "field@example.test",
+                "recipient_name": None,
+                "recipient_role": "field",
+                "status": "failed",
+                "provider": "resend",
+                "provider_message_id": None,
+                "idempotency_key": worker.report_ready_idempotency_key(PACKAGE_ID, "field-user"),
+                "attempt_count": 1,
+                "last_error": "previous provider error",
+                "created_at": "2026-09-07T22:14:11Z",
+            }
+        )
+        sender = FakeEmailClient()
+
+        summary = worker.drain_report_ready_notifications(client, sender)
+
+        notification = client.tables[worker.REPORT_READY_NOTIFICATION_TABLE][0]
+        self.assertEqual(1, summary["package_count"])
+        self.assertEqual("sent", notification["status"])
+        self.assertEqual("message-1", notification["provider_message_id"])
+        self.assertEqual(1, len(sender.sent))
+
+    def test_resend_request_sets_worker_user_agent_and_idempotency_key(self) -> None:
+        captured: dict[str, Any] = {}
+
+        class FakeResponse:
+            def __enter__(self) -> "FakeResponse":
+                return self
+
+            def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
+                return None
+
+            def read(self) -> bytes:
+                return b'{"id":"resend-message-id"}'
+
+        def fake_urlopen(request: Any, timeout: int = 0) -> FakeResponse:
+            captured["url"] = request.full_url
+            captured["headers"] = dict(request.header_items())
+            captured["payload"] = json.loads(request.data.decode("utf-8"))
+            captured["timeout"] = timeout
+            return FakeResponse()
+
+        original_urlopen = worker.urllib.request.urlopen
+        worker.urllib.request.urlopen = fake_urlopen
+        try:
+            client = worker.ResendEmailClient(
+                api_key="test-api-key",
+                from_email="reports@example.test",
+                portal_base_url="https://reports.example.test",
+            )
+            message_id = client.send(
+                {"email": "recipient@example.test"},
+                {
+                    "property_name": "Test New Property",
+                    "property_address": "123 Portal Way",
+                    "session_datetime": "Sep 07, 2026 at 22:14 UTC",
+                },
+                package(),
+                "report-package-ready-idempotency-key",
+            )
+        finally:
+            worker.urllib.request.urlopen = original_urlopen
+
+        self.assertEqual("resend-message-id", message_id)
+        self.assertEqual("https://api.resend.com/emails", captured["url"])
+        self.assertEqual(worker.REPORT_READY_RESEND_USER_AGENT, captured["headers"]["User-agent"])
+        self.assertEqual("report-package-ready-idempotency-key", captured["headers"]["Idempotency-key"])
+        self.assertEqual(["recipient@example.test"], captured["payload"]["to"])
 
 
 if __name__ == "__main__":
