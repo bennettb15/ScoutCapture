@@ -16046,7 +16046,11 @@ final class AppState: ObservableObject {
         guard !backendFeatureFlags.sessionSnapshotAutoUploadKillSwitch else {
             return SessionSnapshotAutoUploadEligibility(allowed: false, reason: "kill_switch_active")
         }
-        guard backendFeatureFlags.sessionSnapshotAutoUploadHasAllowlist else {
+        let productionAutoUploadTargetAllowed =
+            backendFeatureFlags.sessionSnapshotProductionAutoUploadTargetEnabled &&
+            supabaseConfiguration.isExactProductionSnapshotAutoUploadTarget
+        let allowlistRequired = !productionAutoUploadTargetAllowed
+        guard !allowlistRequired || backendFeatureFlags.sessionSnapshotAutoUploadHasAllowlist else {
             return SessionSnapshotAutoUploadEligibility(allowed: false, reason: "allowlist_empty")
         }
         guard session.status == .completed, session.isSealed, session.deletedAt == nil else {
@@ -16058,9 +16062,6 @@ final class AppState: ObservableObject {
         guard supabaseConfiguration.isConfigured else {
             return SessionSnapshotAutoUploadEligibility(allowed: false, reason: "supabase_config_invalid")
         }
-        let productionAutoUploadTargetAllowed =
-            backendFeatureFlags.sessionSnapshotProductionAutoUploadTargetEnabled &&
-            supabaseConfiguration.isExactProductionSnapshotAutoUploadTarget
         guard supabaseConfiguration.isSessionSnapshotShadowWriteOverrideAllowed || productionAutoUploadTargetAllowed else {
             return SessionSnapshotAutoUploadEligibility(allowed: false, reason: "snapshot_target_not_approved")
         }
@@ -16070,7 +16071,8 @@ final class AppState: ObservableObject {
         guard let orgID else {
             return SessionSnapshotAutoUploadEligibility(allowed: false, reason: "missing_org_id")
         }
-        guard sessionSnapshotAutoUploadAllowlistMatches(propertyID: session.propertyID, orgID: orgID) else {
+        guard !backendFeatureFlags.sessionSnapshotAutoUploadHasAllowlist ||
+            sessionSnapshotAutoUploadAllowlistMatches(propertyID: session.propertyID, orgID: orgID) else {
             return SessionSnapshotAutoUploadEligibility(allowed: false, reason: "allowlist_no_match")
         }
         if requiresAuthentication {
@@ -16092,9 +16094,15 @@ final class AppState: ObservableObject {
         let productionAutoUploadTargetAllowed =
             backendFeatureFlags.sessionSnapshotProductionAutoUploadTargetEnabled &&
             supabaseConfiguration.isExactProductionSnapshotAutoUploadTarget
-        let allowlistMatches = orgID.map {
-            sessionSnapshotAutoUploadAllowlistMatches(propertyID: session.propertyID, orgID: $0)
-        } ?? false
+        let allowlistRequired = !productionAutoUploadTargetAllowed
+        let allowlistMatches: Bool = {
+            guard backendFeatureFlags.sessionSnapshotAutoUploadHasAllowlist else {
+                return !allowlistRequired
+            }
+            return orgID.map {
+                sessionSnapshotAutoUploadAllowlistMatches(propertyID: session.propertyID, orgID: $0)
+            } ?? false
+        }()
         let authGatePassed = !requiresAuthentication || (isAuthenticationReady && authenticatedSupabaseUser != nil)
         let activeOrgGatePassed = !requiresAuthentication || (isOrganizationContextReady && activeOrganizationID == orgID)
         let targetApproved =
@@ -16110,6 +16118,7 @@ final class AppState: ObservableObject {
             "orgID=\(orgID?.uuidString ?? "nil") " +
             "autoUploadEnabled=\(backendFeatureFlags.sessionSnapshotAutoUploadEnabled) " +
             "killSwitchInactive=\(!backendFeatureFlags.sessionSnapshotAutoUploadKillSwitch) " +
+            "allowlistRequired=\(allowlistRequired) " +
             "allowlistPresent=\(backendFeatureFlags.sessionSnapshotAutoUploadHasAllowlist) " +
             "completedSealedActive=\(session.status == .completed && session.isSealed && session.deletedAt == nil) " +
             "shadowWriteEnabled=\(backendFeatureFlags.sessionSnapshotShadowWriteEnabled) " +
