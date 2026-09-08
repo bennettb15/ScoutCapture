@@ -24,6 +24,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import zipfile
+from zoneinfo import ZoneInfo
 from typing import Any
 
 
@@ -37,6 +38,7 @@ REPORT_READY_NOTIFICATION_TYPE = "report_package_ready"
 REPORT_READY_NOTIFICATION_ROLES = ("owner", "manager", "field", "viewer")
 REPORT_READY_NOTIFICATION_TABLE = "report_package_email_notifications"
 REPORT_READY_RESEND_USER_AGENT = "ScoutCaptureReportWorker/1.0 (+https://scoutclear.com)"
+REPORT_READY_EMAIL_LOGO_URL = "https://www.scoutclear.com/scout-logo-email.png"
 PACKAGED_LOGO_SVG = pathlib.Path("web-contract/report-production/assets/ScoutOnlyLogo.svg")
 DISABLED_LOGO_PDF = pathlib.Path("web-contract/report-production/assets/ScoutLogoBlue.pdf")
 REPORT_TYPE_MAP = {
@@ -521,7 +523,11 @@ def format_session_datetime(value: Any) -> str | None:
         parsed = dt.datetime.fromisoformat(str(value).replace("Z", "+00:00"))
     except ValueError:
         return str(value)
-    return parsed.astimezone(dt.timezone.utc).strftime("%b %d, %Y at %H:%M UTC")
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=dt.timezone.utc)
+    eastern = parsed.astimezone(ZoneInfo("America/New_York"))
+    hour = eastern.strftime("%I").lstrip("0") or "0"
+    return f"{eastern:%b} {eastern.day}, {eastern.year} at {hour}:{eastern:%M %p} ET"
 
 
 def normalize_email(value: Any) -> str:
@@ -733,17 +739,33 @@ class ResendEmailClient:
             [
                 "",
                 "Reports and photos are ready in the Scout Reports portal.",
-                f"Open Reports portal: {portal_link}",
+                f"Open Reports Portal: {portal_link}",
             ]
         )
         html_lines = [
-            f"<p>New Scout reports and photos are ready for <strong>{html_escape(property_name)}</strong>.</p>",
+            '<div style="margin:0;padding:0;background:#f8fafc;font-family:Arial,Helvetica,sans-serif;color:#1c2742;">',
+            '<div style="max-width:560px;margin:0 auto;padding:24px 16px;">',
+            f'<img src="{html_escape(REPORT_READY_EMAIL_LOGO_URL)}" alt="ScoutClear" width="150" style="display:block;width:150px;max-width:100%;height:auto;margin:0 0 20px;" />',
+            '<div style="background:#ffffff;border:1px solid #e2e8f0;border-radius:8px;padding:24px;">',
+            f'<p style="margin:0 0 16px;font-size:16px;line-height:1.55;">New Scout reports and photos are ready for <strong>{html_escape(property_name)}</strong>.</p>',
         ]
         if property_address:
-            html_lines.append(f"<p><strong>Address:</strong> {html_escape(property_address)}</p>")
+            html_lines.append(
+                f'<p style="margin:0 0 10px;font-size:14px;line-height:1.5;"><strong>Address:</strong> {html_escape(property_address)}</p>'
+            )
         if session_datetime:
-            html_lines.append(f"<p><strong>Session:</strong> {html_escape(session_datetime)}</p>")
-        html_lines.append(f'<p><a href="{html_escape(portal_link)}">Open Reports portal</a></p>')
+            html_lines.append(
+                f'<p style="margin:0 0 10px;font-size:14px;line-height:1.5;"><strong>Session:</strong> {html_escape(session_datetime)}</p>'
+            )
+        html_lines.extend(
+            [
+                f'<p style="margin:24px 0 0;"><a href="{html_escape(portal_link)}" style="display:inline-block;background:#1C2742;color:#ffffff;text-decoration:none;border-radius:6px;padding:12px 18px;font-size:14px;font-weight:700;">Open Reports Portal</a></p>',
+                f'<p style="margin:18px 0 0;font-size:12px;line-height:1.5;color:#64748b;">If the button does not work, open this link:<br><a href="{html_escape(portal_link)}" style="color:#1C2742;">{html_escape(portal_link)}</a></p>',
+                "</div>",
+                "</div>",
+                "</div>",
+            ]
+        )
 
         payload: dict[str, Any] = {
             "from": self.from_email,

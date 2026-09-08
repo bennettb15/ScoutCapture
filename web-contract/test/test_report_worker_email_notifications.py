@@ -326,6 +326,12 @@ class ReportWorkerEmailNotificationTests(unittest.TestCase):
             worker.reports_portal_link("https://scoutclear.com/reports", package()),
         )
 
+    def test_session_datetime_uses_eastern_time(self) -> None:
+        context = worker.report_ready_email_context(FakeSupabaseClient(), package(), validation())
+
+        self.assertEqual("Sep 7, 2026 at 10:30 AM ET", context["session_datetime"])
+        self.assertNotIn("UTC", context["session_datetime"] or "")
+
     def test_resend_request_sets_worker_user_agent_and_idempotency_key(self) -> None:
         captured: dict[str, Any] = {}
 
@@ -359,7 +365,7 @@ class ReportWorkerEmailNotificationTests(unittest.TestCase):
                 {
                     "property_name": "Test New Property",
                     "property_address": "123 Portal Way",
-                    "session_datetime": "Sep 07, 2026 at 22:14 UTC",
+                    "session_datetime": "Sep 7, 2026 at 6:14 PM ET",
                 },
                 package(),
                 "report-package-ready-idempotency-key",
@@ -373,7 +379,14 @@ class ReportWorkerEmailNotificationTests(unittest.TestCase):
         self.assertEqual("report-package-ready-idempotency-key", captured["headers"]["Idempotency-key"])
         self.assertEqual(["recipient@example.test"], captured["payload"]["to"])
         self.assertIn("https://reports.example.test/reports?", captured["payload"]["text"])
+        self.assertIn("Open Reports Portal:", captured["payload"]["text"])
         self.assertIn('href="https://reports.example.test/reports?', captured["payload"]["html"])
+        self.assertIn("Open Reports Portal</a>", captured["payload"]["html"])
+        self.assertIn('style="display:inline-block;background:#1C2742;', captured["payload"]["html"])
+        self.assertIn(worker.REPORT_READY_EMAIL_LOGO_URL, captured["payload"]["html"])
+        self.assertIn('alt="ScoutClear"', captured["payload"]["html"])
+        self.assertIn("Sep 7, 2026 at 6:14 PM ET", captured["payload"]["html"])
+        self.assertNotIn("UTC", captured["payload"]["html"])
 
 
 if __name__ == "__main__":
