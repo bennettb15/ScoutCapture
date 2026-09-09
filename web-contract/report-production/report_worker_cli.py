@@ -604,6 +604,21 @@ def renderer_report_arg(validation: dict[str, Any]) -> str:
     return "punchlist" if session_type(validation) == "punchlist_visit" else "all"
 
 
+def package_session_type(package: dict[str, Any]) -> str:
+    manifest = package.get("manifest") if isinstance(package.get("manifest"), dict) else {}
+    validation_summary = package.get("validation_summary") if isinstance(package.get("validation_summary"), dict) else {}
+    raw = (
+        package.get("sessionType")
+        or package.get("session_type")
+        or manifest.get("sessionType")
+        or manifest.get("session_type")
+        or validation_summary.get("sessionType")
+        or validation_summary.get("session_type")
+    )
+    normalized = str(raw or "").strip().lower()
+    return "punchlist_visit" if normalized == "punchlist_visit" else "full_documentation"
+
+
 def format_session_datetime(value: Any) -> str | None:
     if not value:
         return None
@@ -810,14 +825,17 @@ class ResendEmailClient:
         return cls(api_key, from_email, portal_base_url, os.environ.get("REPORT_EMAIL_REPLY_TO", "").strip() or None)
 
     def send(self, recipient: dict[str, Any], context: dict[str, str | None], package: dict[str, Any], idempotency_key: str) -> str:
-        property_name = context["property_name"] or "Scout report"
+        is_punchlist_visit = package_session_type(package) == "punchlist_visit"
+        package_label = "punchlist update" if is_punchlist_visit else "report"
+        portal_label = "Punchlist updates and photos" if is_punchlist_visit else "Reports and photos"
+        property_name = context["property_name"] or ("Scout punchlist update" if is_punchlist_visit else "Scout report")
         property_address = context.get("property_address")
         session_datetime = context.get("session_datetime")
         portal_link = reports_portal_link(self.portal_base_url, package)
-        subject = f"New Scout report ready: {property_name}"
+        subject = f"New Scout {package_label} ready: {property_name}"
 
         text_lines = [
-            f"New Scout report ready: {property_name}",
+            f"New Scout {package_label} ready: {property_name}",
         ]
         if property_address:
             text_lines.append(f"Address: {property_address}")
@@ -826,7 +844,7 @@ class ResendEmailClient:
         text_lines.extend(
             [
                 "",
-                "Reports and photos are ready in the Scout Reports portal.",
+                f"{portal_label} are ready in the Scout Reports portal.",
                 f"Open Reports Portal: {portal_link}",
             ]
         )
@@ -835,7 +853,7 @@ class ResendEmailClient:
             '<div style="max-width:560px;margin:0 auto;padding:24px 16px;">',
             f'<img src="{html_escape(REPORT_READY_EMAIL_LOGO_URL)}" alt="ScoutClear" width="150" style="display:block;width:150px;max-width:100%;height:auto;margin:0 0 20px;" />',
             '<div style="background:#ffffff;border:1px solid #e2e8f0;border-radius:8px;padding:24px;">',
-            f'<p style="margin:0 0 16px;font-size:16px;line-height:1.55;">New Scout reports and photos are ready for <strong>{html_escape(property_name)}</strong>.</p>',
+            f'<p style="margin:0 0 16px;font-size:16px;line-height:1.55;">New Scout {html_escape(portal_label.lower())} are ready for <strong>{html_escape(property_name)}</strong>.</p>',
         ]
         if property_address:
             html_lines.append(

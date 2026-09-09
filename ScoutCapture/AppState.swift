@@ -7052,6 +7052,7 @@ final class AppState: ObservableObject {
     @Published private(set) var localDiagnostics = LocalDiagnosticsState()
     @Published private(set) var propertyOpenFreshnessByPropertyID: [UUID: PropertyOpenFreshnessSnapshot] = [:]
     private var propertyOpenFreshnessHydrationRecheckPropertyIDs: Set<UUID> = []
+    private var propertyOpenFreshnessCheckInFlightPropertyIDs: Set<UUID> = []
 
     @Published var selectedPropertyID: UUID? {
         didSet {
@@ -44205,6 +44206,11 @@ final class AppState: ObservableObject {
             return
         }
 
+        guard !propertyOpenFreshnessCheckInFlightPropertyIDs.contains(propertyID) else {
+            print("[PropertyFreshness] propertyID=\(propertyID.uuidString) status=checking_cloud_status reason=already_in_flight")
+            return
+        }
+        propertyOpenFreshnessCheckInFlightPropertyIDs.insert(propertyID)
         propertyOpenFreshnessByPropertyID[propertyID] = PropertyOpenFreshnessSnapshot(
             propertyID: propertyID,
             status: .checkingCloudStatus,
@@ -44217,20 +44223,26 @@ final class AppState: ObservableObject {
         )
 
         Task { [weak self] in
-            await self?.syncPortalPunchlistOperationalOverlaysForPropertyOpen(
+            guard let self else { return }
+            defer {
+                Task { @MainActor in
+                    self.propertyOpenFreshnessCheckInFlightPropertyIDs.remove(propertyID)
+                }
+            }
+            await self.syncPortalPunchlistOperationalOverlaysForPropertyOpen(
                 propertyID: propertyID,
                 activeOrganizationID: activeOrganizationID
             )
-            await self?.performPropertyOpenFreshnessCheck(
+            await self.performPropertyOpenFreshnessCheck(
                 propertyID: propertyID,
                 activeOrganizationID: activeOrganizationID
             )
-            let hydrationResult = await self?.hydrateMetadataFromLatestVerifiedSessionSnapshotForPropertyOpen(
+            let hydrationResult = await self.hydrateMetadataFromLatestVerifiedSessionSnapshotForPropertyOpen(
                 propertyID: propertyID,
                 activeOrganizationID: activeOrganizationID
             )
-            if hydrationResult?.allowed == true {
-                await self?.syncPortalPunchlistOperationalOverlaysForPropertyOpen(
+            if hydrationResult.allowed == true {
+                await self.syncPortalPunchlistOperationalOverlaysForPropertyOpen(
                     propertyID: propertyID,
                     activeOrganizationID: activeOrganizationID
                 )
@@ -47694,12 +47706,37 @@ final class AppState: ObservableObject {
         ensureCanonicalOrgPersistenceForSelectedPropertyIfKnown(reason: "start_session")
         let sessionsForProperty = sessions(for: selectedPropertyID)
         let reusableDrafts = sessionsForProperty
-            .filter { $0.deletedAt == nil && $0.status == .draft && !$0.isSealed && sessionHasCaptures($0) }
+            .filter { reusableDraftSession($0) }
             .sorted { $0.startedAt > $1.startedAt }
         let pendingDeliveryExists = sessionsForProperty.contains(where: { isPendingDelivery($0) })
         let reExportEligibleExists = sessionsForProperty.contains(where: { isReExportEligible($0) })
         if let currentSession, currentSession.status == .draft, currentSession.propertyID == selectedPropertyID {
-            guard sessionHasCaptures(currentSession) else {
+            if let persistedCurrent = persistedSessionIncludingDeleted(
+                propertyID: selectedPropertyID,
+                sessionID: currentSession.id
+            ),
+               !reusableDraftSession(persistedCurrent) {
+                self.currentSession = nil
+                recordDraftSessionReuseDecision(
+                    propertyID: selectedPropertyID,
+                    session: nil,
+                    decision: "ignored_stale_current_session",
+                    candidateCount: reusableDrafts.count,
+                    blockedReason: "current_session_persisted_state_not_reusable",
+                    foregroundRefreshReconciliation: "stale_current_session_ignored_for_session_type_selection"
+                )
+                print(
+                    "[StartSession] propertyID=\(selectedPropertyID.uuidString) " +
+                    "sessionID=\(currentSession.id.uuidString) reuse=skipped reason=current_session_persisted_state_not_reusable"
+                )
+                cloudBackupManager?.setCaptureModeActive(false)
+                return startSession(
+                    sessionType: sessionType,
+                    skipPropertyStatusPreflight: true
+                )
+            }
+
+            guard reusableDraftSession(currentSession) else {
                 self.currentSession = nil
                 recordDraftSessionReuseDecision(
                     propertyID: selectedPropertyID,
@@ -47797,7 +47834,19 @@ final class AppState: ObservableObject {
               !isFinalSession(session) else {
             return false
         }
-        return !sessions(for: propertyID).contains { $0.id == session.id }
+        if let persisted = persistedSessionIncludingDeleted(propertyID: propertyID, sessionID: session.id) {
+            if reusableDraftSession(persisted) {
+                return false
+            }
+            if persisted.deletedAt == nil,
+               persisted.status == .draft,
+               !persisted.isSealed,
+               !isFinalSession(persisted) {
+                return false
+            }
+            return true
+        }
+        return !sessionHasCaptures(session)
     }
 
     @discardableResult
@@ -47847,7 +47896,7 @@ final class AppState: ObservableObject {
     }
 
     nonisolated static func sessionCompletionActionTitle(sessionType: SessionType) -> String {
-        sessionType == .punchlistVisit ? "Complete Punchlist Visit" : "Complete Session"
+        sessionType == .punchlistVisit ? "Complete Punchlist" : "Complete Session"
     }
 
     private func persistReusableDraftSessionIfNeeded(_ session: Session) -> Session {
@@ -50527,7 +50576,7 @@ final class AppState: ObservableObject {
 
     private func latestVisibleDraft(in sessions: [Session]) -> Session? {
         sessions
-            .filter { $0.deletedAt == nil && $0.status == .draft && !$0.isSealed && sessionHasCaptures($0) }
+            .filter { reusableDraftSession($0) }
             .sorted { $0.startedAt > $1.startedAt }
             .first
     }
@@ -50541,7 +50590,7 @@ final class AppState: ObservableObject {
             return drafts.first
         }
 
-        return drafts.first(where: { sessionHasCaptures($0) })
+        return drafts.first(where: { reusableDraftSession($0) })
     }
 
     private func isFinalRemoteSessionState(
@@ -50565,6 +50614,21 @@ final class AppState: ObservableObject {
             session.exportedAt != nil ||
             session.isSealed ||
             session.firstDeliveredAt != nil
+    }
+
+    private func reusableDraftSession(_ session: Session) -> Bool {
+        session.deletedAt == nil &&
+            session.status == .draft &&
+            !session.isSealed &&
+            !isFinalSession(session) &&
+            sessionHasCaptures(session)
+    }
+
+    private func persistedSessionIncludingDeleted(propertyID: UUID, sessionID: UUID) -> Session? {
+        if let cached = allSessionIndexByProperty[propertyID]?.first(where: { $0.id == sessionID }) {
+            return cached
+        }
+        return loadAndNormalizeSessions(propertyID: propertyID).first(where: { $0.id == sessionID })
     }
 
     private func sessionHasCaptures(_ session: Session) -> Bool {

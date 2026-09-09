@@ -360,6 +360,80 @@ final class Phase2C27EDraftSessionReuseTests: XCTestCase {
         XCTAssertFalse(fixture.appState.currentSessionRequiresInitialSessionTypeSelection(propertyID: fixture.property.id))
     }
 
+    func testCompletedPunchlistSessionPromptsAgainOnReentry() throws {
+        let fixture = try makeFixture()
+        defer { tearDownFixture(fixture) }
+
+        fixture.appState.selectProperty(id: fixture.property.id)
+        _ = try XCTUnwrap(fixture.appState.startSession(skipPropertyStatusPreflight: true))
+        let punchlist = try XCTUnwrap(fixture.appState.persistCurrentSessionType(.punchlistVisit))
+        try addMaterialShot(to: punchlist, in: fixture, isFlagged: true)
+        fixture.appState.completeCurrentSessionWithoutZIP()
+
+        fixture.appState.selectProperty(id: fixture.property.id)
+        let reopened = try XCTUnwrap(fixture.appState.startSession(skipPropertyStatusPreflight: true))
+
+        XCTAssertNotEqual(reopened.id, punchlist.id)
+        XCTAssertEqual(reopened.status, .draft)
+        XCTAssertEqual(reopened.sessionType, .fullDocumentation)
+        XCTAssertTrue(fixture.appState.currentSessionRequiresInitialSessionTypeSelection(propertyID: fixture.property.id))
+    }
+
+    func testStaleCompletedPunchlistCurrentSessionDoesNotSuppressInitialTypePrompt() throws {
+        let fixture = try makeFixture()
+        defer { tearDownFixture(fixture) }
+
+        fixture.appState.selectProperty(id: fixture.property.id)
+        _ = try XCTUnwrap(fixture.appState.startSession(skipPropertyStatusPreflight: true))
+        let punchlist = try XCTUnwrap(fixture.appState.persistCurrentSessionType(.punchlistVisit))
+        try addMaterialShot(to: punchlist, in: fixture, isFlagged: true)
+
+        var stalePersisted = punchlist
+        stalePersisted.status = .completed
+        stalePersisted.endedAt = Date(timeIntervalSinceReferenceDate: 200)
+        stalePersisted.isSealed = true
+        _ = try fixture.localStore.upsertSession(stalePersisted)
+        fixture.appState._debugRefreshPropertiesLocallyForTests()
+
+        fixture.appState.selectProperty(id: fixture.property.id)
+        let reopened = try XCTUnwrap(fixture.appState.startSession(skipPropertyStatusPreflight: true))
+
+        XCTAssertNotEqual(reopened.id, punchlist.id)
+        XCTAssertEqual(reopened.status, .draft)
+        XCTAssertTrue(fixture.appState.currentSessionRequiresInitialSessionTypeSelection(propertyID: fixture.property.id))
+        XCTAssertEqual(
+            fixture.appState._debugLocalDiagnosticsForTests()
+                .sessionSnapshotUpload
+                .lastDraftReuseBlockedReason,
+            "no_reusable_active_draft_completed_or_sealed_sessions_only"
+        )
+    }
+
+    func testStaleUploadedPunchlistCurrentSessionDoesNotSuppressInitialTypePrompt() throws {
+        let fixture = try makeFixture()
+        defer { tearDownFixture(fixture) }
+
+        fixture.appState.selectProperty(id: fixture.property.id)
+        _ = try XCTUnwrap(fixture.appState.startSession(skipPropertyStatusPreflight: true))
+        let punchlist = try XCTUnwrap(fixture.appState.persistCurrentSessionType(.punchlistVisit))
+        try addMaterialShot(to: punchlist, in: fixture, isFlagged: true)
+
+        var uploaded = punchlist
+        uploaded.status = .completed
+        uploaded.endedAt = Date(timeIntervalSinceReferenceDate: 200)
+        uploaded.isSealed = true
+        uploaded.firstDeliveredAt = Date(timeIntervalSinceReferenceDate: 220)
+        _ = try fixture.localStore.upsertSession(uploaded)
+        fixture.appState._debugRefreshPropertiesLocallyForTests()
+
+        fixture.appState.selectProperty(id: fixture.property.id)
+        let reopened = try XCTUnwrap(fixture.appState.startSession(skipPropertyStatusPreflight: true))
+
+        XCTAssertNotEqual(reopened.id, punchlist.id)
+        XCTAssertEqual(reopened.status, .draft)
+        XCTAssertTrue(fixture.appState.currentSessionRequiresInitialSessionTypeSelection(propertyID: fixture.property.id))
+    }
+
     func testPunchlistCompletionIgnoresGuidedRemainingWhileFullDocumentationDoesNot() {
         XCTAssertTrue(
             AppState.sessionCanComplete(
@@ -379,7 +453,7 @@ final class Phase2C27EDraftSessionReuseTests: XCTestCase {
         )
         XCTAssertEqual(
             AppState.sessionCompletionActionTitle(sessionType: .punchlistVisit),
-            "Complete Punchlist Visit"
+            "Complete Punchlist"
         )
 
         XCTAssertFalse(

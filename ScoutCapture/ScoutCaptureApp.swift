@@ -12561,7 +12561,6 @@ struct PropertySessionView: View {
                 guard !didSetup else { return }
                 didSetup = true
                 appState.selectProperty(id: propertyID)
-                appState.beginPropertyOpenFreshnessCheck(propertyID: propertyID)
                 Task { @MainActor in
                     let propertyStatusPreflight = await appState.evaluateFreshPropertyStatusEntryPreflight(
                         propertyID: propertyID,

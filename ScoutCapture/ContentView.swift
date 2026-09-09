@@ -5717,7 +5717,7 @@ struct ContentView: View {
                 return "\(exportActionTitle) is disabled until at least one photo is captured."
             }
             if isPunchlistVisit {
-                return "Complete Punchlist Visit is disabled until all active and resolution required items are complete."
+                return "Complete Punchlist is disabled until all active and resolution required items are complete."
             }
             return "Complete Session is disabled until all guided and flagged items are complete."
         }
@@ -15883,7 +15883,7 @@ extension ContentView {
                 return "\(summary.exportActionTitle) is disabled until at least one photo is captured."
             }
             if summary.isPunchlistVisit {
-                return "Complete Punchlist Visit is disabled until all active and resolution required items are complete."
+                return "Complete Punchlist is disabled until all active and resolution required items are complete."
             }
             return "Complete Session is disabled until all guided and flagged items are complete."
         }
