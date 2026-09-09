@@ -7311,7 +7311,11 @@ struct ContentView: View {
                                 .minimumScaleFactor(0.54)
                                 .truncationMode(.tail)
 
-                            propertyOpenFreshnessHeaderIndicator
+                            HStack(spacing: 6) {
+                                propertyOpenFreshnessHeaderIndicator
+                                punchlistVisitHeaderBadge
+                            }
+                            .frame(height: 14)
                         }
                         .padding(.horizontal, titleSideInset)
                         .frame(maxWidth: .infinity, alignment: .center)
@@ -7357,6 +7361,27 @@ struct ContentView: View {
             return .blue.opacity(0.95)
         case .needsReview:
             return .orange.opacity(0.95)
+        }
+    }
+
+    @ViewBuilder
+    private var punchlistVisitHeaderBadge: some View {
+        if isPunchlistVisitSession {
+            Text("Punchlist Visit")
+                .font(.system(size: 11, weight: .bold))
+                .foregroundColor(.white.opacity(0.88))
+                .lineLimit(1)
+                .padding(.horizontal, 7)
+                .padding(.vertical, 2)
+                .background(
+                    Capsule()
+                        .fill(Color.white.opacity(0.13))
+                )
+                .overlay(
+                    Capsule()
+                        .stroke(Color.white.opacity(0.24), lineWidth: 1)
+                )
+                .accessibilityLabel("Punchlist Visit")
         }
     }
 

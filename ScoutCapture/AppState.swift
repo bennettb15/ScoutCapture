@@ -16323,8 +16323,9 @@ final class AppState: ObservableObject {
     }
 
     private func sessionSnapshotAutoUploadOrgID(for session: Session) -> UUID? {
-        if let metadata = try? localStore.loadSessionMetadata(propertyID: session.propertyID, sessionID: session.id) {
-            return metadata.orgID
+        if let metadata = try? localStore.loadSessionMetadata(propertyID: session.propertyID, sessionID: session.id),
+           let orgID = metadata.orgID {
+            return orgID
         }
         if let property = (try? localStore.fetchProperties())?.first(where: { $0.id == session.propertyID }),
            let orgID = property.orgId {

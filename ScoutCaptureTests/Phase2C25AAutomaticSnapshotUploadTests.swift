@@ -479,6 +479,126 @@ final class Phase2C25AAutomaticSnapshotUploadTests: XCTestCase {
         XCTAssertEqual(insertCount, 1)
     }
 
+    func testPunchlistVisitUploadsCompletedSnapshotWhenGuidedRowsAreIncompleteAndMetadataOrgMissing() async throws {
+        var uploadedObjects: [AppState.SessionSnapshotStorageObject] = []
+        var insertedRows: [AppState.SessionSnapshotUploadRow] = []
+        let fixture = try makeFixture(
+            autoUploadEnabled: true,
+            allowGeneratedOrg: true,
+            storageUploadOverride: { object in uploadedObjects.append(object) },
+            rowInsertOverride: { row in insertedRows.append(row) }
+        )
+
+        var punchlistSession = fixture.session
+        punchlistSession.sessionType = .punchlistVisit
+        _ = try fixture.store.upsertSession(punchlistSession)
+
+        var metadata = try fixture.store.loadSessionMetadata(
+            propertyID: fixture.property.id,
+            sessionID: punchlistSession.id
+        )
+        metadata.sessionType = .punchlistVisit
+        metadata.orgID = nil
+        metadata.shots = metadata.shots.map { shot in
+            var uploadedShot = shot
+            uploadedShot.uploadState = "uploaded"
+            return uploadedShot
+        }
+        metadata.guidedShots = [
+            GuidedShot(
+                title: "Uncaptured guided reference",
+                building: "Building",
+                targetElevation: "South",
+                detailType: "Overview",
+                angleIndex: 2
+            )
+        ]
+        try fixture.store.saveSessionMetadataAtomically(
+            propertyID: fixture.property.id,
+            sessionID: punchlistSession.id,
+            metadata: metadata
+        )
+
+        let eligibility = fixture.appState._debugSessionSnapshotAutoUploadEligibilityForTests(
+            session: punchlistSession
+        )
+        XCTAssertTrue(eligibility.allowed, eligibility.reason)
+        XCTAssertEqual(eligibility.reason, "eligible")
+
+        let result = await fixture.appState.attemptAutomaticSessionSnapshotUploadForCompletedSealedCheckpoint(
+            session: punchlistSession,
+            triggerSource: "completeCurrentSessionWithoutZIP"
+        )
+
+        XCTAssertEqual(result?.outcome, .succeeded)
+        XCTAssertEqual(uploadedObjects.count, 1)
+        XCTAssertEqual(insertedRows.count, 1)
+        XCTAssertEqual(insertedRows.first?.orgID, fixture.orgID)
+        XCTAssertEqual(insertedRows.first?.guidedCount, 1)
+        XCTAssertTrue(try fixture.appState._debugSessionSnapshotUploadRetryWorkItemsForTests().isEmpty)
+
+        let status = try XCTUnwrap(fixture.appState.sessionSnapshotCloudStatus(for: punchlistSession))
+        XCTAssertEqual(status.state, .uploaded)
+        XCTAssertFalse(status.isConfigurationBlocked)
+        XCTAssertNotEqual(status.symbolName, "icloud.slash")
+        XCTAssertNotEqual(status.reason, "guided_metadata_incomplete")
+        XCTAssertNotEqual(status.reason, "missing_org_id")
+
+        let uploadedObject = try XCTUnwrap(uploadedObjects.first)
+        let payload = try XCTUnwrap(JSONSerialization.jsonObject(with: uploadedObject.payloadData) as? [String: Any])
+        XCTAssertEqual(payload["sessionType"] as? String, SessionType.punchlistVisit.rawValue)
+        XCTAssertEqual(payload["orgID"] as? String, fixture.orgID.uuidString)
+        let rawSessionJSON = try XCTUnwrap(payload["rawSessionJSON"] as? String)
+        let rawData = try XCTUnwrap(rawSessionJSON.data(using: .utf8))
+        let rawPayload = try XCTUnwrap(JSONSerialization.jsonObject(with: rawData) as? [String: Any])
+        XCTAssertEqual(rawPayload["sessionType"] as? String, SessionType.punchlistVisit.rawValue)
+        XCTAssertEqual(rawPayload["orgID"] as? String, fixture.orgID.uuidString)
+    }
+
+    func testFullDocumentationCompletedSnapshotUploadPathRemainsUnchanged() async throws {
+        var uploadedObjects: [AppState.SessionSnapshotStorageObject] = []
+        var insertCount = 0
+        let fixture = try makeFixture(
+            autoUploadEnabled: true,
+            allowGeneratedOrg: true,
+            storageUploadOverride: { object in uploadedObjects.append(object) },
+            rowInsertOverride: { _ in insertCount += 1 }
+        )
+        var metadata = try fixture.store.loadSessionMetadata(
+            propertyID: fixture.property.id,
+            sessionID: fixture.session.id
+        )
+        metadata.shots = metadata.shots.map { shot in
+            var uploadedShot = shot
+            uploadedShot.uploadState = "uploaded"
+            return uploadedShot
+        }
+        try fixture.store.saveSessionMetadataAtomically(
+            propertyID: fixture.property.id,
+            sessionID: fixture.session.id,
+            metadata: metadata
+        )
+
+        let eligibility = fixture.appState._debugSessionSnapshotAutoUploadEligibilityForTests(
+            session: fixture.session
+        )
+        XCTAssertTrue(eligibility.allowed, eligibility.reason)
+
+        let result = await fixture.appState.attemptAutomaticSessionSnapshotUploadForCompletedSealedCheckpoint(
+            session: fixture.session,
+            triggerSource: "completeCurrentSessionWithoutZIP"
+        )
+
+        XCTAssertEqual(result?.outcome, .succeeded)
+        XCTAssertEqual(insertCount, 1)
+        let status = try XCTUnwrap(fixture.appState.sessionSnapshotCloudStatus(for: fixture.session))
+        XCTAssertEqual(status.state, .uploaded)
+        XCTAssertFalse(status.isConfigurationBlocked)
+        let uploadedObject = try XCTUnwrap(uploadedObjects.first)
+        let payload = try XCTUnwrap(JSONSerialization.jsonObject(with: uploadedObject.payloadData) as? [String: Any])
+        XCTAssertEqual(payload["sessionType"] as? String, SessionType.fullDocumentation.rawValue)
+    }
+
     func testNormalCompletionPathsScheduleExactlyOneArchiveSnapshot() async throws {
         let later = try makeFixture()
         later.appState.currentSession = later.session
