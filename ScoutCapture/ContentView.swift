@@ -7368,18 +7368,14 @@ struct ContentView: View {
     private var punchlistVisitHeaderBadge: some View {
         if isPunchlistVisitSession {
             Text("Punchlist Visit")
-                .font(.system(size: 11, weight: .bold))
-                .foregroundColor(.white.opacity(0.88))
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundColor(.white.opacity(0.62))
                 .lineLimit(1)
-                .padding(.horizontal, 7)
-                .padding(.vertical, 2)
+                .padding(.horizontal, 6)
+                .padding(.vertical, 1)
                 .background(
                     Capsule()
-                        .fill(Color.white.opacity(0.13))
-                )
-                .overlay(
-                    Capsule()
-                        .stroke(Color.white.opacity(0.24), lineWidth: 1)
+                        .fill(Color.white.opacity(0.07))
                 )
                 .accessibilityLabel("Punchlist Visit")
         }

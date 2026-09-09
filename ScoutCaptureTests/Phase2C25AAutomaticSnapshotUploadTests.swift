@@ -338,6 +338,31 @@ final class Phase2C25AAutomaticSnapshotUploadTests: XCTestCase {
         XCTAssertEqual(fixture.appState.localDiagnostics.sessionSnapshotUpload.autoUploadSkippedReason, "auto_upload_disabled")
     }
 
+    func testPunchlistVisitAutoUploadDisabledPersistsConfigurationBlockedReason() async throws {
+        var attemptedStorageUpload = false
+        let fixture = try makeFixture(
+            autoUploadEnabled: false,
+            storageUploadOverride: { _ in attemptedStorageUpload = true }
+        )
+        var punchlistSession = fixture.session
+        punchlistSession.sessionType = .punchlistVisit
+        _ = try fixture.store.upsertSession(punchlistSession)
+
+        let result = await fixture.appState.attemptAutomaticSessionSnapshotUploadForCompletedSealedCheckpoint(
+            session: punchlistSession,
+            triggerSource: "completeCurrentSessionWithoutZIP"
+        )
+
+        XCTAssertNil(result)
+        XCTAssertFalse(attemptedStorageUpload)
+        XCTAssertEqual(fixture.appState.localDiagnostics.sessionSnapshotUpload.autoUploadSkippedReason, "auto_upload_disabled")
+        let status = try XCTUnwrap(fixture.appState.sessionSnapshotCloudStatus(for: punchlistSession))
+        XCTAssertEqual(status.state, .failed)
+        XCTAssertEqual(status.reason, "auto_upload_disabled")
+        XCTAssertTrue(status.isConfigurationBlocked)
+        XCTAssertEqual(status.symbolName, "icloud.slash")
+    }
+
     func testEnableAloneDoesNotWorkWithoutAllowlist() async throws {
         var attemptedStorageUpload = false
         let fixture = try makeFixture(

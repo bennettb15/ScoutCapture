@@ -16739,6 +16739,7 @@ final class AppState: ObservableObject {
         )
         do {
             _ = try localStore.upsertSessionSnapshotUploadStatusRecord(record)
+            logSessionSnapshotCloudStatusPersistence(record)
             refreshSessionSnapshotCloudStatusCache()
         } catch {
             recordDiagnosticsError(error)
@@ -16778,10 +16779,89 @@ final class AppState: ObservableObject {
         )
         do {
             _ = try localStore.upsertSessionSnapshotUploadStatusRecord(record)
+            logSessionSnapshotCloudStatusPersistence(record)
             refreshSessionSnapshotCloudStatusCache()
         } catch {
             recordDiagnosticsError(error)
         }
+    }
+
+    private func logSessionSnapshotCloudStatusPersistence(_ record: LocalStore.SessionSnapshotUploadStatusRecord) {
+        let sessionType = sessionSnapshotCloudStatusTraceSessionType(
+            propertyID: record.propertyID,
+            sessionID: record.sessionID
+        )
+        let fields: [(String, String?)] = [
+            ("timestamp", Self.sessionSnapshotStatusTraceTimestamp(record.updatedAt)),
+            ("event", "session_snapshot_cloud_status_persisted"),
+            ("status", record.status.rawValue),
+            ("reason", record.reason),
+            ("sessionType", sessionType),
+            ("snapshotID", record.snapshotID.uuidString),
+            ("snapshotKind", record.snapshotKind),
+            ("orgID", record.organizationID.uuidString),
+            ("propertyID", record.propertyID.uuidString),
+            ("sessionID", record.sessionID.uuidString),
+            ("triggerSource", record.triggerSource),
+            ("autoUploadEnabled", String(backendFeatureFlags.sessionSnapshotAutoUploadEnabled)),
+            ("shadowWriteEnabled", String(backendFeatureFlags.sessionSnapshotShadowWriteEnabled)),
+            ("productionAutoUploadTargetEnabled", String(backendFeatureFlags.sessionSnapshotProductionAutoUploadTargetEnabled)),
+            ("killSwitchActive", String(backendFeatureFlags.sessionSnapshotAutoUploadKillSwitch)),
+            ("requiresAuthentication", String(requiresAuthentication)),
+            ("authReady", String(isAuthenticationReady)),
+            ("hasAuthenticatedUser", String(authenticatedSupabaseUser != nil)),
+            ("organizationContextReady", String(isOrganizationContextReady)),
+            ("activeOrgID", activeOrganizationID?.uuidString)
+        ]
+        let line = fields
+            .map { "\($0)=\(Self.sessionSnapshotStatusTraceValue($1))" }
+            .joined(separator: " ")
+        print("[SessionSnapshotCloudStatus] \(line)")
+
+        guard let documentsURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first else {
+            return
+        }
+        let logURL = documentsURL.appendingPathComponent(
+            "session-snapshot-upload-status-events.log",
+            isDirectory: false
+        )
+        do {
+            if !FileManager.default.fileExists(atPath: logURL.path) {
+                try Data().write(to: logURL, options: .atomic)
+            }
+            let handle = try FileHandle(forWritingTo: logURL)
+            defer { try? handle.close() }
+            try handle.seekToEnd()
+            handle.write(Data((line + "\n").utf8))
+        } catch {
+            print("[SessionSnapshotCloudStatus] trace_write_failed error=\(error.localizedDescription)")
+        }
+    }
+
+    private func sessionSnapshotCloudStatusTraceSessionType(propertyID: UUID, sessionID: UUID) -> String {
+        if let session = try? localSessionForSnapshotUpload(propertyID: propertyID, sessionID: sessionID) {
+            return session.sessionType.rawValue
+        }
+        if let metadata = try? localStore.loadSessionMetadata(propertyID: propertyID, sessionID: sessionID) {
+            return metadata.sessionType.rawValue
+        }
+        return "unknown"
+    }
+
+    private static func sessionSnapshotStatusTraceTimestamp(_ date: Date) -> String {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter.string(from: date)
+    }
+
+    private static func sessionSnapshotStatusTraceValue(_ value: String?) -> String {
+        let raw = value ?? "nil"
+        return raw
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\n", with: "_")
+            .replacingOccurrences(of: "\r", with: "_")
+            .replacingOccurrences(of: "\t", with: "_")
+            .replacingOccurrences(of: " ", with: "_")
     }
 
     private static func sessionSnapshotAutoUploadCheckpointKey(session: Session, triggerSource: String) -> String {
