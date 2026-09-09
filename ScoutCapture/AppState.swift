@@ -47613,11 +47613,31 @@ final class AppState: ObservableObject {
         ensureCanonicalOrgPersistenceForSelectedPropertyIfKnown(reason: "start_session")
         let sessionsForProperty = sessions(for: selectedPropertyID)
         let reusableDrafts = sessionsForProperty
-            .filter { $0.deletedAt == nil && $0.status == .draft && !$0.isSealed }
+            .filter { $0.deletedAt == nil && $0.status == .draft && !$0.isSealed && sessionHasCaptures($0) }
             .sorted { $0.startedAt > $1.startedAt }
         let pendingDeliveryExists = sessionsForProperty.contains(where: { isPendingDelivery($0) })
         let reExportEligibleExists = sessionsForProperty.contains(where: { isReExportEligible($0) })
         if let currentSession, currentSession.status == .draft, currentSession.propertyID == selectedPropertyID {
+            guard sessionHasCaptures(currentSession) else {
+                self.currentSession = nil
+                recordDraftSessionReuseDecision(
+                    propertyID: selectedPropertyID,
+                    session: nil,
+                    decision: "ignored_empty_current_draft",
+                    candidateCount: reusableDrafts.count,
+                    blockedReason: "empty_current_draft_no_material_content",
+                    foregroundRefreshReconciliation: "empty_current_draft_ignored_for_session_type_selection"
+                )
+                print(
+                    "[StartSession] propertyID=\(selectedPropertyID.uuidString) " +
+                    "sessionID=\(currentSession.id.uuidString) reuse=skipped reason=empty_current_draft_no_material_content"
+                )
+                cloudBackupManager?.setCaptureModeActive(false)
+                return startSession(
+                    sessionType: sessionType,
+                    skipPropertyStatusPreflight: true
+                )
+            }
             let persistedCurrent = persistReusableDraftSessionIfNeeded(currentSession)
             recordDraftSessionReuseDecision(
                 propertyID: selectedPropertyID,
