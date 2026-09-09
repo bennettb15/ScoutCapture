@@ -5,7 +5,9 @@ from __future__ import annotations
 import importlib.util
 import json
 import pathlib
+import tempfile
 import unittest
+from types import SimpleNamespace
 from typing import Any
 
 
@@ -28,6 +30,7 @@ PACKAGE_ID = "40000000-0000-0000-0000-000000000001"
 
 class FakeSupabaseClient:
     def __init__(self) -> None:
+        self.environment = "local-test"
         self.tables: dict[str, list[dict[str, Any]]] = {
             "org_memberships": [],
             "users_profile": [],
@@ -45,9 +48,25 @@ class FakeSupabaseClient:
                     "deleted_at": None,
                 }
             ],
+            "session_snapshots": [
+                {
+                    "id": SNAPSHOT_ID,
+                    "org_id": ORG_ID,
+                    "property_id": PROPERTY_ID,
+                    "session_id": SESSION_ID,
+                    "snapshot_kind": "completed",
+                    "session_status": "completed",
+                    "is_sealed": True,
+                    "raw_session_json_sha256": "raw-session-sha",
+                    "snapshot_payload_sha256": "snapshot-payload-sha",
+                    "deleted_at": None,
+                }
+            ],
             "report_packages": [],
+            "report_package_files": [],
             worker.REPORT_READY_NOTIFICATION_TABLE: [],
         }
+        self.uploads: list[dict[str, Any]] = []
 
     def add_profile(self, user_id: str, email: str | None, full_name: str | None = None, deleted: bool = False) -> None:
         self.tables["users_profile"].append(
@@ -100,7 +119,11 @@ class FakeSupabaseClient:
                 continue
             if value.startswith("eq."):
                 expected = value[3:]
-                rows = [row for row in rows if str(row.get(key)) == expected]
+                if expected.lower() in {"true", "false"}:
+                    expected_bool = expected.lower() == "true"
+                    rows = [row for row in rows if bool(row.get(key)) == expected_bool]
+                else:
+                    rows = [row for row in rows if str(row.get(key)) == expected]
             elif value.startswith("in.(") and value.endswith(")"):
                 expected_values = set(value[4:-1].split(","))
                 rows = [row for row in rows if str(row.get(key)) in expected_values]
@@ -145,9 +168,25 @@ class FakeSupabaseClient:
 
     def insert(self, table: str, row: dict[str, Any]) -> dict[str, Any]:
         stored = dict(row)
-        stored.setdefault("id", PACKAGE_ID)
+        if table == "report_package_files":
+            stored.setdefault("id", f"file-{len(self.tables.setdefault(table, [])) + 1}")
+        else:
+            stored.setdefault("id", PACKAGE_ID)
         self.tables.setdefault(table, []).append(stored)
         return dict(stored)
+
+    def upload_object(self, bucket: str, path: str, source_path: pathlib.Path, content_type: str) -> None:
+        self.uploads.append(
+            {
+                "bucket": bucket,
+                "path": path,
+                "source_path": str(source_path),
+                "content_type": content_type,
+            }
+        )
+
+    def delete_object(self, bucket: str, path: str) -> None:
+        return None
 
 
 class FakeEmailClient:
@@ -210,6 +249,106 @@ def snapshot_row() -> dict[str, Any]:
     }
 
 
+def worker_args(output_dir: pathlib.Path) -> SimpleNamespace:
+    return SimpleNamespace(
+        output_dir=str(output_dir),
+        allow_weather_fetch=False,
+        retention_mode="dry-run",
+        pretty=True,
+    )
+
+
+def fake_worker_run_step(session_type: str, rendered_report_types: list[str]):
+    def run_step(cmd: list[str], cwd: pathlib.Path, env: dict[str, str]) -> None:
+        joined = " ".join(cmd)
+        if "report_input_phase1.py" in joined:
+            output = pathlib.Path(cmd[cmd.index("--output") + 1])
+            worker.write_json(
+                output,
+                {
+                    "source_snapshot_id": SNAPSHOT_ID,
+                    "session_type": session_type,
+                    "sessionType": session_type,
+                    "renderable_remotely": True,
+                    "media": {"missing_count": 0},
+                    "inputs": {
+                        "session": {
+                            "session_id": SESSION_ID,
+                            "property_name": "Test New Property",
+                            "property_address": "123 Portal Way, Austin, TX",
+                            "started_at_utc": "2026-09-07T14:00:00Z",
+                            "ended_at_utc": "2026-09-07T14:30:00Z",
+                            "session_type": session_type,
+                            "sessionType": session_type,
+                        },
+                        "ordered_shots": [
+                            {
+                                "shot_id": "shot-1",
+                                "session_id": SESSION_ID,
+                                "captured_by_user_id": "field-user",
+                                "captured_by_email": "field@example.test",
+                            }
+                        ],
+                    },
+                },
+            )
+            return
+        if "report_media_phase2a.py" in joined:
+            output_dir = pathlib.Path(cmd[cmd.index("--output-dir") + 1])
+            worker.write_json(
+                output_dir / "prepared_report_media.json",
+                {
+                    "errors": [],
+                    "items": [
+                        {
+                            "role": "current",
+                            "shot_id": "shot-1",
+                            "session_id": SESSION_ID,
+                            "source_storage_bucket": "scoutcapture-originals",
+                            "source_storage_path": "sessions/test/shot-1.heic",
+                            "uploaded_by_user_id": "field-user",
+                            "uploaded_by_email": "field@example.test",
+                        }
+                    ],
+                },
+            )
+            return
+        if "report_renderer_phase2b.py" in joined:
+            output_dir = pathlib.Path(cmd[cmd.index("--output-dir") + 1])
+            reports = []
+            for report_type in rendered_report_types:
+                report_dir = output_dir / report_type
+                report_dir.mkdir(parents=True, exist_ok=True)
+                pdf_path = report_dir / f"{report_type}.pdf"
+                pdf_path.write_bytes(f"%PDF-1.4\n% {report_type}\n".encode("utf-8"))
+                reports.append(
+                    {
+                        "report_type": report_type,
+                        "output_filename": pdf_path.name,
+                        "pdf_path": str(pdf_path),
+                        "pdf_sha256": worker.sha256_file(pdf_path),
+                        "page_count": 1,
+                        "report_plan_sha256": f"{report_type}-plan-sha",
+                        "validation_failures": [],
+                    }
+                )
+            worker.write_json(
+                output_dir / "phase2c_summary.json",
+                {
+                    "generator_version": worker.RENDERER_VERSION,
+                    "session_type": session_type,
+                    "sessionType": session_type,
+                    "reports": reports,
+                    "skipped_reports": [],
+                    "weather": {},
+                },
+            )
+            return
+        raise AssertionError(f"Unexpected worker command: {joined}")
+
+    return run_step
+
+
 class ReportWorkerEmailNotificationTests(unittest.TestCase):
     def test_worker_uses_punchlist_renderer_for_punchlist_visits(self) -> None:
         payload = validation()
@@ -241,6 +380,72 @@ class ReportWorkerEmailNotificationTests(unittest.TestCase):
         self.assertEqual("created", action)
         self.assertEqual("punchlist_visit", package_row["manifest"]["sessionType"])
         self.assertEqual("punchlist_visit", package_row["manifest"]["session_type"])
+
+    def test_punchlist_visit_package_skips_property_report(self) -> None:
+        client = FakeSupabaseClient()
+        original_run_step = worker.run_step
+        with tempfile.TemporaryDirectory() as tmp:
+            worker.run_step = fake_worker_run_step("punchlist_visit", ["priority", "comparison"])
+            try:
+                summary = worker.process_session(
+                    worker_args(pathlib.Path(tmp)),
+                    client,
+                    ROOT,
+                    SESSION_ID,
+                    SNAPSHOT_ID,
+                )
+            finally:
+                worker.run_step = original_run_step
+
+        package_row = client.tables["report_packages"][0]
+        package_report_types = [item["report_type"] for item in package_row["manifest"]["reports"]]
+        file_report_types = [row["report_type"] for row in client.tables["report_package_files"]]
+        upload_paths = [upload["path"] for upload in client.uploads]
+
+        self.assertEqual("ready", package_row["status"])
+        self.assertEqual("punchlist_visit", package_row["manifest"]["sessionType"])
+        self.assertEqual("punchlist_visit", package_row["manifest"]["session_type"])
+        self.assertEqual(["flagged_observations", "flagged_comparison"], package_report_types)
+        self.assertEqual(["flagged_observations", "flagged_comparison"], file_report_types)
+        self.assertEqual(["flagged_observations", "flagged_comparison"], [item["report_type"] for item in summary["uploaded_files"]])
+        self.assertFalse(any("property_report.pdf" in path for path in upload_paths))
+        self.assertNotIn("property_report", package_report_types)
+
+    def test_full_documentation_package_includes_property_report(self) -> None:
+        client = FakeSupabaseClient()
+        original_run_step = worker.run_step
+        with tempfile.TemporaryDirectory() as tmp:
+            worker.run_step = fake_worker_run_step("full_documentation", ["property", "priority", "comparison"])
+            try:
+                summary = worker.process_session(
+                    worker_args(pathlib.Path(tmp)),
+                    client,
+                    ROOT,
+                    SESSION_ID,
+                    SNAPSHOT_ID,
+                )
+            finally:
+                worker.run_step = original_run_step
+
+        package_row = client.tables["report_packages"][0]
+        package_report_types = [item["report_type"] for item in package_row["manifest"]["reports"]]
+        file_report_types = [row["report_type"] for row in client.tables["report_package_files"]]
+
+        self.assertEqual("ready", package_row["status"])
+        self.assertEqual("full_documentation", package_row["manifest"]["sessionType"])
+        self.assertEqual("full_documentation", package_row["manifest"]["session_type"])
+        self.assertEqual(
+            ["property_report", "flagged_observations", "flagged_comparison"],
+            package_report_types,
+        )
+        self.assertEqual(
+            ["property_report", "flagged_observations", "flagged_comparison"],
+            file_report_types,
+        )
+        self.assertEqual(
+            ["property_report", "flagged_observations", "flagged_comparison"],
+            [item["report_type"] for item in summary["uploaded_files"]],
+        )
 
     def test_recipient_scoping_excludes_inactive_and_unrelated_users(self) -> None:
         client = FakeSupabaseClient()
