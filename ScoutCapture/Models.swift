@@ -69,6 +69,12 @@ struct SessionMetadata: Codable {
     var timeZoneOffsetAtCapture: String
     var timeZoneOffsetMinutesAtCapture: Int?
     var captureProfile: String?
+    var capturedByUserID: UUID?
+    var capturedByEmail: String?
+    var uploadedByUserID: UUID?
+    var uploadedByEmail: String?
+    var actorUserID: UUID?
+    var actorEmail: String?
     var startedAt: Date
     var sessionStartedAtLocal: String
     var endedAt: Date?
@@ -133,6 +139,21 @@ struct SessionMetadata: Codable {
         case timeZoneOffsetMinutesAtCapture
         case captureProfile
         case capture_profile
+        case capturedByUserID
+        case capturedByUserId
+        case capturedByEmail
+        case captured_by_user_id
+        case captured_by_email
+        case uploadedByUserID
+        case uploadedByUserId
+        case uploadedByEmail
+        case uploaded_by_user_id
+        case uploaded_by_email
+        case actorUserID
+        case actorUserId
+        case actorEmail
+        case actor_user_id
+        case actor_email
         case building
         case elevation
         case detailType
@@ -176,6 +197,12 @@ struct SessionMetadata: Codable {
         timeZoneOffsetAtCapture: String = "+00:00",
         timeZoneOffsetMinutesAtCapture: Int? = nil,
         captureProfile: String? = nil,
+        capturedByUserID: UUID? = nil,
+        capturedByEmail: String? = nil,
+        uploadedByUserID: UUID? = nil,
+        uploadedByEmail: String? = nil,
+        actorUserID: UUID? = nil,
+        actorEmail: String? = nil,
         startedAt: Date,
         sessionStartedAtLocal: String = "",
         endedAt: Date?,
@@ -213,6 +240,12 @@ struct SessionMetadata: Codable {
         self.timeZoneOffsetAtCapture = timeZoneOffsetAtCapture.trimmingCharacters(in: .whitespacesAndNewlines)
         self.timeZoneOffsetMinutesAtCapture = timeZoneOffsetMinutesAtCapture
         self.captureProfile = SessionMetadata.trimmedNonEmpty(captureProfile)
+        self.capturedByUserID = capturedByUserID
+        self.capturedByEmail = SessionMetadata.trimmedNonEmpty(capturedByEmail)
+        self.uploadedByUserID = uploadedByUserID
+        self.uploadedByEmail = SessionMetadata.trimmedNonEmpty(uploadedByEmail)
+        self.actorUserID = actorUserID ?? capturedByUserID ?? uploadedByUserID
+        self.actorEmail = SessionMetadata.trimmedNonEmpty(actorEmail) ?? SessionMetadata.trimmedNonEmpty(capturedByEmail) ?? SessionMetadata.trimmedNonEmpty(uploadedByEmail)
         self.startedAt = startedAt
         self.sessionStartedAtLocal = sessionStartedAtLocal.trimmingCharacters(in: .whitespacesAndNewlines)
         self.endedAt = endedAt
@@ -297,6 +330,29 @@ struct SessionMetadata: Codable {
             try c.decodeIfPresent(String.self, forKey: .captureProfile)
                 ?? c.decodeIfPresent(String.self, forKey: .capture_profile)
         )
+        capturedByUserID = try c.decodeIfPresent(UUID.self, forKey: .capturedByUserID)
+            ?? c.decodeIfPresent(UUID.self, forKey: .capturedByUserId)
+            ?? c.decodeIfPresent(UUID.self, forKey: .captured_by_user_id)
+        capturedByEmail = SessionMetadata.trimmedNonEmpty(
+            try c.decodeIfPresent(String.self, forKey: .capturedByEmail)
+                ?? c.decodeIfPresent(String.self, forKey: .captured_by_email)
+        )
+        uploadedByUserID = try c.decodeIfPresent(UUID.self, forKey: .uploadedByUserID)
+            ?? c.decodeIfPresent(UUID.self, forKey: .uploadedByUserId)
+            ?? c.decodeIfPresent(UUID.self, forKey: .uploaded_by_user_id)
+        uploadedByEmail = SessionMetadata.trimmedNonEmpty(
+            try c.decodeIfPresent(String.self, forKey: .uploadedByEmail)
+                ?? c.decodeIfPresent(String.self, forKey: .uploaded_by_email)
+        )
+        actorUserID = try c.decodeIfPresent(UUID.self, forKey: .actorUserID)
+            ?? c.decodeIfPresent(UUID.self, forKey: .actorUserId)
+            ?? c.decodeIfPresent(UUID.self, forKey: .actor_user_id)
+            ?? capturedByUserID
+            ?? uploadedByUserID
+        actorEmail = SessionMetadata.trimmedNonEmpty(
+            try c.decodeIfPresent(String.self, forKey: .actorEmail)
+                ?? c.decodeIfPresent(String.self, forKey: .actor_email)
+        ) ?? capturedByEmail ?? uploadedByEmail
         startedAt = try c.decodeIfPresent(Date.self, forKey: .startedAt) ?? Date()
         sessionStartedAtLocal = try c.decodeIfPresent(String.self, forKey: .sessionStartedAtLocal)?
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
@@ -360,6 +416,23 @@ struct SessionMetadata: Codable {
         try c.encodeIfPresent(timeZoneOffsetMinutesAtCapture, forKey: .timeZoneOffsetMinutesAtCapture)
         try c.encodeIfPresent(SessionMetadata.trimmedNonEmpty(captureProfile), forKey: .captureProfile)
         try c.encodeIfPresent(SessionMetadata.trimmedNonEmpty(captureProfile), forKey: .capture_profile)
+        let resolvedActorUserID = actorUserID ?? capturedByUserID ?? uploadedByUserID
+        let resolvedActorEmail = SessionMetadata.trimmedNonEmpty(actorEmail) ?? SessionMetadata.trimmedNonEmpty(capturedByEmail) ?? SessionMetadata.trimmedNonEmpty(uploadedByEmail)
+        try c.encodeIfPresent(capturedByUserID, forKey: .capturedByUserID)
+        try c.encodeIfPresent(capturedByUserID, forKey: .capturedByUserId)
+        try c.encodeIfPresent(capturedByUserID, forKey: .captured_by_user_id)
+        try c.encodeIfPresent(SessionMetadata.trimmedNonEmpty(capturedByEmail), forKey: .capturedByEmail)
+        try c.encodeIfPresent(SessionMetadata.trimmedNonEmpty(capturedByEmail), forKey: .captured_by_email)
+        try c.encodeIfPresent(uploadedByUserID, forKey: .uploadedByUserID)
+        try c.encodeIfPresent(uploadedByUserID, forKey: .uploadedByUserId)
+        try c.encodeIfPresent(uploadedByUserID, forKey: .uploaded_by_user_id)
+        try c.encodeIfPresent(SessionMetadata.trimmedNonEmpty(uploadedByEmail), forKey: .uploadedByEmail)
+        try c.encodeIfPresent(SessionMetadata.trimmedNonEmpty(uploadedByEmail), forKey: .uploaded_by_email)
+        try c.encodeIfPresent(resolvedActorUserID, forKey: .actorUserID)
+        try c.encodeIfPresent(resolvedActorUserID, forKey: .actorUserId)
+        try c.encodeIfPresent(resolvedActorUserID, forKey: .actor_user_id)
+        try c.encodeIfPresent(resolvedActorEmail, forKey: .actorEmail)
+        try c.encodeIfPresent(resolvedActorEmail, forKey: .actor_email)
         try c.encodeIfPresent(shots.first?.building.trimmingCharacters(in: .whitespacesAndNewlines), forKey: .building)
         try c.encodeIfPresent(shots.first?.elevation.trimmingCharacters(in: .whitespacesAndNewlines), forKey: .elevation)
         try c.encodeIfPresent(shots.first?.detailType.trimmingCharacters(in: .whitespacesAndNewlines), forKey: .detailType)
@@ -627,6 +700,10 @@ struct ShotMetadata: Codable, Identifiable, Equatable {
     let createdAt: Date
     var capturedAtLocal: String?
     var updatedAt: Date
+    var capturedByUserID: UUID?
+    var capturedByEmail: String?
+    var uploadedByUserID: UUID?
+    var uploadedByEmail: String?
     var building: String
     var elevation: String
     var detailType: String
@@ -720,6 +797,16 @@ struct ShotMetadata: Codable, Identifiable, Equatable {
         case shotCreatedAtLocal // legacy
         case updatedAt
         case shotUpdatedAtLocal // legacy
+        case capturedByUserID
+        case capturedByUserId
+        case capturedByEmail
+        case captured_by_user_id
+        case captured_by_email
+        case uploadedByUserID
+        case uploadedByUserId
+        case uploadedByEmail
+        case uploaded_by_user_id
+        case uploaded_by_email
         case building
         case elevation
         case detailType
@@ -785,6 +872,10 @@ struct ShotMetadata: Codable, Identifiable, Equatable {
         createdAt: Date,
         capturedAtLocal: String? = nil,
         updatedAt: Date,
+        capturedByUserID: UUID? = nil,
+        capturedByEmail: String? = nil,
+        uploadedByUserID: UUID? = nil,
+        uploadedByEmail: String? = nil,
         building: String,
         elevation: String,
         detailType: String,
@@ -838,6 +929,10 @@ struct ShotMetadata: Codable, Identifiable, Equatable {
         self.createdAt = createdAt
         self.capturedAtLocal = ShotMetadata.trimmedNonEmpty(capturedAtLocal)
         self.updatedAt = updatedAt
+        self.capturedByUserID = capturedByUserID
+        self.capturedByEmail = ShotMetadata.trimmedNonEmpty(capturedByEmail)
+        self.uploadedByUserID = uploadedByUserID
+        self.uploadedByEmail = ShotMetadata.trimmedNonEmpty(uploadedByEmail)
         self.building = building
         self.elevation = elevation
         self.detailType = detailType
@@ -897,6 +992,20 @@ struct ShotMetadata: Codable, Identifiable, Equatable {
         let legacyUpdatedLocal = ShotMetadata.trimmedNonEmpty(try c.decodeIfPresent(String.self, forKey: .shotUpdatedAtLocal))
         capturedAtLocal = explicitCapturedLocal ?? legacyUpdatedLocal ?? legacyCreatedLocal
         updatedAt = try c.decodeIfPresent(Date.self, forKey: .updatedAt) ?? createdAt
+        capturedByUserID = try c.decodeIfPresent(UUID.self, forKey: .capturedByUserID)
+            ?? c.decodeIfPresent(UUID.self, forKey: .capturedByUserId)
+            ?? c.decodeIfPresent(UUID.self, forKey: .captured_by_user_id)
+        capturedByEmail = ShotMetadata.trimmedNonEmpty(
+            try c.decodeIfPresent(String.self, forKey: .capturedByEmail)
+                ?? c.decodeIfPresent(String.self, forKey: .captured_by_email)
+        )
+        uploadedByUserID = try c.decodeIfPresent(UUID.self, forKey: .uploadedByUserID)
+            ?? c.decodeIfPresent(UUID.self, forKey: .uploadedByUserId)
+            ?? c.decodeIfPresent(UUID.self, forKey: .uploaded_by_user_id)
+        uploadedByEmail = ShotMetadata.trimmedNonEmpty(
+            try c.decodeIfPresent(String.self, forKey: .uploadedByEmail)
+                ?? c.decodeIfPresent(String.self, forKey: .uploaded_by_email)
+        )
         building = try c.decodeIfPresent(String.self, forKey: .building) ?? ""
         elevation = CanonicalElevation.normalize(try c.decodeIfPresent(String.self, forKey: .elevation)) ?? ""
         detailType = try c.decodeIfPresent(String.self, forKey: .detailType) ?? ""
@@ -989,6 +1098,16 @@ struct ShotMetadata: Codable, Identifiable, Equatable {
         try c.encode(createdAt, forKey: .createdAt)
         try c.encodeIfPresent(ShotMetadata.trimmedNonEmpty(capturedAtLocal), forKey: .capturedAtLocal)
         try c.encode(updatedAt, forKey: .updatedAt)
+        try c.encodeIfPresent(capturedByUserID, forKey: .capturedByUserID)
+        try c.encodeIfPresent(capturedByUserID, forKey: .capturedByUserId)
+        try c.encodeIfPresent(capturedByUserID, forKey: .captured_by_user_id)
+        try c.encodeIfPresent(ShotMetadata.trimmedNonEmpty(capturedByEmail), forKey: .capturedByEmail)
+        try c.encodeIfPresent(ShotMetadata.trimmedNonEmpty(capturedByEmail), forKey: .captured_by_email)
+        try c.encodeIfPresent(uploadedByUserID, forKey: .uploadedByUserID)
+        try c.encodeIfPresent(uploadedByUserID, forKey: .uploadedByUserId)
+        try c.encodeIfPresent(uploadedByUserID, forKey: .uploaded_by_user_id)
+        try c.encodeIfPresent(ShotMetadata.trimmedNonEmpty(uploadedByEmail), forKey: .uploadedByEmail)
+        try c.encodeIfPresent(ShotMetadata.trimmedNonEmpty(uploadedByEmail), forKey: .uploaded_by_email)
         try c.encode(building, forKey: .building)
         try c.encode(CanonicalElevation.normalize(elevation) ?? elevation, forKey: .elevation)
         try c.encode(detailType, forKey: .detailType)

@@ -327,13 +327,21 @@ def previous_reason(previous: dict[str, Any]) -> str | None:
     )
 
 
-def report_shot(metadata: dict[str, Any], shot: dict[str, Any], issues: dict[str, dict[str, Any]]) -> dict[str, Any]:
+def report_shot(
+    metadata: dict[str, Any],
+    shot: dict[str, Any],
+    issues: dict[str, dict[str, Any]],
+    session_actor: dict[str, str | None],
+) -> dict[str, Any]:
     sid = str(metadata.get("sessionID") or "")
     sid_shot = shot_id(shot)
     original = trim(shot.get("originalFilename")) or ""
     bucket = trim(shot.get("storageBucket")) or ORIGINALS_BUCKET
     path = trim(shot.get("storagePath")) or operational_media_storage_path(sid, sid_shot, original)
     captured = iso(shot.get("createdAt") or shot.get("capturedAt") or shot.get("captured_at"))
+    captured_actor = merge_actor_identity(actor_identity(shot, "captured"), session_actor)
+    uploaded_actor = merge_actor_identity(actor_identity(shot, "uploaded"), session_actor)
+    shot_actor = merge_actor_identity(actor_identity(shot), captured_actor)
     return {
         "shot_id": sid_shot,
         "session_id": sid,
@@ -344,6 +352,15 @@ def report_shot(metadata: dict[str, Any], shot: dict[str, Any], issues: dict[str
         "shot_key": shot_key(shot),
         "logical_shot_identity": logical_shot_identity(metadata, shot),
         "captured_at_utc": captured,
+        "actor": shot_actor,
+        "actor_user_id": shot_actor.get("user_id"),
+        "actor_email": shot_actor.get("email"),
+        "captured_by": captured_actor,
+        "captured_by_user_id": captured_actor.get("user_id"),
+        "captured_by_email": captured_actor.get("email"),
+        "uploaded_by": uploaded_actor,
+        "uploaded_by_user_id": uploaded_actor.get("user_id"),
+        "uploaded_by_email": uploaded_actor.get("email"),
         "latitude": shot.get("latitude"),
         "longitude": shot.get("longitude"),
         "original_filename": original,
@@ -397,6 +414,78 @@ def detail_identifier(shot_key_value: Any, angle_index: Any) -> str:
 
 def display_text(value: Any, fallback: str) -> str:
     return trim(value) or fallback
+
+
+def actor_value(source: dict[str, Any] | None, keys: list[str]) -> str | None:
+    if not isinstance(source, dict):
+        return None
+    for key in keys:
+        value = trim(source.get(key))
+        if value:
+            return value
+    return None
+
+
+def actor_identity(source: dict[str, Any] | None, prefix: str | None = None) -> dict[str, str | None]:
+    if not isinstance(source, dict):
+        return {"user_id": None, "email": None}
+    nested_keys = []
+    direct_user_keys = []
+    direct_email_keys = []
+    if prefix == "captured":
+        nested_keys = ["capturedBy", "captured_by", "actor"]
+        direct_user_keys = ["capturedByUserID", "capturedByUserId", "captured_by_user_id", "actorUserID", "actorUserId", "actor_user_id"]
+        direct_email_keys = ["capturedByEmail", "captured_by_email", "actorEmail", "actor_email"]
+    elif prefix == "uploaded":
+        nested_keys = ["uploadedBy", "uploaded_by", "actor"]
+        direct_user_keys = ["uploadedByUserID", "uploadedByUserId", "uploaded_by_user_id", "actorUserID", "actorUserId", "actor_user_id"]
+        direct_email_keys = ["uploadedByEmail", "uploaded_by_email", "actorEmail", "actor_email"]
+    else:
+        nested_keys = ["actor", "capturedBy", "uploadedBy", "captured_by", "uploaded_by"]
+        direct_user_keys = [
+            "actorUserID",
+            "actorUserId",
+            "actor_user_id",
+            "capturedByUserID",
+            "capturedByUserId",
+            "captured_by_user_id",
+            "uploadedByUserID",
+            "uploadedByUserId",
+            "uploaded_by_user_id",
+            "created_by",
+            "updated_by",
+        ]
+        direct_email_keys = ["actorEmail", "actor_email", "capturedByEmail", "captured_by_email", "uploadedByEmail", "uploaded_by_email"]
+
+    user_id = actor_value(source, direct_user_keys)
+    email = actor_value(source, direct_email_keys)
+    manifest = source.get("manifest")
+    if isinstance(manifest, dict):
+        user_id = user_id or actor_value(manifest, direct_user_keys)
+        email = email or actor_value(manifest, direct_email_keys)
+        for key in nested_keys:
+            nested = manifest.get(key)
+            if not isinstance(nested, dict):
+                continue
+            user_id = user_id or actor_value(nested, ["user_id", "userId", "userID", "id"])
+            email = email or actor_value(nested, ["email"])
+    for key in nested_keys:
+        nested = source.get(key)
+        if not isinstance(nested, dict):
+            continue
+        user_id = user_id or actor_value(nested, ["user_id", "userId", "userID", "id"])
+        email = email or actor_value(nested, ["email"])
+    return {"user_id": user_id, "email": email}
+
+
+def merge_actor_identity(
+    preferred: dict[str, str | None],
+    fallback: dict[str, str | None],
+) -> dict[str, str | None]:
+    return {
+        "user_id": preferred.get("user_id") or fallback.get("user_id"),
+        "email": preferred.get("email") or fallback.get("email"),
+    }
 
 
 def numeric_suffix(prefix: str, value: Any) -> str | None:
@@ -638,6 +727,15 @@ def media_validations(report_shots: list[dict[str, Any]], storage: StorageProbe)
         result.append(
             {
                 "shot_id": shot["shot_id"],
+                "actor": shot.get("actor"),
+                "actor_user_id": shot.get("actor_user_id"),
+                "actor_email": shot.get("actor_email"),
+                "captured_by": shot.get("captured_by"),
+                "captured_by_user_id": shot.get("captured_by_user_id"),
+                "captured_by_email": shot.get("captured_by_email"),
+                "uploaded_by": shot.get("uploaded_by"),
+                "uploaded_by_user_id": shot.get("uploaded_by_user_id"),
+                "uploaded_by_email": shot.get("uploaded_by_email"),
                 "bucket": bucket,
                 "path": path,
                 "expected_convention_path": expected_path,
@@ -792,6 +890,10 @@ def comparison_validations(
 
 
 def session_input(metadata: dict[str, Any], payload: dict[str, Any], row: dict[str, Any]) -> dict[str, Any]:
+    snapshot_actor = merge_actor_identity(actor_identity(payload), actor_identity(row))
+    session_actor = merge_actor_identity(actor_identity(metadata), snapshot_actor)
+    captured_actor = merge_actor_identity(actor_identity(metadata, "captured"), session_actor)
+    uploaded_actor = merge_actor_identity(actor_identity(metadata, "uploaded"), session_actor)
     return {
         "session_id": str(metadata.get("sessionID") or ""),
         "property_id": str(metadata.get("propertyID") or ""),
@@ -808,8 +910,18 @@ def session_input(metadata: dict[str, Any], payload: dict[str, Any], row: dict[s
         "ended_at_utc": iso(metadata.get("endedAt")),
         "status": trim(metadata.get("status") or payload.get("status") or row.get("session_status")),
         "is_sealed": bool_value(metadata.get("isSealed") if "isSealed" in metadata else payload.get("isSealed")),
+        "actor": session_actor,
+        "actor_user_id": session_actor.get("user_id"),
+        "actor_email": session_actor.get("email"),
+        "captured_by": captured_actor,
+        "captured_by_user_id": captured_actor.get("user_id"),
+        "captured_by_email": captured_actor.get("email"),
+        "uploaded_by": uploaded_actor,
+        "uploaded_by_user_id": uploaded_actor.get("user_id"),
+        "uploaded_by_email": uploaded_actor.get("email"),
         "provenance": {
             "identity": ["session_snapshots.rawSessionJSON", "session_snapshot_metadata"],
+            "actor": ["session_snapshots.rawSessionJSON", "session_snapshots.payload.actor", "session_snapshots.created_by/updated_by"],
             "property_display_fields": ["session_snapshots.rawSessionJSON"],
             "timestamps": ["session_snapshots.rawSessionJSON"],
         },
@@ -824,7 +936,8 @@ def build_validation(args: argparse.Namespace) -> dict[str, Any]:
     storage_fixture = read_json_file(args.storage_fixture) if args.storage_fixture else None
     storage = StorageProbe(client, storage_fixture)
     issues = issue_by_id(metadata)
-    shots = [report_shot(metadata, shot, issues) for shot in exported_shots(metadata)]
+    session_actor = merge_actor_identity(actor_identity(metadata), merge_actor_identity(actor_identity(payload), actor_identity(row)))
+    shots = [report_shot(metadata, shot, issues, session_actor) for shot in exported_shots(metadata)]
     shots.sort(key=lambda item: (item.get("captured_at_utc") or "", item.get("original_filename") or ""))
 
     media = media_validations(shots, storage)
@@ -971,6 +1084,11 @@ def field_provenance() -> dict[str, Any]:
     return {
         "session_identity": ["session_snapshots.rawSessionJSON", "session_snapshot_metadata"],
         "org_property_identity": ["session_snapshots.rawSessionJSON", "session_snapshot_metadata"],
+        "actor_attribution": [
+            "session_snapshots.rawSessionJSON actor/capturedBy/uploadedBy fields",
+            "session_snapshots payload actor/capturedBy/uploadedBy fields",
+            "session_snapshots created_by/updated_by fallback for user_id only",
+        ],
         "property_display_fields": ["session_snapshots.rawSessionJSON"],
         "session_timestamps": ["session_snapshots.rawSessionJSON"],
         "ordered_shots": ["session_snapshots.rawSessionJSON", "derived_report_rule: exported active shots ordered by captured_at_utc, original_filename"],
@@ -978,6 +1096,7 @@ def field_provenance() -> dict[str, Any]:
         "guided_skipped_placeholders": ["session_snapshots.rawSessionJSON", "derived_report_rule: skipped current-session slot with no shot"],
         "guided_retired_notes": ["session_snapshots.rawSessionJSON", "derived_report_rule: retired during session"],
         "shot_identity_fields": ["session_snapshots.rawSessionJSON"],
+        "shot_actor_attribution": ["session_snapshots.rawSessionJSON shot captured/uploaded actor fields", "session-level actor fallback"],
         "logical_shot_identity": ["session_snapshots.rawSessionJSON", "derived_report_rule fallback"],
         "captured_at_utc": ["session_snapshots.rawSessionJSON"],
         "gps": ["session_snapshots.rawSessionJSON"],

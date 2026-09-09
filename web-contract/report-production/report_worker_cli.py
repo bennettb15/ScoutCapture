@@ -196,6 +196,77 @@ def read_json(path: pathlib.Path) -> Any:
         return json.load(handle)
 
 
+def trim(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def actor_from_dict(source: dict[str, Any] | None) -> dict[str, str | None]:
+    if not isinstance(source, dict):
+        return {"user_id": None, "email": None}
+    nested = source.get("actor") if isinstance(source.get("actor"), dict) else {}
+    return {
+        "user_id": trim(source.get("actor_user_id"))
+        or trim(source.get("captured_by_user_id"))
+        or trim(source.get("uploaded_by_user_id"))
+        or trim(nested.get("user_id"))
+        or trim(nested.get("userId")),
+        "email": trim(source.get("actor_email"))
+        or trim(source.get("captured_by_email"))
+        or trim(source.get("uploaded_by_email"))
+        or trim(nested.get("email")),
+    }
+
+
+def merge_actor(preferred: dict[str, str | None], fallback: dict[str, str | None]) -> dict[str, str | None]:
+    return {
+        "user_id": preferred.get("user_id") or fallback.get("user_id"),
+        "email": preferred.get("email") or fallback.get("email"),
+    }
+
+
+def validation_actor(validation: dict[str, Any]) -> dict[str, str | None]:
+    session = validation.get("inputs", {}).get("session", {})
+    actor = actor_from_dict(session)
+    for shot in validation.get("inputs", {}).get("ordered_shots", []):
+        actor = merge_actor(actor, actor_from_dict(shot))
+        if actor.get("user_id") and actor.get("email"):
+            break
+    return actor
+
+
+def original_photo_actor_manifest(validation: dict[str, Any], prepared: dict[str, Any]) -> list[dict[str, Any]]:
+    by_shot_id = {
+        str(shot.get("shot_id")).lower(): shot
+        for shot in validation.get("inputs", {}).get("ordered_shots", [])
+        if shot.get("shot_id")
+    }
+    result = []
+    for item in prepared.get("items", []):
+        if item.get("role") != "current":
+            continue
+        shot = by_shot_id.get(str(item.get("shot_id")).lower()) or {}
+        actor = merge_actor(actor_from_dict(shot), actor_from_dict(item))
+        result.append(
+            {
+                "shot_id": item.get("shot_id"),
+                "session_id": item.get("session_id"),
+                "source_storage_bucket": item.get("source_storage_bucket"),
+                "source_storage_path": item.get("source_storage_path"),
+                "actor": actor,
+                "actor_user_id": actor.get("user_id"),
+                "actor_email": actor.get("email"),
+                "captured_by_user_id": shot.get("captured_by_user_id") or item.get("captured_by_user_id"),
+                "captured_by_email": shot.get("captured_by_email") or item.get("captured_by_email"),
+                "uploaded_by_user_id": shot.get("uploaded_by_user_id") or item.get("uploaded_by_user_id"),
+                "uploaded_by_email": shot.get("uploaded_by_email") or item.get("uploaded_by_email"),
+            }
+        )
+    return sorted(result, key=lambda item: str(item.get("shot_id") or ""))
+
+
 def write_json(path: pathlib.Path, data: Any, pretty: bool = True) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(stable_json(data, pretty), encoding="utf-8")
@@ -1105,6 +1176,7 @@ def get_or_create_package(
     session_id = str(snapshot_row["session_id"])
     org_id = str(snapshot_row["org_id"])
     property_id = str(snapshot_row["property_id"])
+    actor = validation_actor(validation)
     idempotency_key = f"pdf-package:{snapshot_id}:{RENDERER_VERSION}"
     existing = client.select(
         "report_packages",
@@ -1147,6 +1219,12 @@ def get_or_create_package(
         "renderer_version": RENDERER_VERSION,
         "report_contract_version": REPORT_CONTRACT_VERSION,
         "media_preparer_version": MEDIA_PREPARER_VERSION,
+        "manifest": {
+            "worker": "web-contract/report-production/report_worker_cli.py",
+            "actor": actor,
+            "actor_user_id": actor.get("user_id"),
+            "actor_email": actor.get("email"),
+        },
     }
     return client.insert("report_packages", row), "created"
 
@@ -2105,6 +2183,8 @@ def process_session(
             report_plan_hashes.append(report["report_plan_sha256"])
 
         completed_at = safe_iso_now()
+        package_actor = validation_actor(validation)
+        original_photo_actors = original_photo_actor_manifest(validation, prepared)
         package_rows = client.patch(
             "report_packages",
             {"id": f"eq.{package['id']}"},
@@ -2129,6 +2209,9 @@ def process_session(
                     "report_count": len(uploaded_files),
                     "skipped_reports": render_summary.get("skipped_reports", []),
                     "pdf_validation_failures": [],
+                    "actor": package_actor,
+                    "actor_user_id": package_actor.get("user_id"),
+                    "actor_email": package_actor.get("email"),
                 },
                 "manifest": {
                     "worker": "web-contract/report-production/report_worker_cli.py",
@@ -2136,6 +2219,10 @@ def process_session(
                     "production_writes_made": False,
                     "remote_validation_writes_made": client.environment == "remote-validation",
                     "local_dev_writes_made": client.environment == "local-dev",
+                    "actor": package_actor,
+                    "actor_user_id": package_actor.get("user_id"),
+                    "actor_email": package_actor.get("email"),
+                    "original_photos": original_photo_actors,
                     "reports": uploaded_files,
                     "skipped_reports": render_summary.get("skipped_reports", []),
                 },

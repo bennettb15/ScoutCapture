@@ -127,6 +127,12 @@ class MediaItem:
     angle_index: int | None
     shot_key: str | None
     captured_at_utc: str | None
+    actor_user_id: str | None
+    actor_email: str | None
+    captured_by_user_id: str | None
+    captured_by_email: str | None
+    uploaded_by_user_id: str | None
+    uploaded_by_email: str | None
     is_flagged: bool
     is_resolved_in_session: bool
     session_completed_at_utc: str | None = None
@@ -407,6 +413,12 @@ def current_media_items(validation: dict[str, Any]) -> list[MediaItem]:
                 angle_index=safe_int(shot.get("angle_index")),
                 shot_key=shot.get("shot_key"),
                 captured_at_utc=shot.get("captured_at_utc"),
+                actor_user_id=shot.get("actor_user_id"),
+                actor_email=shot.get("actor_email"),
+                captured_by_user_id=shot.get("captured_by_user_id"),
+                captured_by_email=shot.get("captured_by_email"),
+                uploaded_by_user_id=shot.get("uploaded_by_user_id"),
+                uploaded_by_email=shot.get("uploaded_by_email"),
                 session_completed_at_utc=session.get("ended_at_utc"),
                 session_exported_at_utc=session.get("exported_at_utc"),
                 session_ended_at_utc=session.get("ended_at_utc"),
@@ -461,6 +473,12 @@ def previous_media_items(validation: dict[str, Any], client: SupabaseReadClient)
                 angle_index=safe_int(row.get("angle_index")),
                 shot_key=row.get("shot_key"),
                 captured_at_utc=comparison.get("previous_captured_at_utc") or row.get("captured_at"),
+                actor_user_id=None,
+                actor_email=None,
+                captured_by_user_id=None,
+                captured_by_email=None,
+                uploaded_by_user_id=None,
+                uploaded_by_email=None,
                 session_completed_at_utc=comparison.get("previous_session_completed_at_utc"),
                 session_exported_at_utc=comparison.get("previous_session_exported_at_utc"),
                 session_ended_at_utc=comparison.get("previous_session_ended_at_utc"),
@@ -530,6 +548,12 @@ def main() -> int:
                     "source_storage_path": item.source_path,
                     "source_filename": item.source_filename,
                     "captured_at_utc": item.captured_at_utc,
+                    "actor_user_id": item.actor_user_id,
+                    "actor_email": item.actor_email,
+                    "captured_by_user_id": item.captured_by_user_id,
+                    "captured_by_email": item.captured_by_email,
+                    "uploaded_by_user_id": item.uploaded_by_user_id,
+                    "uploaded_by_email": item.uploaded_by_email,
                     "session_completed_at_utc": item.session_completed_at_utc,
                     "session_exported_at_utc": item.session_exported_at_utc,
                     "session_ended_at_utc": item.session_ended_at_utc,

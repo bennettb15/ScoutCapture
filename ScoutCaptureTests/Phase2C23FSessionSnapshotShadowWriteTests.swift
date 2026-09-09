@@ -300,6 +300,51 @@ final class Phase2C23FSessionSnapshotShadowWriteTests: XCTestCase {
         XCTAssertEqual(artifacts.row.payloadByteSize, envelope.snapshotPayloadByteCount)
     }
 
+    func testSnapshotUploadArtifactsPersistAuthenticatedActorMetadata() async throws {
+        let actorID = UUID(uuidString: "11111111-2222-3333-4444-555555555555")!
+        let fixture = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        fixture.appState._debugSetOfflineReplayEnvironmentForTests(
+            activeOrganizationID: fixture.property.orgId,
+            authenticatedUserID: actorID
+        )
+
+        let artifacts = try fixture.appState._debugMakeSessionSnapshotUploadArtifactsForTests(
+            propertyID: fixture.property.id,
+            sessionID: fixture.session.id,
+            snapshotID: UUID(uuidString: "00000000-0000-0000-0000-000000000124")!,
+            kind: .completed,
+            trigger: "completed_sealed_checkpoint",
+            generatedAt: Date(timeIntervalSinceReferenceDate: 900)
+        )
+
+        let payload = try XCTUnwrap(JSONSerialization.jsonObject(with: artifacts.object.payloadData) as? [String: Any])
+        let actor = try XCTUnwrap(payload["actor"] as? [String: Any])
+        XCTAssertEqual((actor["user_id"] as? String)?.lowercased(), actorID.uuidString.lowercased())
+        XCTAssertEqual(actor["email"] as? String, "debug@example.com")
+        XCTAssertEqual(artifacts.row.createdBy, actorID)
+        XCTAssertEqual(artifacts.row.updatedBy, actorID)
+        XCTAssertEqual(artifacts.row.manifest.actor?.userID, actorID)
+        XCTAssertEqual(artifacts.row.manifest.actor?.email, "debug@example.com")
+
+        let rawSessionJSON = try XCTUnwrap(payload["rawSessionJSON"] as? String)
+        let rawSessionData = try XCTUnwrap(rawSessionJSON.data(using: .utf8))
+        let rawSession = try XCTUnwrap(JSONSerialization.jsonObject(with: rawSessionData) as? [String: Any])
+        XCTAssertEqual(rawSession["actorEmail"] as? String, "debug@example.com")
+        XCTAssertEqual((rawSession["actor_user_id"] as? String)?.lowercased(), actorID.uuidString.lowercased())
+
+        let shots = try XCTUnwrap(rawSession["shots"] as? [[String: Any]])
+        let firstShot = try XCTUnwrap(shots.first)
+        XCTAssertEqual(firstShot["capturedByEmail"] as? String, "debug@example.com")
+        XCTAssertEqual((firstShot["captured_by_user_id"] as? String)?.lowercased(), actorID.uuidString.lowercased())
+        XCTAssertEqual(firstShot["uploadedByEmail"] as? String, "debug@example.com")
+
+        let media = try XCTUnwrap(payload["mediaManifest"] as? [[String: Any]])
+        let firstMedia = try XCTUnwrap(media.first)
+        XCTAssertEqual(firstMedia["capturedByEmail"] as? String, "debug@example.com")
+        XCTAssertEqual((firstMedia["uploadedByUserID"] as? String)?.lowercased(), actorID.uuidString.lowercased())
+    }
+
     func testStorageAndTableSuccessRecordsSuccess() async throws {
         let fixture = try makeFixture()
         defer { try? FileManager.default.removeItem(at: fixture.root) }

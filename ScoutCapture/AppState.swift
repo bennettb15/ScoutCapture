@@ -960,8 +960,59 @@ final class AppState: ObservableObject {
         let payloadSHA256: String
     }
 
+    struct SessionSnapshotActorIdentity: Codable, Equatable {
+        let userID: UUID?
+        let email: String?
+
+        enum CodingKeys: String, CodingKey {
+            case userID = "user_id"
+            case userId
+            case email
+        }
+
+        init(userID: UUID?, email: String?) {
+            self.userID = userID
+            self.email = Self.trimmedNonEmpty(email)
+        }
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            userID = try container.decodeIfPresent(UUID.self, forKey: .userID)
+                ?? container.decodeIfPresent(UUID.self, forKey: .userId)
+            email = Self.trimmedNonEmpty(try container.decodeIfPresent(String.self, forKey: .email))
+        }
+
+        func encode(to encoder: Encoder) throws {
+            var container = encoder.container(keyedBy: CodingKeys.self)
+            try container.encodeIfPresent(userID, forKey: .userID)
+            try container.encodeIfPresent(userID, forKey: .userId)
+            try container.encodeIfPresent(email, forKey: .email)
+        }
+
+        private static func trimmedNonEmpty(_ value: String?) -> String? {
+            guard let value else { return nil }
+            let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty ? nil : trimmed
+        }
+    }
+
     struct SessionSnapshotUploadManifest: Codable, Equatable {
         let media: [SessionSnapshotMediaManifestItem]
+        let actor: SessionSnapshotActorIdentity?
+        let capturedBy: SessionSnapshotActorIdentity?
+        let uploadedBy: SessionSnapshotActorIdentity?
+
+        init(
+            media: [SessionSnapshotMediaManifestItem],
+            actor: SessionSnapshotActorIdentity? = nil,
+            capturedBy: SessionSnapshotActorIdentity? = nil,
+            uploadedBy: SessionSnapshotActorIdentity? = nil
+        ) {
+            self.media = media
+            self.actor = actor
+            self.capturedBy = capturedBy
+            self.uploadedBy = uploadedBy
+        }
     }
 
     struct SessionSnapshotUploadRow: Codable, Equatable, Identifiable {
@@ -1907,6 +1958,10 @@ final class AppState: ObservableObject {
         let storagePathPresent: Bool
         let checksumPresent: Bool
         let storageByteSize: Int?
+        let capturedByUserID: UUID?
+        let capturedByEmail: String?
+        let uploadedByUserID: UUID?
+        let uploadedByEmail: String?
     }
 
     struct SessionSnapshotEnvelope: Codable, Equatable, Identifiable {
@@ -1925,6 +1980,9 @@ final class AppState: ObservableObject {
         let exportedAt: Date?
         let firstDeliveredAt: Date?
         let reExportExpiresAt: Date?
+        let actor: SessionSnapshotActorIdentity?
+        let capturedBy: SessionSnapshotActorIdentity?
+        let uploadedBy: SessionSnapshotActorIdentity?
         let shotCount: Int
         let issueCount: Int
         let guidedCount: Int
@@ -14887,6 +14945,9 @@ final class AppState: ObservableObject {
         let exportedAt: Date?
         let firstDeliveredAt: Date?
         let reExportExpiresAt: Date?
+        let actor: SessionSnapshotActorIdentity?
+        let capturedBy: SessionSnapshotActorIdentity?
+        let uploadedBy: SessionSnapshotActorIdentity?
         let shotCount: Int
         let issueCount: Int
         let guidedCount: Int
@@ -14918,6 +14979,61 @@ final class AppState: ObservableObject {
         ).envelope
     }
 
+    private func sessionSnapshotActorIdentity(for metadata: SessionMetadata) -> SessionSnapshotActorIdentity? {
+        let firstShot = metadata.shots.sorted { lhs, rhs in
+            if lhs.createdAt != rhs.createdAt { return lhs.createdAt < rhs.createdAt }
+            return lhs.shotID.uuidString < rhs.shotID.uuidString
+        }.first
+        let userID = firstShot?.capturedByUserID
+            ?? firstShot?.uploadedByUserID
+            ?? metadata.capturedByUserID
+            ?? metadata.uploadedByUserID
+            ?? metadata.actorUserID
+            ?? authenticatedSupabaseUser?.id
+        let email = Self.trimmedNonEmpty(firstShot?.capturedByEmail)
+            ?? Self.trimmedNonEmpty(firstShot?.uploadedByEmail)
+            ?? Self.trimmedNonEmpty(metadata.capturedByEmail)
+            ?? Self.trimmedNonEmpty(metadata.uploadedByEmail)
+            ?? Self.trimmedNonEmpty(metadata.actorEmail)
+            ?? Self.trimmedNonEmpty(authenticatedSupabaseUser?.email)
+        guard userID != nil || email != nil else { return nil }
+        return SessionSnapshotActorIdentity(userID: userID, email: email)
+    }
+
+    private static func sessionSnapshotMetadata(
+        _ metadata: SessionMetadata,
+        stampedWith actor: SessionSnapshotActorIdentity?
+    ) -> SessionMetadata {
+        guard let actor else { return metadata }
+        var enriched = metadata
+        enriched.capturedByUserID = enriched.capturedByUserID ?? actor.userID
+        enriched.capturedByEmail = trimmedNonEmpty(enriched.capturedByEmail) ?? actor.email
+        enriched.uploadedByUserID = actor.userID ?? enriched.uploadedByUserID
+        enriched.uploadedByEmail = actor.email ?? trimmedNonEmpty(enriched.uploadedByEmail)
+        enriched.actorUserID = enriched.actorUserID ?? enriched.capturedByUserID ?? enriched.uploadedByUserID
+        enriched.actorEmail = trimmedNonEmpty(enriched.actorEmail) ?? enriched.capturedByEmail ?? enriched.uploadedByEmail
+        enriched.shots = enriched.shots.map { shot in
+            var stampedShot = shot
+            stampedShot.capturedByUserID = stampedShot.capturedByUserID ?? actor.userID
+            stampedShot.capturedByEmail = trimmedNonEmpty(stampedShot.capturedByEmail) ?? actor.email
+            stampedShot.uploadedByUserID = actor.userID ?? stampedShot.uploadedByUserID
+            stampedShot.uploadedByEmail = actor.email ?? trimmedNonEmpty(stampedShot.uploadedByEmail)
+            return stampedShot
+        }
+        return enriched
+    }
+
+    private static func encodeSessionSnapshotRawSessionJSON(_ metadata: SessionMetadata) throws -> Data {
+        do {
+            let encoder = JSONEncoder()
+            encoder.dateEncodingStrategy = .iso8601
+            encoder.outputFormatting = [.sortedKeys]
+            return try encoder.encode(metadata)
+        } catch {
+            throw SessionSnapshotPreviewError.checksumGenerationFailed
+        }
+    }
+
     private func makeSessionSnapshotBuildResult(
         propertyID: UUID,
         session: Session,
@@ -14940,9 +15056,12 @@ final class AppState: ObservableObject {
             throw SessionSnapshotPreviewError.sessionJSONIDMismatch
         }
 
-        let rawSessionJSON = String(data: rawData, encoding: .utf8) ?? rawData.base64EncodedString()
-        let rawChecksum = Self.sessionSnapshotSHA256Hex(for: rawData)
-        let manifest = metadata.shots.map { shot in
+        let actor = sessionSnapshotActorIdentity(for: metadata)
+        let enrichedMetadata = Self.sessionSnapshotMetadata(metadata, stampedWith: actor)
+        let enrichedRawData = actor == nil ? rawData : try Self.encodeSessionSnapshotRawSessionJSON(enrichedMetadata)
+        let rawSessionJSON = String(data: enrichedRawData, encoding: .utf8) ?? enrichedRawData.base64EncodedString()
+        let rawChecksum = Self.sessionSnapshotSHA256Hex(for: enrichedRawData)
+        let manifest = enrichedMetadata.shots.map { shot in
             Self.makeSessionSnapshotMediaManifestItem(
                 for: shot,
                 propertyID: propertyID,
@@ -14967,15 +15086,18 @@ final class AppState: ObservableObject {
             exportedAt: metadata.exportedAt,
             firstDeliveredAt: metadata.firstDeliveredAt,
             reExportExpiresAt: metadata.reExportExpiresAt,
-            shotCount: metadata.shots.count,
-            issueCount: metadata.issues.count,
-            guidedCount: metadata.guidedShots.count,
+            actor: actor,
+            capturedBy: actor,
+            uploadedBy: actor,
+            shotCount: enrichedMetadata.shots.count,
+            issueCount: enrichedMetadata.issues.count,
+            guidedCount: enrichedMetadata.guidedShots.count,
             mediaManifestCount: manifest.count,
             missingLocalOriginalsCount: missingOriginals,
             supabaseStorageMetadataCount: storageMetadataCount,
             rawSessionJSON: rawSessionJSON,
             rawSessionJSONSHA256: rawChecksum,
-            rawSessionJSONByteCount: rawData.count,
+            rawSessionJSONByteCount: enrichedRawData.count,
             mediaManifest: manifest
         )
 
@@ -15005,6 +15127,9 @@ final class AppState: ObservableObject {
             exportedAt: payload.exportedAt,
             firstDeliveredAt: payload.firstDeliveredAt,
             reExportExpiresAt: payload.reExportExpiresAt,
+            actor: payload.actor,
+            capturedBy: payload.capturedBy,
+            uploadedBy: payload.uploadedBy,
             shotCount: payload.shotCount,
             issueCount: payload.issueCount,
             guidedCount: payload.guidedCount,
@@ -15014,7 +15139,7 @@ final class AppState: ObservableObject {
             rawSessionJSON: rawSessionJSON,
             rawSessionJSONSHA256: rawChecksum,
             snapshotPayloadSHA256: Self.sessionSnapshotSHA256Hex(for: payloadData),
-            rawSessionJSONByteCount: rawData.count,
+            rawSessionJSONByteCount: enrichedRawData.count,
             snapshotPayloadByteCount: payloadData.count,
             mediaManifest: manifest
         )
@@ -15046,9 +15171,12 @@ final class AppState: ObservableObject {
             throw SessionSnapshotPreviewError.sessionJSONIDMismatch
         }
 
-        let rawSessionJSON = String(data: rawData, encoding: .utf8) ?? rawData.base64EncodedString()
-        let rawChecksum = Self.sessionSnapshotSHA256Hex(for: rawData)
-        let manifest = metadata.shots.map { shot in
+        let actor = sessionSnapshotActorIdentity(for: metadata)
+        let enrichedMetadata = Self.sessionSnapshotMetadata(metadata, stampedWith: actor)
+        let enrichedRawData = actor == nil ? rawData : try Self.encodeSessionSnapshotRawSessionJSON(enrichedMetadata)
+        let rawSessionJSON = String(data: enrichedRawData, encoding: .utf8) ?? enrichedRawData.base64EncodedString()
+        let rawChecksum = Self.sessionSnapshotSHA256Hex(for: enrichedRawData)
+        let manifest = enrichedMetadata.shots.map { shot in
             Self.makeSessionSnapshotMediaManifestItem(
                 forArchivedShot: shot,
                 payloadRoot: payloadRoot
@@ -15071,15 +15199,18 @@ final class AppState: ObservableObject {
             exportedAt: metadata.exportedAt,
             firstDeliveredAt: metadata.firstDeliveredAt,
             reExportExpiresAt: metadata.reExportExpiresAt,
-            shotCount: metadata.shots.count,
-            issueCount: metadata.issues.count,
-            guidedCount: metadata.guidedShots.count,
+            actor: actor,
+            capturedBy: actor,
+            uploadedBy: actor,
+            shotCount: enrichedMetadata.shots.count,
+            issueCount: enrichedMetadata.issues.count,
+            guidedCount: enrichedMetadata.guidedShots.count,
             mediaManifestCount: manifest.count,
             missingLocalOriginalsCount: missingOriginals,
             supabaseStorageMetadataCount: storageMetadataCount,
             rawSessionJSON: rawSessionJSON,
             rawSessionJSONSHA256: rawChecksum,
-            rawSessionJSONByteCount: rawData.count,
+            rawSessionJSONByteCount: enrichedRawData.count,
             mediaManifest: manifest
         )
 
@@ -15109,6 +15240,9 @@ final class AppState: ObservableObject {
             exportedAt: payload.exportedAt,
             firstDeliveredAt: payload.firstDeliveredAt,
             reExportExpiresAt: payload.reExportExpiresAt,
+            actor: payload.actor,
+            capturedBy: payload.capturedBy,
+            uploadedBy: payload.uploadedBy,
             shotCount: payload.shotCount,
             issueCount: payload.issueCount,
             guidedCount: payload.guidedCount,
@@ -15118,7 +15252,7 @@ final class AppState: ObservableObject {
             rawSessionJSON: rawSessionJSON,
             rawSessionJSONSHA256: rawChecksum,
             snapshotPayloadSHA256: Self.sessionSnapshotSHA256Hex(for: payloadData),
-            rawSessionJSONByteCount: rawData.count,
+            rawSessionJSONByteCount: enrichedRawData.count,
             snapshotPayloadByteCount: payloadData.count,
             mediaManifest: manifest
         )
@@ -17291,7 +17425,12 @@ final class AppState: ObservableObject {
             payloadByteSize: envelope.snapshotPayloadByteCount,
             rawSessionJSONSHA256: envelope.rawSessionJSONSHA256,
             snapshotPayloadSHA256: envelope.snapshotPayloadSHA256,
-            manifest: SessionSnapshotUploadManifest(media: envelope.mediaManifest),
+            manifest: SessionSnapshotUploadManifest(
+                media: envelope.mediaManifest,
+                actor: envelope.actor,
+                capturedBy: envelope.capturedBy,
+                uploadedBy: envelope.uploadedBy
+            ),
             shotCount: envelope.shotCount,
             issueCount: envelope.issueCount,
             guidedCount: envelope.guidedCount,
@@ -19908,7 +20047,11 @@ final class AppState: ObservableObject {
             storageBucketPresent: trimmedNonEmpty(shot.storageBucket) != nil,
             storagePathPresent: trimmedNonEmpty(shot.storagePath) != nil,
             checksumPresent: trimmedNonEmpty(shot.checksumSHA256) != nil,
-            storageByteSize: shot.byteSize
+            storageByteSize: shot.byteSize,
+            capturedByUserID: shot.capturedByUserID,
+            capturedByEmail: trimmedNonEmpty(shot.capturedByEmail),
+            uploadedByUserID: shot.uploadedByUserID,
+            uploadedByEmail: trimmedNonEmpty(shot.uploadedByEmail)
         )
     }
 
@@ -19933,7 +20076,11 @@ final class AppState: ObservableObject {
             storageBucketPresent: trimmedNonEmpty(shot.storageBucket) != nil,
             storagePathPresent: trimmedNonEmpty(shot.storagePath) != nil,
             checksumPresent: trimmedNonEmpty(shot.checksumSHA256) != nil,
-            storageByteSize: shot.byteSize
+            storageByteSize: shot.byteSize,
+            capturedByUserID: shot.capturedByUserID,
+            capturedByEmail: trimmedNonEmpty(shot.capturedByEmail),
+            uploadedByUserID: shot.uploadedByUserID,
+            uploadedByEmail: trimmedNonEmpty(shot.uploadedByEmail)
         )
     }
 

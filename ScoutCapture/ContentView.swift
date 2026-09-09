@@ -3422,6 +3422,17 @@ private final class DetailTypesModel: ObservableObject {
         persistSelected()
     }
 
+    func resetSelectionsToOverview(for profile: CaptureProfile) {
+        let interiorOverview = types(for: .interior, profile: profile).first { $0.name == "Overview" }?.name
+            ?? types(for: .interior, profile: profile).first?.name
+            ?? ""
+        let exteriorOverview = types(for: .exterior, profile: profile).first { $0.name == "Overview" }?.name
+            ?? types(for: .exterior, profile: profile).first?.name
+            ?? ""
+        setSelected(interiorOverview, for: .interior, profile: profile)
+        setSelected(exteriorOverview, for: .exterior, profile: profile)
+    }
+
     @discardableResult
     func insertBlankItem(for mode: ContentView.LocationMode, profile: CaptureProfile) -> UUID {
         let newItem = DetailTypeItem(name: "")
@@ -6748,6 +6759,7 @@ struct ContentView: View {
                     sessionID: appState.currentSession?.id
                 )
                 refreshCaptureProfileSessionState()
+                resetDetailSelectionForNewEmptySessionIfNeeded()
                 primeDeferredReferenceResolution()
                 loadBuildingOptions()
                 loadTradeOptions()
@@ -6780,6 +6792,7 @@ struct ContentView: View {
                     sessionID: appState.currentSession?.id
                 )
                 refreshCaptureProfileSessionState()
+                resetDetailSelectionForNewEmptySessionIfNeeded()
                 reservedAngleByContextKey = [:]
                 primeDeferredReferenceResolution()
                 resetSelectionForSwitch()
@@ -6810,6 +6823,7 @@ struct ContentView: View {
                     "property=\(propertyIDText) baseline=\(baselineActive)"
                 )
                 refreshCaptureProfileSessionState()
+                resetDetailSelectionForNewEmptySessionIfNeeded()
                 ensureCameraSessionPrecondition()
                 if hasValidCurrentSession {
                     camera.ensurePreviewRunningAsync()
@@ -6861,6 +6875,7 @@ struct ContentView: View {
                 scheduleHudAngleIndexRefresh()
             }
             .onChange(of: captureProfile) { _, _ in
+                resetDetailSelectionForNewEmptySessionIfNeeded()
                 scheduleHudAngleIndexRefresh()
             }
             .onAppear {
@@ -11025,6 +11040,9 @@ extension ContentView {
         )
         let exifOrientation = capturedExifOrientation ?? Int(ReportLibraryModel.cgOrientationRawFromDevice(lastValidDeviceOrientation))
         let location = locationManager.lastLocation
+        let captureActorUserID = appState.authenticatedSupabaseUser?.id
+        let captureActorEmail = (appState.authenticatedSupabaseUser?.email)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
 
         var metadata = ShotMetadata(
             shotID: shot.id,
@@ -11032,6 +11050,10 @@ extension ContentView {
             sessionID: session.id,
             createdAt: shot.capturedAt,
             updatedAt: shot.capturedAt,
+            capturedByUserID: captureActorUserID,
+            capturedByEmail: captureActorEmail?.isEmpty == true ? nil : captureActorEmail,
+            uploadedByUserID: captureActorUserID,
+            uploadedByEmail: captureActorEmail?.isEmpty == true ? nil : captureActorEmail,
             building: buildingValue,
             elevation: normalizedElevation,
             detailType: detailTypeValue,
@@ -14576,6 +14598,20 @@ extension ContentView {
         isArmedIssueDetailNoteReadOnly = false
         detailNote = ""
         selectedPriority = ""
+    }
+
+    private func resetDetailSelectionForNewEmptySessionIfNeeded() {
+        guard let propertyID = appState.selectedPropertyID,
+              let session = appState.currentSession,
+              session.status == .draft,
+              !session.isSealed else {
+            return
+        }
+        if let metadata = try? localStore.loadSessionMetadata(propertyID: propertyID, sessionID: session.id),
+           !metadata.shots.isEmpty {
+            return
+        }
+        detailTypesModel.resetSelectionsToOverview(for: captureProfile)
     }
 
     private func cancelArmedIssueCapture() {
