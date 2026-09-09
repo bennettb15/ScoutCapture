@@ -587,6 +587,23 @@ def report_date(validation: dict[str, Any]) -> str:
     return dt.datetime.now().strftime("%m/%d/%Y")
 
 
+def session_type(validation: dict[str, Any]) -> str:
+    session = (validation.get("inputs") or {}).get("session") or {}
+    value = (
+        validation.get("session_type")
+        or validation.get("sessionType")
+        or session.get("session_type")
+        or session.get("sessionType")
+        or "full_documentation"
+    )
+    normalized = str(value or "").strip().lower()
+    return "punchlist_visit" if normalized == "punchlist_visit" else "full_documentation"
+
+
+def renderer_report_arg(validation: dict[str, Any]) -> str:
+    return "punchlist" if session_type(validation) == "punchlist_visit" else "all"
+
+
 def format_session_datetime(value: Any) -> str | None:
     if not value:
         return None
@@ -1167,6 +1184,7 @@ def get_or_create_package(
     attempt_started_at: str,
 ) -> tuple[dict[str, Any], str]:
     session = validation["inputs"]["session"]
+    package_session_type = session_type(validation)
     snapshot_id = str(snapshot_row["id"])
     validation_snapshot_id = str(validation["source_snapshot_id"])
     if validation_snapshot_id.lower() != snapshot_id.lower():
@@ -1221,6 +1239,8 @@ def get_or_create_package(
         "media_preparer_version": MEDIA_PREPARER_VERSION,
         "manifest": {
             "worker": "web-contract/report-production/report_worker_cli.py",
+            "sessionType": package_session_type,
+            "session_type": package_session_type,
             "actor": actor,
             "actor_user_id": actor.get("user_id"),
             "actor_email": actor.get("email"),
@@ -2122,6 +2142,7 @@ def process_session(
             str(logo_svg),
             "--pretty",
         ]
+        render_cmd[render_cmd.index("--report") + 1] = renderer_report_arg(validation)
         if args.allow_weather_fetch:
             render_cmd.append("--allow-weather-fetch")
         run_step(render_cmd, repo, env)
@@ -2131,7 +2152,8 @@ def process_session(
         if failed:
             raise WorkerError(f"PDF validation failures: {failed}")
         if not render_summary.get("reports"):
-            raise WorkerError(f"No applicable PDF reports were generated: {render_summary.get('skipped_reports')}")
+            if session_type(validation) != "punchlist_visit":
+                raise WorkerError(f"No applicable PDF reports were generated: {render_summary.get('skipped_reports')}")
     except Exception as error:
         if package is not None:
             client.patch(
@@ -2185,6 +2207,7 @@ def process_session(
         completed_at = safe_iso_now()
         package_actor = validation_actor(validation)
         original_photo_actors = original_photo_actor_manifest(validation, prepared)
+        package_session_type = session_type(validation)
         package_rows = client.patch(
             "report_packages",
             {"id": f"eq.{package['id']}"},
@@ -2207,6 +2230,8 @@ def process_session(
                 "weather_metadata": render_summary.get("weather") or {},
                 "validation_summary": {
                     "report_count": len(uploaded_files),
+                    "sessionType": package_session_type,
+                    "session_type": package_session_type,
                     "skipped_reports": render_summary.get("skipped_reports", []),
                     "pdf_validation_failures": [],
                     "actor": package_actor,
@@ -2215,6 +2240,8 @@ def process_session(
                 },
                 "manifest": {
                     "worker": "web-contract/report-production/report_worker_cli.py",
+                    "sessionType": package_session_type,
+                    "session_type": package_session_type,
                     "environment": client.environment,
                     "production_writes_made": False,
                     "remote_validation_writes_made": client.environment == "remote-validation",

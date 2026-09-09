@@ -1975,6 +1975,7 @@ final class AppState: ObservableObject {
         let orgID: UUID?
         let propertyID: UUID
         let sessionID: UUID
+        let sessionType: SessionType?
         let status: Session.Status
         let isSealed: Bool
         let exportedAt: Date?
@@ -14940,6 +14941,7 @@ final class AppState: ObservableObject {
         let orgID: UUID?
         let propertyID: UUID
         let sessionID: UUID
+        let sessionType: SessionType?
         let status: Session.Status
         let isSealed: Bool
         let exportedAt: Date?
@@ -15081,6 +15083,7 @@ final class AppState: ObservableObject {
             orgID: metadata.orgID,
             propertyID: propertyID,
             sessionID: session.id,
+            sessionType: enrichedMetadata.sessionType,
             status: metadata.status,
             isSealed: metadata.isSealed,
             exportedAt: metadata.exportedAt,
@@ -15122,6 +15125,7 @@ final class AppState: ObservableObject {
             orgID: payload.orgID,
             propertyID: payload.propertyID,
             sessionID: payload.sessionID,
+            sessionType: payload.sessionType,
             status: payload.status,
             isSealed: payload.isSealed,
             exportedAt: payload.exportedAt,
@@ -15194,6 +15198,7 @@ final class AppState: ObservableObject {
             orgID: metadata.orgID,
             propertyID: propertyID,
             sessionID: sessionID,
+            sessionType: enrichedMetadata.sessionType,
             status: metadata.status,
             isSealed: metadata.isSealed,
             exportedAt: metadata.exportedAt,
@@ -15235,6 +15240,7 @@ final class AppState: ObservableObject {
             orgID: payload.orgID,
             propertyID: payload.propertyID,
             sessionID: payload.sessionID,
+            sessionType: payload.sessionType,
             status: payload.status,
             isSealed: payload.isSealed,
             exportedAt: payload.exportedAt,
@@ -47576,7 +47582,10 @@ final class AppState: ObservableObject {
     }
 
     @discardableResult
-    func startSession(skipPropertyStatusPreflight: Bool = false) -> Session? {
+    func startSession(
+        sessionType: SessionType = .fullDocumentation,
+        skipPropertyStatusPreflight: Bool = false
+    ) -> Session? {
         guard let selectedPropertyID else { return nil }
         if !skipPropertyStatusPreflight {
             let propertyStatusEntryPreflight = evaluatePropertyStatusEntryPreflight(
@@ -47604,7 +47613,7 @@ final class AppState: ObservableObject {
         ensureCanonicalOrgPersistenceForSelectedPropertyIfKnown(reason: "start_session")
         let sessionsForProperty = sessions(for: selectedPropertyID)
         let reusableDrafts = sessionsForProperty
-            .filter { $0.deletedAt == nil && $0.status == .draft && !$0.isSealed && sessionHasCaptures($0) }
+            .filter { $0.deletedAt == nil && $0.status == .draft && !$0.isSealed }
             .sorted { $0.startedAt > $1.startedAt }
         let pendingDeliveryExists = sessionsForProperty.contains(where: { isPendingDelivery($0) })
         let reExportEligibleExists = sessionsForProperty.contains(where: { isReExportEligible($0) })
@@ -47646,6 +47655,7 @@ final class AppState: ObservableObject {
             allProperties.first(where: { $0.id == selectedPropertyID })?.captureProfile
         let session = Session(
             propertyID: selectedPropertyID,
+            sessionType: sessionType,
             startedAt: Date(),
             status: .draft,
             endedAt: nil,
@@ -47676,6 +47686,67 @@ final class AppState: ObservableObject {
         print("[StartSession] propertyID=\(selectedPropertyID.uuidString) blockedReason=none pendingDeliveryExists=\(pendingDeliveryExists) reExportEligibleExists=\(reExportEligibleExists)")
         cloudBackupManager?.setCaptureModeActive(true)
         return session
+    }
+
+    func currentSessionRequiresInitialSessionTypeSelection(propertyID: UUID) -> Bool {
+        guard let session = currentSession,
+              session.propertyID == propertyID,
+              session.status == .draft,
+              !session.isSealed,
+              !isFinalSession(session) else {
+            return false
+        }
+        return !sessions(for: propertyID).contains { $0.id == session.id }
+    }
+
+    @discardableResult
+    func persistCurrentSessionType(_ sessionType: SessionType) -> Session? {
+        guard var session = currentSession else { return nil }
+        session.sessionType = sessionType
+        currentSession = session
+        do {
+            let persisted = try localStore.upsertSession(session)
+            currentSession = persisted
+            reloadSessionCache(for: persisted.propertyID)
+            try localStore.ensureSessionMetadata(for: persisted)
+            schedulePhaseBSessionShadowWrite(for: persisted)
+            return persisted
+        } catch {
+            recordDiagnosticsError(error)
+            return nil
+        }
+    }
+
+    func isPunchlistVisitSession(_ session: Session?) -> Bool {
+        session?.sessionType == .punchlistVisit
+    }
+
+    nonisolated static func sessionCompletionHasOutstandingChecklistItems(
+        sessionType: SessionType,
+        guidedRemainingCount: Int,
+        flaggedRemainingCount: Int
+    ) -> Bool {
+        if sessionType == .punchlistVisit {
+            return flaggedRemainingCount > 0
+        }
+        return guidedRemainingCount > 0 || flaggedRemainingCount > 0
+    }
+
+    nonisolated static func sessionCanComplete(
+        sessionType: SessionType,
+        hasBaseline: Bool,
+        guidedRemainingCount: Int,
+        flaggedRemainingCount: Int,
+        currentSessionCaptureCount: Int
+    ) -> Bool {
+        if sessionType == .punchlistVisit {
+            return flaggedRemainingCount == 0 && (hasBaseline || currentSessionCaptureCount > 0)
+        }
+        return hasBaseline && guidedRemainingCount == 0 && flaggedRemainingCount == 0
+    }
+
+    nonisolated static func sessionCompletionActionTitle(sessionType: SessionType) -> String {
+        sessionType == .punchlistVisit ? "Complete Punchlist Visit" : "Complete Session"
     }
 
     private func persistReusableDraftSessionIfNeeded(_ session: Session) -> Session {

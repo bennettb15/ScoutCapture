@@ -143,6 +143,12 @@ class FakeSupabaseClient:
                 patched.append(dict(existing))
         return patched
 
+    def insert(self, table: str, row: dict[str, Any]) -> dict[str, Any]:
+        stored = dict(row)
+        stored.setdefault("id", PACKAGE_ID)
+        self.tables.setdefault(table, []).append(stored)
+        return dict(stored)
+
 
 class FakeEmailClient:
     def __init__(self, fail: bool = False) -> None:
@@ -189,12 +195,53 @@ def validation() -> dict[str, Any]:
                 "property_name": "Test New Property",
                 "property_address": "123 Portal Way, Austin, TX",
                 "ended_at_utc": "2026-09-07T14:30:00Z",
+                "session_type": "full_documentation",
             }
         }
     }
 
 
+def snapshot_row() -> dict[str, Any]:
+    return {
+        "id": SNAPSHOT_ID,
+        "org_id": ORG_ID,
+        "property_id": PROPERTY_ID,
+        "session_id": SESSION_ID,
+    }
+
+
 class ReportWorkerEmailNotificationTests(unittest.TestCase):
+    def test_worker_uses_punchlist_renderer_for_punchlist_visits(self) -> None:
+        payload = validation()
+        payload["session_type"] = "punchlist_visit"
+        payload["inputs"]["session"]["session_type"] = "punchlist_visit"
+
+        self.assertEqual("punchlist_visit", worker.session_type(payload))
+        self.assertEqual("punchlist", worker.renderer_report_arg(payload))
+
+    def test_worker_uses_full_renderer_for_full_documentation(self) -> None:
+        self.assertEqual("full_documentation", worker.session_type(validation()))
+        self.assertEqual("all", worker.renderer_report_arg(validation()))
+
+    def test_created_package_manifest_marks_punchlistSessionType(self) -> None:
+        client = FakeSupabaseClient()
+        payload = validation()
+        payload["source_snapshot_id"] = SNAPSHOT_ID
+        payload["session_type"] = "punchlist_visit"
+        payload["inputs"]["session"]["session_id"] = SESSION_ID
+        payload["inputs"]["session"]["session_type"] = "punchlist_visit"
+
+        package_row, action = worker.get_or_create_package(
+            client,
+            payload,
+            snapshot_row(),
+            "2026-09-07T14:30:00Z",
+        )
+
+        self.assertEqual("created", action)
+        self.assertEqual("punchlist_visit", package_row["manifest"]["sessionType"])
+        self.assertEqual("punchlist_visit", package_row["manifest"]["session_type"])
+
     def test_recipient_scoping_excludes_inactive_and_unrelated_users(self) -> None:
         client = FakeSupabaseClient()
         client.add_profile("owner-user", "owner@example.test")

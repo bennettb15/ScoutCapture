@@ -109,7 +109,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-dir", required=True, help="Local shadow output directory.")
     parser.add_argument(
         "--report",
-        choices=["all", "property", "priority", "comparison"],
+        choices=["all", "property", "priority", "comparison", "punchlist"],
         default="all",
         help="Report type to render.",
     )
@@ -1441,8 +1441,12 @@ def make_plan(
         "report_type": report_type,
         "output_filename": output_filename(session, report_type),
         "session_id": validation.get("session_id") or session.get("session_id"),
+        "session_type": validation.get("session_type") or session.get("session_type") or "full_documentation",
+        "sessionType": validation.get("sessionType") or session.get("sessionType") or validation.get("session_type") or session.get("session_type") or "full_documentation",
         "source_snapshot_id": validation.get("source_snapshot_id"),
         "session": {
+            "session_type": session.get("session_type") or validation.get("session_type") or "full_documentation",
+            "sessionType": session.get("sessionType") or validation.get("sessionType") or session.get("session_type") or validation.get("session_type") or "full_documentation",
             "property_name": session.get("property_name"),
             "property_address": formatted_address(session),
             "started_at_utc": session.get("started_at_utc"),
@@ -2254,7 +2258,10 @@ def main() -> int:
     weather = resolve_weather_summary(validation, weather_cache_path, args.allow_weather_fetch, weather_warnings, args.pretty)
     weather["warnings"] = list(weather_warnings)
     report_date = args.report_date or dt.datetime.now(DISPLAY_TZ).strftime("%m/%d/%Y")
-    reports = ["property", "priority", "comparison"] if args.report == "all" else [args.report]
+    reports = {
+        "all": ["property", "priority", "comparison"],
+        "punchlist": ["priority", "comparison"],
+    }.get(args.report, [args.report])
     summary: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
         "phase": "ScoutCapture Phase 2C Visual Parity Renderer",
@@ -2263,6 +2270,8 @@ def main() -> int:
         "prepared_media_json": str(media_path),
         "output_dir": str(output_dir),
         "generator_version": GENERATOR_VERSION,
+        "session_type": validation.get("session_type") or validation.get("inputs", {}).get("session", {}).get("session_type") or "full_documentation",
+        "sessionType": validation.get("sessionType") or validation.get("inputs", {}).get("session", {}).get("sessionType") or validation.get("session_type") or "full_documentation",
         "logo": logo,
         "weather": weather,
         "weather_cache_path": str(weather_cache_path),
@@ -2295,6 +2304,8 @@ def main() -> int:
             "phase": "ScoutCapture Phase 2C PDF Validation",
             "session_id": plan.get("session_id"),
             "source_snapshot_id": plan.get("source_snapshot_id"),
+            "session_type": plan.get("session_type"),
+            "sessionType": plan.get("sessionType"),
             "report_type": report_type,
             "output_filename": plan["output_filename"],
             "generator_version": GENERATOR_VERSION,

@@ -60,11 +60,12 @@ final class Phase2C27EDraftSessionReuseTests: XCTestCase {
         defer { tearDownFixture(fixture) }
 
         fixture.appState.selectProperty(id: fixture.property.id)
-        let first = try XCTUnwrap(fixture.appState.startSession())
+        _ = try XCTUnwrap(fixture.appState.startSession(skipPropertyStatusPreflight: true))
+        let first = try XCTUnwrap(fixture.appState.persistCurrentSessionType(.fullDocumentation))
         fixture.appState.clearCurrentSession()
 
         fixture.appState.selectProperty(id: fixture.property.id)
-        let reopened = try XCTUnwrap(fixture.appState.startSession())
+        let reopened = try XCTUnwrap(fixture.appState.startSession(skipPropertyStatusPreflight: true))
 
         XCTAssertEqual(reopened.id, first.id)
         XCTAssertEqual(try fixture.localStore.fetchSessions(propertyID: fixture.property.id).count, 1)
@@ -78,12 +79,13 @@ final class Phase2C27EDraftSessionReuseTests: XCTestCase {
         defer { tearDownFixture(fixture) }
 
         fixture.appState.selectProperty(id: fixture.property.id)
-        let first = try XCTUnwrap(fixture.appState.startSession())
+        _ = try XCTUnwrap(fixture.appState.startSession(skipPropertyStatusPreflight: true))
+        let first = try XCTUnwrap(fixture.appState.persistCurrentSessionType(.fullDocumentation))
         fixture.appState.clearCurrentSession()
         fixture.appState._debugRefreshPropertiesLocallyForTests()
 
         fixture.appState.selectProperty(id: fixture.property.id)
-        let reopened = try XCTUnwrap(fixture.appState.startSession())
+        let reopened = try XCTUnwrap(fixture.appState.startSession(skipPropertyStatusPreflight: true))
 
         XCTAssertEqual(reopened.id, first.id)
         XCTAssertEqual(
@@ -99,10 +101,11 @@ final class Phase2C27EDraftSessionReuseTests: XCTestCase {
         defer { tearDownFixture(fixture) }
 
         fixture.appState.selectProperty(id: fixture.property.id)
-        let first = try XCTUnwrap(fixture.appState.startSession())
-        let second = try XCTUnwrap(fixture.appState.startSession())
+        _ = try XCTUnwrap(fixture.appState.startSession(skipPropertyStatusPreflight: true))
+        let first = try XCTUnwrap(fixture.appState.persistCurrentSessionType(.fullDocumentation))
+        let second = try XCTUnwrap(fixture.appState.startSession(skipPropertyStatusPreflight: true))
         fixture.appState.clearCurrentSession()
-        let third = try XCTUnwrap(fixture.appState.startSession())
+        let third = try XCTUnwrap(fixture.appState.startSession(skipPropertyStatusPreflight: true))
 
         XCTAssertEqual(second.id, first.id)
         XCTAssertEqual(third.id, first.id)
@@ -137,7 +140,8 @@ final class Phase2C27EDraftSessionReuseTests: XCTestCase {
         fixture.appState._debugRefreshPropertiesLocallyForTests()
 
         fixture.appState.selectProperty(id: fixture.property.id)
-        let newDraft = try XCTUnwrap(fixture.appState.startSession())
+        _ = try XCTUnwrap(fixture.appState.startSession(skipPropertyStatusPreflight: true))
+        let newDraft = try XCTUnwrap(fixture.appState.persistCurrentSessionType(.fullDocumentation))
 
         XCTAssertNotEqual(newDraft.id, completed.id)
         XCTAssertNotEqual(newDraft.id, sealedDraft.id)
@@ -165,7 +169,8 @@ final class Phase2C27EDraftSessionReuseTests: XCTestCase {
         fixture.appState._debugRefreshPropertiesLocallyForTests()
 
         fixture.appState.selectProperty(id: fixture.property.id)
-        let newDraft = try XCTUnwrap(fixture.appState.startSession())
+        _ = try XCTUnwrap(fixture.appState.startSession(skipPropertyStatusPreflight: true))
+        let newDraft = try XCTUnwrap(fixture.appState.persistCurrentSessionType(.fullDocumentation))
 
         XCTAssertNotEqual(newDraft.id, stale.id)
         XCTAssertEqual(newDraft.status, .draft)
@@ -196,7 +201,7 @@ final class Phase2C27EDraftSessionReuseTests: XCTestCase {
         fixture.appState._debugRefreshPropertiesLocallyForTests()
 
         fixture.appState.selectProperty(id: fixture.property.id)
-        let reused = try XCTUnwrap(fixture.appState.startSession())
+        let reused = try XCTUnwrap(fixture.appState.startSession(skipPropertyStatusPreflight: true))
 
         XCTAssertEqual(reused.id, newer.id)
         XCTAssertEqual(try fixture.localStore.fetchSessions(propertyID: fixture.property.id).count, 2)
@@ -204,5 +209,164 @@ final class Phase2C27EDraftSessionReuseTests: XCTestCase {
         XCTAssertEqual(diagnostics.lastDraftReuseCandidateCount, 2)
         XCTAssertTrue(diagnostics.lastDraftDuplicateDetected)
         XCTAssertEqual(diagnostics.lastDraftReuseDecision, "reuse_persisted_draft")
+    }
+
+    func testInitialSessionTypeSelectionPersistsPunchlistVisit() throws {
+        let fixture = try makeFixture()
+        defer { tearDownFixture(fixture) }
+
+        fixture.appState.selectProperty(id: fixture.property.id)
+        let shell = try XCTUnwrap(fixture.appState.startSession(skipPropertyStatusPreflight: true))
+
+        XCTAssertTrue(fixture.appState.currentSessionRequiresInitialSessionTypeSelection(propertyID: fixture.property.id))
+        XCTAssertEqual(shell.sessionType, .fullDocumentation)
+
+        let persisted = try XCTUnwrap(fixture.appState.persistCurrentSessionType(.punchlistVisit))
+        let metadata = try fixture.localStore.loadSessionMetadata(propertyID: fixture.property.id, sessionID: persisted.id)
+
+        XCTAssertEqual(persisted.sessionType, .punchlistVisit)
+        XCTAssertEqual(metadata.sessionType, .punchlistVisit)
+        XCTAssertFalse(fixture.appState.currentSessionRequiresInitialSessionTypeSelection(propertyID: fixture.property.id))
+        XCTAssertEqual(try fixture.localStore.fetchSessions(propertyID: fixture.property.id).map(\.id), [persisted.id])
+    }
+
+    func testInitialSessionTypeSelectionPersistsFullDocumentation() throws {
+        let fixture = try makeFixture()
+        defer { tearDownFixture(fixture) }
+
+        fixture.appState.selectProperty(id: fixture.property.id)
+        _ = try XCTUnwrap(fixture.appState.startSession(skipPropertyStatusPreflight: true))
+        let persisted = try XCTUnwrap(fixture.appState.persistCurrentSessionType(.fullDocumentation))
+        let metadata = try fixture.localStore.loadSessionMetadata(propertyID: fixture.property.id, sessionID: persisted.id)
+
+        XCTAssertEqual(persisted.sessionType, .fullDocumentation)
+        XCTAssertEqual(metadata.sessionType, .fullDocumentation)
+    }
+
+    func testPersistedTypedDraftResumesWithoutInitialTypePrompt() throws {
+        let fixture = try makeFixture()
+        defer { tearDownFixture(fixture) }
+
+        fixture.appState.selectProperty(id: fixture.property.id)
+        _ = try XCTUnwrap(fixture.appState.startSession(skipPropertyStatusPreflight: true))
+        let first = try XCTUnwrap(fixture.appState.persistCurrentSessionType(.punchlistVisit))
+        fixture.appState.clearCurrentSession()
+
+        fixture.appState.selectProperty(id: fixture.property.id)
+        let reopened = try XCTUnwrap(fixture.appState.startSession(skipPropertyStatusPreflight: true))
+
+        XCTAssertEqual(reopened.id, first.id)
+        XCTAssertEqual(reopened.sessionType, .punchlistVisit)
+        XCTAssertFalse(fixture.appState.currentSessionRequiresInitialSessionTypeSelection(propertyID: fixture.property.id))
+    }
+
+    func testPunchlistCompletionIgnoresGuidedRemainingWhileFullDocumentationDoesNot() {
+        XCTAssertTrue(
+            AppState.sessionCanComplete(
+                sessionType: .punchlistVisit,
+                hasBaseline: true,
+                guidedRemainingCount: 8,
+                flaggedRemainingCount: 0,
+                currentSessionCaptureCount: 0
+            )
+        )
+        XCTAssertFalse(
+            AppState.sessionCompletionHasOutstandingChecklistItems(
+                sessionType: .punchlistVisit,
+                guidedRemainingCount: 8,
+                flaggedRemainingCount: 0
+            )
+        )
+        XCTAssertEqual(
+            AppState.sessionCompletionActionTitle(sessionType: .punchlistVisit),
+            "Complete Punchlist Visit"
+        )
+
+        XCTAssertFalse(
+            AppState.sessionCanComplete(
+                sessionType: .fullDocumentation,
+                hasBaseline: true,
+                guidedRemainingCount: 8,
+                flaggedRemainingCount: 0,
+                currentSessionCaptureCount: 0
+            )
+        )
+        XCTAssertTrue(
+            AppState.sessionCompletionHasOutstandingChecklistItems(
+                sessionType: .fullDocumentation,
+                guidedRemainingCount: 8,
+                flaggedRemainingCount: 0
+            )
+        )
+        XCTAssertEqual(
+            AppState.sessionCompletionActionTitle(sessionType: .fullDocumentation),
+            "Complete Session"
+        )
+    }
+
+    func testPunchlistVisitCompletionPreservesGuidedRequirementsForNextFullSession() throws {
+        let fixture = try makeFixture()
+        defer { tearDownFixture(fixture) }
+        let guidedID = UUID()
+        let guided = GuidedShot(
+            id: guidedID,
+            title: "North Overview",
+            building: "B1",
+            targetElevation: "North",
+            detailType: "Overview",
+            angleIndex: 1,
+            isCompleted: false
+        )
+        try fixture.localStore.saveGuidedShots([guided], propertyID: fixture.property.id)
+
+        fixture.appState.selectProperty(id: fixture.property.id)
+        _ = try XCTUnwrap(fixture.appState.startSession(skipPropertyStatusPreflight: true))
+        let punchlist = try XCTUnwrap(fixture.appState.persistCurrentSessionType(.punchlistVisit))
+        fixture.appState.completeCurrentSessionWithoutZIP()
+
+        let afterPunchlist = try fixture.localStore.fetchGuidedShots(propertyID: fixture.property.id)
+        XCTAssertEqual(afterPunchlist.count, 1)
+        XCTAssertEqual(afterPunchlist.first?.id, guidedID)
+        XCTAssertEqual(afterPunchlist.first?.isCompleted, false)
+        XCTAssertNil(afterPunchlist.first?.skipReason)
+        XCTAssertNil(afterPunchlist.first?.skipSessionID)
+
+        fixture.appState.selectProperty(id: fixture.property.id)
+        let nextFull = try XCTUnwrap(fixture.appState.startSession(skipPropertyStatusPreflight: true))
+
+        XCTAssertNotEqual(nextFull.id, punchlist.id)
+        XCTAssertEqual(nextFull.sessionType, .fullDocumentation)
+        XCTAssertEqual(try fixture.localStore.fetchGuidedShots(propertyID: fixture.property.id).first?.id, guidedID)
+    }
+
+    func testCompletedSnapshotPayloadIncludesSessionType() throws {
+        let fixture = try makeFixture()
+        defer { tearDownFixture(fixture) }
+
+        let session = try fixture.localStore.upsertSession(
+            Session(
+                propertyID: fixture.property.id,
+                sessionType: .punchlistVisit,
+                startedAt: Date(timeIntervalSinceReferenceDate: 100),
+                status: .completed,
+                endedAt: Date(timeIntervalSinceReferenceDate: 200),
+                isSealed: true
+            )
+        )
+        try fixture.localStore.ensureSessionMetadata(for: session)
+
+        let artifacts = try fixture.appState._debugMakeSessionSnapshotUploadArtifactsForTests(
+            propertyID: fixture.property.id,
+            sessionID: session.id,
+            kind: .completed,
+            trigger: "completed_sealed_checkpoint"
+        )
+        let payload = try XCTUnwrap(JSONSerialization.jsonObject(with: artifacts.object.payloadData) as? [String: Any])
+        let rawSessionJSON = try XCTUnwrap(payload["rawSessionJSON"] as? String)
+        let rawSessionData = try XCTUnwrap(rawSessionJSON.data(using: .utf8))
+        let rawSession = try XCTUnwrap(JSONSerialization.jsonObject(with: rawSessionData) as? [String: Any])
+
+        XCTAssertEqual(payload["sessionType"] as? String, SessionType.punchlistVisit.rawValue)
+        XCTAssertEqual(rawSession["sessionType"] as? String, SessionType.punchlistVisit.rawValue)
     }
 }

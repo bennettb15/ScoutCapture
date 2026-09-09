@@ -580,6 +580,8 @@ def main() -> int:
         "phase": "ScoutCapture Phase 2A PreparedReportMedia",
         "source_validation_json": str(validation_path),
         "session_id": validation.get("session_id"),
+        "session_type": validation.get("session_type") or validation.get("inputs", {}).get("session", {}).get("session_type") or "full_documentation",
+        "sessionType": validation.get("sessionType") or validation.get("inputs", {}).get("session", {}).get("sessionType") or validation.get("session_type") or "full_documentation",
         "property_id": validation.get("inputs", {}).get("session", {}).get("property_id"),
         "source_snapshot_id": validation.get("source_snapshot_id"),
         "read_only_remote_access": True,

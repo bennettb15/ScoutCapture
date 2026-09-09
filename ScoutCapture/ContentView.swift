@@ -3961,6 +3961,10 @@ struct ContentView: View {
         return persistedBaselineState(propertyID: propertyID).hasBaseline
     }
 
+    private var isPunchlistVisitSession: Bool {
+        appState.currentSession?.sessionType == .punchlistVisit
+    }
+
     private var shouldAllowChecklistReferenceFallback: Bool {
         hasGuidedBaselineForSelectedProperty
     }
@@ -3972,6 +3976,7 @@ struct ContentView: View {
     }
 
     private var guidedRemainingForCompass: Int {
+        guard !isPunchlistVisitSession else { return 0 }
         guard hasGuidedBaselineForSelectedProperty else { return 0 }
         guard !isCurrentSessionBaselineFromPersisted else { return 0 }
         let remaining = max(0, guidedReferenceKeys.subtracting(guidedUpdatedKeysThisSession).count)
@@ -5636,9 +5641,20 @@ struct ContentView: View {
         let firstDeliveredAt: Date?
         let reExportExpiresAt: Date?
         let reExportEligibleNow: Bool
+        let sessionType: SessionType
+
+        var isPunchlistVisit: Bool {
+            sessionType == .punchlistVisit
+        }
 
         var isCompletionEligible: Bool {
-            hasBaseline && guidedRemainingCount == 0 && flaggedRemainingCount == 0
+            AppState.sessionCanComplete(
+                sessionType: sessionType,
+                hasBaseline: hasBaseline,
+                guidedRemainingCount: guidedRemainingCount,
+                flaggedRemainingCount: flaggedRemainingCount,
+                currentSessionCaptureCount: currentSessionCaptureCount
+            )
         }
 
         var hasCaptures: Bool {
@@ -5646,7 +5662,11 @@ struct ContentView: View {
         }
 
         var hasOutstandingChecklistItems: Bool {
-            guidedRemainingCount > 0 || flaggedRemainingCount > 0
+            AppState.sessionCompletionHasOutstandingChecklistItems(
+                sessionType: sessionType,
+                guidedRemainingCount: guidedRemainingCount,
+                flaggedRemainingCount: flaggedRemainingCount
+            )
         }
 
         var canSealNow: Bool {
@@ -5659,7 +5679,7 @@ struct ContentView: View {
         }
 
         var exportActionTitle: String {
-            return "Complete Session"
+            AppState.sessionCompletionActionTitle(sessionType: sessionType)
         }
 
         var exitActionTitle: String {
@@ -5694,7 +5714,10 @@ struct ContentView: View {
                 return "Complete Session is disabled until at least one photo is captured."
             }
             if !hasBaseline {
-                return "Complete Session is disabled until at least one photo is captured."
+                return "\(exportActionTitle) is disabled until at least one photo is captured."
+            }
+            if isPunchlistVisit {
+                return "Complete Punchlist Visit is disabled until all active and resolution required items are complete."
             }
             return "Complete Session is disabled until all guided and flagged items are complete."
         }
@@ -6430,6 +6453,10 @@ struct ContentView: View {
     }
 
     private func presentGuidedChecklist() {
+        guard !isPunchlistVisitSession else {
+            showFlaggedActionToastNow("No guided requirements")
+            return
+        }
         ensureReferenceResolutionReady()
         let snapshot = guidedSessionCountSnapshot()
         guard snapshot.remaining > 0 else {
@@ -9843,14 +9870,16 @@ extension ContentView {
 
             activeIssuesFlagButton()
 
-            guidedCompassButton {
-                fireQuickButtonHaptic()
-                presentGuidedChecklist()
-            }
+            if !isPunchlistVisitSession {
+                guidedCompassButton {
+                    fireQuickButtonHaptic()
+                    presentGuidedChecklist()
+                }
 
-            coreElevationChecklistButton {
-                fireQuickButtonHaptic()
-                presentCoreElevationChecklist()
+                coreElevationChecklistButton {
+                    fireQuickButtonHaptic()
+                    presentCoreElevationChecklist()
+                }
             }
         }
     }
@@ -10672,7 +10701,7 @@ extension ContentView {
                         }
                         if !didApplyGuidedShot && !didApplyIssueUpdate && !didQueueResolution {
                             if case .free = captureIntent {
-                                if noteAtCapture.isEmpty {
+                                if noteAtCapture.isEmpty && !isPunchlistVisitSession {
                                     createGuidedAngleFromCaptureIfNeeded(
                                         with: shot,
                                         referenceImagePath: referenceImagePath,
@@ -10687,7 +10716,7 @@ extension ContentView {
                                 }
                             }
                         }
-                        let captureIsGuided = didApplyGuidedShot || (createdObservationID == nil && noteAtCapture.isEmpty && {
+                        let captureIsGuided = didApplyGuidedShot || (!isPunchlistVisitSession && createdObservationID == nil && noteAtCapture.isEmpty && {
                             if case .free = captureIntent { return true }
                             return false
                         }())
@@ -11359,6 +11388,24 @@ extension ContentView {
             guidedReferenceThumbnail = nil
             showGuidedAlignmentOverlay = false
             showArmedReferenceMenu = false
+            refreshReferenceSetsAndPendingCounts()
+            return
+        }
+
+        if isPunchlistVisitSession {
+            activeSessionShotIDs = sessionShotIDsForActiveSession(propertyID: propertyID, sessionID: appState.currentSession?.id)
+            guidedShots = []
+            retiredGuidedShots = []
+            guidedResolvedThumbnailPathByID = [:]
+            guidedReferencePathByID = [:]
+            guidedReferenceKeys = []
+            guidedUpdatedKeysThisSession = []
+            if armedGuidedShotID != nil || armedGuidedRetakeShotID != nil {
+                armedGuidedShotID = nil
+                armedGuidedRetakeShotID = nil
+                currentCaptureIntent = .free
+                showArmedReferenceMenu = false
+            }
             refreshReferenceSetsAndPendingCounts()
             return
         }
@@ -12909,7 +12956,8 @@ extension ContentView {
             isSessionSealed: currentSession.isSealed,
             firstDeliveredAt: currentSession.firstDeliveredAt,
             reExportExpiresAt: currentSession.reExportExpiresAt,
-            reExportEligibleNow: reExportEligibleNow
+            reExportEligibleNow: reExportEligibleNow,
+            sessionType: currentSession.sessionType
         )
         if let reason = sessionActionsSummary?.exportDisabledReason {
             print("[ExportEligibility] sessionID=\(currentSession.id.uuidString) enabled=false reason=\(reason)")
@@ -15717,7 +15765,9 @@ extension ContentView {
 
                             VStack(spacing: 8) {
                                 summaryRow(title: "Flagged Remaining", value: summary.flaggedRemainingCount)
-                                summaryRow(title: "Guided Remaining", value: summary.guidedRemainingCount)
+                                if !summary.isPunchlistVisit {
+                                    summaryRow(title: "Guided Remaining", value: summary.guidedRemainingCount)
+                                }
                             }
                             .padding(.horizontal, 12)
                             .padding(.vertical, 10)
@@ -15809,7 +15859,10 @@ extension ContentView {
                 return "Use Re-export from the home screen for a manual ZIP."
             }
             if !summary.hasBaseline && summary.currentSessionCaptureCount == 0 {
-                return "Complete Session is disabled until at least one photo is captured."
+                return "\(summary.exportActionTitle) is disabled until at least one photo is captured."
+            }
+            if summary.isPunchlistVisit {
+                return "Complete Punchlist Visit is disabled until all active and resolution required items are complete."
             }
             return "Complete Session is disabled until all guided and flagged items are complete."
         }

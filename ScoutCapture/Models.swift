@@ -48,10 +48,25 @@ enum CaptureProfile: String, Codable, CaseIterable, Equatable {
     }
 }
 
+enum SessionType: String, Codable, CaseIterable, Equatable {
+    case fullDocumentation = "full_documentation"
+    case punchlistVisit = "punchlist_visit"
+
+    var title: String {
+        switch self {
+        case .fullDocumentation:
+            return "Full Documentation"
+        case .punchlistVisit:
+            return "Punchlist Visit"
+        }
+    }
+}
+
 struct SessionMetadata: Codable {
     var schemaVersion: Int
     var propertyID: UUID
     var sessionID: UUID
+    var sessionType: SessionType
     var orgID: UUID?
     var orgNameAtCapture: String?
     var folderIDAtCapture: String?
@@ -103,6 +118,8 @@ struct SessionMetadata: Codable {
         case propertyID
         case propertyId
         case sessionID
+        case sessionType
+        case session_type
         case orgID
         case orgId
         case orgNameAtCapture
@@ -180,6 +197,7 @@ struct SessionMetadata: Codable {
         schemaVersion: Int,
         propertyID: UUID,
         sessionID: UUID,
+        sessionType: SessionType = .fullDocumentation,
         orgID: UUID? = nil,
         orgNameAtCapture: String? = nil,
         folderIDAtCapture: String? = nil,
@@ -223,6 +241,7 @@ struct SessionMetadata: Codable {
         self.schemaVersion = schemaVersion
         self.propertyID = propertyID
         self.sessionID = sessionID
+        self.sessionType = sessionType
         self.orgID = orgID
         self.orgNameAtCapture = SessionMetadata.trimmedNonEmpty(orgNameAtCapture)
         self.folderIDAtCapture = SessionMetadata.trimmedNonEmpty(folderIDAtCapture)
@@ -270,6 +289,9 @@ struct SessionMetadata: Codable {
         propertyID = try c.decodeIfPresent(UUID.self, forKey: .propertyID)
             ?? c.decode(UUID.self, forKey: .propertyId)
         sessionID = try c.decode(UUID.self, forKey: .sessionID)
+        sessionType = try c.decodeIfPresent(SessionType.self, forKey: .sessionType)
+            ?? c.decodeIfPresent(SessionType.self, forKey: .session_type)
+            ?? .fullDocumentation
         orgID = try c.decodeIfPresent(UUID.self, forKey: .orgID)
             ?? c.decodeIfPresent(UUID.self, forKey: .orgId)
         orgNameAtCapture = SessionMetadata.trimmedNonEmpty(
@@ -386,6 +408,8 @@ struct SessionMetadata: Codable {
         try c.encode(propertyID, forKey: .propertyID)
         try c.encode(propertyID, forKey: .propertyId)
         try c.encode(sessionID, forKey: .sessionID)
+        try c.encode(sessionType, forKey: .sessionType)
+        try c.encode(sessionType, forKey: .session_type)
         try c.encodeIfPresent(orgID, forKey: .orgID)
         try c.encodeIfPresent(orgID, forKey: .orgId)
         try c.encodeIfPresent(SessionMetadata.trimmedNonEmpty(orgNameAtCapture), forKey: .orgNameAtCapture)
@@ -1778,6 +1802,7 @@ struct Session: Codable, Identifiable, Equatable {
 
     let id: UUID
     let propertyID: UUID
+    var sessionType: SessionType
     var startedAt: Date
     var status: Status
     var endedAt: Date?
@@ -1792,6 +1817,7 @@ struct Session: Codable, Identifiable, Equatable {
     init(
         id: UUID = UUID(),
         propertyID: UUID,
+        sessionType: SessionType = .fullDocumentation,
         startedAt: Date = Date(),
         status: Status = .draft,
         endedAt: Date? = nil,
@@ -1805,6 +1831,7 @@ struct Session: Codable, Identifiable, Equatable {
     ) {
         self.id = id
         self.propertyID = propertyID
+        self.sessionType = sessionType
         self.startedAt = startedAt
         self.status = status
         self.endedAt = endedAt
@@ -1820,6 +1847,8 @@ struct Session: Codable, Identifiable, Equatable {
     private enum CodingKeys: String, CodingKey {
         case id
         case propertyID
+        case sessionType
+        case session_type
         case startedAt
         case status
         case endedAt
@@ -1836,6 +1865,9 @@ struct Session: Codable, Identifiable, Equatable {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         id = try c.decode(UUID.self, forKey: .id)
         propertyID = try c.decode(UUID.self, forKey: .propertyID)
+        sessionType = try c.decodeIfPresent(SessionType.self, forKey: .sessionType)
+            ?? c.decodeIfPresent(SessionType.self, forKey: .session_type)
+            ?? .fullDocumentation
         startedAt = try c.decode(Date.self, forKey: .startedAt)
         endedAt = try c.decodeIfPresent(Date.self, forKey: .endedAt)
         exportedAt = try c.decodeIfPresent(Date.self, forKey: .exportedAt)
@@ -1864,6 +1896,8 @@ struct Session: Codable, Identifiable, Equatable {
         var c = encoder.container(keyedBy: CodingKeys.self)
         try c.encode(id, forKey: .id)
         try c.encode(propertyID, forKey: .propertyID)
+        try c.encode(sessionType, forKey: .sessionType)
+        try c.encode(sessionType, forKey: .session_type)
         try c.encode(startedAt, forKey: .startedAt)
         try c.encode(status, forKey: .status)
         try c.encodeIfPresent(endedAt, forKey: .endedAt)

@@ -12516,6 +12516,7 @@ struct PropertySessionView: View {
     @State private var hasSessionReadyForProperty: Bool = false
     @State private var isCheckingSessionBeforeOpen: Bool = true
     @State private var isCheckingSessionCoordination: Bool = false
+    @State private var isAwaitingInitialSessionTypeSelection: Bool = false
     @State private var sessionEntryBlock: AppState.SessionEntryCoordinationBlock? = nil
     @State private var didSchedulePostOpenReferenceReconcile: Bool = false
 
@@ -12536,6 +12537,21 @@ struct PropertySessionView: View {
         }
             .navigationBarBackButtonHidden(true)
             .toolbar(.hidden, for: .navigationBar)
+            .sheet(isPresented: $isAwaitingInitialSessionTypeSelection) {
+                InitialSessionTypeChoiceSheet(
+                    onChoose: { sessionType in
+                        guard appState.persistCurrentSessionType(sessionType) != nil else { return }
+                        isAwaitingInitialSessionTypeSelection = false
+                        beginOpenFlow(forceRetry: true)
+                    },
+                    onBack: {
+                        isAwaitingInitialSessionTypeSelection = false
+                        exitCaptureScreen()
+                    }
+                )
+                .interactiveDismissDisabled(true)
+                .presentationDetents([.height(330)])
+            }
             .onReceive(camera.$isPreviewRunning.removeDuplicates()) { isRunning in
                 if isRunning && didStartOpenFlow && hasSessionReadyForProperty {
                     completeOpenFlow()
@@ -12691,12 +12707,18 @@ struct PropertySessionView: View {
                         .disabled(isCheckingSessionCoordination)
                     }
                 } else {
-                    Text(isCheckingSessionBeforeOpen || isCheckingSessionCoordination ? "Checking Session" : "Opening Camera")
+                    Text(isCheckingSessionBeforeOpen || isCheckingSessionCoordination ? "Checking Session" : isAwaitingInitialSessionTypeSelection ? "Choose Session Type" : "Opening Camera")
                         .font(.system(size: 24, weight: .bold))
                         .foregroundColor(.white)
-                    ProgressView()
-                        .progressViewStyle(.circular)
-                        .tint(.white)
+                    if isAwaitingInitialSessionTypeSelection {
+                        Text("Select how to capture this visit.")
+                            .font(.system(size: 14, weight: .medium))
+                            .foregroundColor(.white.opacity(0.86))
+                    } else {
+                        ProgressView()
+                            .progressViewStyle(.circular)
+                            .tint(.white)
+                    }
                 }
             }
             .padding(.horizontal, 24)
@@ -12753,6 +12775,14 @@ struct PropertySessionView: View {
         }
         schedulePostOpenReferenceReconcile()
         appState.ensureCurrentSessionMetadataInBackground()
+    }
+
+    private func continueAfterSessionCoordinationAllowed() {
+        if appState.currentSessionRequiresInitialSessionTypeSelection(propertyID: propertyID) {
+            isAwaitingInitialSessionTypeSelection = true
+            return
+        }
+        beginOpenFlow(forceRetry: true)
     }
 
     private func schedulePostOpenReferenceReconcile() {
@@ -12813,7 +12843,7 @@ struct PropertySessionView: View {
             switch status {
             case .allowed:
                 sessionEntryBlock = nil
-                beginOpenFlow(forceRetry: true)
+                continueAfterSessionCoordinationAllowed()
             case .blocked(let block):
                 sessionEntryBlock = block
                 appState.locallyLockedPropertyIDs.insert(propertyID)
@@ -12845,6 +12875,74 @@ struct PropertySessionView: View {
         formatter.timeStyle = .short
         return AppState.sessionEntryBlockMessage(for: block) { lockedAt in
             formatter.string(from: lockedAt)
+        }
+    }
+
+    private struct InitialSessionTypeChoiceSheet: View {
+        let onChoose: (SessionType) -> Void
+        let onBack: () -> Void
+
+        var body: some View {
+            VStack(spacing: 16) {
+                Text("Session Type")
+                    .font(.system(size: 22, weight: .bold))
+
+                VStack(spacing: 10) {
+                    choiceButton(
+                        title: "Full Documentation",
+                        subtitle: "Guided photos + flags + resolution required",
+                        systemImage: "camera.metering.matrix",
+                        action: { onChoose(.fullDocumentation) }
+                    )
+                    choiceButton(
+                        title: "Punchlist Visit",
+                        subtitle: "Active/RR items only, no guided requirements",
+                        systemImage: "checklist",
+                        action: { onChoose(.punchlistVisit) }
+                    )
+                }
+
+                Button("Back", action: onBack)
+                    .font(.system(size: 16, weight: .semibold))
+                    .buttonStyle(.plain)
+                    .foregroundColor(.secondary)
+                    .padding(.top, 2)
+            }
+            .padding(.horizontal, 20)
+            .padding(.vertical, 18)
+        }
+
+        private func choiceButton(
+            title: String,
+            subtitle: String,
+            systemImage: String,
+            action: @escaping () -> Void
+        ) -> some View {
+            Button(action: action) {
+                HStack(spacing: 12) {
+                    Image(systemName: systemImage)
+                        .font(.system(size: 22, weight: .semibold))
+                        .frame(width: 32)
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(title)
+                            .font(.system(size: 17, weight: .semibold))
+                        Text(subtitle)
+                            .font(.system(size: 13, weight: .medium))
+                            .foregroundColor(.secondary)
+                            .lineLimit(2)
+                    }
+                    Spacer(minLength: 0)
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundColor(.secondary)
+                }
+                .foregroundColor(.primary)
+                .padding(.horizontal, 14)
+                .frame(minHeight: 72)
+                .background(Color(uiColor: .secondarySystemGroupedBackground))
+                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+            }
+            .buttonStyle(.plain)
         }
     }
 }

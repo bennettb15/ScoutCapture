@@ -571,7 +571,7 @@ final class LocalStore {
         }
     }
 
-    private let currentSessionSchemaVersion = 12
+    private let currentSessionSchemaVersion = 13
     private let fileIOQueue = DispatchQueue(label: "ScoutCapture.LocalStore.fileIO")
     private let fileIOQueueKey = DispatchSpecificKey<UInt8>()
     private let fileIOQueueValue: UInt8 = 1
@@ -6154,6 +6154,7 @@ final class LocalStore {
         metadata.endedAt = session.endedAt
         metadata.sessionEndedAtLocal = session.endedAt.map { localISO8601String(for: $0, timeZone: captureTimeZone.timeZone) }
         metadata.status = session.status
+        metadata.sessionType = session.sessionType
         if metadata.captureProfile == nil {
             metadata.captureProfile = session.captureProfile?.rawValue
         }
@@ -6538,6 +6539,7 @@ final class LocalStore {
             schemaVersion: max(metadata.schemaVersion, currentSessionSchemaVersion),
             propertyID: propertyID,
             sessionID: sessionID,
+            sessionType: metadata.sessionType,
             orgID: resolvedOrgID,
             orgNameAtCapture: resolvedOrgName,
             folderIDAtCapture: resolvedFolderID,

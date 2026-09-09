@@ -894,8 +894,11 @@ def session_input(metadata: dict[str, Any], payload: dict[str, Any], row: dict[s
     session_actor = merge_actor_identity(actor_identity(metadata), snapshot_actor)
     captured_actor = merge_actor_identity(actor_identity(metadata, "captured"), session_actor)
     uploaded_actor = merge_actor_identity(actor_identity(metadata, "uploaded"), session_actor)
+    session_type = normalized_session_type(metadata, payload)
     return {
         "session_id": str(metadata.get("sessionID") or ""),
+        "session_type": session_type,
+        "sessionType": session_type,
         "property_id": str(metadata.get("propertyID") or ""),
         "org_id": str(metadata.get("orgID") or payload.get("orgID") or row.get("org_id") or ""),
         "org_name": trim(metadata.get("orgNameAtCapture")),
@@ -928,11 +931,24 @@ def session_input(metadata: dict[str, Any], payload: dict[str, Any], row: dict[s
     }
 
 
+def normalized_session_type(metadata: dict[str, Any], payload: dict[str, Any] | None = None) -> str:
+    raw = (
+        metadata.get("sessionType")
+        or metadata.get("session_type")
+        or (payload or {}).get("sessionType")
+        or (payload or {}).get("session_type")
+        or "full_documentation"
+    )
+    value = trim(raw).lower()
+    return "punchlist_visit" if value == "punchlist_visit" else "full_documentation"
+
+
 def build_validation(args: argparse.Namespace) -> dict[str, Any]:
     client = None if args.snapshot_row_fixture and args.snapshot_payload_fixture else SupabaseReadClient.from_env()
     row = load_snapshot_row(args, client)
     payload = load_snapshot_payload(args, client, row)
     metadata = payload_raw_metadata(payload)
+    session_type = normalized_session_type(metadata, payload)
     storage_fixture = read_json_file(args.storage_fixture) if args.storage_fixture else None
     storage = StorageProbe(client, storage_fixture)
     issues = issue_by_id(metadata)
@@ -1001,12 +1017,15 @@ def build_validation(args: argparse.Namespace) -> dict[str, Any]:
     output = {
         "schema_version": 1,
         "session_id": str(metadata.get("sessionID") or row.get("session_id") or ""),
+        "session_type": session_type,
+        "sessionType": session_type,
         "source_snapshot_id": str(row.get("id") or payload.get("id") or ""),
         "renderable_remotely": renderable,
         "reports": {
             "property_report": {
                 "generator_method": "generateSessionReport",
                 "source_of_truth": REPORT_GENERATOR_SOURCE,
+                "applicable": session_type == "full_documentation",
                 "reconstructable": len(missing_media) == 0,
                 "photo_entry_count": len([item for item in entries if item["kind"] == "photo"]),
                 "skipped_placeholder_count": guided["skipped_placeholder_count"],
@@ -1083,6 +1102,7 @@ def build_validation(args: argparse.Namespace) -> dict[str, Any]:
 def field_provenance() -> dict[str, Any]:
     return {
         "session_identity": ["session_snapshots.rawSessionJSON", "session_snapshot_metadata"],
+        "session_type": ["session_snapshots.rawSessionJSON", "session_snapshots payload sessionType"],
         "org_property_identity": ["session_snapshots.rawSessionJSON", "session_snapshot_metadata"],
         "actor_attribution": [
             "session_snapshots.rawSessionJSON actor/capturedBy/uploadedBy fields",
