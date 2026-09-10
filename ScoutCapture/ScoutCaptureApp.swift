@@ -834,7 +834,6 @@ struct SessionHubView: View {
                                 }
                             }
                         }
-                        .id(appState.hubRowRefreshToken)
                         .refreshable {
                             await appState.refreshPropertiesAwaitingForegroundRefresh()
                         }
@@ -1182,7 +1181,7 @@ struct SessionHubView: View {
         let uploadStatusChip = sessionUploadStatus.flatMap(sessionSnapshotUploadStatusChip)
         let hasDraft = badgeModel.showDraft
         let hasPendingExport = badgeModel.showPendingExport
-        let latestReExportSession = reExportCandidateSession(for: property.id)
+        let latestReExportSession = appState.cachedReExportCandidateSessionForPropertyRow(propertyID: property.id)
         let hasReExportGlyph = badgeModel.showReExport && latestReExportSession != nil
         let manualExportSession = latestReExportSession ?? pendingSession
         let hasManualExportAction = manualExportSession != nil && (hasReExportGlyph || hasPendingExport)
@@ -12562,10 +12561,18 @@ struct PropertySessionView: View {
                 didSetup = true
                 appState.selectProperty(id: propertyID)
                 Task { @MainActor in
-                    let propertyStatusPreflight = await appState.evaluateFreshPropertyStatusEntryPreflight(
+                    let propertyStatusPreflight: AppState.PropertyStatusEntryPreflightEvaluation
+                    if let cachedPreflight = appState.cachedPropertyStatusEntryPreflightForFastEntry(
                         propertyID: propertyID,
                         context: "property_session_view"
-                    )
+                    ) {
+                        propertyStatusPreflight = cachedPreflight
+                    } else {
+                        propertyStatusPreflight = await appState.evaluateFreshPropertyStatusEntryPreflight(
+                            propertyID: propertyID,
+                            context: "property_session_view"
+                        )
+                    }
                     if let block = propertyStatusPreflight.decision?.block {
                         isCheckingSessionBeforeOpen = false
                         sessionEntryBlock = block
