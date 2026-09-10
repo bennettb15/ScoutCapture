@@ -12992,34 +12992,7 @@ extension ContentView {
     }
 
     private func currentSessionCaptureCountForSummary(propertyID: UUID, session: Session) -> Int {
-        guard let metadata = try? localStore.loadSessionMetadata(propertyID: propertyID, sessionID: session.id) else {
-            return 0
-        }
-        let sessionStart = session.startedAt
-        let sessionEnd = session.endedAt
-        var count = 0
-        for shot in metadata.shots {
-            guard shot.lifecycleState.isActiveForDefaultWorkflows else { continue }
-            if shot.createdAt < sessionStart { continue }
-            if let sessionEnd, shot.createdAt > sessionEnd { continue }
-            let captureKind = shot.captureKind?
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-                .lowercased()
-            if captureKind == "reference" || captureKind == "reclassified" {
-                continue
-            }
-            let relative = shot.originalRelativePath.trimmingCharacters(in: .whitespacesAndNewlines)
-            if relative.isEmpty { continue }
-            guard localStore.resolveSessionRelativeFileURL(
-                propertyID: propertyID,
-                sessionID: session.id,
-                relativePath: relative
-            ) != nil else {
-                continue
-            }
-            count += 1
-        }
-        return count
+        appState.materialDraftCaptureCount(for: session)
     }
 
     private func carryoverFlaggedRemainingCount(observations: [Observation]) -> Int {

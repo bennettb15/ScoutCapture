@@ -47705,7 +47705,6 @@ final class AppState: ObservableObject {
             }
         }
         ensureCanonicalOrgPersistenceForSelectedPropertyIfKnown(reason: "start_session")
-        refreshSessionSnapshotCloudStatusCache()
         let sessionsForProperty = sessions(for: selectedPropertyID)
         let reusableDrafts = sessionsForProperty
             .filter { reusableDraftSession($0) }
@@ -47836,7 +47835,7 @@ final class AppState: ObservableObject {
               !isFinalSession(session) else {
             return false
         }
-        let materialContentCount = sessionMaterialContentCount(session)
+        let materialContentCount = materialDraftCaptureCount(for: session)
         if sessionHasFinalLocalStateEvidence(session) {
             logInitialSessionTypeSelectionDecision(
                 session,
@@ -47903,6 +47902,11 @@ final class AppState: ObservableObject {
         return true
     }
 
+    func markCurrentSessionCameraEntryBegan() {
+        guard let sessionID = currentSession?.id else { return }
+        initialSessionTypeSelectedSessionIDs.remove(sessionID)
+    }
+
     @discardableResult
     func persistCurrentSessionType(_ sessionType: SessionType) -> Session? {
         guard var session = currentSession else { return nil }
@@ -47924,6 +47928,14 @@ final class AppState: ObservableObject {
 
     func isPunchlistVisitSession(_ session: Session?) -> Bool {
         session?.sessionType == .punchlistVisit
+    }
+
+    func materialDraftCaptureCount(for session: Session) -> Int {
+        sessionMaterialContentCount(session, requireLocalDraftEvidence: true)
+    }
+
+    func hasMaterialDraftCaptures(_ session: Session) -> Bool {
+        materialDraftCaptureCount(for: session) > 0
     }
 
     nonisolated static func sessionCompletionHasOutstandingChecklistItems(
@@ -50678,7 +50690,7 @@ final class AppState: ObservableObject {
             !session.isSealed &&
             !isFinalSession(session) &&
             !sessionHasFinalLocalStateEvidence(session) &&
-            sessionHasCaptures(session)
+            hasMaterialDraftCaptures(session)
     }
 
     private func sessionHasFinalLocalStateEvidence(_ session: Session) -> Bool {
@@ -50710,7 +50722,10 @@ final class AppState: ObservableObject {
         sessionMaterialContentCount(session) > 0
     }
 
-    private func sessionMaterialContentCount(_ session: Session) -> Int {
+    private func sessionMaterialContentCount(
+        _ session: Session,
+        requireLocalDraftEvidence: Bool = false
+    ) -> Int {
         guard let metadata = try? localStore.loadSessionMetadata(propertyID: session.propertyID, sessionID: session.id) else {
             return 0
         }
@@ -50719,8 +50734,18 @@ final class AppState: ObservableObject {
             if shot.createdAt < session.startedAt { return false }
             if let endedAt = session.endedAt, shot.createdAt > endedAt { return false }
             let captureKind = normalizedSupabaseText(shot.captureKind)?.lowercased()
-            if captureKind == "reference" || captureKind == "reclassified" {
+            if captureKind == "reference" ||
+                captureKind == "reclassified" ||
+                captureKind == "restored" ||
+                captureKind == "historical" {
                 return false
+            }
+            if requireLocalDraftEvidence {
+                let storagePath = normalizedSupabaseText(shot.storagePath)
+                let uploadState = normalizedSupabaseText(shot.uploadState)?.lowercased()
+                if storagePath != nil && uploadState == "uploaded" {
+                    return false
+                }
             }
             let originalRelative = shot.originalRelativePath.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !originalRelative.isEmpty else { return false }

@@ -12769,10 +12769,14 @@ struct PropertySessionView: View {
 
     private func completeOpenFlow() {
         guard !showCameraContent else { return }
+        appState.markCurrentSessionCameraEntryBegan()
         withAnimation(.easeInOut(duration: 0.14)) {
             showCameraContent = true
         }
-        schedulePostOpenReferenceReconcile()
+        if let session = appState.currentSession,
+           appState.hasMaterialDraftCaptures(session) {
+            schedulePostOpenReferenceReconcile()
+        }
         appState.ensureCurrentSessionMetadataInBackground()
     }
 
