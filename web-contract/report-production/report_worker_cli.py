@@ -587,21 +587,125 @@ def report_date(validation: dict[str, Any]) -> str:
     return dt.datetime.now().strftime("%m/%d/%Y")
 
 
+def normalized_session_type(value: Any) -> str | None:
+    normalized = str(value or "").strip().lower()
+    if normalized == "punchlist_visit":
+        return "punchlist_visit"
+    if normalized == "full_documentation":
+        return "full_documentation"
+    return None
+
+
+def json_object(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str) and value.strip():
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError:
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+    return {}
+
+
+def session_type_values_from_object(value: Any) -> list[str]:
+    source = json_object(value)
+    if not source:
+        return []
+
+    values: list[str] = []
+    for key in ("sessionType", "session_type"):
+        if resolved := normalized_session_type(source.get(key)):
+            values.append(resolved)
+
+    inputs = json_object(source.get("inputs"))
+    nested_sources = [
+        source.get("session"),
+        source.get("sessionManifest"),
+        source.get("session_manifest"),
+        source.get("sessionMetadata"),
+        source.get("session_metadata"),
+        source.get("manifest"),
+        source.get("validationSummary"),
+        source.get("validation_summary"),
+        inputs.get("session"),
+    ]
+    for nested in nested_sources:
+        nested_object = json_object(nested)
+        for key in ("sessionType", "session_type"):
+            if resolved := normalized_session_type(nested_object.get(key)):
+                values.append(resolved)
+    return values
+
+
+def resolve_session_type_from_sources(*sources: Any, default: str = "full_documentation") -> str:
+    values: list[str] = []
+    for source in sources:
+        values.extend(session_type_values_from_object(source))
+    if "punchlist_visit" in values:
+        return "punchlist_visit"
+    if "full_documentation" in values:
+        return "full_documentation"
+    return default
+
+
 def session_type(validation: dict[str, Any]) -> str:
     session = (validation.get("inputs") or {}).get("session") or {}
-    value = (
-        validation.get("session_type")
-        or validation.get("sessionType")
-        or session.get("session_type")
-        or session.get("sessionType")
-        or "full_documentation"
-    )
-    normalized = str(value or "").strip().lower()
-    return "punchlist_visit" if normalized == "punchlist_visit" else "full_documentation"
+    return resolve_session_type_from_sources(validation, session)
 
 
 def renderer_report_arg(validation: dict[str, Any]) -> str:
     return "punchlist" if session_type(validation) == "punchlist_visit" else "all"
+
+
+def package_session_type(package: dict[str, Any]) -> str:
+    return resolve_session_type_from_sources(package)
+
+
+def report_ready_snapshot_metadata(client: SupabaseServiceClient, package: dict[str, Any]) -> dict[str, Any]:
+    snapshot_id = str(package.get("snapshot_id") or "").strip()
+    if not snapshot_id:
+        return {}
+    try:
+        rows = client.select(
+            "session_snapshots",
+            {
+                "select": "id,manifest,snapshot_kind,session_status,is_sealed",
+                "id": f"eq.{snapshot_id}",
+                "deleted_at": "is.null",
+                "limit": "1",
+            },
+        )
+    except Exception:
+        return {}
+    return rows[0] if rows else {}
+
+
+def report_ready_session_type(
+    package: dict[str, Any],
+    validation: dict[str, Any] | None = None,
+    snapshot: dict[str, Any] | None = None,
+) -> str:
+    return resolve_session_type_from_sources(
+        package,
+        validation or {},
+        snapshot or {},
+        json_object((snapshot or {}).get("manifest")),
+    )
+
+
+def package_with_report_ready_session_type(
+    package: dict[str, Any],
+    resolved_session_type: str,
+) -> dict[str, Any]:
+    resolved = dict(package)
+    resolved["sessionType"] = resolved_session_type
+    resolved["session_type"] = resolved_session_type
+    manifest = dict(json_object(resolved.get("manifest")))
+    manifest["sessionType"] = resolved_session_type
+    manifest["session_type"] = resolved_session_type
+    resolved["manifest"] = manifest
+    return resolved
 
 
 def format_session_datetime(value: Any) -> str | None:
@@ -810,14 +914,17 @@ class ResendEmailClient:
         return cls(api_key, from_email, portal_base_url, os.environ.get("REPORT_EMAIL_REPLY_TO", "").strip() or None)
 
     def send(self, recipient: dict[str, Any], context: dict[str, str | None], package: dict[str, Any], idempotency_key: str) -> str:
-        property_name = context["property_name"] or "Scout report"
+        is_punchlist_visit = package_session_type(package) == "punchlist_visit"
+        package_label = "punchlist update" if is_punchlist_visit else "report"
+        portal_label = "Punchlist updates and photos" if is_punchlist_visit else "Reports and photos"
+        property_name = context["property_name"] or ("Scout punchlist update" if is_punchlist_visit else "Scout report")
         property_address = context.get("property_address")
         session_datetime = context.get("session_datetime")
         portal_link = reports_portal_link(self.portal_base_url, package)
-        subject = f"New Scout report ready: {property_name}"
+        subject = f"New Scout {package_label} ready: {property_name}"
 
         text_lines = [
-            f"New Scout report ready: {property_name}",
+            f"New Scout {package_label} ready: {property_name}",
         ]
         if property_address:
             text_lines.append(f"Address: {property_address}")
@@ -826,7 +933,7 @@ class ResendEmailClient:
         text_lines.extend(
             [
                 "",
-                "Reports and photos are ready in the Scout Reports portal.",
+                f"{portal_label} are ready in the Scout Reports portal.",
                 f"Open Reports Portal: {portal_link}",
             ]
         )
@@ -835,7 +942,7 @@ class ResendEmailClient:
             '<div style="max-width:560px;margin:0 auto;padding:24px 16px;">',
             f'<img src="{html_escape(REPORT_READY_EMAIL_LOGO_URL)}" alt="ScoutClear" width="150" style="display:block;width:150px;max-width:100%;height:auto;margin:0 0 20px;" />',
             '<div style="background:#ffffff;border:1px solid #e2e8f0;border-radius:8px;padding:24px;">',
-            f'<p style="margin:0 0 16px;font-size:16px;line-height:1.55;">New Scout reports and photos are ready for <strong>{html_escape(property_name)}</strong>.</p>',
+            f'<p style="margin:0 0 16px;font-size:16px;line-height:1.55;">New Scout {html_escape(portal_label.lower())} are ready for <strong>{html_escape(property_name)}</strong>.</p>',
         ]
         if property_address:
             html_lines.append(
@@ -981,7 +1088,10 @@ def send_report_ready_notifications(
             return summary
 
         eligible_user_ids = {recipient["user_id"] for recipient in recipients}
-        context = report_ready_email_context(client, package, validation)
+        snapshot = report_ready_snapshot_metadata(client, package)
+        resolved_session_type = report_ready_session_type(package, validation, snapshot)
+        email_package = package_with_report_ready_session_type(package, resolved_session_type)
+        context = report_ready_email_context(client, email_package, validation)
         try:
             sender = email_client or ResendEmailClient.from_env()
         except Exception as error:
@@ -1036,7 +1146,7 @@ def send_report_ready_notifications(
                 provider_message_id = sender.send(
                     recipient,
                     context,
-                    package,
+                    email_package,
                     str(notification["idempotency_key"]),
                 )
             except Exception as error:

@@ -497,6 +497,41 @@ class ReportWorkerEmailNotificationTests(unittest.TestCase):
         self.assertEqual(0, second["sent_count"])
         self.assertEqual(1, len(sender.sent))
 
+    def test_report_ready_email_uses_validation_session_type_when_package_missing_it(self) -> None:
+        client = FakeSupabaseClient()
+        client.add_profile("manager-user", "manager@example.test")
+        client.add_membership("manager-user", "manager")
+        payload = validation()
+        payload["inputs"]["session"]["session_type"] = "punchlist_visit"
+        payload["inputs"]["session"]["sessionType"] = "punchlist_visit"
+        sender = FakeEmailClient()
+
+        summary = worker.send_report_ready_notifications(client, package(), payload, sender)
+
+        self.assertEqual(1, summary["sent_count"])
+        sent_package = sender.sent[0]["package"]
+        self.assertEqual("punchlist_visit", sent_package["sessionType"])
+        self.assertEqual("punchlist_visit", sent_package["manifest"]["sessionType"])
+
+    def test_report_ready_email_uses_snapshot_manifest_session_type_when_package_missing_it(self) -> None:
+        client = FakeSupabaseClient()
+        client.add_profile("manager-user", "manager@example.test")
+        client.add_membership("manager-user", "manager")
+        client.tables["session_snapshots"][0]["manifest"] = {
+            "sessionType": "punchlist_visit",
+            "session_type": "punchlist_visit",
+        }
+        payload = validation()
+        payload["inputs"]["session"].pop("session_type", None)
+        sender = FakeEmailClient()
+
+        summary = worker.send_report_ready_notifications(client, package(), payload, sender)
+
+        self.assertEqual(1, summary["sent_count"])
+        sent_package = sender.sent[0]["package"]
+        self.assertEqual("punchlist_visit", sent_package["sessionType"])
+        self.assertEqual("punchlist_visit", sent_package["manifest"]["session_type"])
+
     def test_notification_only_after_package_ready(self) -> None:
         client = FakeSupabaseClient()
         client.add_profile("field-user", "field@example.test")
@@ -639,6 +674,100 @@ class ReportWorkerEmailNotificationTests(unittest.TestCase):
         self.assertIn('alt="ScoutClear"', captured["payload"]["html"])
         self.assertIn("Sep 7, 2026 at 6:14 PM ET", captured["payload"]["html"])
         self.assertNotIn("UTC", captured["payload"]["html"])
+
+    def test_resend_full_documentation_email_copy_stays_report_ready(self) -> None:
+        captured: dict[str, Any] = {}
+
+        class FakeResponse:
+            def __enter__(self) -> "FakeResponse":
+                return self
+
+            def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
+                return None
+
+            def read(self) -> bytes:
+                return b'{"id":"resend-message-id"}'
+
+        def fake_urlopen(request: Any, timeout: int = 0) -> FakeResponse:
+            captured["payload"] = json.loads(request.data.decode("utf-8"))
+            return FakeResponse()
+
+        original_urlopen = worker.urllib.request.urlopen
+        worker.urllib.request.urlopen = fake_urlopen
+        try:
+            client = worker.ResendEmailClient(
+                api_key="test-api-key",
+                from_email="reports@example.test",
+                portal_base_url="https://reports.example.test",
+            )
+            client.send(
+                {"email": "recipient@example.test"},
+                {
+                    "property_name": "Test New Property",
+                    "property_address": "123 Portal Way",
+                    "session_datetime": "Sep 7, 2026 at 6:14 PM ET",
+                },
+                package(),
+                "report-package-ready-idempotency-key",
+            )
+        finally:
+            worker.urllib.request.urlopen = original_urlopen
+
+        self.assertEqual("New Scout report ready: Test New Property", captured["payload"]["subject"])
+        self.assertIn("New Scout report ready: Test New Property", captured["payload"]["text"])
+        self.assertIn("Reports and photos are ready in the Scout Reports portal.", captured["payload"]["text"])
+        self.assertIn("New Scout reports and photos are ready", captured["payload"]["html"])
+
+    def test_resend_punchlist_visit_email_copy_says_punchlist_update(self) -> None:
+        captured: dict[str, Any] = {}
+
+        class FakeResponse:
+            def __enter__(self) -> "FakeResponse":
+                return self
+
+            def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
+                return None
+
+            def read(self) -> bytes:
+                return b'{"id":"resend-message-id"}'
+
+        def fake_urlopen(request: Any, timeout: int = 0) -> FakeResponse:
+            captured["payload"] = json.loads(request.data.decode("utf-8"))
+            return FakeResponse()
+
+        punchlist_package = package()
+        punchlist_package["manifest"] = json.dumps({
+            "sessionType": "punchlist_visit",
+            "session_type": "punchlist_visit",
+        })
+
+        original_urlopen = worker.urllib.request.urlopen
+        worker.urllib.request.urlopen = fake_urlopen
+        try:
+            client = worker.ResendEmailClient(
+                api_key="test-api-key",
+                from_email="reports@example.test",
+                portal_base_url="https://reports.example.test",
+            )
+            client.send(
+                {"email": "recipient@example.test"},
+                {
+                    "property_name": "Test New Property",
+                    "property_address": "123 Portal Way",
+                    "session_datetime": "Sep 7, 2026 at 6:14 PM ET",
+                },
+                punchlist_package,
+                "punchlist-package-ready-idempotency-key",
+            )
+        finally:
+            worker.urllib.request.urlopen = original_urlopen
+
+        self.assertEqual("New Scout punchlist update ready: Test New Property", captured["payload"]["subject"])
+        self.assertIn("New Scout punchlist update ready: Test New Property", captured["payload"]["text"])
+        self.assertIn("Punchlist updates and photos are ready in the Scout Reports portal.", captured["payload"]["text"])
+        self.assertIn("New Scout punchlist updates and photos are ready", captured["payload"]["html"])
+        self.assertNotIn("New Scout report ready", captured["payload"]["text"])
+        self.assertNotIn("Reports and photos are ready", captured["payload"]["text"])
 
 
 if __name__ == "__main__":
