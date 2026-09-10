@@ -12939,10 +12939,9 @@ struct PropertySessionView: View {
                     VStack(alignment: .leading, spacing: 3) {
                         Text(title)
                             .font(.system(size: 17, weight: .semibold))
-                            .foregroundColor(isSelected ? .white : .primary)
                         Text(subtitle)
                             .font(.system(size: 13, weight: .medium))
-                            .foregroundColor(isSelected ? .white.opacity(0.86) : .secondary)
+                            .foregroundColor(.secondary)
                             .lineLimit(2)
                     }
                     Spacer(minLength: 0)
@@ -12963,10 +12962,8 @@ struct PropertySessionView: View {
             let isHighlighted = isSelected || configuration.isPressed
 
             configuration.label
-                .foregroundColor(isHighlighted ? .white : .primary)
                 .background(isHighlighted ? Color.accentColor : Color(uiColor: .secondarySystemGroupedBackground))
                 .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-                .opacity(isHighlighted ? 0.96 : 1)
                 .animation(.easeOut(duration: 0.08), value: isHighlighted)
         }
     }
