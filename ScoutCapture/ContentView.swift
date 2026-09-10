@@ -3689,6 +3689,8 @@ struct ContentView: View {
     @State private var flaggedAngleIndexByID: [UUID: Int] = [:]
     @State private var allowReferenceThumbnailResolution: Bool = false
     @State private var referenceResolutionToken: Int = 0
+    @State private var guidedChecklistHydrating: Bool = false
+    @State private var deferredSessionMediaHydrationWorkItem: DispatchWorkItem? = nil
     @State private var reservedAngleByContextKey: [String: Int] = [:]
     @State private var guidedThumbnailRefreshToken: UUID = UUID()
     @State private var gridThumbnailRefreshToken: UUID = UUID()
@@ -4061,6 +4063,41 @@ struct ContentView: View {
         allowReferenceThumbnailResolution = true
         refreshGuidedShots()
         refreshActiveIssues()
+    }
+
+    private func hydrateGuidedChecklistAfterPresentation() {
+        guard showGuidedChecklist else { return }
+        guard !allowReferenceThumbnailResolution else {
+            guidedChecklistHydrating = false
+            return
+        }
+        guidedChecklistHydrating = true
+        deferCameraOverlayWork {
+            guard showGuidedChecklist else {
+                guidedChecklistHydrating = false
+                return
+            }
+            ensureReferenceResolutionReady()
+            guidedChecklistHydrating = false
+            guidedThumbnailRefreshToken = UUID()
+        }
+    }
+
+    private func scheduleDeferredSessionMediaHydration(
+        propertyID: UUID?,
+        sessionID: UUID?,
+        delay: TimeInterval = 0.65
+    ) {
+        deferredSessionMediaHydrationWorkItem?.cancel()
+        guard let propertyID, let sessionID else { return }
+        let item = DispatchWorkItem {
+            appState.ensureOperationalMediaAvailableForSession(
+                propertyID: propertyID,
+                sessionID: sessionID
+            )
+        }
+        deferredSessionMediaHydrationWorkItem = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: item)
     }
 
     private func refreshReferenceSetsAndPendingCounts() {
@@ -6457,14 +6494,15 @@ struct ContentView: View {
             showFlaggedActionToastNow("No guided requirements")
             return
         }
-        ensureReferenceResolutionReady()
         let snapshot = guidedSessionCountSnapshot()
         guard snapshot.remaining > 0 else {
             showFlaggedActionToastNow("No guided photos")
             verboseLog("[GuidedCount] opened empty guidedRemaining=0")
             return
         }
+        guidedChecklistHydrating = !allowReferenceThumbnailResolution
         showGuidedChecklist = true
+        hydrateGuidedChecklistAfterPresentation()
         deferCameraOverlayWork {
             let sessionIDText = appState.currentSession?.id.uuidString ?? "NONE"
             verboseLog("[GuidedCount] session=\(sessionIDText) guidedTotal=\(snapshot.total) capturedForSession=\(snapshot.captured) remaining=\(snapshot.remaining)")
@@ -6784,6 +6822,10 @@ struct ContentView: View {
                     propertyID: appState.selectedPropertyID,
                     sessionID: appState.currentSession?.id
                 )
+                scheduleDeferredSessionMediaHydration(
+                    propertyID: appState.selectedPropertyID,
+                    sessionID: appState.currentSession?.id
+                )
                 refreshCaptureProfileSessionState()
                 resetDetailSelectionForNewEmptySessionIfNeeded()
                 primeDeferredReferenceResolution()
@@ -6803,6 +6845,9 @@ struct ContentView: View {
                 refreshBottomGlyphRotation()
             }
             .onDisappear {
+                deferredSessionMediaHydrationWorkItem?.cancel()
+                deferredSessionMediaHydrationWorkItem = nil
+                guidedChecklistHydrating = false
                 isPollingDeviceOrientation = false
                 isEndingSession = false
                 locationManager.stop()
@@ -6814,6 +6859,10 @@ struct ContentView: View {
                     await appState.ensureGalleryMediaAvailableForRequests(requests)
                 }
                 reportLibrary.setSessionContext(
+                    propertyID: appState.selectedPropertyID,
+                    sessionID: appState.currentSession?.id
+                )
+                scheduleDeferredSessionMediaHydration(
                     propertyID: appState.selectedPropertyID,
                     sessionID: appState.currentSession?.id
                 )
@@ -6837,6 +6886,10 @@ struct ContentView: View {
                     propertyID: appState.selectedPropertyID,
                     sessionID: appState.currentSession?.id
                 )
+                scheduleDeferredSessionMediaHydration(
+                    propertyID: appState.selectedPropertyID,
+                    sessionID: appState.currentSession?.id
+                )
                 let propertyIDText = appState.selectedPropertyID?.uuidString ?? "NONE"
                 let baselineActive: Bool = {
                     guard let propertyID = appState.selectedPropertyID,
@@ -6856,13 +6909,6 @@ struct ContentView: View {
                 }
                 primeDeferredReferenceResolution()
                 resetSelectionForSwitch()
-                if let propertyID = appState.selectedPropertyID,
-                   let sessionID = nextSessionID {
-                    appState.ensureOperationalMediaAvailableForSession(
-                        propertyID: propertyID,
-                        sessionID: sessionID
-                    )
-                }
                 refreshActiveIssues()
                 refreshGuidedShots()
                 refreshCoreElevationChecklistSnapshot()
@@ -6909,13 +6955,10 @@ struct ContentView: View {
                 if hasValidCurrentSession {
                     camera.ensurePreviewRunningAsync()
                 }
-                if let propertyID = appState.selectedPropertyID,
-                   let sessionID = appState.currentSession?.id {
-                    appState.ensureOperationalMediaAvailableForSession(
-                        propertyID: propertyID,
-                        sessionID: sessionID
-                    )
-                }
+                scheduleDeferredSessionMediaHydration(
+                    propertyID: appState.selectedPropertyID,
+                    sessionID: appState.currentSession?.id
+                )
             }
 
             if showSessionActionsSheet, let summary = sessionActionsSummary {
@@ -7118,6 +7161,7 @@ struct ContentView: View {
             canChangeShotLifecycle: appState.currentSession?.status == .draft && appState.currentSession?.isSealed == false,
             isBaselineSession: isCurrentSessionBaselineFromPersisted,
             allowReferenceFallback: shouldAllowChecklistReferenceFallback,
+            isHydrating: guidedChecklistHydrating,
             captureProfile: captureProfile,
             buildingOptions: $buildingOptions,
             detailTypesModel: detailTypesModel,
@@ -7126,9 +7170,11 @@ struct ContentView: View {
             refreshToken: guidedThumbnailRefreshToken,
             cache: imageCache,
             onClose: {
+                guidedChecklistHydrating = false
                 showGuidedChecklist = false
             },
             onSelectGuided: { guidedShot in
+                guidedChecklistHydrating = false
                 showGuidedChecklist = false
                 DispatchQueue.main.async {
                     armGuidedShot(guidedShot)
@@ -7141,6 +7187,7 @@ struct ContentView: View {
                 undoGuidedShotSkip(guidedShot)
             },
             onRetake: { guidedShot in
+                guidedChecklistHydrating = false
                 showGuidedChecklist = false
                 DispatchQueue.main.async {
                     armGuidedRetake(guidedShot)
@@ -12951,43 +12998,70 @@ extension ContentView {
             return
         }
 
-        let flaggedRemaining = flaggedPendingCaptureCount
-        let guidedRemaining = guidedRemainingForCompass
-        let hasBaseline = appState.propertyHasBaseline(propertyID)
-        let currentSessionCaptureCount = currentSessionCaptureCountForSummary(
+        let initial = makeSessionActionsSummary(
             propertyID: propertyID,
-            session: currentSession
+            currentSession: currentSession,
+            includeArchiveAvailability: false
         )
-        let reExportEligibleNow = appState.isReExportLocallyAvailable(currentSession)
-        let isPendingDelivery = appState.isPendingDeliveryLocallyAvailable(currentSession)
+        sessionActionsSummary = initial.summary
+        showSessionActionsSheet = true
 
         print(
             "[EndSession] sessionID=\(currentSession.id.uuidString) " +
-            "metadataShots=\(currentSessionCaptureCount) guidedCount=\(guidedShots.count) guidedRemaining=\(guidedRemaining) flaggedRemaining=\(flaggedRemaining)"
+            "metadataShots=\(initial.summary.currentSessionCaptureCount) guidedCount=\(guidedShots.count) guidedRemaining=\(initial.summary.guidedRemainingCount) flaggedRemaining=\(initial.summary.flaggedRemainingCount)"
         )
-        let liveGuidedCount = guidedRemainingForCompass
-        verboseLog("[Badge] beforeOpen guidedCount=\(liveGuidedCount) flaggedCount=\(flaggedPendingCaptureCount)")
-
-        sessionActionsSummary = SessionActionsSummary(
-            guidedRemainingCount: guidedRemaining,
-            flaggedRemainingCount: flaggedRemaining,
-            hasBaseline: hasBaseline,
-            currentSessionCaptureCount: currentSessionCaptureCount,
-            isSessionSealed: currentSession.isSealed,
-            firstDeliveredAt: currentSession.firstDeliveredAt,
-            reExportExpiresAt: currentSession.reExportExpiresAt,
-            reExportEligibleNow: reExportEligibleNow,
-            sessionType: currentSession.sessionType
-        )
-        if let reason = sessionActionsSummary?.exportDisabledReason {
+        verboseLog("[Badge] afterOpen guidedCount=\(guidedRemainingForCompass) flaggedCount=\(flaggedPendingCaptureCount)")
+        if let reason = initial.summary.exportDisabledReason {
             print("[ExportEligibility] sessionID=\(currentSession.id.uuidString) enabled=false reason=\(reason)")
         } else {
             print("[ExportEligibility] sessionID=\(currentSession.id.uuidString) enabled=true")
         }
-        print("[ExportUI] sessionID=\(currentSession.id.uuidString) isPendingDelivery=\(isPendingDelivery) isReExportEligible=\(reExportEligibleNow)")
-        showSessionActionsSheet = true
-        let liveGuidedCountAfter = guidedRemainingForCompass
-        verboseLog("[Badge] afterOpen guidedCount=\(liveGuidedCountAfter) flaggedCount=\(flaggedPendingCaptureCount)")
+        scheduleSessionActionsArchiveAvailabilityRefresh(propertyID: propertyID, sessionID: currentSession.id)
+    }
+
+    private func makeSessionActionsSummary(
+        propertyID: UUID,
+        currentSession: Session,
+        includeArchiveAvailability: Bool
+    ) -> (summary: SessionActionsSummary, isPendingDelivery: Bool) {
+        let reExportEligibleNow = includeArchiveAvailability ? appState.isReExportLocallyAvailable(currentSession) : false
+        let isPendingDelivery = includeArchiveAvailability ? appState.isPendingDeliveryLocallyAvailable(currentSession) : false
+        return (
+            SessionActionsSummary(
+                guidedRemainingCount: guidedRemainingForCompass,
+                flaggedRemainingCount: flaggedPendingCaptureCount,
+                hasBaseline: appState.propertyHasBaseline(propertyID),
+                currentSessionCaptureCount: currentSessionCaptureCountForSummary(
+                    propertyID: propertyID,
+                    session: currentSession
+                ),
+                isSessionSealed: currentSession.isSealed,
+                firstDeliveredAt: currentSession.firstDeliveredAt,
+                reExportExpiresAt: currentSession.reExportExpiresAt,
+                reExportEligibleNow: reExportEligibleNow,
+                sessionType: currentSession.sessionType
+            ),
+            isPendingDelivery
+        )
+    }
+
+    private func scheduleSessionActionsArchiveAvailabilityRefresh(propertyID: UUID, sessionID: UUID) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) {
+            guard showSessionActionsSheet,
+                  let currentSession = appState.currentSession,
+                  currentSession.id == sessionID else { return }
+            let refreshed = makeSessionActionsSummary(
+                propertyID: propertyID,
+                currentSession: currentSession,
+                includeArchiveAvailability: true
+            )
+            sessionActionsSummary = refreshed.summary
+            print(
+                "[ExportUI] sessionID=\(currentSession.id.uuidString) " +
+                "isPendingDelivery=\(refreshed.isPendingDelivery) " +
+                "isReExportEligible=\(refreshed.summary.reExportEligibleNow)"
+            )
+        }
     }
 
     private func currentSessionCaptureCountForSummary(propertyID: UUID, session: Session) -> Int {
@@ -18731,6 +18805,7 @@ extension ContentView {
         let canChangeShotLifecycle: Bool
         let isBaselineSession: Bool
         let allowReferenceFallback: Bool
+        let isHydrating: Bool
         let captureProfile: CaptureProfile
         @Binding var buildingOptions: [String]
         @ObservedObject var detailTypesModel: DetailTypesModel
@@ -19054,6 +19129,19 @@ extension ContentView {
                             )
                                 .padding(.top, 64)
                                 .transition(.opacity)
+                        }
+                    }
+                    .overlay(alignment: .topTrailing) {
+                        if isHydrating {
+                            ProgressView()
+                                .progressViewStyle(.circular)
+                                .controlSize(.small)
+                                .tint(theme.label.opacity(0.75))
+                                .padding(10)
+                                .background(theme.fill.opacity(0.82))
+                                .clipShape(Capsule())
+                                .padding(.top, 68)
+                                .padding(.trailing, 14)
                         }
                     }
                     .overlay {
