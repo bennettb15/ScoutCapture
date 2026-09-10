@@ -114,6 +114,29 @@ final class Phase2C27EDraftSessionReuseTests: XCTestCase {
         return shot
     }
 
+    private func makeCompletedUploadStatusRecord(
+        for session: Session,
+        in fixture: Fixture,
+        generatedAt: Date = Date(timeIntervalSinceReferenceDate: 500)
+    ) throws -> LocalStore.SessionSnapshotUploadStatusRecord {
+        let orgID = try XCTUnwrap(fixture.property.orgId)
+        let snapshotID = UUID()
+        return LocalStore.SessionSnapshotUploadStatusRecord(
+            snapshotID: snapshotID,
+            organizationID: orgID,
+            propertyID: fixture.property.id,
+            sessionID: session.id,
+            snapshotKind: AppState.SessionSnapshotKind.completed.rawValue,
+            trigger: "auto_completed_sealed_archive:completeCurrentSessionWithoutZIP",
+            triggerSource: "completeCurrentSessionWithoutZIP",
+            idempotencyKey: "\(fixture.property.id.uuidString)|\(session.id.uuidString)|completeCurrentSessionWithoutZIP|\(snapshotID.uuidString)",
+            storagePath: "org/\(orgID.uuidString)/property/\(fixture.property.id.uuidString)/session/\(session.id.uuidString)/\(snapshotID.uuidString).json",
+            generatedAt: generatedAt,
+            status: .uploaded,
+            updatedAt: generatedAt.addingTimeInterval(5)
+        )
+    }
+
     func testPropertyReopenReusesPersistedDraft() throws {
         let fixture = try makeFixture()
         defer { tearDownFixture(fixture) }
@@ -483,6 +506,35 @@ final class Phase2C27EDraftSessionReuseTests: XCTestCase {
         XCTAssertNotEqual(reopened.id, punchlist.id)
         XCTAssertEqual(reopened.status, .draft)
         XCTAssertTrue(fixture.appState.currentSessionRequiresInitialSessionTypeSelection(propertyID: fixture.property.id))
+    }
+
+    func testUploadedCompletedSnapshotStatusPreventsStaleDraftResume() throws {
+        let fixture = try makeFixture()
+        defer { tearDownFixture(fixture) }
+
+        fixture.appState.selectProperty(id: fixture.property.id)
+        _ = try XCTUnwrap(fixture.appState.startSession(skipPropertyStatusPreflight: true))
+        let staleDraft = try XCTUnwrap(fixture.appState.persistCurrentSessionType(.fullDocumentation))
+        try addMaterialShot(to: staleDraft, in: fixture)
+        _ = try fixture.localStore.upsertSessionSnapshotUploadStatusRecord(
+            makeCompletedUploadStatusRecord(for: staleDraft, in: fixture)
+        )
+        fixture.appState._debugRunForegroundCacheRefreshForTests()
+
+        XCTAssertTrue(
+            fixture.appState.currentSessionRequiresInitialSessionTypeSelection(propertyID: fixture.property.id)
+        )
+
+        let reopened = try XCTUnwrap(fixture.appState.startSession(skipPropertyStatusPreflight: true))
+
+        XCTAssertNotEqual(reopened.id, staleDraft.id)
+        XCTAssertEqual(reopened.status, .draft)
+        XCTAssertEqual(reopened.sessionType, .fullDocumentation)
+        XCTAssertTrue(fixture.appState.currentSessionRequiresInitialSessionTypeSelection(propertyID: fixture.property.id))
+        XCTAssertTrue(
+            try fixture.localStore.fetchSessions(propertyID: fixture.property.id)
+                .contains(where: { $0.id == staleDraft.id })
+        )
     }
 
     func testPunchlistCompletionIgnoresGuidedRemainingWhileFullDocumentationDoesNot() {

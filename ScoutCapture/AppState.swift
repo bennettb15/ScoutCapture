@@ -47705,6 +47705,7 @@ final class AppState: ObservableObject {
             }
         }
         ensureCanonicalOrgPersistenceForSelectedPropertyIfKnown(reason: "start_session")
+        refreshSessionSnapshotCloudStatusCache()
         let sessionsForProperty = sessions(for: selectedPropertyID)
         let reusableDrafts = sessionsForProperty
             .filter { reusableDraftSession($0) }
@@ -47836,6 +47837,15 @@ final class AppState: ObservableObject {
             return false
         }
         let materialContentCount = sessionMaterialContentCount(session)
+        if sessionHasFinalLocalStateEvidence(session) {
+            logInitialSessionTypeSelectionDecision(
+                session,
+                requiresSelection: true,
+                reason: "final_snapshot_or_metadata_state",
+                materialContentCount: materialContentCount
+            )
+            return true
+        }
         if materialContentCount > 0 {
             logInitialSessionTypeSelectionDecision(
                 session,
@@ -50667,7 +50677,26 @@ final class AppState: ObservableObject {
             session.status == .draft &&
             !session.isSealed &&
             !isFinalSession(session) &&
+            !sessionHasFinalLocalStateEvidence(session) &&
             sessionHasCaptures(session)
+    }
+
+    private func sessionHasFinalLocalStateEvidence(_ session: Session) -> Bool {
+        if let metadata = try? localStore.loadSessionMetadata(propertyID: session.propertyID, sessionID: session.id),
+           metadata.status == .completed ||
+            metadata.endedAt != nil ||
+            metadata.exportedAt != nil ||
+            metadata.isSealed ||
+            metadata.firstDeliveredAt != nil {
+            return true
+        }
+        guard let status = sessionSnapshotCloudStatusBySessionID[session.id],
+              status.propertyID == session.propertyID,
+              status.state == .uploaded,
+              status.triggerSource == "completeCurrentSessionWithoutZIP" else {
+            return false
+        }
+        return true
     }
 
     private func persistedSessionIncludingDeleted(propertyID: UUID, sessionID: UUID) -> Session? {
