@@ -12519,6 +12519,7 @@ struct PropertySessionView: View {
     @State private var isAwaitingInitialSessionTypeSelection: Bool = false
     @State private var sessionEntryBlock: AppState.SessionEntryCoordinationBlock? = nil
     @State private var didSchedulePostOpenReferenceReconcile: Bool = false
+    @State private var isVerifyingSessionAfterPresentation: Bool = false
 
     private let camera = CameraManager.shared
     private let timeoutSeconds: Double = 4.0
@@ -12530,6 +12531,10 @@ struct PropertySessionView: View {
                     exitCaptureScreen()
                 })
                 .transition(.opacity)
+                if isVerifyingSessionAfterPresentation {
+                    sessionVerificationOverlay
+                        .transition(.opacity)
+                }
             } else {
                 openingCameraInterstitial
                     .transition(.opacity)
@@ -12540,9 +12545,11 @@ struct PropertySessionView: View {
             .sheet(isPresented: $isAwaitingInitialSessionTypeSelection) {
                 InitialSessionTypeChoiceSheet(
                     onChoose: { sessionType in
-                        guard appState.persistCurrentSessionType(sessionType) != nil else { return }
                         isAwaitingInitialSessionTypeSelection = false
-                        beginOpenFlow(forceRetry: true)
+                        DispatchQueue.main.async {
+                            guard appState.persistCurrentSessionType(sessionType) != nil else { return }
+                            beginOpenFlow(forceRetry: true)
+                        }
                     },
                     onBack: {
                         isAwaitingInitialSessionTypeSelection = false
@@ -12586,7 +12593,12 @@ struct PropertySessionView: View {
                     }
                     refreshSessionReadiness()
                     isCheckingSessionBeforeOpen = false
-                    beginSessionCoordinationFlow()
+                    if appState.canFastPresentCurrentMaterialDraftResume(propertyID: propertyID) {
+                        beginOpenFlow(forceRetry: true)
+                        beginSessionCoordinationFlow(openAfterAllowed: false)
+                    } else {
+                        beginSessionCoordinationFlow()
+                    }
                 }
             }
             .onChange(of: appState.currentSession?.id) { _, _ in
@@ -12607,7 +12619,29 @@ struct PropertySessionView: View {
                     propertyID: request.propertyID
                 )
                 exitCaptureScreen()
+        }
+    }
+
+    @ViewBuilder
+    private var sessionVerificationOverlay: some View {
+        ZStack {
+            Color.black.opacity(0.28)
+                .ignoresSafeArea()
+
+            VStack(spacing: 12) {
+                ProgressView()
+                    .progressViewStyle(.circular)
+                    .tint(.white)
+                Text("Checking Session")
+                    .font(.system(size: 17, weight: .semibold))
+                    .foregroundColor(.white)
             }
+            .padding(.horizontal, 20)
+            .padding(.vertical, 18)
+            .background(Color.black.opacity(0.78))
+            .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+        }
+        .allowsHitTesting(true)
     }
 
     @ViewBuilder
@@ -12768,7 +12802,7 @@ struct PropertySessionView: View {
     }
 
     private func completeOpenFlow() {
-        guard !showCameraContent else { return }
+        guard !showCameraContent, sessionEntryBlock == nil else { return }
         appState.markCurrentSessionCameraEntryBegan()
         withAnimation(.easeInOut(duration: 0.14)) {
             showCameraContent = true
@@ -12813,7 +12847,10 @@ struct PropertySessionView: View {
         hasSessionReadyForProperty = session?.propertyID == propertyID && session?.status == .draft
     }
 
-    private func beginSessionCoordinationFlow(forceClaim: Bool = false) {
+    private func beginSessionCoordinationFlow(
+        forceClaim: Bool = false,
+        openAfterAllowed: Bool = true
+    ) {
         print(
             "[SessionCoordinationUI] event=begin " +
             "propertyID=\(propertyID.uuidString) " +
@@ -12826,10 +12863,13 @@ struct PropertySessionView: View {
                 isCheckingSessionCoordination = false
                 return
             }
-            beginOpenFlow(forceRetry: true)
+            if openAfterAllowed {
+                beginOpenFlow(forceRetry: true)
+            }
             return
         }
-        isCheckingSessionCoordination = true
+        isCheckingSessionCoordination = openAfterAllowed
+        isVerifyingSessionAfterPresentation = !openAfterAllowed
         sessionEntryBlock = nil
         Task {
             let status = await appState.evaluateSessionEntryCoordination(
@@ -12850,17 +12890,28 @@ struct PropertySessionView: View {
             }
             await MainActor.run {
                 isCheckingSessionCoordination = false
-            switch status {
-            case .allowed:
-                sessionEntryBlock = nil
-                continueAfterSessionCoordinationAllowed()
-            case .blocked(let block):
-                sessionEntryBlock = block
-                appState.locallyLockedPropertyIDs.insert(propertyID)
+                isVerifyingSessionAfterPresentation = false
+                switch status {
+                case .allowed:
+                    sessionEntryBlock = nil
+                    if openAfterAllowed {
+                        continueAfterSessionCoordinationAllowed()
+                    }
+                case .blocked(let block):
+                    openFlowToken += 1
+                    didStartOpenFlow = false
+                    camera.stopPreviewAsync()
+                    if showCameraContent {
+                        withAnimation(.easeInOut(duration: 0.14)) {
+                            showCameraContent = false
+                        }
+                    }
+                    sessionEntryBlock = block
+                    appState.locallyLockedPropertyIDs.insert(propertyID)
+                }
             }
         }
     }
-}
 
     private func claimBlockedSession() {
         if sessionEntryBlock?.blockContext == "pending_export",
@@ -12891,7 +12942,6 @@ struct PropertySessionView: View {
     private struct InitialSessionTypeChoiceSheet: View {
         let onChoose: (SessionType) -> Void
         let onBack: () -> Void
-        private static let selectionFeedbackDelay: TimeInterval = 0.06
         @State private var selectedSessionTypeBeingOpened: SessionType? = nil
 
         var body: some View {
@@ -12936,7 +12986,7 @@ struct PropertySessionView: View {
             return Button(action: {
                 guard selectedSessionTypeBeingOpened == nil else { return }
                 selectedSessionTypeBeingOpened = sessionType
-                DispatchQueue.main.asyncAfter(deadline: .now() + Self.selectionFeedbackDelay) {
+                DispatchQueue.main.async {
                     onChoose(sessionType)
                 }
             }) {

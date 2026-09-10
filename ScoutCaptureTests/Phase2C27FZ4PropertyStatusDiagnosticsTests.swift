@@ -1179,6 +1179,83 @@ final class Phase2C27FZ4PropertyStatusDiagnosticsTests: XCTestCase {
         XCTAssertNil(fixture.appState.currentSession)
     }
 
+    func testCurrentOwnerMaterialDraftCanFastPresentFromCachedStatus() throws {
+        let fixture = try makeCutoverFixture()
+        let draft = try seedCapturedDraft(propertyID: fixture.property.id, localStore: fixture.localStore)
+        fixture.appState._debugRefreshPropertiesLocallyForTests()
+        fixture.appState.selectProperty(id: fixture.property.id)
+        fixture.appState.currentSession = draft
+        let record = makeStatusRecord(
+            propertyID: fixture.property.id,
+            orgID: fixture.orgID,
+            status: .draft,
+            activeSessionID: draft.id,
+            draftSessionID: draft.id,
+            ownerUserID: fixture.userID,
+            ownerDeviceID: fixture.appState._debugCurrentDeviceIdentifierForTests()
+        )
+        fixture.appState._debugReplacePropertyStatusCacheForTests([record])
+
+        XCTAssertTrue(
+            fixture.appState.canFastPresentCurrentMaterialDraftResume(
+                propertyID: fixture.property.id
+            )
+        )
+    }
+
+    func testOtherOwnerMaterialDraftCannotFastPresentFromCachedStatus() throws {
+        let fixture = try makeCutoverFixture()
+        let draft = try seedCapturedDraft(propertyID: fixture.property.id, localStore: fixture.localStore)
+        fixture.appState._debugRefreshPropertiesLocallyForTests()
+        fixture.appState.selectProperty(id: fixture.property.id)
+        fixture.appState.currentSession = draft
+        let record = makeStatusRecord(
+            propertyID: fixture.property.id,
+            orgID: fixture.orgID,
+            status: .draft,
+            activeSessionID: draft.id,
+            draftSessionID: draft.id,
+            ownerUserID: UUID(),
+            ownerDeviceID: "other-device"
+        )
+        fixture.appState._debugReplacePropertyStatusCacheForTests([record])
+
+        XCTAssertFalse(
+            fixture.appState.canFastPresentCurrentMaterialDraftResume(
+                propertyID: fixture.property.id
+            )
+        )
+    }
+
+    func testNoPhotoDraftCannotFastPresentFromCachedStatus() throws {
+        let fixture = try makeCutoverFixture()
+        fixture.appState.selectProperty(id: fixture.property.id)
+        let session = try XCTUnwrap(
+            fixture.appState.startSession(skipPropertyStatusPreflight: true)
+        )
+        let record = makeStatusRecord(
+            propertyID: fixture.property.id,
+            orgID: fixture.orgID,
+            status: .draft,
+            activeSessionID: session.id,
+            draftSessionID: session.id,
+            ownerUserID: fixture.userID,
+            ownerDeviceID: fixture.appState._debugCurrentDeviceIdentifierForTests()
+        )
+        fixture.appState._debugReplacePropertyStatusCacheForTests([record])
+
+        XCTAssertFalse(
+            fixture.appState.canFastPresentCurrentMaterialDraftResume(
+                propertyID: fixture.property.id
+            )
+        )
+        XCTAssertTrue(
+            fixture.appState.currentSessionRequiresInitialSessionTypeSelection(
+                propertyID: fixture.property.id
+            )
+        )
+    }
+
     func testDraftPromotionLocalCacheUpdateShowsOwnerDraftBadgeImmediately() throws {
         let fixture = try makeCutoverFixture()
         let draft = try seedCapturedDraft(propertyID: fixture.property.id, localStore: fixture.localStore)

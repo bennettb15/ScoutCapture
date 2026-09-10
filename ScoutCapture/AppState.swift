@@ -47927,6 +47927,55 @@ final class AppState: ObservableObject {
         return true
     }
 
+    func canFastPresentCurrentMaterialDraftResume(propertyID: UUID) -> Bool {
+        guard let session = currentSession,
+              session.propertyID == propertyID,
+              reusableDraftSession(session),
+              !locallyLockedPropertyIDs.contains(propertyID),
+              !isSessionLockedByOther(sessionID: session.id),
+              let record = propertyStatusByPropertyID[propertyID],
+              record.status == .draft,
+              record.pendingExportSessionID == nil,
+              record.lastExportedSessionID == nil else {
+            return false
+        }
+
+        let sourceSessionIDs = [record.draftSessionID, record.activeSessionID].compactMap { $0 }
+        guard sourceSessionIDs.isEmpty || sourceSessionIDs.contains(session.id) else {
+            return false
+        }
+
+        let currentUserID = authenticatedSupabaseUser?.id
+        let currentDeviceID = currentDeviceIdentifier()
+        guard Self.propertyStatusActorOwnedByCurrentActor(
+            record: record,
+            currentUserID: currentUserID,
+            currentDeviceID: currentDeviceID
+        ) else {
+            return false
+        }
+
+        if let occupancy = propertySessionOccupancyByPropertyID[propertyID] {
+            let occupancyUserID = occupancy.occupiedByUserID
+            let occupancyDeviceID = normalizedSupabaseText(occupancy.occupiedByDeviceID)
+            let occupancyHasOwner = occupancyUserID != nil || occupancyDeviceID != nil
+            let occupancyOwnedByCurrentActor =
+                (occupancyUserID != nil && occupancyUserID == currentUserID) ||
+                (occupancyDeviceID != nil && occupancyDeviceID == currentDeviceID)
+            if occupancyHasOwner,
+               !occupancyOwnedByCurrentActor,
+               !isStaleCoordinationLock(lockedAt: occupancy.occupiedAt) {
+                return false
+            }
+        }
+
+        let decision = makePropertyStatusEntryPreflightDecision(
+            propertyID: propertyID,
+            record: record
+        )
+        return !decision.isBlocked
+    }
+
     func markCurrentSessionCameraEntryBegan() {
         guard let sessionID = currentSession?.id else { return }
         initialSessionTypeSelectedSessionIDs.remove(sessionID)
