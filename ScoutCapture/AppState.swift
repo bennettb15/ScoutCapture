@@ -7732,6 +7732,7 @@ final class AppState: ObservableObject {
     private var allDraftSessionByProperty: [UUID: Session] = [:]
     private var allPendingExportSessionByProperty: [UUID: Session] = [:]
     private var allHubMetaByProperty: [UUID: HubPropertyMeta] = [:]
+    private var initialSessionTypeSelectedSessionIDs: Set<UUID> = []
 
     var requiresAuthentication: Bool {
         backendFeatureFlags.supabaseEnabled && supabaseClient != nil
@@ -47834,19 +47835,62 @@ final class AppState: ObservableObject {
               !isFinalSession(session) else {
             return false
         }
+        let materialContentCount = sessionMaterialContentCount(session)
+        if materialContentCount > 0 {
+            logInitialSessionTypeSelectionDecision(
+                session,
+                requiresSelection: false,
+                reason: "material_draft_resume",
+                materialContentCount: materialContentCount
+            )
+            return false
+        }
+        if initialSessionTypeSelectedSessionIDs.contains(session.id) {
+            logInitialSessionTypeSelectionDecision(
+                session,
+                requiresSelection: false,
+                reason: "initial_type_selected_for_active_shell",
+                materialContentCount: materialContentCount
+            )
+            return false
+        }
         if let persisted = persistedSessionIncludingDeleted(propertyID: propertyID, sessionID: session.id) {
             if reusableDraftSession(persisted) {
+                logInitialSessionTypeSelectionDecision(
+                    session,
+                    requiresSelection: false,
+                    reason: "persisted_material_draft_resume",
+                    materialContentCount: materialContentCount
+                )
                 return false
             }
             if persisted.deletedAt == nil,
                persisted.status == .draft,
                !persisted.isSealed,
                !isFinalSession(persisted) {
-                return false
+                logInitialSessionTypeSelectionDecision(
+                    session,
+                    requiresSelection: true,
+                    reason: "persisted_empty_draft_shell",
+                    materialContentCount: materialContentCount
+                )
+                return true
             }
+            logInitialSessionTypeSelectionDecision(
+                session,
+                requiresSelection: true,
+                reason: "persisted_final_or_deleted_session",
+                materialContentCount: materialContentCount
+            )
             return true
         }
-        return !sessionHasCaptures(session)
+        logInitialSessionTypeSelectionDecision(
+            session,
+            requiresSelection: true,
+            reason: "new_empty_session_shell",
+            materialContentCount: materialContentCount
+        )
+        return true
     }
 
     @discardableResult
@@ -47860,6 +47904,7 @@ final class AppState: ObservableObject {
             reloadSessionCache(for: persisted.propertyID)
             try localStore.ensureSessionMetadata(for: persisted)
             schedulePhaseBSessionShadowWrite(for: persisted)
+            initialSessionTypeSelectedSessionIDs.insert(persisted.id)
             return persisted
         } catch {
             recordDiagnosticsError(error)
@@ -48239,6 +48284,7 @@ final class AppState: ObservableObject {
         if let sessionID = currentSession?.id {
             sessionCoordinationStateBySessionID.removeValue(forKey: sessionID)
             sessionCoordinationEntrySnapshotBySessionID.removeValue(forKey: sessionID)
+            initialSessionTypeSelectedSessionIDs.remove(sessionID)
         }
         currentSession = nil
         cloudBackupManager?.setCaptureModeActive(false)
@@ -50640,6 +50686,13 @@ final class AppState: ObservableObject {
             return 0
         }
         return metadata.shots.filter { shot in
+            guard shot.lifecycleState.isActiveForDefaultWorkflows else { return false }
+            if shot.createdAt < session.startedAt { return false }
+            if let endedAt = session.endedAt, shot.createdAt > endedAt { return false }
+            let captureKind = normalizedSupabaseText(shot.captureKind)?.lowercased()
+            if captureKind == "reference" || captureKind == "reclassified" {
+                return false
+            }
             let originalRelative = shot.originalRelativePath.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !originalRelative.isEmpty else { return false }
             return localStore.resolveSessionRelativeFileURL(
@@ -50648,6 +50701,28 @@ final class AppState: ObservableObject {
                 relativePath: originalRelative
             ) != nil
         }.count
+    }
+
+    private func logInitialSessionTypeSelectionDecision(
+        _ session: Session,
+        requiresSelection: Bool,
+        reason: String,
+        materialContentCount: Int
+    ) {
+        print(
+            "[SessionTypeSelection] propertyID=\(session.propertyID.uuidString) " +
+            "sessionID=\(session.id.uuidString) " +
+            "sessionType=\(session.sessionType.rawValue) " +
+            "requiresSelection=\(requiresSelection) " +
+            "reason=\(reason) " +
+            "status=\(session.status.rawValue) " +
+            "isSealed=\(session.isSealed) " +
+            "endedAt=\(session.endedAt == nil ? "nil" : "set") " +
+            "exportedAt=\(session.exportedAt == nil ? "nil" : "set") " +
+            "firstDeliveredAt=\(session.firstDeliveredAt == nil ? "nil" : "set") " +
+            "deletedAt=\(session.deletedAt == nil ? "nil" : "set") " +
+            "materialContentCount=\(materialContentCount)"
+        )
     }
 
     private func scheduleOffloadEligibleSessionMedia(excludingSessionID: UUID?) {

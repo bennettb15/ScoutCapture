@@ -59,7 +59,9 @@ final class Phase2C27EDraftSessionReuseTests: XCTestCase {
     private func addMaterialShot(
         to session: Session,
         in fixture: Fixture,
-        isFlagged: Bool = false
+        isFlagged: Bool = false,
+        createdAt: Date? = nil,
+        captureKind: String? = nil
     ) throws -> ShotMetadata {
         try fixture.localStore.ensureSessionFileStorage(propertyID: session.propertyID, sessionID: session.id)
         let shotID = UUID()
@@ -74,8 +76,8 @@ final class Phase2C27EDraftSessionReuseTests: XCTestCase {
             shotID: shotID,
             propertyID: session.propertyID,
             sessionID: session.id,
-            createdAt: Date(timeIntervalSinceReferenceDate: 10),
-            updatedAt: Date(timeIntervalSinceReferenceDate: 11),
+            createdAt: createdAt ?? session.startedAt.addingTimeInterval(1),
+            updatedAt: (createdAt ?? session.startedAt.addingTimeInterval(1)).addingTimeInterval(1),
             building: "B1",
             elevation: "North",
             detailType: "Overview",
@@ -85,6 +87,7 @@ final class Phase2C27EDraftSessionReuseTests: XCTestCase {
             isFlagged: isFlagged,
             issueID: isFlagged ? UUID() : nil,
             issueStatus: isFlagged ? "active" : nil,
+            captureKind: captureKind,
             noteText: isFlagged ? "Loose trim" : nil,
             noteCategory: isFlagged ? "Issue" : nil,
             originalFilename: originalFilename,
@@ -342,6 +345,25 @@ final class Phase2C27EDraftSessionReuseTests: XCTestCase {
         XCTAssertEqual(try fixture.localStore.fetchSessions(propertyID: fixture.property.id).map(\.id), [emptyDraft.id])
     }
 
+    func testPersistedEmptyTypedCurrentDraftPromptsAgainWithoutFreshChoice() throws {
+        let fixture = try makeFixture()
+        defer { tearDownFixture(fixture) }
+
+        let staleTypedDraft = Session(
+            propertyID: fixture.property.id,
+            sessionType: .punchlistVisit,
+            startedAt: Date(timeIntervalSinceReferenceDate: 100),
+            status: .draft
+        )
+        let persisted = try fixture.localStore.upsertSession(staleTypedDraft)
+        try fixture.localStore.ensureSessionMetadata(for: persisted)
+        fixture.appState._debugRefreshPropertiesLocallyForTests()
+        fixture.appState.selectProperty(id: fixture.property.id)
+        fixture.appState.currentSession = persisted
+
+        XCTAssertTrue(fixture.appState.currentSessionRequiresInitialSessionTypeSelection(propertyID: fixture.property.id))
+    }
+
     func testPersistedTypedDraftWithPhotosResumesWithoutInitialTypePrompt() throws {
         let fixture = try makeFixture()
         defer { tearDownFixture(fixture) }
@@ -358,6 +380,35 @@ final class Phase2C27EDraftSessionReuseTests: XCTestCase {
         XCTAssertEqual(reopened.id, first.id)
         XCTAssertEqual(reopened.sessionType, .punchlistVisit)
         XCTAssertFalse(fixture.appState.currentSessionRequiresInitialSessionTypeSelection(propertyID: fixture.property.id))
+    }
+
+    func testDraftWithOnlyPreSessionReferencePhotoDoesNotResumeWithoutPrompting() throws {
+        let fixture = try makeFixture()
+        defer { tearDownFixture(fixture) }
+
+        let stale = Session(
+            propertyID: fixture.property.id,
+            sessionType: .punchlistVisit,
+            startedAt: Date(timeIntervalSinceReferenceDate: 1_000),
+            status: .draft
+        )
+        let persisted = try fixture.localStore.upsertSession(stale)
+        try fixture.localStore.ensureSessionMetadata(for: persisted)
+        try addMaterialShot(
+            to: persisted,
+            in: fixture,
+            createdAt: Date(timeIntervalSinceReferenceDate: 900),
+            captureKind: "reference"
+        )
+        fixture.appState.clearCurrentSession()
+        fixture.appState._debugRefreshPropertiesLocallyForTests()
+
+        fixture.appState.selectProperty(id: fixture.property.id)
+        let reopened = try XCTUnwrap(fixture.appState.startSession(skipPropertyStatusPreflight: true))
+
+        XCTAssertNotEqual(reopened.id, persisted.id)
+        XCTAssertEqual(reopened.sessionType, .fullDocumentation)
+        XCTAssertTrue(fixture.appState.currentSessionRequiresInitialSessionTypeSelection(propertyID: fixture.property.id))
     }
 
     func testCompletedPunchlistSessionPromptsAgainOnReentry() throws {
