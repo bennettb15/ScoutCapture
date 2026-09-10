@@ -12927,10 +12927,8 @@ struct PropertySessionView: View {
 
             return Button(action: {
                 guard selectedSessionTypeBeingOpened == nil else { return }
-                withAnimation(.easeOut(duration: 0.08)) {
-                    selectedSessionTypeBeingOpened = sessionType
-                }
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) {
+                selectedSessionTypeBeingOpened = sessionType
+                DispatchQueue.main.async {
                     onChoose(sessionType)
                 }
             }) {
@@ -12965,7 +12963,6 @@ struct PropertySessionView: View {
 
             configuration.label
                 .background(isHighlighted ? Color.accentColor : Color(uiColor: .secondarySystemGroupedBackground))
-                .foregroundColor(isHighlighted ? .white : .primary)
                 .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
                 .animation(.easeOut(duration: 0.08), value: isHighlighted)
         }

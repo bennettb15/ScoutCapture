@@ -3635,8 +3635,6 @@ struct ContentView: View {
     @State private var showFlaggedActionToast: Bool = false
     @State private var flaggedActionToastText: String = ""
     @State private var flaggedActionToastToken: Int = 0
-    @State private var shutterFeedbackActive: Bool = false
-    @State private var shutterFeedbackToken: Int = 0
     @State private var isArmedIssueDetailNoteReadOnly: Bool = false
     
     @State private var focusPoint: CGPoint? = nil
@@ -6459,6 +6457,7 @@ struct ContentView: View {
             showFlaggedActionToastNow("No guided requirements")
             return
         }
+        ensureReferenceResolutionReady()
         let snapshot = guidedSessionCountSnapshot()
         guard Self.guidedChecklistShouldOpen(totalCount: snapshot.total) else {
             showFlaggedActionToastNow("No guided photos")
@@ -6467,25 +6466,10 @@ struct ContentView: View {
         }
         showGuidedChecklist = true
         deferCameraOverlayWork {
-            ensureReferenceResolutionReady()
             let sessionIDText = appState.currentSession?.id.uuidString ?? "NONE"
             verboseLog("[GuidedCount] session=\(sessionIDText) guidedTotal=\(snapshot.total) capturedForSession=\(snapshot.captured) remaining=\(snapshot.remaining)")
             let liveGuidedCount = guidedRemainingForCompass
             verboseLog("[Badge] opened guidedCount=\(liveGuidedCount) flaggedCount=\(flaggedPendingCaptureCount)")
-        }
-    }
-
-    private func flashShutterFeedback() {
-        shutterFeedbackToken += 1
-        let token = shutterFeedbackToken
-        withAnimation(.easeOut(duration: 0.06)) {
-            shutterFeedbackActive = true
-        }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.16) {
-            guard token == shutterFeedbackToken else { return }
-            withAnimation(.easeOut(duration: 0.12)) {
-                shutterFeedbackActive = false
-            }
         }
     }
 
@@ -8976,12 +8960,11 @@ struct ContentView: View {
                     Button(action: {
                         shutterHaptic.impactOccurred()
                         shutterHaptic.prepare()
-                        flashShutterFeedback()
                         capture()
                     }) {
                         ZStack {
                             Circle()
-                                .fill(shutterFeedbackActive ? Color.white.opacity(0.70) : Color.white)
+                                .fill(Color.white)
                                 .frame(width: 74, height: 74)
                                 .shadow(radius: 2)
                                 .overlay(
@@ -8989,14 +8972,13 @@ struct ContentView: View {
                                 )
 
                             Circle()
-                                .stroke(shutterFeedbackActive ? Color.accentColor.opacity(0.90) : Color.white.opacity(0.18), lineWidth: shutterFeedbackActive ? 3 : 1)
+                                .stroke(Color.white.opacity(0.18), lineWidth: 1)
                                 .frame(width: 92, height: 92)
 
                             Circle()
-                                .fill(shutterFeedbackActive ? Color.accentColor.opacity(0.18) : Color.black.opacity(0.08))
+                                .fill(Color.black.opacity(0.08))
                                 .frame(width: 74, height: 74)
                         }
-                        .scaleEffect(shutterFeedbackActive ? 0.92 : 1.0)
                     }
                     .disabled(camera.isCapturing)
                     .buttonStyle(.plain)
