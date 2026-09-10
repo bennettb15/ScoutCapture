@@ -3680,6 +3680,7 @@ struct ContentView: View {
     @State private var guidedUpdatedKeysThisSession: Set<String> = []
     @State private var flaggedUpdatedIDsThisSession: Set<UUID> = []
     @State private var showGuidedChecklist: Bool = false
+    @State private var guidedReferenceHydrationWorkItem: DispatchWorkItem? = nil
     @State private var guidedShots: [GuidedShot] = []
     @State private var retiredGuidedShots: [GuidedShot] = []
     @State private var guidedResolvedThumbnailPathByID: [UUID: String] = [:]
@@ -4051,6 +4052,8 @@ struct ContentView: View {
     }
 
     private func primeDeferredReferenceResolution() {
+        guidedReferenceHydrationWorkItem?.cancel()
+        guidedReferenceHydrationWorkItem = nil
         referenceResolutionToken += 1
         allowReferenceThumbnailResolution = false
     }
@@ -4061,6 +4064,71 @@ struct ContentView: View {
         allowReferenceThumbnailResolution = true
         refreshGuidedShots()
         refreshActiveIssues()
+    }
+
+    private func scheduleGuidedReferenceHydration() {
+        guidedReferenceHydrationWorkItem?.cancel()
+        let item = DispatchWorkItem {
+            guard showGuidedChecklist else { return }
+            hydrateGuidedReferenceDetailsIfNeeded()
+        }
+        guidedReferenceHydrationWorkItem = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35, execute: item)
+    }
+
+    private func hydrateGuidedReferenceDetailsIfNeeded() {
+        guard !allowReferenceThumbnailResolution else { return }
+        guard showGuidedChecklist else { return }
+        guard let propertyID = currentSessionScopedPropertyID else { return }
+        guard !isPunchlistVisitSession else { return }
+
+        let expectedSessionID = appState.currentSession?.id
+        let baselineState = persistedBaselineState(propertyID: propertyID)
+        let orderedSessions = ((try? localStore.fetchSessions(propertyID: propertyID)) ?? []).sorted { $0.startedAt < $1.startedAt }
+        let currentSession = orderedSessions.first(where: { $0.id == expectedSessionID }) ?? appState.currentSession
+        let sessionMetadata = sessionMetadataForActiveSession(propertyID: propertyID, sessionID: expectedSessionID)
+        var metadataCache: [UUID: SessionMetadata] = [:]
+        if let sessionMetadata, let expectedSessionID {
+            metadataCache[expectedSessionID] = sessionMetadata
+        }
+
+        var resolvedMap: [UUID: String] = [:]
+        var referenceMap: [UUID: String] = [:]
+        for guidedShot in guidedShots {
+            let resolved = resolveGuidedThumbnailForDisplay(
+                propertyID: propertyID,
+                currentSession: currentSession,
+                baselineSessionID: baselineState.baselineSessionID,
+                guidedShot: guidedShot,
+                currentSessionMetadata: sessionMetadata,
+                orderedSessions: orderedSessions,
+                metadataCache: &metadataCache
+            )
+            guard let resolvedPath = resolved.path?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !resolvedPath.isEmpty,
+                  resolved.exists else {
+                continue
+            }
+            resolvedMap[guidedShot.id] = resolvedPath
+            if resolved.source != .current {
+                referenceMap[guidedShot.id] = resolvedPath
+            }
+        }
+
+        guard showGuidedChecklist,
+              currentSessionScopedPropertyID == propertyID,
+              appState.currentSession?.id == expectedSessionID else {
+            return
+        }
+        allowReferenceThumbnailResolution = true
+        referenceResolutionToken += 1
+        if guidedResolvedThumbnailPathByID != resolvedMap {
+            guidedResolvedThumbnailPathByID = resolvedMap
+        }
+        if guidedReferencePathByID != referenceMap {
+            guidedReferencePathByID = referenceMap
+        }
+        guidedThumbnailRefreshToken = UUID()
     }
 
     private func refreshReferenceSetsAndPendingCounts() {
@@ -6465,7 +6533,7 @@ struct ContentView: View {
         }
         showGuidedChecklist = true
         deferCameraOverlayWork {
-            ensureReferenceResolutionReady()
+            scheduleGuidedReferenceHydration()
             let sessionIDText = appState.currentSession?.id.uuidString ?? "NONE"
             verboseLog("[GuidedCount] session=\(sessionIDText) guidedTotal=\(snapshot.total) capturedForSession=\(snapshot.captured) remaining=\(snapshot.remaining)")
             let liveGuidedCount = guidedRemainingForCompass
@@ -7130,9 +7198,13 @@ struct ContentView: View {
             refreshToken: guidedThumbnailRefreshToken,
             cache: imageCache,
             onClose: {
+                guidedReferenceHydrationWorkItem?.cancel()
+                guidedReferenceHydrationWorkItem = nil
                 showGuidedChecklist = false
             },
             onSelectGuided: { guidedShot in
+                guidedReferenceHydrationWorkItem?.cancel()
+                guidedReferenceHydrationWorkItem = nil
                 showGuidedChecklist = false
                 DispatchQueue.main.async {
                     armGuidedShot(guidedShot)
@@ -7145,6 +7217,8 @@ struct ContentView: View {
                 undoGuidedShotSkip(guidedShot)
             },
             onRetake: { guidedShot in
+                guidedReferenceHydrationWorkItem?.cancel()
+                guidedReferenceHydrationWorkItem = nil
                 showGuidedChecklist = false
                 DispatchQueue.main.async {
                     armGuidedRetake(guidedShot)

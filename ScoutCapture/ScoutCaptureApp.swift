@@ -12964,7 +12964,6 @@ struct PropertySessionView: View {
 
             configuration.label
                 .background(isHighlighted ? Color.accentColor : Color(uiColor: .secondarySystemGroupedBackground))
-                .foregroundColor(isHighlighted ? .white : .primary)
                 .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
         }
     }
