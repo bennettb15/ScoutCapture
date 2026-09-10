@@ -12936,7 +12936,6 @@ struct PropertySessionView: View {
                     Image(systemName: systemImage)
                         .font(.system(size: 22, weight: .semibold))
                         .frame(width: 32)
-                        .foregroundColor(isSelected ? .white : .primary)
                     VStack(alignment: .leading, spacing: 3) {
                         Text(title)
                             .font(.system(size: 17, weight: .semibold))
@@ -12964,6 +12963,7 @@ struct PropertySessionView: View {
             let isHighlighted = isSelected || configuration.isPressed
 
             configuration.label
+                .foregroundColor(isHighlighted ? .white : .primary)
                 .background(isHighlighted ? Color.accentColor : Color(uiColor: .secondarySystemGroupedBackground))
                 .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
                 .opacity(isHighlighted ? 0.96 : 1)
