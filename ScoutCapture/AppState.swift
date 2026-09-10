@@ -7689,6 +7689,8 @@ final class AppState: ObservableObject {
     private var propertySessionOccupancyDebugRemoteRecords: [UUID: RemotePropertySessionOccupancyRecord] = [:]
 #endif
     private var lastForegroundSyncDeltaCompletedAt: Date?
+    private var deferredPropertyRefreshWorkItem: DispatchWorkItem?
+    private var deferredSceneActiveWorkItem: DispatchWorkItem?
 #if DEBUG
     private var passwordRecoveryRequestOverride: PasswordRecoveryRequestOverride?
     private var syncDeltaFetchOverride: SyncDeltaFetchOverride?
@@ -40449,20 +40451,27 @@ final class AppState: ObservableObject {
         if allProperties.isEmpty,
            let localState = try? localStore.fetchPropertyAndOrganizationStateFromLocalHubIndexCache(),
            !localState.properties.isEmpty {
-            let caches = makeHubCaches(for: localState.properties)
-            applyHubCachePayload(
-                properties: localState.properties,
-                organizations: localState.organizations,
-                caches: caches
-            )
-            setLoadingState(false)
-            logHubFetch(
-                phase: "warmLaunch",
-                source: localState.source.rawValue,
-                properties: localState.properties.count,
-                orgs: localState.organizations.count,
-                elapsedMs: 0
-            )
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                guard let self else { return }
+                let start = Date()
+                let caches = self.makeHubCaches(for: localState.properties)
+                DispatchQueue.main.async { [weak self] in
+                    guard let self, self.allProperties.isEmpty else { return }
+                    self.applyHubCachePayload(
+                        properties: localState.properties,
+                        organizations: localState.organizations,
+                        caches: caches
+                    )
+                    self.setLoadingState(false)
+                    self.logHubFetch(
+                        phase: "warmLaunch",
+                        source: localState.source.rawValue,
+                        properties: localState.properties.count,
+                        orgs: localState.organizations.count,
+                        elapsedMs: Int(Date().timeIntervalSince(start) * 1000)
+                    )
+                }
+            }
         }
 
         DispatchQueue.global(qos: .utility).async {
@@ -40542,6 +40551,8 @@ final class AppState: ObservableObject {
     }
 
     func refreshPropertiesInBackground() {
+        deferredPropertyRefreshWorkItem?.cancel()
+        deferredPropertyRefreshWorkItem = nil
         cloudBackupManager?.refreshStatus()
         if isStartupHydrationInProgress {
             return
@@ -40652,6 +40663,20 @@ final class AppState: ObservableObject {
                 }
             }
         }
+    }
+
+    func schedulePropertiesRefreshAfterVisibleTransition(
+        reason: String,
+        delay: TimeInterval = 0.9
+    ) {
+        deferredPropertyRefreshWorkItem?.cancel()
+        let item = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.deferredPropertyRefreshWorkItem = nil
+            self.refreshPropertiesInBackground()
+        }
+        deferredPropertyRefreshWorkItem = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: item)
     }
 
     func refreshPropertySessionState(propertyID: UUID) {
@@ -49069,6 +49094,21 @@ final class AppState: ObservableObject {
     }
 
     func handleSceneDidBecomeActive() {
+        deferredSceneActiveWorkItem?.cancel()
+        guard currentSession?.status != .draft else {
+            performSceneDidBecomeActiveWork()
+            return
+        }
+        let item = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.deferredSceneActiveWorkItem = nil
+            self.performSceneDidBecomeActiveWork()
+        }
+        deferredSceneActiveWorkItem = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.9, execute: item)
+    }
+
+    private func performSceneDidBecomeActiveWork() {
         refreshVisiblePropertySessionCachesFromLocalStore(reason: "scene_active")
         scheduleDeliveredSessionStateReconciliation(reason: "scene_active")
         refreshSessionSnapshotCloudStatusCache()

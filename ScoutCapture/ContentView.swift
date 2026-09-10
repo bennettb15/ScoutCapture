@@ -3675,6 +3675,7 @@ struct ContentView: View {
     @State private var coreElevationChecklistRowsSnapshot: [CoreElevationChecklistRowState] =
         CoreElevationChecklistCategory.allCases.map { CoreElevationChecklistRowState(category: $0, count: 0) }
     @State private var activeIssuesOpenRefreshWorkItem: DispatchWorkItem? = nil
+    @State private var postCameraHydrationWorkItem: DispatchWorkItem? = nil
     @State private var guidedReferenceKeys: Set<String> = []
     @State private var flaggedReferenceIDs: Set<UUID> = []
     @State private var guidedUpdatedKeysThisSession: Set<String> = []
@@ -6512,6 +6513,27 @@ struct ContentView: View {
         }
     }
 
+    private func schedulePostCameraHydration(
+        propertyID: UUID?,
+        sessionID: UUID?,
+        delay: TimeInterval = 0.85
+    ) {
+        postCameraHydrationWorkItem?.cancel()
+        guard let propertyID, let sessionID else { return }
+        let item = DispatchWorkItem {
+            guard appState.selectedPropertyID == propertyID,
+                  appState.currentSession?.id == sessionID else {
+                return
+            }
+            appState.ensureOperationalMediaAvailableForSession(
+                propertyID: propertyID,
+                sessionID: sessionID
+            )
+        }
+        postCameraHydrationWorkItem = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: item)
+    }
+
     private func presentMetadataFilter() {
         showMetadataFilterSheet = true
     }
@@ -6755,11 +6777,11 @@ struct ContentView: View {
             .onChange(of: sessionExportFile?.id) { oldValue, newValue in
                 guard oldValue != nil, newValue == nil, awaitingSessionExportDismiss else { return }
                 awaitingSessionExportDismiss = false
-                appState.refreshPropertiesInBackground()
                 Task {
                     await appState.releaseCurrentSessionCoordinationLockIfOwned()
                     await MainActor.run {
                         onExitToHub?()
+                        appState.schedulePropertiesRefreshAfterVisibleTransition(reason: "session_export_dismiss", delay: 3.0)
                     }
                 }
             }
@@ -6875,6 +6897,8 @@ struct ContentView: View {
                 refreshBottomGlyphRotation()
             }
             .onDisappear {
+                postCameraHydrationWorkItem?.cancel()
+                postCameraHydrationWorkItem = nil
                 isPollingDeviceOrientation = false
                 isEndingSession = false
                 locationManager.stop()
@@ -6930,7 +6954,7 @@ struct ContentView: View {
                 resetSelectionForSwitch()
                 if let propertyID = appState.selectedPropertyID,
                    let sessionID = nextSessionID {
-                    appState.ensureOperationalMediaAvailableForSession(
+                    schedulePostCameraHydration(
                         propertyID: propertyID,
                         sessionID: sessionID
                     )
@@ -6983,7 +7007,7 @@ struct ContentView: View {
                 }
                 if let propertyID = appState.selectedPropertyID,
                    let sessionID = appState.currentSession?.id {
-                    appState.ensureOperationalMediaAvailableForSession(
+                    schedulePostCameraHydration(
                         propertyID: propertyID,
                         sessionID: sessionID
                     )
@@ -13374,8 +13398,8 @@ extension ContentView {
         let completedPropertyID = appState.selectedPropertyID
         let completedSessionID = appState.currentSession?.id
         appState.completeCurrentSessionWithoutZIP()
-        appState.refreshPropertiesInBackground()
         finishEndingSessionByExitingToHub()
+        appState.schedulePropertiesRefreshAfterVisibleTransition(reason: "complete_without_zip_exit", delay: 3.0)
         if let completedPropertyID, let completedSessionID {
             Task {
                 await appState.releaseSessionCoordinationAndOccupancyIfOwned(
@@ -13496,11 +13520,11 @@ extension ContentView {
         if summary.hasCaptures {
             let persistedDraft = appState.saveDraftCurrentSession(scheduleShadowWrite: false)
             appState.triggerBackupForLifecycleEvent()
-            appState.refreshPropertiesInBackground()
             if let persistedDraft {
                 appState.scheduleSessionShadowWriteAfterCoordinationRelease(for: persistedDraft)
             }
             finishEndingSessionByExitingToHub()
+            appState.schedulePropertiesRefreshAfterVisibleTransition(reason: "save_draft_exit", delay: 3.0)
             return
         } else if let propertyID = appState.selectedPropertyID,
                   let sessionID = appState.currentSession?.id {
@@ -13510,9 +13534,9 @@ extension ContentView {
                    appState.currentSession?.propertyID == propertyID {
                     appState.clearCurrentSession()
                 }
-                appState.refreshPropertiesInBackground()
                 await MainActor.run {
                     finishEndingSessionByExitingToHub()
+                    appState.schedulePropertiesRefreshAfterVisibleTransition(reason: "empty_session_exit", delay: 3.0)
                 }
             }
             return
@@ -13532,11 +13556,11 @@ extension ContentView {
 
         let finish = {
             appState.sealCurrentSessionForExportLater()
-            appState.refreshPropertiesInBackground()
             Task {
                 await appState.releaseCurrentSessionCoordinationLockIfOwned()
                 await MainActor.run {
                     finishEndingSessionByExitingToHub()
+                    appState.schedulePropertiesRefreshAfterVisibleTransition(reason: "export_later_exit", delay: 3.0)
                 }
             }
         }

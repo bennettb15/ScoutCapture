@@ -12792,7 +12792,14 @@ struct PropertySessionView: View {
         guard !didSchedulePostOpenReferenceReconcile else { return }
         didSchedulePostOpenReferenceReconcile = true
         let startedAt = Date()
-        Task {
+        let sessionID = appState.currentSession?.id
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 1_200_000_000)
+            guard showCameraContent,
+                  appState.selectedPropertyID == propertyID,
+                  appState.currentSession?.id == sessionID else {
+                return
+            }
             await appState.reconcileRemoteSessionContentForPropertyOpen(propertyID: propertyID)
             print(
                 "[PropertyOpenPerf] propertyID=\(propertyID.uuidString) " +
