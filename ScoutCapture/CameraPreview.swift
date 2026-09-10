@@ -238,7 +238,6 @@ final class CameraManager: NSObject, ObservableObject {
     @Published private(set) var isReadyForPreview: Bool = false
     @Published private(set) var isPreviewRunning: Bool = false
     @Published private(set) var isStartingPreview: Bool = false
-    private var isPreviewStartQueued: Bool = false
 
     @Published var isCapturing: Bool = false
     @Published private(set) var zoomSteps: [ZoomStep] = []
@@ -792,7 +791,6 @@ final class CameraManager: NSObject, ObservableObject {
 
             let auth = AVCaptureDevice.authorizationStatus(for: .video)
             guard auth == .authorized else {
-                self.isPreviewStartQueued = false
                 DispatchQueue.main.async {
                     self.isStartingPreview = false
                     self.isPreviewRunning = false
@@ -803,7 +801,6 @@ final class CameraManager: NSObject, ObservableObject {
 
             let hasAnyDeviceInput = self.session.inputs.contains { $0 is AVCaptureDeviceInput }
             guard hasAnyDeviceInput else {
-                self.isPreviewStartQueued = false
                 DispatchQueue.main.async {
                     self.isStartingPreview = false
                     self.isPreviewRunning = false
@@ -821,22 +818,12 @@ final class CameraManager: NSObject, ObservableObject {
                 return
             }
 
-            if self.isPreviewStartQueued {
-                DispatchQueue.main.async {
-                    self.isStartingPreview = true
-                    self.isReadyForPreview = true
-                }
-                return
-            }
-
             DispatchQueue.main.async {
                 self.isStartingPreview = true
                 self.isReadyForPreview = true
             }
 
-            self.isPreviewStartQueued = true
             self.session.startRunning()
-            self.isPreviewStartQueued = false
 
             DispatchQueue.main.async {
                 self.isPreviewRunning = self.session.isRunning
@@ -849,7 +836,6 @@ final class CameraManager: NSObject, ObservableObject {
         sessionQueue.async { [weak self] in
             guard let self else { return }
             self.isPreviewDesired = false
-            self.isPreviewStartQueued = false
 
             if self.session.isRunning {
                 self.session.stopRunning()
