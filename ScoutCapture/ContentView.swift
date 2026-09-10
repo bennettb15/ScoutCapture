@@ -12999,8 +12999,15 @@ extension ContentView {
         let sessionEnd = session.endedAt
         var count = 0
         for shot in metadata.shots {
+            guard shot.lifecycleState.isActiveForDefaultWorkflows else { continue }
             if shot.createdAt < sessionStart { continue }
             if let sessionEnd, shot.createdAt > sessionEnd { continue }
+            let captureKind = shot.captureKind?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .lowercased()
+            if captureKind == "reference" || captureKind == "reclassified" {
+                continue
+            }
             let relative = shot.originalRelativePath.trimmingCharacters(in: .whitespacesAndNewlines)
             if relative.isEmpty { continue }
             guard localStore.resolveSessionRelativeFileURL(
