@@ -12884,6 +12884,7 @@ struct PropertySessionView: View {
     private struct InitialSessionTypeChoiceSheet: View {
         let onChoose: (SessionType) -> Void
         let onBack: () -> Void
+        @State private var selectedSessionTypeBeingOpened: SessionType? = nil
 
         var body: some View {
             VStack(spacing: 16) {
@@ -12895,13 +12896,13 @@ struct PropertySessionView: View {
                         title: "Full Documentation",
                         subtitle: "Guided photos + flags + resolution required",
                         systemImage: "camera.metering.matrix",
-                        action: { onChoose(.fullDocumentation) }
+                        sessionType: .fullDocumentation
                     )
                     choiceButton(
                         title: "Punchlist Visit",
                         subtitle: "Active/RR items only, no guided requirements",
                         systemImage: "checklist",
-                        action: { onChoose(.punchlistVisit) }
+                        sessionType: .punchlistVisit
                     )
                 }
 
@@ -12910,6 +12911,7 @@ struct PropertySessionView: View {
                     .buttonStyle(.plain)
                     .foregroundColor(.secondary)
                     .padding(.top, 2)
+                    .disabled(selectedSessionTypeBeingOpened != nil)
             }
             .padding(.horizontal, 20)
             .padding(.vertical, 18)
@@ -12919,33 +12921,56 @@ struct PropertySessionView: View {
             title: String,
             subtitle: String,
             systemImage: String,
-            action: @escaping () -> Void
+            sessionType: SessionType
         ) -> some View {
-            Button(action: action) {
+            let isSelected = selectedSessionTypeBeingOpened == sessionType
+
+            return Button(action: {
+                guard selectedSessionTypeBeingOpened == nil else { return }
+                selectedSessionTypeBeingOpened = sessionType
+                DispatchQueue.main.async {
+                    onChoose(sessionType)
+                }
+            }) {
                 HStack(spacing: 12) {
                     Image(systemName: systemImage)
                         .font(.system(size: 22, weight: .semibold))
                         .frame(width: 32)
+                        .foregroundColor(isSelected ? .white : .primary)
                     VStack(alignment: .leading, spacing: 3) {
                         Text(title)
                             .font(.system(size: 17, weight: .semibold))
+                            .foregroundColor(isSelected ? .white : .primary)
                         Text(subtitle)
                             .font(.system(size: 13, weight: .medium))
-                            .foregroundColor(.secondary)
+                            .foregroundColor(isSelected ? .white.opacity(0.86) : .secondary)
                             .lineLimit(2)
                     }
                     Spacer(minLength: 0)
                     Image(systemName: "chevron.right")
                         .font(.system(size: 13, weight: .semibold))
-                        .foregroundColor(.secondary)
+                        .foregroundColor(isSelected ? .white.opacity(0.86) : .secondary)
                 }
-                .foregroundColor(.primary)
                 .padding(.horizontal, 14)
                 .frame(minHeight: 72)
-                .background(Color(uiColor: .secondarySystemGroupedBackground))
-                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
             }
-            .buttonStyle(.plain)
+            .buttonStyle(SessionTypeChoiceButtonStyle(isSelected: isSelected))
+            .disabled(selectedSessionTypeBeingOpened != nil && !isSelected)
+            .accessibilityValue(isSelected ? "Selected" : "")
+        }
+    }
+
+    private struct SessionTypeChoiceButtonStyle: ButtonStyle {
+        let isSelected: Bool
+
+        func makeBody(configuration: Configuration) -> some View {
+            let isHighlighted = isSelected || configuration.isPressed
+
+            configuration.label
+                .background(isHighlighted ? Color.accentColor : Color(uiColor: .secondarySystemGroupedBackground))
+                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                .opacity(isHighlighted ? 0.96 : 1)
+                .animation(.easeOut(duration: 0.08), value: isHighlighted)
         }
     }
 }
