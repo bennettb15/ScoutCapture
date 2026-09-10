@@ -4068,17 +4068,12 @@ struct ContentView: View {
 
     private func hydrateGuidedChecklistAfterPresentation() {
         guard showGuidedChecklist else { return }
-        guard !allowReferenceThumbnailResolution else {
-            guidedChecklistHydrating = false
-            return
-        }
-        guidedChecklistHydrating = true
+        guard !allowReferenceThumbnailResolution else { return }
         deferCameraOverlayWork {
             guard showGuidedChecklist else {
                 guidedChecklistHydrating = false
                 return
             }
-            ensureReferenceResolutionReady()
             guidedChecklistHydrating = false
             guidedThumbnailRefreshToken = UUID()
         }

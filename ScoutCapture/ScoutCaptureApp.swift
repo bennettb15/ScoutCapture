@@ -12884,6 +12884,7 @@ struct PropertySessionView: View {
     private struct InitialSessionTypeChoiceSheet: View {
         let onChoose: (SessionType) -> Void
         let onBack: () -> Void
+        @State private var selectedSessionType: SessionType? = nil
 
         var body: some View {
             VStack(spacing: 16) {
@@ -12895,13 +12896,13 @@ struct PropertySessionView: View {
                         title: "Full Documentation",
                         subtitle: "Guided photos + flags + resolution required",
                         systemImage: "camera.metering.matrix",
-                        action: { onChoose(.fullDocumentation) }
+                        sessionType: .fullDocumentation
                     )
                     choiceButton(
                         title: "Punchlist Visit",
                         subtitle: "Active/RR items only, no guided requirements",
                         systemImage: "checklist",
-                        action: { onChoose(.punchlistVisit) }
+                        sessionType: .punchlistVisit
                     )
                 }
 
@@ -12910,6 +12911,7 @@ struct PropertySessionView: View {
                     .buttonStyle(.plain)
                     .foregroundColor(.secondary)
                     .padding(.top, 2)
+                    .disabled(selectedSessionType != nil)
             }
             .padding(.horizontal, 20)
             .padding(.vertical, 18)
@@ -12919,9 +12921,16 @@ struct PropertySessionView: View {
             title: String,
             subtitle: String,
             systemImage: String,
-            action: @escaping () -> Void
+            sessionType: SessionType
         ) -> some View {
-            Button(action: action) {
+            let isSelected = selectedSessionType == sessionType
+            return Button {
+                guard selectedSessionType == nil else { return }
+                selectedSessionType = sessionType
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) {
+                    onChoose(sessionType)
+                }
+            } label: {
                 HStack(spacing: 12) {
                     Image(systemName: systemImage)
                         .font(.system(size: 22, weight: .semibold))
@@ -12935,17 +12944,18 @@ struct PropertySessionView: View {
                             .lineLimit(2)
                     }
                     Spacer(minLength: 0)
-                    Image(systemName: "chevron.right")
+                    Image(systemName: isSelected ? "checkmark.circle.fill" : "chevron.right")
                         .font(.system(size: 13, weight: .semibold))
-                        .foregroundColor(.secondary)
+                        .foregroundColor(isSelected ? .white : .secondary)
                 }
-                .foregroundColor(.primary)
+                .foregroundColor(isSelected ? .white : .primary)
                 .padding(.horizontal, 14)
                 .frame(minHeight: 72)
-                .background(Color(uiColor: .secondarySystemGroupedBackground))
+                .background(isSelected ? Color.blue : Color(uiColor: .secondarySystemGroupedBackground))
                 .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
             }
             .buttonStyle(.plain)
+            .disabled(selectedSessionType != nil)
         }
     }
 }
