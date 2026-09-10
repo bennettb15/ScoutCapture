@@ -3691,6 +3691,7 @@ struct ContentView: View {
     @State private var referenceResolutionToken: Int = 0
     @State private var guidedChecklistHydrating: Bool = false
     @State private var deferredSessionMediaHydrationWorkItem: DispatchWorkItem? = nil
+    @State private var deferredCameraDataRefreshWorkItem: DispatchWorkItem? = nil
     @State private var reservedAngleByContextKey: [String: Int] = [:]
     @State private var guidedThumbnailRefreshToken: UUID = UUID()
     @State private var gridThumbnailRefreshToken: UUID = UUID()
@@ -4081,6 +4082,22 @@ struct ContentView: View {
             guidedChecklistHydrating = false
             guidedThumbnailRefreshToken = UUID()
         }
+    }
+
+    private func scheduleDeferredCameraDataRefresh(
+        reason: String,
+        delay: TimeInterval = 0.05
+    ) {
+        deferredCameraDataRefreshWorkItem?.cancel()
+        let item = DispatchWorkItem {
+            refreshActiveIssues()
+            refreshGuidedShots()
+            refreshCoreElevationChecklistSnapshot()
+            refreshHudAngleIndex()
+            verboseLog("[CameraDataRefresh] reason=\(reason)")
+        }
+        deferredCameraDataRefreshWorkItem = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: item)
     }
 
     private func scheduleDeferredSessionMediaHydration(
@@ -6495,9 +6512,9 @@ struct ContentView: View {
             return
         }
         let snapshot = guidedSessionCountSnapshot()
-        guard snapshot.remaining > 0 else {
+        guard Self.guidedChecklistShouldOpen(totalCount: snapshot.total) else {
             showFlaggedActionToastNow("No guided photos")
-            verboseLog("[GuidedCount] opened empty guidedRemaining=0")
+            verboseLog("[GuidedCount] opened empty guidedTotal=0 guidedRemaining=\(snapshot.remaining)")
             return
         }
         guidedChecklistHydrating = !allowReferenceThumbnailResolution
@@ -6509,6 +6526,10 @@ struct ContentView: View {
             let liveGuidedCount = guidedRemainingForCompass
             verboseLog("[Badge] opened guidedCount=\(liveGuidedCount) flaggedCount=\(flaggedPendingCaptureCount)")
         }
+    }
+
+    nonisolated static func guidedChecklistShouldOpen(totalCount: Int) -> Bool {
+        totalCount > 0
     }
 
     private func presentCoreElevationChecklist() {
@@ -6831,10 +6852,7 @@ struct ContentView: View {
                 primeDeferredReferenceResolution()
                 loadBuildingOptions()
                 loadTradeOptions()
-                refreshActiveIssues()
-                refreshGuidedShots()
-                refreshCoreElevationChecklistSnapshot()
-                refreshHudAngleIndex()
+                scheduleDeferredCameraDataRefresh(reason: "camera_appear")
                 isPollingDeviceOrientation = true
             }
             .onReceive(NotificationCenter.default.publisher(for: UIDevice.orientationDidChangeNotification)) { _ in
@@ -6847,6 +6865,8 @@ struct ContentView: View {
             .onDisappear {
                 deferredSessionMediaHydrationWorkItem?.cancel()
                 deferredSessionMediaHydrationWorkItem = nil
+                deferredCameraDataRefreshWorkItem?.cancel()
+                deferredCameraDataRefreshWorkItem = nil
                 guidedChecklistHydrating = false
                 isPollingDeviceOrientation = false
                 isEndingSession = false
@@ -6871,10 +6891,7 @@ struct ContentView: View {
                 reservedAngleByContextKey = [:]
                 primeDeferredReferenceResolution()
                 resetSelectionForSwitch()
-                refreshActiveIssues()
-                refreshGuidedShots()
-                refreshCoreElevationChecklistSnapshot()
-                refreshHudAngleIndex()
+                scheduleDeferredCameraDataRefresh(reason: "property_changed")
             }
             .onChange(of: appState.currentSession?.id) { previousSessionID, nextSessionID in
                 clearPropertyScopedChecklistState()
@@ -6909,10 +6926,7 @@ struct ContentView: View {
                 }
                 primeDeferredReferenceResolution()
                 resetSelectionForSwitch()
-                refreshActiveIssues()
-                refreshGuidedShots()
-                refreshCoreElevationChecklistSnapshot()
-                refreshHudAngleIndex()
+                scheduleDeferredCameraDataRefresh(reason: "session_changed")
             }
             .onChange(of: appState.currentSession?.status) { _, _ in
                 if !hasValidCurrentSession {
@@ -6923,13 +6937,10 @@ struct ContentView: View {
                     camera.ensurePreviewRunningAsync()
                 }
                 resetSelectionForSwitch()
-                refreshActiveIssues()
-                refreshCoreElevationChecklistSnapshot()
-                scheduleHudAngleIndexRefresh()
+                scheduleDeferredCameraDataRefresh(reason: "session_status_changed")
             }
             .onChange(of: propertyOpenFreshnessHUDSnapshot?.status) { _, _ in
-                refreshActiveIssues()
-                scheduleHudAngleIndexRefresh()
+                scheduleDeferredCameraDataRefresh(reason: "property_freshness_changed")
             }
             .onChange(of: detailNote) { _, _ in
                 camera.updateDetailNoteActive(hasDetailNote)

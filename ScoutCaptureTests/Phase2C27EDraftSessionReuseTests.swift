@@ -841,6 +841,14 @@ final class Phase2C27EDraftSessionReuseTests: XCTestCase {
         )
     }
 
+    func testGuidedChecklistCanOpenForCompletedRowsWhenRemainingIsZero() {
+        XCTAssertTrue(ContentView.guidedChecklistShouldOpen(totalCount: 1))
+    }
+
+    func testGuidedChecklistEmptyStateOnlyWhenNoRowsExist() {
+        XCTAssertFalse(ContentView.guidedChecklistShouldOpen(totalCount: 0))
+    }
+
     func testPunchlistVisitCompletionPreservesGuidedRequirementsForNextFullSession() throws {
         let fixture = try makeFixture()
         defer { tearDownFixture(fixture) }
