@@ -6457,7 +6457,6 @@ struct ContentView: View {
             showFlaggedActionToastNow("No guided requirements")
             return
         }
-        ensureReferenceResolutionReady()
         let snapshot = guidedSessionCountSnapshot()
         guard Self.guidedChecklistShouldOpen(totalCount: snapshot.total) else {
             showFlaggedActionToastNow("No guided photos")
@@ -6466,6 +6465,7 @@ struct ContentView: View {
         }
         showGuidedChecklist = true
         deferCameraOverlayWork {
+            ensureReferenceResolutionReady()
             let sessionIDText = appState.currentSession?.id.uuidString ?? "NONE"
             verboseLog("[GuidedCount] session=\(sessionIDText) guidedTotal=\(snapshot.total) capturedForSession=\(snapshot.captured) remaining=\(snapshot.remaining)")
             let liveGuidedCount = guidedRemainingForCompass
@@ -8949,6 +8949,26 @@ struct ContentView: View {
         .disabled(!isEnabled)
     }
 
+    private struct ArmedCaptureShutterButtonStyle: ButtonStyle {
+        let isArmed: Bool
+
+        func makeBody(configuration: Configuration) -> some View {
+            let isPressed = isArmed && configuration.isPressed
+
+            configuration.label
+                .scaleEffect(isPressed ? 0.92 : 1.0)
+                .brightness(isPressed ? -0.08 : 0)
+                .overlay {
+                    if isPressed {
+                        Circle()
+                            .stroke(Color.accentColor.opacity(0.95), lineWidth: 3)
+                            .frame(width: 96, height: 96)
+                    }
+                }
+                .animation(.easeOut(duration: 0.05), value: isPressed)
+        }
+    }
+
     private func bottomMaskView(bottomBarH: CGFloat, containerWidth: CGFloat) -> some View {
         ZStack {
             Color.black
@@ -8981,7 +9001,7 @@ struct ContentView: View {
                         }
                     }
                     .disabled(camera.isCapturing)
-                    .buttonStyle(.plain)
+                    .buttonStyle(ArmedCaptureShutterButtonStyle(isArmed: isCaptureTargetArmed))
                     .offset(y: -13)
                     .overlay(alignment: .center) {
                         let hdOffsetX: CGFloat = -94

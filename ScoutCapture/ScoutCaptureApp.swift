@@ -12884,6 +12884,7 @@ struct PropertySessionView: View {
     private struct InitialSessionTypeChoiceSheet: View {
         let onChoose: (SessionType) -> Void
         let onBack: () -> Void
+        private static let selectionFeedbackDelay: TimeInterval = 0.06
         @State private var selectedSessionTypeBeingOpened: SessionType? = nil
 
         var body: some View {
@@ -12928,7 +12929,7 @@ struct PropertySessionView: View {
             return Button(action: {
                 guard selectedSessionTypeBeingOpened == nil else { return }
                 selectedSessionTypeBeingOpened = sessionType
-                DispatchQueue.main.async {
+                DispatchQueue.main.asyncAfter(deadline: .now() + Self.selectionFeedbackDelay) {
                     onChoose(sessionType)
                 }
             }) {
@@ -12963,8 +12964,8 @@ struct PropertySessionView: View {
 
             configuration.label
                 .background(isHighlighted ? Color.accentColor : Color(uiColor: .secondarySystemGroupedBackground))
+                .foregroundColor(isHighlighted ? .white : .primary)
                 .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-                .animation(.easeOut(duration: 0.08), value: isHighlighted)
         }
     }
 }
