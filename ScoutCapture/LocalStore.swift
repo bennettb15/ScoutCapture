@@ -3394,7 +3394,7 @@ final class LocalStore {
             metadata.shots[shotIndex].trade = normalizedTrade
             if isResolved || observation.status == .pendingReview {
                 metadata.shots[shotIndex].captureKind = "resolved_capture"
-            } else if trimmedNonEmpty(metadata.shots[shotIndex].captureKind) == "resolved_capture" {
+            } else if trimmedNonEmpty(metadata.shots[shotIndex].captureKind) != captureKindForActiveUpdate {
                 metadata.shots[shotIndex].captureKind = captureKindForActiveUpdate
             }
             if metadata.shots[shotIndex].firstCaptureKind == nil {

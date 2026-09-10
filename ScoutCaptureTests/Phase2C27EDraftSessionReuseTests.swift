@@ -60,6 +60,8 @@ final class Phase2C27EDraftSessionReuseTests: XCTestCase {
         to session: Session,
         in fixture: Fixture,
         isFlagged: Bool = false,
+        issueID: UUID? = nil,
+        issueStatus: String? = nil,
         createdAt: Date? = nil,
         captureKind: String? = nil,
         storagePath: String? = nil,
@@ -87,8 +89,8 @@ final class Phase2C27EDraftSessionReuseTests: XCTestCase {
             shotKey: "b1|north|overview|1",
             isGuided: !isFlagged,
             isFlagged: isFlagged,
-            issueID: isFlagged ? UUID() : nil,
-            issueStatus: isFlagged ? "active" : nil,
+            issueID: isFlagged ? (issueID ?? UUID()) : nil,
+            issueStatus: isFlagged ? (issueStatus ?? "active") : nil,
             captureKind: captureKind,
             noteText: isFlagged ? "Loose trim" : nil,
             noteCategory: isFlagged ? "Issue" : nil,
@@ -516,6 +518,107 @@ final class Phase2C27EDraftSessionReuseTests: XCTestCase {
         XCTAssertFalse(fixture.appState.currentSessionRequiresInitialSessionTypeSelection(propertyID: fixture.property.id))
     }
 
+    func testPunchlistPendingActiveIssueCaptureCountsAsMaterialDraftAndResumes() throws {
+        let fixture = try makeFixture()
+        defer { tearDownFixture(fixture) }
+
+        fixture.appState.selectProperty(id: fixture.property.id)
+        _ = try XCTUnwrap(fixture.appState.startSession(skipPropertyStatusPreflight: true))
+        let draft = try XCTUnwrap(fixture.appState.persistCurrentSessionType(.punchlistVisit))
+        fixture.appState.markCurrentSessionCameraEntryBegan()
+        let issueID = UUID()
+        try addMaterialShot(
+            to: draft,
+            in: fixture,
+            isFlagged: true,
+            issueID: issueID,
+            issueStatus: Observation.Status.active.issueStatusValue,
+            captureKind: "follow_up_capture"
+        )
+
+        XCTAssertEqual(fixture.appState.materialDraftCaptureCount(for: draft), 1)
+        XCTAssertFalse(fixture.appState.currentSessionRequiresInitialSessionTypeSelection(propertyID: fixture.property.id))
+
+        fixture.appState.clearCurrentSession()
+        fixture.appState.selectProperty(id: fixture.property.id)
+        let reopened = try XCTUnwrap(fixture.appState.startSession(skipPropertyStatusPreflight: true))
+
+        XCTAssertEqual(reopened.id, draft.id)
+        XCTAssertEqual(reopened.sessionType, .punchlistVisit)
+        XCTAssertEqual(fixture.appState.materialDraftCaptureCount(for: reopened), 1)
+        XCTAssertFalse(fixture.appState.currentSessionRequiresInitialSessionTypeSelection(propertyID: fixture.property.id))
+    }
+
+    func testPunchlistFinalizedActiveIssueUpdateRepairsReferenceCaptureKind() throws {
+        let fixture = try makeFixture()
+        defer { tearDownFixture(fixture) }
+
+        fixture.appState.selectProperty(id: fixture.property.id)
+        _ = try XCTUnwrap(fixture.appState.startSession(skipPropertyStatusPreflight: true))
+        let draft = try XCTUnwrap(fixture.appState.persistCurrentSessionType(.punchlistVisit))
+        fixture.appState.markCurrentSessionCameraEntryBegan()
+        let issueID = UUID()
+        let shot = try addMaterialShot(
+            to: draft,
+            in: fixture,
+            isFlagged: true,
+            issueID: issueID,
+            issueStatus: Observation.Status.active.issueStatusValue,
+            captureKind: "reference"
+        )
+        XCTAssertEqual(fixture.appState.materialDraftCaptureCount(for: draft), 0)
+
+        let observation = try fixture.localStore.createObservation(
+            Observation(
+                id: issueID,
+                propertyID: fixture.property.id,
+                createdAt: draft.startedAt.addingTimeInterval(-60),
+                updatedAt: draft.startedAt.addingTimeInterval(2),
+                statement: "Loose trim",
+                status: .active,
+                linkedShotID: shot.shotID,
+                updatedInSessionID: draft.id,
+                building: shot.building,
+                targetElevation: shot.elevation,
+                detailType: shot.detailType,
+                priority: "P2",
+                currentReason: "Loose trim",
+                note: "Loose trim",
+                shots: [
+                    Shot(
+                        id: shot.shotID,
+                        capturedAt: shot.createdAt,
+                        imageLocalIdentifier: fixture.localStore
+                            .originalsDirectoryURL(propertyID: draft.propertyID, sessionID: draft.id)
+                            .appendingPathComponent(shot.originalFilename, isDirectory: false)
+                            .path,
+                        note: "Loose trim"
+                    )
+                ]
+            )
+        )
+        let synced = try XCTUnwrap(
+            fixture.localStore.syncFlaggedObservationUpdateToSessionMetadata(
+                propertyID: fixture.property.id,
+                sessionID: draft.id,
+                observation: observation,
+                shotID: shot.shotID,
+                trade: nil,
+                activeCaptureKind: "follow_up_capture"
+            )
+        )
+
+        XCTAssertEqual(synced.captureKind, "follow_up_capture")
+        XCTAssertEqual(fixture.appState.materialDraftCaptureCount(for: draft), 1)
+
+        fixture.appState.clearCurrentSession()
+        fixture.appState.selectProperty(id: fixture.property.id)
+        let reopened = try XCTUnwrap(fixture.appState.startSession(skipPropertyStatusPreflight: true))
+
+        XCTAssertEqual(reopened.id, draft.id)
+        XCTAssertEqual(reopened.sessionType, .punchlistVisit)
+    }
+
     func testDraftWithOnlyPreSessionReferencePhotoDoesNotResumeWithoutPrompting() throws {
         let fixture = try makeFixture()
         defer { tearDownFixture(fixture) }
@@ -696,6 +799,24 @@ final class Phase2C27EDraftSessionReuseTests: XCTestCase {
         XCTAssertEqual(
             AppState.sessionCompletionActionTitle(sessionType: .punchlistVisit),
             "Complete Punchlist"
+        )
+        XCTAssertTrue(
+            AppState.sessionCanComplete(
+                sessionType: .punchlistVisit,
+                hasBaseline: false,
+                guidedRemainingCount: 8,
+                flaggedRemainingCount: 0,
+                currentSessionCaptureCount: 1
+            )
+        )
+        XCTAssertFalse(
+            AppState.sessionCanComplete(
+                sessionType: .punchlistVisit,
+                hasBaseline: false,
+                guidedRemainingCount: 0,
+                flaggedRemainingCount: 1,
+                currentSessionCaptureCount: 1
+            )
         )
 
         XCTAssertFalse(

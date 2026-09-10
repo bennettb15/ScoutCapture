@@ -660,10 +660,10 @@ final class ReportLibraryModel: ObservableObject {
 
     func reloadSessionAssets(propertyID: UUID, sessionID: UUID) {
         setSessionContext(propertyID: propertyID, sessionID: sessionID)
-        reloadAssets()
     }
 
     func warmUpAlbumIfAuthorized() {
+        guard propertyID == nil, sessionID == nil else { return }
         reloadAssets()
     }
 
@@ -6780,7 +6780,6 @@ struct ContentView: View {
                 reportLibrary.setMediaHydrationHandler { requests in
                     await appState.ensureGalleryMediaAvailableForRequests(requests)
                 }
-                reportLibrary.warmUpAlbumIfAuthorized()
                 reportLibrary.setSessionContext(
                     propertyID: appState.selectedPropertyID,
                     sessionID: appState.currentSession?.id
@@ -11021,8 +11020,8 @@ extension ContentView {
                 issueStatus = Observation.Status.active.issueStatusValue
                 captureKind = "retake"
                 firstCaptureKind = "captured"
-            } else if observation.updatedInSessionID == session.id {
-                issueStatus = Observation.Status.active.issueStatusValue
+            } else if observation.updatedInSessionID == session.id || flaggedObservationIDAtCapture == observation.id {
+                issueStatus = observation.status.issueStatusValue
                 captureKind = "follow_up_capture"
                 firstCaptureKind = "captured"
             } else {
