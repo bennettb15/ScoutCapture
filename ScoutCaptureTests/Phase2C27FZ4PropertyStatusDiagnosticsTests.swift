@@ -907,53 +907,8 @@ final class Phase2C27FZ4PropertyStatusDiagnosticsTests: XCTestCase {
         XCTAssertEqual(fixture.appState.currentSession?.id, session?.id)
     }
 
-    func testCachedOwnerDraftStatusCanUseFastEntryPreflight() throws {
-        let fixture = try makeCutoverFixture()
-        let draft = try seedCapturedDraft(propertyID: fixture.property.id, localStore: fixture.localStore)
-        fixture.appState._debugRefreshPropertiesLocallyForTests()
-        let record = makeStatusRecord(
-            propertyID: fixture.property.id,
-            orgID: fixture.orgID,
-            status: .draft,
-            draftSessionID: draft.id,
-            ownerUserID: fixture.userID,
-            ownerDeviceID: fixture.appState._debugCurrentDeviceIdentifierForTests()
-        )
-        fixture.appState._debugReplacePropertyStatusCacheForTests([record])
-
-        let evaluation = fixture.appState.cachedPropertyStatusEntryPreflightForFastEntry(
-            propertyID: fixture.property.id,
-            context: "test_cached_owner_draft_fast_entry"
-        )
-
-        XCTAssertEqual(evaluation?.source, "property_status_cached_fast")
-        XCTAssertEqual(evaluation?.decision?.decision, "allow")
-        XCTAssertEqual(evaluation?.decision?.reason, "draft_owned_by_current_actor")
-    }
-
-    func testCachedNonOwnerDraftDoesNotUseFastEntryPreflight() throws {
-        let fixture = try makeCutoverFixture()
-        let record = makeStatusRecord(
-            propertyID: fixture.property.id,
-            orgID: fixture.orgID,
-            status: .draft,
-            draftSessionID: UUID(),
-            ownerUserID: UUID(),
-            ownerDeviceID: "other-device"
-        )
-        fixture.appState._debugReplacePropertyStatusCacheForTests([record])
-
-        let evaluation = fixture.appState.cachedPropertyStatusEntryPreflightForFastEntry(
-            propertyID: fixture.property.id,
-            context: "test_cached_nonowner_draft_fast_entry"
-        )
-
-        XCTAssertNil(evaluation)
-    }
-
     func testCachedExportedFreshRemoteOccupiedByOtherBlocksEntry() async throws {
         let fixture = try makeCutoverFixture()
-        await stabilizeAsyncFixtureAuthContext(fixture)
         let cachedExported = makeStatusRecord(
             propertyID: fixture.property.id,
             orgID: fixture.orgID,

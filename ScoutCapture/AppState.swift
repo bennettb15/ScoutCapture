@@ -7038,8 +7038,6 @@ final class AppState: ObservableObject {
     private var lastPropertyStatusDiagnosticsSignature: String?
     private var lastPropertyStatusDiagnosticsCompletedAt: Date?
     private let propertyStatusDiagnosticsDedupeInterval: TimeInterval = 5
-    private var sceneActiveMaintenanceTask: Task<Void, Never>?
-    private var liveSyncFingerprintRefreshInFlight = false
     private var persistentDataCacheRefreshScheduled = false
     private var persistentDataCacheRefreshRunning = false
     private var reconcilingDeliveredSessionState = false
@@ -8063,9 +8061,6 @@ final class AppState: ObservableObject {
         NotificationCenter.default.publisher(for: .scoutPersistentDataDidChange)
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in
-#if DEBUG
-                guard !AppStateTestEnvironment.isRunningUnderXCTest else { return }
-#endif
                 print("[AppStateDiag] scoutPersistentDataDidChange_sink")
                 self?.schedulePersistentDataCacheRefresh(reason: "persistent_data_changed")
                 self?.cloudBackupManager?.markDataChanged(scheduleBackupAfter: 30)
@@ -16597,32 +16592,7 @@ final class AppState: ObservableObject {
             }
         }
         if didChange {
-            objectWillChange.send()
-        }
-    }
-
-    private func scheduleSceneActiveMaintenance(reason: String) {
-        sceneActiveMaintenanceTask?.cancel()
-        sceneActiveMaintenanceTask = Task(priority: .utility) { @MainActor [weak self] in
-            do {
-                try await Task.sleep(nanoseconds: 850_000_000)
-            } catch {
-                return
-            }
-            guard let self, !Task.isCancelled else { return }
-            self.refreshVisiblePropertySessionCachesFromLocalStore(reason: reason)
-            await Task.yield()
-            self.scheduleDeliveredSessionStateReconciliation(reason: reason)
-            self.refreshSessionSnapshotCloudStatusCache()
-            self.queuePendingSupabaseMediaBackfillIfNeeded(reason: reason)
-            await Task.yield()
-            await self.reconcileOccupancyForAppLifecycle(reason: reason)
-            guard !Task.isCancelled else { return }
-            await Task.yield()
-            await self.performForegroundAccessRefreshSequence()
-            guard !Task.isCancelled else { return }
-            await Task.yield()
-            _ = await self.performSessionSnapshotUploadRetry(source: reason)
+            hubRowRefreshToken = UUID()
         }
     }
 
@@ -16632,18 +16602,7 @@ final class AppState: ObservableObject {
             return
         }
         persistentDataCacheRefreshScheduled = true
-#if DEBUG
-        if AppStateTestEnvironment.isRunningUnderXCTest {
-            runScheduledPersistentDataCacheRefresh(reason: reason)
-            return
-        }
-#endif
         Task { @MainActor [weak self] in
-            do {
-                try await Task.sleep(nanoseconds: 500_000_000)
-            } catch {
-                return
-            }
             self?.runScheduledPersistentDataCacheRefresh(reason: reason)
         }
     }
@@ -40599,10 +40558,8 @@ final class AppState: ObservableObject {
         }
         isBackgroundRefreshInFlight = true
         lastBackgroundRefreshStartedAt = now
-        let hasCachedProperties = !allProperties.isEmpty
-        setLoadingState(!hasCachedProperties)
-        let refreshQoS: DispatchQoS.QoSClass = hasCachedProperties ? .utility : .userInitiated
-        DispatchQueue.global(qos: refreshQoS).async {
+        setLoadingState(allProperties.isEmpty)
+        DispatchQueue.global(qos: .userInitiated).async {
             let fastPayload = try? self.makeRefreshPayloadForHubIndexOnly()
             let fastHasProperties = (fastPayload?.properties.isEmpty == false)
             let withinStartupFallbackGraceWindow: Bool = {
@@ -40648,7 +40605,7 @@ final class AppState: ObservableObject {
                 }
                 if !shouldRunFallback {
                     if self.isRemotePropertyRefreshEnabled {
-                        Task(priority: .utility) { @MainActor [weak self] in
+                        Task { @MainActor [weak self] in
                             guard let self else { return }
                             await self.performBackgroundRemotePropertyRefresh()
                         }
@@ -40677,7 +40634,7 @@ final class AppState: ObservableObject {
                     self.scheduleOffloadEligibleSessionMedia(excludingSessionID: self.currentSession?.id)
                     self.setLoadingState(false)
                     if self.isRemotePropertyRefreshEnabled {
-                        Task(priority: .utility) { @MainActor [weak self] in
+                        Task { @MainActor [weak self] in
                             guard let self else { return }
                             await self.performBackgroundRemotePropertyRefresh()
                         }
@@ -40908,7 +40865,7 @@ final class AppState: ObservableObject {
     func propertyCardBadgeModel(for propertyID: UUID) -> PropertyCardBadgeModel {
         let currentUserID = authenticatedSupabaseUser?.id
         let currentDeviceID = currentDeviceIdentifier()
-        let reExportSession = cachedReExportCandidateSessionForPropertyRow(propertyID: propertyID)
+        let reExportSession = reExportCandidateSession(for: propertyID)
         let showReExport = reExportSession != nil
         let reExportReason = showReExport ? "local_archive_available" : "no_local_archive_available"
 
@@ -41009,31 +40966,6 @@ final class AppState: ObservableObject {
         return candidates.first { isReExportLocallyAvailable($0, now: now) }
     }
 
-    func cachedReExportCandidateSessionForPropertyRow(propertyID: UUID, now: Date = Date()) -> Session? {
-        let currentDeviceID = currentDeviceIdentifier()
-        let candidates = sessions(for: propertyID)
-            .sorted { lhs, rhs in
-                let l = lhs.firstDeliveredAt ?? lhs.exportedAt ?? lhs.endedAt ?? lhs.startedAt
-                let r = rhs.firstDeliveredAt ?? rhs.exportedAt ?? rhs.endedAt ?? rhs.startedAt
-                if l == r {
-                    return lhs.startedAt > rhs.startedAt
-                }
-                return l > r
-            }
-        return candidates.first { session in
-            let cacheKey = reExportAvailabilityCacheKey(session: session, currentDeviceID: currentDeviceID)
-            guard let cached = reExportAvailabilityCache[cacheKey],
-                  cached.available,
-                  now.timeIntervalSince(cached.checkedAt) < sessionArchiveAvailabilityCacheTTL else {
-                return false
-            }
-            if let expiresAt = session.reExportExpiresAt ?? cached.expiresAt {
-                return now < expiresAt
-            }
-            return true
-        }
-    }
-
     func propertyStatusRecord(for propertyID: UUID) -> PropertyStatusRecord? {
         propertyStatusByPropertyID[propertyID]
     }
@@ -41098,49 +41030,6 @@ final class AppState: ObservableObject {
             )
         }
         return decision
-    }
-
-    func cachedPropertyStatusEntryPreflightForFastEntry(
-        propertyID: UUID,
-        context: String
-    ) -> PropertyStatusEntryPreflightEvaluation? {
-        guard let record = propertyStatusByPropertyID[propertyID] else {
-            return nil
-        }
-        let decision = makePropertyStatusEntryPreflightDecision(propertyID: propertyID, record: record)
-        guard !decision.isBlocked else {
-            return nil
-        }
-        switch record.status {
-        case .idle, .exported:
-            return nil
-        case .draft:
-            guard Self.propertyStatusActorOwnedByCurrentActor(
-                record: record,
-                currentUserID: authenticatedSupabaseUser?.id,
-                currentDeviceID: currentDeviceIdentifier()
-            ) || decision.reason == "draft_without_material_local_session" else {
-                return nil
-            }
-        case .occupied:
-            guard decision.reason == "occupied_owned_by_current_actor" ||
-                    decision.reason == "occupied_stale_owned_by_current_actor" else {
-                return nil
-            }
-        case .pendingExport:
-            return nil
-        }
-        logPropertyStatusEntryPreflight(
-            propertyID: propertyID,
-            decision: decision,
-            context: "\(context)_cached_fast"
-        )
-        return PropertyStatusEntryPreflightEvaluation(
-            decision: decision,
-            skipCachedPropertyStatusPreflight: false,
-            source: "property_status_cached_fast",
-            reason: decision.reason
-        )
     }
 
     @MainActor
@@ -42157,7 +42046,7 @@ final class AppState: ObservableObject {
         return [
             orgID.uuidString.lowercased(),
             propertyPart,
-            lastLiveSyncFingerprint ?? "fingerprint_unavailable",
+            localStore.propertiesLedgerFingerprint(),
             statusPart,
             derivedPart
         ].joined(separator: "#")
@@ -43224,19 +43113,10 @@ final class AppState: ObservableObject {
                    now.timeIntervalSince(lastRefresh) < 6.0 {
                     return
                 }
-                guard !self.liveSyncFingerprintRefreshInFlight else { return }
-                self.liveSyncFingerprintRefreshInFlight = true
-                DispatchQueue.global(qos: .utility).async { [weak self] in
-                    guard let self else { return }
-                    let fingerprint = self.localStore.propertiesLedgerFingerprint()
-                    DispatchQueue.main.async { [weak self] in
-                        guard let self else { return }
-                        self.liveSyncFingerprintRefreshInFlight = false
-                        if fingerprint != self.lastLiveSyncFingerprint {
-                            self.lastLiveSyncRefreshAt = Date()
-                            self.refreshPropertiesInBackground()
-                        }
-                    }
+                let fingerprint = self.localStore.propertiesLedgerFingerprint()
+                if fingerprint != self.lastLiveSyncFingerprint {
+                    self.lastLiveSyncRefreshAt = now
+                    self.refreshPropertiesInBackground()
                 }
             }
             liveSyncTimer?.tolerance = 1.0
@@ -43245,7 +43125,6 @@ final class AppState: ObservableObject {
             liveSyncTimer = nil
             liveSyncBurstUntil = nil
             lastLiveSyncRefreshAt = nil
-            liveSyncFingerprintRefreshInFlight = false
         }
     }
 
@@ -49179,7 +49058,7 @@ final class AppState: ObservableObject {
 
     func triggerBackupForLifecycleEvent() {
         cloudBackupManager?.setCaptureModeActive(false)
-        cloudBackupManager?.scheduleAutomaticBackup(after: 2.0)
+        cloudBackupManager?.scheduleAutomaticBackup(after: 0)
     }
 
     func handleSceneDidEnterBackground() {
@@ -49190,10 +49069,15 @@ final class AppState: ObservableObject {
     }
 
     func handleSceneDidBecomeActive() {
-        scheduleSceneActiveMaintenance(reason: "scene_active")
+        refreshVisiblePropertySessionCachesFromLocalStore(reason: "scene_active")
+        scheduleDeliveredSessionStateReconciliation(reason: "scene_active")
+        refreshSessionSnapshotCloudStatusCache()
+        queuePendingSupabaseMediaBackfillIfNeeded(reason: "scene_active")
         Task { @MainActor [weak self] in
             guard let self else { return }
-            await self.refreshActiveOccupancyHeartbeatIfNeeded(reason: "scene_active")
+            _ = await self.performSessionSnapshotUploadRetry(source: "scene_active")
+            await self.reconcileOccupancyForAppLifecycle(reason: "scene_active")
+            await self.performForegroundAccessRefreshSequence()
         }
     }
 
