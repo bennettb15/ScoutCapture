@@ -47931,7 +47931,7 @@ final class AppState: ObservableObject {
     }
 
     func materialDraftCaptureCount(for session: Session) -> Int {
-        sessionMaterialContentCount(session, requireLocalDraftEvidence: true)
+        sessionMaterialContentCount(session)
     }
 
     func hasMaterialDraftCaptures(_ session: Session) -> Bool {
@@ -50722,10 +50722,7 @@ final class AppState: ObservableObject {
         sessionMaterialContentCount(session) > 0
     }
 
-    private func sessionMaterialContentCount(
-        _ session: Session,
-        requireLocalDraftEvidence: Bool = false
-    ) -> Int {
+    private func sessionMaterialContentCount(_ session: Session) -> Int {
         guard let metadata = try? localStore.loadSessionMetadata(propertyID: session.propertyID, sessionID: session.id) else {
             return 0
         }
@@ -50739,13 +50736,6 @@ final class AppState: ObservableObject {
                 captureKind == "restored" ||
                 captureKind == "historical" {
                 return false
-            }
-            if requireLocalDraftEvidence {
-                let storagePath = normalizedSupabaseText(shot.storagePath)
-                let uploadState = normalizedSupabaseText(shot.uploadState)?.lowercased()
-                if storagePath != nil && uploadState == "uploaded" {
-                    return false
-                }
             }
             let originalRelative = shot.originalRelativePath.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !originalRelative.isEmpty else { return false }
