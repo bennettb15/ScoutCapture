@@ -8860,17 +8860,19 @@ struct ContentView: View {
                         .foregroundColor(.white)
 
                     HStack(spacing: 10) {
-                        Button("Retake") {
-                            resetResolutionCapturePreview()
-                        }
-                        .buttonStyle(.bordered)
-                        .tint(.white)
+                        postCapturePreviewActionButton(
+                            "Retake",
+                            fill: Color.white.opacity(0.12),
+                            stroke: Color.white.opacity(0.22),
+                            action: resetResolutionCapturePreview
+                        )
 
-                        Button("Confirm") {
-                            confirmResolution()
-                        }
-                        .buttonStyle(.borderedProminent)
-                        .tint(.green)
+                        postCapturePreviewActionButton(
+                            "Confirm",
+                            fill: Color.green,
+                            stroke: Color.green.opacity(0.85),
+                            action: confirmResolution
+                        )
                     }
                 }
                 .padding(.horizontal, 20)
@@ -8944,28 +8946,60 @@ struct ContentView: View {
                 }
                 .contentShape(RoundedRectangle(cornerRadius: 14))
         }
-        .buttonStyle(.plain)
+        .buttonStyle(PostCaptureActionButtonStyle(cornerRadius: 14))
         .contentShape(RoundedRectangle(cornerRadius: 14))
         .disabled(!isEnabled)
     }
 
-    private struct ArmedCaptureShutterButtonStyle: ButtonStyle {
-        let isArmed: Bool
+    @ViewBuilder
+    private func postCapturePreviewActionButton(
+        _ title: String,
+        fill: Color,
+        stroke: Color,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            Text(title)
+                .font(.system(size: 16, weight: .semibold))
+                .foregroundColor(.white)
+                .frame(minWidth: 104)
+                .frame(height: 42)
+                .background(fill)
+                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .stroke(stroke, lineWidth: 1)
+                }
+                .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        }
+        .buttonStyle(PostCaptureActionButtonStyle(cornerRadius: 12))
+        .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+    }
+
+    private struct PostCaptureActionButtonStyle: ButtonStyle {
+        let cornerRadius: CGFloat
 
         func makeBody(configuration: Configuration) -> some View {
-            let isPressed = isArmed && configuration.isPressed
+            let isPressed = configuration.isPressed
 
             configuration.label
-                .scaleEffect(isPressed ? 0.92 : 1.0)
+                .scaleEffect(isPressed ? 0.97 : 1.0)
                 .brightness(isPressed ? -0.08 : 0)
                 .overlay {
                     if isPressed {
-                        Circle()
-                            .stroke(Color.accentColor.opacity(0.95), lineWidth: 3)
-                            .frame(width: 96, height: 96)
+                        RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                            .fill(Color.white.opacity(0.16))
+                            .allowsHitTesting(false)
                     }
                 }
-                .animation(.easeOut(duration: 0.05), value: isPressed)
+                .overlay {
+                    if isPressed {
+                        RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                            .stroke(Color.white.opacity(0.65), lineWidth: 1.5)
+                            .allowsHitTesting(false)
+                    }
+                }
+                .animation(.easeOut(duration: 0.04), value: isPressed)
         }
     }
 
@@ -9001,7 +9035,7 @@ struct ContentView: View {
                         }
                     }
                     .disabled(camera.isCapturing)
-                    .buttonStyle(ArmedCaptureShutterButtonStyle(isArmed: isCaptureTargetArmed))
+                    .buttonStyle(.plain)
                     .offset(y: -13)
                     .overlay(alignment: .center) {
                         let hdOffsetX: CGFloat = -94
