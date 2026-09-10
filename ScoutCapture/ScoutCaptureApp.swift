@@ -12947,9 +12947,6 @@ struct PropertySessionView: View {
                             .lineLimit(2)
                     }
                     Spacer(minLength: 0)
-                    Image(systemName: "chevron.right")
-                        .font(.system(size: 13, weight: .semibold))
-                        .foregroundColor(isSelected ? .white.opacity(0.86) : .secondary)
                 }
                 .padding(.horizontal, 14)
                 .frame(minHeight: 72)
