@@ -1175,14 +1175,13 @@ struct SessionHubView: View {
     @ViewBuilder
     private func propertyRow(_ property: Property) -> some View {
         let isPressed = pressedPropertyID == property.id
-        let sessionsForProperty = appState.sessions(for: property.id).sorted { $0.startedAt > $1.startedAt }
         let badgeModel = appState.propertyCardBadgeModel(for: property.id)
-        let pendingSession = sessionsForProperty.first(where: { appState.isPendingDeliveryLocallyAvailable($0) })
-        let sessionUploadStatus = appState.sessionSnapshotCloudStatusForPropertyRow(propertyID: property.id)
+        let pendingSession = appState.propertyRowPendingDeliverySession(for: property.id)
+        let sessionUploadStatus = appState.propertyRowSessionSnapshotCloudStatus(propertyID: property.id)
         let uploadStatusChip = sessionUploadStatus.flatMap(sessionSnapshotUploadStatusChip)
         let hasDraft = badgeModel.showDraft
         let hasPendingExport = badgeModel.showPendingExport
-        let latestReExportSession = reExportCandidateSession(for: property.id)
+        let latestReExportSession = appState.propertyRowReExportCandidateSession(for: property.id)
         let hasReExportGlyph = badgeModel.showReExport && latestReExportSession != nil
         let manualExportSession = latestReExportSession ?? pendingSession
         let hasManualExportAction = manualExportSession != nil && (hasReExportGlyph || hasPendingExport)
@@ -1268,7 +1267,13 @@ struct SessionHubView: View {
         )
         .contentShape(Rectangle())
         .onTapGesture {
-            handlePropertyTap(property, latestSession: sessionsForProperty.first, pendingSession: pendingSession)
+            handlePropertyTap(property)
+        }
+        .onAppear {
+            appState.schedulePropertyRowDetailsHydration(
+                reason: "property_row_appeared",
+                propertyIDs: [property.id]
+            )
         }
         .contextMenu {
             Button("Manage Sessions") {
@@ -1805,10 +1810,6 @@ struct SessionHubView: View {
 
     private func propertyHasPendingExport(_ property: Property) -> Bool {
         appState.propertyCardBadgeModel(for: property.id).showPendingExport
-    }
-
-    private func reExportCandidateSession(for propertyID: UUID) -> Session? {
-        appState.reExportCandidateSession(for: propertyID)
     }
 
     private func matchesPropertyFilter(_ property: Property) -> Bool {
@@ -3286,17 +3287,16 @@ struct SessionHubView: View {
         path.append(.propertySession(propertyID: property.id, resumeDraft: false))
     }
 
-    private func handlePropertyTap(
-        _ property: Property,
-        latestSession: Session?,
-        pendingSession: Session?
-    ) {
+    private func handlePropertyTap(_ property: Property) {
         guard !isOpeningProperty else { return }
         isOpeningProperty = true
         propertyTapToken += 1
         let tapToken = propertyTapToken
         selectionHaptic.impactOccurred()
         pressedPropertyID = property.id
+        let sessionsForProperty = appState.sessions(for: property.id).sorted { $0.startedAt > $1.startedAt }
+        let latestSession = sessionsForProperty.first
+        let pendingSession = sessionsForProperty.first(where: { appState.isPendingDeliveryLocallyAvailable($0) })
 
         let pending = pendingSession != nil
         let latestID = latestSession?.id.uuidString ?? "NONE"
