@@ -3692,6 +3692,7 @@ struct ContentView: View {
     @State private var guidedChecklistHydrating: Bool = false
     @State private var deferredSessionMediaHydrationWorkItem: DispatchWorkItem? = nil
     @State private var deferredCameraDataRefreshWorkItem: DispatchWorkItem? = nil
+    @State private var deferredReferenceResolutionWorkItem: DispatchWorkItem? = nil
     @State private var reservedAngleByContextKey: [String: Int] = [:]
     @State private var guidedThumbnailRefreshToken: UUID = UUID()
     @State private var gridThumbnailRefreshToken: UUID = UUID()
@@ -4066,14 +4067,23 @@ struct ContentView: View {
         refreshActiveIssues()
     }
 
+    private func enableReferenceThumbnailResolutionIfNeeded() {
+        guard !allowReferenceThumbnailResolution else { return }
+        referenceResolutionToken += 1
+        allowReferenceThumbnailResolution = true
+    }
+
     private func hydrateGuidedChecklistAfterPresentation() {
         guard showGuidedChecklist else { return }
         guard !allowReferenceThumbnailResolution else { return }
-        deferCameraOverlayWork {
+        guidedChecklistHydrating = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
             guard showGuidedChecklist else {
                 guidedChecklistHydrating = false
                 return
             }
+            enableReferenceThumbnailResolutionIfNeeded()
+            refreshGuidedShots()
             guidedChecklistHydrating = false
             guidedThumbnailRefreshToken = UUID()
         }
@@ -4092,6 +4102,25 @@ struct ContentView: View {
             verboseLog("[CameraDataRefresh] reason=\(reason)")
         }
         deferredCameraDataRefreshWorkItem = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: item)
+    }
+
+    private func scheduleDeferredReferenceResolutionRefresh(
+        reason: String,
+        delay: TimeInterval = 1.0
+    ) {
+        deferredReferenceResolutionWorkItem?.cancel()
+        let item = DispatchWorkItem {
+            guard !showGuidedChecklist,
+                  !showActiveIssuesSheet,
+                  !showResolutionRequiredSheet else {
+                verboseLog("[ReferenceResolution] skipped reason=\(reason) panelOpen=true")
+                return
+            }
+            ensureReferenceResolutionReady()
+            verboseLog("[ReferenceResolution] reason=\(reason)")
+        }
+        deferredReferenceResolutionWorkItem = item
         DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: item)
     }
 
@@ -6536,25 +6565,15 @@ struct ContentView: View {
 
     private func scheduleActiveIssuesOpenRefresh() {
         activeIssuesOpenRefreshWorkItem?.cancel()
-        if showActiveIssuesSheet {
-            activeIssuesSheetHydrating = true
-        }
-        if showResolutionRequiredSheet {
-            resolutionRequiredSheetHydrating = true
-        }
         let item = DispatchWorkItem {
             guard showActiveIssuesSheet || showResolutionRequiredSheet else { return }
-            ensureReferenceResolutionReady()
-            refreshActiveIssues()
-            if showActiveIssuesSheet {
-                activeIssuesSheetHydrating = false
-            }
-            if showResolutionRequiredSheet {
-                resolutionRequiredSheetHydrating = false
+            guard allowReferenceThumbnailResolution else { return }
+            if !showGuidedChecklist {
+                refreshActiveIssues()
             }
         }
         activeIssuesOpenRefreshWorkItem = item
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.08, execute: item)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35, execute: item)
     }
 
     private func dismissActiveIssuesSheet() {
@@ -6579,7 +6598,6 @@ struct ContentView: View {
         }
 
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) {
-            ensureReferenceResolutionReady()
             refreshActiveIssues()
             if !activeObservations.isEmpty {
                 showActiveIssuesSheet = true
@@ -6601,7 +6619,6 @@ struct ContentView: View {
         }
 
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) {
-            ensureReferenceResolutionReady()
             refreshActiveIssues()
             if !resolutionRequiredObservations.isEmpty {
                 showResolutionRequiredSheet = true
@@ -6848,6 +6865,7 @@ struct ContentView: View {
                 loadBuildingOptions()
                 loadTradeOptions()
                 scheduleDeferredCameraDataRefresh(reason: "camera_appear")
+                scheduleDeferredReferenceResolutionRefresh(reason: "camera_appear")
                 isPollingDeviceOrientation = true
             }
             .onReceive(NotificationCenter.default.publisher(for: UIDevice.orientationDidChangeNotification)) { _ in
@@ -6862,6 +6880,8 @@ struct ContentView: View {
                 deferredSessionMediaHydrationWorkItem = nil
                 deferredCameraDataRefreshWorkItem?.cancel()
                 deferredCameraDataRefreshWorkItem = nil
+                deferredReferenceResolutionWorkItem?.cancel()
+                deferredReferenceResolutionWorkItem = nil
                 guidedChecklistHydrating = false
                 isPollingDeviceOrientation = false
                 isEndingSession = false
@@ -6887,6 +6907,7 @@ struct ContentView: View {
                 primeDeferredReferenceResolution()
                 resetSelectionForSwitch()
                 scheduleDeferredCameraDataRefresh(reason: "property_changed")
+                scheduleDeferredReferenceResolutionRefresh(reason: "property_changed")
             }
             .onChange(of: appState.currentSession?.id) { previousSessionID, nextSessionID in
                 clearPropertyScopedChecklistState()
@@ -6922,6 +6943,7 @@ struct ContentView: View {
                 primeDeferredReferenceResolution()
                 resetSelectionForSwitch()
                 scheduleDeferredCameraDataRefresh(reason: "session_changed")
+                scheduleDeferredReferenceResolutionRefresh(reason: "session_changed")
             }
             .onChange(of: appState.currentSession?.status) { _, _ in
                 if !hasValidCurrentSession {
