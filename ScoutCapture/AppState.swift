@@ -7692,6 +7692,7 @@ final class AppState: ObservableObject {
     private var propertyRowDetailsHydratedAtByPropertyID: [UUID: Date] = [:]
     private var propertyRowDetailHydrationTask: Task<Void, Never>?
     private var pendingPropertyRowDetailHydrationRefreshesCloudStatus = false
+    private var suppressPropertyRowAppearHydrationUntil: Date?
     private let propertyRowDetailHydrationQueue = DispatchQueue(
         label: "ScoutCapture.PropertyRowDetailHydration",
         qos: .utility
@@ -7702,6 +7703,7 @@ final class AppState: ObservableObject {
     private var lastForegroundSyncDeltaCompletedAt: Date?
     private var deferredPropertyRefreshWorkItem: DispatchWorkItem?
     private var deferredSceneActiveWorkItem: DispatchWorkItem?
+    private var deferredForegroundBackupStatusWorkItem: DispatchWorkItem?
 #if DEBUG
     private var passwordRecoveryRequestOverride: PasswordRecoveryRequestOverride?
     private var syncDeltaFetchOverride: SyncDeltaFetchOverride?
@@ -40443,7 +40445,10 @@ final class AppState: ObservableObject {
 
     func warmLaunchReadiness(completion: @escaping () -> Void) {
         guard !didLoad else {
-            completion()
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                completion()
+            }
             return
         }
         didLoad = true
@@ -40464,7 +40469,6 @@ final class AppState: ObservableObject {
                         organizations: localState.organizations,
                         caches: caches
                     )
-                    self.setLoadingState(false)
                     self.logHubFetch(
                         phase: "warmLaunch",
                         source: localState.source.rawValue,
@@ -40484,36 +40488,84 @@ final class AppState: ObservableObject {
                 }
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
-                if let fetchedResult, !fetchedResult.state.properties.isEmpty {
-                    let elapsedMs = Int(Date().timeIntervalSince(start) * 1000)
-                    self.logHubFetch(
-                        phase: "warmLaunch",
-                        source: fetchedResult.state.source.rawValue,
-                        properties: fetchedResult.state.properties.count,
-                        orgs: fetchedResult.state.organizations.count,
-                        elapsedMs: elapsedMs
-                    )
-                    self.applyHubCachePayload(
-                        properties: fetchedResult.state.properties,
-                        organizations: fetchedResult.state.organizations,
-                        caches: fetchedResult.caches
-                    )
-                } else {
-                    let elapsedMs = Int(Date().timeIntervalSince(start) * 1000)
-                    self.logHubFetch(
-                        phase: "warmLaunch",
-                        source: "none",
-                        properties: 0,
-                        orgs: 0,
-                        elapsedMs: elapsedMs
-                    )
+                Task { @MainActor [weak self] in
+                    guard let self else { return }
+                    if let fetchedResult, !fetchedResult.state.properties.isEmpty {
+                        let elapsedMs = Int(Date().timeIntervalSince(start) * 1000)
+                        self.logHubFetch(
+                            phase: "warmLaunch",
+                            source: fetchedResult.state.source.rawValue,
+                            properties: fetchedResult.state.properties.count,
+                            orgs: fetchedResult.state.organizations.count,
+                            elapsedMs: elapsedMs
+                        )
+                        self.applyHubCachePayload(
+                            properties: fetchedResult.state.properties,
+                            organizations: fetchedResult.state.organizations,
+                            caches: fetchedResult.caches
+                        )
+                    } else {
+                        let elapsedMs = Int(Date().timeIntervalSince(start) * 1000)
+                        self.logHubFetch(
+                            phase: "warmLaunch",
+                            source: "none",
+                            properties: 0,
+                            orgs: 0,
+                            elapsedMs: elapsedMs
+                        )
+                    }
+                    self.setLoadingState(false)
+                    self.isStartupHydrationInProgress = false
+                    self.startupHydrationCompletedAt = Date()
+                    completion()
                 }
-                self.setLoadingState(false)
-                self.isStartupHydrationInProgress = false
-                self.startupHydrationCompletedAt = Date()
-                completion()
             }
         }
+    }
+
+    private func prepareInitialPropertyListForDisplay(reason: String) async {
+        let propertyIDs = Self.uniquePropertyIDs(
+            properties
+                .filter { $0.deletedAt == nil }
+                .map(\.id)
+        )
+        guard !propertyIDs.isEmpty else {
+            return
+        }
+        await hydratePropertyRowDetails(
+            reason: reason,
+            propertyIDs: propertyIDs,
+            refreshCloudStatus: true
+        )
+        await waitForInitialPropertyRowDetailsToSettle(propertyIDs: propertyIDs, reason: reason)
+        await Task.yield()
+    }
+
+    func prepareInitialHomePropertyListForDisplay(reason: String) async {
+        await prepareInitialPropertyListForDisplay(reason: reason)
+    }
+
+    private func waitForInitialPropertyRowDetailsToSettle(
+        propertyIDs: [UUID],
+        reason: String,
+        renderSettleDelayNanoseconds: UInt64 = 250_000_000
+    ) async {
+        let expectedIDs = Set(propertyIDs)
+        let start = Date()
+        while true {
+            let hydratedIDs = Set(propertyRowDetailsHydratedAtByPropertyID.keys).intersection(expectedIDs)
+            if hydratedIDs.count >= expectedIDs.count {
+                break
+            }
+            if Date().timeIntervalSince(start) >= 1.0 {
+                break
+            }
+            await Task.yield()
+            try? await Task.sleep(nanoseconds: 40_000_000)
+        }
+
+        try? await Task.sleep(nanoseconds: renderSettleDelayNanoseconds)
+        await Task.yield()
     }
 
     func refreshProperties() {
@@ -41059,6 +41111,11 @@ final class AppState: ObservableObject {
         now: Date
     ) -> Bool {
         guard reason == "property_row_appeared" else { return true }
+        if let suppressUntil = suppressPropertyRowAppearHydrationUntil,
+           now < suppressUntil,
+           propertyRowDetailsHydratedAtByPropertyID[propertyID] != nil {
+            return false
+        }
         guard !pendingPropertyRowDetailHydrationIDs.contains(propertyID) else { return false }
         guard let lastHydratedAt = propertyRowDetailsHydratedAtByPropertyID[propertyID] else {
             return true
@@ -49580,6 +49637,8 @@ final class AppState: ObservableObject {
     }
 
     func handleSceneDidEnterBackground() {
+        deferredForegroundBackupStatusWorkItem?.cancel()
+        deferredForegroundBackupStatusWorkItem = nil
         cloudBackupManager?.scheduleAutomaticBackup(after: 0)
         Task { @MainActor [weak self] in
             await self?.refreshActiveOccupancyHeartbeatIfNeeded(reason: "scene_background", force: true)
@@ -49588,6 +49647,8 @@ final class AppState: ObservableObject {
 
     func handleSceneDidBecomeActive() {
         deferredSceneActiveWorkItem?.cancel()
+        suppressPropertyRowAppearHydrationUntil = Date().addingTimeInterval(2.5)
+        scheduleForegroundBackupStatusRefresh()
         guard currentSession?.status != .draft else {
             performSceneDidBecomeActiveWork()
             return
@@ -49599,6 +49660,17 @@ final class AppState: ObservableObject {
         }
         deferredSceneActiveWorkItem = item
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.9, execute: item)
+    }
+
+    private func scheduleForegroundBackupStatusRefresh() {
+        deferredForegroundBackupStatusWorkItem?.cancel()
+        let item = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.deferredForegroundBackupStatusWorkItem = nil
+            self.refreshBackupStatus()
+        }
+        deferredForegroundBackupStatusWorkItem = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0, execute: item)
     }
 
     private func performSceneDidBecomeActiveWork() {

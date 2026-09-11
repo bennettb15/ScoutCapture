@@ -182,7 +182,7 @@ struct ScoutCaptureApp: App {
         WindowGroup {
             PortraitLockedRootView(
                 rootView: AppRootView(
-                    skipStartupLoading: true,
+                    skipStartupLoading: false,
                     onInitialLaunchCompleted: markInitialLaunchCompleted
                 )
                     .environmentObject(appState)
@@ -196,7 +196,6 @@ struct ScoutCaptureApp: App {
                         appState.setLiveSyncMonitoringActive(false)
                     } else if newValue == .active {
                         appState.setLiveSyncMonitoringActive(true)
-                        appState.refreshBackupStatus()
                         appState.handleSceneDidBecomeActive()
                     }
                 }
@@ -510,11 +509,27 @@ private struct AppRootView: View {
     @State private var didStartWarmup: Bool = false
     @State private var launchProgress: Double = 0
     @State private var showsProgressBar: Bool = false
-    // Allow warm-launch hub fetch to complete more often before leaving splash.
-    private let warmLaunchTimeoutSeconds: TimeInterval = 1.9
+    @State private var propertyListReadinessTimedOut: Bool = false
+    @State private var homePropertyListReady: Bool = false
+    @State private var didStartHomePropertyListReadiness: Bool = false
+    @State private var homePropertyListReadinessTimedOut: Bool = false
+    // Keep first property-row badge/cloud hydration behind splash when possible.
+    private let warmLaunchTimeoutSeconds: TimeInterval = 15.0
 
     private var isAppReady: Bool {
         skipStartupLoading || (sessionHubReady && minimumLaunchDelayMet)
+    }
+
+    private var canPrepareHomePropertyList: Bool {
+        guard isAppReady else { return false }
+        guard appState.requiresAuthentication else { return true }
+        return appState.isAuthenticationReady &&
+            appState.isAuthenticated &&
+            appState.isOrganizationContextReady
+    }
+
+    private var initialPropertyListTimedOut: Bool {
+        propertyListReadinessTimedOut || homePropertyListReadinessTimedOut
     }
 
     var body: some View {
@@ -522,8 +537,10 @@ private struct AppRootView: View {
             if !isAppReady {
                 LoadingView(
                     progress: launchProgress,
-                    showsProgressBar: false,
-                    showsLogo: true
+                    showsProgressBar: showsProgressBar,
+                    showsLogo: true,
+                    message: "Loading properties...",
+                    showsSpinner: false
                 )
             } else if appState.requiresAuthentication && !appState.isAuthenticationReady {
                 LoadingView(
@@ -539,9 +556,32 @@ private struct AppRootView: View {
                     showsProgressBar: false,
                     showsLogo: true
                 )
+            } else if !homePropertyListReady {
+                LoadingView(
+                    progress: launchProgress,
+                    showsProgressBar: true,
+                    showsLogo: true,
+                    message: "Loading properties...",
+                    showsSpinner: false
+                )
             } else {
-                SessionHubView()
+                SessionHubView(initialPropertyListTimedOut: initialPropertyListTimedOut)
             }
+        }
+        .onChange(of: appState.isAuthenticationReady) { _, _ in
+            startHomePropertyListReadinessIfNeeded()
+        }
+        .onChange(of: appState.isAuthenticated) { _, _ in
+            startHomePropertyListReadinessIfNeeded()
+        }
+        .onChange(of: appState.isOrganizationContextReady) { _, _ in
+            startHomePropertyListReadinessIfNeeded()
+        }
+        .onChange(of: sessionHubReady) { _, _ in
+            startHomePropertyListReadinessIfNeeded()
+        }
+        .onChange(of: minimumLaunchDelayMet) { _, _ in
+            startHomePropertyListReadinessIfNeeded()
         }
         .task {
             guard !didStartWarmup else { return }
@@ -555,6 +595,7 @@ private struct AppRootView: View {
                     if appState.properties.isEmpty {
                         appState.refreshPropertiesInBackground()
                     }
+                    startHomePropertyListReadinessIfNeeded()
                 }
                 AddPropertyWarmup.prewarm()
                 OptionalDetailNoteWarmup.prewarm()
@@ -586,13 +627,14 @@ private struct AppRootView: View {
                         resumeOnce()
                         return
                     }
-                    print("[Launch] warm launch timed out; continuing app launch")
+                    propertyListReadinessTimedOut = true
                     sessionHubReady = true
                     advanceLaunchProgress(to: 0.88)
                     resumeOnce()
                 }
 
                 appState.warmLaunchReadiness {
+                    propertyListReadinessTimedOut = false
                     sessionHubReady = true
                     advanceLaunchProgress(to: 0.88)
                     resumeOnce()
@@ -603,9 +645,9 @@ private struct AppRootView: View {
             advanceLaunchProgress(to: 0.96)
             AddPropertyWarmup.prewarm()
             OptionalDetailNoteWarmup.prewarm()
-            advanceLaunchProgress(to: 1.0)
             try? await Task.sleep(nanoseconds: 60_000_000)
             minimumLaunchDelayMet = true
+            startHomePropertyListReadinessIfNeeded()
             onInitialLaunchCompleted()
         }
     }
@@ -617,11 +659,38 @@ private struct AppRootView: View {
             launchProgress = clamped
         }
     }
+
+    private func startHomePropertyListReadinessIfNeeded() {
+        guard canPrepareHomePropertyList else { return }
+        guard !homePropertyListReady, !didStartHomePropertyListReadiness else { return }
+        didStartHomePropertyListReadiness = true
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + warmLaunchTimeoutSeconds) {
+            guard !homePropertyListReady else { return }
+            homePropertyListReadinessTimedOut = true
+            advanceLaunchProgress(to: 1.0)
+            homePropertyListReady = true
+        }
+
+        Task { @MainActor in
+            await appState.prepareInitialHomePropertyListForDisplay(reason: "home_property_list_readiness")
+            guard !homePropertyListReady else {
+                if homePropertyListReadinessTimedOut {
+                    homePropertyListReadinessTimedOut = false
+                }
+                return
+            }
+            homePropertyListReadinessTimedOut = false
+            advanceLaunchProgress(to: 1.0)
+            homePropertyListReady = true
+        }
+    }
 }
 
 struct SessionHubView: View {
     @EnvironmentObject private var appState: AppState
     @Environment(\.colorScheme) private var colorScheme
+    let initialPropertyListTimedOut: Bool
     private var localStore: LocalStore { appState.sharedLocalStore }
     @State private var path: [HubRoute] = []
     @State private var showAddProperty: Bool = false
@@ -663,6 +732,7 @@ struct SessionHubView: View {
     @State private var dismissedPendingInvitationIDs: Set<UUID> = []
     @State private var isPendingInviteActionInFlight: Bool = false
     @State private var pendingInvitePromptErrorMessage: String? = nil
+    @State private var isManualPropertyRefreshInFlight: Bool = false
 
     private let selectionHaptic = UIImpactFeedbackGenerator(style: .light)
     private let hiddenDebugTapWindow: TimeInterval = 1.5
@@ -756,6 +826,32 @@ struct SessionHubView: View {
         return false
     }
 
+    private var initialPropertyListUpdatingBanner: some View {
+        HStack(spacing: 10) {
+            ProgressView()
+                .progressViewStyle(.circular)
+                .scaleEffect(0.9)
+
+            Text("Still updating...")
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundColor(headerPrimaryLabel)
+
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+        .background(
+            colorScheme == .light
+                ? Color(.systemBlue).opacity(0.10)
+                : Color(.systemBlue).opacity(0.22)
+        )
+        .overlay(alignment: .bottom) {
+            Divider()
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Still updating property details")
+    }
+
     private var isCompactSearchMode: Bool {
         (isSearchExpanded && isSearchFieldFocused) || !normalizedSearchQuery.isEmpty
     }
@@ -769,6 +865,10 @@ struct SessionHubView: View {
             VStack(spacing: 0) {
                 if let invitation = visiblePendingInvitationPrompt {
                     pendingInvitationPrompt(invitation)
+                }
+
+                if initialPropertyListTimedOut {
+                    initialPropertyListUpdatingBanner
                 }
 
                 Group {
@@ -835,9 +935,6 @@ struct SessionHubView: View {
                             }
                         }
                         .id(appState.hubRowRefreshToken)
-                        .refreshable {
-                            await appState.refreshPropertiesAwaitingForegroundRefresh()
-                        }
                         .listStyle(.plain)
                     }
                 }
@@ -1078,6 +1175,15 @@ struct SessionHubView: View {
                     }
                 }
             }
+        }
+    }
+
+    private func runManualPropertyRefresh() {
+        guard !isManualPropertyRefreshInFlight else { return }
+        isManualPropertyRefreshInFlight = true
+        Task {
+            await appState.refreshPropertiesAwaitingForegroundRefresh()
+            isManualPropertyRefreshInFlight = false
         }
     }
 
@@ -1545,6 +1651,32 @@ struct SessionHubView: View {
             if !isSearchExpanded {
                 ZStack {
                     HStack {
+                        Button {
+                            runManualPropertyRefresh()
+                        } label: {
+                            Group {
+                                if isManualPropertyRefreshInFlight {
+                                    ProgressView()
+                                        .progressViewStyle(.circular)
+                                        .scaleEffect(0.82)
+                                } else {
+                                    Image(systemName: "arrow.clockwise")
+                                        .font(.system(size: 18, weight: .medium))
+                                }
+                            }
+                            .foregroundColor(buttonLabel)
+                            .frame(width: 42, height: 42)
+                            .background(buttonFill)
+                            .clipShape(Circle())
+                            .overlay(
+                                Circle()
+                                    .stroke(buttonStroke, lineWidth: 1)
+                            )
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(isManualPropertyRefreshInFlight)
+                        .accessibilityLabel("Refresh properties")
+
                         Spacer(minLength: 0)
                         Button {
                             showSettingsSheet = true
