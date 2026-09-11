@@ -5820,6 +5820,16 @@ final class AppState: ObservableObject {
         }
     }
 
+    private struct PropertyEntryStatusRPCPayload: Encodable {
+        let targetPropertyID: UUID
+        let targetDeviceID: String
+
+        enum CodingKeys: String, CodingKey {
+            case targetPropertyID = "target_property_id"
+            case targetDeviceID = "target_device_id"
+        }
+    }
+
     private enum PropertyStatusShadowTransition: String {
         case claim = "claim"
         case heartbeat = "heartbeat"
@@ -42717,16 +42727,17 @@ final class AppState: ObservableObject {
             )
         }
 #endif
-        guard supabaseClient != nil else {
+        guard let client = supabaseClient else {
             throw RemotePropertyFetchError.missingClient
         }
-        guard let status = try await fetchPropertyStatusRecord(propertyID: propertyID) else {
-            return nil
-        }
-        return makePropertyEntryStatusRecord(
-            from: status,
-            deviceID: deviceID
+        let params = PropertyEntryStatusRPCPayload(
+            targetPropertyID: propertyID,
+            targetDeviceID: deviceID
         )
+        let rows = try await (try client.rpc("get_property_entry_status", params: params))
+            .execute()
+            .value as [PropertyEntryStatusRecord]
+        return rows.first
     }
 
 #if DEBUG
@@ -42740,17 +42751,7 @@ final class AppState: ObservableObject {
             return nil
         }
         guard let status = propertyStatusByPropertyID[propertyID] else { return nil }
-        return makePropertyEntryStatusRecord(
-            from: status,
-            deviceID: deviceID
-        )
-    }
-#endif
 
-    private func makePropertyEntryStatusRecord(
-        from status: PropertyStatusRecord,
-        deviceID: String
-    ) -> PropertyEntryStatusRecord {
         let ownedByCurrentActor = Self.propertyStatusActorOwnedByCurrentActor(
             record: status,
             currentUserID: authenticatedSupabaseUser?.id,
@@ -42798,6 +42799,7 @@ final class AppState: ObservableObject {
             isStale: isStale
         )
     }
+#endif
 
     @MainActor
     private func applyPropertyEntryStatusCache(_ entryStatus: PropertyEntryStatusRecord) {

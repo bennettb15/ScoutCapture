@@ -1266,26 +1266,6 @@ struct SessionHubView: View {
                 .stroke(isPressed ? Color.blue.opacity(colorScheme == .light ? 0.55 : 0.70) : .clear, lineWidth: 1)
         )
         .contentShape(Rectangle())
-        .simultaneousGesture(
-            DragGesture(minimumDistance: 0)
-                .onChanged { value in
-                    guard !isOpeningProperty else { return }
-                    let moved = hypot(value.translation.width, value.translation.height)
-                    if moved < 8 {
-                        if pressedPropertyID != property.id {
-                            pressedPropertyID = property.id
-                        }
-                    } else if pressedPropertyID == property.id {
-                        pressedPropertyID = nil
-                    }
-                }
-                .onEnded { value in
-                    let moved = hypot(value.translation.width, value.translation.height)
-                    if moved >= 8, pressedPropertyID == property.id {
-                        pressedPropertyID = nil
-                    }
-                }
-        )
         .onTapGesture {
             handlePropertyTap(property)
         }
@@ -12590,11 +12570,11 @@ struct PropertySessionView: View {
                 didSetup = true
                 appState.selectProperty(id: propertyID)
                 Task { @MainActor in
-                    let propertyStatusPreflight = appState.evaluatePropertyStatusEntryPreflight(
+                    let propertyStatusPreflight = await appState.evaluateFreshPropertyStatusEntryPreflight(
                         propertyID: propertyID,
                         context: "property_session_view"
                     )
-                    if let block = propertyStatusPreflight?.block {
+                    if let block = propertyStatusPreflight.decision?.block {
                         if block.blockContext != "missing_property_status" {
                             isCheckingSessionBeforeOpen = false
                             sessionEntryBlock = block
@@ -12602,7 +12582,8 @@ struct PropertySessionView: View {
                         }
                     }
                     let skipCachedPropertyStatusPreflight =
-                        propertyStatusPreflight?.block?.blockContext == "missing_property_status"
+                        propertyStatusPreflight.skipCachedPropertyStatusPreflight ||
+                        propertyStatusPreflight.decision?.block?.blockContext == "missing_property_status"
                     if resumeDraft {
                         if appState.currentSession?.propertyID != propertyID || appState.currentSession?.status != .draft {
                             _ = appState.loadDraftSession(
