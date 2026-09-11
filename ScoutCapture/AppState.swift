@@ -49603,9 +49603,11 @@ final class AppState: ObservableObject {
 
     private func performSceneDidBecomeActiveWork() {
         queuePendingSupabaseMediaBackfillIfNeeded(reason: "scene_active")
+        let shouldRevalidateActiveDraft = currentSession?.status == .draft
+        guard shouldRevalidateActiveDraft else { return }
+
         Task { @MainActor [weak self] in
             guard let self else { return }
-            _ = await self.performSessionSnapshotUploadRetry(source: "scene_active")
             await self.reconcileOccupancyForAppLifecycle(reason: "scene_active")
             await self.performForegroundAccessRefreshSequence()
         }
