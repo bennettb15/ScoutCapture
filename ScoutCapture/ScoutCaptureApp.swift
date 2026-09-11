@@ -12575,15 +12575,11 @@ struct PropertySessionView: View {
                         context: "property_session_view"
                     )
                     if let block = propertyStatusPreflight.decision?.block {
-                        if block.blockContext != "missing_property_status" {
-                            isCheckingSessionBeforeOpen = false
-                            sessionEntryBlock = block
-                            return
-                        }
+                        isCheckingSessionBeforeOpen = false
+                        sessionEntryBlock = block
+                        return
                     }
-                    let skipCachedPropertyStatusPreflight =
-                        propertyStatusPreflight.skipCachedPropertyStatusPreflight ||
-                        propertyStatusPreflight.decision?.block?.blockContext == "missing_property_status"
+                    let skipCachedPropertyStatusPreflight = propertyStatusPreflight.skipCachedPropertyStatusPreflight
                     if resumeDraft {
                         if appState.currentSession?.propertyID != propertyID || appState.currentSession?.status != .draft {
                             _ = appState.loadDraftSession(
