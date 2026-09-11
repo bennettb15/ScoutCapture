@@ -1372,9 +1372,15 @@ struct SessionHubView: View {
                 .stroke(isPressed ? Color.blue.opacity(colorScheme == .light ? 0.55 : 0.70) : .clear, lineWidth: 1)
         )
         .contentShape(Rectangle())
-        .onTapGesture {
-            handlePropertyTap(property)
-        }
+        .simultaneousGesture(
+            DragGesture(minimumDistance: 0)
+                .onChanged { value in
+                    handlePropertyPressChanged(propertyID: property.id, translation: value.translation)
+                }
+                .onEnded { value in
+                    handlePropertyPressEnded(property, translation: value.translation)
+                }
+        )
         .onAppear {
             appState.schedulePropertyRowDetailsHydration(
                 reason: "property_row_appeared",
@@ -3420,13 +3426,51 @@ struct SessionHubView: View {
         path.append(.propertySession(propertyID: property.id, resumeDraft: false))
     }
 
+    private func beginPropertyPressFeedback(propertyID: UUID) {
+        guard !isOpeningProperty, pressedPropertyID != propertyID else { return }
+        pressedPropertyID = propertyID
+        selectionHaptic.impactOccurred()
+        selectionHaptic.prepare()
+    }
+
+    private func isPropertyPressWithinTapDistance(_ translation: CGSize) -> Bool {
+        abs(translation.width) <= 12 && abs(translation.height) <= 12
+    }
+
+    private func handlePropertyPressChanged(propertyID: UUID, translation: CGSize) {
+        guard isPropertyPressWithinTapDistance(translation) else {
+            if pressedPropertyID == propertyID, !isOpeningProperty {
+                pressedPropertyID = nil
+            }
+            return
+        }
+        beginPropertyPressFeedback(propertyID: propertyID)
+    }
+
+    private func handlePropertyPressEnded(_ property: Property, translation: CGSize) {
+        guard isPropertyPressWithinTapDistance(translation) else {
+            if pressedPropertyID == property.id, !isOpeningProperty {
+                pressedPropertyID = nil
+            }
+            return
+        }
+        handlePropertyTap(property)
+    }
+
     private func handlePropertyTap(_ property: Property) {
         guard !isOpeningProperty else { return }
         isOpeningProperty = true
         propertyTapToken += 1
         let tapToken = propertyTapToken
-        selectionHaptic.impactOccurred()
-        pressedPropertyID = property.id
+        beginPropertyPressFeedback(propertyID: property.id)
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.03) {
+            guard tapToken == propertyTapToken else { return }
+            continueAcceptedPropertyTap(property, tapToken: tapToken)
+        }
+    }
+
+    private func continueAcceptedPropertyTap(_ property: Property, tapToken: Int) {
         let sessionsForProperty = appState.sessions(for: property.id).sorted { $0.startedAt > $1.startedAt }
         let latestSession = sessionsForProperty.first
         let pendingSession = sessionsForProperty.first(where: { appState.isPendingDeliveryLocallyAvailable($0) })
@@ -12679,7 +12723,7 @@ struct PropertySessionView: View {
                 InitialSessionTypeChoiceSheet(
                     onChoose: { sessionType in
                         isAwaitingInitialSessionTypeSelection = false
-                        DispatchQueue.main.async {
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
                             guard appState.persistCurrentSessionType(sessionType) != nil else { return }
                             beginOpenFlow(forceRetry: true)
                         }
