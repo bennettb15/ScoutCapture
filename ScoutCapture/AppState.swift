@@ -7689,7 +7689,9 @@ final class AppState: ObservableObject {
     private var reExportAvailabilityDiagnostics = ReExportAvailabilityDiagnostics()
     private var lastReExportAvailabilitySummaryLogAt: Date?
     private var pendingPropertyRowDetailHydrationIDs: Set<UUID> = []
+    private var propertyRowDetailsHydratedAtByPropertyID: [UUID: Date] = [:]
     private var propertyRowDetailHydrationTask: Task<Void, Never>?
+    private var pendingPropertyRowDetailHydrationRefreshesCloudStatus = false
     private let propertyRowDetailHydrationQueue = DispatchQueue(
         label: "ScoutCapture.PropertyRowDetailHydration",
         qos: .utility
@@ -41029,12 +41031,19 @@ final class AppState: ObservableObject {
 
     func schedulePropertyRowDetailsHydration(
         reason: String,
-        propertyIDs requestedPropertyIDs: [UUID]? = nil
+        propertyIDs requestedPropertyIDs: [UUID]? = nil,
+        refreshCloudStatus: Bool = false
     ) {
+        let now = Date()
         let requested = requestedPropertyIDs ?? properties.map(\.id)
-        let propertyIDs = requested.filter { canAccessProperty($0) }
+        let propertyIDs = requested.filter {
+            canAccessProperty($0) &&
+                shouldSchedulePropertyRowDetailsHydration(propertyID: $0, reason: reason, now: now)
+        }
         guard !propertyIDs.isEmpty else { return }
         pendingPropertyRowDetailHydrationIDs.formUnion(propertyIDs)
+        pendingPropertyRowDetailHydrationRefreshesCloudStatus =
+            pendingPropertyRowDetailHydrationRefreshesCloudStatus || refreshCloudStatus
         guard propertyRowDetailHydrationTask == nil else { return }
 
         propertyRowDetailHydrationTask = Task { @MainActor [weak self] in
@@ -41042,6 +41051,19 @@ final class AppState: ObservableObject {
             guard !Task.isCancelled else { return }
             await self?.runPropertyRowDetailsHydration(reason: reason)
         }
+    }
+
+    private func shouldSchedulePropertyRowDetailsHydration(
+        propertyID: UUID,
+        reason: String,
+        now: Date
+    ) -> Bool {
+        guard reason == "property_row_appeared" else { return true }
+        guard !pendingPropertyRowDetailHydrationIDs.contains(propertyID) else { return false }
+        guard let lastHydratedAt = propertyRowDetailsHydratedAtByPropertyID[propertyID] else {
+            return true
+        }
+        return now.timeIntervalSince(lastHydratedAt) > 90
     }
 
     private func hydratePropertyRowDetails(
@@ -41231,6 +41253,7 @@ final class AppState: ObservableObject {
     }
 
     private func applyPropertyRowDetailsHydrationBatch(_ batch: PropertyRowDetailsHydrationBatch) {
+        let hydratedAt = Date()
         if batch.updatesCloudStatus,
            sessionSnapshotCloudStatusBySessionID != batch.cloudStatusBySessionID {
             sessionSnapshotCloudStatusBySessionID = batch.cloudStatusBySessionID
@@ -41260,6 +41283,7 @@ final class AppState: ObservableObject {
                     _ = setPropertyRowSnapshotCloudStatus(snapshot.cloudStatus, for: snapshot.propertyID, in: &nextRowCloud)
                 }
             }
+            propertyRowDetailsHydratedAtByPropertyID[snapshot.propertyID] = hydratedAt
         }
 
         if allSessionIndexByProperty != nextAllSessionIndex {
@@ -41297,7 +41321,13 @@ final class AppState: ObservableObject {
             guard let propertyID = nextPropertyRowDetailHydrationID() else { break }
             propertyIDs.append(propertyID)
         }
-        await hydratePropertyRowDetails(reason: reason, propertyIDs: propertyIDs, refreshCloudStatus: false)
+        let refreshCloudStatus = pendingPropertyRowDetailHydrationRefreshesCloudStatus
+        pendingPropertyRowDetailHydrationRefreshesCloudStatus = false
+        await hydratePropertyRowDetails(
+            reason: reason,
+            propertyIDs: propertyIDs,
+            refreshCloudStatus: refreshCloudStatus
+        )
         propertyRowDetailHydrationTask = nil
         if !pendingPropertyRowDetailHydrationIDs.isEmpty {
             schedulePropertyRowDetailsHydration(reason: "\(reason)_coalesced")
@@ -49572,7 +49602,6 @@ final class AppState: ObservableObject {
     }
 
     private func performSceneDidBecomeActiveWork() {
-        schedulePersistentDataCacheRefresh(reason: "scene_active")
         queuePendingSupabaseMediaBackfillIfNeeded(reason: "scene_active")
         Task { @MainActor [weak self] in
             guard let self else { return }
@@ -49643,10 +49672,12 @@ final class AppState: ObservableObject {
             allHubMetaByProperty = canonicalCaches.meta
         }
         applyTenantScopedState()
-        schedulePropertyRowDetailsHydration(
-            reason: "hub_cache_payload",
-            propertyIDs: canonicalProperties.map(\.id)
-        )
+        if canonicalCaches.includesSessionDetails {
+            schedulePropertyRowDetailsHydration(
+                reason: "hub_cache_payload",
+                propertyIDs: canonicalProperties.map(\.id)
+            )
+        }
     }
 
     private func normalizedHubCachePayload(_ caches: HubCachePayload) -> HubCachePayload {

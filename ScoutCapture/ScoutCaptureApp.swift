@@ -1272,7 +1272,8 @@ struct SessionHubView: View {
         .onAppear {
             appState.schedulePropertyRowDetailsHydration(
                 reason: "property_row_appeared",
-                propertyIDs: [property.id]
+                propertyIDs: [property.id],
+                refreshCloudStatus: true
             )
         }
         .contextMenu {
