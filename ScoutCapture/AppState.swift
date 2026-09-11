@@ -7690,6 +7690,10 @@ final class AppState: ObservableObject {
     private var lastReExportAvailabilitySummaryLogAt: Date?
     private var pendingPropertyRowDetailHydrationIDs: Set<UUID> = []
     private var propertyRowDetailHydrationTask: Task<Void, Never>?
+    private let propertyRowDetailHydrationQueue = DispatchQueue(
+        label: "ScoutCapture.PropertyRowDetailHydration",
+        qos: .utility
+    )
 #if DEBUG
     private var propertySessionOccupancyDebugRemoteRecords: [UUID: RemotePropertySessionOccupancyRecord] = [:]
 #endif
@@ -16608,10 +16612,12 @@ final class AppState: ObservableObject {
         persistentDataCacheRefreshScheduled = false
         Task { @MainActor [weak self] in
             guard let self else { return }
-            await self.refreshVisiblePropertySessionCachesFromLocalStoreIncrementally(reason: reason)
+            await self.hydratePropertyRowDetails(
+                reason: reason,
+                propertyIDs: self.properties.map(\.id),
+                refreshCloudStatus: true
+            )
             self.reconcileDeliveredSessionStateFromPropertyStatusCache(reason: reason)
-            self.refreshSessionSnapshotCloudStatusCache()
-            self.schedulePropertyRowDetailsHydration(reason: "\(reason)_snapshot_status", propertyIDs: self.properties.map(\.id))
             self.persistentDataCacheRefreshRunning = false
             if self.persistentDataCacheRefreshScheduled {
                 self.persistentDataCacheRefreshScheduled = false
@@ -41006,6 +41012,21 @@ final class AppState: ObservableObject {
         propertyRowSnapshotCloudStatusByPropertyID[propertyID]
     }
 
+    private struct PropertyRowDetailsHydrationBatch {
+        let cloudStatusBySessionID: [UUID: SessionSnapshotCloudStatus]
+        let updatesCloudStatus: Bool
+        let snapshots: [PropertyRowDetailsSnapshot]
+    }
+
+    private struct PropertyRowDetailsSnapshot {
+        let propertyID: UUID
+        let sessions: [Session]
+        let latestDraft: Session?
+        let pendingSession: Session?
+        let reExportSession: Session?
+        let cloudStatus: SessionSnapshotCloudStatus?
+    }
+
     func schedulePropertyRowDetailsHydration(
         reason: String,
         propertyIDs requestedPropertyIDs: [UUID]? = nil
@@ -41023,20 +41044,263 @@ final class AppState: ObservableObject {
         }
     }
 
-    private func runPropertyRowDetailsHydration(reason: String) async {
-        defer {
-            propertyRowDetailHydrationTask = nil
-            if !pendingPropertyRowDetailHydrationIDs.isEmpty {
-                schedulePropertyRowDetailsHydration(reason: "\(reason)_coalesced")
+    private func hydratePropertyRowDetails(
+        reason: String,
+        propertyIDs requestedPropertyIDs: [UUID],
+        refreshCloudStatus: Bool
+    ) async {
+        let propertyIDs = Self.uniquePropertyIDs(requestedPropertyIDs)
+            .filter { canAccessProperty($0) }
+        guard !propertyIDs.isEmpty else { return }
+
+        let localStore = localStore
+        let cloudStatusBySessionID = sessionSnapshotCloudStatusBySessionID
+        let propertyStatusByPropertyID = propertyStatusByPropertyID
+        let currentUserID = authenticatedSupabaseUser?.id
+        let currentDeviceID = currentDeviceIdentifier()
+        let now = Date()
+        let reExportWindowDays = reExportWindowDays
+
+        let batch = await makePropertyRowDetailsHydrationBatch(
+            propertyIDs: propertyIDs,
+            localStore: localStore,
+            cloudStatusBySessionID: cloudStatusBySessionID,
+            propertyStatusByPropertyID: propertyStatusByPropertyID,
+            currentUserID: currentUserID,
+            currentDeviceID: currentDeviceID,
+            now: now,
+            reExportWindowDays: reExportWindowDays,
+            refreshCloudStatus: refreshCloudStatus
+        )
+        guard !Task.isCancelled else { return }
+        applyPropertyRowDetailsHydrationBatch(batch)
+    }
+
+    private func makePropertyRowDetailsHydrationBatch(
+        propertyIDs: [UUID],
+        localStore: LocalStore,
+        cloudStatusBySessionID: [UUID: SessionSnapshotCloudStatus],
+        propertyStatusByPropertyID: [UUID: PropertyStatusRecord],
+        currentUserID: UUID?,
+        currentDeviceID: String,
+        now: Date,
+        reExportWindowDays: Int,
+        refreshCloudStatus: Bool
+    ) async -> PropertyRowDetailsHydrationBatch {
+        await withCheckedContinuation { continuation in
+            propertyRowDetailHydrationQueue.async {
+                let batch = Self.makePropertyRowDetailsHydrationBatchSync(
+                    propertyIDs: propertyIDs,
+                    localStore: localStore,
+                    cloudStatusBySessionID: cloudStatusBySessionID,
+                    propertyStatusByPropertyID: propertyStatusByPropertyID,
+                    currentUserID: currentUserID,
+                    currentDeviceID: currentDeviceID,
+                    now: now,
+                    reExportWindowDays: reExportWindowDays,
+                    refreshCloudStatus: refreshCloudStatus
+                )
+                continuation.resume(returning: batch)
+            }
+        }
+    }
+
+    private static func makePropertyRowDetailsHydrationBatchSync(
+        propertyIDs: [UUID],
+        localStore: LocalStore,
+        cloudStatusBySessionID existingCloudStatusBySessionID: [UUID: SessionSnapshotCloudStatus],
+        propertyStatusByPropertyID: [UUID: PropertyStatusRecord],
+        currentUserID: UUID?,
+        currentDeviceID: String,
+        now: Date,
+        reExportWindowDays: Int,
+        refreshCloudStatus: Bool
+    ) -> PropertyRowDetailsHydrationBatch {
+        let statusRecords = refreshCloudStatus
+            ? ((try? localStore.fetchSessionSnapshotUploadStatusRecords(downloadTimeout: 0.2)) ?? [])
+            : []
+        let retryItems = refreshCloudStatus
+            ? ((try? localStore.fetchSessionSnapshotUploadRetryWorkItems(downloadTimeout: 0.2)) ?? [])
+            : []
+        let cloudStatusBySessionID = refreshCloudStatus
+            ? makeSessionSnapshotCloudStatusBySessionID(records: statusRecords, retryItems: retryItems)
+            : existingCloudStatusBySessionID
+        let noZIPStatusRecords = refreshCloudStatus
+            ? statusRecords
+            : ((try? localStore.fetchSessionSnapshotUploadStatusRecords(downloadTimeout: 0)) ?? [])
+        let noZIPRetryItems = refreshCloudStatus
+            ? retryItems
+            : ((try? localStore.fetchSessionSnapshotUploadRetryWorkItems(downloadTimeout: 0)) ?? [])
+        let archiveSummaries = (try? localStore.fetchSessionArchiveSummaries()) ?? []
+
+        let snapshots = propertyIDs.map { propertyID in
+            makePropertyRowDetailsSnapshot(
+                propertyID: propertyID,
+                localStore: localStore,
+                cloudStatusBySessionID: cloudStatusBySessionID,
+                propertyStatusByPropertyID: propertyStatusByPropertyID,
+                statusRecords: noZIPStatusRecords,
+                retryItems: noZIPRetryItems,
+                archiveSummaries: archiveSummaries,
+                currentUserID: currentUserID,
+                currentDeviceID: currentDeviceID,
+                now: now,
+                reExportWindowDays: reExportWindowDays,
+                includeCloudRowStatus: refreshCloudStatus
+            )
+        }
+        return PropertyRowDetailsHydrationBatch(
+            cloudStatusBySessionID: cloudStatusBySessionID,
+            updatesCloudStatus: refreshCloudStatus,
+            snapshots: snapshots
+        )
+    }
+
+    private static func makePropertyRowDetailsSnapshot(
+        propertyID: UUID,
+        localStore: LocalStore,
+        cloudStatusBySessionID: [UUID: SessionSnapshotCloudStatus],
+        propertyStatusByPropertyID: [UUID: PropertyStatusRecord],
+        statusRecords: [LocalStore.SessionSnapshotUploadStatusRecord],
+        retryItems: [LocalStore.SessionSnapshotUploadRetryWorkItem],
+        archiveSummaries: [LocalStore.SessionArchiveSummary],
+        currentUserID: UUID?,
+        currentDeviceID: String,
+        now: Date,
+        reExportWindowDays: Int,
+        includeCloudRowStatus: Bool
+    ) -> PropertyRowDetailsSnapshot {
+        let sessions = loadAndNormalizeSessions(propertyID: propertyID, localStore: localStore)
+        let activeSessions = uniqueSessionsByID(sessions)
+            .filter { $0.deletedAt == nil }
+        let latestDraft = latestVisibleDraft(
+            in: sessions,
+            localStore: localStore,
+            cloudStatusBySessionID: cloudStatusBySessionID
+        )
+        let pendingSession = activeSessions
+            .filter {
+                isPendingDelivery(
+                    $0,
+                    localStore: localStore,
+                    cloudStatusBySessionID: cloudStatusBySessionID,
+                    propertyStatusByPropertyID: propertyStatusByPropertyID,
+                    statusRecords: statusRecords,
+                    retryItems: retryItems,
+                    archiveSummaries: archiveSummaries,
+                    currentUserID: currentUserID,
+                    currentDeviceID: currentDeviceID
+                ) && sessionHasCaptures($0, localStore: localStore)
+            }
+            .sorted { $0.startedAt > $1.startedAt }
+            .first {
+                sessionArchivePackageAvailability(
+                    session: $0,
+                    localStore: localStore,
+                    requireDelivered: false,
+                    expectedDeviceID: nil
+                ).available
+            }
+        let reExportSession = reExportCandidateSession(
+            in: activeSessions,
+            localStore: localStore,
+            cloudStatusBySessionID: cloudStatusBySessionID,
+            statusRecords: statusRecords,
+            retryItems: retryItems,
+            archiveSummaries: archiveSummaries,
+            currentDeviceID: currentDeviceID,
+            reExportWindowDays: reExportWindowDays,
+            now: now
+        )
+        let cloudStatus = includeCloudRowStatus
+            ? activeSessions
+                .compactMap { cloudStatusBySessionID[$0.id] }
+                .max { lhs, rhs in
+                    sessionSnapshotCloudStatus(rhs, isNewerThan: lhs)
+                }
+            : nil
+
+        return PropertyRowDetailsSnapshot(
+            propertyID: propertyID,
+            sessions: sessions,
+            latestDraft: latestDraft,
+            pendingSession: pendingSession,
+            reExportSession: reExportSession,
+            cloudStatus: cloudStatus
+        )
+    }
+
+    private func applyPropertyRowDetailsHydrationBatch(_ batch: PropertyRowDetailsHydrationBatch) {
+        if batch.updatesCloudStatus,
+           sessionSnapshotCloudStatusBySessionID != batch.cloudStatusBySessionID {
+            sessionSnapshotCloudStatusBySessionID = batch.cloudStatusBySessionID
+        }
+
+        var nextAllSessionIndex = allSessionIndexByProperty
+        var nextAllDrafts = allDraftSessionByProperty
+        var nextAllPending = allPendingExportSessionByProperty
+        var nextSessionIndex = sessionIndexByProperty
+        var nextDrafts = draftSessionByProperty
+        var nextPending = pendingExportSessionByProperty
+        var nextRowPending = propertyRowPendingDeliverySessionByPropertyID
+        var nextRowReExport = propertyRowReExportSessionByPropertyID
+        var nextRowCloud = propertyRowSnapshotCloudStatusByPropertyID
+
+        for snapshot in batch.snapshots {
+            nextAllSessionIndex[snapshot.propertyID] = snapshot.sessions
+            _ = setPropertyRowSession(snapshot.latestDraft, for: snapshot.propertyID, in: &nextAllDrafts)
+            _ = setPropertyRowSession(snapshot.pendingSession, for: snapshot.propertyID, in: &nextAllPending)
+            if canAccessProperty(snapshot.propertyID) {
+                nextSessionIndex[snapshot.propertyID] = snapshot.sessions
+                _ = setPropertyRowSession(snapshot.latestDraft, for: snapshot.propertyID, in: &nextDrafts)
+                _ = setPropertyRowSession(snapshot.pendingSession, for: snapshot.propertyID, in: &nextPending)
+                _ = setPropertyRowSession(snapshot.pendingSession, for: snapshot.propertyID, in: &nextRowPending)
+                _ = setPropertyRowSession(snapshot.reExportSession, for: snapshot.propertyID, in: &nextRowReExport)
+                if batch.updatesCloudStatus {
+                    _ = setPropertyRowSnapshotCloudStatus(snapshot.cloudStatus, for: snapshot.propertyID, in: &nextRowCloud)
+                }
             }
         }
 
-        while !pendingPropertyRowDetailHydrationIDs.isEmpty, !Task.isCancelled {
+        if allSessionIndexByProperty != nextAllSessionIndex {
+            allSessionIndexByProperty = nextAllSessionIndex
+        }
+        if allDraftSessionByProperty != nextAllDrafts {
+            allDraftSessionByProperty = nextAllDrafts
+        }
+        if allPendingExportSessionByProperty != nextAllPending {
+            allPendingExportSessionByProperty = nextAllPending
+        }
+        if sessionIndexByProperty != nextSessionIndex {
+            sessionIndexByProperty = nextSessionIndex
+        }
+        if draftSessionByProperty != nextDrafts {
+            draftSessionByProperty = nextDrafts
+        }
+        if pendingExportSessionByProperty != nextPending {
+            pendingExportSessionByProperty = nextPending
+        }
+        if propertyRowPendingDeliverySessionByPropertyID != nextRowPending {
+            propertyRowPendingDeliverySessionByPropertyID = nextRowPending
+        }
+        if propertyRowReExportSessionByPropertyID != nextRowReExport {
+            propertyRowReExportSessionByPropertyID = nextRowReExport
+        }
+        if propertyRowSnapshotCloudStatusByPropertyID != nextRowCloud {
+            propertyRowSnapshotCloudStatusByPropertyID = nextRowCloud
+        }
+    }
+
+    private func runPropertyRowDetailsHydration(reason: String) async {
+        var propertyIDs: [UUID] = []
+        while !pendingPropertyRowDetailHydrationIDs.isEmpty {
             guard let propertyID = nextPropertyRowDetailHydrationID() else { break }
-            let sessions = refreshSessionDerivedCaches(propertyID: propertyID)
-            _ = updatePropertyRowSecondaryDetails(propertyID: propertyID, sessions: sessions)
-            await Task.yield()
-            try? await Task.sleep(nanoseconds: 12_000_000)
+            propertyIDs.append(propertyID)
+        }
+        await hydratePropertyRowDetails(reason: reason, propertyIDs: propertyIDs, refreshCloudStatus: false)
+        propertyRowDetailHydrationTask = nil
+        if !pendingPropertyRowDetailHydrationIDs.isEmpty {
+            schedulePropertyRowDetailsHydration(reason: "\(reason)_coalesced")
         }
     }
 
@@ -41049,6 +41313,11 @@ final class AppState: ObservableObject {
         guard let fallback = pendingPropertyRowDetailHydrationIDs.first else { return nil }
         pendingPropertyRowDetailHydrationIDs.remove(fallback)
         return fallback
+    }
+
+    private static func uniquePropertyIDs(_ propertyIDs: [UUID]) -> [UUID] {
+        var seen: Set<UUID> = []
+        return propertyIDs.filter { seen.insert($0).inserted }
     }
 
     @discardableResult
@@ -41099,11 +41368,24 @@ final class AppState: ObservableObject {
         _ status: SessionSnapshotCloudStatus?,
         for propertyID: UUID
     ) -> Bool {
-        guard propertyRowSnapshotCloudStatusByPropertyID[propertyID] != status else { return false }
+        setPropertyRowSnapshotCloudStatus(
+            status,
+            for: propertyID,
+            in: &propertyRowSnapshotCloudStatusByPropertyID
+        )
+    }
+
+    @discardableResult
+    private func setPropertyRowSnapshotCloudStatus(
+        _ status: SessionSnapshotCloudStatus?,
+        for propertyID: UUID,
+        in cache: inout [UUID: SessionSnapshotCloudStatus]
+    ) -> Bool {
+        guard cache[propertyID] != status else { return false }
         if let status {
-            propertyRowSnapshotCloudStatusByPropertyID[propertyID] = status
+            cache[propertyID] = status
         } else {
-            propertyRowSnapshotCloudStatusByPropertyID.removeValue(forKey: propertyID)
+            cache.removeValue(forKey: propertyID)
         }
         return true
     }
@@ -50805,6 +51087,432 @@ final class AppState: ObservableObject {
     private func loadAndNormalizeSessions(propertyID: UUID) -> [Session] {
         let fetched = (try? localStore.fetchSessionsForCacheBuild(propertyID: propertyID)) ?? []
         return Self.uniqueSessionsByID(fetched).sorted { $0.startedAt < $1.startedAt }
+    }
+
+    private static func loadAndNormalizeSessions(propertyID: UUID, localStore: LocalStore) -> [Session] {
+        let fetched = (try? localStore.fetchSessionsForCacheBuild(propertyID: propertyID)) ?? []
+        return uniqueSessionsByID(fetched).sorted { $0.startedAt < $1.startedAt }
+    }
+
+    private static func latestVisibleDraft(
+        in sessions: [Session],
+        localStore: LocalStore,
+        cloudStatusBySessionID: [UUID: SessionSnapshotCloudStatus]
+    ) -> Session? {
+        sessions
+            .filter {
+                reusableDraftSession(
+                    $0,
+                    localStore: localStore,
+                    cloudStatusBySessionID: cloudStatusBySessionID
+                )
+            }
+            .sorted { $0.startedAt > $1.startedAt }
+            .first
+    }
+
+    private static func reusableDraftSession(
+        _ session: Session,
+        localStore: LocalStore,
+        cloudStatusBySessionID: [UUID: SessionSnapshotCloudStatus]
+    ) -> Bool {
+        session.deletedAt == nil &&
+            session.status == .draft &&
+            !session.isSealed &&
+            !isFinalSession(session) &&
+            !sessionHasFinalLocalStateEvidence(
+                session,
+                localStore: localStore,
+                cloudStatusBySessionID: cloudStatusBySessionID
+            ) &&
+            sessionHasCaptures(session, localStore: localStore)
+    }
+
+    private static func isFinalSession(_ session: Session?) -> Bool {
+        guard let session else { return false }
+        return session.status == .completed ||
+            session.endedAt != nil ||
+            session.exportedAt != nil ||
+            session.isSealed ||
+            session.firstDeliveredAt != nil
+    }
+
+    private static func sessionHasFinalLocalStateEvidence(
+        _ session: Session,
+        localStore: LocalStore,
+        cloudStatusBySessionID: [UUID: SessionSnapshotCloudStatus]
+    ) -> Bool {
+        if let metadata = try? localStore.loadSessionMetadata(propertyID: session.propertyID, sessionID: session.id),
+           metadata.status == .completed ||
+            metadata.endedAt != nil ||
+            metadata.exportedAt != nil ||
+            metadata.isSealed ||
+            metadata.firstDeliveredAt != nil {
+            return true
+        }
+        guard let status = cloudStatusBySessionID[session.id],
+              status.propertyID == session.propertyID,
+              status.state == .uploaded,
+              status.triggerSource == "completeCurrentSessionWithoutZIP" else {
+            return false
+        }
+        return true
+    }
+
+    private static func sessionHasCaptures(_ session: Session, localStore: LocalStore) -> Bool {
+        sessionMaterialContentCount(session, localStore: localStore) > 0
+    }
+
+    private static func sessionMaterialContentCount(_ session: Session, localStore: LocalStore) -> Int {
+        guard let metadata = try? localStore.loadSessionMetadata(propertyID: session.propertyID, sessionID: session.id) else {
+            return 0
+        }
+        return metadata.shots.filter { shot in
+            guard shot.lifecycleState.isActiveForDefaultWorkflows else { return false }
+            if shot.createdAt < session.startedAt { return false }
+            if let endedAt = session.endedAt, shot.createdAt > endedAt { return false }
+            let captureKind = normalizedRowDetailText(shot.captureKind)?.lowercased()
+            if captureKind == "reference" ||
+                captureKind == "reclassified" ||
+                captureKind == "restored" ||
+                captureKind == "historical" {
+                return false
+            }
+            let originalRelative = shot.originalRelativePath.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !originalRelative.isEmpty else { return false }
+            return localStore.resolveSessionRelativeFileURL(
+                propertyID: session.propertyID,
+                sessionID: session.id,
+                relativePath: originalRelative
+            ) != nil
+        }.count
+    }
+
+    private static func isPendingDelivery(
+        _ session: Session,
+        localStore: LocalStore,
+        cloudStatusBySessionID: [UUID: SessionSnapshotCloudStatus],
+        propertyStatusByPropertyID: [UUID: PropertyStatusRecord],
+        statusRecords: [LocalStore.SessionSnapshotUploadStatusRecord],
+        retryItems: [LocalStore.SessionSnapshotUploadRetryWorkItem],
+        archiveSummaries: [LocalStore.SessionArchiveSummary],
+        currentUserID: UUID?,
+        currentDeviceID: String
+    ) -> Bool {
+        guard session.status == .completed && session.isSealed && session.firstDeliveredAt == nil else {
+            return false
+        }
+        guard !noZIPCompletionSatisfiesManualDelivery(
+            for: session,
+            localStore: localStore,
+            cloudStatusBySessionID: cloudStatusBySessionID,
+            statusRecords: statusRecords,
+            retryItems: retryItems,
+            archiveSummaries: archiveSummaries
+        ) else {
+            return false
+        }
+        if let propertyStatus = propertyStatusByPropertyID[session.propertyID] {
+            var answer = makePropertyStatusCompareAnswer(
+                record: propertyStatus,
+                currentUserID: currentUserID,
+                currentDeviceID: currentDeviceID
+            )
+            if propertyStatus.status == .pendingExport,
+               answer.entryBlocked,
+               let pendingExportSessionID = propertyStatus.pendingExportSessionID {
+                let availability = sessionArchivePackageAvailability(
+                    propertyID: session.propertyID,
+                    sessionID: pendingExportSessionID,
+                    localStore: localStore,
+                    requireDelivered: false,
+                    expectedDeviceID: currentDeviceID
+                )
+                if availability.available {
+                    answer = PropertyStatusCompareAnswer(
+                        visibleBadgeState: answer.visibleBadgeState,
+                        draftCountIncluded: answer.draftCountIncluded,
+                        pendingExportCountIncluded: answer.pendingExportCountIncluded,
+                        entryBlocked: false,
+                        deleteEligible: answer.deleteEligible
+                    )
+                }
+            }
+            guard propertyStatus.status == .pendingExport,
+                  answer.visibleBadgeState == .pendingExport,
+                  !answer.entryBlocked else {
+                return false
+            }
+            if let pendingExportSessionID = propertyStatus.pendingExportSessionID {
+                return pendingExportSessionID == session.id
+            }
+        }
+        return true
+    }
+
+    private static func noZIPCompletionSatisfiesManualDelivery(
+        for session: Session,
+        localStore: LocalStore,
+        cloudStatusBySessionID: [UUID: SessionSnapshotCloudStatus],
+        statusRecords: [LocalStore.SessionSnapshotUploadStatusRecord],
+        retryItems: [LocalStore.SessionSnapshotUploadRetryWorkItem],
+        archiveSummaries: [LocalStore.SessionArchiveSummary]
+    ) -> Bool {
+        guard session.status == .completed,
+              session.isSealed,
+              session.exportedAt == nil else {
+            return false
+        }
+
+        if cloudStatusBySessionID[session.id]?.triggerSource == "completeCurrentSessionWithoutZIP" {
+            return true
+        }
+        if statusRecords.contains(where: {
+            $0.propertyID == session.propertyID &&
+                $0.sessionID == session.id &&
+                $0.triggerSource == "completeCurrentSessionWithoutZIP"
+        }) {
+            return true
+        }
+        if retryItems.contains(where: {
+            $0.propertyID == session.propertyID &&
+                $0.sessionID == session.id &&
+                $0.triggerSource == "completeCurrentSessionWithoutZIP"
+        }) {
+            return true
+        }
+        if archiveSummaries.contains(where: {
+            $0.propertyID == session.propertyID &&
+                $0.sessionID == session.id &&
+                $0.trigger == "completeCurrentSessionWithoutZIP"
+        }) {
+            return true
+        }
+        return false
+    }
+
+    private static func reExportCandidateSession(
+        in sessions: [Session],
+        localStore: LocalStore,
+        cloudStatusBySessionID: [UUID: SessionSnapshotCloudStatus],
+        statusRecords: [LocalStore.SessionSnapshotUploadStatusRecord],
+        retryItems: [LocalStore.SessionSnapshotUploadRetryWorkItem],
+        archiveSummaries: [LocalStore.SessionArchiveSummary],
+        currentDeviceID: String,
+        reExportWindowDays: Int,
+        now: Date
+    ) -> Session? {
+        let candidates = sessions.sorted { lhs, rhs in
+            let lhsDate = reExportSortDate(
+                for: lhs,
+                cloudStatusBySessionID: cloudStatusBySessionID,
+                statusRecords: statusRecords,
+                archiveSummaries: archiveSummaries
+            ) ?? .distantPast
+            let rhsDate = reExportSortDate(
+                for: rhs,
+                cloudStatusBySessionID: cloudStatusBySessionID,
+                statusRecords: statusRecords,
+                archiveSummaries: archiveSummaries
+            ) ?? .distantPast
+            if lhsDate == rhsDate {
+                return lhs.startedAt > rhs.startedAt
+            }
+            return lhsDate > rhsDate
+        }
+        return candidates.first {
+            isReExportLocallyAvailable(
+                $0,
+                localStore: localStore,
+                cloudStatusBySessionID: cloudStatusBySessionID,
+                statusRecords: statusRecords,
+                retryItems: retryItems,
+                archiveSummaries: archiveSummaries,
+                currentDeviceID: currentDeviceID,
+                reExportWindowDays: reExportWindowDays,
+                now: now
+            )
+        }
+    }
+
+    private static func isReExportLocallyAvailable(
+        _ session: Session,
+        localStore: LocalStore,
+        cloudStatusBySessionID: [UUID: SessionSnapshotCloudStatus],
+        statusRecords: [LocalStore.SessionSnapshotUploadStatusRecord],
+        retryItems: [LocalStore.SessionSnapshotUploadRetryWorkItem],
+        archiveSummaries: [LocalStore.SessionArchiveSummary],
+        currentDeviceID: String,
+        reExportWindowDays: Int,
+        now: Date
+    ) -> Bool {
+        let noZIPFallbackArchiveAllowed = session.firstDeliveredAt == nil && noZIPCompletionSatisfiesManualDelivery(
+            for: session,
+            localStore: localStore,
+            cloudStatusBySessionID: cloudStatusBySessionID,
+            statusRecords: statusRecords,
+            retryItems: retryItems,
+            archiveSummaries: archiveSummaries
+        )
+        guard isReExportEligible(
+            session,
+            cloudStatusBySessionID: cloudStatusBySessionID,
+            statusRecords: statusRecords,
+            archiveSummaries: archiveSummaries,
+            reExportWindowDays: reExportWindowDays,
+            now: now
+        ) else {
+            return false
+        }
+        return sessionArchivePackageAvailability(
+            session: session,
+            localStore: localStore,
+            requireDelivered: !noZIPFallbackArchiveAllowed,
+            expectedDeviceID: currentDeviceID
+        ).available
+    }
+
+    private static func isReExportEligible(
+        _ session: Session,
+        cloudStatusBySessionID: [UUID: SessionSnapshotCloudStatus],
+        statusRecords: [LocalStore.SessionSnapshotUploadStatusRecord],
+        archiveSummaries: [LocalStore.SessionArchiveSummary],
+        reExportWindowDays: Int,
+        now: Date
+    ) -> Bool {
+        guard reExportSortDate(
+            for: session,
+            cloudStatusBySessionID: cloudStatusBySessionID,
+            statusRecords: statusRecords,
+            archiveSummaries: archiveSummaries
+        ) != nil else {
+            return false
+        }
+        guard let expiresAt = session.reExportExpiresAt ?? noZIPCompletionReExportExpiresAt(
+            for: session,
+            cloudStatusBySessionID: cloudStatusBySessionID,
+            statusRecords: statusRecords,
+            archiveSummaries: archiveSummaries,
+            reExportWindowDays: reExportWindowDays
+        ) else {
+            return false
+        }
+        return now < expiresAt
+    }
+
+    private static func reExportSortDate(
+        for session: Session,
+        cloudStatusBySessionID: [UUID: SessionSnapshotCloudStatus],
+        statusRecords: [LocalStore.SessionSnapshotUploadStatusRecord],
+        archiveSummaries: [LocalStore.SessionArchiveSummary]
+    ) -> Date? {
+        if let firstDeliveredAt = session.firstDeliveredAt {
+            return firstDeliveredAt
+        }
+        return noZIPCompletionDeliveredAt(
+            for: session,
+            cloudStatusBySessionID: cloudStatusBySessionID,
+            statusRecords: statusRecords,
+            archiveSummaries: archiveSummaries
+        )
+    }
+
+    private static func noZIPCompletionDeliveredAt(
+        for session: Session,
+        cloudStatusBySessionID: [UUID: SessionSnapshotCloudStatus],
+        statusRecords: [LocalStore.SessionSnapshotUploadStatusRecord],
+        archiveSummaries: [LocalStore.SessionArchiveSummary]
+    ) -> Date? {
+        if let endedAt = session.endedAt {
+            return endedAt
+        }
+        if let status = cloudStatusBySessionID[session.id] {
+            return status.generatedAt
+        }
+        if let record = statusRecords
+            .filter({
+                $0.propertyID == session.propertyID &&
+                    $0.sessionID == session.id &&
+                    $0.triggerSource == "completeCurrentSessionWithoutZIP"
+            })
+            .sorted(by: { $0.generatedAt > $1.generatedAt })
+            .first {
+            return record.generatedAt
+        }
+        if let archive = archiveSummaries
+            .filter({
+                $0.propertyID == session.propertyID &&
+                    $0.sessionID == session.id &&
+                    $0.trigger == "completeCurrentSessionWithoutZIP"
+            })
+            .sorted(by: { $0.createdAt > $1.createdAt })
+            .first {
+            return archive.createdAt
+        }
+        return nil
+    }
+
+    private static func noZIPCompletionReExportExpiresAt(
+        for session: Session,
+        cloudStatusBySessionID: [UUID: SessionSnapshotCloudStatus],
+        statusRecords: [LocalStore.SessionSnapshotUploadStatusRecord],
+        archiveSummaries: [LocalStore.SessionArchiveSummary],
+        reExportWindowDays: Int
+    ) -> Date? {
+        guard let deliveredAt = noZIPCompletionDeliveredAt(
+            for: session,
+            cloudStatusBySessionID: cloudStatusBySessionID,
+            statusRecords: statusRecords,
+            archiveSummaries: archiveSummaries
+        ) else {
+            return nil
+        }
+        return Calendar.current.date(byAdding: .day, value: reExportWindowDays, to: deliveredAt)
+    }
+
+    private static func sessionArchivePackageAvailability(
+        session: Session,
+        localStore: LocalStore,
+        requireDelivered: Bool,
+        expectedDeviceID: String?
+    ) -> LocalStore.SessionArchivePackageAvailability {
+        sessionArchivePackageAvailability(
+            propertyID: session.propertyID,
+            sessionID: session.id,
+            localStore: localStore,
+            requireDelivered: requireDelivered,
+            expectedDeviceID: expectedDeviceID
+        )
+    }
+
+    private static func sessionArchivePackageAvailability(
+        propertyID: UUID,
+        sessionID: UUID,
+        localStore: LocalStore,
+        requireDelivered: Bool,
+        expectedDeviceID: String?
+    ) -> LocalStore.SessionArchivePackageAvailability {
+        (try? localStore.sessionArchivePackageAvailability(
+            propertyID: propertyID,
+            sessionID: sessionID,
+            requireDelivered: requireDelivered,
+            expectedDeviceID: expectedDeviceID
+        )) ?? LocalStore.SessionArchivePackageAvailability(
+            available: false,
+            pathExists: false,
+            checksumVerified: false,
+            archivePath: nil,
+            originatingDeviceID: nil,
+            reason: "archive_availability_check_failed"
+        )
+    }
+
+    private static func normalizedRowDetailText(_ value: String?) -> String? {
+        guard let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !trimmed.isEmpty else {
+            return nil
+        }
+        return trimmed
     }
 
     @discardableResult
