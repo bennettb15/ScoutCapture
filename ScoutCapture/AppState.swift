@@ -4427,6 +4427,7 @@ final class AppState: ObservableObject {
     typealias PropertyDeletePreflightRefreshOverride = (UUID, UUID) async throws -> PropertyDeletePreflightSnapshot
     typealias PropertySessionOccupancyPersistOverride = (UUID, UUID) async -> Bool
     typealias PropertyStatusFetchOverride = (UUID, [UUID]) async throws -> [PropertyStatusRecord]
+    typealias LightweightPropertyEntryStatusOverride = (UUID, UUID, String) async throws -> LightweightPropertyEntryStatus
     typealias SessionSoftDeleteRPCOverride = (UUID) async throws -> Void
     typealias SessionSoftDeleteRefreshOverride = () async -> Bool
     typealias SessionDeletePreflightRefreshOverride = (UUID, UUID, UUID) async throws -> SessionDeletePreflightSnapshot
@@ -4868,6 +4869,45 @@ final class AppState: ObservableObject {
         let skipCachedPropertyStatusPreflight: Bool
         let source: String
         let reason: String
+    }
+
+    enum LightweightPropertyEntryState: String, Decodable, Equatable {
+        case unlockedAndClaimed = "unlocked_and_claimed"
+        case lockedByCurrentUser = "locked_by_current_user"
+        case lockedByOtherUser = "locked_by_other_user"
+        case staleClaimable = "stale_claimable"
+        case pendingExport = "pending_export"
+        case unknownRequiresFallback = "unknown_requires_fallback"
+    }
+
+    struct LightweightPropertyEntryStatus: Decodable, Equatable {
+        let entryState: LightweightPropertyEntryState
+        let propertyID: UUID
+        let lockSessionID: UUID?
+        let lockedByUserID: UUID?
+        let lockedByEmail: String?
+        let lockedByDeviceID: String?
+        let lockedAt: Date?
+        let updatedAt: Date?
+        let serverTimestamp: Date?
+        let lockAgeSeconds: Int?
+        let requiresFallback: Bool
+        let reason: String?
+
+        enum CodingKeys: String, CodingKey {
+            case entryState = "entry_state"
+            case propertyID = "property_id"
+            case lockSessionID = "lock_session_id"
+            case lockedByUserID = "locked_by_user_id"
+            case lockedByEmail = "locked_by_email"
+            case lockedByDeviceID = "locked_by_device_id"
+            case lockedAt = "locked_at"
+            case updatedAt = "updated_at"
+            case serverTimestamp = "server_timestamp"
+            case lockAgeSeconds = "lock_age_seconds"
+            case requiresFallback = "requires_fallback"
+            case reason
+        }
     }
 
     struct PropertyStatusDerivedSummary: Equatable {
@@ -5740,6 +5780,18 @@ final class AppState: ObservableObject {
             case targetPropertyID = "target_property_id"
             case targetDeviceID = "target_device_id"
             case targetStatusReason = "target_status_reason"
+        }
+    }
+
+    private struct LightweightPropertyEntryStatusRPCPayload: Encodable {
+        let targetPropertyID: UUID
+        let targetDeviceID: String
+        let targetSessionID: UUID
+
+        enum CodingKeys: String, CodingKey {
+            case targetPropertyID = "target_property_id"
+            case targetDeviceID = "target_device_id"
+            case targetSessionID = "target_session_id"
         }
     }
 
@@ -7722,6 +7774,7 @@ final class AppState: ObservableObject {
     private var propertyDeletePreflightRefreshOverride: PropertyDeletePreflightRefreshOverride?
     private var propertySessionOccupancyPersistOverride: PropertySessionOccupancyPersistOverride?
     private var propertyStatusFetchOverride: PropertyStatusFetchOverride?
+    private var lightweightPropertyEntryStatusOverride: LightweightPropertyEntryStatusOverride?
     private var sessionSoftDeleteRPCOverride: SessionSoftDeleteRPCOverride?
     private var sessionSoftDeleteRefreshOverride: SessionSoftDeleteRefreshOverride?
     private var sessionDeletePreflightRefreshOverride: SessionDeletePreflightRefreshOverride?
@@ -8679,6 +8732,12 @@ final class AppState: ObservableObject {
         _ override: PropertyStatusFetchOverride?
     ) {
         propertyStatusFetchOverride = override
+    }
+
+    func _debugSetLightweightPropertyEntryStatusOverrideForTests(
+        _ override: LightweightPropertyEntryStatusOverride?
+    ) {
+        lightweightPropertyEntryStatusOverride = override
     }
 #endif
 
@@ -41543,6 +41602,105 @@ final class AppState: ObservableObject {
         return decision
     }
 
+    func preferredPropertyEntrySessionID(for propertyID: UUID) -> UUID {
+        if let currentSession,
+           currentSession.propertyID == propertyID,
+           currentSession.status == .draft,
+           !isFinalSession(currentSession) {
+            return currentSession.id
+        }
+        if let draft = canonicalDraftSession(for: propertyID, requireCaptures: true) {
+            return draft.id
+        }
+        return UUID()
+    }
+
+    func evaluateLightweightPropertyEntryStatus(
+        propertyID: UUID,
+        targetSessionID: UUID
+    ) async -> LightweightPropertyEntryStatus? {
+        let deviceID = currentDeviceIdentifier()
+        guard backendFeatureFlags.sessionCoordinationEnabled,
+              backendFeatureFlags.supabaseEnabled,
+              backendFeatureFlags.shadowWriteEnabled else {
+            return nil
+        }
+
+#if DEBUG
+        if let lightweightPropertyEntryStatusOverride {
+            do {
+                return try await lightweightPropertyEntryStatusOverride(propertyID, targetSessionID, deviceID)
+            } catch {
+                return nil
+            }
+        }
+#endif
+
+        guard let client = supabaseClient,
+              authenticatedSupabaseUser != nil else {
+            return nil
+        }
+
+        do {
+            let payload = LightweightPropertyEntryStatusRPCPayload(
+                targetPropertyID: propertyID,
+                targetDeviceID: deviceID,
+                targetSessionID: targetSessionID
+            )
+            let rows = try await (try client.rpc("get_or_claim_property_entry_status", params: payload))
+                .execute()
+                .value as [LightweightPropertyEntryStatus]
+            guard let status = rows.first,
+                  status.propertyID == propertyID else {
+                return nil
+            }
+            return status
+        } catch {
+            return nil
+        }
+    }
+
+    func sessionEntryBlock(for status: LightweightPropertyEntryStatus) -> SessionEntryCoordinationBlock? {
+        let ownerDescription: String = {
+            if let email = normalizedSupabaseText(status.lockedByEmail) {
+                return email
+            }
+            if let lockedByUserID = status.lockedByUserID {
+                return localOwnerDisplayName(for: lockedByUserID) ??
+                    localOwnerEmail(for: lockedByUserID) ??
+                    fallbackOwnerDisplayName(for: lockedByUserID)
+            }
+            if let device = friendlyDeviceDescription(for: status.lockedByDeviceID) {
+                return "another signed-in user on \(device)"
+            }
+            return "another signed-in user"
+        }()
+
+        switch status.entryState {
+        case .lockedByOtherUser:
+            let context = (status.reason ?? "").contains("draft") ? "draft" : "occupied"
+            return SessionEntryCoordinationBlock(
+                ownerDescription: ownerDescription,
+                lockedAt: status.lockedAt,
+                blockContext: context
+            )
+        case .staleClaimable:
+            return SessionEntryCoordinationBlock(
+                ownerDescription: ownerDescription,
+                lockedAt: status.lockedAt,
+                blockContext: "occupied"
+            )
+        case .pendingExport:
+            return SessionEntryCoordinationBlock(
+                ownerDescription: ownerDescription,
+                lockedAt: status.lockedAt ?? status.updatedAt,
+                blockContext: "pending_export"
+            )
+        case .unlockedAndClaimed, .lockedByCurrentUser, .unknownRequiresFallback:
+            return nil
+        }
+    }
+
     @MainActor
     func evaluateFreshPropertyStatusEntryPreflight(
         propertyID: UUID,
@@ -48192,7 +48350,8 @@ final class AppState: ObservableObject {
     @discardableResult
     func startSession(
         sessionType: SessionType = .fullDocumentation,
-        skipPropertyStatusPreflight: Bool = false
+        skipPropertyStatusPreflight: Bool = false,
+        preferredNewSessionID: UUID? = nil
     ) -> Session? {
         guard let selectedPropertyID else { return nil }
         if !skipPropertyStatusPreflight {
@@ -48247,7 +48406,8 @@ final class AppState: ObservableObject {
                 cloudBackupManager?.setCaptureModeActive(false)
                 return startSession(
                     sessionType: sessionType,
-                    skipPropertyStatusPreflight: true
+                    skipPropertyStatusPreflight: true,
+                    preferredNewSessionID: preferredNewSessionID
                 )
             }
 
@@ -48268,7 +48428,8 @@ final class AppState: ObservableObject {
                 cloudBackupManager?.setCaptureModeActive(false)
                 return startSession(
                     sessionType: sessionType,
-                    skipPropertyStatusPreflight: true
+                    skipPropertyStatusPreflight: true,
+                    preferredNewSessionID: preferredNewSessionID
                 )
             }
             let persistedCurrent = persistReusableDraftSessionIfNeeded(currentSession)
@@ -48307,6 +48468,7 @@ final class AppState: ObservableObject {
         let inheritedCaptureProfile = properties.first(where: { $0.id == selectedPropertyID })?.captureProfile ??
             allProperties.first(where: { $0.id == selectedPropertyID })?.captureProfile
         let session = Session(
+            id: preferredNewSessionID ?? UUID(),
             propertyID: selectedPropertyID,
             sessionType: sessionType,
             startedAt: Date(),

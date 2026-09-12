@@ -12746,36 +12746,7 @@ struct PropertySessionView: View {
                 didSetup = true
                 appState.selectProperty(id: propertyID)
                 Task { @MainActor in
-                    let propertyStatusPreflight = await appState.evaluateFreshPropertyStatusEntryPreflight(
-                        propertyID: propertyID,
-                        context: "property_session_view"
-                    )
-                    if let block = propertyStatusPreflight.decision?.block {
-                        isCheckingSessionBeforeOpen = false
-                        sessionEntryBlock = block
-                        return
-                    }
-                    let skipCachedPropertyStatusPreflight = propertyStatusPreflight.skipCachedPropertyStatusPreflight
-                    if resumeDraft {
-                        if appState.currentSession?.propertyID != propertyID || appState.currentSession?.status != .draft {
-                            _ = appState.loadDraftSession(
-                                for: propertyID,
-                                skipPropertyStatusPreflight: skipCachedPropertyStatusPreflight
-                            )
-                        }
-                    } else {
-                        _ = appState.startSession(
-                            skipPropertyStatusPreflight: skipCachedPropertyStatusPreflight
-                        )
-                    }
-                    refreshSessionReadiness()
-                    isCheckingSessionBeforeOpen = false
-                    if appState.canFastPresentCurrentMaterialDraftResume(propertyID: propertyID) {
-                        beginOpenFlow(forceRetry: true)
-                        beginSessionCoordinationFlow(openAfterAllowed: false)
-                    } else {
-                        beginSessionCoordinationFlow()
-                    }
+                    await runPropertyEntryFlow()
                 }
             }
             .onChange(of: appState.currentSession?.id) { _, _ in
@@ -12796,6 +12767,126 @@ struct PropertySessionView: View {
                     propertyID: request.propertyID
                 )
                 exitCaptureScreen()
+        }
+    }
+
+    @MainActor
+    private func runPropertyEntryFlow() async {
+        let targetSessionID = appState.preferredPropertyEntrySessionID(for: propertyID)
+        let lightweightStatus = await appState.evaluateLightweightPropertyEntryStatus(
+            propertyID: propertyID,
+            targetSessionID: targetSessionID
+        )
+
+        guard let lightweightStatus,
+              !lightweightStatus.requiresFallback,
+              lightweightStatus.entryState != .unknownRequiresFallback else {
+            await runLegacyCheckingSession(reason: "lightweight_rpc_fallback")
+            return
+        }
+
+        switch lightweightStatus.entryState {
+        case .unlockedAndClaimed:
+            let session = appState.startSession(
+                skipPropertyStatusPreflight: true,
+                preferredNewSessionID: targetSessionID
+            )
+            guard session?.id == targetSessionID else {
+                await runLegacyCheckingSession(reason: "lightweight_session_mismatch")
+                return
+            }
+            finishAllowedFastEntry()
+
+        case .lockedByCurrentUser:
+            let desiredSessionID = lightweightStatus.lockSessionID ?? targetSessionID
+            let loadedSession: Session?
+            if appState.currentSession?.propertyID == propertyID,
+               appState.currentSession?.id == desiredSessionID,
+               appState.currentSession?.status == .draft {
+                loadedSession = appState.currentSession
+            } else {
+                loadedSession = appState.loadDraftSession(
+                    for: propertyID,
+                    skipPropertyStatusPreflight: true
+                )
+            }
+            guard loadedSession?.id == desiredSessionID else {
+                await runLegacyCheckingSession(reason: "lightweight_current_user_lock_missing_local_draft")
+                return
+            }
+            finishAllowedFastEntry()
+
+        case .lockedByOtherUser, .pendingExport:
+            guard let block = appState.sessionEntryBlock(for: lightweightStatus) else {
+                await runLegacyCheckingSession(reason: "lightweight_block_mapping_missing")
+                return
+            }
+            isCheckingSessionBeforeOpen = false
+            sessionEntryBlock = block
+
+        case .staleClaimable:
+            _ = appState.startSession(
+                skipPropertyStatusPreflight: true,
+                preferredNewSessionID: targetSessionID
+            )
+            refreshSessionReadiness()
+            guard appState.currentSession?.id == targetSessionID,
+                  let block = appState.sessionEntryBlock(for: lightweightStatus) else {
+                await runLegacyCheckingSession(reason: "lightweight_stale_claimable_session_missing")
+                return
+            }
+            isCheckingSessionBeforeOpen = false
+            sessionEntryBlock = block
+
+        case .unknownRequiresFallback:
+            await runLegacyCheckingSession(reason: "lightweight_unknown_requires_fallback")
+        }
+    }
+
+    @MainActor
+    private func runLegacyCheckingSession(reason _: String) async {
+        let propertyStatusPreflight = await appState.evaluateFreshPropertyStatusEntryPreflight(
+            propertyID: propertyID,
+            context: "property_session_view"
+        )
+        if let block = propertyStatusPreflight.decision?.block {
+            isCheckingSessionBeforeOpen = false
+            sessionEntryBlock = block
+            return
+        }
+        let skipCachedPropertyStatusPreflight = propertyStatusPreflight.skipCachedPropertyStatusPreflight
+        if resumeDraft {
+            if appState.currentSession?.propertyID != propertyID || appState.currentSession?.status != .draft {
+                _ = appState.loadDraftSession(
+                    for: propertyID,
+                    skipPropertyStatusPreflight: skipCachedPropertyStatusPreflight
+                )
+            }
+        } else {
+            _ = appState.startSession(
+                skipPropertyStatusPreflight: skipCachedPropertyStatusPreflight
+            )
+        }
+        refreshSessionReadiness()
+        isCheckingSessionBeforeOpen = false
+        if appState.canFastPresentCurrentMaterialDraftResume(propertyID: propertyID) {
+            beginOpenFlow(forceRetry: true)
+            beginSessionCoordinationFlow(openAfterAllowed: false)
+        } else {
+            beginSessionCoordinationFlow()
+        }
+    }
+
+    @MainActor
+    private func finishAllowedFastEntry() {
+        refreshSessionReadiness()
+        isCheckingSessionBeforeOpen = false
+        if appState.canFastPresentCurrentMaterialDraftResume(propertyID: propertyID) {
+            beginOpenFlow(forceRetry: true)
+            beginSessionCoordinationFlow(openAfterAllowed: false)
+        } else {
+            continueAfterSessionCoordinationAllowed()
+            beginSessionCoordinationFlow(openAfterAllowed: false)
         }
     }
 
@@ -13075,6 +13166,7 @@ struct PropertySessionView: View {
                         continueAfterSessionCoordinationAllowed()
                     }
                 case .blocked(let block):
+                    isAwaitingInitialSessionTypeSelection = false
                     openFlowToken += 1
                     didStartOpenFlow = false
                     camera.stopPreviewAsync()

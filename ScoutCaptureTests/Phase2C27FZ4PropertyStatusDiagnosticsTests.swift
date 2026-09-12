@@ -2094,6 +2094,55 @@ final class Phase2C27FZ4PropertyStatusDiagnosticsTests: XCTestCase {
         )
     }
 
+    func testStartSessionUsesPreferredLightweightEntrySessionIDForNewShell() throws {
+        let fixture = try makeCutoverFixture()
+        fixture.appState.selectProperty(id: fixture.property.id)
+
+        let preferredID = UUID()
+        let session = try XCTUnwrap(
+            fixture.appState.startSession(
+                skipPropertyStatusPreflight: true,
+                preferredNewSessionID: preferredID
+            )
+        )
+
+        XCTAssertEqual(session.id, preferredID)
+        XCTAssertEqual(fixture.appState.currentSession?.id, preferredID)
+    }
+
+    func testLightweightEntryStatusOverrideReturnsClaimResult() async throws {
+        let fixture = try makeCutoverFixture()
+        let targetSessionID = UUID()
+        fixture.appState._debugSetLightweightPropertyEntryStatusOverrideForTests { propertyID, sessionID, deviceID in
+            XCTAssertEqual(propertyID, fixture.property.id)
+            XCTAssertEqual(sessionID, targetSessionID)
+            XCTAssertFalse(deviceID.isEmpty)
+            return AppState.LightweightPropertyEntryStatus(
+                entryState: .unlockedAndClaimed,
+                propertyID: propertyID,
+                lockSessionID: sessionID,
+                lockedByUserID: fixture.userID,
+                lockedByEmail: "entry-a@example.com",
+                lockedByDeviceID: deviceID,
+                lockedAt: Date(),
+                updatedAt: Date(),
+                serverTimestamp: Date(),
+                lockAgeSeconds: 0,
+                requiresFallback: false,
+                reason: "claimed_from_idle"
+            )
+        }
+
+        let status = await fixture.appState.evaluateLightweightPropertyEntryStatus(
+            propertyID: fixture.property.id,
+            targetSessionID: targetSessionID
+        )
+
+        XCTAssertEqual(status?.entryState, .unlockedAndClaimed)
+        XCTAssertEqual(status?.lockSessionID, targetSessionID)
+        XCTAssertFalse(status?.requiresFallback ?? true)
+    }
+
     private struct CutoverFixture {
         let localStore: LocalStore
         let appState: AppState
