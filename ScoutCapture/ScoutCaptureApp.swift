@@ -1027,6 +1027,7 @@ struct SessionHubView: View {
             .onAppear {
                 isOpeningProperty = false
                 pressedPropertyID = nil
+                appState.markHomePropertyListVisible()
                 if appState.properties.isEmpty {
                     beginStartupPlaceholderHoldWindow()
                 } else {
@@ -1280,7 +1281,6 @@ struct SessionHubView: View {
 
     @ViewBuilder
     private func propertyRow(_ property: Property) -> some View {
-        let isPressed = pressedPropertyID == property.id
         let badgeModel = appState.propertyCardBadgeModel(for: property.id)
         let pendingSession = appState.propertyRowPendingDeliverySession(for: property.id)
         let sessionUploadStatus = appState.propertyRowSessionSnapshotCloudStatus(propertyID: property.id)
@@ -1297,90 +1297,78 @@ struct SessionHubView: View {
         let hasPhoneActions = hasValidPhoneNumber(property)
         let hasStatusRow = hasDraft || hasPendingExport || hasReExportGlyph || uploadStatusChip != nil
         let showLock = badgeModel.showLock
-        HStack(alignment: .top, spacing: 10) {
-            VStack(alignment: .leading, spacing: 4) {
-                HStack(alignment: .firstTextBaseline, spacing: 6) {
-                    if hasReExportGlyph {
-                        Image(systemName: "arrow.clockwise.circle")
-                            .font(.system(size: 18, weight: .semibold))
-                            .foregroundColor(Color.green.opacity(0.92))
-                    }
-                    if showLock {
-                        Image(systemName: "lock.fill")
-                            .font(.system(size: 14, weight: .semibold))
-                            .foregroundColor(.red)
-                    }
-                    Text(property.name)
-                        .font(.system(size: 18, weight: .semibold))
-                        .foregroundColor(.primary)
-                        .lineLimit(1)
-                    if let sessionUploadStatus {
-                        sessionSnapshotCloudIcon(sessionUploadStatus)
-                    }
-                }
-
-                if let clientLine {
-                    Text(clientLine)
-                        .font(.system(size: 13, weight: .medium))
-                        .foregroundColor(.secondary)
-                        .lineLimit(1)
-                        .truncationMode(.tail)
-                }
-
-                if let addressLine {
-                    Text(addressLine)
-                        .font(.system(size: 13, weight: .medium))
-                        .foregroundColor(.secondary)
-                        .lineLimit(1)
-                        .truncationMode(.tail)
-                }
-            }
-
-            Spacer(minLength: 8)
-
-            VStack(alignment: .trailing, spacing: 6) {
-                if hasStatusRow {
-                    VStack(alignment: .trailing, spacing: 4) {
-                        HStack(spacing: 8) {
-                            if hasDraft {
-                                chipLabel("Draft", tint: .orange)
-                            }
-
-                            if hasPendingExport {
-                                chipLabel("Pending Export", tint: .blue)
-                            }
-
-                            if let uploadStatusChip {
-                                chipLabel(uploadStatusChip.title, tint: uploadStatusChip.tint)
-                            }
+        Button {
+            handlePropertyTap(property)
+        } label: {
+            HStack(alignment: .top, spacing: 10) {
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack(alignment: .firstTextBaseline, spacing: 6) {
+                        if hasReExportGlyph {
+                            Image(systemName: "arrow.clockwise.circle")
+                                .font(.system(size: 18, weight: .semibold))
+                                .foregroundColor(Color.green.opacity(0.92))
                         }
+                        if showLock {
+                            Image(systemName: "lock.fill")
+                                .font(.system(size: 14, weight: .semibold))
+                                .foregroundColor(.red)
+                        }
+                        Text(property.name)
+                            .font(.system(size: 18, weight: .semibold))
+                            .foregroundColor(.primary)
+                            .lineLimit(1)
+                        if let sessionUploadStatus {
+                            sessionSnapshotCloudIcon(sessionUploadStatus)
+                        }
+                    }
 
+                    if let clientLine {
+                        Text(clientLine)
+                            .font(.system(size: 13, weight: .medium))
+                            .foregroundColor(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                    }
+
+                    if let addressLine {
+                        Text(addressLine)
+                            .font(.system(size: 13, weight: .medium))
+                            .foregroundColor(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
                     }
                 }
 
+                Spacer(minLength: 8)
+
+                VStack(alignment: .trailing, spacing: 6) {
+                    if hasStatusRow {
+                        VStack(alignment: .trailing, spacing: 4) {
+                            HStack(spacing: 8) {
+                                if hasDraft {
+                                    chipLabel("Draft", tint: .orange)
+                                }
+
+                                if hasPendingExport {
+                                    chipLabel("Pending Export", tint: .blue)
+                                }
+
+                                if let uploadStatusChip {
+                                    chipLabel(uploadStatusChip.title, tint: uploadStatusChip.tint)
+                                }
+                            }
+
+                        }
+                    }
+
+                }
+                .frame(minHeight: (addressLine != nil ? (clientLine != nil ? 58 : 40) : 24), alignment: .top)
             }
-            .frame(minHeight: (addressLine != nil ? (clientLine != nil ? 58 : 40) : 24), alignment: .top)
+            .padding(.vertical, 8)
+            .padding(.horizontal, 10)
+            .contentShape(Rectangle())
         }
-        .padding(.vertical, 8)
-        .padding(.horizontal, 10)
-        .background(
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .fill(isPressed ? Color.blue.opacity(colorScheme == .light ? 0.22 : 0.30) : Color.clear)
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .stroke(isPressed ? Color.blue.opacity(colorScheme == .light ? 0.55 : 0.70) : .clear, lineWidth: 1)
-        )
-        .contentShape(Rectangle())
-        .simultaneousGesture(
-            DragGesture(minimumDistance: 0)
-                .onChanged { value in
-                    handlePropertyPressChanged(propertyID: property.id, translation: value.translation)
-                }
-                .onEnded { value in
-                    handlePropertyPressEnded(property, translation: value.translation)
-                }
-        )
+        .buttonStyle(.plain)
         .onAppear {
             appState.schedulePropertyRowDetailsHydration(
                 reason: "property_row_appeared",

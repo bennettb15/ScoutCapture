@@ -40583,11 +40583,7 @@ final class AppState: ObservableObject {
     }
 
     private func prepareInitialPropertyListForDisplay(reason: String) async {
-        let propertyIDs = Self.uniquePropertyIDs(
-            properties
-                .filter { $0.deletedAt == nil }
-                .map(\.id)
-        )
+        let propertyIDs = await waitForInitialVisiblePropertyIDs(reason: reason)
         guard !propertyIDs.isEmpty else {
             return
         }
@@ -40597,6 +40593,13 @@ final class AppState: ObservableObject {
             refreshCloudStatus: true
         )
         await waitForInitialPropertyRowDetailsToSettle(propertyIDs: propertyIDs, reason: reason)
+        suppressPropertyRowAppearHydrationUntil = Date().addingTimeInterval(8.0)
+        pendingPropertyRowDetailHydrationIDs.subtract(propertyIDs)
+        if pendingPropertyRowDetailHydrationIDs.isEmpty {
+            pendingPropertyRowDetailHydrationRefreshesCloudStatus = false
+            propertyRowDetailHydrationTask?.cancel()
+            propertyRowDetailHydrationTask = nil
+        }
         await Task.yield()
     }
 
@@ -40604,10 +40607,44 @@ final class AppState: ObservableObject {
         await prepareInitialPropertyListForDisplay(reason: reason)
     }
 
+    func markHomePropertyListVisible() {
+        suppressPropertyRowAppearHydrationUntil = Date().addingTimeInterval(8.0)
+        let hydratedIDs = Set(propertyRowDetailsHydratedAtByPropertyID.keys)
+        guard !pendingPropertyRowDetailHydrationIDs.isEmpty else { return }
+        pendingPropertyRowDetailHydrationIDs.subtract(hydratedIDs)
+        if pendingPropertyRowDetailHydrationIDs.isEmpty {
+            pendingPropertyRowDetailHydrationRefreshesCloudStatus = false
+            propertyRowDetailHydrationTask?.cancel()
+            propertyRowDetailHydrationTask = nil
+        }
+    }
+
+    private func waitForInitialVisiblePropertyIDs(
+        reason: String,
+        timeout: TimeInterval = 10.0
+    ) async -> [UUID] {
+        let start = Date()
+        while true {
+            let propertyIDs = Self.uniquePropertyIDs(
+                properties
+                    .filter { $0.deletedAt == nil }
+                    .map(\.id)
+            )
+            if !propertyIDs.isEmpty {
+                return propertyIDs
+            }
+            if Date().timeIntervalSince(start) >= timeout {
+                return []
+            }
+            await Task.yield()
+            try? await Task.sleep(nanoseconds: 60_000_000)
+        }
+    }
+
     private func waitForInitialPropertyRowDetailsToSettle(
         propertyIDs: [UUID],
         reason: String,
-        renderSettleDelayNanoseconds: UInt64 = 250_000_000
+        renderSettleDelayNanoseconds: UInt64 = 500_000_000
     ) async {
         let expectedIDs = Set(propertyIDs)
         let start = Date()
@@ -41179,7 +41216,7 @@ final class AppState: ObservableObject {
         guard let lastHydratedAt = propertyRowDetailsHydratedAtByPropertyID[propertyID] else {
             return true
         }
-        return now.timeIntervalSince(lastHydratedAt) > 90
+        return now.timeIntervalSince(lastHydratedAt) > 300
     }
 
     private func hydratePropertyRowDetails(
@@ -49809,22 +49846,26 @@ final class AppState: ObservableObject {
 
     func handleSceneDidBecomeActive() {
         deferredSceneActiveWorkItem?.cancel()
-        suppressPropertyRowAppearHydrationUntil = Date().addingTimeInterval(2.5)
-        scheduleForegroundBackupStatusRefresh()
         guard currentSession?.status != .draft else {
+            suppressPropertyRowAppearHydrationUntil = Date().addingTimeInterval(8.0)
+            scheduleForegroundBackupStatusRefresh()
             performSceneDidBecomeActiveWork()
             return
         }
+        suppressPropertyRowAppearHydrationUntil = Date().addingTimeInterval(12.0)
+        lastLiveSyncRefreshAt = Date()
+        lastLiveSyncFingerprint = localStore.propertiesLedgerFingerprint()
+        scheduleForegroundBackupStatusRefresh(delay: 10.0)
         let item = DispatchWorkItem { [weak self] in
             guard let self else { return }
             self.deferredSceneActiveWorkItem = nil
             self.performSceneDidBecomeActiveWork()
         }
         deferredSceneActiveWorkItem = item
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.9, execute: item)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 10.0, execute: item)
     }
 
-    private func scheduleForegroundBackupStatusRefresh() {
+    private func scheduleForegroundBackupStatusRefresh(delay: TimeInterval = 2.0) {
         deferredForegroundBackupStatusWorkItem?.cancel()
         let item = DispatchWorkItem { [weak self] in
             guard let self else { return }
@@ -49832,7 +49873,7 @@ final class AppState: ObservableObject {
             self.refreshBackupStatus()
         }
         deferredForegroundBackupStatusWorkItem = item
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0, execute: item)
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: item)
     }
 
     private func performSceneDidBecomeActiveWork() {
