@@ -13212,6 +13212,11 @@ struct PropertySessionView: View {
         camera.prepareForPreviewAsync()
         camera.ensurePreviewRunningAsync()
 
+        refreshSessionReadiness()
+        if hasSessionReadyForProperty {
+            completeOpenFlow()
+        }
+
         // Do not hard-gate view transition on preview startup; preview can finish after ContentView appears.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
             guard token == openFlowToken else { return }
