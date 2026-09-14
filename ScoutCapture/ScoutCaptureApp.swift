@@ -702,6 +702,7 @@ struct SessionHubView: View {
     @State private var manageSessionsProperty: Property? = nil
     @State private var pendingExportPromptSession: Session? = nil
     @State private var pendingExportPromptProperty: Property? = nil
+    @State private var initialSessionTypePickerProperty: Property? = nil
     @State private var isPreparingPendingExport: Bool = false
     @State private var pendingExportFile: PendingExportFile? = nil
     @State private var pendingExportChecklist = ExportChecklistState()
@@ -1112,6 +1113,11 @@ struct SessionHubView: View {
             .overlay {
                 if pendingExportPromptSession != nil, pendingExportPromptProperty != nil {
                     pendingExportPromptOverlay
+                }
+            }
+            .overlay {
+                if let property = initialSessionTypePickerProperty {
+                    initialSessionTypePickerOverlay(for: property)
                 }
             }
             .overlay {
@@ -3354,6 +3360,97 @@ struct SessionHubView: View {
         .animation(.easeInOut(duration: 0.18), value: isSearchExpanded)
     }
 
+    @ViewBuilder
+    private func initialSessionTypePickerOverlay(for property: Property) -> some View {
+        ZStack {
+            Color.black.opacity(colorScheme == .light ? 0.52 : 0.68)
+                .ignoresSafeArea()
+
+            VStack(spacing: 16) {
+                Text("Session Type")
+                    .font(.system(size: 24, weight: .bold))
+                    .foregroundColor(headerPrimaryLabel)
+
+                VStack(spacing: 10) {
+                    inactiveInitialSessionChoiceButton(
+                        title: "Full Documentation",
+                        subtitle: "Guided photos + flags + resolution required",
+                        systemImage: "camera.metering.matrix"
+                    )
+                    inactiveInitialSessionChoiceButton(
+                        title: "Punchlist Visit",
+                        subtitle: "Active/RR items only, no guided requirements",
+                        systemImage: "checklist"
+                    )
+                }
+
+                Button {
+                    dismissInitialSessionTypePicker(for: property)
+                } label: {
+                    Text("Back")
+                        .font(.system(size: 16, weight: .semibold))
+                        .foregroundColor(.blue)
+                        .padding(.horizontal, 18)
+                        .frame(height: 38)
+                }
+                .buttonStyle(.plain)
+            }
+            .padding(.horizontal, 18)
+            .padding(.vertical, 20)
+            .frame(maxWidth: 430)
+            .background(colorScheme == .light ? Color(.systemBackground) : Color(.secondarySystemBackground))
+            .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .stroke(colorScheme == .light ? Color.black.opacity(0.12) : Color.white.opacity(0.18), lineWidth: 1)
+            )
+            .shadow(color: Color.black.opacity(0.22), radius: 18, x: 0, y: 10)
+            .padding(.horizontal, 20)
+        }
+        .allowsHitTesting(true)
+    }
+
+    private func inactiveInitialSessionChoiceButton(
+        title: String,
+        subtitle: String,
+        systemImage: String
+    ) -> some View {
+        Button(action: {}) {
+            HStack(spacing: 12) {
+                Image(systemName: systemImage)
+                    .font(.system(size: 22, weight: .semibold))
+                    .frame(width: 32)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(title)
+                        .font(.system(size: 17, weight: .semibold))
+                    Text(subtitle)
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundColor(.secondary)
+                        .lineLimit(2)
+                    Text("Not enabled in this build")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundColor(.secondary.opacity(0.82))
+                }
+                Spacer(minLength: 0)
+                Image(systemName: "lock.fill")
+                    .font(.system(size: 13, weight: .bold))
+                    .foregroundColor(.secondary.opacity(0.70))
+            }
+            .foregroundColor(.secondary)
+            .padding(.horizontal, 14)
+            .frame(minHeight: 82)
+            .background(Color(.tertiarySystemFill))
+            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .stroke(Color.secondary.opacity(0.18), lineWidth: 1)
+            )
+            .opacity(0.78)
+        }
+        .buttonStyle(.plain)
+        .disabled(true)
+    }
+
     private func matchesSearch(_ property: Property) -> Bool {
         let query = normalizedSearchQuery
         guard !query.isEmpty else { return true }
@@ -3480,6 +3577,15 @@ struct SessionHubView: View {
             }
             return
         }
+        if !appState.propertyCardBadgeModel(for: property.id).showDraft {
+            isOpeningProperty = false
+            initialSessionTypePickerProperty = property
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.20) {
+                guard tapToken == propertyTapToken else { return }
+                if pressedPropertyID == property.id { pressedPropertyID = nil }
+            }
+            return
+        }
         openProperty(property)
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) {
             guard tapToken == propertyTapToken else { return }
@@ -3508,6 +3614,16 @@ struct SessionHubView: View {
     private func dismissPendingExportPrompt() {
         pendingExportPromptProperty = nil
         pendingExportPromptSession = nil
+    }
+
+    private func dismissInitialSessionTypePicker(for property: Property) {
+        guard initialSessionTypePickerProperty?.id == property.id else { return }
+        initialSessionTypePickerProperty = nil
+        isOpeningProperty = false
+        if pressedPropertyID == property.id {
+            pressedPropertyID = nil
+        }
+        selectionHaptic.prepare()
     }
 
     private func beginPendingExport(for property: Property, session: Session) {
