@@ -3675,6 +3675,8 @@ struct ContentView: View {
     @State private var coreElevationChecklistRowsSnapshot: [CoreElevationChecklistRowState] =
         CoreElevationChecklistCategory.allCases.map { CoreElevationChecklistRowState(category: $0, count: 0) }
     @State private var activeIssuesOpenRefreshWorkItem: DispatchWorkItem? = nil
+    @State private var firstCameraFrameHydrationWorkItem: DispatchWorkItem? = nil
+    @State private var didRunFirstCameraFrameHydration: Bool = false
     @State private var postCameraHydrationWorkItem: DispatchWorkItem? = nil
     @State private var guidedReferenceKeys: Set<String> = []
     @State private var flaggedReferenceIDs: Set<UUID> = []
@@ -6507,6 +6509,30 @@ struct ContentView: View {
         coreElevationChecklistRowsSnapshot = coreElevationChecklistRows
     }
 
+    private func scheduleFirstCameraFrameHydrationIfReady(delay: TimeInterval = 0.45) {
+        guard camera.isPreviewRunning else { return }
+        guard !didRunFirstCameraFrameHydration else { return }
+        firstCameraFrameHydrationWorkItem?.cancel()
+
+        let expectedPropertyID = appState.selectedPropertyID
+        let expectedSessionID = appState.currentSession?.id
+        let item = DispatchWorkItem {
+            guard appState.selectedPropertyID == expectedPropertyID,
+                  appState.currentSession?.id == expectedSessionID else {
+                return
+            }
+            didRunFirstCameraFrameHydration = true
+            loadBuildingOptions()
+            loadTradeOptions()
+            refreshActiveIssues()
+            refreshGuidedShots()
+            refreshCoreElevationChecklistSnapshot()
+            refreshHudAngleIndex()
+        }
+        firstCameraFrameHydrationWorkItem = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: item)
+    }
+
     private func deferCameraOverlayWork(_ action: @escaping () -> Void) {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
             action()
@@ -6881,13 +6907,12 @@ struct ContentView: View {
                 refreshCaptureProfileSessionState()
                 resetDetailSelectionForNewEmptySessionIfNeeded()
                 primeDeferredReferenceResolution()
-                loadBuildingOptions()
-                loadTradeOptions()
-                refreshActiveIssues()
-                refreshGuidedShots()
-                refreshCoreElevationChecklistSnapshot()
-                refreshHudAngleIndex()
+                scheduleFirstCameraFrameHydrationIfReady()
                 isPollingDeviceOrientation = true
+            }
+            .onReceive(camera.$isPreviewRunning.removeDuplicates()) { isRunning in
+                guard isRunning else { return }
+                scheduleFirstCameraFrameHydrationIfReady()
             }
             .onReceive(NotificationCenter.default.publisher(for: UIDevice.orientationDidChangeNotification)) { _ in
                 refreshBottomGlyphRotation()
@@ -6897,6 +6922,8 @@ struct ContentView: View {
                 refreshBottomGlyphRotation()
             }
             .onDisappear {
+                firstCameraFrameHydrationWorkItem?.cancel()
+                firstCameraFrameHydrationWorkItem = nil
                 postCameraHydrationWorkItem?.cancel()
                 postCameraHydrationWorkItem = nil
                 isPollingDeviceOrientation = false
