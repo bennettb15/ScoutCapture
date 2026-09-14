@@ -5709,7 +5709,7 @@ struct ContentView: View {
         let isSessionSealed: Bool
         let firstDeliveredAt: Date?
         let reExportExpiresAt: Date?
-        let reExportEligibleNow: Bool
+        var reExportEligibleNow: Bool
         let sessionType: SessionType
 
         var isPunchlistVisit: Bool {
@@ -13114,8 +13114,6 @@ extension ContentView {
             propertyID: propertyID,
             session: currentSession
         )
-        let reExportEligibleNow = appState.isReExportLocallyAvailable(currentSession)
-        let isPendingDelivery = appState.isPendingDeliveryLocallyAvailable(currentSession)
 
         print(
             "[EndSession] sessionID=\(currentSession.id.uuidString) " +
@@ -13132,7 +13130,7 @@ extension ContentView {
             isSessionSealed: currentSession.isSealed,
             firstDeliveredAt: currentSession.firstDeliveredAt,
             reExportExpiresAt: currentSession.reExportExpiresAt,
-            reExportEligibleNow: reExportEligibleNow,
+            reExportEligibleNow: false,
             sessionType: currentSession.sessionType
         )
         if let reason = sessionActionsSummary?.exportDisabledReason {
@@ -13140,10 +13138,28 @@ extension ContentView {
         } else {
             print("[ExportEligibility] sessionID=\(currentSession.id.uuidString) enabled=true")
         }
-        print("[ExportUI] sessionID=\(currentSession.id.uuidString) isPendingDelivery=\(isPendingDelivery) isReExportEligible=\(reExportEligibleNow)")
+        print("[ExportUI] sessionID=\(currentSession.id.uuidString) availability=pending_async")
         showSessionActionsSheet = true
+        hydrateSessionActionsAvailabilityIfNeeded(for: currentSession)
         let liveGuidedCountAfter = guidedRemainingForCompass
         verboseLog("[Badge] afterOpen guidedCount=\(liveGuidedCountAfter) flaggedCount=\(flaggedPendingCaptureCount)")
+    }
+
+    private func hydrateSessionActionsAvailabilityIfNeeded(for session: Session) {
+        guard session.isSealed, session.firstDeliveredAt != nil else { return }
+        let sessionID = session.id
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+            guard showSessionActionsSheet,
+                  appState.currentSession?.id == sessionID,
+                  var summary = sessionActionsSummary else {
+                return
+            }
+            let reExportEligibleNow = appState.isReExportLocallyAvailable(session)
+            summary.reExportEligibleNow = reExportEligibleNow
+            sessionActionsSummary = summary
+            let isPendingDelivery = appState.isPendingDeliveryLocallyAvailable(session)
+            print("[ExportUI] sessionID=\(session.id.uuidString) isPendingDelivery=\(isPendingDelivery) isReExportEligible=\(reExportEligibleNow)")
+        }
     }
 
     private func currentSessionCaptureCountForSummary(propertyID: UUID, session: Session) -> Int {
