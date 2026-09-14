@@ -41738,6 +41738,57 @@ final class AppState: ObservableObject {
         }
     }
 
+    func canRebuildMissingLocalShellFromLightweightCurrentUserLock(
+        _ status: LightweightPropertyEntryStatus,
+        propertyID: UUID
+    ) -> Bool {
+        guard status.entryState == .lockedByCurrentUser,
+              status.propertyID == propertyID,
+              status.requiresFallback == false,
+              status.lockSessionID != nil,
+              normalizedSupabaseText(status.reason) == "current_user_occupied" else {
+            return false
+        }
+
+        let userMatches = status.lockedByUserID != nil && status.lockedByUserID == authenticatedSupabaseUser?.id
+        let deviceMatches = normalizedSupabaseText(status.lockedByDeviceID) == currentDeviceIdentifier()
+        return userMatches || deviceMatches
+    }
+
+    @discardableResult
+    func rebuildLightweightCurrentUserSessionShell(
+        propertyID: UUID,
+        sessionID: UUID,
+        sessionType: SessionType
+    ) -> Session? {
+        guard canAccessProperty(propertyID) else { return nil }
+        let inheritedCaptureProfile = properties.first(where: { $0.id == propertyID })?.captureProfile ??
+            allProperties.first(where: { $0.id == propertyID })?.captureProfile
+        let session = Session(
+            id: sessionID,
+            propertyID: propertyID,
+            sessionType: sessionType,
+            startedAt: Date(),
+            status: .draft,
+            endedAt: nil,
+            exportedAt: nil,
+            captureProfile: inheritedCaptureProfile
+        )
+        selectedPropertyID = propertyID
+        currentSession = session
+        recordDraftSessionReuseDecision(
+            propertyID: propertyID,
+            session: session,
+            decision: "rebuilt_lightweight_current_user_shell",
+            candidateCount: 0,
+            blockedReason: nil,
+            foregroundRefreshReconciliation: "rpc_current_user_occupied_shell_rebuilt_without_availability_scan"
+        )
+        logActiveSession(session)
+        cloudBackupManager?.setCaptureModeActive(true)
+        return session
+    }
+
     @MainActor
     func evaluateFreshPropertyStatusEntryPreflight(
         propertyID: UUID,

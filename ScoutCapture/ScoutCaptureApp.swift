@@ -12962,9 +12962,23 @@ struct PropertySessionView: View {
                     skipPropertyStatusPreflight: true
                 )
             }
-            guard loadedSession?.id == desiredSessionID else {
-                await runLegacyCheckingSession(reason: "lightweight_current_user_lock_missing_local_draft")
-                return
+            if loadedSession?.id != desiredSessionID {
+                guard appState.canRebuildMissingLocalShellFromLightweightCurrentUserLock(
+                    lightweightStatus,
+                    propertyID: propertyID
+                ) else {
+                    await runLegacyCheckingSession(reason: "lightweight_current_user_lock_missing_local_draft")
+                    return
+                }
+                let rebuiltSession = appState.rebuildLightweightCurrentUserSessionShell(
+                    propertyID: propertyID,
+                    sessionID: desiredSessionID,
+                    sessionType: initialSessionType ?? .fullDocumentation
+                )
+                guard rebuiltSession?.id == desiredSessionID else {
+                    await runLegacyCheckingSession(reason: "lightweight_current_user_lock_rebuild_failed")
+                    return
+                }
             }
             finishAllowedFastEntry()
 
@@ -13035,10 +13049,8 @@ struct PropertySessionView: View {
         isCheckingSessionBeforeOpen = false
         if appState.canFastPresentCurrentMaterialDraftResume(propertyID: propertyID) {
             beginOpenFlow(forceRetry: true)
-            beginSessionCoordinationFlow(openAfterAllowed: false)
         } else {
             continueAfterSessionCoordinationAllowed()
-            beginSessionCoordinationFlow(openAfterAllowed: false)
         }
     }
 
