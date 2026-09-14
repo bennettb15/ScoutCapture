@@ -59,7 +59,13 @@ final class Phase2C27EDraftSessionReuseTests: XCTestCase {
     private func addMaterialShot(
         to session: Session,
         in fixture: Fixture,
-        isFlagged: Bool = false
+        isFlagged: Bool = false,
+        issueID: UUID? = nil,
+        issueStatus: String? = nil,
+        createdAt: Date? = nil,
+        captureKind: String? = nil,
+        storagePath: String? = nil,
+        uploadState: String = "pending"
     ) throws -> ShotMetadata {
         try fixture.localStore.ensureSessionFileStorage(propertyID: session.propertyID, sessionID: session.id)
         let shotID = UUID()
@@ -74,8 +80,8 @@ final class Phase2C27EDraftSessionReuseTests: XCTestCase {
             shotID: shotID,
             propertyID: session.propertyID,
             sessionID: session.id,
-            createdAt: Date(timeIntervalSinceReferenceDate: 10),
-            updatedAt: Date(timeIntervalSinceReferenceDate: 11),
+            createdAt: createdAt ?? session.startedAt.addingTimeInterval(1),
+            updatedAt: (createdAt ?? session.startedAt.addingTimeInterval(1)).addingTimeInterval(1),
             building: "B1",
             elevation: "North",
             detailType: "Overview",
@@ -83,14 +89,17 @@ final class Phase2C27EDraftSessionReuseTests: XCTestCase {
             shotKey: "b1|north|overview|1",
             isGuided: !isFlagged,
             isFlagged: isFlagged,
-            issueID: isFlagged ? UUID() : nil,
-            issueStatus: isFlagged ? "active" : nil,
+            issueID: isFlagged ? (issueID ?? UUID()) : nil,
+            issueStatus: isFlagged ? (issueStatus ?? "active") : nil,
+            captureKind: captureKind,
             noteText: isFlagged ? "Loose trim" : nil,
             noteCategory: isFlagged ? "Issue" : nil,
             originalFilename: originalFilename,
             originalRelativePath: originalRelativePath,
             originalByteSize: 4,
+            storagePath: storagePath,
             byteSize: 4,
+            uploadState: uploadState,
             stampedFilename: nil,
             stampedRelativePath: nil,
             captureMode: nil,
@@ -109,6 +118,29 @@ final class Phase2C27EDraftSessionReuseTests: XCTestCase {
             matchMode: .append
         )
         return shot
+    }
+
+    private func makeCompletedUploadStatusRecord(
+        for session: Session,
+        in fixture: Fixture,
+        generatedAt: Date = Date(timeIntervalSinceReferenceDate: 500)
+    ) throws -> LocalStore.SessionSnapshotUploadStatusRecord {
+        let orgID = try XCTUnwrap(fixture.property.orgId)
+        let snapshotID = UUID()
+        return LocalStore.SessionSnapshotUploadStatusRecord(
+            snapshotID: snapshotID,
+            organizationID: orgID,
+            propertyID: fixture.property.id,
+            sessionID: session.id,
+            snapshotKind: AppState.SessionSnapshotKind.completed.rawValue,
+            trigger: "auto_completed_sealed_archive:completeCurrentSessionWithoutZIP",
+            triggerSource: "completeCurrentSessionWithoutZIP",
+            idempotencyKey: "\(fixture.property.id.uuidString)|\(session.id.uuidString)|completeCurrentSessionWithoutZIP|\(snapshotID.uuidString)",
+            storagePath: "org/\(orgID.uuidString)/property/\(fixture.property.id.uuidString)/session/\(session.id.uuidString)/\(snapshotID.uuidString).json",
+            generatedAt: generatedAt,
+            status: .uploaded,
+            updatedAt: generatedAt.addingTimeInterval(5)
+        )
     }
 
     func testPropertyReopenReusesPersistedDraft() throws {
@@ -313,6 +345,9 @@ final class Phase2C27EDraftSessionReuseTests: XCTestCase {
         fixture.appState.selectProperty(id: fixture.property.id)
         _ = try XCTUnwrap(fixture.appState.startSession(skipPropertyStatusPreflight: true))
         let emptyDraft = try XCTUnwrap(fixture.appState.persistCurrentSessionType(.fullDocumentation))
+        fixture.appState.markCurrentSessionCameraEntryBegan()
+        XCTAssertEqual(fixture.appState.materialDraftCaptureCount(for: emptyDraft), 0)
+        XCTAssertTrue(fixture.appState.currentSessionRequiresInitialSessionTypeSelection(propertyID: fixture.property.id))
         fixture.appState.clearCurrentSession()
 
         fixture.appState.selectProperty(id: fixture.property.id)
@@ -331,6 +366,9 @@ final class Phase2C27EDraftSessionReuseTests: XCTestCase {
         fixture.appState.selectProperty(id: fixture.property.id)
         _ = try XCTUnwrap(fixture.appState.startSession(skipPropertyStatusPreflight: true))
         let emptyDraft = try XCTUnwrap(fixture.appState.persistCurrentSessionType(.punchlistVisit))
+        fixture.appState.markCurrentSessionCameraEntryBegan()
+        XCTAssertEqual(fixture.appState.materialDraftCaptureCount(for: emptyDraft), 0)
+        XCTAssertTrue(fixture.appState.currentSessionRequiresInitialSessionTypeSelection(propertyID: fixture.property.id))
         fixture.appState.clearCurrentSession()
 
         fixture.appState.selectProperty(id: fixture.property.id)
@@ -340,6 +378,69 @@ final class Phase2C27EDraftSessionReuseTests: XCTestCase {
         XCTAssertEqual(reopened.sessionType, .fullDocumentation)
         XCTAssertTrue(fixture.appState.currentSessionRequiresInitialSessionTypeSelection(propertyID: fixture.property.id))
         XCTAssertEqual(try fixture.localStore.fetchSessions(propertyID: fixture.property.id).map(\.id), [emptyDraft.id])
+    }
+
+    func testNoPhotoFullDocumentationCurrentSessionDoesNotRemainResumableAfterCameraEntry() throws {
+        let fixture = try makeFixture()
+        defer { tearDownFixture(fixture) }
+
+        fixture.appState.selectProperty(id: fixture.property.id)
+        _ = try XCTUnwrap(fixture.appState.startSession(skipPropertyStatusPreflight: true))
+        let emptyDraft = try XCTUnwrap(fixture.appState.persistCurrentSessionType(.fullDocumentation))
+
+        XCTAssertFalse(fixture.appState.currentSessionRequiresInitialSessionTypeSelection(propertyID: fixture.property.id))
+
+        fixture.appState.markCurrentSessionCameraEntryBegan()
+
+        XCTAssertEqual(fixture.appState.materialDraftCaptureCount(for: emptyDraft), 0)
+        XCTAssertTrue(fixture.appState.currentSessionRequiresInitialSessionTypeSelection(propertyID: fixture.property.id))
+
+        fixture.appState.selectProperty(id: fixture.property.id)
+        let reopened = try XCTUnwrap(fixture.appState.startSession(skipPropertyStatusPreflight: true))
+
+        XCTAssertNotEqual(reopened.id, emptyDraft.id)
+        XCTAssertTrue(fixture.appState.currentSessionRequiresInitialSessionTypeSelection(propertyID: fixture.property.id))
+    }
+
+    func testNoPhotoPunchlistVisitCurrentSessionDoesNotRemainResumableAfterCameraEntry() throws {
+        let fixture = try makeFixture()
+        defer { tearDownFixture(fixture) }
+
+        fixture.appState.selectProperty(id: fixture.property.id)
+        _ = try XCTUnwrap(fixture.appState.startSession(skipPropertyStatusPreflight: true))
+        let emptyDraft = try XCTUnwrap(fixture.appState.persistCurrentSessionType(.punchlistVisit))
+
+        XCTAssertFalse(fixture.appState.currentSessionRequiresInitialSessionTypeSelection(propertyID: fixture.property.id))
+
+        fixture.appState.markCurrentSessionCameraEntryBegan()
+
+        XCTAssertEqual(fixture.appState.materialDraftCaptureCount(for: emptyDraft), 0)
+        XCTAssertTrue(fixture.appState.currentSessionRequiresInitialSessionTypeSelection(propertyID: fixture.property.id))
+
+        fixture.appState.selectProperty(id: fixture.property.id)
+        let reopened = try XCTUnwrap(fixture.appState.startSession(skipPropertyStatusPreflight: true))
+
+        XCTAssertNotEqual(reopened.id, emptyDraft.id)
+        XCTAssertTrue(fixture.appState.currentSessionRequiresInitialSessionTypeSelection(propertyID: fixture.property.id))
+    }
+
+    func testPersistedEmptyTypedCurrentDraftPromptsAgainWithoutFreshChoice() throws {
+        let fixture = try makeFixture()
+        defer { tearDownFixture(fixture) }
+
+        let staleTypedDraft = Session(
+            propertyID: fixture.property.id,
+            sessionType: .punchlistVisit,
+            startedAt: Date(timeIntervalSinceReferenceDate: 100),
+            status: .draft
+        )
+        let persisted = try fixture.localStore.upsertSession(staleTypedDraft)
+        try fixture.localStore.ensureSessionMetadata(for: persisted)
+        fixture.appState._debugRefreshPropertiesLocallyForTests()
+        fixture.appState.selectProperty(id: fixture.property.id)
+        fixture.appState.currentSession = persisted
+
+        XCTAssertTrue(fixture.appState.currentSessionRequiresInitialSessionTypeSelection(propertyID: fixture.property.id))
     }
 
     func testPersistedTypedDraftWithPhotosResumesWithoutInitialTypePrompt() throws {
@@ -358,6 +459,324 @@ final class Phase2C27EDraftSessionReuseTests: XCTestCase {
         XCTAssertEqual(reopened.id, first.id)
         XCTAssertEqual(reopened.sessionType, .punchlistVisit)
         XCTAssertFalse(fixture.appState.currentSessionRequiresInitialSessionTypeSelection(propertyID: fixture.property.id))
+    }
+
+    func testFullDocumentationUploadedRealCaptureRemainsMaterialDraftAndResumes() throws {
+        let fixture = try makeFixture()
+        defer { tearDownFixture(fixture) }
+
+        fixture.appState.selectProperty(id: fixture.property.id)
+        _ = try XCTUnwrap(fixture.appState.startSession(skipPropertyStatusPreflight: true))
+        let draft = try XCTUnwrap(fixture.appState.persistCurrentSessionType(.fullDocumentation))
+        fixture.appState.markCurrentSessionCameraEntryBegan()
+        try addMaterialShot(
+            to: draft,
+            in: fixture,
+            captureKind: "captured",
+            storagePath: "org/example/property/example/session/\(draft.id.uuidString)/originals/captured.jpg",
+            uploadState: "uploaded"
+        )
+
+        XCTAssertEqual(fixture.appState.materialDraftCaptureCount(for: draft), 1)
+        XCTAssertFalse(fixture.appState.currentSessionRequiresInitialSessionTypeSelection(propertyID: fixture.property.id))
+
+        fixture.appState.clearCurrentSession()
+        fixture.appState.selectProperty(id: fixture.property.id)
+        let reopened = try XCTUnwrap(fixture.appState.startSession(skipPropertyStatusPreflight: true))
+
+        XCTAssertEqual(reopened.id, draft.id)
+        XCTAssertEqual(reopened.sessionType, .fullDocumentation)
+        XCTAssertFalse(fixture.appState.currentSessionRequiresInitialSessionTypeSelection(propertyID: fixture.property.id))
+    }
+
+    func testPunchlistUploadedRealCaptureRemainsMaterialDraftAndResumes() throws {
+        let fixture = try makeFixture()
+        defer { tearDownFixture(fixture) }
+
+        fixture.appState.selectProperty(id: fixture.property.id)
+        _ = try XCTUnwrap(fixture.appState.startSession(skipPropertyStatusPreflight: true))
+        let draft = try XCTUnwrap(fixture.appState.persistCurrentSessionType(.punchlistVisit))
+        fixture.appState.markCurrentSessionCameraEntryBegan()
+        try addMaterialShot(
+            to: draft,
+            in: fixture,
+            isFlagged: true,
+            captureKind: "captured",
+            storagePath: "org/example/property/example/session/\(draft.id.uuidString)/originals/captured.jpg",
+            uploadState: "uploaded"
+        )
+
+        XCTAssertEqual(fixture.appState.materialDraftCaptureCount(for: draft), 1)
+        XCTAssertFalse(fixture.appState.currentSessionRequiresInitialSessionTypeSelection(propertyID: fixture.property.id))
+
+        fixture.appState.clearCurrentSession()
+        fixture.appState.selectProperty(id: fixture.property.id)
+        let reopened = try XCTUnwrap(fixture.appState.startSession(skipPropertyStatusPreflight: true))
+
+        XCTAssertEqual(reopened.id, draft.id)
+        XCTAssertEqual(reopened.sessionType, .punchlistVisit)
+        XCTAssertFalse(fixture.appState.currentSessionRequiresInitialSessionTypeSelection(propertyID: fixture.property.id))
+    }
+
+    func testPunchlistPendingActiveIssueCaptureCountsAsMaterialDraftAndResumes() throws {
+        let fixture = try makeFixture()
+        defer { tearDownFixture(fixture) }
+
+        fixture.appState.selectProperty(id: fixture.property.id)
+        _ = try XCTUnwrap(fixture.appState.startSession(skipPropertyStatusPreflight: true))
+        let draft = try XCTUnwrap(fixture.appState.persistCurrentSessionType(.punchlistVisit))
+        fixture.appState.markCurrentSessionCameraEntryBegan()
+        let issueID = UUID()
+        try addMaterialShot(
+            to: draft,
+            in: fixture,
+            isFlagged: true,
+            issueID: issueID,
+            issueStatus: Observation.Status.active.issueStatusValue,
+            captureKind: "follow_up_capture"
+        )
+
+        XCTAssertEqual(fixture.appState.materialDraftCaptureCount(for: draft), 1)
+        XCTAssertFalse(fixture.appState.currentSessionRequiresInitialSessionTypeSelection(propertyID: fixture.property.id))
+
+        fixture.appState.clearCurrentSession()
+        fixture.appState.selectProperty(id: fixture.property.id)
+        let reopened = try XCTUnwrap(fixture.appState.startSession(skipPropertyStatusPreflight: true))
+
+        XCTAssertEqual(reopened.id, draft.id)
+        XCTAssertEqual(reopened.sessionType, .punchlistVisit)
+        XCTAssertEqual(fixture.appState.materialDraftCaptureCount(for: reopened), 1)
+        XCTAssertFalse(fixture.appState.currentSessionRequiresInitialSessionTypeSelection(propertyID: fixture.property.id))
+    }
+
+    func testPunchlistFinalizedActiveIssueUpdateRepairsReferenceCaptureKind() throws {
+        let fixture = try makeFixture()
+        defer { tearDownFixture(fixture) }
+
+        fixture.appState.selectProperty(id: fixture.property.id)
+        _ = try XCTUnwrap(fixture.appState.startSession(skipPropertyStatusPreflight: true))
+        let draft = try XCTUnwrap(fixture.appState.persistCurrentSessionType(.punchlistVisit))
+        fixture.appState.markCurrentSessionCameraEntryBegan()
+        let issueID = UUID()
+        let shot = try addMaterialShot(
+            to: draft,
+            in: fixture,
+            isFlagged: true,
+            issueID: issueID,
+            issueStatus: Observation.Status.active.issueStatusValue,
+            captureKind: "reference"
+        )
+        XCTAssertEqual(fixture.appState.materialDraftCaptureCount(for: draft), 0)
+
+        let observation = try fixture.localStore.createObservation(
+            Observation(
+                id: issueID,
+                propertyID: fixture.property.id,
+                createdAt: draft.startedAt.addingTimeInterval(-60),
+                updatedAt: draft.startedAt.addingTimeInterval(2),
+                statement: "Loose trim",
+                status: .active,
+                linkedShotID: shot.shotID,
+                updatedInSessionID: draft.id,
+                building: shot.building,
+                targetElevation: shot.elevation,
+                detailType: shot.detailType,
+                priority: "P2",
+                currentReason: "Loose trim",
+                note: "Loose trim",
+                shots: [
+                    Shot(
+                        id: shot.shotID,
+                        capturedAt: shot.createdAt,
+                        imageLocalIdentifier: fixture.localStore
+                            .originalsDirectoryURL(propertyID: draft.propertyID, sessionID: draft.id)
+                            .appendingPathComponent(shot.originalFilename, isDirectory: false)
+                            .path,
+                        note: "Loose trim"
+                    )
+                ]
+            )
+        )
+        let synced = try XCTUnwrap(
+            fixture.localStore.syncFlaggedObservationUpdateToSessionMetadata(
+                propertyID: fixture.property.id,
+                sessionID: draft.id,
+                observation: observation,
+                shotID: shot.shotID,
+                trade: nil,
+                activeCaptureKind: "follow_up_capture"
+            )
+        )
+
+        XCTAssertEqual(synced.captureKind, "follow_up_capture")
+        XCTAssertEqual(fixture.appState.materialDraftCaptureCount(for: draft), 1)
+
+        fixture.appState.clearCurrentSession()
+        fixture.appState.selectProperty(id: fixture.property.id)
+        let reopened = try XCTUnwrap(fixture.appState.startSession(skipPropertyStatusPreflight: true))
+
+        XCTAssertEqual(reopened.id, draft.id)
+        XCTAssertEqual(reopened.sessionType, .punchlistVisit)
+    }
+
+    func testDraftWithOnlyPreSessionReferencePhotoDoesNotResumeWithoutPrompting() throws {
+        let fixture = try makeFixture()
+        defer { tearDownFixture(fixture) }
+
+        let stale = Session(
+            propertyID: fixture.property.id,
+            sessionType: .punchlistVisit,
+            startedAt: Date(timeIntervalSinceReferenceDate: 1_000),
+            status: .draft
+        )
+        let persisted = try fixture.localStore.upsertSession(stale)
+        try fixture.localStore.ensureSessionMetadata(for: persisted)
+        try addMaterialShot(
+            to: persisted,
+            in: fixture,
+            createdAt: Date(timeIntervalSinceReferenceDate: 900),
+            captureKind: "reference"
+        )
+        fixture.appState.clearCurrentSession()
+        fixture.appState._debugRefreshPropertiesLocallyForTests()
+
+        fixture.appState.selectProperty(id: fixture.property.id)
+        let reopened = try XCTUnwrap(fixture.appState.startSession(skipPropertyStatusPreflight: true))
+
+        XCTAssertNotEqual(reopened.id, persisted.id)
+        XCTAssertEqual(reopened.sessionType, .fullDocumentation)
+        XCTAssertTrue(fixture.appState.currentSessionRequiresInitialSessionTypeSelection(propertyID: fixture.property.id))
+    }
+
+    func testUploadedRestoredCurrentSessionPhotoDoesNotCountAsMaterialDraftCapture() throws {
+        let fixture = try makeFixture()
+        defer { tearDownFixture(fixture) }
+
+        let shell = Session(
+            propertyID: fixture.property.id,
+            sessionType: .fullDocumentation,
+            startedAt: Date(timeIntervalSinceReferenceDate: 1_000),
+            status: .draft
+        )
+        let persisted = try fixture.localStore.upsertSession(shell)
+        try fixture.localStore.ensureSessionMetadata(for: persisted)
+        try addMaterialShot(
+            to: persisted,
+            in: fixture,
+            createdAt: Date(timeIntervalSinceReferenceDate: 1_001),
+            captureKind: "restored",
+            storagePath: "org/example/property/example/session/example/originals/restored.jpg",
+            uploadState: "uploaded"
+        )
+        fixture.appState._debugRefreshPropertiesLocallyForTests()
+        fixture.appState.selectProperty(id: fixture.property.id)
+        fixture.appState.currentSession = persisted
+
+        XCTAssertEqual(fixture.appState.materialDraftCaptureCount(for: persisted), 0)
+        XCTAssertTrue(fixture.appState.currentSessionRequiresInitialSessionTypeSelection(propertyID: fixture.property.id))
+    }
+
+    func testCompletedPunchlistSessionPromptsAgainOnReentry() throws {
+        let fixture = try makeFixture()
+        defer { tearDownFixture(fixture) }
+
+        fixture.appState.selectProperty(id: fixture.property.id)
+        _ = try XCTUnwrap(fixture.appState.startSession(skipPropertyStatusPreflight: true))
+        let punchlist = try XCTUnwrap(fixture.appState.persistCurrentSessionType(.punchlistVisit))
+        try addMaterialShot(to: punchlist, in: fixture, isFlagged: true)
+        fixture.appState.completeCurrentSessionWithoutZIP()
+
+        fixture.appState.selectProperty(id: fixture.property.id)
+        let reopened = try XCTUnwrap(fixture.appState.startSession(skipPropertyStatusPreflight: true))
+
+        XCTAssertNotEqual(reopened.id, punchlist.id)
+        XCTAssertEqual(reopened.status, .draft)
+        XCTAssertEqual(reopened.sessionType, .fullDocumentation)
+        XCTAssertTrue(fixture.appState.currentSessionRequiresInitialSessionTypeSelection(propertyID: fixture.property.id))
+    }
+
+    func testStaleCompletedPunchlistCurrentSessionDoesNotSuppressInitialTypePrompt() throws {
+        let fixture = try makeFixture()
+        defer { tearDownFixture(fixture) }
+
+        fixture.appState.selectProperty(id: fixture.property.id)
+        _ = try XCTUnwrap(fixture.appState.startSession(skipPropertyStatusPreflight: true))
+        let punchlist = try XCTUnwrap(fixture.appState.persistCurrentSessionType(.punchlistVisit))
+        try addMaterialShot(to: punchlist, in: fixture, isFlagged: true)
+
+        var stalePersisted = punchlist
+        stalePersisted.status = .completed
+        stalePersisted.endedAt = Date(timeIntervalSinceReferenceDate: 200)
+        stalePersisted.isSealed = true
+        _ = try fixture.localStore.upsertSession(stalePersisted)
+        fixture.appState._debugRefreshPropertiesLocallyForTests()
+
+        fixture.appState.selectProperty(id: fixture.property.id)
+        let reopened = try XCTUnwrap(fixture.appState.startSession(skipPropertyStatusPreflight: true))
+
+        XCTAssertNotEqual(reopened.id, punchlist.id)
+        XCTAssertEqual(reopened.status, .draft)
+        XCTAssertTrue(fixture.appState.currentSessionRequiresInitialSessionTypeSelection(propertyID: fixture.property.id))
+        XCTAssertEqual(
+            fixture.appState._debugLocalDiagnosticsForTests()
+                .sessionSnapshotUpload
+                .lastDraftReuseBlockedReason,
+            "no_reusable_active_draft_completed_or_sealed_sessions_only"
+        )
+    }
+
+    func testStaleUploadedPunchlistCurrentSessionDoesNotSuppressInitialTypePrompt() throws {
+        let fixture = try makeFixture()
+        defer { tearDownFixture(fixture) }
+
+        fixture.appState.selectProperty(id: fixture.property.id)
+        _ = try XCTUnwrap(fixture.appState.startSession(skipPropertyStatusPreflight: true))
+        let punchlist = try XCTUnwrap(fixture.appState.persistCurrentSessionType(.punchlistVisit))
+        try addMaterialShot(to: punchlist, in: fixture, isFlagged: true)
+
+        var uploaded = punchlist
+        uploaded.status = .completed
+        uploaded.endedAt = Date(timeIntervalSinceReferenceDate: 200)
+        uploaded.isSealed = true
+        uploaded.firstDeliveredAt = Date(timeIntervalSinceReferenceDate: 220)
+        _ = try fixture.localStore.upsertSession(uploaded)
+        fixture.appState._debugRefreshPropertiesLocallyForTests()
+
+        fixture.appState.selectProperty(id: fixture.property.id)
+        let reopened = try XCTUnwrap(fixture.appState.startSession(skipPropertyStatusPreflight: true))
+
+        XCTAssertNotEqual(reopened.id, punchlist.id)
+        XCTAssertEqual(reopened.status, .draft)
+        XCTAssertTrue(fixture.appState.currentSessionRequiresInitialSessionTypeSelection(propertyID: fixture.property.id))
+    }
+
+    func testUploadedCompletedSnapshotStatusPreventsStaleDraftResume() throws {
+        let fixture = try makeFixture()
+        defer { tearDownFixture(fixture) }
+
+        fixture.appState.selectProperty(id: fixture.property.id)
+        _ = try XCTUnwrap(fixture.appState.startSession(skipPropertyStatusPreflight: true))
+        let staleDraft = try XCTUnwrap(fixture.appState.persistCurrentSessionType(.fullDocumentation))
+        try addMaterialShot(to: staleDraft, in: fixture)
+        _ = try fixture.localStore.upsertSessionSnapshotUploadStatusRecord(
+            makeCompletedUploadStatusRecord(for: staleDraft, in: fixture)
+        )
+        fixture.appState._debugRunForegroundCacheRefreshForTests()
+
+        XCTAssertTrue(
+            fixture.appState.currentSessionRequiresInitialSessionTypeSelection(propertyID: fixture.property.id)
+        )
+
+        let reopened = try XCTUnwrap(fixture.appState.startSession(skipPropertyStatusPreflight: true))
+
+        XCTAssertNotEqual(reopened.id, staleDraft.id)
+        XCTAssertEqual(reopened.status, .draft)
+        XCTAssertEqual(reopened.sessionType, .fullDocumentation)
+        XCTAssertTrue(fixture.appState.currentSessionRequiresInitialSessionTypeSelection(propertyID: fixture.property.id))
+        XCTAssertTrue(
+            try fixture.localStore.fetchSessions(propertyID: fixture.property.id)
+                .contains(where: { $0.id == staleDraft.id })
+        )
     }
 
     func testPunchlistCompletionIgnoresGuidedRemainingWhileFullDocumentationDoesNot() {
@@ -379,7 +798,25 @@ final class Phase2C27EDraftSessionReuseTests: XCTestCase {
         )
         XCTAssertEqual(
             AppState.sessionCompletionActionTitle(sessionType: .punchlistVisit),
-            "Complete Punchlist Visit"
+            "Complete Punchlist"
+        )
+        XCTAssertTrue(
+            AppState.sessionCanComplete(
+                sessionType: .punchlistVisit,
+                hasBaseline: false,
+                guidedRemainingCount: 8,
+                flaggedRemainingCount: 0,
+                currentSessionCaptureCount: 1
+            )
+        )
+        XCTAssertFalse(
+            AppState.sessionCanComplete(
+                sessionType: .punchlistVisit,
+                hasBaseline: false,
+                guidedRemainingCount: 0,
+                flaggedRemainingCount: 1,
+                currentSessionCaptureCount: 1
+            )
         )
 
         XCTAssertFalse(
@@ -402,6 +839,14 @@ final class Phase2C27EDraftSessionReuseTests: XCTestCase {
             AppState.sessionCompletionActionTitle(sessionType: .fullDocumentation),
             "Complete Session"
         )
+    }
+
+    func testGuidedChecklistCanOpenForCompletedRowsWhenRemainingIsZero() {
+        XCTAssertTrue(ContentView.guidedChecklistShouldOpen(totalCount: 1))
+    }
+
+    func testGuidedChecklistEmptyStateOnlyWhenNoRowsExist() {
+        XCTAssertFalse(ContentView.guidedChecklistShouldOpen(totalCount: 0))
     }
 
     func testPunchlistVisitCompletionPreservesGuidedRequirementsForNextFullSession() throws {

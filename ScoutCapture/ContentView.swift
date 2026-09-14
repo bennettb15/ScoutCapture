@@ -660,10 +660,10 @@ final class ReportLibraryModel: ObservableObject {
 
     func reloadSessionAssets(propertyID: UUID, sessionID: UUID) {
         setSessionContext(propertyID: propertyID, sessionID: sessionID)
-        reloadAssets()
     }
 
     func warmUpAlbumIfAuthorized() {
+        guard propertyID == nil, sessionID == nil else { return }
         reloadAssets()
     }
 
@@ -3675,11 +3675,13 @@ struct ContentView: View {
     @State private var coreElevationChecklistRowsSnapshot: [CoreElevationChecklistRowState] =
         CoreElevationChecklistCategory.allCases.map { CoreElevationChecklistRowState(category: $0, count: 0) }
     @State private var activeIssuesOpenRefreshWorkItem: DispatchWorkItem? = nil
+    @State private var postCameraHydrationWorkItem: DispatchWorkItem? = nil
     @State private var guidedReferenceKeys: Set<String> = []
     @State private var flaggedReferenceIDs: Set<UUID> = []
     @State private var guidedUpdatedKeysThisSession: Set<String> = []
     @State private var flaggedUpdatedIDsThisSession: Set<UUID> = []
     @State private var showGuidedChecklist: Bool = false
+    @State private var guidedReferenceHydrationWorkItem: DispatchWorkItem? = nil
     @State private var guidedShots: [GuidedShot] = []
     @State private var retiredGuidedShots: [GuidedShot] = []
     @State private var guidedResolvedThumbnailPathByID: [UUID: String] = [:]
@@ -4051,6 +4053,8 @@ struct ContentView: View {
     }
 
     private func primeDeferredReferenceResolution() {
+        guidedReferenceHydrationWorkItem?.cancel()
+        guidedReferenceHydrationWorkItem = nil
         referenceResolutionToken += 1
         allowReferenceThumbnailResolution = false
     }
@@ -4061,6 +4065,71 @@ struct ContentView: View {
         allowReferenceThumbnailResolution = true
         refreshGuidedShots()
         refreshActiveIssues()
+    }
+
+    private func scheduleGuidedReferenceHydration() {
+        guidedReferenceHydrationWorkItem?.cancel()
+        let item = DispatchWorkItem {
+            guard showGuidedChecklist else { return }
+            hydrateGuidedReferenceDetailsIfNeeded()
+        }
+        guidedReferenceHydrationWorkItem = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35, execute: item)
+    }
+
+    private func hydrateGuidedReferenceDetailsIfNeeded() {
+        guard !allowReferenceThumbnailResolution else { return }
+        guard showGuidedChecklist else { return }
+        guard let propertyID = currentSessionScopedPropertyID else { return }
+        guard !isPunchlistVisitSession else { return }
+
+        let expectedSessionID = appState.currentSession?.id
+        let baselineState = persistedBaselineState(propertyID: propertyID)
+        let orderedSessions = ((try? localStore.fetchSessions(propertyID: propertyID)) ?? []).sorted { $0.startedAt < $1.startedAt }
+        let currentSession = orderedSessions.first(where: { $0.id == expectedSessionID }) ?? appState.currentSession
+        let sessionMetadata = sessionMetadataForActiveSession(propertyID: propertyID, sessionID: expectedSessionID)
+        var metadataCache: [UUID: SessionMetadata] = [:]
+        if let sessionMetadata, let expectedSessionID {
+            metadataCache[expectedSessionID] = sessionMetadata
+        }
+
+        var resolvedMap: [UUID: String] = [:]
+        var referenceMap: [UUID: String] = [:]
+        for guidedShot in guidedShots {
+            let resolved = resolveGuidedThumbnailForDisplay(
+                propertyID: propertyID,
+                currentSession: currentSession,
+                baselineSessionID: baselineState.baselineSessionID,
+                guidedShot: guidedShot,
+                currentSessionMetadata: sessionMetadata,
+                orderedSessions: orderedSessions,
+                metadataCache: &metadataCache
+            )
+            guard let resolvedPath = resolved.path?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !resolvedPath.isEmpty,
+                  resolved.exists else {
+                continue
+            }
+            resolvedMap[guidedShot.id] = resolvedPath
+            if resolved.source != .current {
+                referenceMap[guidedShot.id] = resolvedPath
+            }
+        }
+
+        guard showGuidedChecklist,
+              currentSessionScopedPropertyID == propertyID,
+              appState.currentSession?.id == expectedSessionID else {
+            return
+        }
+        allowReferenceThumbnailResolution = true
+        referenceResolutionToken += 1
+        if guidedResolvedThumbnailPathByID != resolvedMap {
+            guidedResolvedThumbnailPathByID = resolvedMap
+        }
+        if guidedReferencePathByID != referenceMap {
+            guidedReferencePathByID = referenceMap
+        }
+        guidedThumbnailRefreshToken = UUID()
     }
 
     private func refreshReferenceSetsAndPendingCounts() {
@@ -5717,7 +5786,7 @@ struct ContentView: View {
                 return "\(exportActionTitle) is disabled until at least one photo is captured."
             }
             if isPunchlistVisit {
-                return "Complete Punchlist Visit is disabled until all active and resolution required items are complete."
+                return "Complete Punchlist is disabled until all active and resolution required items are complete."
             }
             return "Complete Session is disabled until all guided and flagged items are complete."
         }
@@ -6444,6 +6513,27 @@ struct ContentView: View {
         }
     }
 
+    private func schedulePostCameraHydration(
+        propertyID: UUID?,
+        sessionID: UUID?,
+        delay: TimeInterval = 0.85
+    ) {
+        postCameraHydrationWorkItem?.cancel()
+        guard let propertyID, let sessionID else { return }
+        let item = DispatchWorkItem {
+            guard appState.selectedPropertyID == propertyID,
+                  appState.currentSession?.id == sessionID else {
+                return
+            }
+            appState.ensureOperationalMediaAvailableForSession(
+                propertyID: propertyID,
+                sessionID: sessionID
+            )
+        }
+        postCameraHydrationWorkItem = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: item)
+    }
+
     private func presentMetadataFilter() {
         showMetadataFilterSheet = true
     }
@@ -6457,20 +6547,24 @@ struct ContentView: View {
             showFlaggedActionToastNow("No guided requirements")
             return
         }
-        ensureReferenceResolutionReady()
         let snapshot = guidedSessionCountSnapshot()
-        guard snapshot.remaining > 0 else {
+        guard Self.guidedChecklistShouldOpen(totalCount: snapshot.total) else {
             showFlaggedActionToastNow("No guided photos")
-            verboseLog("[GuidedCount] opened empty guidedRemaining=0")
+            verboseLog("[GuidedCount] opened empty guidedTotal=0 guidedRemaining=\(snapshot.remaining)")
             return
         }
         showGuidedChecklist = true
         deferCameraOverlayWork {
+            scheduleGuidedReferenceHydration()
             let sessionIDText = appState.currentSession?.id.uuidString ?? "NONE"
             verboseLog("[GuidedCount] session=\(sessionIDText) guidedTotal=\(snapshot.total) capturedForSession=\(snapshot.captured) remaining=\(snapshot.remaining)")
             let liveGuidedCount = guidedRemainingForCompass
             verboseLog("[Badge] opened guidedCount=\(liveGuidedCount) flaggedCount=\(flaggedPendingCaptureCount)")
         }
+    }
+
+    nonisolated static func guidedChecklistShouldOpen(totalCount: Int) -> Bool {
+        totalCount > 0
     }
 
     private func presentCoreElevationChecklist() {
@@ -6683,11 +6777,11 @@ struct ContentView: View {
             .onChange(of: sessionExportFile?.id) { oldValue, newValue in
                 guard oldValue != nil, newValue == nil, awaitingSessionExportDismiss else { return }
                 awaitingSessionExportDismiss = false
-                appState.refreshPropertiesInBackground()
                 Task {
                     await appState.releaseCurrentSessionCoordinationLockIfOwned()
                     await MainActor.run {
                         onExitToHub?()
+                        appState.schedulePropertiesRefreshAfterVisibleTransition(reason: "session_export_dismiss", delay: 3.0)
                     }
                 }
             }
@@ -6780,7 +6874,6 @@ struct ContentView: View {
                 reportLibrary.setMediaHydrationHandler { requests in
                     await appState.ensureGalleryMediaAvailableForRequests(requests)
                 }
-                reportLibrary.warmUpAlbumIfAuthorized()
                 reportLibrary.setSessionContext(
                     propertyID: appState.selectedPropertyID,
                     sessionID: appState.currentSession?.id
@@ -6804,6 +6897,8 @@ struct ContentView: View {
                 refreshBottomGlyphRotation()
             }
             .onDisappear {
+                postCameraHydrationWorkItem?.cancel()
+                postCameraHydrationWorkItem = nil
                 isPollingDeviceOrientation = false
                 isEndingSession = false
                 locationManager.stop()
@@ -6859,7 +6954,7 @@ struct ContentView: View {
                 resetSelectionForSwitch()
                 if let propertyID = appState.selectedPropertyID,
                    let sessionID = nextSessionID {
-                    appState.ensureOperationalMediaAvailableForSession(
+                    schedulePostCameraHydration(
                         propertyID: propertyID,
                         sessionID: sessionID
                     )
@@ -6912,7 +7007,7 @@ struct ContentView: View {
                 }
                 if let propertyID = appState.selectedPropertyID,
                    let sessionID = appState.currentSession?.id {
-                    appState.ensureOperationalMediaAvailableForSession(
+                    schedulePostCameraHydration(
                         propertyID: propertyID,
                         sessionID: sessionID
                     )
@@ -7127,9 +7222,13 @@ struct ContentView: View {
             refreshToken: guidedThumbnailRefreshToken,
             cache: imageCache,
             onClose: {
+                guidedReferenceHydrationWorkItem?.cancel()
+                guidedReferenceHydrationWorkItem = nil
                 showGuidedChecklist = false
             },
             onSelectGuided: { guidedShot in
+                guidedReferenceHydrationWorkItem?.cancel()
+                guidedReferenceHydrationWorkItem = nil
                 showGuidedChecklist = false
                 DispatchQueue.main.async {
                     armGuidedShot(guidedShot)
@@ -7142,6 +7241,8 @@ struct ContentView: View {
                 undoGuidedShotSkip(guidedShot)
             },
             onRetake: { guidedShot in
+                guidedReferenceHydrationWorkItem?.cancel()
+                guidedReferenceHydrationWorkItem = nil
                 showGuidedChecklist = false
                 DispatchQueue.main.async {
                     armGuidedRetake(guidedShot)
@@ -8857,17 +8958,19 @@ struct ContentView: View {
                         .foregroundColor(.white)
 
                     HStack(spacing: 10) {
-                        Button("Retake") {
-                            resetResolutionCapturePreview()
-                        }
-                        .buttonStyle(.bordered)
-                        .tint(.white)
+                        postCapturePreviewActionButton(
+                            "Retake",
+                            fill: Color.white.opacity(0.12),
+                            stroke: Color.white.opacity(0.22),
+                            action: resetResolutionCapturePreview
+                        )
 
-                        Button("Confirm") {
-                            confirmResolution()
-                        }
-                        .buttonStyle(.borderedProminent)
-                        .tint(.green)
+                        postCapturePreviewActionButton(
+                            "Confirm",
+                            fill: Color.green,
+                            stroke: Color.green.opacity(0.85),
+                            action: confirmResolution
+                        )
                     }
                 }
                 .padding(.horizontal, 20)
@@ -8941,9 +9044,61 @@ struct ContentView: View {
                 }
                 .contentShape(RoundedRectangle(cornerRadius: 14))
         }
-        .buttonStyle(.plain)
+        .buttonStyle(PostCaptureActionButtonStyle(cornerRadius: 14))
         .contentShape(RoundedRectangle(cornerRadius: 14))
         .disabled(!isEnabled)
+    }
+
+    @ViewBuilder
+    private func postCapturePreviewActionButton(
+        _ title: String,
+        fill: Color,
+        stroke: Color,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            Text(title)
+                .font(.system(size: 16, weight: .semibold))
+                .foregroundColor(.white)
+                .frame(minWidth: 104)
+                .frame(height: 42)
+                .background(fill)
+                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .stroke(stroke, lineWidth: 1)
+                }
+                .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        }
+        .buttonStyle(PostCaptureActionButtonStyle(cornerRadius: 12))
+        .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+    }
+
+    private struct PostCaptureActionButtonStyle: ButtonStyle {
+        let cornerRadius: CGFloat
+
+        func makeBody(configuration: Configuration) -> some View {
+            let isPressed = configuration.isPressed
+
+            configuration.label
+                .scaleEffect(isPressed ? 0.97 : 1.0)
+                .brightness(isPressed ? -0.08 : 0)
+                .overlay {
+                    if isPressed {
+                        RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                            .fill(Color.white.opacity(0.16))
+                            .allowsHitTesting(false)
+                    }
+                }
+                .overlay {
+                    if isPressed {
+                        RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                            .stroke(Color.white.opacity(0.65), lineWidth: 1.5)
+                            .allowsHitTesting(false)
+                    }
+                }
+                .animation(.easeOut(duration: 0.04), value: isPressed)
+        }
     }
 
     private func bottomMaskView(bottomBarH: CGFloat, containerWidth: CGFloat) -> some View {
@@ -11021,8 +11176,8 @@ extension ContentView {
                 issueStatus = Observation.Status.active.issueStatusValue
                 captureKind = "retake"
                 firstCaptureKind = "captured"
-            } else if observation.updatedInSessionID == session.id {
-                issueStatus = Observation.Status.active.issueStatusValue
+            } else if observation.updatedInSessionID == session.id || flaggedObservationIDAtCapture == observation.id {
+                issueStatus = observation.status.issueStatusValue
                 captureKind = "follow_up_capture"
                 firstCaptureKind = "captured"
             } else {
@@ -12992,27 +13147,7 @@ extension ContentView {
     }
 
     private func currentSessionCaptureCountForSummary(propertyID: UUID, session: Session) -> Int {
-        guard let metadata = try? localStore.loadSessionMetadata(propertyID: propertyID, sessionID: session.id) else {
-            return 0
-        }
-        let sessionStart = session.startedAt
-        let sessionEnd = session.endedAt
-        var count = 0
-        for shot in metadata.shots {
-            if shot.createdAt < sessionStart { continue }
-            if let sessionEnd, shot.createdAt > sessionEnd { continue }
-            let relative = shot.originalRelativePath.trimmingCharacters(in: .whitespacesAndNewlines)
-            if relative.isEmpty { continue }
-            guard localStore.resolveSessionRelativeFileURL(
-                propertyID: propertyID,
-                sessionID: session.id,
-                relativePath: relative
-            ) != nil else {
-                continue
-            }
-            count += 1
-        }
-        return count
+        appState.materialDraftCaptureCount(for: session)
     }
 
     private func carryoverFlaggedRemainingCount(observations: [Observation]) -> Int {
@@ -13263,8 +13398,8 @@ extension ContentView {
         let completedPropertyID = appState.selectedPropertyID
         let completedSessionID = appState.currentSession?.id
         appState.completeCurrentSessionWithoutZIP()
-        appState.refreshPropertiesInBackground()
         finishEndingSessionByExitingToHub()
+        appState.schedulePropertiesRefreshAfterVisibleTransition(reason: "complete_without_zip_exit", delay: 3.0)
         if let completedPropertyID, let completedSessionID {
             Task {
                 await appState.releaseSessionCoordinationAndOccupancyIfOwned(
@@ -13385,11 +13520,11 @@ extension ContentView {
         if summary.hasCaptures {
             let persistedDraft = appState.saveDraftCurrentSession(scheduleShadowWrite: false)
             appState.triggerBackupForLifecycleEvent()
-            appState.refreshPropertiesInBackground()
             if let persistedDraft {
                 appState.scheduleSessionShadowWriteAfterCoordinationRelease(for: persistedDraft)
             }
             finishEndingSessionByExitingToHub()
+            appState.schedulePropertiesRefreshAfterVisibleTransition(reason: "save_draft_exit", delay: 3.0)
             return
         } else if let propertyID = appState.selectedPropertyID,
                   let sessionID = appState.currentSession?.id {
@@ -13399,9 +13534,9 @@ extension ContentView {
                    appState.currentSession?.propertyID == propertyID {
                     appState.clearCurrentSession()
                 }
-                appState.refreshPropertiesInBackground()
                 await MainActor.run {
                     finishEndingSessionByExitingToHub()
+                    appState.schedulePropertiesRefreshAfterVisibleTransition(reason: "empty_session_exit", delay: 3.0)
                 }
             }
             return
@@ -13421,11 +13556,11 @@ extension ContentView {
 
         let finish = {
             appState.sealCurrentSessionForExportLater()
-            appState.refreshPropertiesInBackground()
             Task {
                 await appState.releaseCurrentSessionCoordinationLockIfOwned()
                 await MainActor.run {
                     finishEndingSessionByExitingToHub()
+                    appState.schedulePropertiesRefreshAfterVisibleTransition(reason: "export_later_exit", delay: 3.0)
                 }
             }
         }
@@ -15883,7 +16018,7 @@ extension ContentView {
                 return "\(summary.exportActionTitle) is disabled until at least one photo is captured."
             }
             if summary.isPunchlistVisit {
-                return "Complete Punchlist Visit is disabled until all active and resolution required items are complete."
+                return "Complete Punchlist is disabled until all active and resolution required items are complete."
             }
             return "Complete Session is disabled until all guided and flagged items are complete."
         }

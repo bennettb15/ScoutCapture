@@ -5,6 +5,8 @@ struct LoadingView: View {
     var progress: Double = 0.0
     var showsProgressBar: Bool = true
     var showsLogo: Bool = true
+    var message: String? = nil
+    var showsSpinner: Bool = false
 
     private var backgroundColor: Color {
         Color("StartupBackground")
@@ -36,6 +38,27 @@ struct LoadingView: View {
                         .resizable()
                         .scaledToFit()
                         .frame(width: logoWidth)
+                }
+
+                if message != nil || showsSpinner {
+                    VStack(spacing: 10) {
+                        if showsSpinner {
+                            ProgressView()
+                                .progressViewStyle(.circular)
+                                .tint(fillColor)
+                                .scaleEffect(1.35)
+                                .padding(.bottom, 2)
+                        }
+
+                        if let message {
+                            Text(message)
+                                .font(.system(size: 16, weight: .bold))
+                                .foregroundColor(fillColor.opacity(0.90))
+                        }
+                    }
+                    .offset(y: progressOffsetY + (showsProgressBar ? 34 : 10))
+                    .accessibilityElement(children: .combine)
+                    .accessibilityLabel(message ?? "Loading")
                 }
 
                 ZStack(alignment: .leading) {

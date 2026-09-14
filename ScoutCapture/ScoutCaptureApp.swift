@@ -182,7 +182,7 @@ struct ScoutCaptureApp: App {
         WindowGroup {
             PortraitLockedRootView(
                 rootView: AppRootView(
-                    skipStartupLoading: true,
+                    skipStartupLoading: false,
                     onInitialLaunchCompleted: markInitialLaunchCompleted
                 )
                     .environmentObject(appState)
@@ -196,7 +196,6 @@ struct ScoutCaptureApp: App {
                         appState.setLiveSyncMonitoringActive(false)
                     } else if newValue == .active {
                         appState.setLiveSyncMonitoringActive(true)
-                        appState.refreshBackupStatus()
                         appState.handleSceneDidBecomeActive()
                     }
                 }
@@ -510,11 +509,27 @@ private struct AppRootView: View {
     @State private var didStartWarmup: Bool = false
     @State private var launchProgress: Double = 0
     @State private var showsProgressBar: Bool = false
-    // Allow warm-launch hub fetch to complete more often before leaving splash.
-    private let warmLaunchTimeoutSeconds: TimeInterval = 1.9
+    @State private var propertyListReadinessTimedOut: Bool = false
+    @State private var homePropertyListReady: Bool = false
+    @State private var didStartHomePropertyListReadiness: Bool = false
+    @State private var homePropertyListReadinessTimedOut: Bool = false
+    // Keep first property-row badge/cloud hydration behind splash when possible.
+    private let warmLaunchTimeoutSeconds: TimeInterval = 15.0
 
     private var isAppReady: Bool {
         skipStartupLoading || (sessionHubReady && minimumLaunchDelayMet)
+    }
+
+    private var canPrepareHomePropertyList: Bool {
+        guard isAppReady else { return false }
+        guard appState.requiresAuthentication else { return true }
+        return appState.isAuthenticationReady &&
+            appState.isAuthenticated &&
+            appState.isOrganizationContextReady
+    }
+
+    private var initialPropertyListTimedOut: Bool {
+        propertyListReadinessTimedOut || homePropertyListReadinessTimedOut
     }
 
     var body: some View {
@@ -522,8 +537,10 @@ private struct AppRootView: View {
             if !isAppReady {
                 LoadingView(
                     progress: launchProgress,
-                    showsProgressBar: false,
-                    showsLogo: true
+                    showsProgressBar: showsProgressBar,
+                    showsLogo: true,
+                    message: "Loading properties...",
+                    showsSpinner: false
                 )
             } else if appState.requiresAuthentication && !appState.isAuthenticationReady {
                 LoadingView(
@@ -539,9 +556,32 @@ private struct AppRootView: View {
                     showsProgressBar: false,
                     showsLogo: true
                 )
+            } else if !homePropertyListReady {
+                LoadingView(
+                    progress: launchProgress,
+                    showsProgressBar: true,
+                    showsLogo: true,
+                    message: "Loading properties...",
+                    showsSpinner: false
+                )
             } else {
-                SessionHubView()
+                SessionHubView(initialPropertyListTimedOut: initialPropertyListTimedOut)
             }
+        }
+        .onChange(of: appState.isAuthenticationReady) { _, _ in
+            startHomePropertyListReadinessIfNeeded()
+        }
+        .onChange(of: appState.isAuthenticated) { _, _ in
+            startHomePropertyListReadinessIfNeeded()
+        }
+        .onChange(of: appState.isOrganizationContextReady) { _, _ in
+            startHomePropertyListReadinessIfNeeded()
+        }
+        .onChange(of: sessionHubReady) { _, _ in
+            startHomePropertyListReadinessIfNeeded()
+        }
+        .onChange(of: minimumLaunchDelayMet) { _, _ in
+            startHomePropertyListReadinessIfNeeded()
         }
         .task {
             guard !didStartWarmup else { return }
@@ -555,6 +595,7 @@ private struct AppRootView: View {
                     if appState.properties.isEmpty {
                         appState.refreshPropertiesInBackground()
                     }
+                    startHomePropertyListReadinessIfNeeded()
                 }
                 AddPropertyWarmup.prewarm()
                 OptionalDetailNoteWarmup.prewarm()
@@ -586,13 +627,14 @@ private struct AppRootView: View {
                         resumeOnce()
                         return
                     }
-                    print("[Launch] warm launch timed out; continuing app launch")
+                    propertyListReadinessTimedOut = true
                     sessionHubReady = true
                     advanceLaunchProgress(to: 0.88)
                     resumeOnce()
                 }
 
                 appState.warmLaunchReadiness {
+                    propertyListReadinessTimedOut = false
                     sessionHubReady = true
                     advanceLaunchProgress(to: 0.88)
                     resumeOnce()
@@ -603,9 +645,9 @@ private struct AppRootView: View {
             advanceLaunchProgress(to: 0.96)
             AddPropertyWarmup.prewarm()
             OptionalDetailNoteWarmup.prewarm()
-            advanceLaunchProgress(to: 1.0)
             try? await Task.sleep(nanoseconds: 60_000_000)
             minimumLaunchDelayMet = true
+            startHomePropertyListReadinessIfNeeded()
             onInitialLaunchCompleted()
         }
     }
@@ -617,11 +659,38 @@ private struct AppRootView: View {
             launchProgress = clamped
         }
     }
+
+    private func startHomePropertyListReadinessIfNeeded() {
+        guard canPrepareHomePropertyList else { return }
+        guard !homePropertyListReady, !didStartHomePropertyListReadiness else { return }
+        didStartHomePropertyListReadiness = true
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + warmLaunchTimeoutSeconds) {
+            guard !homePropertyListReady else { return }
+            homePropertyListReadinessTimedOut = true
+            advanceLaunchProgress(to: 1.0)
+            homePropertyListReady = true
+        }
+
+        Task { @MainActor in
+            await appState.prepareInitialHomePropertyListForDisplay(reason: "home_property_list_readiness")
+            guard !homePropertyListReady else {
+                if homePropertyListReadinessTimedOut {
+                    homePropertyListReadinessTimedOut = false
+                }
+                return
+            }
+            homePropertyListReadinessTimedOut = false
+            advanceLaunchProgress(to: 1.0)
+            homePropertyListReady = true
+        }
+    }
 }
 
 struct SessionHubView: View {
     @EnvironmentObject private var appState: AppState
     @Environment(\.colorScheme) private var colorScheme
+    let initialPropertyListTimedOut: Bool
     private var localStore: LocalStore { appState.sharedLocalStore }
     @State private var path: [HubRoute] = []
     @State private var showAddProperty: Bool = false
@@ -663,6 +732,7 @@ struct SessionHubView: View {
     @State private var dismissedPendingInvitationIDs: Set<UUID> = []
     @State private var isPendingInviteActionInFlight: Bool = false
     @State private var pendingInvitePromptErrorMessage: String? = nil
+    @State private var isManualPropertyRefreshInFlight: Bool = false
 
     private let selectionHaptic = UIImpactFeedbackGenerator(style: .light)
     private let hiddenDebugTapWindow: TimeInterval = 1.5
@@ -756,6 +826,32 @@ struct SessionHubView: View {
         return false
     }
 
+    private var initialPropertyListUpdatingBanner: some View {
+        HStack(spacing: 10) {
+            ProgressView()
+                .progressViewStyle(.circular)
+                .scaleEffect(0.9)
+
+            Text("Still updating...")
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundColor(headerPrimaryLabel)
+
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+        .background(
+            colorScheme == .light
+                ? Color(.systemBlue).opacity(0.10)
+                : Color(.systemBlue).opacity(0.22)
+        )
+        .overlay(alignment: .bottom) {
+            Divider()
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Still updating property details")
+    }
+
     private var isCompactSearchMode: Bool {
         (isSearchExpanded && isSearchFieldFocused) || !normalizedSearchQuery.isEmpty
     }
@@ -769,6 +865,10 @@ struct SessionHubView: View {
             VStack(spacing: 0) {
                 if let invitation = visiblePendingInvitationPrompt {
                     pendingInvitationPrompt(invitation)
+                }
+
+                if initialPropertyListTimedOut {
+                    initialPropertyListUpdatingBanner
                 }
 
                 Group {
@@ -835,9 +935,6 @@ struct SessionHubView: View {
                             }
                         }
                         .id(appState.hubRowRefreshToken)
-                        .refreshable {
-                            await appState.refreshPropertiesAwaitingForegroundRefresh()
-                        }
                         .listStyle(.plain)
                     }
                 }
@@ -930,6 +1027,7 @@ struct SessionHubView: View {
             .onAppear {
                 isOpeningProperty = false
                 pressedPropertyID = nil
+                appState.markHomePropertyListVisible()
                 if appState.properties.isEmpty {
                     beginStartupPlaceholderHoldWindow()
                 } else {
@@ -1081,6 +1179,15 @@ struct SessionHubView: View {
         }
     }
 
+    private func runManualPropertyRefresh() {
+        guard !isManualPropertyRefreshInFlight else { return }
+        isManualPropertyRefreshInFlight = true
+        Task {
+            await appState.refreshPropertiesAwaitingForegroundRefresh()
+            isManualPropertyRefreshInFlight = false
+        }
+    }
+
     @ViewBuilder
     private func pendingInvitationPrompt(_ invitation: PendingOrganizationInvitation) -> some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -1174,15 +1281,13 @@ struct SessionHubView: View {
 
     @ViewBuilder
     private func propertyRow(_ property: Property) -> some View {
-        let isPressed = pressedPropertyID == property.id
-        let sessionsForProperty = appState.sessions(for: property.id).sorted { $0.startedAt > $1.startedAt }
         let badgeModel = appState.propertyCardBadgeModel(for: property.id)
-        let pendingSession = sessionsForProperty.first(where: { appState.isPendingDeliveryLocallyAvailable($0) })
-        let sessionUploadStatus = appState.sessionSnapshotCloudStatusForPropertyRow(propertyID: property.id)
+        let pendingSession = appState.propertyRowPendingDeliverySession(for: property.id)
+        let sessionUploadStatus = appState.propertyRowSessionSnapshotCloudStatus(propertyID: property.id)
         let uploadStatusChip = sessionUploadStatus.flatMap(sessionSnapshotUploadStatusChip)
         let hasDraft = badgeModel.showDraft
         let hasPendingExport = badgeModel.showPendingExport
-        let latestReExportSession = reExportCandidateSession(for: property.id)
+        let latestReExportSession = appState.propertyRowReExportCandidateSession(for: property.id)
         let hasReExportGlyph = badgeModel.showReExport && latestReExportSession != nil
         let manualExportSession = latestReExportSession ?? pendingSession
         let hasManualExportAction = manualExportSession != nil && (hasReExportGlyph || hasPendingExport)
@@ -1192,83 +1297,84 @@ struct SessionHubView: View {
         let hasPhoneActions = hasValidPhoneNumber(property)
         let hasStatusRow = hasDraft || hasPendingExport || hasReExportGlyph || uploadStatusChip != nil
         let showLock = badgeModel.showLock
-        HStack(alignment: .top, spacing: 10) {
-            VStack(alignment: .leading, spacing: 4) {
-                HStack(alignment: .firstTextBaseline, spacing: 6) {
-                    if hasReExportGlyph {
-                        Image(systemName: "arrow.clockwise.circle")
-                            .font(.system(size: 18, weight: .semibold))
-                            .foregroundColor(Color.green.opacity(0.92))
-                    }
-                    if showLock {
-                        Image(systemName: "lock.fill")
-                            .font(.system(size: 14, weight: .semibold))
-                            .foregroundColor(.red)
-                    }
-                    Text(property.name)
-                        .font(.system(size: 18, weight: .semibold))
-                        .foregroundColor(.primary)
-                        .lineLimit(1)
-                    if let sessionUploadStatus {
-                        sessionSnapshotCloudIcon(sessionUploadStatus)
-                    }
-                }
-
-                if let clientLine {
-                    Text(clientLine)
-                        .font(.system(size: 13, weight: .medium))
-                        .foregroundColor(.secondary)
-                        .lineLimit(1)
-                        .truncationMode(.tail)
-                }
-
-                if let addressLine {
-                    Text(addressLine)
-                        .font(.system(size: 13, weight: .medium))
-                        .foregroundColor(.secondary)
-                        .lineLimit(1)
-                        .truncationMode(.tail)
-                }
-            }
-
-            Spacer(minLength: 8)
-
-            VStack(alignment: .trailing, spacing: 6) {
-                if hasStatusRow {
-                    VStack(alignment: .trailing, spacing: 4) {
-                        HStack(spacing: 8) {
-                            if hasDraft {
-                                chipLabel("Draft", tint: .orange)
-                            }
-
-                            if hasPendingExport {
-                                chipLabel("Pending Export", tint: .blue)
-                            }
-
-                            if let uploadStatusChip {
-                                chipLabel(uploadStatusChip.title, tint: uploadStatusChip.tint)
-                            }
+        Button {
+            handlePropertyTap(property)
+        } label: {
+            HStack(alignment: .top, spacing: 10) {
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack(alignment: .firstTextBaseline, spacing: 6) {
+                        if hasReExportGlyph {
+                            Image(systemName: "arrow.clockwise.circle")
+                                .font(.system(size: 18, weight: .semibold))
+                                .foregroundColor(Color.green.opacity(0.92))
                         }
+                        if showLock {
+                            Image(systemName: "lock.fill")
+                                .font(.system(size: 14, weight: .semibold))
+                                .foregroundColor(.red)
+                        }
+                        Text(property.name)
+                            .font(.system(size: 18, weight: .semibold))
+                            .foregroundColor(.primary)
+                            .lineLimit(1)
+                        if let sessionUploadStatus {
+                            sessionSnapshotCloudIcon(sessionUploadStatus)
+                        }
+                    }
 
+                    if let clientLine {
+                        Text(clientLine)
+                            .font(.system(size: 13, weight: .medium))
+                            .foregroundColor(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                    }
+
+                    if let addressLine {
+                        Text(addressLine)
+                            .font(.system(size: 13, weight: .medium))
+                            .foregroundColor(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
                     }
                 }
 
+                Spacer(minLength: 8)
+
+                VStack(alignment: .trailing, spacing: 6) {
+                    if hasStatusRow {
+                        VStack(alignment: .trailing, spacing: 4) {
+                            HStack(spacing: 8) {
+                                if hasDraft {
+                                    chipLabel("Draft", tint: .orange)
+                                }
+
+                                if hasPendingExport {
+                                    chipLabel("Pending Export", tint: .blue)
+                                }
+
+                                if let uploadStatusChip {
+                                    chipLabel(uploadStatusChip.title, tint: uploadStatusChip.tint)
+                                }
+                            }
+
+                        }
+                    }
+
+                }
+                .frame(minHeight: (addressLine != nil ? (clientLine != nil ? 58 : 40) : 24), alignment: .top)
             }
-            .frame(minHeight: (addressLine != nil ? (clientLine != nil ? 58 : 40) : 24), alignment: .top)
+            .padding(.vertical, 8)
+            .padding(.horizontal, 10)
+            .contentShape(Rectangle())
         }
-        .padding(.vertical, 8)
-        .padding(.horizontal, 10)
-        .background(
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .fill(isPressed ? Color.blue.opacity(colorScheme == .light ? 0.22 : 0.30) : Color.clear)
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .stroke(isPressed ? Color.blue.opacity(colorScheme == .light ? 0.55 : 0.70) : .clear, lineWidth: 1)
-        )
-        .contentShape(Rectangle())
-        .onTapGesture {
-            handlePropertyTap(property, latestSession: sessionsForProperty.first, pendingSession: pendingSession)
+        .buttonStyle(.plain)
+        .onAppear {
+            appState.schedulePropertyRowDetailsHydration(
+                reason: "property_row_appeared",
+                propertyIDs: [property.id],
+                refreshCloudStatus: true
+            )
         }
         .contextMenu {
             Button("Manage Sessions") {
@@ -1539,6 +1645,32 @@ struct SessionHubView: View {
             if !isSearchExpanded {
                 ZStack {
                     HStack {
+                        Button {
+                            runManualPropertyRefresh()
+                        } label: {
+                            Group {
+                                if isManualPropertyRefreshInFlight {
+                                    ProgressView()
+                                        .progressViewStyle(.circular)
+                                        .scaleEffect(0.82)
+                                } else {
+                                    Image(systemName: "arrow.clockwise")
+                                        .font(.system(size: 18, weight: .medium))
+                                }
+                            }
+                            .foregroundColor(buttonLabel)
+                            .frame(width: 42, height: 42)
+                            .background(buttonFill)
+                            .clipShape(Circle())
+                            .overlay(
+                                Circle()
+                                    .stroke(buttonStroke, lineWidth: 1)
+                            )
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(isManualPropertyRefreshInFlight)
+                        .accessibilityLabel("Refresh properties")
+
                         Spacer(minLength: 0)
                         Button {
                             showSettingsSheet = true
@@ -1805,10 +1937,6 @@ struct SessionHubView: View {
 
     private func propertyHasPendingExport(_ property: Property) -> Bool {
         appState.propertyCardBadgeModel(for: property.id).showPendingExport
-    }
-
-    private func reExportCandidateSession(for propertyID: UUID) -> Session? {
-        appState.reExportCandidateSession(for: propertyID)
     }
 
     private func matchesPropertyFilter(_ property: Property) -> Bool {
@@ -3286,17 +3414,54 @@ struct SessionHubView: View {
         path.append(.propertySession(propertyID: property.id, resumeDraft: false))
     }
 
-    private func handlePropertyTap(
-        _ property: Property,
-        latestSession: Session?,
-        pendingSession: Session?
-    ) {
+    private func beginPropertyPressFeedback(propertyID: UUID) {
+        guard !isOpeningProperty, pressedPropertyID != propertyID else { return }
+        pressedPropertyID = propertyID
+        selectionHaptic.impactOccurred()
+        selectionHaptic.prepare()
+    }
+
+    private func isPropertyPressWithinTapDistance(_ translation: CGSize) -> Bool {
+        abs(translation.width) <= 12 && abs(translation.height) <= 12
+    }
+
+    private func handlePropertyPressChanged(propertyID: UUID, translation: CGSize) {
+        guard isPropertyPressWithinTapDistance(translation) else {
+            if pressedPropertyID == propertyID, !isOpeningProperty {
+                pressedPropertyID = nil
+            }
+            return
+        }
+        beginPropertyPressFeedback(propertyID: propertyID)
+    }
+
+    private func handlePropertyPressEnded(_ property: Property, translation: CGSize) {
+        guard isPropertyPressWithinTapDistance(translation) else {
+            if pressedPropertyID == property.id, !isOpeningProperty {
+                pressedPropertyID = nil
+            }
+            return
+        }
+        handlePropertyTap(property)
+    }
+
+    private func handlePropertyTap(_ property: Property) {
         guard !isOpeningProperty else { return }
         isOpeningProperty = true
         propertyTapToken += 1
         let tapToken = propertyTapToken
-        selectionHaptic.impactOccurred()
-        pressedPropertyID = property.id
+        beginPropertyPressFeedback(propertyID: property.id)
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.03) {
+            guard tapToken == propertyTapToken else { return }
+            continueAcceptedPropertyTap(property, tapToken: tapToken)
+        }
+    }
+
+    private func continueAcceptedPropertyTap(_ property: Property, tapToken: Int) {
+        let sessionsForProperty = appState.sessions(for: property.id).sorted { $0.startedAt > $1.startedAt }
+        let latestSession = sessionsForProperty.first
+        let pendingSession = sessionsForProperty.first(where: { appState.isPendingDeliveryLocallyAvailable($0) })
 
         let pending = pendingSession != nil
         let latestID = latestSession?.id.uuidString ?? "NONE"
@@ -12519,6 +12684,7 @@ struct PropertySessionView: View {
     @State private var isAwaitingInitialSessionTypeSelection: Bool = false
     @State private var sessionEntryBlock: AppState.SessionEntryCoordinationBlock? = nil
     @State private var didSchedulePostOpenReferenceReconcile: Bool = false
+    @State private var isVerifyingSessionAfterPresentation: Bool = false
 
     private let camera = CameraManager.shared
     private let timeoutSeconds: Double = 4.0
@@ -12530,6 +12696,10 @@ struct PropertySessionView: View {
                     exitCaptureScreen()
                 })
                 .transition(.opacity)
+                if isVerifyingSessionAfterPresentation {
+                    sessionVerificationOverlay
+                        .transition(.opacity)
+                }
             } else {
                 openingCameraInterstitial
                     .transition(.opacity)
@@ -12540,9 +12710,11 @@ struct PropertySessionView: View {
             .sheet(isPresented: $isAwaitingInitialSessionTypeSelection) {
                 InitialSessionTypeChoiceSheet(
                     onChoose: { sessionType in
-                        guard appState.persistCurrentSessionType(sessionType) != nil else { return }
                         isAwaitingInitialSessionTypeSelection = false
-                        beginOpenFlow(forceRetry: true)
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+                            guard appState.persistCurrentSessionType(sessionType) != nil else { return }
+                            beginOpenFlow(forceRetry: true)
+                        }
                     },
                     onBack: {
                         isAwaitingInitialSessionTypeSelection = false
@@ -12561,33 +12733,8 @@ struct PropertySessionView: View {
                 guard !didSetup else { return }
                 didSetup = true
                 appState.selectProperty(id: propertyID)
-                appState.beginPropertyOpenFreshnessCheck(propertyID: propertyID)
                 Task { @MainActor in
-                    let propertyStatusPreflight = await appState.evaluateFreshPropertyStatusEntryPreflight(
-                        propertyID: propertyID,
-                        context: "property_session_view"
-                    )
-                    if let block = propertyStatusPreflight.decision?.block {
-                        isCheckingSessionBeforeOpen = false
-                        sessionEntryBlock = block
-                        return
-                    }
-                    let skipCachedPropertyStatusPreflight = propertyStatusPreflight.skipCachedPropertyStatusPreflight
-                    if resumeDraft {
-                        if appState.currentSession?.propertyID != propertyID || appState.currentSession?.status != .draft {
-                            _ = appState.loadDraftSession(
-                                for: propertyID,
-                                skipPropertyStatusPreflight: skipCachedPropertyStatusPreflight
-                            )
-                        }
-                    } else {
-                        _ = appState.startSession(
-                            skipPropertyStatusPreflight: skipCachedPropertyStatusPreflight
-                        )
-                    }
-                    refreshSessionReadiness()
-                    isCheckingSessionBeforeOpen = false
-                    beginSessionCoordinationFlow()
+                    await runPropertyEntryFlow()
                 }
             }
             .onChange(of: appState.currentSession?.id) { _, _ in
@@ -12608,7 +12755,149 @@ struct PropertySessionView: View {
                     propertyID: request.propertyID
                 )
                 exitCaptureScreen()
+        }
+    }
+
+    @MainActor
+    private func runPropertyEntryFlow() async {
+        let targetSessionID = appState.preferredPropertyEntrySessionID(for: propertyID)
+        let lightweightStatus = await appState.evaluateLightweightPropertyEntryStatus(
+            propertyID: propertyID,
+            targetSessionID: targetSessionID
+        )
+
+        guard let lightweightStatus,
+              !lightweightStatus.requiresFallback,
+              lightweightStatus.entryState != .unknownRequiresFallback else {
+            await runLegacyCheckingSession(reason: "lightweight_rpc_fallback")
+            return
+        }
+
+        switch lightweightStatus.entryState {
+        case .unlockedAndClaimed:
+            let session = appState.startSession(
+                skipPropertyStatusPreflight: true,
+                preferredNewSessionID: targetSessionID
+            )
+            guard session?.id == targetSessionID else {
+                await runLegacyCheckingSession(reason: "lightweight_session_mismatch")
+                return
             }
+            finishAllowedFastEntry()
+
+        case .lockedByCurrentUser:
+            let desiredSessionID = lightweightStatus.lockSessionID ?? targetSessionID
+            let loadedSession: Session?
+            if appState.currentSession?.propertyID == propertyID,
+               appState.currentSession?.id == desiredSessionID,
+               appState.currentSession?.status == .draft {
+                loadedSession = appState.currentSession
+            } else {
+                loadedSession = appState.loadDraftSession(
+                    for: propertyID,
+                    skipPropertyStatusPreflight: true
+                )
+            }
+            guard loadedSession?.id == desiredSessionID else {
+                await runLegacyCheckingSession(reason: "lightweight_current_user_lock_missing_local_draft")
+                return
+            }
+            finishAllowedFastEntry()
+
+        case .lockedByOtherUser, .pendingExport:
+            guard let block = appState.sessionEntryBlock(for: lightweightStatus) else {
+                await runLegacyCheckingSession(reason: "lightweight_block_mapping_missing")
+                return
+            }
+            isCheckingSessionBeforeOpen = false
+            sessionEntryBlock = block
+
+        case .staleClaimable:
+            _ = appState.startSession(
+                skipPropertyStatusPreflight: true,
+                preferredNewSessionID: targetSessionID
+            )
+            refreshSessionReadiness()
+            guard appState.currentSession?.id == targetSessionID,
+                  let block = appState.sessionEntryBlock(for: lightweightStatus) else {
+                await runLegacyCheckingSession(reason: "lightweight_stale_claimable_session_missing")
+                return
+            }
+            isCheckingSessionBeforeOpen = false
+            sessionEntryBlock = block
+
+        case .unknownRequiresFallback:
+            await runLegacyCheckingSession(reason: "lightweight_unknown_requires_fallback")
+        }
+    }
+
+    @MainActor
+    private func runLegacyCheckingSession(reason _: String) async {
+        let propertyStatusPreflight = await appState.evaluateFreshPropertyStatusEntryPreflight(
+            propertyID: propertyID,
+            context: "property_session_view"
+        )
+        if let block = propertyStatusPreflight.decision?.block {
+            isCheckingSessionBeforeOpen = false
+            sessionEntryBlock = block
+            return
+        }
+        let skipCachedPropertyStatusPreflight = propertyStatusPreflight.skipCachedPropertyStatusPreflight
+        if resumeDraft {
+            if appState.currentSession?.propertyID != propertyID || appState.currentSession?.status != .draft {
+                _ = appState.loadDraftSession(
+                    for: propertyID,
+                    skipPropertyStatusPreflight: skipCachedPropertyStatusPreflight
+                )
+            }
+        } else {
+            _ = appState.startSession(
+                skipPropertyStatusPreflight: skipCachedPropertyStatusPreflight
+            )
+        }
+        refreshSessionReadiness()
+        isCheckingSessionBeforeOpen = false
+        if appState.canFastPresentCurrentMaterialDraftResume(propertyID: propertyID) {
+            beginOpenFlow(forceRetry: true)
+            beginSessionCoordinationFlow(openAfterAllowed: false)
+        } else {
+            beginSessionCoordinationFlow()
+        }
+    }
+
+    @MainActor
+    private func finishAllowedFastEntry() {
+        refreshSessionReadiness()
+        isCheckingSessionBeforeOpen = false
+        if appState.canFastPresentCurrentMaterialDraftResume(propertyID: propertyID) {
+            beginOpenFlow(forceRetry: true)
+            beginSessionCoordinationFlow(openAfterAllowed: false)
+        } else {
+            continueAfterSessionCoordinationAllowed()
+            beginSessionCoordinationFlow(openAfterAllowed: false)
+        }
+    }
+
+    @ViewBuilder
+    private var sessionVerificationOverlay: some View {
+        ZStack {
+            Color.black.opacity(0.28)
+                .ignoresSafeArea()
+
+            VStack(spacing: 12) {
+                ProgressView()
+                    .progressViewStyle(.circular)
+                    .tint(.white)
+                Text("Checking Session")
+                    .font(.system(size: 17, weight: .semibold))
+                    .foregroundColor(.white)
+            }
+            .padding(.horizontal, 20)
+            .padding(.vertical, 18)
+            .background(Color.black.opacity(0.78))
+            .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+        }
+        .allowsHitTesting(true)
     }
 
     @ViewBuilder
@@ -12769,11 +13058,15 @@ struct PropertySessionView: View {
     }
 
     private func completeOpenFlow() {
-        guard !showCameraContent else { return }
+        guard !showCameraContent, sessionEntryBlock == nil else { return }
+        appState.markCurrentSessionCameraEntryBegan()
         withAnimation(.easeInOut(duration: 0.14)) {
             showCameraContent = true
         }
-        schedulePostOpenReferenceReconcile()
+        if let session = appState.currentSession,
+           appState.hasMaterialDraftCaptures(session) {
+            schedulePostOpenReferenceReconcile()
+        }
         appState.ensureCurrentSessionMetadataInBackground()
     }
 
@@ -12789,7 +13082,14 @@ struct PropertySessionView: View {
         guard !didSchedulePostOpenReferenceReconcile else { return }
         didSchedulePostOpenReferenceReconcile = true
         let startedAt = Date()
-        Task {
+        let sessionID = appState.currentSession?.id
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 1_200_000_000)
+            guard showCameraContent,
+                  appState.selectedPropertyID == propertyID,
+                  appState.currentSession?.id == sessionID else {
+                return
+            }
             await appState.reconcileRemoteSessionContentForPropertyOpen(propertyID: propertyID)
             print(
                 "[PropertyOpenPerf] propertyID=\(propertyID.uuidString) " +
@@ -12803,7 +13103,10 @@ struct PropertySessionView: View {
         hasSessionReadyForProperty = session?.propertyID == propertyID && session?.status == .draft
     }
 
-    private func beginSessionCoordinationFlow(forceClaim: Bool = false) {
+    private func beginSessionCoordinationFlow(
+        forceClaim: Bool = false,
+        openAfterAllowed: Bool = true
+    ) {
         print(
             "[SessionCoordinationUI] event=begin " +
             "propertyID=\(propertyID.uuidString) " +
@@ -12816,10 +13119,13 @@ struct PropertySessionView: View {
                 isCheckingSessionCoordination = false
                 return
             }
-            beginOpenFlow(forceRetry: true)
+            if openAfterAllowed {
+                beginOpenFlow(forceRetry: true)
+            }
             return
         }
-        isCheckingSessionCoordination = true
+        isCheckingSessionCoordination = openAfterAllowed
+        isVerifyingSessionAfterPresentation = !openAfterAllowed
         sessionEntryBlock = nil
         Task {
             let status = await appState.evaluateSessionEntryCoordination(
@@ -12840,17 +13146,29 @@ struct PropertySessionView: View {
             }
             await MainActor.run {
                 isCheckingSessionCoordination = false
-            switch status {
-            case .allowed:
-                sessionEntryBlock = nil
-                continueAfterSessionCoordinationAllowed()
-            case .blocked(let block):
-                sessionEntryBlock = block
-                appState.locallyLockedPropertyIDs.insert(propertyID)
+                isVerifyingSessionAfterPresentation = false
+                switch status {
+                case .allowed:
+                    sessionEntryBlock = nil
+                    if openAfterAllowed {
+                        continueAfterSessionCoordinationAllowed()
+                    }
+                case .blocked(let block):
+                    isAwaitingInitialSessionTypeSelection = false
+                    openFlowToken += 1
+                    didStartOpenFlow = false
+                    camera.stopPreviewAsync()
+                    if showCameraContent {
+                        withAnimation(.easeInOut(duration: 0.14)) {
+                            showCameraContent = false
+                        }
+                    }
+                    sessionEntryBlock = block
+                    appState.locallyLockedPropertyIDs.insert(propertyID)
+                }
             }
         }
     }
-}
 
     private func claimBlockedSession() {
         if sessionEntryBlock?.blockContext == "pending_export",
@@ -12881,6 +13199,7 @@ struct PropertySessionView: View {
     private struct InitialSessionTypeChoiceSheet: View {
         let onChoose: (SessionType) -> Void
         let onBack: () -> Void
+        @State private var selectedSessionTypeBeingOpened: SessionType? = nil
 
         var body: some View {
             VStack(spacing: 16) {
@@ -12892,13 +13211,13 @@ struct PropertySessionView: View {
                         title: "Full Documentation",
                         subtitle: "Guided photos + flags + resolution required",
                         systemImage: "camera.metering.matrix",
-                        action: { onChoose(.fullDocumentation) }
+                        sessionType: .fullDocumentation
                     )
                     choiceButton(
                         title: "Punchlist Visit",
                         subtitle: "Active/RR items only, no guided requirements",
                         systemImage: "checklist",
-                        action: { onChoose(.punchlistVisit) }
+                        sessionType: .punchlistVisit
                     )
                 }
 
@@ -12907,6 +13226,7 @@ struct PropertySessionView: View {
                     .buttonStyle(.plain)
                     .foregroundColor(.secondary)
                     .padding(.top, 2)
+                    .disabled(selectedSessionTypeBeingOpened != nil)
             }
             .padding(.horizontal, 20)
             .padding(.vertical, 18)
@@ -12916,9 +13236,17 @@ struct PropertySessionView: View {
             title: String,
             subtitle: String,
             systemImage: String,
-            action: @escaping () -> Void
+            sessionType: SessionType
         ) -> some View {
-            Button(action: action) {
+            let isSelected = selectedSessionTypeBeingOpened == sessionType
+
+            return Button(action: {
+                guard selectedSessionTypeBeingOpened == nil else { return }
+                selectedSessionTypeBeingOpened = sessionType
+                DispatchQueue.main.async {
+                    onChoose(sessionType)
+                }
+            }) {
                 HStack(spacing: 12) {
                     Image(systemName: systemImage)
                         .font(.system(size: 22, weight: .semibold))
@@ -12932,17 +13260,25 @@ struct PropertySessionView: View {
                             .lineLimit(2)
                     }
                     Spacer(minLength: 0)
-                    Image(systemName: "chevron.right")
-                        .font(.system(size: 13, weight: .semibold))
-                        .foregroundColor(.secondary)
                 }
-                .foregroundColor(.primary)
                 .padding(.horizontal, 14)
                 .frame(minHeight: 72)
-                .background(Color(uiColor: .secondarySystemGroupedBackground))
-                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
             }
-            .buttonStyle(.plain)
+            .buttonStyle(SessionTypeChoiceButtonStyle(isSelected: isSelected))
+            .disabled(selectedSessionTypeBeingOpened != nil && !isSelected)
+            .accessibilityValue(isSelected ? "Selected" : "")
+        }
+    }
+
+    private struct SessionTypeChoiceButtonStyle: ButtonStyle {
+        let isSelected: Bool
+
+        func makeBody(configuration: Configuration) -> some View {
+            let isHighlighted = isSelected || configuration.isPressed
+
+            configuration.label
+                .background(isHighlighted ? Color.accentColor : Color(uiColor: .secondarySystemGroupedBackground))
+                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
         }
     }
 }
