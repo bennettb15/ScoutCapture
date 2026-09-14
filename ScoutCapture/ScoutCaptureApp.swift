@@ -12849,6 +12849,7 @@ struct PropertySessionView: View {
     @State private var sessionEntryBlock: AppState.SessionEntryCoordinationBlock? = nil
     @State private var didSchedulePostOpenReferenceReconcile: Bool = false
     @State private var isVerifyingSessionAfterPresentation: Bool = false
+    @State private var didUseLightweightFastEntry: Bool = false
 
     private let camera = CameraManager.shared
     private let timeoutSeconds: Double = 4.0
@@ -12947,7 +12948,7 @@ struct PropertySessionView: View {
                 await runLegacyCheckingSession(reason: "lightweight_session_mismatch")
                 return
             }
-            finishAllowedFastEntry()
+            finishAllowedFastEntry(deferInitialSessionTypePersistence: true)
 
         case .lockedByCurrentUser:
             let desiredSessionID = lightweightStatus.lockSessionID ?? targetSessionID
@@ -12980,7 +12981,7 @@ struct PropertySessionView: View {
                     return
                 }
             }
-            finishAllowedFastEntry()
+            finishAllowedFastEntry(deferInitialSessionTypePersistence: true)
 
         case .lockedByOtherUser, .pendingExport:
             guard let block = appState.sessionEntryBlock(for: lightweightStatus) else {
@@ -13044,7 +13045,8 @@ struct PropertySessionView: View {
     }
 
     @MainActor
-    private func finishAllowedFastEntry() {
+    private func finishAllowedFastEntry(deferInitialSessionTypePersistence: Bool = false) {
+        didUseLightweightFastEntry = deferInitialSessionTypePersistence
         refreshSessionReadiness()
         isCheckingSessionBeforeOpen = false
         if appState.canFastPresentCurrentMaterialDraftResume(propertyID: propertyID) {
@@ -13249,7 +13251,12 @@ struct PropertySessionView: View {
     private func continueAfterSessionCoordinationAllowed() {
         if appState.currentSessionRequiresInitialSessionTypeSelection(propertyID: propertyID) {
             if let initialSessionType {
-                guard appState.persistCurrentSessionType(initialSessionType) != nil else { return }
+                if didUseLightweightFastEntry {
+                    guard appState.applyCurrentSessionTypeForFastEntry(initialSessionType) != nil else { return }
+                    appState.persistCurrentSessionTypeAfterFastEntry(initialSessionType)
+                } else {
+                    guard appState.persistCurrentSessionType(initialSessionType) != nil else { return }
+                }
                 beginOpenFlow(forceRetry: true)
                 return
             }

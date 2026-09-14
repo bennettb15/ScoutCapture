@@ -2219,6 +2219,28 @@ final class Phase2C27FZ4PropertyStatusDiagnosticsTests: XCTestCase {
         )
     }
 
+    func testFastEntrySessionTypeAppliesInMemoryWithoutChangingSessionIdentity() throws {
+        let fixture = try makeCutoverFixture()
+        fixture.appState.selectProperty(id: fixture.property.id)
+        let sessionID = UUID()
+        let session = try XCTUnwrap(
+            fixture.appState.rebuildLightweightCurrentUserSessionShell(
+                propertyID: fixture.property.id,
+                sessionID: sessionID,
+                sessionType: .fullDocumentation
+            )
+        )
+
+        XCTAssertEqual(session.id, sessionID)
+        XCTAssertEqual(session.sessionType, .fullDocumentation)
+
+        let updated = try XCTUnwrap(fixture.appState.applyCurrentSessionTypeForFastEntry(.punchlistVisit))
+        XCTAssertEqual(updated.id, sessionID)
+        XCTAssertEqual(updated.sessionType, .punchlistVisit)
+        XCTAssertEqual(fixture.appState.currentSession?.id, sessionID)
+        XCTAssertEqual(fixture.appState.currentSession?.sessionType, .punchlistVisit)
+    }
+
     private struct CutoverFixture {
         let localStore: LocalStore
         let appState: AppState

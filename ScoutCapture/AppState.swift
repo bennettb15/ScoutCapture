@@ -48739,6 +48739,28 @@ final class AppState: ObservableObject {
         }
     }
 
+    @discardableResult
+    func applyCurrentSessionTypeForFastEntry(_ sessionType: SessionType) -> Session? {
+        guard var session = currentSession else { return nil }
+        session.sessionType = sessionType
+        currentSession = session
+        initialSessionTypeSelectedSessionIDs.insert(session.id)
+        return session
+    }
+
+    func persistCurrentSessionTypeAfterFastEntry(_ sessionType: SessionType, delayNanoseconds: UInt64 = 1_200_000_000) {
+        guard let sessionID = currentSession?.id else { return }
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: delayNanoseconds)
+            guard let self,
+                  self.currentSession?.id == sessionID,
+                  self.currentSession?.sessionType == sessionType else {
+                return
+            }
+            _ = self.persistCurrentSessionType(sessionType)
+        }
+    }
+
     func isPunchlistVisitSession(_ session: Session?) -> Bool {
         session?.sessionType == .punchlistVisit
     }
