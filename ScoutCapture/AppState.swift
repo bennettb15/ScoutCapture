@@ -41208,8 +41208,7 @@ final class AppState: ObservableObject {
     ) -> Bool {
         guard reason == "property_row_appeared" else { return true }
         if let suppressUntil = suppressPropertyRowAppearHydrationUntil,
-           now < suppressUntil,
-           propertyRowDetailsHydratedAtByPropertyID[propertyID] != nil {
+           now < suppressUntil {
             return false
         }
         guard !pendingPropertyRowDetailHydrationIDs.contains(propertyID) else { return false }
@@ -49830,9 +49829,9 @@ final class AppState: ObservableObject {
         }
     }
 
-    func triggerBackupForLifecycleEvent() {
+    func triggerBackupForLifecycleEvent(after delay: TimeInterval = 0) {
         cloudBackupManager?.setCaptureModeActive(false)
-        cloudBackupManager?.scheduleAutomaticBackup(after: 0)
+        cloudBackupManager?.scheduleAutomaticBackup(after: delay)
     }
 
     func handleSceneDidEnterBackground() {

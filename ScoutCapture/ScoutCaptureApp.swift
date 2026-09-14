@@ -1035,7 +1035,7 @@ struct SessionHubView: View {
                 } else {
                     placeholderHoldUntil = nil
                 }
-                appState.triggerBackupForLifecycleEvent()
+                appState.triggerBackupForLifecycleEvent(after: 8.0)
                 selectionHaptic.prepare()
             }
             .onChange(of: appState.hubTransientStatusMessage) { _, newValue in
