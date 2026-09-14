@@ -13294,7 +13294,7 @@ struct PropertySessionView: View {
             return
         }
         isCheckingSessionCoordination = openAfterAllowed
-        isVerifyingSessionAfterPresentation = !openAfterAllowed
+        isVerifyingSessionAfterPresentation = false
         sessionEntryBlock = nil
         Task {
             let status = await appState.evaluateSessionEntryCoordination(

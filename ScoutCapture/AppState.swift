@@ -7756,6 +7756,7 @@ final class AppState: ObservableObject {
     private var deferredPropertyRefreshWorkItem: DispatchWorkItem?
     private var deferredSceneActiveWorkItem: DispatchWorkItem?
     private var deferredForegroundBackupStatusWorkItem: DispatchWorkItem?
+    private var deferredLifecycleBackupWorkItem: DispatchWorkItem?
 #if DEBUG
     private var passwordRecoveryRequestOverride: PasswordRecoveryRequestOverride?
     private var syncDeltaFetchOverride: SyncDeltaFetchOverride?
@@ -49830,11 +49831,29 @@ final class AppState: ObservableObject {
     }
 
     func triggerBackupForLifecycleEvent(after delay: TimeInterval = 0) {
-        cloudBackupManager?.setCaptureModeActive(false)
-        cloudBackupManager?.scheduleAutomaticBackup(after: delay)
+        guard delay > 0 else {
+            deferredLifecycleBackupWorkItem?.cancel()
+            deferredLifecycleBackupWorkItem = nil
+            cloudBackupManager?.setCaptureModeActive(false)
+            cloudBackupManager?.scheduleAutomaticBackup(after: 0)
+            return
+        }
+
+        deferredLifecycleBackupWorkItem?.cancel()
+        let item = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.deferredLifecycleBackupWorkItem = nil
+            guard self.currentSession?.status != .draft else { return }
+            self.cloudBackupManager?.setCaptureModeActive(false)
+            self.cloudBackupManager?.scheduleAutomaticBackup(after: 0)
+        }
+        deferredLifecycleBackupWorkItem = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: item)
     }
 
     func handleSceneDidEnterBackground() {
+        deferredLifecycleBackupWorkItem?.cancel()
+        deferredLifecycleBackupWorkItem = nil
         deferredForegroundBackupStatusWorkItem?.cancel()
         deferredForegroundBackupStatusWorkItem = nil
         cloudBackupManager?.scheduleAutomaticBackup(after: 0)
