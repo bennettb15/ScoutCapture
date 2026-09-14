@@ -3386,9 +3386,10 @@ struct SessionHubView: View {
                         title: "Punchlist Visit",
                         subtitle: "Active/RR items only, no guided requirements",
                         systemImage: "checklist",
-                        isEnabled: false,
-                        disabledCaption: "Not enabled in this build"
+                        isEnabled: true,
+                        disabledCaption: nil
                     ) {
+                        beginInitialPunchlistEntry(for: property)
                     }
                 }
 
@@ -3650,6 +3651,14 @@ struct SessionHubView: View {
     }
 
     private func beginInitialFullDocumentationEntry(for property: Property) {
+        beginInitialSessionEntry(for: property, sessionType: .fullDocumentation)
+    }
+
+    private func beginInitialPunchlistEntry(for property: Property) {
+        beginInitialSessionEntry(for: property, sessionType: .punchlistVisit)
+    }
+
+    private func beginInitialSessionEntry(for property: Property, sessionType: SessionType) {
         guard initialSessionTypePickerProperty?.id == property.id else { return }
         initialSessionTypePickerProperty = nil
         isOpeningProperty = true
@@ -3660,7 +3669,7 @@ struct SessionHubView: View {
         selectionHaptic.impactOccurred()
         selectionHaptic.prepare()
         DispatchQueue.main.async {
-            openProperty(property, initialSessionType: .fullDocumentation)
+            openProperty(property, initialSessionType: sessionType)
         }
     }
 
