@@ -7108,6 +7108,7 @@ final class AppState: ObservableObject {
     @Published private(set) var propertyOpenFreshnessByPropertyID: [UUID: PropertyOpenFreshnessSnapshot] = [:]
     private var propertyOpenFreshnessHydrationRecheckPropertyIDs: Set<UUID> = []
     private var propertyOpenFreshnessCheckInFlightPropertyIDs: Set<UUID> = []
+    private var propertyOpenHeaderStatusCheckInFlightPropertyIDs: Set<UUID> = []
 
     @Published var selectedPropertyID: UUID? {
         didSet {
@@ -44886,11 +44887,112 @@ final class AppState: ObservableObject {
     func selectProperty(id: UUID) {
         selectedPropertyID = id
         markPropertyActivated(id: id)
-        beginPropertyOpenFreshnessCheck(propertyID: id)
+        beginPropertyOpenHeaderStatusRefresh(propertyID: id)
     }
 
     func propertyOpenFreshness(for propertyID: UUID) -> PropertyOpenFreshnessSnapshot? {
         propertyOpenFreshnessByPropertyID[propertyID]
+    }
+
+    private func beginPropertyOpenHeaderStatusRefresh(propertyID: UUID) {
+        guard let localProperty = properties.first(where: { $0.id == propertyID }) ??
+                allProperties.first(where: { $0.id == propertyID }) else {
+            propertyOpenFreshnessByPropertyID[propertyID] = PropertyOpenFreshnessSnapshot(
+                propertyID: propertyID,
+                status: .unknown,
+                checkedAt: Date(),
+                localUpdatedAt: nil,
+                remoteUpdatedAt: nil,
+                remoteRevision: nil,
+                hasUnsyncedLocalPropertyWork: false,
+                reason: "local_property_missing"
+            )
+            return
+        }
+
+        guard isRemotePropertyRefreshEnabled,
+              let activeOrganizationID else {
+            propertyOpenFreshnessByPropertyID[propertyID] = PropertyOpenFreshnessSnapshot(
+                propertyID: propertyID,
+                status: .usingLocalCache,
+                checkedAt: Date(),
+                localUpdatedAt: localProperty.updatedAt,
+                remoteUpdatedAt: nil,
+                remoteRevision: nil,
+                hasUnsyncedLocalPropertyWork: false,
+                reason: "remote_scope_unavailable"
+            )
+            return
+        }
+
+        guard !propertyOpenHeaderStatusCheckInFlightPropertyIDs.contains(propertyID) else { return }
+        propertyOpenHeaderStatusCheckInFlightPropertyIDs.insert(propertyID)
+        propertyOpenFreshnessByPropertyID[propertyID] = PropertyOpenFreshnessSnapshot(
+            propertyID: propertyID,
+            status: .checkingCloudStatus,
+            checkedAt: Date(),
+            localUpdatedAt: localProperty.updatedAt,
+            remoteUpdatedAt: nil,
+            remoteRevision: nil,
+            hasUnsyncedLocalPropertyWork: false,
+            reason: "checking_header_status"
+        )
+
+        Task { [weak self] in
+            guard let self else { return }
+            defer {
+                Task { @MainActor in
+                    self.propertyOpenHeaderStatusCheckInFlightPropertyIDs.remove(propertyID)
+                }
+            }
+
+            let hasUnsyncedLocalPropertyWork = Self.hasUnsyncedLocalPropertyWork(
+                propertyID: propertyID,
+                queuedMutations: (try? localStore.fetchQueuedMutations()) ?? []
+            )
+
+            do {
+                let remote = try await fetchRemotePropertyFreshness(
+                    propertyID: propertyID,
+                    activeOrganizationID: activeOrganizationID
+                )
+                let evaluation = Self.evaluatePropertyOpenFreshness(
+                    localPropertyID: localProperty.id,
+                    localOrgID: localProperty.orgId,
+                    localUpdatedAt: localProperty.updatedAt,
+                    localIsArchived: localProperty.isArchived,
+                    activeOrganizationID: activeOrganizationID,
+                    remote: remote,
+                    hasUnsyncedLocalPropertyWork: hasUnsyncedLocalPropertyWork
+                )
+                await MainActor.run {
+                    self.propertyOpenFreshnessByPropertyID[propertyID] = PropertyOpenFreshnessSnapshot(
+                        propertyID: propertyID,
+                        status: evaluation.status,
+                        checkedAt: Date(),
+                        localUpdatedAt: localProperty.updatedAt,
+                        remoteUpdatedAt: remote?.updatedAt,
+                        remoteRevision: remote?.revision,
+                        hasUnsyncedLocalPropertyWork: hasUnsyncedLocalPropertyWork,
+                        reason: "header_status_\(evaluation.reason)"
+                    )
+                }
+            } catch {
+                let status = Self.propertyOpenFreshnessStatusForRemoteFailure(error)
+                await MainActor.run {
+                    self.propertyOpenFreshnessByPropertyID[propertyID] = PropertyOpenFreshnessSnapshot(
+                        propertyID: propertyID,
+                        status: status,
+                        checkedAt: Date(),
+                        localUpdatedAt: localProperty.updatedAt,
+                        remoteUpdatedAt: nil,
+                        remoteRevision: nil,
+                        hasUnsyncedLocalPropertyWork: hasUnsyncedLocalPropertyWork,
+                        reason: "header_status_\(Self.diagnosticErrorCategory(for: error).rawValue)"
+                    )
+                }
+            }
+        }
     }
 
     static func shouldRecheckPropertyOpenFreshnessAfterOperationalMediaHydration(
