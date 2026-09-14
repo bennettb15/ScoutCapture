@@ -740,7 +740,7 @@ struct SessionHubView: View {
     private let startupPlaceholderHoldSeconds: TimeInterval = 8.0
 
     private enum HubRoute: Hashable {
-        case propertySession(propertyID: UUID, resumeDraft: Bool)
+        case propertySession(propertyID: UUID, resumeDraft: Bool, initialSessionType: SessionType?)
     }
 
     private enum PropertyListFilter {
@@ -947,10 +947,11 @@ struct SessionHubView: View {
             }
             .navigationDestination(for: HubRoute.self) { route in
                 switch route {
-                case let .propertySession(propertyID, resumeDraft):
+                case let .propertySession(propertyID, resumeDraft, initialSessionType):
                     PropertySessionView(
                         propertyID: propertyID,
                         resumeDraft: resumeDraft,
+                        initialSessionType: initialSessionType,
                         onPendingExportRecovered: { property, session in
                             pendingExportPromptProperty = property
                             pendingExportPromptSession = session
@@ -1060,7 +1061,7 @@ struct SessionHubView: View {
                 }
             }
             .onChange(of: path) { oldPath, newPath in
-                if case let .propertySession(propertyID, _) = oldPath.last,
+                if case let .propertySession(propertyID, _, _) = oldPath.last,
                    newPath.isEmpty {
                     appState.refreshPropertySessionState(propertyID: propertyID)
                 }
@@ -3372,16 +3373,23 @@ struct SessionHubView: View {
                     .foregroundColor(headerPrimaryLabel)
 
                 VStack(spacing: 10) {
-                    inactiveInitialSessionChoiceButton(
+                    initialSessionChoiceButton(
                         title: "Full Documentation",
                         subtitle: "Guided photos + flags + resolution required",
-                        systemImage: "camera.metering.matrix"
-                    )
-                    inactiveInitialSessionChoiceButton(
+                        systemImage: "camera.metering.matrix",
+                        isEnabled: true,
+                        disabledCaption: nil
+                    ) {
+                        beginInitialFullDocumentationEntry(for: property)
+                    }
+                    initialSessionChoiceButton(
                         title: "Punchlist Visit",
                         subtitle: "Active/RR items only, no guided requirements",
-                        systemImage: "checklist"
-                    )
+                        systemImage: "checklist",
+                        isEnabled: false,
+                        disabledCaption: "Not enabled in this build"
+                    ) {
+                    }
                 }
 
                 Button {
@@ -3410,12 +3418,15 @@ struct SessionHubView: View {
         .allowsHitTesting(true)
     }
 
-    private func inactiveInitialSessionChoiceButton(
+    private func initialSessionChoiceButton(
         title: String,
         subtitle: String,
-        systemImage: String
+        systemImage: String,
+        isEnabled: Bool,
+        disabledCaption: String?,
+        action: @escaping () -> Void
     ) -> some View {
-        Button(action: {}) {
+        Button(action: action) {
             HStack(spacing: 12) {
                 Image(systemName: systemImage)
                     .font(.system(size: 22, weight: .semibold))
@@ -3427,28 +3438,36 @@ struct SessionHubView: View {
                         .font(.system(size: 13, weight: .medium))
                         .foregroundColor(.secondary)
                         .lineLimit(2)
-                    Text("Not enabled in this build")
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundColor(.secondary.opacity(0.82))
+                    if let disabledCaption {
+                        Text(disabledCaption)
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundColor(.secondary.opacity(0.82))
+                    }
                 }
                 Spacer(minLength: 0)
-                Image(systemName: "lock.fill")
-                    .font(.system(size: 13, weight: .bold))
-                    .foregroundColor(.secondary.opacity(0.70))
+                if isEnabled {
+                    Image(systemName: "arrow.right.circle.fill")
+                        .font(.system(size: 20, weight: .semibold))
+                        .foregroundColor(.blue)
+                } else {
+                    Image(systemName: "lock.fill")
+                        .font(.system(size: 13, weight: .bold))
+                        .foregroundColor(.secondary.opacity(0.70))
+                }
             }
-            .foregroundColor(.secondary)
+            .foregroundColor(isEnabled ? headerPrimaryLabel : .secondary)
             .padding(.horizontal, 14)
             .frame(minHeight: 82)
-            .background(Color(.tertiarySystemFill))
+            .background(isEnabled ? Color.blue.opacity(colorScheme == .light ? 0.10 : 0.18) : Color(.tertiarySystemFill))
             .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
             .overlay(
                 RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .stroke(Color.secondary.opacity(0.18), lineWidth: 1)
+                    .stroke(isEnabled ? Color.blue.opacity(0.30) : Color.secondary.opacity(0.18), lineWidth: 1)
             )
-            .opacity(0.78)
+            .opacity(isEnabled ? 1 : 0.78)
         }
         .buttonStyle(.plain)
-        .disabled(true)
+        .disabled(!isEnabled)
     }
 
     private func matchesSearch(_ property: Property) -> Bool {
@@ -3508,7 +3527,11 @@ struct SessionHubView: View {
     private func openProperty(_ property: Property) {
         // PropertySessionView sets selected property on appear.
         // Avoid duplicating that state write during the navigation push.
-        path.append(.propertySession(propertyID: property.id, resumeDraft: false))
+        path.append(.propertySession(propertyID: property.id, resumeDraft: false, initialSessionType: nil))
+    }
+
+    private func openProperty(_ property: Property, initialSessionType: SessionType) {
+        path.append(.propertySession(propertyID: property.id, resumeDraft: false, initialSessionType: initialSessionType))
     }
 
     private func beginPropertyPressFeedback(propertyID: UUID) {
@@ -3624,6 +3647,21 @@ struct SessionHubView: View {
             pressedPropertyID = nil
         }
         selectionHaptic.prepare()
+    }
+
+    private func beginInitialFullDocumentationEntry(for property: Property) {
+        guard initialSessionTypePickerProperty?.id == property.id else { return }
+        initialSessionTypePickerProperty = nil
+        isOpeningProperty = true
+        propertyTapToken += 1
+        if pressedPropertyID == property.id {
+            pressedPropertyID = nil
+        }
+        selectionHaptic.impactOccurred()
+        selectionHaptic.prepare()
+        DispatchQueue.main.async {
+            openProperty(property, initialSessionType: .fullDocumentation)
+        }
     }
 
     private func beginPendingExport(for property: Property, session: Session) {
@@ -12787,6 +12825,7 @@ struct PropertySessionView: View {
     @Environment(\.dismiss) private var dismiss
     let propertyID: UUID
     let resumeDraft: Bool
+    let initialSessionType: SessionType?
     let onPendingExportRecovered: (Property, Session) -> Void
 
     @State private var didSetup: Bool = false
@@ -13188,6 +13227,11 @@ struct PropertySessionView: View {
 
     private func continueAfterSessionCoordinationAllowed() {
         if appState.currentSessionRequiresInitialSessionTypeSelection(propertyID: propertyID) {
+            if let initialSessionType {
+                guard appState.persistCurrentSessionType(initialSessionType) != nil else { return }
+                beginOpenFlow(forceRetry: true)
+                return
+            }
             isAwaitingInitialSessionTypeSelection = true
             return
         }
