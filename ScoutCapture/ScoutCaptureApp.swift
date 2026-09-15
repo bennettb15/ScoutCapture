@@ -3580,17 +3580,29 @@ struct SessionHubView: View {
     }
 
     private func continueAcceptedPropertyTap(_ property: Property, tapToken: Int) {
-        let sessionsForProperty = appState.sessions(for: property.id).sorted { $0.startedAt > $1.startedAt }
-        let latestSession = sessionsForProperty.first
-        let pendingSession = sessionsForProperty.first(where: { appState.isPendingDeliveryLocallyAvailable($0) })
+        let badgeModel = appState.propertyCardBadgeModel(for: property.id)
+        let pendingSession = appState.propertyRowPendingDeliverySession(for: property.id)
+        let hasPendingExport = badgeModel.showPendingExport
+        let hasDraft = badgeModel.showDraft
 
-        let pending = pendingSession != nil
-        let latestID = latestSession?.id.uuidString ?? "NONE"
-        let isBaseline = latestSession.map { property.baselineSessionID == $0.id } ?? false
-        let sealed = latestSession?.isSealed ?? false
-        let firstDelivered = latestSession?.firstDeliveredAt.map { "\($0)" } ?? "nil"
-        let action = pending ? "promptDeliver" : "openCamera"
-        verboseLog("[PropertyTap] propertyID=\(property.id.uuidString) latestSessionID=\(latestID) isBaseline=\(isBaseline) sealed=\(sealed) firstDeliveredAt=\(firstDelivered) pending=\(pending) action=\(action)")
+        let latestID = pendingSession?.id.uuidString ??
+            badgeModel.activeOccupancySessionID?.uuidString ??
+            badgeModel.materialDraftSessionID?.uuidString ??
+            "NONE"
+        let isBaseline = pendingSession.map { property.baselineSessionID == $0.id } ?? false
+        let sealed = pendingSession?.isSealed ?? false
+        let firstDelivered = pendingSession?.firstDeliveredAt.map { "\($0)" } ?? "nil"
+        let action: String
+        if pendingSession != nil {
+            action = "promptDeliver"
+        } else if hasPendingExport {
+            action = "openPendingExportGate"
+        } else if !hasDraft {
+            action = "showSessionTypePicker"
+        } else {
+            action = "openCamera"
+        }
+        verboseLog("[PropertyTap] propertyID=\(property.id.uuidString) latestSessionID=\(latestID) isBaseline=\(isBaseline) sealed=\(sealed) firstDeliveredAt=\(firstDelivered) pending=\(pendingSession != nil) cachedPendingExport=\(hasPendingExport) draft=\(hasDraft) action=\(action) badgeSource=\(badgeModel.badgeSource)")
         if let pendingSession {
             isOpeningProperty = false
             pendingExportPromptProperty = property
@@ -3601,7 +3613,15 @@ struct SessionHubView: View {
             }
             return
         }
-        if !appState.propertyCardBadgeModel(for: property.id).showDraft {
+        if hasPendingExport {
+            openProperty(property)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) {
+                guard tapToken == propertyTapToken else { return }
+                if pressedPropertyID == property.id { pressedPropertyID = nil }
+            }
+            return
+        }
+        if !hasDraft {
             isOpeningProperty = false
             initialSessionTypePickerProperty = property
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.20) {
