@@ -3947,10 +3947,7 @@ struct ContentView: View {
     }
 
     private var currentSessionScopedPropertyID: UUID? {
-        guard let session = appState.currentSession else { return nil }
-        guard let selectedPropertyID = appState.selectedPropertyID else { return nil }
-        guard session.propertyID == selectedPropertyID else { return nil }
-        return selectedPropertyID
+        appState.selectedCaptureRuntimeContext?.propertyID
     }
 
     private var shouldShowStartingCameraOverlay: Bool {
@@ -3966,7 +3963,7 @@ struct ContentView: View {
     }
 
     private var isPunchlistVisitSession: Bool {
-        appState.currentSession?.sessionType == .punchlistVisit
+        appState.selectedCaptureRuntimeContext?.sessionType == .punchlistVisit
     }
 
     private var shouldAllowChecklistReferenceFallback: Bool {
@@ -3974,9 +3971,8 @@ struct ContentView: View {
     }
 
     private var isCurrentSessionBaselineFromPersisted: Bool {
-        guard let propertyID = currentSessionScopedPropertyID else { return false }
-        guard let sessionID = appState.currentSession?.id else { return false }
-        return persistedBaselineState(propertyID: propertyID).baselineSessionID == sessionID
+        guard let context = appState.selectedCaptureRuntimeContext else { return false }
+        return persistedBaselineState(propertyID: context.propertyID).baselineSessionID == context.sessionID
     }
 
     private var guidedRemainingForCompass: Int {
@@ -7130,7 +7126,7 @@ struct ContentView: View {
             mode: .activeIssues,
             observations: activeObservations,
             isHydrating: activeIssuesSheetHydrating,
-            currentSessionID: appState.currentSession?.id,
+            currentSessionID: appState.selectedCaptureRuntimeContext?.sessionID,
             sessionShotIDs: activeSessionShotIDs,
             resolvedThumbnailPathByID: flaggedResolvedThumbnailPathByID,
             referencePathByID: flaggedReferencePathByID,
@@ -7180,7 +7176,7 @@ struct ContentView: View {
             mode: .resolutionRequired,
             observations: resolutionRequiredObservations,
             isHydrating: resolutionRequiredSheetHydrating,
-            currentSessionID: appState.currentSession?.id,
+            currentSessionID: appState.selectedCaptureRuntimeContext?.sessionID,
             sessionShotIDs: activeSessionShotIDs,
             resolvedThumbnailPathByID: flaggedResolvedThumbnailPathByID,
             referencePathByID: flaggedReferencePathByID,
@@ -7234,11 +7230,11 @@ struct ContentView: View {
             retiredGuidedShots: retiredGuidedShots,
             resolvedThumbnailPathByID: guidedResolvedThumbnailPathByID,
             referencePathByID: guidedReferencePathByID,
-            currentSessionID: appState.currentSession?.id,
-            currentSessionStartedAt: appState.currentSession?.startedAt,
-            currentSessionEndedAt: appState.currentSession?.endedAt,
+            currentSessionID: appState.selectedCaptureRuntimeContext?.sessionID,
+            currentSessionStartedAt: appState.selectedCaptureRuntimeContext?.startedAt,
+            currentSessionEndedAt: appState.selectedCaptureRuntimeContext?.endedAt,
             currentSessionShotIDs: activeSessionShotIDs,
-            canChangeShotLifecycle: appState.currentSession?.status == .draft && appState.currentSession?.isSealed == false,
+            canChangeShotLifecycle: appState.selectedCaptureRuntimeContext?.canCapture == true,
             isBaselineSession: isCurrentSessionBaselineFromPersisted,
             allowReferenceFallback: shouldAllowChecklistReferenceFallback,
             captureProfile: captureProfile,

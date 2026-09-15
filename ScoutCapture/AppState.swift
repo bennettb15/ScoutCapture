@@ -7374,6 +7374,19 @@ final class AppState: ObservableObject {
         return properties.first { $0.id == selectedPropertyID }
     }
 
+    var captureRuntimeContext: CaptureRuntimeContext? {
+        currentSession.map(CaptureRuntimeContext.init)
+    }
+
+    var selectedCaptureRuntimeContext: CaptureRuntimeContext? {
+        guard let selectedPropertyID,
+              let context = captureRuntimeContext,
+              context.propertyID == selectedPropertyID else {
+            return nil
+        }
+        return context
+    }
+
     func clearLocalDiagnostics() {
         mutateLocalDiagnostics { diagnostics in
             diagnostics = LocalDiagnosticsState()

@@ -1911,6 +1911,32 @@ struct Session: Codable, Identifiable, Equatable {
     }
 }
 
+struct CaptureRuntimeContext: Equatable {
+    let sessionID: UUID
+    let propertyID: UUID
+    let sessionType: SessionType
+    let startedAt: Date
+    let status: Session.Status
+    let endedAt: Date?
+    let isSealed: Bool
+    let captureProfile: CaptureProfile?
+
+    var canCapture: Bool {
+        status == .draft && !isSealed
+    }
+
+    nonisolated init(session: Session) {
+        sessionID = session.id
+        propertyID = session.propertyID
+        sessionType = session.sessionType
+        startedAt = session.startedAt
+        status = session.status
+        endedAt = session.endedAt
+        isSealed = session.isSealed
+        captureProfile = session.captureProfile
+    }
+}
+
 enum SkipReason: String, Codable, CaseIterable {
     case inaccessible
     case obstructed
