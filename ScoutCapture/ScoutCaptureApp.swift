@@ -706,6 +706,7 @@ struct SessionHubView: View {
     @State private var fastLaneOpeningProperty: Property? = nil
     @State private var fastLanePreviewRequest: FastRuntimeCameraPreviewRequest? = nil
     @State private var fastLaneCloseResult: AppState.FastRuntimePrototypeCloseResult? = nil
+    @State private var fastLaneDraftIssue: FastLaneDraftIssue? = nil
     @State private var isPreparingPendingExport: Bool = false
     @State private var pendingExportFile: PendingExportFile? = nil
     @State private var pendingExportChecklist = ExportChecklistState()
@@ -1049,6 +1050,18 @@ struct SessionHubView: View {
                 )
                 .environmentObject(appState)
                 .interactiveDismissDisabled(true)
+            }
+            .alert(item: $fastLaneDraftIssue) { issue in
+                Alert(
+                    title: Text("Fast-Lane Draft Needs Cleanup"),
+                    message: Text(issue.message),
+                    primaryButton: .destructive(Text("Clear Fast-Lane Drafts")) {
+                        clearFastLaneDraftsFromIssue()
+                    },
+                    secondaryButton: .default(Text("Use Legacy Path")) {
+                        openLegacyPathAfterFastLaneIssue(issue.property)
+                    }
+                )
             }
             .onAppear {
                 isOpeningProperty = false
@@ -3750,22 +3763,9 @@ struct SessionHubView: View {
                 )
             } else {
                 isOpeningProperty = false
-                fastLaneCloseResult = AppState.FastRuntimePrototypeCloseResult(
-                    propertyID: property.id,
-                    propertyName: fastDraftResumeState.propertyName,
-                    sessionID: fastDraftResumeState.summary?.sessionID ?? UUID(),
-                    draftPersisted: false,
-                    photoCount: fastDraftResumeState.summary?.photoCount ?? 0,
-                    lockAction: "not_checked",
-                    tempDiscarded: false,
-                    draftRootPath: fastDraftResumeState.summary?.draftRootPath,
-                    errorMessage: fastDraftResumeState.errorMessage ?? "Fast-lane draft resume state is unavailable.",
-                    timings: AppState.FastRuntimePrototypeCloseTimings(
-                        persistMilliseconds: nil,
-                        releaseMilliseconds: nil,
-                        cleanupMilliseconds: nil,
-                        totalMilliseconds: 0
-                    )
+                fastLaneDraftIssue = FastLaneDraftIssue(
+                    property: property,
+                    message: fastDraftResumeState.errorMessage ?? "Fast-lane draft resume state is unavailable."
                 )
             }
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.20) {
@@ -3830,6 +3830,37 @@ struct SessionHubView: View {
             storageRoot: storageRoot,
             isDraftResume: true
         )
+    }
+
+    private func clearFastLaneDraftsFromIssue() {
+        fastLaneCloseResult = nil
+        Task {
+            let result = await appState.clearFastRuntimePrototypeState()
+            await MainActor.run {
+                fastLaneCloseResult = AppState.FastRuntimePrototypeCloseResult(
+                    propertyID: UUID(),
+                    propertyName: "Fast-Lane Cleanup",
+                    sessionID: UUID(),
+                    draftPersisted: false,
+                    photoCount: 0,
+                    lockAction: "cleanup \(result.claimReleaseSuccessCount)/\(result.claimReleaseAttemptCount)",
+                    tempDiscarded: result.draftFolderDeleted || result.tempFoldersDeletedCount > 0,
+                    draftRootPath: nil,
+                    errorMessage: result.summary,
+                    timings: AppState.FastRuntimePrototypeCloseTimings(
+                        persistMilliseconds: nil,
+                        releaseMilliseconds: nil,
+                        cleanupMilliseconds: nil,
+                        totalMilliseconds: 0
+                    )
+                )
+            }
+        }
+    }
+
+    private func openLegacyPathAfterFastLaneIssue(_ property: Property) {
+        isOpeningProperty = true
+        openProperty(property)
     }
 
     private func handleHiddenDebugTap() {
@@ -12390,6 +12421,12 @@ private struct FastRuntimeCameraPreviewRequest: Identifiable {
     let isDraftResume: Bool
 }
 
+private struct FastLaneDraftIssue: Identifiable {
+    let id = UUID()
+    let property: Property
+    let message: String
+}
+
 private struct DebugFastRuntimePrototypeView: View {
     @EnvironmentObject private var appState: AppState
     @Environment(\.dismiss) private var dismiss
@@ -12701,6 +12738,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
     @State private var captureErrorMessage: String?
     @State private var lastCapture: FastRuntimePreviewCaptureTiming?
     @State private var fastStorageRoot: URL?
+    @State private var isTimingExpanded: Bool = false
 
     var body: some View {
         ZStack {
@@ -12757,27 +12795,46 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
 
                 VStack(alignment: .leading, spacing: 2) {
                     Text(propertyName)
-                        .font(.system(size: 13, weight: .semibold))
+                        .font(.system(size: 15, weight: .semibold))
                         .foregroundColor(.white)
                         .lineLimit(1)
-                    Text("\(context.sessionType.rawValue) - \(context.sessionID.uuidString.prefix(8))")
-                        .font(.system(size: 11, weight: .medium, design: .monospaced))
+                    Text("\(sessionTypeLabel) - \(isDraftResume ? "Draft" : "Fast Lane")")
+                        .font(.system(size: 12, weight: .medium))
                         .foregroundColor(.white.opacity(0.78))
                         .lineLimit(1)
                 }
 
                 Spacer(minLength: 0)
 
-                Text(camera.isPreviewRunning ? "Running" : "Starting")
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundColor(camera.isPreviewRunning ? .green : .yellow)
-                    .padding(.horizontal, 10)
-                    .frame(height: 28)
-                    .background(Color.black.opacity(0.58))
-                    .clipShape(Capsule())
+                Button {
+                    withAnimation(.easeInOut(duration: 0.18)) {
+                        isTimingExpanded.toggle()
+                    }
+                } label: {
+                    Text(isTimingExpanded ? "Hide" : "Timing")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundColor(.white.opacity(0.92))
+                        .padding(.horizontal, 10)
+                        .frame(height: 28)
+                        .background(Color.black.opacity(0.58))
+                        .clipShape(Capsule())
+                }
+                .buttonStyle(.plain)
             }
 
-            timingPanel
+            HStack(spacing: 8) {
+                statusBadge(camera.isPreviewRunning ? "Ready" : "Starting", color: camera.isPreviewRunning ? .green : .yellow)
+                statusBadge("Saved \(capturedCount)", color: .white.opacity(0.82))
+                if let total = lastCapture?.totalMilliseconds {
+                    statusBadge("Last \(String(format: "%.0f", total)) ms", color: .white.opacity(0.82))
+                }
+                Spacer(minLength: 0)
+            }
+
+            if isTimingExpanded {
+                timingPanel
+                    .transition(.opacity.combined(with: .move(edge: .top)))
+            }
         }
         .padding(.horizontal, 12)
         .padding(.top, 12)
@@ -12799,7 +12856,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
 
             HStack(spacing: 18) {
                 Text("Saved \(capturedCount)")
-                    .font(.system(size: 13, weight: .semibold, design: .monospaced))
+                    .font(.system(size: 13, weight: .semibold))
                     .foregroundColor(.white.opacity(0.88))
                     .frame(width: 92, alignment: .leading)
 
@@ -12819,14 +12876,33 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                 .disabled(!canUseFastShutter)
                 .accessibilityLabel("Capture prototype photo")
 
-                    Text(isSavingFastCapture || camera.isCapturing ? "Saving" : (isDraftResume ? "Draft" : "Ready"))
-                    .font(.system(size: 13, weight: .semibold, design: .monospaced))
+                Text(isSavingFastCapture || camera.isCapturing ? "Saving" : (isDraftResume ? "Draft" : "Ready"))
+                    .font(.system(size: 13, weight: .semibold))
                     .foregroundColor(.white.opacity(canUseFastShutter ? 0.88 : 0.55))
                     .frame(width: 92, alignment: .trailing)
             }
         }
         .padding(.horizontal, 14)
         .padding(.bottom, 28)
+    }
+
+    private var sessionTypeLabel: String {
+        switch context.sessionType {
+        case .fullDocumentation:
+            return "Full Documentation"
+        case .punchlistVisit:
+            return "Punchlist"
+        }
+    }
+
+    private func statusBadge(_ text: String, color: Color) -> some View {
+        Text(text)
+            .font(.system(size: 11, weight: .semibold))
+            .foregroundColor(color)
+            .padding(.horizontal, 9)
+            .frame(height: 24)
+            .background(Color.black.opacity(0.52))
+            .clipShape(Capsule())
     }
 
     private var timingPanel: some View {
