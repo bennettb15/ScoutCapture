@@ -4910,6 +4910,140 @@ final class AppState: ObservableObject {
         }
     }
 
+    struct FastRuntimePrototypeTimings: Equatable {
+        let targetSessionID: UUID
+        let rpcMilliseconds: Double
+        let contextMilliseconds: Double
+        let tempStorageMilliseconds: Double?
+        let releaseMilliseconds: Double?
+        let totalMilliseconds: Double
+    }
+
+    struct FastRuntimePrototypeResult: Equatable {
+        let propertyID: UUID
+        let propertyName: String
+        let sessionType: SessionType
+        let entryState: LightweightPropertyEntryState?
+        let requiresFallback: Bool
+        let reason: String?
+        let contextSource: String
+        let context: ActiveCaptureContext?
+        let tempStorageRoot: URL?
+        let didReleasePrototypeClaim: Bool
+        let releaseErrorMessage: String?
+        let timings: FastRuntimePrototypeTimings
+    }
+
+    struct FastRuntimePrototypeReleaseResult: Equatable {
+        let propertyID: UUID
+        let propertyName: String
+        let probeSessionID: UUID
+        let lockSessionID: UUID?
+        let entryState: LightweightPropertyEntryState?
+        let reason: String?
+        let didRelease: Bool
+        let message: String
+        let rpcMilliseconds: Double
+        let releaseMilliseconds: Double?
+        let totalMilliseconds: Double
+    }
+
+    struct FastRuntimePrototypeCaptureTimings: Equatable {
+        let storageMilliseconds: Double
+        let fileWriteMilliseconds: Double
+        let metadataMilliseconds: Double
+        let totalMilliseconds: Double
+    }
+
+    struct FastRuntimePrototypeShotRecord: Codable, Equatable, Identifiable {
+        let id: UUID
+        let sessionID: UUID
+        let propertyID: UUID
+        let orgID: UUID?
+        let sessionType: SessionType
+        let capturedAt: Date
+        let localFilePath: String
+        let originalRelativePath: String
+        let captureKind: String
+        let firstCaptureKind: String
+    }
+
+    struct FastRuntimePrototypeCaptureSaveResult: Equatable {
+        let success: Bool
+        let shot: FastRuntimePrototypeShotRecord?
+        let storageRoot: URL?
+        let errorMessage: String?
+        let timings: FastRuntimePrototypeCaptureTimings
+    }
+
+    struct FastRuntimeDraftSummary: Codable, Equatable, Identifiable {
+        var id: UUID { sessionID }
+
+        let propertyID: UUID
+        let sessionID: UUID
+        let orgID: UUID?
+        let sessionType: SessionType
+        let ownerUserID: UUID?
+        let ownerEmail: String?
+        let ownerDeviceID: String?
+        let createdAt: Date
+        let updatedAt: Date
+        let photoCount: Int
+        let draftRootPath: String
+        let metadataPath: String
+    }
+
+    struct FastRuntimePrototypeCloseTimings: Equatable {
+        let persistMilliseconds: Double?
+        let releaseMilliseconds: Double?
+        let cleanupMilliseconds: Double?
+        let totalMilliseconds: Double
+    }
+
+    struct FastRuntimePrototypeCloseResult: Equatable {
+        let propertyID: UUID
+        let propertyName: String
+        let sessionID: UUID
+        let draftPersisted: Bool
+        let photoCount: Int
+        let lockAction: String
+        let tempDiscarded: Bool
+        let draftRootPath: String?
+        let errorMessage: String?
+        let timings: FastRuntimePrototypeCloseTimings
+    }
+
+    struct FastRuntimeDraftResumeState: Equatable {
+        let propertyID: UUID
+        let propertyName: String
+        let summary: FastRuntimeDraftSummary?
+        let context: ActiveCaptureContext?
+        let storageRoot: URL?
+        let errorMessage: String?
+
+        var canResume: Bool {
+            summary != nil && context != nil && storageRoot != nil && errorMessage == nil
+        }
+    }
+
+    struct FastRuntimePrototypeCleanupResult: Equatable {
+        let indexDeleted: Bool
+        let draftFolderDeleted: Bool
+        let tempFoldersDeletedCount: Int
+        let claimReleaseAttemptCount: Int
+        let claimReleaseSuccessCount: Int
+        let claimReleaseMessages: [String]
+
+        var summary: String {
+            [
+                "index_deleted=\(indexDeleted)",
+                "draft_folder_deleted=\(draftFolderDeleted)",
+                "temp_folders_deleted=\(tempFoldersDeletedCount)",
+                "claim_release_success=\(claimReleaseSuccessCount)/\(claimReleaseAttemptCount)"
+            ].joined(separator: " ")
+        }
+    }
+
     struct PropertyStatusDerivedSummary: Equatable {
         let draftBadgeDecision: Bool
         let pendingExportDecision: Bool
@@ -7074,6 +7208,7 @@ final class AppState: ObservableObject {
     @Published private(set) var propertyRowReExportSessionByPropertyID: [UUID: Session] = [:]
     @Published private(set) var propertyRowPendingDeliverySessionByPropertyID: [UUID: Session] = [:]
     @Published private(set) var propertyRowSnapshotCloudStatusByPropertyID: [UUID: SessionSnapshotCloudStatus] = [:]
+    @Published private(set) var fastRuntimeDraftsByPropertyID: [UUID: FastRuntimeDraftSummary] = AppState.loadFastRuntimeDraftIndexFromDisk()
     @Published private(set) var cloudBackupStatus: CloudBackupStatus
     @Published private(set) var supabaseConfiguration: SupabaseRuntimeConfiguration
     @Published private(set) var backendFeatureFlags: BackendFeatureFlags
@@ -41067,17 +41202,41 @@ final class AppState: ObservableObject {
     func propertyCardBadgeModel(for propertyID: UUID) -> PropertyCardBadgeModel {
         let currentUserID = authenticatedSupabaseUser?.id
         let currentDeviceID = currentDeviceIdentifier()
+        let fastRuntimeDraft = fastRuntimeDraftBadgeSummary(
+            for: propertyID,
+            currentUserID: currentUserID,
+            currentDeviceID: currentDeviceID
+        )
         let reExportSession = propertyRowReExportSessionByPropertyID[propertyID]
         let showReExport = reExportSession != nil
         let reExportReason = showReExport ? "local_archive_available" : "deferred_local_archive_availability"
 
         if let propertyStatus = propertyStatusByPropertyID[propertyID] {
-            let propertyStatusAnswer = makePropertyStatusCompareAnswer(
+            let basePropertyStatusAnswer = Self.makePropertyStatusCompareAnswer(
                 record: propertyStatus,
-                propertyID: propertyID,
                 currentUserID: currentUserID,
                 currentDeviceID: currentDeviceID
             )
+            let canOverlayFastRuntimeDraft = fastRuntimeDraft != nil &&
+                (propertyStatus.status == .idle ||
+                    propertyStatus.status == .occupied ||
+                    propertyStatus.status == .draft) &&
+                basePropertyStatusAnswer.visibleBadgeState != .locked &&
+                basePropertyStatusAnswer.visibleBadgeState != .pendingExport
+            let propertyStatusAnswer = canOverlayFastRuntimeDraft
+                ? PropertyStatusCompareAnswer(
+                    visibleBadgeState: .draft,
+                    draftCountIncluded: true,
+                    pendingExportCountIncluded: false,
+                    entryBlocked: false,
+                    deleteEligible: false
+                )
+                : makePropertyStatusCompareAnswer(
+                    record: propertyStatus,
+                    propertyID: propertyID,
+                    currentUserID: currentUserID,
+                    currentDeviceID: currentDeviceID
+                )
             let propertyStatusBadgeState = propertyStatusAnswer.visibleBadgeState
             let propertyStatusOwnedByCurrentActor = Self.propertyStatusActorOwnedByCurrentActor(
                 record: propertyStatus,
@@ -41102,6 +41261,9 @@ final class AppState: ObservableObject {
                 }
             }()
             let propertyStatusReasonPrefix = "property_status:\(propertyStatus.status.rawValue)"
+            let draftSessionID = propertyStatusBadgeState == .draft
+                ? (fastRuntimeDraft?.sessionID ?? propertyStatusSourceSessionID)
+                : nil
             return PropertyCardBadgeModel(
                 propertyID: propertyID,
                 activeOccupancySessionID: propertyStatus.status == .occupied ? propertyStatus.activeSessionID : nil,
@@ -41109,9 +41271,9 @@ final class AppState: ObservableObject {
                 occupancyOwnerDeviceID: propertyStatus.status == .occupied ? normalizedSupabaseText(propertyStatus.ownerDeviceID) : nil,
                 currentUserID: currentUserID,
                 currentDeviceID: currentDeviceID,
-                materialDraftSessionID: propertyStatus.status == .draft ? propertyStatusSourceSessionID : nil,
-                draftOwnerUserID: propertyStatus.status == .draft ? propertyStatus.ownerUserID : nil,
-                draftOwnerDeviceID: propertyStatus.status == .draft ? normalizedSupabaseText(propertyStatus.ownerDeviceID) : nil,
+                materialDraftSessionID: draftSessionID,
+                draftOwnerUserID: propertyStatusBadgeState == .draft ? (fastRuntimeDraft?.ownerUserID ?? propertyStatus.ownerUserID) : nil,
+                draftOwnerDeviceID: propertyStatusBadgeState == .draft ? (fastRuntimeDraft?.ownerDeviceID ?? normalizedSupabaseText(propertyStatus.ownerDeviceID)) : nil,
                 finalizedOrExported: propertyStatus.status == .exported || propertyStatusBadgeState == .exported,
                 showLock: propertyStatusShowsLock,
                 showDraft: propertyStatusBadgeState == .draft,
@@ -41121,7 +41283,7 @@ final class AppState: ObservableObject {
                     ? "\(propertyStatusReasonPrefix):owner_mismatch"
                     : "\(propertyStatusReasonPrefix):lock_hidden",
                 draftReason: propertyStatusBadgeState == .draft
-                    ? "\(propertyStatusReasonPrefix):owner_match"
+                    ? "\(propertyStatusReasonPrefix):\(fastRuntimeDraft == nil ? "owner_match" : "fast_runtime_draft_index")"
                     : "\(propertyStatusReasonPrefix):draft_hidden_owner_match=\(propertyStatusOwnedByCurrentActor)",
                 pendingExportReason: propertyStatusBadgeState == .pendingExport
                     ? "\(propertyStatusReasonPrefix):pending_export"
@@ -41133,7 +41295,7 @@ final class AppState: ObservableObject {
 
         let localDraft = draftSessionByProperty[propertyID]
         let localPending = pendingExportSessionByProperty[propertyID]
-        let localShowsDraft = localDraft != nil
+        let localShowsDraft = localDraft != nil || fastRuntimeDraft != nil
         let localShowsPendingExport = localPending != nil
 
         return PropertyCardBadgeModel(
@@ -41143,19 +41305,19 @@ final class AppState: ObservableObject {
             occupancyOwnerDeviceID: nil,
             currentUserID: currentUserID,
             currentDeviceID: currentDeviceID,
-            materialDraftSessionID: localDraft?.id,
-            draftOwnerUserID: nil,
-            draftOwnerDeviceID: nil,
+            materialDraftSessionID: fastRuntimeDraft?.sessionID ?? localDraft?.id,
+            draftOwnerUserID: fastRuntimeDraft?.ownerUserID,
+            draftOwnerDeviceID: fastRuntimeDraft?.ownerDeviceID,
             finalizedOrExported: localShowsPendingExport,
             showLock: false,
             showDraft: localShowsDraft,
             showPendingExport: localShowsPendingExport,
             showReExport: showReExport,
             lockReason: "missing_property_status_row",
-            draftReason: localShowsDraft ? "local_cache:draft" : "missing_property_status_row",
+            draftReason: localShowsDraft ? (fastRuntimeDraft == nil ? "local_cache:draft" : "fast_runtime_draft_index") : "missing_property_status_row",
             pendingExportReason: localShowsPendingExport ? "local_cache:pending_export" : "missing_property_status_row",
             reExportReason: reExportReason,
-            badgeSource: "property_status_missing"
+            badgeSource: fastRuntimeDraft == nil ? "property_status_missing" : "fast_runtime_draft_index"
         )
     }
 
@@ -41721,6 +41883,866 @@ final class AppState: ObservableObject {
         } catch {
             return nil
         }
+    }
+
+    func runFastRuntimePrototype(
+        propertyID: UUID,
+        sessionType: SessionType,
+        prepareTempStorage: Bool = true,
+        releaseClaim: Bool = true,
+        allowCurrentUserOccupiedContext: Bool = false
+    ) async -> FastRuntimePrototypeResult {
+        let startedAt = Date()
+        let targetSessionID = UUID()
+        let property = properties.first(where: { $0.id == propertyID }) ??
+            allProperties.first(where: { $0.id == propertyID })
+        let propertyName = property?.name ?? propertyID.uuidString
+        let orgID = property?.orgId ?? activeOrganizationID
+
+        let rpcStartedAt = Date()
+        let status = await evaluateLightweightPropertyEntryStatus(
+            propertyID: propertyID,
+            targetSessionID: targetSessionID
+        )
+        let rpcMilliseconds = Date().timeIntervalSince(rpcStartedAt) * 1_000
+
+        let contextStartedAt = Date()
+        var contextSource = "none"
+        let context: ActiveCaptureContext? = {
+            guard let status,
+                  status.requiresFallback == false else {
+                return nil
+            }
+            let contextSessionID: UUID
+            switch status.entryState {
+            case .unlockedAndClaimed:
+                contextSource = "unlocked_and_claimed"
+                contextSessionID = targetSessionID
+            case .lockedByCurrentUser
+                where allowCurrentUserOccupiedContext &&
+                prototypeStatusIsCurrentUserOccupiedByThisClient(status):
+                contextSource = "locked_by_current_user_current_user_occupied"
+                contextSessionID = status.lockSessionID ?? targetSessionID
+            case .lockedByCurrentUser, .lockedByOtherUser, .staleClaimable, .pendingExport, .unknownRequiresFallback:
+                return nil
+            }
+            return ActiveCaptureContext(
+                sessionID: contextSessionID,
+                propertyID: propertyID,
+                orgID: orgID,
+                sessionType: sessionType,
+                ownerUserID: status.lockedByUserID ?? authenticatedSupabaseUser?.id,
+                ownerEmail: normalizedSupabaseText(status.lockedByEmail) ??
+                    normalizedSupabaseText(authenticatedSupabaseUser?.email),
+                ownerDeviceID: normalizedSupabaseText(status.lockedByDeviceID) ?? currentDeviceIdentifier(),
+                createdAt: status.lockedAt ?? status.serverTimestamp ?? Date(),
+                status: .draft,
+                statusReason: status.reason
+            )
+        }()
+        let contextMilliseconds = Date().timeIntervalSince(contextStartedAt) * 1_000
+
+        var tempStorageRoot: URL?
+        var tempStorageMilliseconds: Double?
+        var tempStorageErrorMessage: String?
+        if prepareTempStorage, let context {
+            let tempStorageStartedAt = Date()
+            do {
+                tempStorageRoot = try prepareFastRuntimePrototypeTempStorage(context: context)
+            } catch {
+                tempStorageErrorMessage = "temp_storage_failed: \(error.localizedDescription)"
+            }
+            tempStorageMilliseconds = Date().timeIntervalSince(tempStorageStartedAt) * 1_000
+        }
+
+        var releaseMilliseconds: Double?
+        var didReleasePrototypeClaim = false
+        var releaseErrorMessage: String?
+        if releaseClaim,
+           let status,
+           status.entryState == .unlockedAndClaimed,
+           status.requiresFallback == false {
+            let releaseStartedAt = Date()
+            let ownershipState = PropertySessionOccupancyState(
+                occupiedByUserID: status.lockedByUserID ?? authenticatedSupabaseUser?.id,
+                occupiedByDeviceID: normalizedSupabaseText(status.lockedByDeviceID) ?? currentDeviceIdentifier(),
+                occupiedAt: status.lockedAt ?? status.serverTimestamp ?? Date()
+            )
+            await releasePropertySessionOccupancyIfOwned(
+                propertyID: propertyID,
+                sessionID: targetSessionID,
+                emitReleasedEvent: false,
+                ownershipState: ownershipState
+            )
+            didReleasePrototypeClaim = true
+            releaseMilliseconds = Date().timeIntervalSince(releaseStartedAt) * 1_000
+        } else if releaseClaim, status?.entryState == .unlockedAndClaimed {
+            releaseErrorMessage = "Skipped release because the RPC result required fallback."
+        }
+
+        let reason = [status?.reason, tempStorageErrorMessage]
+            .compactMap { $0 }
+            .joined(separator: " | ")
+
+        return FastRuntimePrototypeResult(
+            propertyID: propertyID,
+            propertyName: propertyName,
+            sessionType: sessionType,
+            entryState: status?.entryState,
+            requiresFallback: status?.requiresFallback ?? true,
+            reason: reason.isEmpty ? nil : reason,
+            contextSource: contextSource,
+            context: context,
+            tempStorageRoot: tempStorageRoot,
+            didReleasePrototypeClaim: didReleasePrototypeClaim,
+            releaseErrorMessage: releaseErrorMessage,
+            timings: FastRuntimePrototypeTimings(
+                targetSessionID: targetSessionID,
+                rpcMilliseconds: rpcMilliseconds,
+                contextMilliseconds: contextMilliseconds,
+                tempStorageMilliseconds: tempStorageMilliseconds,
+                releaseMilliseconds: releaseMilliseconds,
+                totalMilliseconds: Date().timeIntervalSince(startedAt) * 1_000
+            )
+        )
+    }
+
+    func releaseFastRuntimePrototypeCurrentUserClaim(
+        propertyID: UUID
+    ) async -> FastRuntimePrototypeReleaseResult {
+        let startedAt = Date()
+        let probeSessionID = UUID()
+        let property = properties.first(where: { $0.id == propertyID }) ??
+            allProperties.first(where: { $0.id == propertyID })
+        let propertyName = property?.name ?? propertyID.uuidString
+
+        let rpcStartedAt = Date()
+        let status = await evaluateLightweightPropertyEntryStatus(
+            propertyID: propertyID,
+            targetSessionID: probeSessionID
+        )
+        let rpcMilliseconds = Date().timeIntervalSince(rpcStartedAt) * 1_000
+
+        guard let status else {
+            return FastRuntimePrototypeReleaseResult(
+                propertyID: propertyID,
+                propertyName: propertyName,
+                probeSessionID: probeSessionID,
+                lockSessionID: nil,
+                entryState: nil,
+                reason: nil,
+                didRelease: false,
+                message: "RPC returned no status.",
+                rpcMilliseconds: rpcMilliseconds,
+                releaseMilliseconds: nil,
+                totalMilliseconds: Date().timeIntervalSince(startedAt) * 1_000
+            )
+        }
+
+        guard status.entryState == .lockedByCurrentUser,
+              prototypeStatusIsCurrentUserOccupiedByThisClient(status) else {
+            return FastRuntimePrototypeReleaseResult(
+                propertyID: propertyID,
+                propertyName: propertyName,
+                probeSessionID: probeSessionID,
+                lockSessionID: status.lockSessionID,
+                entryState: status.entryState,
+                reason: status.reason,
+                didRelease: false,
+                message: "Selected property is not a current-user occupied claim owned by this client.",
+                rpcMilliseconds: rpcMilliseconds,
+                releaseMilliseconds: nil,
+                totalMilliseconds: Date().timeIntervalSince(startedAt) * 1_000
+            )
+        }
+
+        let releaseStartedAt = Date()
+        let releaseSessionID = status.lockSessionID ?? probeSessionID
+        let ownershipState = PropertySessionOccupancyState(
+            occupiedByUserID: status.lockedByUserID ?? authenticatedSupabaseUser?.id,
+            occupiedByDeviceID: normalizedSupabaseText(status.lockedByDeviceID) ?? currentDeviceIdentifier(),
+            occupiedAt: status.lockedAt ?? status.serverTimestamp ?? Date()
+        )
+        await releasePropertySessionOccupancyIfOwned(
+            propertyID: propertyID,
+            sessionID: releaseSessionID,
+            emitReleasedEvent: false,
+            ownershipState: ownershipState
+        )
+        let releaseMilliseconds = Date().timeIntervalSince(releaseStartedAt) * 1_000
+
+        return FastRuntimePrototypeReleaseResult(
+            propertyID: propertyID,
+            propertyName: propertyName,
+            probeSessionID: probeSessionID,
+            lockSessionID: status.lockSessionID,
+            entryState: status.entryState,
+            reason: status.reason,
+            didRelease: true,
+            message: "Released current-user occupied claim. Rerun prototype to test clean unlocked_and_claimed.",
+            rpcMilliseconds: rpcMilliseconds,
+            releaseMilliseconds: releaseMilliseconds,
+            totalMilliseconds: Date().timeIntervalSince(startedAt) * 1_000
+        )
+    }
+
+    func releaseFastRuntimePrototypeClaim(
+        context: ActiveCaptureContext
+    ) async -> FastRuntimePrototypeReleaseResult {
+        let startedAt = Date()
+        let property = properties.first(where: { $0.id == context.propertyID }) ??
+            allProperties.first(where: { $0.id == context.propertyID })
+        let propertyName = property?.name ?? context.propertyID.uuidString
+        let releaseStartedAt = Date()
+        let ownershipState = PropertySessionOccupancyState(
+            occupiedByUserID: context.ownerUserID ?? authenticatedSupabaseUser?.id,
+            occupiedByDeviceID: normalizedSupabaseText(context.ownerDeviceID) ?? currentDeviceIdentifier(),
+            occupiedAt: context.createdAt
+        )
+        await releasePropertySessionOccupancyIfOwned(
+            propertyID: context.propertyID,
+            sessionID: context.sessionID,
+            emitReleasedEvent: false,
+            ownershipState: ownershipState
+        )
+        let releaseMilliseconds = Date().timeIntervalSince(releaseStartedAt) * 1_000
+
+        return FastRuntimePrototypeReleaseResult(
+            propertyID: context.propertyID,
+            propertyName: propertyName,
+            probeSessionID: context.sessionID,
+            lockSessionID: context.sessionID,
+            entryState: .unlockedAndClaimed,
+            reason: context.statusReason,
+            didRelease: true,
+            message: "Released prototype camera preview claim.",
+            rpcMilliseconds: 0,
+            releaseMilliseconds: releaseMilliseconds,
+            totalMilliseconds: Date().timeIntervalSince(startedAt) * 1_000
+        )
+    }
+
+    func saveFastRuntimePrototypeCapture(
+        data: Data,
+        context: ActiveCaptureContext,
+        capturedAt: Date,
+        storageRootOverride: URL? = nil
+    ) async -> FastRuntimePrototypeCaptureSaveResult {
+        let startedAt = Date()
+        let target = ActiveCaptureTarget(context: context)
+        guard target.canCapture else {
+            return FastRuntimePrototypeCaptureSaveResult(
+                success: false,
+                shot: nil,
+                storageRoot: nil,
+                errorMessage: "ActiveCaptureContext cannot capture.",
+                timings: FastRuntimePrototypeCaptureTimings(
+                    storageMilliseconds: 0,
+                    fileWriteMilliseconds: 0,
+                    metadataMilliseconds: 0,
+                    totalMilliseconds: Date().timeIntervalSince(startedAt) * 1_000
+                )
+            )
+        }
+
+        let storageStartedAt = Date()
+        let storageRoot: URL
+        do {
+            if let storageRootOverride {
+                try prepareFastRuntimePrototypeStorage(at: storageRootOverride, context: context)
+                storageRoot = storageRootOverride
+            } else {
+                storageRoot = try prepareFastRuntimePrototypeTempStorage(context: context)
+            }
+        } catch {
+            return FastRuntimePrototypeCaptureSaveResult(
+                success: false,
+                shot: nil,
+                storageRoot: nil,
+                errorMessage: "temp_storage_failed: \(error.localizedDescription)",
+                timings: FastRuntimePrototypeCaptureTimings(
+                    storageMilliseconds: Date().timeIntervalSince(storageStartedAt) * 1_000,
+                    fileWriteMilliseconds: 0,
+                    metadataMilliseconds: 0,
+                    totalMilliseconds: Date().timeIntervalSince(startedAt) * 1_000
+                )
+            )
+        }
+        let storageMilliseconds = Date().timeIntervalSince(storageStartedAt) * 1_000
+
+        return await Task.detached(priority: .userInitiated) {
+            let shotID = UUID()
+            let filename = "\(shotID.uuidString).jpg"
+            let originalRelativePath = "Originals/\(filename)"
+            let originalURL = storageRoot.appendingPathComponent(originalRelativePath, isDirectory: false)
+            let metadataURL = storageRoot
+                .appendingPathComponent("Metadata", isDirectory: true)
+                .appendingPathComponent("fast-lane-shots.json", isDirectory: false)
+            let captureKind = context.sessionType == .punchlistVisit ? "punchlist_capture" : "captured"
+
+            let fileWriteStartedAt = Date()
+            do {
+                try data.write(to: originalURL, options: .atomic)
+            } catch {
+                return FastRuntimePrototypeCaptureSaveResult(
+                    success: false,
+                    shot: nil,
+                    storageRoot: storageRoot,
+                    errorMessage: "image_write_failed: \(error.localizedDescription)",
+                    timings: FastRuntimePrototypeCaptureTimings(
+                        storageMilliseconds: storageMilliseconds,
+                        fileWriteMilliseconds: Date().timeIntervalSince(fileWriteStartedAt) * 1_000,
+                        metadataMilliseconds: 0,
+                        totalMilliseconds: Date().timeIntervalSince(startedAt) * 1_000
+                    )
+                )
+            }
+            let fileWriteMilliseconds = Date().timeIntervalSince(fileWriteStartedAt) * 1_000
+
+            let metadataStartedAt = Date()
+            let shot = FastRuntimePrototypeShotRecord(
+                id: shotID,
+                sessionID: target.sessionID,
+                propertyID: target.propertyID,
+                orgID: context.orgID,
+                sessionType: target.sessionType,
+                capturedAt: capturedAt,
+                localFilePath: originalURL.path,
+                originalRelativePath: originalRelativePath,
+                captureKind: captureKind,
+                firstCaptureKind: "captured"
+            )
+
+            do {
+                let decoder = JSONDecoder()
+                decoder.dateDecodingStrategy = .iso8601
+                var shots: [FastRuntimePrototypeShotRecord] = []
+                if FileManager.default.fileExists(atPath: metadataURL.path) {
+                    let existingData = try Data(contentsOf: metadataURL)
+                    shots = (try? decoder.decode([FastRuntimePrototypeShotRecord].self, from: existingData)) ?? []
+                }
+                shots.append(shot)
+
+                let encoder = JSONEncoder()
+                encoder.dateEncodingStrategy = .iso8601
+                encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+                let metadataData = try encoder.encode(shots)
+                try metadataData.write(to: metadataURL, options: .atomic)
+            } catch {
+                return FastRuntimePrototypeCaptureSaveResult(
+                    success: false,
+                    shot: shot,
+                    storageRoot: storageRoot,
+                    errorMessage: "metadata_write_failed: \(error.localizedDescription)",
+                    timings: FastRuntimePrototypeCaptureTimings(
+                        storageMilliseconds: storageMilliseconds,
+                        fileWriteMilliseconds: fileWriteMilliseconds,
+                        metadataMilliseconds: Date().timeIntervalSince(metadataStartedAt) * 1_000,
+                        totalMilliseconds: Date().timeIntervalSince(startedAt) * 1_000
+                    )
+                )
+            }
+
+            let metadataMilliseconds = Date().timeIntervalSince(metadataStartedAt) * 1_000
+            return FastRuntimePrototypeCaptureSaveResult(
+                success: true,
+                shot: shot,
+                storageRoot: storageRoot,
+                errorMessage: nil,
+                timings: FastRuntimePrototypeCaptureTimings(
+                    storageMilliseconds: storageMilliseconds,
+                    fileWriteMilliseconds: fileWriteMilliseconds,
+                    metadataMilliseconds: metadataMilliseconds,
+                    totalMilliseconds: Date().timeIntervalSince(startedAt) * 1_000
+                )
+            )
+        }.value
+    }
+
+    func closeFastRuntimePrototypePreview(
+        context: ActiveCaptureContext,
+        tempStorageRoot: URL?,
+        capturedPhotoCount: Int
+    ) async -> FastRuntimePrototypeCloseResult {
+        let startedAt = Date()
+        let property = properties.first(where: { $0.id == context.propertyID }) ??
+            allProperties.first(where: { $0.id == context.propertyID })
+        let propertyName = property?.name ?? context.propertyID.uuidString
+        let photoCount = max(0, capturedPhotoCount)
+
+        if photoCount == 0 {
+            let releaseStartedAt = Date()
+            let release = await releaseFastRuntimePrototypeClaim(context: context)
+            let releaseMilliseconds = Date().timeIntervalSince(releaseStartedAt) * 1_000
+
+            var tempDiscarded = false
+            var cleanupMilliseconds: Double?
+            if let tempStorageRoot {
+                let cleanupStartedAt = Date()
+                tempDiscarded = (try? Self.removeFastRuntimePrototypeStorage(at: tempStorageRoot)) != nil
+                cleanupMilliseconds = Date().timeIntervalSince(cleanupStartedAt) * 1_000
+            }
+
+            return FastRuntimePrototypeCloseResult(
+                propertyID: context.propertyID,
+                propertyName: propertyName,
+                sessionID: context.sessionID,
+                draftPersisted: false,
+                photoCount: 0,
+                lockAction: release.didRelease ? "released" : "release_failed",
+                tempDiscarded: tempDiscarded,
+                draftRootPath: nil,
+                errorMessage: release.didRelease ? nil : release.message,
+                timings: FastRuntimePrototypeCloseTimings(
+                    persistMilliseconds: nil,
+                    releaseMilliseconds: releaseMilliseconds,
+                    cleanupMilliseconds: cleanupMilliseconds,
+                    totalMilliseconds: Date().timeIntervalSince(startedAt) * 1_000
+                )
+            )
+        }
+
+        let persistStartedAt = Date()
+        do {
+            let summary = try await Self.persistFastRuntimeDraftStorage(
+                context: context,
+                tempStorageRoot: tempStorageRoot,
+                photoCount: photoCount
+            )
+            var nextDrafts = fastRuntimeDraftsByPropertyID
+            nextDrafts[context.propertyID] = summary
+            try Self.writeFastRuntimeDraftIndexToDisk(Array(nextDrafts.values))
+            fastRuntimeDraftsByPropertyID = nextDrafts
+
+            let persistMilliseconds = Date().timeIntervalSince(persistStartedAt) * 1_000
+            return FastRuntimePrototypeCloseResult(
+                propertyID: context.propertyID,
+                propertyName: propertyName,
+                sessionID: context.sessionID,
+                draftPersisted: true,
+                photoCount: photoCount,
+                lockAction: "kept_for_draft",
+                tempDiscarded: false,
+                draftRootPath: summary.draftRootPath,
+                errorMessage: nil,
+                timings: FastRuntimePrototypeCloseTimings(
+                    persistMilliseconds: persistMilliseconds,
+                    releaseMilliseconds: nil,
+                    cleanupMilliseconds: nil,
+                    totalMilliseconds: Date().timeIntervalSince(startedAt) * 1_000
+                )
+            )
+        } catch {
+            let persistMilliseconds = Date().timeIntervalSince(persistStartedAt) * 1_000
+            return FastRuntimePrototypeCloseResult(
+                propertyID: context.propertyID,
+                propertyName: propertyName,
+                sessionID: context.sessionID,
+                draftPersisted: false,
+                photoCount: photoCount,
+                lockAction: "kept_after_persist_failure",
+                tempDiscarded: false,
+                draftRootPath: nil,
+                errorMessage: "draft_persist_failed: \(error.localizedDescription)",
+                timings: FastRuntimePrototypeCloseTimings(
+                    persistMilliseconds: persistMilliseconds,
+                    releaseMilliseconds: nil,
+                    cleanupMilliseconds: nil,
+                    totalMilliseconds: Date().timeIntervalSince(startedAt) * 1_000
+                )
+            )
+        }
+    }
+
+    private func prototypeStatusIsCurrentUserOccupiedByThisClient(
+        _ status: LightweightPropertyEntryStatus
+    ) -> Bool {
+        guard status.entryState == .lockedByCurrentUser,
+              normalizedSupabaseText(status.reason) == "current_user_occupied" else {
+            return false
+        }
+        let userMatches = status.lockedByUserID != nil && status.lockedByUserID == authenticatedSupabaseUser?.id
+        let deviceMatches = normalizedSupabaseText(status.lockedByDeviceID) == currentDeviceIdentifier()
+        return userMatches || deviceMatches
+    }
+
+    private func fastRuntimeDraftBadgeSummary(
+        for propertyID: UUID,
+        currentUserID: UUID?,
+        currentDeviceID: String
+    ) -> FastRuntimeDraftSummary? {
+        guard let summary = fastRuntimeDraftsByPropertyID[propertyID],
+              summary.photoCount > 0 else {
+            return nil
+        }
+        if let ownerDeviceID = normalizedSupabaseText(summary.ownerDeviceID),
+           ownerDeviceID == currentDeviceID {
+            return summary
+        }
+        if let ownerUserID = summary.ownerUserID,
+           ownerUserID == currentUserID {
+            return summary
+        }
+        return nil
+    }
+
+    func fastRuntimeDraftResumeState(for propertyID: UUID) -> FastRuntimeDraftResumeState? {
+        let property = properties.first(where: { $0.id == propertyID }) ??
+            allProperties.first(where: { $0.id == propertyID })
+        let propertyName = property?.name ?? propertyID.uuidString
+        guard let summary = fastRuntimeDraftBadgeSummary(
+            for: propertyID,
+            currentUserID: authenticatedSupabaseUser?.id,
+            currentDeviceID: currentDeviceIdentifier()
+        ) else {
+            return nil
+        }
+
+        let storageRoot = URL(fileURLWithPath: summary.draftRootPath, isDirectory: true)
+        let metadataURL = URL(fileURLWithPath: summary.metadataPath, isDirectory: false)
+        guard FileManager.default.fileExists(atPath: storageRoot.path) else {
+            return FastRuntimeDraftResumeState(
+                propertyID: propertyID,
+                propertyName: propertyName,
+                summary: summary,
+                context: nil,
+                storageRoot: nil,
+                errorMessage: "Fast-lane draft folder is missing."
+            )
+        }
+        guard FileManager.default.fileExists(atPath: metadataURL.path) else {
+            return FastRuntimeDraftResumeState(
+                propertyID: propertyID,
+                propertyName: propertyName,
+                summary: summary,
+                context: nil,
+                storageRoot: storageRoot,
+                errorMessage: "Fast-lane draft metadata is missing."
+            )
+        }
+
+        return FastRuntimeDraftResumeState(
+            propertyID: propertyID,
+            propertyName: propertyName,
+            summary: summary,
+            context: ActiveCaptureContext(
+                sessionID: summary.sessionID,
+                propertyID: summary.propertyID,
+                orgID: summary.orgID,
+                sessionType: summary.sessionType,
+                ownerUserID: summary.ownerUserID,
+                ownerEmail: summary.ownerEmail,
+                ownerDeviceID: summary.ownerDeviceID,
+                createdAt: summary.createdAt,
+                status: .draft,
+                statusReason: "fast_runtime_draft_resume"
+            ),
+            storageRoot: storageRoot,
+            errorMessage: nil
+        )
+    }
+
+    func clearFastRuntimePrototypeState() async -> FastRuntimePrototypeCleanupResult {
+        let currentUserID = authenticatedSupabaseUser?.id
+        let currentDeviceID = currentDeviceIdentifier()
+        let indexedSummaries = Array(fastRuntimeDraftsByPropertyID.values)
+        let indexedContexts = indexedSummaries.compactMap { summary -> ActiveCaptureContext? in
+            guard fastRuntimeContextIsOwnedByCurrentActor(
+                ownerUserID: summary.ownerUserID,
+                ownerDeviceID: summary.ownerDeviceID,
+                currentUserID: currentUserID,
+                currentDeviceID: currentDeviceID
+            ) else {
+                return nil
+            }
+            return ActiveCaptureContext(
+                sessionID: summary.sessionID,
+                propertyID: summary.propertyID,
+                orgID: summary.orgID,
+                sessionType: summary.sessionType,
+                ownerUserID: summary.ownerUserID,
+                ownerEmail: summary.ownerEmail,
+                ownerDeviceID: summary.ownerDeviceID,
+                createdAt: summary.createdAt,
+                status: .draft,
+                statusReason: "fast_runtime_cleanup_index"
+            )
+        }
+        let tempContexts = Self.loadFastRuntimePrototypeTempContexts()
+            .filter {
+                fastRuntimeContextIsOwnedByCurrentActor(
+                    ownerUserID: $0.ownerUserID,
+                    ownerDeviceID: $0.ownerDeviceID,
+                    currentUserID: currentUserID,
+                    currentDeviceID: currentDeviceID
+                )
+            }
+        let releaseContexts = Dictionary(
+            grouping: indexedContexts + tempContexts,
+            by: { "\($0.propertyID.uuidString):\($0.sessionID.uuidString)" }
+        )
+        .compactMap { $0.value.first }
+
+        var releaseMessages: [String] = []
+        var releaseSuccessCount = 0
+        for context in releaseContexts {
+            let release = await releaseFastRuntimePrototypeClaim(context: context)
+            if release.didRelease {
+                releaseSuccessCount += 1
+            }
+            releaseMessages.append(
+                "\(context.propertyID.uuidString.prefix(8))/\(context.sessionID.uuidString.prefix(8)):\(release.didRelease ? "released" : "not_released")"
+            )
+        }
+
+        let deleteResult = Self.deleteFastRuntimePrototypeStorageRoots()
+        fastRuntimeDraftsByPropertyID = [:]
+
+        return FastRuntimePrototypeCleanupResult(
+            indexDeleted: deleteResult.indexDeleted,
+            draftFolderDeleted: deleteResult.draftFolderDeleted,
+            tempFoldersDeletedCount: deleteResult.tempFoldersDeletedCount,
+            claimReleaseAttemptCount: releaseContexts.count,
+            claimReleaseSuccessCount: releaseSuccessCount,
+            claimReleaseMessages: releaseMessages
+        )
+    }
+
+    private func fastRuntimeContextIsOwnedByCurrentActor(
+        ownerUserID: UUID?,
+        ownerDeviceID: String?,
+        currentUserID: UUID?,
+        currentDeviceID: String
+    ) -> Bool {
+        if let ownerDeviceID = normalizedSupabaseText(ownerDeviceID),
+           ownerDeviceID == currentDeviceID {
+            return true
+        }
+        if let ownerUserID,
+           ownerUserID == currentUserID {
+            return true
+        }
+        return false
+    }
+
+    private func prepareFastRuntimePrototypeTempStorage(context: ActiveCaptureContext) throws -> URL {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ScoutCaptureFastRuntimePrototype", isDirectory: true)
+            .appendingPathComponent(context.propertyID.uuidString, isDirectory: true)
+            .appendingPathComponent(context.sessionID.uuidString, isDirectory: true)
+        try prepareFastRuntimePrototypeStorage(at: root, context: context)
+        return root
+    }
+
+    private func prepareFastRuntimePrototypeStorage(at root: URL, context: ActiveCaptureContext) throws {
+        let fileManager = FileManager.default
+        let originals = root.appendingPathComponent("Originals", isDirectory: true)
+        let stamped = root.appendingPathComponent("Stamped", isDirectory: true)
+        let metadata = root.appendingPathComponent("Metadata", isDirectory: true)
+
+        try fileManager.createDirectory(at: originals, withIntermediateDirectories: true)
+        try fileManager.createDirectory(at: stamped, withIntermediateDirectories: true)
+        try fileManager.createDirectory(at: metadata, withIntermediateDirectories: true)
+
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        let data = try encoder.encode(context)
+        try data.write(
+            to: metadata.appendingPathComponent("active-capture-context.json", isDirectory: false),
+            options: .atomic
+        )
+    }
+
+    private static func loadFastRuntimeDraftIndexFromDisk() -> [UUID: FastRuntimeDraftSummary] {
+        do {
+            let indexURL = try fastRuntimeDraftIndexURL()
+            guard FileManager.default.fileExists(atPath: indexURL.path) else { return [:] }
+            let data = try Data(contentsOf: indexURL)
+            let decoder = JSONDecoder()
+            decoder.dateDecodingStrategy = .iso8601
+            let summaries = try decoder.decode([FastRuntimeDraftSummary].self, from: data)
+            return Dictionary(uniqueKeysWithValues: summaries.map { ($0.propertyID, $0) })
+        } catch {
+            return [:]
+        }
+    }
+
+    private static func loadFastRuntimePrototypeTempContexts() -> [ActiveCaptureContext] {
+        let root = fastRuntimePrototypeTempRootURL()
+        guard let enumerator = FileManager.default.enumerator(
+            at: root,
+            includingPropertiesForKeys: [.isRegularFileKey],
+            options: [.skipsHiddenFiles]
+        ) else {
+            return []
+        }
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        var contexts: [ActiveCaptureContext] = []
+        for case let url as URL in enumerator where url.lastPathComponent == "active-capture-context.json" {
+            guard let data = try? Data(contentsOf: url),
+                  let context = try? decoder.decode(ActiveCaptureContext.self, from: data) else {
+                continue
+            }
+            contexts.append(context)
+        }
+        return contexts
+    }
+
+    private static func deleteFastRuntimePrototypeStorageRoots() -> (
+        indexDeleted: Bool,
+        draftFolderDeleted: Bool,
+        tempFoldersDeletedCount: Int
+    ) {
+        let fileManager = FileManager.default
+        var indexDeleted = false
+        var draftFolderDeleted = false
+        var tempFoldersDeletedCount = 0
+
+        if let indexURL = try? fastRuntimeDraftIndexURL(),
+           fileManager.fileExists(atPath: indexURL.path) {
+            indexDeleted = (try? fileManager.removeItem(at: indexURL)) != nil
+        }
+
+        if let draftsRoot = try? fastRuntimeDraftsRootURL(),
+           fileManager.fileExists(atPath: draftsRoot.path) {
+            draftFolderDeleted = (try? fileManager.removeItem(at: draftsRoot)) != nil
+        }
+
+        let tempRoot = fastRuntimePrototypeTempRootURL()
+        if fileManager.fileExists(atPath: tempRoot.path) {
+            tempFoldersDeletedCount = countFastRuntimePrototypeTempFolders(at: tempRoot)
+            try? fileManager.removeItem(at: tempRoot)
+        }
+
+        return (indexDeleted, draftFolderDeleted, tempFoldersDeletedCount)
+    }
+
+    private static func countFastRuntimePrototypeTempFolders(at root: URL) -> Int {
+        guard let enumerator = FileManager.default.enumerator(
+            at: root,
+            includingPropertiesForKeys: [.isRegularFileKey],
+            options: [.skipsHiddenFiles]
+        ) else {
+            return 0
+        }
+        var count = 0
+        for case let url as URL in enumerator where url.lastPathComponent == "active-capture-context.json" {
+            count += 1
+        }
+        return count
+    }
+
+    private static func persistFastRuntimeDraftStorage(
+        context: ActiveCaptureContext,
+        tempStorageRoot: URL?,
+        photoCount: Int
+    ) async throws -> FastRuntimeDraftSummary {
+        let stableRoot = try stableFastRuntimeDraftRoot(context: context)
+        return try await Task.detached(priority: .userInitiated) {
+            let fileManager = FileManager.default
+            let parent = stableRoot.deletingLastPathComponent()
+            try fileManager.createDirectory(at: parent, withIntermediateDirectories: true)
+
+            if fileManager.fileExists(atPath: stableRoot.path) {
+                let tempPath = tempStorageRoot?.standardizedFileURL.path
+                let stablePath = stableRoot.standardizedFileURL.path
+                if tempPath != stablePath {
+                    try fileManager.removeItem(at: stableRoot)
+                }
+            }
+
+            if let tempStorageRoot,
+               fileManager.fileExists(atPath: tempStorageRoot.path),
+               tempStorageRoot.standardizedFileURL.path != stableRoot.standardizedFileURL.path {
+                do {
+                    try fileManager.moveItem(at: tempStorageRoot, to: stableRoot)
+                } catch {
+                    try fileManager.copyItem(at: tempStorageRoot, to: stableRoot)
+                    try? fileManager.removeItem(at: tempStorageRoot)
+                }
+            } else {
+                try fileManager.createDirectory(at: stableRoot, withIntermediateDirectories: true)
+                try fileManager.createDirectory(
+                    at: stableRoot.appendingPathComponent("Originals", isDirectory: true),
+                    withIntermediateDirectories: true
+                )
+                try fileManager.createDirectory(
+                    at: stableRoot.appendingPathComponent("Metadata", isDirectory: true),
+                    withIntermediateDirectories: true
+                )
+            }
+
+            let metadataPath = stableRoot
+                .appendingPathComponent("Metadata", isDirectory: true)
+                .appendingPathComponent("fast-lane-shots.json", isDirectory: false)
+                .path
+            return FastRuntimeDraftSummary(
+                propertyID: context.propertyID,
+                sessionID: context.sessionID,
+                orgID: context.orgID,
+                sessionType: context.sessionType,
+                ownerUserID: context.ownerUserID,
+                ownerEmail: context.ownerEmail,
+                ownerDeviceID: context.ownerDeviceID,
+                createdAt: context.createdAt,
+                updatedAt: Date(),
+                photoCount: photoCount,
+                draftRootPath: stableRoot.path,
+                metadataPath: metadataPath
+            )
+        }.value
+    }
+
+    private static func removeFastRuntimePrototypeStorage(at root: URL) throws {
+        guard FileManager.default.fileExists(atPath: root.path) else { return }
+        try FileManager.default.removeItem(at: root)
+    }
+
+    private static func writeFastRuntimeDraftIndexToDisk(_ summaries: [FastRuntimeDraftSummary]) throws {
+        let indexURL = try fastRuntimeDraftIndexURL()
+        try FileManager.default.createDirectory(
+            at: indexURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        let sortedSummaries = summaries.sorted {
+            if $0.updatedAt == $1.updatedAt {
+                return $0.propertyID.uuidString < $1.propertyID.uuidString
+            }
+            return $0.updatedAt > $1.updatedAt
+        }
+        let data = try encoder.encode(sortedSummaries)
+        try data.write(to: indexURL, options: .atomic)
+    }
+
+    private static func stableFastRuntimeDraftRoot(context: ActiveCaptureContext) throws -> URL {
+        try fastRuntimeDraftsRootURL()
+            .appendingPathComponent("Drafts", isDirectory: true)
+            .appendingPathComponent(context.propertyID.uuidString, isDirectory: true)
+            .appendingPathComponent(context.sessionID.uuidString, isDirectory: true)
+    }
+
+    private static func fastRuntimeDraftIndexURL() throws -> URL {
+        try fastRuntimeDraftsRootURL()
+            .appendingPathComponent("fast-lane-draft-index.json", isDirectory: false)
+    }
+
+    private static func fastRuntimeDraftsRootURL() throws -> URL {
+        try FileManager.default.url(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask,
+            appropriateFor: nil,
+            create: true
+        )
+        .appendingPathComponent("ScoutCaptureFastRuntimeDrafts", isDirectory: true)
+    }
+
+    private static func fastRuntimePrototypeTempRootURL() -> URL {
+        FileManager.default.temporaryDirectory
+            .appendingPathComponent("ScoutCaptureFastRuntimePrototype", isDirectory: true)
     }
 
     func sessionEntryBlock(for status: LightweightPropertyEntryStatus) -> SessionEntryCoordinationBlock? {

@@ -1937,6 +1937,25 @@ struct CaptureRuntimeContext: Equatable {
     }
 }
 
+struct ActiveCaptureContext: Codable, Equatable, Identifiable {
+    var id: UUID { sessionID }
+
+    let sessionID: UUID
+    let propertyID: UUID
+    let orgID: UUID?
+    let sessionType: SessionType
+    let ownerUserID: UUID?
+    let ownerEmail: String?
+    let ownerDeviceID: String?
+    let createdAt: Date
+    let status: Session.Status
+    let statusReason: String?
+
+    var canCapture: Bool {
+        status == .draft
+    }
+}
+
 struct ActiveCaptureTarget: Equatable {
     let propertyID: UUID
     let sessionID: UUID
@@ -1951,6 +1970,15 @@ struct ActiveCaptureTarget: Equatable {
         sessionType = context.sessionType
         canCapture = context.status == .draft && !context.isSealed
         startedAt = context.startedAt
+        status = context.status
+    }
+
+    nonisolated init(context: ActiveCaptureContext) {
+        propertyID = context.propertyID
+        sessionID = context.sessionID
+        sessionType = context.sessionType
+        canCapture = context.status == .draft
+        startedAt = context.createdAt
         status = context.status
     }
 }
