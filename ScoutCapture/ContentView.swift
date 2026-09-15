@@ -10683,8 +10683,9 @@ extension ContentView {
             showFlaggedActionToastNow("Priority is required for flagged capture")
             return
         }
-        guard let propertyID = appState.selectedPropertyID,
-              let sessionID = appState.currentSession?.id else { return }
+        guard let captureTarget = appState.activeCaptureTarget() else { return }
+        let propertyID = captureTarget.propertyID
+        let sessionID = captureTarget.sessionID
         let captureDeviceOrientationAtShutter = stableDeviceOrientationForCaptureMetadata()
         let capturedExifOrientationRawAtShutter = ReportLibraryModel.cgOrientationRawFromDevice(captureDeviceOrientationAtShutter)
         let captureIntent = currentCaptureIntent
@@ -10997,7 +10998,9 @@ extension ContentView {
     ) -> UUID? {
         guard !noteText.isEmpty else { return nil }
         guard !Self.normalizedPriority(priority).isEmpty else { return nil }
-        guard let propertyID = appState.selectedPropertyID else { return nil }
+        guard let captureTarget = appState.activeCaptureTarget() else { return nil }
+        let propertyID = captureTarget.propertyID
+        let sessionID = captureTarget.sessionID
         let reason = noteText.trimmingCharacters(in: .whitespacesAndNewlines)
         let normalizedPriority = Self.normalizedPriority(priority)
         let buildingValue = retakeContext?.building ?? selectedBuilding
@@ -11006,11 +11009,11 @@ extension ContentView {
 
         let observation = Observation(
             propertyID: propertyID,
-            sessionID: appState.currentSession?.id,
+            sessionID: sessionID,
             statement: reason,
             status: .active,
             linkedShotID: shot.id,
-            updatedInSessionID: appState.currentSession?.id,
+            updatedInSessionID: sessionID,
             building: buildingValue,
             targetElevation: elevationValue,
             detailType: detailTypeValue,
@@ -11020,7 +11023,7 @@ extension ContentView {
             historyEvents: [
                 ObservationHistoryEvent(
                     timestamp: shot.capturedAt,
-                    sessionID: appState.currentSession?.id,
+                    sessionID: sessionID,
                     kind: .created,
                     afterValue: reason,
                     field: "reason",
@@ -11028,7 +11031,7 @@ extension ContentView {
                 ),
                 ObservationHistoryEvent(
                     timestamp: shot.capturedAt,
-                    sessionID: appState.currentSession?.id,
+                    sessionID: sessionID,
                     kind: historyCaptureKind,
                     shotID: shot.id
                 )
@@ -11115,11 +11118,12 @@ extension ContentView {
         capturedExifOrientation: Int?,
         reservedAngleIndexAtCapture: Int?
     ) {
-        guard let propertyID = appState.selectedPropertyID else { return }
-        guard let session = appState.ensureCurrentSessionPersisted() ?? appState.currentSession else { return }
+        guard let captureTarget = appState.activeCaptureTarget(ensuringCurrentSessionPersisted: true) else { return }
+        let propertyID = captureTarget.propertyID
+        let sessionID = captureTarget.sessionID
         syncGuidedShotsToCurrentSessionMetadataIfPersisted(
             propertyID: propertyID,
-            sessionID: session.id
+            sessionID: sessionID
         )
 
         let imageSize = UIImage(data: imageData)?.size
@@ -11183,7 +11187,7 @@ extension ContentView {
                 priorityValue = Self.normalizedPriority(observationPriority)
             }
             let isNewFlaggedIssueCapture = createdFlaggedObservationID == observation.id
-            if observation.status == .resolved || observation.resolvedInSessionID == session.id {
+            if observation.status == .resolved || observation.resolvedInSessionID == sessionID {
                 issueStatus = Observation.Status.resolved.issueStatusValue
                 captureKind = "resolved_capture"
                 firstCaptureKind = "captured"
@@ -11199,7 +11203,7 @@ extension ContentView {
                 issueStatus = Observation.Status.active.issueStatusValue
                 captureKind = "retake"
                 firstCaptureKind = "captured"
-            } else if observation.updatedInSessionID == session.id || flaggedObservationIDAtCapture == observation.id {
+            } else if observation.updatedInSessionID == sessionID || flaggedObservationIDAtCapture == observation.id {
                 issueStatus = observation.status.issueStatusValue
                 captureKind = "follow_up_capture"
                 firstCaptureKind = "captured"
@@ -11275,7 +11279,7 @@ extension ContentView {
         var metadata = ShotMetadata(
             shotID: shot.id,
             propertyID: propertyID,
-            sessionID: session.id,
+            sessionID: sessionID,
             createdAt: shot.capturedAt,
             updatedAt: shot.capturedAt,
             capturedByUserID: captureActorUserID,
@@ -11328,15 +11332,15 @@ extension ContentView {
                 : .append
             try localStore.upsertShot(
                 propertyID: propertyID,
-                sessionID: session.id,
+                sessionID: sessionID,
                 shot: metadata,
                 matchMode: matchMode
             )
-            var updated = try localStore.loadSessionMetadata(propertyID: propertyID, sessionID: session.id)
+            var updated = try localStore.loadSessionMetadata(propertyID: propertyID, sessionID: sessionID)
             updated.captureProfile = captureProfile.rawValue
-            try localStore.saveSessionMetadataAtomically(propertyID: propertyID, sessionID: session.id, metadata: updated)
+            try localStore.saveSessionMetadataAtomically(propertyID: propertyID, sessionID: sessionID, metadata: updated)
             sessionCaptureProfileLocked = true
-            let originalsURL = localStore.originalsDirectoryURL(propertyID: propertyID, sessionID: session.id)
+            let originalsURL = localStore.originalsDirectoryURL(propertyID: propertyID, sessionID: sessionID)
             let originalsItems = (try? FileManager.default.contentsOfDirectory(
                 at: originalsURL,
                 includingPropertiesForKeys: nil,
@@ -11351,20 +11355,20 @@ extension ContentView {
 #endif
             appState.scheduleShotMetadataSupabaseWriteIfNeeded(
                 propertyID: propertyID,
-                sessionID: session.id,
+                sessionID: sessionID,
                 shotID: shot.id,
                 reason: "initial_capture",
                 allowInsert: true
             )
             appState.refreshCurrentSessionDraftBadgeAfterCapture(
                 propertyID: propertyID,
-                sessionID: session.id,
+                sessionID: sessionID,
                 reason: "initial_capture_local_badge"
             )
             appState.promoteCurrentSessionToActiveCaptureLockIfNeeded(reason: "initial_capture")
             appState.uploadOperationalMediaIfNeeded(
                 propertyID: propertyID,
-                sessionID: session.id,
+                sessionID: sessionID,
                 shotID: shot.id
             )
         } catch {
@@ -12047,8 +12051,9 @@ extension ContentView {
             imageCache.invalidate(localIdentifier: newLocalIdentifier)
         }
 
-        if let propertyID = appState.selectedPropertyID,
-           let sessionID = appState.currentSession?.id {
+        if let captureTarget = appState.activeCaptureTarget() {
+            let propertyID = captureTarget.propertyID
+            let sessionID = captureTarget.sessionID
             if let existingFilename {
                 let trimmed = existingFilename.trimmingCharacters(in: .whitespacesAndNewlines)
                 if !trimmed.isEmpty {
@@ -12182,7 +12187,9 @@ extension ContentView {
     }
 
     private func markGuidedShotSkipped(_ guidedShot: GuidedShot, reason: SkipReason, otherNote: String?) {
-        guard let propertyID = appState.selectedPropertyID else { return }
+        guard let captureTarget = appState.activeCaptureTarget() else { return }
+        let propertyID = captureTarget.propertyID
+        let sessionID = captureTarget.sessionID
         guard !isGuidedShotCapturedInCurrentSession(guidedShot.shot) else { return }
 
         do {
@@ -12191,7 +12198,7 @@ extension ContentView {
 
             allGuidedShots[idx].skipReason = reason
             allGuidedShots[idx].skipReasonNote = reason == .other ? otherNote?.trimmingCharacters(in: .whitespacesAndNewlines) : nil
-            allGuidedShots[idx].skipSessionID = appState.currentSession?.id
+            allGuidedShots[idx].skipSessionID = sessionID
             allGuidedShots[idx].isCompleted = false
             allGuidedShots[idx].shot = nil
 
@@ -12232,8 +12239,9 @@ extension ContentView {
     }
 
     private func retireGuidedShot(_ guidedShot: GuidedShot, reason: String) {
-        guard let propertyID = appState.selectedPropertyID,
-              let sessionID = appState.currentSession?.id else { return }
+        guard let captureTarget = appState.activeCaptureTarget() else { return }
+        let propertyID = captureTarget.propertyID
+        let sessionID = captureTarget.sessionID
         do {
             let retired = try localStore.retireGuidedShot(
                 propertyID: propertyID,
@@ -12265,8 +12273,9 @@ extension ContentView {
     }
 
     private func restoreRetiredGuidedShot(_ guidedShot: GuidedShot) {
-        guard let propertyID = appState.selectedPropertyID,
-              let sessionID = appState.currentSession?.id else { return }
+        guard let captureTarget = appState.activeCaptureTarget() else { return }
+        let propertyID = captureTarget.propertyID
+        let sessionID = captureTarget.sessionID
         do {
             let restored = try localStore.restoreRetiredGuidedShot(
                 propertyID: propertyID,
@@ -12302,7 +12311,9 @@ extension ContentView {
         elevation: String,
         detailType: String
     ) {
-        guard let propertyID = appState.selectedPropertyID else { return }
+        guard let captureTarget = appState.activeCaptureTarget() else { return }
+        let propertyID = captureTarget.propertyID
+        let sessionID = captureTarget.sessionID
 
         let normalizedBuilding = building.trimmingCharacters(in: .whitespacesAndNewlines)
         let normalizedElevation = (CanonicalElevation.normalize(elevation) ?? elevation).trimmingCharacters(in: .whitespacesAndNewlines)
@@ -12331,7 +12342,7 @@ extension ContentView {
                 detailType: normalizedDetailType
             )
             allGuidedShots[idx].reassignedAt = Date()
-            allGuidedShots[idx].reassignedInSessionID = appState.currentSession?.id
+            allGuidedShots[idx].reassignedInSessionID = sessionID
 
             let updatedGuided = allGuidedShots[idx]
             _ = try saveNormalizedGuidedShots(allGuidedShots, propertyID: propertyID)
@@ -12390,7 +12401,9 @@ extension ContentView {
         elevation: String,
         detailType: String
     ) {
-        guard let propertyID = appState.selectedPropertyID else { return }
+        guard let captureTarget = appState.activeCaptureTarget() else { return }
+        let propertyID = captureTarget.propertyID
+        let sessionID = captureTarget.sessionID
 
         let normalizedBuilding = building.trimmingCharacters(in: .whitespacesAndNewlines)
         let normalizedElevation = (CanonicalElevation.normalize(elevation) ?? elevation).trimmingCharacters(in: .whitespacesAndNewlines)
@@ -12409,7 +12422,7 @@ extension ContentView {
             )
             let assignedAngle = nextAvailableFlaggedAngleIndex(
                 propertyID: propertyID,
-                sessionID: appState.currentSession?.id,
+                sessionID: sessionID,
                 building: normalizedBuilding,
                 elevation: normalizedElevation,
                 detailType: normalizedDetailType,
@@ -12420,11 +12433,11 @@ extension ContentView {
             updated.targetElevation = normalizedElevation
             updated.detailType = normalizedDetailType
             updated.updatedAt = Date()
-            updated.updatedInSessionID = appState.currentSession?.id
+            updated.updatedInSessionID = sessionID
             appendObservationHistoryEvent(
                 ObservationHistoryEvent(
                     timestamp: updated.updatedAt,
-                    sessionID: appState.currentSession?.id,
+                    sessionID: sessionID,
                     kind: .reclassified,
                     beforeValue: beforeContext,
                     afterValue: Self.observationContextValue(
@@ -12571,7 +12584,9 @@ extension ContentView {
     }
 
     private func reassignGuidedShot(_ source: GuidedShot, to targetID: UUID) {
-        guard let propertyID = appState.selectedPropertyID else { return }
+        guard let captureTarget = appState.activeCaptureTarget() else { return }
+        let propertyID = captureTarget.propertyID
+        let sessionID = captureTarget.sessionID
         guard source.id != targetID else { return }
 
         do {
@@ -12584,7 +12599,6 @@ extension ContentView {
             let sourceReferenceID = allGuidedShots[sourceIndex].referenceImageLocalIdentifier
             let sourceReferencePath = allGuidedShots[sourceIndex].referenceImagePath
             let now = Date()
-            let sessionID = appState.currentSession?.id
 
             allGuidedShots[targetIndex].shot = sourceShot
             allGuidedShots[targetIndex].isCompleted = sourceCompleted
@@ -12627,7 +12641,9 @@ extension ContentView {
     }
 
     private func updateGuidedShotLabel(_ guidedShot: GuidedShot, detailLabel: String) {
-        guard let propertyID = appState.selectedPropertyID else { return }
+        guard let captureTarget = appState.activeCaptureTarget() else { return }
+        let propertyID = captureTarget.propertyID
+        let sessionID = captureTarget.sessionID
         let trimmed = detailLabel.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
 
@@ -12642,7 +12658,7 @@ extension ContentView {
             )
             allGuidedShots[idx].title = recomputed.isEmpty ? trimmed : recomputed
             allGuidedShots[idx].labelEditedAt = Date()
-            allGuidedShots[idx].labelEditedInSessionID = appState.currentSession?.id
+            allGuidedShots[idx].labelEditedInSessionID = sessionID
 
             _ = try saveNormalizedGuidedShots(allGuidedShots, propertyID: propertyID)
             refreshGuidedShots()
@@ -12659,13 +12675,14 @@ extension ContentView {
         retakeShotIDAtCapture: UUID?
     ) -> Bool {
         guard let armedID = guidedIDAtCapture ?? armedGuidedShotID else { return false }
-        guard let propertyID = appState.selectedPropertyID else {
+        guard let captureTarget = appState.activeCaptureTarget() else {
             armedGuidedShotID = nil
             armedGuidedRetakeShotID = nil
             retakeContext = nil
             currentCaptureIntent = .free
             return false
         }
+        let propertyID = captureTarget.propertyID
 
         do {
             var allGuidedShots = try localStore.fetchGuidedShots(propertyID: propertyID)
@@ -12960,7 +12977,7 @@ extension ContentView {
         try localStore.saveGuidedShots(normalized, propertyID: propertyID)
         syncGuidedShotsToCurrentSessionMetadataIfPersisted(
             propertyID: propertyID,
-            sessionID: appState.currentSession?.id,
+            sessionID: appState.activeCaptureTarget()?.sessionID,
             guidedShots: normalized
         )
         return normalized
@@ -14844,13 +14861,14 @@ extension ContentView {
     }
 
     private func resetDetailSelectionForNewEmptySessionIfNeeded() {
-        guard let propertyID = appState.selectedPropertyID,
-              let session = appState.currentSession,
-              session.status == .draft,
-              !session.isSealed else {
+        guard let captureTarget = appState.activeCaptureTarget(),
+              captureTarget.canCapture else {
             return
         }
-        if let metadata = try? localStore.loadSessionMetadata(propertyID: propertyID, sessionID: session.id),
+        if let metadata = try? localStore.loadSessionMetadata(
+            propertyID: captureTarget.propertyID,
+            sessionID: captureTarget.sessionID
+        ),
            !metadata.shots.isEmpty {
             return
         }
@@ -14881,8 +14899,9 @@ extension ContentView {
     }
 
     private func armFlaggedRetake(_ observation: Observation) {
-        guard let propertyID = appState.selectedPropertyID,
-              let sessionID = appState.currentSession?.id else { return }
+        guard let captureTarget = appState.activeCaptureTarget() else { return }
+        let propertyID = captureTarget.propertyID
+        let sessionID = captureTarget.sessionID
         guard let linkedShotID = observation.linkedShotID,
               let existingShot = observation.shots.first(where: { $0.id == linkedShotID }) else { return }
 
@@ -14994,7 +15013,9 @@ extension ContentView {
     }
 
     private func applyPendingFlaggedResolve() {
-        guard let propertyID = appState.selectedPropertyID else { return }
+        guard let captureTarget = appState.activeCaptureTarget() else { return }
+        let propertyID = captureTarget.propertyID
+        let sessionID = captureTarget.sessionID
         guard let targetID = flaggedActionTargetObservation?.id else { return }
         guard let shot = pendingFlaggedDecisionShot else { return }
 
@@ -15019,12 +15040,12 @@ extension ContentView {
             upsertShot(shot, in: &updated)
             updated.resolutionPhotoRef = pendingFlaggedDecisionPhotoRef ?? shot.imageLocalIdentifier
             updated.resolutionStatement = "Condition no longer visibly present at time of documentation."
-            updated.updatedInSessionID = appState.currentSession?.id
-            updated.resolvedInSessionID = appState.currentSession?.id
+            updated.updatedInSessionID = sessionID
+            updated.resolvedInSessionID = sessionID
             appendObservationHistoryEvent(
                 ObservationHistoryEvent(
                     timestamp: shot.capturedAt,
-                    sessionID: appState.currentSession?.id,
+                    sessionID: sessionID,
                     kind: retakeContext == nil ? .captured : .retake,
                     shotID: shot.id
                 ),
@@ -15033,7 +15054,7 @@ extension ContentView {
             appendObservationHistoryEvent(
                 ObservationHistoryEvent(
                     timestamp: Date(),
-                    sessionID: appState.currentSession?.id,
+                    sessionID: sessionID,
                     kind: .pendingReview,
                     beforeValue: "active",
                     afterValue: Observation.Status.pendingReview.issueStatusValue,
@@ -15044,25 +15065,23 @@ extension ContentView {
             )
 
             let persisted = try localStore.updateObservation(updated)
-            if let sessionID = appState.currentSession?.id {
-                do {
-                    _ = try localStore.syncFlaggedObservationUpdateToSessionMetadata(
-                        propertyID: propertyID,
-                        sessionID: sessionID,
-                        observation: persisted,
-                        shotID: shot.id,
-                        trade: Self.canonicalTradeLabel(selectedTrade, preferredOptions: tradeOptions),
-                        activeCaptureKind: retakeContext == nil ? "follow_up_capture" : "retake"
-                    )
-                    appState.scheduleShotMetadataSupabaseWriteIfNeeded(
-                        propertyID: propertyID,
-                        sessionID: sessionID,
-                        shotID: shot.id,
-                        reason: "flagged_issue_pending_review"
-                    )
-                } catch {
-                    // Keep the capture decision flow resilient; the observation itself has already been saved.
-                }
+            do {
+                _ = try localStore.syncFlaggedObservationUpdateToSessionMetadata(
+                    propertyID: propertyID,
+                    sessionID: sessionID,
+                    observation: persisted,
+                    shotID: shot.id,
+                    trade: Self.canonicalTradeLabel(selectedTrade, preferredOptions: tradeOptions),
+                    activeCaptureKind: retakeContext == nil ? "follow_up_capture" : "retake"
+                )
+                appState.scheduleShotMetadataSupabaseWriteIfNeeded(
+                    propertyID: propertyID,
+                    sessionID: sessionID,
+                    shotID: shot.id,
+                    reason: "flagged_issue_pending_review"
+                )
+            } catch {
+                // Keep the capture decision flow resilient; the observation itself has already been saved.
             }
             showFlaggedActionToastNow("Issue submitted for review")
             finalizeArmedIssueCaptureAfterDecision()
@@ -15077,7 +15096,9 @@ extension ContentView {
         revisedPriority: String?,
         revisedTrade: String?
     ) {
-        guard let propertyID = appState.selectedPropertyID else { return }
+        guard let captureTarget = appState.activeCaptureTarget() else { return }
+        let propertyID = captureTarget.propertyID
+        let sessionID = captureTarget.sessionID
         guard let targetID = flaggedActionTargetObservation?.id else { return }
         guard let shot = pendingFlaggedDecisionShot else { return }
 
@@ -15101,7 +15122,7 @@ extension ContentView {
             updated.status = .active
             updated.linkedShotID = shot.id
             upsertShot(shot, in: &updated)
-            updated.updatedInSessionID = appState.currentSession?.id
+            updated.updatedInSessionID = sessionID
             updated.resolvedInSessionID = nil
             updated.resolutionPhotoRef = nil
             updated.resolutionStatement = nil
@@ -15129,7 +15150,7 @@ extension ContentView {
             appendObservationHistoryEvent(
                 ObservationHistoryEvent(
                     timestamp: shot.capturedAt,
-                    sessionID: appState.currentSession?.id,
+                    sessionID: sessionID,
                     kind: retakeContext == nil ? .captured : .retake,
                     shotID: shot.id
                 ),
@@ -15139,7 +15160,7 @@ extension ContentView {
                 appendObservationHistoryEvent(
                     ObservationHistoryEvent(
                         timestamp: Date(),
-                        sessionID: appState.currentSession?.id,
+                        sessionID: sessionID,
                         kind: .reopened,
                         beforeValue: "resolved",
                         afterValue: "active",
@@ -15167,7 +15188,7 @@ extension ContentView {
                 appendObservationHistoryEvent(
                     ObservationHistoryEvent(
                         timestamp: Date(),
-                        sessionID: appState.currentSession?.id,
+                        sessionID: sessionID,
                         kind: .reasonUpdated,
                         beforeValue: priorReason,
                         afterValue: revisedText,
@@ -15187,25 +15208,23 @@ extension ContentView {
             }
 
             let persisted = try localStore.updateObservation(updated)
-            if let sessionID = appState.currentSession?.id {
-                do {
-                    _ = try localStore.syncFlaggedObservationUpdateToSessionMetadata(
-                        propertyID: propertyID,
-                        sessionID: sessionID,
-                        observation: persisted,
-                        shotID: shot.id,
-                        trade: revisedTrade ?? Self.canonicalTradeLabel(selectedTrade, preferredOptions: tradeOptions),
-                        activeCaptureKind: retakeContext == nil ? "follow_up_capture" : "retake"
-                    )
-                    appState.scheduleShotMetadataSupabaseWriteIfNeeded(
-                        propertyID: propertyID,
-                        sessionID: sessionID,
-                        shotID: shot.id,
-                        reason: "flagged_issue_updated"
-                    )
-                } catch {
-                    // Keep flagged update flow resilient if metadata persistence fails.
-                }
+            do {
+                _ = try localStore.syncFlaggedObservationUpdateToSessionMetadata(
+                    propertyID: propertyID,
+                    sessionID: sessionID,
+                    observation: persisted,
+                    shotID: shot.id,
+                    trade: revisedTrade ?? Self.canonicalTradeLabel(selectedTrade, preferredOptions: tradeOptions),
+                    activeCaptureKind: retakeContext == nil ? "follow_up_capture" : "retake"
+                )
+                appState.scheduleShotMetadataSupabaseWriteIfNeeded(
+                    propertyID: propertyID,
+                    sessionID: sessionID,
+                    shotID: shot.id,
+                    reason: "flagged_issue_updated"
+                )
+            } catch {
+                // Keep flagged update flow resilient if metadata persistence fails.
             }
             if revisedPriority != nil || revisedTrade != nil {
                 if revisedTrade != nil {
@@ -15213,7 +15232,7 @@ extension ContentView {
                 }
                 applyFlaggedShotMetadataOverrides(
                     propertyID: propertyID,
-                    sessionID: appState.currentSession?.id,
+                    sessionID: sessionID,
                     shotID: shot.id,
                     priority: revisedPriority ?? "",
                     trade: revisedTrade ?? ""
@@ -15242,7 +15261,9 @@ extension ContentView {
     }
 
     private func resolveObservationFromChecklist(_ observation: Observation) {
-        guard let propertyID = appState.selectedPropertyID else { return }
+        guard let captureTarget = appState.activeCaptureTarget() else { return }
+        let propertyID = captureTarget.propertyID
+        let sessionID = captureTarget.sessionID
 
         do {
             let observations = try localStore.fetchObservations(propertyID: propertyID)
@@ -15250,15 +15271,15 @@ extension ContentView {
 
             var updated = existing
             updated.status = .pendingReview
-            updated.updatedInSessionID = appState.currentSession?.id
-            updated.resolvedInSessionID = appState.currentSession?.id
+            updated.updatedInSessionID = sessionID
+            updated.resolvedInSessionID = sessionID
             if updated.resolutionStatement?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true {
                 updated.resolutionStatement = "Condition no longer visibly present at time of documentation."
             }
             appendObservationHistoryEvent(
                 ObservationHistoryEvent(
                     timestamp: Date(),
-                    sessionID: appState.currentSession?.id,
+                    sessionID: sessionID,
                     kind: .pendingReview,
                     beforeValue: "active",
                     afterValue: Observation.Status.pendingReview.issueStatusValue,
@@ -15269,8 +15290,7 @@ extension ContentView {
             )
 
             let persisted = try localStore.updateObservation(updated)
-            if let sessionID = appState.currentSession?.id,
-               let shotID = persisted.linkedShotID {
+            if let shotID = persisted.linkedShotID {
                 do {
                     _ = try localStore.syncFlaggedObservationUpdateToSessionMetadata(
                         propertyID: propertyID,
@@ -15298,7 +15318,9 @@ extension ContentView {
     }
 
     private func reassignObservation(_ source: Observation, to targetID: UUID) {
-        guard let propertyID = appState.selectedPropertyID else { return }
+        guard let captureTarget = appState.activeCaptureTarget() else { return }
+        let propertyID = captureTarget.propertyID
+        let sessionID = captureTarget.sessionID
         guard source.id != targetID else { return }
 
         do {
@@ -15312,11 +15334,11 @@ extension ContentView {
                 observations[targetIndex].shots.append(movedShot)
             }
             observations[targetIndex].linkedShotID = movedShot.id
-            observations[targetIndex].updatedInSessionID = appState.currentSession?.id
+            observations[targetIndex].updatedInSessionID = sessionID
 
             let remainingSourceShots = observations[sourceIndex].shots.filter { $0.id != movedShot.id }
             observations[sourceIndex].linkedShotID = remainingSourceShots.last?.id
-            observations[sourceIndex].updatedInSessionID = appState.currentSession?.id
+            observations[sourceIndex].updatedInSessionID = sessionID
 
             _ = try localStore.updateObservation(observations[targetIndex])
             _ = try localStore.updateObservation(observations[sourceIndex])
@@ -15328,7 +15350,9 @@ extension ContentView {
     }
 
     private func updateObservationLabel(_ observation: Observation, detailLabel: String) {
-        guard let propertyID = appState.selectedPropertyID else { return }
+        guard let captureTarget = appState.activeCaptureTarget() else { return }
+        let propertyID = captureTarget.propertyID
+        let sessionID = captureTarget.sessionID
         let trimmed = detailLabel.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
 
@@ -15338,7 +15362,7 @@ extension ContentView {
 
             var updated = existing
             updated.detailType = trimmed
-            updated.updatedInSessionID = appState.currentSession?.id
+            updated.updatedInSessionID = sessionID
 
             _ = try localStore.updateObservation(updated)
             refreshActiveIssues()
@@ -15747,7 +15771,9 @@ extension ContentView {
     private func confirmResolution() {
         guard let target = resolutionTargetObservation else { return }
         guard let shot = resolutionCapturedShot else { return }
-        guard let propertyID = appState.selectedPropertyID else { return }
+        guard let captureTarget = appState.activeCaptureTarget() else { return }
+        let propertyID = captureTarget.propertyID
+        let sessionID = captureTarget.sessionID
 
         do {
             let observations = try localStore.fetchObservations(propertyID: propertyID)
@@ -15759,12 +15785,12 @@ extension ContentView {
             upsertShot(shot, in: &updated)
             updated.resolutionPhotoRef = resolutionCapturedPhotoRef
             updated.resolutionStatement = "Condition no longer visibly present at time of documentation."
-            updated.updatedInSessionID = appState.currentSession?.id
-            updated.resolvedInSessionID = appState.currentSession?.id
+            updated.updatedInSessionID = sessionID
+            updated.resolvedInSessionID = sessionID
             appendObservationHistoryEvent(
                 ObservationHistoryEvent(
                     timestamp: shot.capturedAt,
-                    sessionID: appState.currentSession?.id,
+                    sessionID: sessionID,
                     kind: .captured,
                     shotID: shot.id
                 ),
@@ -15773,7 +15799,7 @@ extension ContentView {
             appendObservationHistoryEvent(
                 ObservationHistoryEvent(
                     timestamp: Date(),
-                    sessionID: appState.currentSession?.id,
+                    sessionID: sessionID,
                     kind: .resolved,
                     beforeValue: existing.status.issueStatusValue,
                     afterValue: Observation.Status.resolved.issueStatusValue,
@@ -15783,25 +15809,23 @@ extension ContentView {
                 to: &updated
             )
             let persisted = try localStore.updateObservation(updated)
-            if let sessionID = appState.currentSession?.id {
-                do {
-                    _ = try localStore.syncFlaggedObservationUpdateToSessionMetadata(
-                        propertyID: propertyID,
-                        sessionID: sessionID,
-                        observation: persisted,
-                        shotID: shot.id,
-                        trade: Self.canonicalTradeLabel(selectedTrade, preferredOptions: tradeOptions),
-                        activeCaptureKind: "follow_up_capture"
-                    )
-                    appState.scheduleShotMetadataSupabaseWriteIfNeeded(
-                        propertyID: propertyID,
-                        sessionID: sessionID,
-                        shotID: shot.id,
-                        reason: "flagged_issue_resolved"
-                    )
-                } catch {
-                    // Keep resolution capture resilient; the observation itself has already been saved.
-                }
+            do {
+                _ = try localStore.syncFlaggedObservationUpdateToSessionMetadata(
+                    propertyID: propertyID,
+                    sessionID: sessionID,
+                    observation: persisted,
+                    shotID: shot.id,
+                    trade: Self.canonicalTradeLabel(selectedTrade, preferredOptions: tradeOptions),
+                    activeCaptureKind: "follow_up_capture"
+                )
+                appState.scheduleShotMetadataSupabaseWriteIfNeeded(
+                    propertyID: propertyID,
+                    sessionID: sessionID,
+                    shotID: shot.id,
+                    reason: "flagged_issue_resolved"
+                )
+            } catch {
+                // Keep resolution capture resilient; the observation itself has already been saved.
             }
 
             resolutionTargetObservation = nil
@@ -15816,8 +15840,9 @@ extension ContentView {
     }
 
     private func reopenResolutionRequiredIssue(_ observation: Observation) {
-        guard let propertyID = appState.selectedPropertyID else { return }
-        let sessionID = appState.currentSession?.id
+        guard let captureTarget = appState.activeCaptureTarget() else { return }
+        let propertyID = captureTarget.propertyID
+        let sessionID = captureTarget.sessionID
         let previousActiveObservations = activeObservations
         let previousResolutionRequiredObservations = resolutionRequiredObservations
         let reopenEvent = ObservationHistoryEvent(
@@ -15879,8 +15904,7 @@ extension ContentView {
                 updated.historyEvents.sort { $0.timestamp < $1.timestamp }
 
                 persisted = try store.updateObservation(updated)
-                if let sessionID,
-                   let shotID = persisted.linkedShotID {
+                if let shotID = persisted.linkedShotID {
                     _ = try store.syncFlaggedObservationUpdateToSessionMetadata(
                         propertyID: propertyID,
                         sessionID: sessionID,
@@ -15901,8 +15925,7 @@ extension ContentView {
                 return
             }
 
-            if let sessionID,
-               let shotID = persisted.linkedShotID {
+            if let shotID = persisted.linkedShotID {
                 DispatchQueue.main.async {
                     state.scheduleShotMetadataSupabaseWriteIfNeeded(
                         propertyID: propertyID,

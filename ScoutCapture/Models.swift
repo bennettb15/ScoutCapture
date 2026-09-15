@@ -1937,6 +1937,24 @@ struct CaptureRuntimeContext: Equatable {
     }
 }
 
+struct ActiveCaptureTarget: Equatable {
+    let propertyID: UUID
+    let sessionID: UUID
+    let sessionType: SessionType
+    let canCapture: Bool
+    let startedAt: Date
+    let status: Session.Status
+
+    nonisolated init(context: CaptureRuntimeContext) {
+        propertyID = context.propertyID
+        sessionID = context.sessionID
+        sessionType = context.sessionType
+        canCapture = context.status == .draft && !context.isSealed
+        startedAt = context.startedAt
+        status = context.status
+    }
+}
+
 enum SkipReason: String, Codable, CaseIterable {
     case inaccessible
     case obstructed

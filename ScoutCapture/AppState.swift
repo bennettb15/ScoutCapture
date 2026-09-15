@@ -7387,6 +7387,18 @@ final class AppState: ObservableObject {
         return context
     }
 
+    func activeCaptureTarget(ensuringCurrentSessionPersisted: Bool = false) -> ActiveCaptureTarget? {
+        guard let context = selectedCaptureRuntimeContext else { return nil }
+        let target = ActiveCaptureTarget(context: context)
+        guard ensuringCurrentSessionPersisted else { return target }
+        guard let session = ensureCurrentSessionPersisted() ?? currentSession,
+              session.propertyID == target.propertyID,
+              session.id == target.sessionID else {
+            return nil
+        }
+        return target
+    }
+
     func clearLocalDiagnostics() {
         mutateLocalDiagnostics { diagnostics in
             diagnostics = LocalDiagnosticsState()
