@@ -5044,6 +5044,54 @@ final class AppState: ObservableObject {
         }
     }
 
+    struct FastRuntimeCompleteDryRunShotSummary: Equatable, Identifiable {
+        let id: UUID
+        let capturedAt: Date
+        let captureKind: String
+        let originalRelativePath: String
+        let resolvedLocalFilePath: String?
+        let metadataLocalFilePath: String
+        let fileExists: Bool
+        let byteSize: Int64?
+    }
+
+    struct FastRuntimeCompleteDryRunResult: Equatable, Identifiable {
+        let id = UUID()
+        let isValid: Bool
+        let propertyID: UUID
+        let sessionID: UUID
+        let sessionType: SessionType
+        let orgID: UUID?
+        let ownerUserID: UUID?
+        let ownerEmail: String?
+        let ownerDeviceID: String?
+        let metadataSource: String
+        let photoCount: Int
+        let metadataPhotoCount: Int
+        let missingFilesCount: Int
+        let missingFields: [String]
+        let warnings: [String]
+        let corruptMetadataMessage: String?
+        let totalBytes: Int64
+        let wouldCreate: [String]
+        let wouldUpload: [String]
+        let shots: [FastRuntimeCompleteDryRunShotSummary]
+
+        var title: String {
+            isValid ? "Complete Dry Run Valid" : "Complete Dry Run Failed"
+        }
+
+        var summary: String {
+            [
+                "valid=\(isValid)",
+                "photos=\(photoCount)",
+                "metadata=\(metadataPhotoCount)",
+                "missing_files=\(missingFilesCount)",
+                "session_type=\(sessionType.rawValue)"
+            ].joined(separator: " ")
+        }
+    }
+
     struct PropertyStatusDerivedSummary: Equatable {
         let draftBadgeDecision: Bool
         let pendingExportDecision: Bool
@@ -42352,6 +42400,150 @@ final class AppState: ObservableObject {
                 )
             )
         }
+    }
+
+    func runFastRuntimeCompleteDryRun(
+        context: ActiveCaptureContext,
+        storageRoot: URL?,
+        capturedPhotoCount: Int
+    ) async -> FastRuntimeCompleteDryRunResult {
+        let summaryCandidate = fastRuntimeDraftsByPropertyID[context.propertyID]
+        let summary = summaryCandidate?.sessionID == context.sessionID ? summaryCandidate : nil
+        let summaryStorageRoot = summary.map { URL(fileURLWithPath: $0.draftRootPath, isDirectory: true) }
+        let root = storageRoot ?? summaryStorageRoot
+        let metadataURL = root?
+            .appendingPathComponent("Metadata", isDirectory: true)
+            .appendingPathComponent("fast-lane-shots.json", isDirectory: false)
+        let metadataSource: String = {
+            if summary != nil, storageRoot?.standardizedFileURL.path == summaryStorageRoot?.standardizedFileURL.path {
+                return "fast_runtime_draft_index"
+            }
+            if summary != nil {
+                return "active_preview_with_draft_index"
+            }
+            return "active_preview_runtime_storage"
+        }()
+
+        var missingFields: [String] = []
+        var warnings: [String] = []
+        if context.orgID == nil { missingFields.append("orgID") }
+        if context.ownerUserID == nil { missingFields.append("ownerUserID") }
+        if normalizedSupabaseText(context.ownerDeviceID) == nil { missingFields.append("ownerDeviceID") }
+        if root == nil { missingFields.append("storageRoot") }
+        if metadataURL == nil { missingFields.append("metadataPath") }
+        if let summary, summary.photoCount != capturedPhotoCount {
+            warnings.append("draft_index_photo_count=\(summary.photoCount) preview_photo_count=\(capturedPhotoCount)")
+        }
+
+        var corruptMetadataMessage: String?
+        var shotRecords: [FastRuntimePrototypeShotRecord] = []
+        if let metadataURL {
+            do {
+                let data = try Data(contentsOf: metadataURL)
+                let decoder = JSONDecoder()
+                decoder.dateDecodingStrategy = .iso8601
+                shotRecords = try decoder.decode([FastRuntimePrototypeShotRecord].self, from: data)
+            } catch {
+                corruptMetadataMessage = "metadata_read_decode_failed: \(error.localizedDescription)"
+            }
+        }
+
+        if capturedPhotoCount <= 0 {
+            missingFields.append("photoCount")
+        }
+        if shotRecords.count != capturedPhotoCount {
+            missingFields.append("photoCountMismatch(metadata=\(shotRecords.count), preview=\(capturedPhotoCount))")
+        }
+
+        let fileManager = FileManager.default
+        var totalBytes: Int64 = 0
+        let shotSummaries: [FastRuntimeCompleteDryRunShotSummary] = shotRecords.map { shot in
+            if shot.propertyID != context.propertyID { missingFields.append("shot[\(shot.id.uuidString.prefix(8))].propertyID") }
+            if shot.sessionID != context.sessionID { missingFields.append("shot[\(shot.id.uuidString.prefix(8))].sessionID") }
+            if shot.sessionType != context.sessionType { missingFields.append("shot[\(shot.id.uuidString.prefix(8))].sessionType") }
+            if shot.orgID == nil { missingFields.append("shot[\(shot.id.uuidString.prefix(8))].orgID") }
+            if shot.originalRelativePath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                missingFields.append("shot[\(shot.id.uuidString.prefix(8))].originalRelativePath")
+            }
+            if shot.localFilePath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                missingFields.append("shot[\(shot.id.uuidString.prefix(8))].localFilePath")
+            }
+            if shot.captureKind.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                missingFields.append("shot[\(shot.id.uuidString.prefix(8))].captureKind")
+            }
+
+            let metadataURL = URL(fileURLWithPath: shot.localFilePath, isDirectory: false)
+            let relativeURL = root?.appendingPathComponent(shot.originalRelativePath, isDirectory: false)
+            let resolvedURL: URL? = {
+                if fileManager.fileExists(atPath: metadataURL.path) {
+                    return metadataURL
+                }
+                if let relativeURL,
+                   fileManager.fileExists(atPath: relativeURL.path) {
+                    if metadataURL.path != relativeURL.path {
+                        warnings.append("shot[\(shot.id.uuidString.prefix(8))].localFilePath resolved from originalRelativePath")
+                    }
+                    return relativeURL
+                }
+                return nil
+            }()
+            let byteSize: Int64? = resolvedURL.flatMap { url in
+                let attributes = try? fileManager.attributesOfItem(atPath: url.path)
+                return attributes?[.size] as? Int64
+            }
+            if let byteSize {
+                totalBytes += byteSize
+            }
+
+            return FastRuntimeCompleteDryRunShotSummary(
+                id: shot.id,
+                capturedAt: shot.capturedAt,
+                captureKind: shot.captureKind,
+                originalRelativePath: shot.originalRelativePath,
+                resolvedLocalFilePath: resolvedURL?.path,
+                metadataLocalFilePath: shot.localFilePath,
+                fileExists: resolvedURL != nil,
+                byteSize: byteSize
+            )
+        }
+
+        let missingFilesCount = shotSummaries.filter { !$0.fileExists }.count
+        let wouldCreate = [
+            "sessions row/session payload for \(context.sessionID.uuidString)",
+            "session metadata package with \(shotRecords.count) shot records",
+            "shot metadata rows for \(shotRecords.count) local captures",
+            context.sessionType == .punchlistVisit ? "punchlist package candidate" : "full documentation package candidate"
+        ]
+        let wouldUpload = shotSummaries.map {
+            "\($0.id.uuidString): \($0.originalRelativePath)"
+        }
+        let isValid = missingFields.isEmpty &&
+            corruptMetadataMessage == nil &&
+            missingFilesCount == 0 &&
+            capturedPhotoCount > 0 &&
+            shotRecords.count == capturedPhotoCount
+
+        return FastRuntimeCompleteDryRunResult(
+            isValid: isValid,
+            propertyID: context.propertyID,
+            sessionID: context.sessionID,
+            sessionType: context.sessionType,
+            orgID: context.orgID,
+            ownerUserID: context.ownerUserID,
+            ownerEmail: context.ownerEmail,
+            ownerDeviceID: context.ownerDeviceID,
+            metadataSource: metadataSource,
+            photoCount: capturedPhotoCount,
+            metadataPhotoCount: shotRecords.count,
+            missingFilesCount: missingFilesCount,
+            missingFields: Array(Set(missingFields)).sorted(),
+            warnings: Array(Set(warnings)).sorted(),
+            corruptMetadataMessage: corruptMetadataMessage,
+            totalBytes: totalBytes,
+            wouldCreate: wouldCreate,
+            wouldUpload: wouldUpload,
+            shots: shotSummaries
+        )
     }
 
     private func prototypeStatusIsCurrentUserOccupiedByThisClient(

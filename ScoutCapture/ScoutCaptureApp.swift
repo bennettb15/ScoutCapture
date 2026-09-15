@@ -12739,6 +12739,8 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
     @State private var lastCapture: FastRuntimePreviewCaptureTiming?
     @State private var fastStorageRoot: URL?
     @State private var isTimingExpanded: Bool = false
+    @State private var isRunningCompleteDryRun: Bool = false
+    @State private var completeDryRunResult: AppState.FastRuntimeCompleteDryRunResult?
 
     var body: some View {
         ZStack {
@@ -12776,6 +12778,9 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
         .onReceive(camera.$isPreviewRunning.removeDuplicates()) { isRunning in
             guard isRunning, previewRunningAt == nil else { return }
             previewRunningAt = Date()
+        }
+        .sheet(item: $completeDryRunResult) { result in
+            FastRuntimeCompleteDryRunResultView(result: result)
         }
     }
 
@@ -12852,6 +12857,23 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                     .background(Color.red.opacity(0.72))
                     .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
                     .padding(.horizontal, 18)
+            }
+
+            if capturedCount > 0 {
+                Button(isRunningCompleteDryRun ? "Checking..." : "Complete Dry Run") {
+                    runCompleteDryRun()
+                }
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundColor(.white.opacity(0.94))
+                .padding(.horizontal, 14)
+                .frame(height: 34)
+                .background(Color.black.opacity(0.58))
+                .clipShape(Capsule())
+                .overlay(
+                    Capsule()
+                        .stroke(Color.white.opacity(0.20), lineWidth: 1)
+                )
+                .disabled(isRunningCompleteDryRun || isClosing || isSavingFastCapture || camera.isCapturing)
             }
 
             HStack(spacing: 18) {
@@ -13005,6 +13027,22 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
         }
     }
 
+    private func runCompleteDryRun() {
+        guard capturedCount > 0, !isRunningCompleteDryRun else { return }
+        isRunningCompleteDryRun = true
+        Task {
+            let result = await appState.runFastRuntimeCompleteDryRun(
+                context: context,
+                storageRoot: fastStorageRoot ?? prototypeResult.tempStorageRoot,
+                capturedPhotoCount: capturedCount
+            )
+            await MainActor.run {
+                completeDryRunResult = result
+                isRunningCompleteDryRun = false
+            }
+        }
+    }
+
     private func closePreview() {
         guard !isClosing else { return }
         isClosing = true
@@ -13049,6 +13087,98 @@ private struct FastRuntimePreviewCaptureTiming {
 
     var totalMilliseconds: Double? {
         savedAt.map { $0.timeIntervalSince(shutterTappedAt) * 1_000 }
+    }
+}
+
+private struct FastRuntimeCompleteDryRunResultView: View {
+    @Environment(\.dismiss) private var dismiss
+    let result: AppState.FastRuntimeCompleteDryRunResult
+
+    var body: some View {
+        NavigationStack {
+            List {
+                Section("Result") {
+                    diagnosticRow("Valid", result.isValid ? "true" : "false")
+                    diagnosticRow("Photo Count", "\(result.photoCount)")
+                    diagnosticRow("Metadata Count", "\(result.metadataPhotoCount)")
+                    diagnosticRow("Missing Files", "\(result.missingFilesCount)")
+                    diagnosticRow("Session Type", result.sessionType.rawValue)
+                    diagnosticRow("Metadata Source", result.metadataSource)
+                    diagnosticRow("Total Bytes", "\(result.totalBytes)")
+                }
+
+                Section("Identity") {
+                    diagnosticRow("Org ID", result.orgID?.uuidString ?? "missing")
+                    diagnosticRow("Property ID", result.propertyID.uuidString)
+                    diagnosticRow("Session ID", result.sessionID.uuidString)
+                    diagnosticRow("Owner User", result.ownerUserID?.uuidString ?? "missing")
+                    diagnosticRow("Owner Email", result.ownerEmail ?? "none")
+                    diagnosticRow("Owner Device", result.ownerDeviceID ?? "missing")
+                }
+
+                if !result.missingFields.isEmpty {
+                    Section("Missing Fields") {
+                        diagnosticBlock("Fields", result.missingFields.joined(separator: "\n"))
+                    }
+                }
+
+                if let corruptMetadataMessage = result.corruptMetadataMessage {
+                    Section("Metadata Error") {
+                        diagnosticBlock("Error", corruptMetadataMessage)
+                    }
+                }
+
+                if !result.warnings.isEmpty {
+                    Section("Warnings") {
+                        diagnosticBlock("Warnings", result.warnings.joined(separator: "\n"))
+                    }
+                }
+
+                Section("Would Create") {
+                    diagnosticBlock("Dry Run Only", result.wouldCreate.joined(separator: "\n"))
+                }
+
+                Section("Would Upload") {
+                    if result.wouldUpload.isEmpty {
+                        Text("No upload candidates.")
+                            .foregroundStyle(.secondary)
+                    } else {
+                        diagnosticBlock("Files", result.wouldUpload.joined(separator: "\n"))
+                    }
+                }
+
+                Section("Shots") {
+                    ForEach(result.shots) { shot in
+                        VStack(alignment: .leading, spacing: 5) {
+                            diagnosticRow("Shot", shot.id.uuidString)
+                            diagnosticRow("Capture Kind", shot.captureKind)
+                            diagnosticRow("File Exists", shot.fileExists ? "true" : "false")
+                            diagnosticRow("Bytes", shot.byteSize.map(String.init) ?? "missing")
+                            diagnosticBlock("Resolved Path", shot.resolvedLocalFilePath ?? "missing")
+                            if shot.resolvedLocalFilePath != shot.metadataLocalFilePath {
+                                diagnosticBlock("Metadata Path", shot.metadataLocalFilePath)
+                            }
+                        }
+                        .padding(.vertical, 4)
+                    }
+                }
+
+                Section("Safety") {
+                    Text("Dry run only. No Supabase write, storage upload, report, email, Complete, or local draft deletion was performed.")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .navigationTitle(result.title)
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Done") {
+                        dismiss()
+                    }
+                }
+            }
+        }
     }
 }
 
