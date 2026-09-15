@@ -12961,6 +12961,7 @@ struct PropertySessionView: View {
         switch lightweightStatus.entryState {
         case .unlockedAndClaimed:
             let session = appState.startSession(
+                sessionType: initialSessionType ?? .fullDocumentation,
                 skipPropertyStatusPreflight: true,
                 preferredNewSessionID: targetSessionID
             )
