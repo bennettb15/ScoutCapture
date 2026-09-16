@@ -532,6 +532,10 @@ private struct AppRootView: View {
         propertyListReadinessTimedOut || homePropertyListReadinessTimedOut
     }
 
+    private var shouldShowInitialPropertyListUpdatingBanner: Bool {
+        initialPropertyListTimedOut && appState.isInitialPropertyListUpdateStillActive
+    }
+
     var body: some View {
         Group {
             if !isAppReady {
@@ -565,7 +569,7 @@ private struct AppRootView: View {
                     showsSpinner: false
                 )
             } else {
-                SessionHubView(initialPropertyListTimedOut: initialPropertyListTimedOut)
+                SessionHubView(initialPropertyListTimedOut: shouldShowInitialPropertyListUpdatingBanner)
             }
         }
         .onChange(of: appState.isAuthenticationReady) { _, _ in
@@ -1343,10 +1347,11 @@ struct SessionHubView: View {
         let badgeModel = appState.propertyCardBadgeModel(for: property.id)
         let pendingSession = appState.propertyRowPendingDeliverySession(for: property.id)
         let sessionUploadStatus = appState.propertyRowSessionSnapshotCloudStatus(propertyID: property.id)
+        let rawHasDraft = badgeModel.showDraft
         let uploadStatusChip = sessionUploadStatus.flatMap(sessionSnapshotUploadStatusChip)
         let isActivelyUploading = sessionUploadStatus?.state == .uploading &&
             sessionUploadStatus?.isConfigurationBlocked == false
-        let hasDraft = badgeModel.showDraft
+        let hasDraft = rawHasDraft && !isActivelyUploading
         let hasPendingExport = badgeModel.showPendingExport && !isActivelyUploading
         let latestReExportSession = appState.propertyRowReExportCandidateSession(for: property.id)
         let hasReExportGlyph = badgeModel.showReExport && latestReExportSession != nil
@@ -1430,13 +1435,6 @@ struct SessionHubView: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .onAppear {
-            appState.schedulePropertyRowDetailsHydration(
-                reason: "property_row_appeared",
-                propertyIDs: [property.id],
-                refreshCloudStatus: true
-            )
-        }
         .contextMenu {
             Button("Manage Sessions") {
                 manageSessionsProperty = property
@@ -3604,20 +3602,19 @@ struct SessionHubView: View {
         _ result: AppState.FastRuntimePrototypeCloseResult
     ) -> some View {
         VStack(alignment: .leading, spacing: 5) {
-            Text(result.draftPersisted ? "Fast Draft Preserved" : "Fast Preview Closed")
+            Text("Fast-Lane Close Needs Attention")
                 .font(.system(size: 14, weight: .bold))
                 .foregroundColor(.white)
-            Text("photos \(result.photoCount)  lock \(result.lockAction)")
-                .font(.system(size: 11, weight: .medium, design: .monospaced))
-                .foregroundColor(.white.opacity(0.86))
-            Text("persist \(optionalMillisecondsText(result.timings.persistMilliseconds))  total \(millisecondsText(result.timings.totalMilliseconds))")
-                .font(.system(size: 11, weight: .medium, design: .monospaced))
-                .foregroundColor(.white.opacity(0.86))
             if let error = result.errorMessage {
                 Text(error)
-                    .font(.system(size: 11, weight: .medium, design: .monospaced))
-                    .foregroundColor(.red.opacity(0.92))
-                    .lineLimit(2)
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundColor(.white.opacity(0.88))
+                    .lineLimit(3)
+            } else {
+                Text("Your draft state may need cleanup from Debug Tools.")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundColor(.white.opacity(0.88))
+                    .lineLimit(3)
             }
         }
         .padding(.horizontal, 14)
@@ -3716,6 +3713,7 @@ struct SessionHubView: View {
         let fastDraftResumeState = appState.fastRuntimeDraftResumeState(for: property.id)
         let hasPendingExport = badgeModel.showPendingExport
         let hasDraft = badgeModel.showDraft
+        let isFastLaneUploading = appState.isFastRuntimeCompletionUploading(propertyID: property.id)
 
         let latestID = pendingSession?.id.uuidString ??
             badgeModel.activeOccupancySessionID?.uuidString ??
@@ -3725,7 +3723,9 @@ struct SessionHubView: View {
         let sealed = pendingSession?.isSealed ?? false
         let firstDelivered = pendingSession?.firstDeliveredAt.map { "\($0)" } ?? "nil"
         let action: String
-        if pendingSession != nil {
+        if isFastLaneUploading {
+            action = "blockFastLaneUploading"
+        } else if pendingSession != nil {
             action = "promptDeliver"
         } else if hasPendingExport {
             action = "openPendingExportGate"
@@ -3737,6 +3737,15 @@ struct SessionHubView: View {
             action = "openCamera"
         }
         verboseLog("[PropertyTap] propertyID=\(property.id.uuidString) latestSessionID=\(latestID) isBaseline=\(isBaseline) sealed=\(sealed) firstDeliveredAt=\(firstDelivered) pending=\(pendingSession != nil) cachedPendingExport=\(hasPendingExport) draft=\(hasDraft) action=\(action) badgeSource=\(badgeModel.badgeSource)")
+        if isFastLaneUploading {
+            isOpeningProperty = false
+            appState.showHubTransientStatusMessage("Uploading. Finishing this session now.")
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.20) {
+                guard tapToken == propertyTapToken else { return }
+                if pressedPropertyID == property.id { pressedPropertyID = nil }
+            }
+            return
+        }
         if let pendingSession {
             isOpeningProperty = false
             pendingExportPromptProperty = property
@@ -12877,7 +12886,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             }
 
             HStack(spacing: 8) {
-                statusBadge(camera.isPreviewRunning ? "Ready" : "Starting", color: camera.isPreviewRunning ? .green : .yellow)
+                statusBadge(previewStatusTitle, color: previewStatusColor)
                 statusBadge("Saved \(capturedCount)", color: .white.opacity(0.82))
                 if didCompleteUpload {
                     statusBadge("Uploaded", color: .green)
@@ -12895,6 +12904,16 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
         }
         .padding(.horizontal, 12)
         .padding(.top, 12)
+    }
+
+    private var previewStatusTitle: String {
+        if isClosing { return "Closing" }
+        return camera.isPreviewRunning ? "Ready" : "Starting"
+    }
+
+    private var previewStatusColor: Color {
+        if isClosing { return .white.opacity(0.82) }
+        return camera.isPreviewRunning ? .green : .yellow
     }
 
     private var shutterPanel: some View {
@@ -13358,8 +13377,23 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                 return
             }
 
+            let didReleaseAfterHandoff = await appState.markFastRuntimeCompletionHandoffAccepted(
+                context: context,
+                snapshotID: handoff.snapshotID,
+                snapshotPath: handoff.snapshotPath
+            )
             await MainActor.run {
-                appState.markFastRuntimeCompletionHandoffAccepted(context: context)
+                guard didReleaseAfterHandoff else {
+                    let message = "Report handoff was accepted, but the property did not release. Please retry from the saved draft."
+                    appState.markFastRuntimeCompletionFailed(
+                        context: context,
+                        message: message
+                    )
+                    if !isClosing {
+                        productionCompleteState = .failed(message)
+                    }
+                    return
+                }
                 if !isClosing {
                     productionCompleteState = .complete
                     finishProductionComplete()

@@ -7487,6 +7487,7 @@ final class AppState: ObservableObject {
     private let propertyStatusDiagnosticsDedupeInterval: TimeInterval = 5
     private var persistentDataCacheRefreshScheduled = false
     private var persistentDataCacheRefreshRunning = false
+    private var suppressedPersistentDataChangeNotificationCount = 0
     private var reconcilingDeliveredSessionState = false
     private var deliveredSessionStateReconcileQueued = false
     private var deliveredSessionStateReconciliationWriteCount = 0
@@ -8530,9 +8531,13 @@ final class AppState: ObservableObject {
         }
 
         self.currentSession = nil
-        self.sessionSnapshotCloudStatusBySessionID = Self.makeSessionSnapshotCloudStatusBySessionID(
+        let initialSessionSnapshotCloudStatusBySessionID = Self.makeSessionSnapshotCloudStatusBySessionID(
             records: (try? self.localStore.fetchSessionSnapshotUploadStatusRecords(downloadTimeout: 0.2)) ?? [],
             retryItems: (try? self.localStore.fetchSessionSnapshotUploadRetryWorkItems(downloadTimeout: 0.2)) ?? []
+        )
+        self.sessionSnapshotCloudStatusBySessionID = initialSessionSnapshotCloudStatusBySessionID
+        self.propertyRowSnapshotCloudStatusByPropertyID = Self.makePropertyRowSnapshotCloudStatusByPropertyID(
+            statuses: Array(initialSessionSnapshotCloudStatusBySessionID.values)
         )
 
         if let cloudBackupManager {
@@ -8548,9 +8553,15 @@ final class AppState: ObservableObject {
         NotificationCenter.default.publisher(for: .scoutPersistentDataDidChange)
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in
+                guard let self else { return }
                 print("[AppStateDiag] scoutPersistentDataDidChange_sink")
-                self?.schedulePersistentDataCacheRefresh(reason: "persistent_data_changed")
-                self?.cloudBackupManager?.markDataChanged(scheduleBackupAfter: 30)
+                if self.suppressedPersistentDataChangeNotificationCount > 0 {
+                    self.suppressedPersistentDataChangeNotificationCount -= 1
+                    self.cloudBackupManager?.markDataChanged(scheduleBackupAfter: 30)
+                    return
+                }
+                self.schedulePersistentDataCacheRefresh(reason: "persistent_data_changed")
+                self.cloudBackupManager?.markDataChanged(scheduleBackupAfter: 30)
             }
             .store(in: &cancellables)
 
@@ -16918,6 +16929,20 @@ final class AppState: ObservableObject {
         }
     }
 
+    private static func makePropertyRowSnapshotCloudStatusByPropertyID(
+        statuses: [SessionSnapshotCloudStatus]
+    ) -> [UUID: SessionSnapshotCloudStatus] {
+        statuses.reduce(into: [:]) { partial, status in
+            guard let existing = partial[status.propertyID] else {
+                partial[status.propertyID] = status
+                return
+            }
+            if sessionSnapshotCloudStatus(status, isNewerThan: existing) {
+                partial[status.propertyID] = status
+            }
+        }
+    }
+
     private static func sessionSnapshotRetryItem(
         for record: LocalStore.SessionSnapshotUploadStatusRecord,
         retryItems: [LocalStore.SessionSnapshotUploadRetryWorkItem]
@@ -17021,6 +17046,23 @@ final class AppState: ObservableObject {
         }
     }
 
+    private static func statusRecordStatus(
+        for state: SessionSnapshotCloudState
+    ) -> LocalStore.SessionSnapshotUploadStatusRecord.Status {
+        switch state {
+        case .queued:
+            return .queued
+        case .uploading:
+            return .uploading
+        case .retryScheduled:
+            return .retryScheduled
+        case .failed:
+            return .failed
+        case .uploaded:
+            return .uploaded
+        }
+    }
+
     private static func cloudState(
         for status: LocalStore.SessionSnapshotUploadStatusRecord.Status
     ) -> SessionSnapshotCloudState {
@@ -17047,6 +17089,26 @@ final class AppState: ObservableObject {
         )
         if sessionSnapshotCloudStatusBySessionID != next {
             sessionSnapshotCloudStatusBySessionID = next
+        }
+        let nextRow = Self.makePropertyRowSnapshotCloudStatusByPropertyID(statuses: Array(next.values))
+        if propertyRowSnapshotCloudStatusByPropertyID != nextRow {
+            propertyRowSnapshotCloudStatusByPropertyID = nextRow
+        }
+    }
+
+    private func refreshLightweightPropertyRowCloudStatusCache(downloadTimeout: TimeInterval = 0.2) {
+        let records = (try? localStore.fetchSessionSnapshotUploadStatusRecords(downloadTimeout: downloadTimeout)) ?? []
+        let retryItems = (try? localStore.fetchSessionSnapshotUploadRetryWorkItems(downloadTimeout: downloadTimeout)) ?? []
+        let nextSession = Self.makeSessionSnapshotCloudStatusBySessionID(
+            records: records,
+            retryItems: retryItems
+        )
+        if sessionSnapshotCloudStatusBySessionID != nextSession {
+            sessionSnapshotCloudStatusBySessionID = nextSession
+        }
+        let nextRow = Self.makePropertyRowSnapshotCloudStatusByPropertyID(statuses: Array(nextSession.values))
+        if propertyRowSnapshotCloudStatusByPropertyID != nextRow {
+            propertyRowSnapshotCloudStatusByPropertyID = nextRow
         }
     }
 
@@ -41021,12 +41083,11 @@ final class AppState: ObservableObject {
         guard !propertyIDs.isEmpty else {
             return
         }
-        await hydratePropertyRowDetails(
-            reason: reason,
+        refreshLightweightPropertyRowCloudStatusCache(downloadTimeout: 0.2)
+        await refreshPropertyStatusCacheForInitialDisplay(
             propertyIDs: propertyIDs,
-            refreshCloudStatus: true
+            reason: reason
         )
-        await waitForInitialPropertyRowDetailsToSettle(propertyIDs: propertyIDs, reason: reason)
         suppressPropertyRowAppearHydrationUntil = Date().addingTimeInterval(8.0)
         pendingPropertyRowDetailHydrationIDs.subtract(propertyIDs)
         if pendingPropertyRowDetailHydrationIDs.isEmpty {
@@ -41039,6 +41100,47 @@ final class AppState: ObservableObject {
 
     func prepareInitialHomePropertyListForDisplay(reason: String) async {
         await prepareInitialPropertyListForDisplay(reason: reason)
+    }
+
+    private func refreshPropertyStatusCacheForInitialDisplay(
+        propertyIDs requestedPropertyIDs: [UUID],
+        reason: String
+    ) async {
+        guard backendFeatureFlags.supabaseEnabled,
+              let activeOrganizationID,
+              supabaseClient != nil else {
+            return
+        }
+        let propertyIDs = Self.uniquePropertyIDs(requestedPropertyIDs)
+            .filter { canAccessProperty($0) }
+        guard !propertyIDs.isEmpty else { return }
+
+        do {
+            let rows = try await fetchPropertyStatusRecords(
+                orgID: activeOrganizationID,
+                propertyIDs: propertyIDs
+            )
+            let rowsByPropertyID = Dictionary(uniqueKeysWithValues: rows.map { ($0.propertyID, $0) })
+            var nextCache = propertyStatusByPropertyID
+            for propertyID in propertyIDs {
+                if let row = rowsByPropertyID[propertyID] {
+                    nextCache[propertyID] = row
+                } else {
+                    nextCache.removeValue(forKey: propertyID)
+                }
+            }
+            if propertyStatusByPropertyID != nextCache {
+                propertyStatusByPropertyID = nextCache
+            }
+            lastPropertyStatusRefreshAt = Date()
+        } catch {
+            print(
+                "[PropertyStatusInitialDisplay] refresh_failed " +
+                    "reason=\(reason) " +
+                    "propertyCount=\(propertyIDs.count) " +
+                    "error=\(Self.diagnosticsPreviewText(error.localizedDescription, maxLength: 120) ?? "unknown_error")"
+            )
+        }
     }
 
     func markHomePropertyListVisible() {
@@ -41490,9 +41592,6 @@ final class AppState: ObservableObject {
                 currentDeviceID: currentDeviceID
             )
             let canOverlayFastRuntimeDraft = fastRuntimeDraft != nil &&
-                (propertyStatus.status == .idle ||
-                    propertyStatus.status == .occupied ||
-                    propertyStatus.status == .draft) &&
                 basePropertyStatusAnswer.visibleBadgeState != .locked &&
                 basePropertyStatusAnswer.visibleBadgeState != .pendingExport
             let propertyStatusAnswer = canOverlayFastRuntimeDraft
@@ -41628,6 +41727,26 @@ final class AppState: ObservableObject {
     func propertyRowSessionSnapshotCloudStatus(propertyID: UUID) -> SessionSnapshotCloudStatus? {
         fastRuntimeCompletionCloudStatusByPropertyID[propertyID] ??
             propertyRowSnapshotCloudStatusByPropertyID[propertyID]
+    }
+
+    func isFastRuntimeCompletionUploading(propertyID: UUID) -> Bool {
+        guard let status = fastRuntimeCompletionCloudStatusByPropertyID[propertyID] else {
+            return false
+        }
+        return status.state == .uploading && !status.isConfigurationBlocked
+    }
+
+    @MainActor
+    func showHubTransientStatusMessage(_ message: String) {
+        hubTransientStatusMessage = message
+    }
+
+    var isInitialPropertyListUpdateStillActive: Bool {
+        isLoading ||
+            isLoadingPropertiesForOrgSwitch ||
+            isStartupHydrationInProgress ||
+            propertyRowDetailHydrationTask != nil ||
+            !pendingPropertyRowDetailHydrationIDs.isEmpty
     }
 
     private struct PropertyRowDetailsHydrationBatch {
@@ -43115,19 +43234,39 @@ final class AppState: ObservableObject {
     }
 
     @MainActor
-    func markFastRuntimeCompletionHandoffAccepted(context: ActiveCaptureContext) {
-        fastRuntimeReportHandoffAcceptedSessionByPropertyID[context.propertyID] = context.sessionID
-        updateLocalPropertyStatusPresentationCache(
+    func markFastRuntimeCompletionHandoffAccepted(
+        context: ActiveCaptureContext,
+        snapshotID: UUID?,
+        snapshotPath: String?
+    ) async -> Bool {
+        let didMarkExported = await performPropertyStatusShadowWrite(
+            transition: .exported,
             propertyID: context.propertyID,
             sessionID: context.sessionID,
-            status: .exported,
+            deviceID: currentDeviceIdentifier(),
             reason: "fast_lane_report_handoff_accepted"
         )
-        applyFastRuntimeCompletionCloudStatus(
+        guard didMarkExported else {
+            fastRuntimeReportHandoffAcceptedSessionByPropertyID.removeValue(forKey: context.propertyID)
+            applyFastRuntimeCompletionCloudStatus(
+                context: context,
+                state: .failed,
+                snapshotID: snapshotID,
+                reason: "fast_lane_report_handoff_accepted_exported_status_failed"
+            )
+            return false
+        }
+
+        fastRuntimeReportHandoffAcceptedSessionByPropertyID[context.propertyID] = context.sessionID
+        if let status = applyFastRuntimeCompletionCloudStatus(
             context: context,
             state: .uploaded,
+            snapshotID: snapshotID,
             reason: "fast_lane_report_handoff_accepted"
-        )
+        ) {
+            persistFastRuntimeCompletionCloudStatus(status, storagePath: snapshotPath)
+        }
+        return true
     }
 
     @MainActor
@@ -43144,21 +43283,22 @@ final class AppState: ObservableObject {
     private func applyFastRuntimeCompletionCloudStatus(
         context: ActiveCaptureContext,
         state: SessionSnapshotCloudState,
+        snapshotID: UUID? = nil,
         reason: String?
-    ) {
+    ) -> SessionSnapshotCloudStatus? {
         let now = Date()
         let orgID = context.orgID ??
             propertyStatusByPropertyID[context.propertyID]?.orgID ??
             properties.first(where: { $0.id == context.propertyID })?.orgId ??
             allProperties.first(where: { $0.id == context.propertyID })?.orgId ??
             activeOrganizationID
-        guard let orgID else { return }
+        guard let orgID else { return nil }
 
         let existing = fastRuntimeCompletionCloudStatusByPropertyID[context.propertyID] ??
             propertyRowSnapshotCloudStatusByPropertyID[context.propertyID]
         let status = SessionSnapshotCloudStatus(
             state: state,
-            snapshotID: existing?.snapshotID ?? UUID(),
+            snapshotID: snapshotID ?? existing?.snapshotID ?? UUID(),
             organizationID: orgID,
             propertyID: context.propertyID,
             sessionID: context.sessionID,
@@ -43180,6 +43320,44 @@ final class AppState: ObservableObject {
         nextRowCloud[context.propertyID] = status
         if propertyRowSnapshotCloudStatusByPropertyID != nextRowCloud {
             propertyRowSnapshotCloudStatusByPropertyID = nextRowCloud
+        }
+        return status
+    }
+
+    private func persistFastRuntimeCompletionCloudStatus(
+        _ status: SessionSnapshotCloudStatus,
+        storagePath: String?
+    ) {
+        let resolvedStoragePath = normalizedSupabaseText(storagePath) ??
+            Self.sessionSnapshotStoragePath(
+                orgID: status.organizationID,
+                propertyID: status.propertyID,
+                sessionID: status.sessionID,
+                snapshotKind: .completed,
+                snapshotID: status.snapshotID
+            )
+        let record = LocalStore.SessionSnapshotUploadStatusRecord(
+            snapshotID: status.snapshotID,
+            organizationID: status.organizationID,
+            propertyID: status.propertyID,
+            sessionID: status.sessionID,
+            snapshotKind: SessionSnapshotKind.completed.rawValue,
+            trigger: "fast_lane_report_handoff",
+            triggerSource: status.triggerSource,
+            idempotencyKey: "fast_lane_report_handoff:\(status.organizationID.uuidString.lowercased()):\(status.propertyID.uuidString.lowercased()):\(status.sessionID.uuidString.lowercased())",
+            storagePath: resolvedStoragePath,
+            generatedAt: status.generatedAt,
+            status: Self.statusRecordStatus(for: status.state),
+            reason: status.reason,
+            updatedAt: status.updatedAt
+        )
+        suppressedPersistentDataChangeNotificationCount += 1
+        do {
+            _ = try localStore.upsertSessionSnapshotUploadStatusRecord(record)
+            logSessionSnapshotCloudStatusPersistence(record)
+        } catch {
+            suppressedPersistentDataChangeNotificationCount = max(0, suppressedPersistentDataChangeNotificationCount - 1)
+            recordDiagnosticsError(error)
         }
     }
 
