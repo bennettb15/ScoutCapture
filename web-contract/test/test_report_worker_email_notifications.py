@@ -62,6 +62,33 @@ class FakeSupabaseClient:
                     "deleted_at": None,
                 }
             ],
+            "sessions": [
+                {
+                    "id": SESSION_ID,
+                    "org_id": ORG_ID,
+                    "property_id": PROPERTY_ID,
+                    "status": "completed",
+                    "is_sealed": True,
+                    "exported_at": None,
+                    "first_delivered_at": None,
+                    "deleted_at": None,
+                }
+            ],
+            "property_status": [
+                {
+                    "property_id": PROPERTY_ID,
+                    "org_id": ORG_ID,
+                    "status": "pending_export",
+                    "active_session_id": None,
+                    "draft_session_id": None,
+                    "pending_export_session_id": SESSION_ID,
+                    "last_exported_session_id": None,
+                    "owner_user_id": None,
+                    "owner_device_id": None,
+                    "heartbeat_at": None,
+                    "status_reason": "test:pending_export",
+                }
+            ],
             "report_packages": [],
             "report_package_files": [],
             worker.REPORT_READY_NOTIFICATION_TABLE: [],
@@ -112,25 +139,31 @@ class FakeSupabaseClient:
             }
         )
 
-    def select(self, table: str, query: dict[str, str]) -> list[dict[str, Any]]:
-        rows = [dict(row) for row in self.tables.get(table, [])]
+    def _matches_query(self, row: dict[str, Any], query: dict[str, str]) -> bool:
         for key, value in query.items():
             if key in {"select", "limit", "order"}:
                 continue
             if value.startswith("eq."):
                 expected = value[3:]
                 if expected.lower() in {"true", "false"}:
-                    expected_bool = expected.lower() == "true"
-                    rows = [row for row in rows if bool(row.get(key)) == expected_bool]
-                else:
-                    rows = [row for row in rows if str(row.get(key)) == expected]
+                    if bool(row.get(key)) != (expected.lower() == "true"):
+                        return False
+                elif str(row.get(key)) != expected:
+                    return False
             elif value.startswith("in.(") and value.endswith(")"):
                 expected_values = set(value[4:-1].split(","))
-                rows = [row for row in rows if str(row.get(key)) in expected_values]
+                if str(row.get(key)) not in expected_values:
+                    return False
             elif value == "is.null":
-                rows = [row for row in rows if row.get(key) is None]
+                if row.get(key) is not None:
+                    return False
             else:
                 raise AssertionError(f"Unsupported fake query: {key}={value}")
+        return True
+
+    def select(self, table: str, query: dict[str, str]) -> list[dict[str, Any]]:
+        rows = [dict(row) for row in self.tables.get(table, [])]
+        rows = [row for row in rows if self._matches_query(row, query)]
         if "limit" in query:
             rows = rows[: int(query["limit"])]
         return rows
@@ -156,12 +189,7 @@ class FakeSupabaseClient:
         rows = self.tables[table]
         patched = []
         for existing in rows:
-            matches = True
-            for key, value in query.items():
-                if not value.startswith("eq.") or str(existing.get(key)) != value[3:]:
-                    matches = False
-                    break
-            if matches:
+            if self._matches_query(existing, query):
                 existing.update(row)
                 patched.append(dict(existing))
         return patched
@@ -436,6 +464,80 @@ class ReportWorkerEmailNotificationTests(unittest.TestCase):
         self.assertEqual(["punchlist_update"], package_report_types)
         self.assertEqual(["punchlist_update"], file_report_types)
         self.assertEqual(["punchlist_update"], [item["report_type"] for item in summary["uploaded_files"]])
+
+    def test_ready_package_success_marks_session_and_property_exported(self) -> None:
+        client = FakeSupabaseClient()
+        client.add_profile("field-user", "field@example.test")
+        client.add_membership("field-user", "field")
+        original_run_step = worker.run_step
+        original_resend = worker.ResendEmailClient
+
+        class FakeResendEmailClient:
+            @classmethod
+            def from_env(cls) -> FakeEmailClient:
+                return FakeEmailClient()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            worker.run_step = fake_worker_run_step("full_documentation", ["property"])
+            worker.ResendEmailClient = FakeResendEmailClient
+            try:
+                summary = worker.process_session(
+                    worker_args(pathlib.Path(tmp)),
+                    client,
+                    ROOT,
+                    SESSION_ID,
+                    SNAPSHOT_ID,
+                )
+            finally:
+                worker.run_step = original_run_step
+                worker.ResendEmailClient = original_resend
+
+        session_row = client.tables["sessions"][0]
+        status_row = client.tables["property_status"][0]
+        self.assertEqual("marked_exported", summary["delivery_status"]["action"])
+        self.assertTrue(summary["delivery_status"]["success"])
+        self.assertIsNotNone(session_row["exported_at"])
+        self.assertIsNotNone(session_row["first_delivered_at"])
+        self.assertEqual("exported", status_row["status"])
+        self.assertIsNone(status_row["pending_export_session_id"])
+        self.assertEqual(SESSION_ID, status_row["last_exported_session_id"])
+
+    def test_email_failure_keeps_pending_export_retryable(self) -> None:
+        client = FakeSupabaseClient()
+        client.add_profile("field-user", "field@example.test")
+        client.add_membership("field-user", "field")
+        original_run_step = worker.run_step
+        original_resend = worker.ResendEmailClient
+
+        class FailingResendEmailClient:
+            @classmethod
+            def from_env(cls) -> FakeEmailClient:
+                return FakeEmailClient(fail=True)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            worker.run_step = fake_worker_run_step("full_documentation", ["property"])
+            worker.ResendEmailClient = FailingResendEmailClient
+            try:
+                summary = worker.process_session(
+                    worker_args(pathlib.Path(tmp)),
+                    client,
+                    ROOT,
+                    SESSION_ID,
+                    SNAPSHOT_ID,
+                )
+            finally:
+                worker.run_step = original_run_step
+                worker.ResendEmailClient = original_resend
+
+        session_row = client.tables["sessions"][0]
+        status_row = client.tables["property_status"][0]
+        self.assertEqual("skipped_email_not_complete", summary["delivery_status"]["action"])
+        self.assertFalse(summary["delivery_status"]["success"])
+        self.assertIsNone(session_row["exported_at"])
+        self.assertIsNone(session_row["first_delivered_at"])
+        self.assertEqual("pending_export", status_row["status"])
+        self.assertEqual(SESSION_ID, status_row["pending_export_session_id"])
+        self.assertEqual(1, summary["email_notifications"]["failed_count"])
 
     def test_full_documentation_package_includes_property_report(self) -> None:
         client = FakeSupabaseClient()

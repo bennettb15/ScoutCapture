@@ -39,6 +39,7 @@ REPORT_READY_NOTIFICATION_ROLES = ("owner", "manager", "field", "viewer")
 REPORT_READY_NOTIFICATION_TABLE = "report_package_email_notifications"
 REPORT_READY_RESEND_USER_AGENT = "ScoutCaptureReportWorker/1.0 (+https://scoutclear.com)"
 REPORT_READY_EMAIL_LOGO_URL = "https://www.scoutclear.com/scout-logo-email.png"
+REPORT_DELIVERED_STATUS_REASON = "report_package_ready_email_sent"
 PACKAGED_LOGO_SVG = pathlib.Path("web-contract/report-production/assets/ScoutOnlyLogo.svg")
 DISABLED_LOGO_PDF = pathlib.Path("web-contract/report-production/assets/ScoutLogoBlue.pdf")
 REPORT_TYPE_MAP = {
@@ -1210,6 +1211,144 @@ def drain_report_ready_notifications(
     return summary
 
 
+def report_ready_notifications_completed(email_summary: dict[str, Any]) -> bool:
+    if not email_summary.get("enabled", True):
+        return False
+    if email_summary.get("error"):
+        return False
+    try:
+        failed_count = int(email_summary.get("failed_count") or 0)
+    except (TypeError, ValueError):
+        failed_count = 1
+    return failed_count == 0
+
+
+def mark_fast_lane_report_delivered(
+    client: SupabaseServiceClient,
+    package: dict[str, Any],
+    email_summary: dict[str, Any],
+) -> dict[str, Any]:
+    result: dict[str, Any] = {
+        "attempted": False,
+        "success": False,
+        "action": "not_attempted",
+        "error": None,
+        "session_id": package.get("session_id"),
+        "property_id": package.get("property_id"),
+        "package_id": package.get("id"),
+    }
+    if package.get("status") != "ready":
+        result["action"] = "skipped_package_not_ready"
+        return result
+    if not report_ready_notifications_completed(email_summary):
+        result["action"] = "skipped_email_not_complete"
+        return result
+
+    session_id = str(package.get("session_id") or "")
+    property_id = str(package.get("property_id") or "")
+    org_id = str(package.get("org_id") or "")
+    if not session_id or not property_id or not org_id:
+        result["action"] = "skipped_missing_required_ids"
+        result["error"] = "package is missing org_id/property_id/session_id"
+        return result
+
+    result["attempted"] = True
+    try:
+        sessions = client.select(
+            "sessions",
+            {
+                "select": "id,org_id,property_id,status,is_sealed,exported_at,first_delivered_at,deleted_at",
+                "id": f"eq.{session_id}",
+                "org_id": f"eq.{org_id}",
+                "property_id": f"eq.{property_id}",
+                "deleted_at": "is.null",
+                "limit": "1",
+            },
+        )
+        if not sessions:
+            result["action"] = "skipped_session_missing"
+            return result
+        session = sessions[0]
+        if session.get("status") != "completed" or not bool(session.get("is_sealed")):
+            result["action"] = "skipped_session_not_completed_sealed"
+            return result
+
+        delivered_at = safe_iso_now()
+        session_updates = {
+            "exported_at": session.get("exported_at") or delivered_at,
+            "first_delivered_at": session.get("first_delivered_at") or delivered_at,
+        }
+        session_rows = client.patch(
+            "sessions",
+            {
+                "id": f"eq.{session_id}",
+                "org_id": f"eq.{org_id}",
+                "property_id": f"eq.{property_id}",
+                "status": "eq.completed",
+                "is_sealed": "eq.true",
+                "deleted_at": "is.null",
+            },
+            session_updates,
+        )
+        result["session_rows_updated"] = len(session_rows)
+        if not session_rows:
+            result["action"] = "skipped_session_update_not_applied"
+            return result
+
+        property_rows = client.patch(
+            "property_status",
+            {
+                "property_id": f"eq.{property_id}",
+                "org_id": f"eq.{org_id}",
+                "status": "eq.pending_export",
+                "pending_export_session_id": f"eq.{session_id}",
+            },
+            {
+                "status": "exported",
+                "active_session_id": None,
+                "draft_session_id": None,
+                "pending_export_session_id": None,
+                "last_exported_session_id": session_id,
+                "owner_user_id": None,
+                "owner_device_id": None,
+                "heartbeat_at": None,
+                "status_reason": REPORT_DELIVERED_STATUS_REASON,
+            },
+        )
+        result["property_status_rows_updated"] = len(property_rows)
+        if property_rows:
+            result["success"] = True
+            result["action"] = "marked_exported"
+            result["property_status"] = property_rows[0].get("status")
+            return result
+
+        existing_status = client.select(
+            "property_status",
+            {
+                "select": "property_id,org_id,status,pending_export_session_id,last_exported_session_id",
+                "property_id": f"eq.{property_id}",
+                "org_id": f"eq.{org_id}",
+                "limit": "1",
+            },
+        )
+        if existing_status:
+            current = existing_status[0]
+            if current.get("status") == "exported" and str(current.get("last_exported_session_id") or "") == session_id:
+                result["success"] = True
+                result["action"] = "already_exported"
+                result["property_status"] = "exported"
+                return result
+            result["property_status"] = current.get("status")
+            result["pending_export_session_id"] = current.get("pending_export_session_id")
+            result["last_exported_session_id"] = current.get("last_exported_session_id")
+        result["action"] = "skipped_property_status_not_pending_for_session"
+        return result
+    except Exception as error:
+        result["action"] = "failed"
+        result["error"] = str(error)[:2000]
+        return result
+
+
 def path_for_pdf(org_id: str, property_id: str, session_id: str, package_id: str, report_type: str) -> str:
     return (
         f"orgs/{org_id.lower()}/properties/{property_id.lower()}/sessions/{session_id.lower()}"
@@ -2372,6 +2511,7 @@ def process_session(
         candidates = retention_candidates(client, package["property_id"])
         retention = apply_retention(client, candidates, args.retention_mode)
         email_notifications = send_report_ready_notifications(client, package, validation)
+        delivery_status = mark_fast_lane_report_delivered(client, package, email_notifications)
     except Exception as error:
         client.patch(
             "report_packages",
@@ -2407,9 +2547,10 @@ def process_session(
             "actions": retention,
         },
         "email_notifications": email_notifications,
+        "delivery_status": delivery_status,
     }
     write_json(summary_path, summary, args.pretty)
-    print(stable_json({"ok": True, "session_id": session_id, "package_id": package["id"], "package_action": package_action, "uploaded_files": uploaded_files, "skipped_reports": summary["skipped_reports"], "retention": summary["retention"], "email_notifications": email_notifications, "summary_path": str(summary_path)}, True))
+    print(stable_json({"ok": True, "session_id": session_id, "package_id": package["id"], "package_action": package_action, "uploaded_files": uploaded_files, "skipped_reports": summary["skipped_reports"], "retention": summary["retention"], "email_notifications": email_notifications, "delivery_status": delivery_status, "summary_path": str(summary_path)}, True))
     return summary
 
 
