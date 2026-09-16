@@ -7475,6 +7475,8 @@ final class AppState: ObservableObject {
     @Published var locallyLockedPropertyIDs: Set<UUID> = []
     @Published private var propertySessionOccupancyByPropertyID: [UUID: PropertySessionOccupancyState] = [:]
     @Published private(set) var propertyStatusByPropertyID: [UUID: PropertyStatusRecord] = [:]
+    private var fastRuntimeReportHandoffAcceptedSessionByPropertyID: [UUID: UUID] = [:]
+    private var fastRuntimeCompletionCloudStatusByPropertyID: [UUID: SessionSnapshotCloudStatus] = [:]
     private(set) var lastPropertyStatusRefreshAt: Date?
     private(set) var propertyStatusDiagnostics: [UUID: PropertyStatusDiagnosticComparison] = [:]
     private var propertyStatusDiagnosticsRefreshTask: Task<Void, Never>?
@@ -41507,7 +41509,13 @@ final class AppState: ObservableObject {
                     currentUserID: currentUserID,
                     currentDeviceID: currentDeviceID
                 )
-            let propertyStatusBadgeState = propertyStatusAnswer.visibleBadgeState
+            let fastRuntimeHandoffAccepted =
+                propertyStatus.status == .pendingExport &&
+                propertyStatus.pendingExportSessionID != nil &&
+                fastRuntimeReportHandoffAcceptedSessionByPropertyID[propertyID] == propertyStatus.pendingExportSessionID
+            let propertyStatusBadgeState: PropertyStatusCompareBadgeState = fastRuntimeHandoffAccepted
+                ? .exported
+                : propertyStatusAnswer.visibleBadgeState
             let propertyStatusOwnedByCurrentActor = Self.propertyStatusActorOwnedByCurrentActor(
                 record: propertyStatus,
                 currentUserID: currentUserID,
@@ -41555,7 +41563,9 @@ final class AppState: ObservableObject {
                     : "\(propertyStatusReasonPrefix):draft_hidden_owner_match=\(propertyStatusOwnedByCurrentActor)",
                 pendingExportReason: propertyStatusBadgeState == .pendingExport
                     ? "\(propertyStatusReasonPrefix):pending_export"
-                    : "\(propertyStatusReasonPrefix):pending_export_hidden",
+                    : fastRuntimeHandoffAccepted
+                        ? "\(propertyStatusReasonPrefix):fast_lane_report_handoff_accepted"
+                        : "\(propertyStatusReasonPrefix):pending_export_hidden",
                 reExportReason: reExportReason,
                 badgeSource: "property_status"
             )
@@ -41616,7 +41626,8 @@ final class AppState: ObservableObject {
     }
 
     func propertyRowSessionSnapshotCloudStatus(propertyID: UUID) -> SessionSnapshotCloudStatus? {
-        propertyRowSnapshotCloudStatusByPropertyID[propertyID]
+        fastRuntimeCompletionCloudStatusByPropertyID[propertyID] ??
+            propertyRowSnapshotCloudStatusByPropertyID[propertyID]
     }
 
     private struct PropertyRowDetailsHydrationBatch {
@@ -43091,6 +43102,85 @@ final class AppState: ObservableObject {
             shots: shots,
             totalMilliseconds: Date().timeIntervalSince(startedAt) * 1_000
         )
+    }
+
+    @MainActor
+    func markFastRuntimeCompletionUploading(context: ActiveCaptureContext) {
+        fastRuntimeReportHandoffAcceptedSessionByPropertyID.removeValue(forKey: context.propertyID)
+        applyFastRuntimeCompletionCloudStatus(
+            context: context,
+            state: .uploading,
+            reason: "fast_lane_complete_uploading"
+        )
+    }
+
+    @MainActor
+    func markFastRuntimeCompletionHandoffAccepted(context: ActiveCaptureContext) {
+        fastRuntimeReportHandoffAcceptedSessionByPropertyID[context.propertyID] = context.sessionID
+        updateLocalPropertyStatusPresentationCache(
+            propertyID: context.propertyID,
+            sessionID: context.sessionID,
+            status: .exported,
+            reason: "fast_lane_report_handoff_accepted"
+        )
+        applyFastRuntimeCompletionCloudStatus(
+            context: context,
+            state: .uploaded,
+            reason: "fast_lane_report_handoff_accepted"
+        )
+    }
+
+    @MainActor
+    func markFastRuntimeCompletionFailed(context: ActiveCaptureContext, message: String?) {
+        fastRuntimeReportHandoffAcceptedSessionByPropertyID.removeValue(forKey: context.propertyID)
+        applyFastRuntimeCompletionCloudStatus(
+            context: context,
+            state: .failed,
+            reason: Self.diagnosticsPreviewText(message ?? "fast_lane_complete_failed", maxLength: 160)
+        )
+    }
+
+    @MainActor
+    private func applyFastRuntimeCompletionCloudStatus(
+        context: ActiveCaptureContext,
+        state: SessionSnapshotCloudState,
+        reason: String?
+    ) {
+        let now = Date()
+        let orgID = context.orgID ??
+            propertyStatusByPropertyID[context.propertyID]?.orgID ??
+            properties.first(where: { $0.id == context.propertyID })?.orgId ??
+            allProperties.first(where: { $0.id == context.propertyID })?.orgId ??
+            activeOrganizationID
+        guard let orgID else { return }
+
+        let existing = fastRuntimeCompletionCloudStatusByPropertyID[context.propertyID] ??
+            propertyRowSnapshotCloudStatusByPropertyID[context.propertyID]
+        let status = SessionSnapshotCloudStatus(
+            state: state,
+            snapshotID: existing?.snapshotID ?? UUID(),
+            organizationID: orgID,
+            propertyID: context.propertyID,
+            sessionID: context.sessionID,
+            triggerSource: "fast_lane_complete",
+            reason: reason,
+            generatedAt: existing?.generatedAt ?? now,
+            updatedAt: now
+        )
+
+        fastRuntimeCompletionCloudStatusByPropertyID[context.propertyID] = status
+
+        var nextSessionCloud = sessionSnapshotCloudStatusBySessionID
+        nextSessionCloud[context.sessionID] = status
+        if sessionSnapshotCloudStatusBySessionID != nextSessionCloud {
+            sessionSnapshotCloudStatusBySessionID = nextSessionCloud
+        }
+
+        var nextRowCloud = propertyRowSnapshotCloudStatusByPropertyID
+        nextRowCloud[context.propertyID] = status
+        if propertyRowSnapshotCloudStatusByPropertyID != nextRowCloud {
+            propertyRowSnapshotCloudStatusByPropertyID = nextRowCloud
+        }
     }
 
     @MainActor

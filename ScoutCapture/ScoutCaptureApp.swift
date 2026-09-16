@@ -1344,8 +1344,10 @@ struct SessionHubView: View {
         let pendingSession = appState.propertyRowPendingDeliverySession(for: property.id)
         let sessionUploadStatus = appState.propertyRowSessionSnapshotCloudStatus(propertyID: property.id)
         let uploadStatusChip = sessionUploadStatus.flatMap(sessionSnapshotUploadStatusChip)
+        let isActivelyUploading = sessionUploadStatus?.state == .uploading &&
+            sessionUploadStatus?.isConfigurationBlocked == false
         let hasDraft = badgeModel.showDraft
-        let hasPendingExport = badgeModel.showPendingExport
+        let hasPendingExport = badgeModel.showPendingExport && !isActivelyUploading
         let latestReExportSession = appState.propertyRowReExportCandidateSession(for: property.id)
         let hasReExportGlyph = badgeModel.showReExport && latestReExportSession != nil
         let manualExportSession = latestReExportSession ?? pendingSession
@@ -13310,6 +13312,8 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
 
             await MainActor.run {
                 productionCompleteState = .uploading
+                appState.markFastRuntimeCompletionUploading(context: context)
+                finishProductionComplete()
             }
 
             let upload = await appState.runFastRuntimeCompleteUpload(
@@ -13319,14 +13323,22 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             )
             guard upload.success else {
                 await MainActor.run {
-                    productionCompleteState = .failed(upload.errorMessage ?? "Upload failed. Please try again.")
+                    appState.markFastRuntimeCompletionFailed(
+                        context: context,
+                        message: upload.errorMessage ?? "Upload failed. Please try again."
+                    )
+                    if !isClosing {
+                        productionCompleteState = .failed(upload.errorMessage ?? "Upload failed. Please try again.")
+                    }
                 }
                 return
             }
 
             await MainActor.run {
                 didCompleteUpload = true
-                productionCompleteState = .preparingReport
+                if !isClosing {
+                    productionCompleteState = .preparingReport
+                }
             }
 
             let handoff = await appState.runFastRuntimeReportHandoff(
@@ -13335,14 +13347,23 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             )
             guard handoff.success else {
                 await MainActor.run {
-                    productionCompleteState = .failed(handoff.errorMessage ?? "Report handoff failed. Please try again.")
+                    appState.markFastRuntimeCompletionFailed(
+                        context: context,
+                        message: handoff.errorMessage ?? "Report handoff failed. Please try again."
+                    )
+                    if !isClosing {
+                        productionCompleteState = .failed(handoff.errorMessage ?? "Report handoff failed. Please try again.")
+                    }
                 }
                 return
             }
 
             await MainActor.run {
-                productionCompleteState = .complete
-                finishProductionComplete()
+                appState.markFastRuntimeCompletionHandoffAccepted(context: context)
+                if !isClosing {
+                    productionCompleteState = .complete
+                    finishProductionComplete()
+                }
             }
         }
     }
