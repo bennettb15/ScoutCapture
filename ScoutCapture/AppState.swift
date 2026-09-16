@@ -5092,6 +5092,38 @@ final class AppState: ObservableObject {
         }
     }
 
+    struct FastRuntimeCompleteUploadShotResult: Equatable, Identifiable {
+        let id: UUID
+        let localFilePath: String
+        let storageBucket: String?
+        let storagePath: String?
+        let byteSize: Int?
+        let checksumSHA256: String?
+        let uploaded: Bool
+        let errorMessage: String?
+    }
+
+    struct FastRuntimeCompleteUploadResult: Equatable, Identifiable {
+        let id = UUID()
+        let success: Bool
+        let dryRun: FastRuntimeCompleteDryRunResult
+        let uploadedFilesCount: Int
+        let createdRowsSummary: [String]
+        let sessionStatus: String
+        let propertyStatus: String
+        let packageSummary: String
+        let lockReleased: Bool
+        let localDraftMarkedUploaded: Bool
+        let errorMessage: String?
+        let diagnostics: [String]
+        let shots: [FastRuntimeCompleteUploadShotResult]
+        let totalMilliseconds: Double
+
+        var title: String {
+            success ? "Fast Upload Complete" : "Fast Upload Failed"
+        }
+    }
+
     struct PropertyStatusDerivedSummary: Equatable {
         let draftBadgeDecision: Bool
         let pendingExportDecision: Bool
@@ -34694,6 +34726,21 @@ final class AppState: ObservableObject {
             .execute()
     }
 
+    private func updateSessionRowToSupabase(
+        _ payload: SupabaseSessionPayload,
+        propertyID: UUID,
+        orgID: UUID
+    ) async throws {
+        guard let client = supabaseClient else { return }
+        try await client
+            .from("sessions")
+            .update(payload, returning: .minimal)
+            .eq("id", value: payload.id.uuidString.lowercased())
+            .eq("property_id", value: propertyID.uuidString.lowercased())
+            .eq("org_id", value: orgID.uuidString.lowercased())
+            .execute()
+    }
+
     @MainActor
     func replayFlaggedObservationShadowWritesForCanonicalCandidate(
         propertyID: UUID,
@@ -42226,7 +42273,7 @@ final class AppState: ObservableObject {
             let metadataURL = storageRoot
                 .appendingPathComponent("Metadata", isDirectory: true)
                 .appendingPathComponent("fast-lane-shots.json", isDirectory: false)
-            let captureKind = context.sessionType == .punchlistVisit ? "punchlist_capture" : "captured"
+            let captureKind = context.sessionType == .punchlistVisit ? "follow_up_capture" : "captured"
 
             let fileWriteStartedAt = Date()
             do {
@@ -42543,6 +42590,464 @@ final class AppState: ObservableObject {
             wouldCreate: wouldCreate,
             wouldUpload: wouldUpload,
             shots: shotSummaries
+        )
+    }
+
+    @MainActor
+    func runFastRuntimeCompleteUpload(
+        context: ActiveCaptureContext,
+        storageRoot: URL?,
+        capturedPhotoCount: Int
+    ) async -> FastRuntimeCompleteUploadResult {
+        let startedAt = Date()
+        let dryRun = await runFastRuntimeCompleteDryRun(
+            context: context,
+            storageRoot: storageRoot,
+            capturedPhotoCount: capturedPhotoCount
+        )
+        guard dryRun.isValid else {
+            return FastRuntimeCompleteUploadResult(
+                success: false,
+                dryRun: dryRun,
+                uploadedFilesCount: 0,
+                createdRowsSummary: [],
+                sessionStatus: "not_started",
+                propertyStatus: "unchanged",
+                packageSummary: "skipped_dry_run_invalid",
+                lockReleased: false,
+                localDraftMarkedUploaded: false,
+                errorMessage: "Dry run validation failed.",
+                diagnostics: ["stage=dry_run_validation"],
+                shots: [],
+                totalMilliseconds: Date().timeIntervalSince(startedAt) * 1_000
+            )
+        }
+        guard backendFeatureFlags.supabaseEnabled,
+              backendFeatureFlags.shadowWriteEnabled,
+              let client = supabaseClient else {
+            return makeFastRuntimeCompleteUploadFailure(
+                dryRun: dryRun,
+                startedAt: startedAt,
+                createdRowsSummary: [],
+                sessionStatus: "not_started",
+                propertyStatus: "unchanged",
+                packageSummary: "skipped_missing_supabase_client",
+                lockReleased: false,
+                localDraftMarkedUploaded: false,
+                diagnostics: ["stage=supabase_gate"],
+                shots: [],
+                message: "Supabase writes are unavailable."
+            )
+        }
+        let property = properties.first(where: { $0.id == context.propertyID }) ??
+            allProperties.first(where: { $0.id == context.propertyID })
+        let resolvedOrgID = property?.orgId ?? context.orgID
+        guard let orgID = resolvedOrgID,
+              canAccessOrganization(orgID) else {
+            return makeFastRuntimeCompleteUploadFailure(
+                dryRun: dryRun,
+                startedAt: startedAt,
+                createdRowsSummary: [],
+                sessionStatus: "not_started",
+                propertyStatus: "unchanged",
+                packageSummary: "skipped_missing_or_inactive_org",
+                lockReleased: false,
+                localDraftMarkedUploaded: false,
+                diagnostics: [
+                    "stage=org_resolution",
+                    "context_org_id=\(context.orgID?.uuidString ?? "nil")",
+                    "property_org_id=\(property?.orgId?.uuidString ?? "nil")",
+                    "active_org_id=\(activeOrganizationID?.uuidString ?? "nil")"
+                ],
+                shots: [],
+                message: "Fast-lane context has no writable organization."
+            )
+        }
+
+        let completedAt = Date()
+        var createdRowsSummary: [String] = []
+        var shotResults: [FastRuntimeCompleteUploadShotResult] = []
+        var sessionStatus = "not_started"
+        var propertyStatus = "unchanged"
+        var lockReleased = false
+        var localDraftMarkedUploaded = false
+        var diagnostics: [String] = [
+            "stage=start",
+            "session_write_shape=ensure_insert_then_update",
+            "auth_user_id=\(authenticatedSupabaseUser?.id.uuidString ?? "nil")",
+            "active_org_id=\(activeOrganizationID?.uuidString ?? "nil")",
+            "context_org_id=\(context.orgID?.uuidString ?? "nil")",
+            "resolved_org_id=\(orgID.uuidString)",
+            "property_id=\(context.propertyID.uuidString)",
+            "session_id=\(context.sessionID.uuidString)"
+        ]
+
+        do {
+            let metadata = makeFastRuntimeCompleteSessionMetadata(
+                context: context,
+                dryRun: dryRun,
+                property: property,
+                completedAt: completedAt
+            )
+            let session = Session(
+                id: context.sessionID,
+                propertyID: context.propertyID,
+                sessionType: context.sessionType,
+                startedAt: context.createdAt,
+                status: .completed,
+                endedAt: completedAt,
+                exportedAt: nil,
+                isSealed: true,
+                firstDeliveredAt: nil,
+                reExportExpiresAt: nil,
+                captureProfile: property?.captureProfile
+            )
+            let sessionPayload = makeSupabaseSessionPayload(
+                sessionID: context.sessionID,
+                propertyID: context.propertyID,
+                orgID: orgID,
+                property: property,
+                metadata: metadata,
+                session: session
+            )
+            diagnostics.append("stage=property_upsert")
+            try await upsertPropertyRowToSupabase(
+                makeSupabasePropertyPayload(
+                    propertyID: context.propertyID,
+                    orgID: orgID,
+                    property: property,
+                    metadata: metadata
+                )
+            )
+            createdRowsSummary.append("properties upserted 1")
+            diagnostics.append("stage=session_ensure")
+            try await ensureSupabaseSessionPrerequisites(
+                propertyID: context.propertyID,
+                sessionID: context.sessionID,
+                metadata: metadata,
+                orgID: orgID
+            )
+            createdRowsSummary.append("sessions ensured 1")
+            diagnostics.append("stage=session_update")
+            try await updateSessionRowToSupabase(
+                sessionPayload,
+                propertyID: context.propertyID,
+                orgID: orgID
+            )
+            sessionStatus = sessionPayload.status
+            createdRowsSummary.append("sessions updated 1")
+
+            for (index, shotSummary) in dryRun.shots.enumerated() {
+                diagnostics.append("stage=shot_prepare:\(shotSummary.id.uuidString)")
+                guard let localPath = shotSummary.resolvedLocalFilePath else {
+                    throw NSError(domain: "ScoutCapture.FastRuntimeCompleteUpload", code: 10, userInfo: [
+                        NSLocalizedDescriptionKey: "Missing local file for shot \(shotSummary.id.uuidString)."
+                    ])
+                }
+                let localFileURL = URL(fileURLWithPath: localPath, isDirectory: false)
+                let fileData = try Data(contentsOf: localFileURL, options: [.mappedIfSafe])
+                let checksum = sha256Hex(for: fileData)
+                let byteSize = fileData.count
+                let storagePath = operationalMediaStoragePath(
+                    sessionID: context.sessionID,
+                    shotID: shotSummary.id,
+                    originalFilename: localFileURL.lastPathComponent
+                )
+                let shot = makeFastRuntimeCompleteShotMetadata(
+                    context: context,
+                    dryRunShot: shotSummary,
+                    position: index,
+                    originalFilename: localFileURL.lastPathComponent,
+                    byteSize: byteSize,
+                    checksumSHA256: checksum,
+                    storagePath: storagePath
+                )
+                diagnostics.append("stage=shot_metadata_insert:\(shotSummary.id.uuidString)")
+                try await persistShotRichMetadataToSupabase(
+                    orgID: orgID,
+                    propertyID: context.propertyID,
+                    sessionID: context.sessionID,
+                    metadata: metadata,
+                    shot: shot,
+                    allowInsert: true
+                )
+                diagnostics.append("stage=blob_upload:\(shotSummary.id.uuidString)")
+                _ = try await client.storage.from(supabaseOperationalMediaBucket).upload(
+                    storagePath,
+                    fileURL: localFileURL,
+                    options: FileOptions(
+                        cacheControl: "31536000",
+                        contentType: contentType(for: localFileURL),
+                        upsert: true
+                    )
+                )
+                diagnostics.append("stage=shot_storage_metadata:\(shotSummary.id.uuidString)")
+                try await persistShotStorageMetadataToSupabase(
+                    orgID: orgID,
+                    propertyID: context.propertyID,
+                    sessionID: context.sessionID,
+                    shotID: shotSummary.id,
+                    storageBucket: supabaseOperationalMediaBucket,
+                    storagePath: storagePath,
+                    checksumSHA256: checksum,
+                    byteSize: byteSize,
+                    uploadState: "uploaded",
+                    uploadAttempts: 1,
+                    lastUploadError: nil
+                )
+                shotResults.append(FastRuntimeCompleteUploadShotResult(
+                    id: shotSummary.id,
+                    localFilePath: localPath,
+                    storageBucket: supabaseOperationalMediaBucket,
+                    storagePath: storagePath,
+                    byteSize: byteSize,
+                    checksumSHA256: checksum,
+                    uploaded: true,
+                    errorMessage: nil
+                ))
+            }
+            createdRowsSummary.append("shots upserted \(shotResults.count)")
+            createdRowsSummary.append("storage originals uploaded \(shotResults.count)")
+
+            diagnostics.append("stage=property_status_pending_export")
+            let didSetPendingExport = await performPropertyStatusShadowWrite(
+                transition: .pendingExport,
+                propertyID: context.propertyID,
+                sessionID: context.sessionID,
+                deviceID: currentDeviceIdentifier(),
+                reason: "fast_lane_complete_upload_experimental"
+            )
+            guard didSetPendingExport else {
+                throw NSError(domain: "ScoutCapture.FastRuntimeCompleteUpload", code: 20, userInfo: [
+                    NSLocalizedDescriptionKey: "Uploaded files and metadata, but failed to mark property_status pending_export."
+                ])
+            }
+            updateLocalPropertyStatusPresentationCache(
+                propertyID: context.propertyID,
+                sessionID: context.sessionID,
+                status: .pendingExport,
+                reason: "fast_lane_complete_upload_experimental"
+            )
+            propertyStatus = "pending_export"
+
+            do {
+                diagnostics.append("stage=occupancy_release")
+                try await deletePropertySessionOccupancyRowFromSupabase(
+                    orgID: orgID,
+                    propertyID: context.propertyID
+                )
+                setPropertySessionOccupancyState(
+                    propertyID: context.propertyID,
+                    occupiedByUserID: nil,
+                    occupiedByDeviceID: nil,
+                    occupiedAt: nil
+                )
+                lockReleased = true
+            } catch {
+                lockReleased = false
+            }
+
+            if fastRuntimeDraftsByPropertyID[context.propertyID]?.sessionID == context.sessionID {
+                diagnostics.append("stage=local_draft_index_hide")
+                var nextDrafts = fastRuntimeDraftsByPropertyID
+                nextDrafts.removeValue(forKey: context.propertyID)
+                try Self.writeFastRuntimeDraftIndexToDisk(Array(nextDrafts.values))
+                fastRuntimeDraftsByPropertyID = nextDrafts
+                localDraftMarkedUploaded = true
+            }
+            diagnostics.append("stage=success")
+
+            return FastRuntimeCompleteUploadResult(
+                success: true,
+                dryRun: dryRun,
+                uploadedFilesCount: shotResults.filter(\.uploaded).count,
+                createdRowsSummary: createdRowsSummary,
+                sessionStatus: sessionStatus,
+                propertyStatus: propertyStatus,
+                packageSummary: "session_snapshots/report package skipped by fast-lane scope",
+                lockReleased: lockReleased,
+                localDraftMarkedUploaded: localDraftMarkedUploaded,
+                errorMessage: nil,
+                diagnostics: diagnostics,
+                shots: shotResults,
+                totalMilliseconds: Date().timeIntervalSince(startedAt) * 1_000
+            )
+        } catch {
+            diagnostics.append("error=\(Self.diagnosticsPreviewText(error.localizedDescription, maxLength: 240) ?? error.localizedDescription)")
+            return makeFastRuntimeCompleteUploadFailure(
+                dryRun: dryRun,
+                startedAt: startedAt,
+                createdRowsSummary: createdRowsSummary,
+                sessionStatus: sessionStatus,
+                propertyStatus: propertyStatus,
+                packageSummary: "session_snapshots/report package skipped by fast-lane scope",
+                lockReleased: lockReleased,
+                localDraftMarkedUploaded: localDraftMarkedUploaded,
+                diagnostics: diagnostics,
+                shots: shotResults,
+                message: error.localizedDescription
+            )
+        }
+    }
+
+    private func makeFastRuntimeCompleteUploadFailure(
+        dryRun: FastRuntimeCompleteDryRunResult,
+        startedAt: Date,
+        createdRowsSummary: [String],
+        sessionStatus: String,
+        propertyStatus: String,
+        packageSummary: String,
+        lockReleased: Bool,
+        localDraftMarkedUploaded: Bool,
+        diagnostics: [String],
+        shots: [FastRuntimeCompleteUploadShotResult],
+        message: String
+    ) -> FastRuntimeCompleteUploadResult {
+        FastRuntimeCompleteUploadResult(
+            success: false,
+            dryRun: dryRun,
+            uploadedFilesCount: shots.filter(\.uploaded).count,
+            createdRowsSummary: createdRowsSummary,
+            sessionStatus: sessionStatus,
+            propertyStatus: propertyStatus,
+            packageSummary: packageSummary,
+            lockReleased: lockReleased,
+            localDraftMarkedUploaded: localDraftMarkedUploaded,
+            errorMessage: message,
+            diagnostics: diagnostics,
+            shots: shots,
+            totalMilliseconds: Date().timeIntervalSince(startedAt) * 1_000
+        )
+    }
+
+    private func makeFastRuntimeCompleteSessionMetadata(
+        context: ActiveCaptureContext,
+        dryRun: FastRuntimeCompleteDryRunResult,
+        property: Property?,
+        completedAt: Date
+    ) -> SessionMetadata {
+        let offsetSeconds = TimeZone.current.secondsFromGMT(for: context.createdAt)
+        let offsetMinutes = offsetSeconds / 60
+        let sign = offsetSeconds >= 0 ? "+" : "-"
+        let absoluteMinutes = abs(offsetMinutes)
+        let offsetString = String(format: "%@%02d:%02d", sign, absoluteMinutes / 60, absoluteMinutes % 60)
+        let appVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String
+        let buildNumber = Bundle.main.infoDictionary?["CFBundleVersion"] as? String
+        let versionString = [appVersion, buildNumber].compactMap { normalizedSupabaseText($0) }.joined(separator: " (")
+        let displayVersion = versionString.isEmpty ? "fast-lane-experimental" : versionString + (buildNumber == nil ? "" : ")")
+        return SessionMetadata(
+            schemaVersion: 12,
+            propertyID: context.propertyID,
+            sessionID: context.sessionID,
+            sessionType: context.sessionType,
+            orgID: context.orgID,
+            propertyNameAtCapture: property?.name,
+            propertyNameAtExport: property?.name,
+            primaryContactNameAtCapture: property?.clientName,
+            primaryContactEmailAtCapture: property?.clientEmail,
+            propertyAddressAtCapture: property?.address,
+            propertyStreetAtCapture: property?.street,
+            propertyCityAtCapture: property?.city,
+            propertyStateAtCapture: property?.state,
+            propertyZipAtCapture: property?.zip,
+            propertyPhoneAtCapture: property?.clientPhone,
+            timeZoneIdentifierAtCapture: TimeZone.current.identifier,
+            timeZoneOffsetAtCapture: offsetString,
+            timeZoneOffsetMinutesAtCapture: offsetMinutes,
+            captureProfile: property?.captureProfile?.rawValue,
+            capturedByUserID: context.ownerUserID,
+            capturedByEmail: context.ownerEmail,
+            uploadedByUserID: authenticatedSupabaseUser?.id,
+            uploadedByEmail: authenticatedSupabaseUser?.email,
+            actorUserID: authenticatedSupabaseUser?.id ?? context.ownerUserID,
+            actorEmail: authenticatedSupabaseUser?.email ?? context.ownerEmail,
+            startedAt: context.createdAt,
+            sessionStartedAtLocal: context.createdAt.formatted(date: .numeric, time: .standard),
+            endedAt: completedAt,
+            sessionEndedAtLocal: completedAt.formatted(date: .numeric, time: .standard),
+            status: .completed,
+            isBaselineSession: false,
+            exportedAt: nil,
+            isSealed: true,
+            firstDeliveredAt: nil,
+            reExportExpiresAt: nil,
+            appVersion: displayVersion,
+            deviceModel: "fast-lane",
+            osVersion: ProcessInfo.processInfo.operatingSystemVersionString,
+            shots: dryRun.shots.map {
+                makeFastRuntimeCompleteShotMetadata(
+                    context: context,
+                    dryRunShot: $0,
+                    position: dryRun.shots.firstIndex(of: $0) ?? 0,
+                    originalFilename: URL(fileURLWithPath: $0.resolvedLocalFilePath ?? $0.originalRelativePath).lastPathComponent,
+                    byteSize: $0.byteSize.flatMap { Int(exactly: $0) },
+                    checksumSHA256: nil,
+                    storagePath: nil
+                )
+            },
+            issues: [],
+            guidedShots: []
+        )
+    }
+
+    private func makeFastRuntimeCompleteShotMetadata(
+        context: ActiveCaptureContext,
+        dryRunShot: FastRuntimeCompleteDryRunShotSummary,
+        position: Int,
+        originalFilename: String,
+        byteSize: Int?,
+        checksumSHA256: String?,
+        storagePath: String?
+    ) -> ShotMetadata {
+        ShotMetadata(
+            shotID: dryRunShot.id,
+            propertyID: context.propertyID,
+            sessionID: context.sessionID,
+            createdAt: dryRunShot.capturedAt,
+            capturedAtLocal: dryRunShot.capturedAt.formatted(date: .numeric, time: .standard),
+            updatedAt: Date(),
+            capturedByUserID: context.ownerUserID,
+            capturedByEmail: context.ownerEmail,
+            uploadedByUserID: authenticatedSupabaseUser?.id,
+            uploadedByEmail: authenticatedSupabaseUser?.email,
+            building: "",
+            elevation: "",
+            detailType: context.sessionType == .punchlistVisit ? "Punchlist Capture" : "Fast Lane Capture",
+            angleIndex: position + 1,
+            shotKey: ShotMetadata.makeShotKey(
+                building: "",
+                elevation: "",
+                detailType: context.sessionType == .punchlistVisit ? "Punchlist Capture" : "Fast Lane Capture",
+                angleIndex: position + 1
+            ),
+            isGuided: false,
+            isFlagged: false,
+            issueID: nil,
+            issueStatus: nil,
+            captureKind: dryRunShot.captureKind,
+            firstCaptureKind: "captured",
+            noteText: nil,
+            noteCategory: nil,
+            originalFilename: originalFilename,
+            originalRelativePath: dryRunShot.originalRelativePath,
+            originalByteSize: byteSize,
+            storageBucket: storagePath == nil ? nil : supabaseOperationalMediaBucket,
+            storagePath: storagePath,
+            checksumSHA256: checksumSHA256,
+            byteSize: byteSize,
+            uploadState: storagePath == nil ? "pending" : "uploaded",
+            uploadAttempts: storagePath == nil ? 0 : 1,
+            lastUploadError: nil,
+            stampedFilename: nil,
+            stampedRelativePath: nil,
+            captureMode: nil,
+            lens: nil,
+            exifOrientation: nil,
+            latitude: nil,
+            longitude: nil,
+            accuracyMeters: nil,
+            imageWidth: nil,
+            imageHeight: nil
         )
     }
 

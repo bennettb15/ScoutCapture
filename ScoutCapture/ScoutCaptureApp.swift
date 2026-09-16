@@ -12740,7 +12740,10 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
     @State private var fastStorageRoot: URL?
     @State private var isTimingExpanded: Bool = false
     @State private var isRunningCompleteDryRun: Bool = false
+    @State private var isRunningCompleteUpload: Bool = false
+    @State private var didCompleteUpload: Bool = false
     @State private var completeDryRunResult: AppState.FastRuntimeCompleteDryRunResult?
+    @State private var completeUploadResult: AppState.FastRuntimeCompleteUploadResult?
 
     var body: some View {
         ZStack {
@@ -12781,6 +12784,9 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
         }
         .sheet(item: $completeDryRunResult) { result in
             FastRuntimeCompleteDryRunResultView(result: result)
+        }
+        .sheet(item: $completeUploadResult) { result in
+            FastRuntimeCompleteUploadResultView(result: result)
         }
     }
 
@@ -12830,6 +12836,9 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             HStack(spacing: 8) {
                 statusBadge(camera.isPreviewRunning ? "Ready" : "Starting", color: camera.isPreviewRunning ? .green : .yellow)
                 statusBadge("Saved \(capturedCount)", color: .white.opacity(0.82))
+                if didCompleteUpload {
+                    statusBadge("Uploaded", color: .green)
+                }
                 if let total = lastCapture?.totalMilliseconds {
                     statusBadge("Last \(String(format: "%.0f", total)) ms", color: .white.opacity(0.82))
                 }
@@ -12860,20 +12869,37 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             }
 
             if capturedCount > 0 {
-                Button(isRunningCompleteDryRun ? "Checking..." : "Complete Dry Run") {
-                    runCompleteDryRun()
+                HStack(spacing: 10) {
+                    Button(isRunningCompleteDryRun ? "Checking..." : "Complete Dry Run") {
+                        runCompleteDryRun()
+                    }
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundColor(.white.opacity(0.94))
+                    .padding(.horizontal, 14)
+                    .frame(height: 34)
+                    .background(Color.black.opacity(0.58))
+                    .clipShape(Capsule())
+                    .overlay(
+                        Capsule()
+                            .stroke(Color.white.opacity(0.20), lineWidth: 1)
+                    )
+                    .disabled(isRunningCompleteDryRun || isRunningCompleteUpload || isClosing || isSavingFastCapture || camera.isCapturing)
+
+                    Button(didCompleteUpload ? "Uploaded" : (isRunningCompleteUpload ? "Uploading..." : "Fast Complete Upload (Experimental)")) {
+                        runCompleteUpload()
+                    }
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundColor(.white.opacity(0.96))
+                    .padding(.horizontal, 14)
+                    .frame(height: 34)
+                    .background(Color.orange.opacity(0.72))
+                    .clipShape(Capsule())
+                    .overlay(
+                        Capsule()
+                            .stroke(Color.white.opacity(0.25), lineWidth: 1)
+                    )
+                    .disabled(didCompleteUpload || isRunningCompleteDryRun || isRunningCompleteUpload || isClosing || isSavingFastCapture || camera.isCapturing)
                 }
-                .font(.system(size: 13, weight: .semibold))
-                .foregroundColor(.white.opacity(0.94))
-                .padding(.horizontal, 14)
-                .frame(height: 34)
-                .background(Color.black.opacity(0.58))
-                .clipShape(Capsule())
-                .overlay(
-                    Capsule()
-                        .stroke(Color.white.opacity(0.20), lineWidth: 1)
-                )
-                .disabled(isRunningCompleteDryRun || isClosing || isSavingFastCapture || camera.isCapturing)
             }
 
             HStack(spacing: 18) {
@@ -12898,7 +12924,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                 .disabled(!canUseFastShutter)
                 .accessibilityLabel("Capture prototype photo")
 
-                Text(isSavingFastCapture || camera.isCapturing ? "Saving" : (isDraftResume ? "Draft" : "Ready"))
+                Text(didCompleteUpload ? "Uploaded" : (isSavingFastCapture || camera.isCapturing ? "Saving" : (isDraftResume ? "Draft" : "Ready")))
                     .font(.system(size: 13, weight: .semibold))
                     .foregroundColor(.white.opacity(canUseFastShutter ? 0.88 : 0.55))
                     .frame(width: 92, alignment: .trailing)
@@ -12965,7 +12991,8 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             camera.isPreviewRunning &&
             !camera.isCapturing &&
             !isSavingFastCapture &&
-            !isClosing
+            !isClosing &&
+            !didCompleteUpload
     }
 
     private func captureFastLanePhoto() {
@@ -13043,11 +13070,51 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
         }
     }
 
+    private func runCompleteUpload() {
+        guard capturedCount > 0, !isRunningCompleteUpload else { return }
+        isRunningCompleteUpload = true
+        Task {
+            let result = await appState.runFastRuntimeCompleteUpload(
+                context: context,
+                storageRoot: fastStorageRoot ?? prototypeResult.tempStorageRoot,
+                capturedPhotoCount: capturedCount
+            )
+            await MainActor.run {
+                completeUploadResult = result
+                if result.success {
+                    didCompleteUpload = true
+                }
+                isRunningCompleteUpload = false
+            }
+        }
+    }
+
     private func closePreview() {
         guard !isClosing else { return }
         isClosing = true
         releaseStartedAt = Date()
         camera.stopPreviewAsync()
+        if didCompleteUpload {
+            releaseFinishedAt = Date()
+            onDismiss(AppState.FastRuntimePrototypeCloseResult(
+                propertyID: context.propertyID,
+                propertyName: propertyName,
+                sessionID: context.sessionID,
+                draftPersisted: false,
+                photoCount: capturedCount,
+                lockAction: "completed_upload",
+                tempDiscarded: false,
+                draftRootPath: fastStorageRoot?.path,
+                errorMessage: nil,
+                timings: AppState.FastRuntimePrototypeCloseTimings(
+                    persistMilliseconds: nil,
+                    releaseMilliseconds: nil,
+                    cleanupMilliseconds: nil,
+                    totalMilliseconds: releaseStartedAt.map { Date().timeIntervalSince($0) * 1_000 } ?? 0
+                )
+            ))
+            return
+        }
         Task {
             let closeResult = await appState.closeFastRuntimePrototypePreview(
                 context: context,
@@ -13182,6 +13249,95 @@ private struct FastRuntimeCompleteDryRunResultView: View {
     }
 }
 
+private struct FastRuntimeCompleteUploadResultView: View {
+    @Environment(\.dismiss) private var dismiss
+    let result: AppState.FastRuntimeCompleteUploadResult
+
+    var body: some View {
+        NavigationStack {
+            List {
+                Section("Result") {
+                    diagnosticRow("Success", result.success ? "true" : "false")
+                    diagnosticRow("Dry Run Valid", result.dryRun.isValid ? "true" : "false")
+                    diagnosticRow("Uploaded Files", "\(result.uploadedFilesCount)")
+                    diagnosticRow("Session Status", result.sessionStatus)
+                    diagnosticRow("Property Status", result.propertyStatus)
+                    diagnosticRow("Lock Released", result.lockReleased ? "true" : "false")
+                    diagnosticRow("Draft Hidden", result.localDraftMarkedUploaded ? "true" : "false")
+                    diagnosticRow("Total", String(format: "%.1f ms", result.totalMilliseconds))
+                }
+
+                if let errorMessage = result.errorMessage {
+                    Section("Error") {
+                        diagnosticBlock("Message", errorMessage)
+                    }
+                }
+
+                Section("Rows") {
+                    if result.createdRowsSummary.isEmpty {
+                        Text("No rows written.")
+                            .foregroundStyle(.secondary)
+                    } else {
+                        diagnosticBlock("Summary", result.createdRowsSummary.joined(separator: "\n"))
+                    }
+                    diagnosticBlock("Package", result.packageSummary)
+                }
+
+                if !result.diagnostics.isEmpty {
+                    Section("Diagnostics") {
+                        diagnosticBlock("Stages", result.diagnostics.joined(separator: "\n"))
+                    }
+                }
+
+                Section("Identity") {
+                    diagnosticRow("Org ID", result.dryRun.orgID?.uuidString ?? "missing")
+                    diagnosticRow("Property ID", result.dryRun.propertyID.uuidString)
+                    diagnosticRow("Session ID", result.dryRun.sessionID.uuidString)
+                    diagnosticRow("Session Type", result.dryRun.sessionType.rawValue)
+                }
+
+                Section("Shots") {
+                    if result.shots.isEmpty {
+                        Text("No shot uploads completed.")
+                            .foregroundStyle(.secondary)
+                    } else {
+                        ForEach(result.shots) { shot in
+                            VStack(alignment: .leading, spacing: 5) {
+                                diagnosticRow("Shot", shot.id.uuidString)
+                                diagnosticRow("Uploaded", shot.uploaded ? "true" : "false")
+                                diagnosticRow("Bucket", shot.storageBucket ?? "none")
+                                diagnosticBlock("Storage Path", shot.storagePath ?? "none")
+                                diagnosticRow("Bytes", shot.byteSize.map(String.init) ?? "missing")
+                                diagnosticBlock("Checksum", shot.checksumSHA256 ?? "none")
+                                diagnosticBlock("Local File", shot.localFilePath)
+                                if let errorMessage = shot.errorMessage {
+                                    diagnosticBlock("Error", errorMessage)
+                                }
+                            }
+                            .padding(.vertical, 4)
+                        }
+                    }
+                }
+
+                Section("Safety") {
+                    Text("Experimental fast-lane write. It uploaded originals and wrote session/shot/property status rows only. It did not create session snapshots, dispatch report workers, send email, delete local files, or touch legacy drafts.")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .navigationTitle(result.title)
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Done") {
+                        dismiss()
+                    }
+                }
+            }
+        }
+    }
+}
+
 private struct DebugToolsView: View {
     @EnvironmentObject private var appState: AppState
     @Environment(\.dismiss) private var dismiss
@@ -13216,9 +13372,20 @@ private struct DebugToolsView: View {
     @State private var showLocalOrgRepairSheet: Bool = false
     @State private var showLocalDiagnosticsSheet: Bool = false
     @State private var showFastRuntimePrototypeSheet: Bool = false
+    @State private var selectedFastLaneLauncherPropertyID: UUID? = nil
+    @State private var isStartingFastLaneSession: Bool = false
+    @State private var fastLaneLauncherResult: AppState.FastRuntimePrototypeResult? = nil
+    @State private var fastLaneLauncherPreviewRequest: FastRuntimeCameraPreviewRequest? = nil
+    @State private var fastLaneLauncherCloseResult: AppState.FastRuntimePrototypeCloseResult? = nil
     @State private var isClearingFastRuntimeDrafts: Bool = false
     @State private var fastRuntimeCleanupResult: AppState.FastRuntimePrototypeCleanupResult? = nil
     @State private var showCaptureProfileMaintenanceBackfillConfirm: Bool = false
+
+    private var fastLaneLauncherProperties: [Property] {
+        appState.properties
+            .filter { $0.deletedAt == nil && !$0.isArchived }
+            .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+    }
 
     private var buttonFill: Color {
         colorScheme == .light ? Color.white.opacity(0.90) : Color.black.opacity(0.55)
@@ -13311,6 +13478,8 @@ private struct DebugToolsView: View {
                         ) {
                             showFastRuntimePrototypeSheet = true
                         }
+
+                        fastLaneLauncherCard
 
                         debugActionCard(
                             title: "Clear Fast-Lane Drafts",
@@ -13674,6 +13843,11 @@ private struct DebugToolsView: View {
                 }
             }
         }
+        .onAppear {
+            if selectedFastLaneLauncherPropertyID == nil {
+                selectedFastLaneLauncherPropertyID = fastLaneLauncherProperties.first?.id
+            }
+        }
         .alert("Nuclear Reset (Local Only)?", isPresented: $showNuclearConfirm) {
             Button("Reset", role: .destructive) {
                 appState.nuclearResetLocalOnly()
@@ -13747,6 +13921,141 @@ private struct DebugToolsView: View {
             DebugFastRuntimePrototypeView()
                 .environmentObject(appState)
         }
+        .fullScreenCover(item: $fastLaneLauncherPreviewRequest) { request in
+            DebugFastRuntimePrototypeCameraPreviewView(
+                context: request.context,
+                propertyName: request.propertyName,
+                prototypeResult: request.result,
+                buttonTappedAt: request.buttonTappedAt,
+                contextReadyAt: request.contextReadyAt,
+                previewRequestedAt: request.previewRequestedAt,
+                initialCapturedCount: request.initialCapturedCount,
+                storageRoot: request.storageRoot,
+                isDraftResume: request.isDraftResume,
+                onDismiss: { closeResult in
+                    fastLaneLauncherCloseResult = closeResult
+                    fastLaneLauncherPreviewRequest = nil
+                }
+            )
+            .environmentObject(appState)
+            .interactiveDismissDisabled(true)
+        }
+    }
+
+    private var fastLaneLauncherCard: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Start Fast-Lane Session")
+                .font(.system(size: 16, weight: .semibold))
+                .foregroundColor(.primary)
+            Text("Debug-only launcher for clean fast-lane upload testing. Uses the lightweight RPC gate and opens the fast preview directly only on unlocked_and_claimed. It does not call openProperty, startSession, currentSession, or legacy camera routing.")
+                .font(.system(size: 13, weight: .medium))
+                .foregroundColor(.secondary)
+
+            if fastLaneLauncherProperties.isEmpty {
+                Text("No active properties loaded.")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundColor(.secondary)
+            } else {
+                Picker("Property", selection: $selectedFastLaneLauncherPropertyID) {
+                    ForEach(fastLaneLauncherProperties) { property in
+                        Text(property.name)
+                            .tag(Optional(property.id))
+                    }
+                }
+                .pickerStyle(.menu)
+            }
+
+            HStack(spacing: 10) {
+                customCapsuleButton(
+                    title: isStartingFastLaneSession ? "Starting..." : "Start Fast-Lane Full",
+                    isEnabled: !isStartingFastLaneSession && selectedFastLaneLauncherPropertyID != nil,
+                    fill: Color.blue.opacity(0.86),
+                    stroke: Color.blue.opacity(0.92),
+                    label: .white
+                ) {
+                    startFastLaneLauncher(sessionType: .fullDocumentation)
+                }
+
+                customCapsuleButton(
+                    title: isStartingFastLaneSession ? "Starting..." : "Start Fast-Lane Punch",
+                    isEnabled: !isStartingFastLaneSession && selectedFastLaneLauncherPropertyID != nil,
+                    fill: Color.purple.opacity(0.78),
+                    stroke: Color.purple.opacity(0.90),
+                    label: .white
+                ) {
+                    startFastLaneLauncher(sessionType: .punchlistVisit)
+                }
+            }
+
+            customCapsuleButton(
+                title: isClearingFastRuntimeDrafts ? "Clearing..." : "Release/Clear Fast-Lane State",
+                isEnabled: !isClearingFastRuntimeDrafts,
+                fill: Color.red.opacity(0.86),
+                stroke: Color.red.opacity(0.90),
+                label: .white
+            ) {
+                clearFastRuntimeDrafts()
+            }
+
+            if let fastLaneLauncherResult {
+                fastLaneLauncherResultBlock(fastLaneLauncherResult)
+            }
+
+            if let fastLaneLauncherCloseResult {
+                fastLaneLauncherCloseResultBlock(fastLaneLauncherCloseResult)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .topLeading)
+        .padding(12)
+        .background(Color(uiColor: .secondarySystemBackground))
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+    }
+
+    private func startFastLaneLauncher(sessionType: SessionType) {
+        guard !isStartingFastLaneSession,
+              let propertyID = selectedFastLaneLauncherPropertyID,
+              let property = fastLaneLauncherProperties.first(where: { $0.id == propertyID }) else {
+            return
+        }
+        isStartingFastLaneSession = true
+        fastLaneLauncherResult = nil
+        fastLaneLauncherCloseResult = nil
+        let buttonTappedAt = Date()
+        Task {
+            let result = await appState.runFastRuntimePrototype(
+                propertyID: propertyID,
+                sessionType: sessionType,
+                prepareTempStorage: true,
+                releaseClaim: false,
+                allowCurrentUserOccupiedContext: false
+            )
+            let contextReadyAt = Date()
+            await MainActor.run {
+                fastLaneLauncherResult = result
+                isStartingFastLaneSession = false
+                guard result.entryState == .unlockedAndClaimed,
+                      result.requiresFallback == false,
+                      result.contextSource == "unlocked_and_claimed",
+                      let context = result.context,
+                      context.propertyID == propertyID,
+                      context.sessionID == result.timings.targetSessionID,
+                      context.sessionType == sessionType,
+                      context.canCapture else {
+                    return
+                }
+                fastLaneLauncherPreviewRequest = FastRuntimeCameraPreviewRequest(
+                    context: context,
+                    propertyName: property.name,
+                    result: result,
+                    buttonTappedAt: buttonTappedAt,
+                    contextReadyAt: contextReadyAt,
+                    previewRequestedAt: Date(),
+                    initialCapturedCount: 0,
+                    storageRoot: result.tempStorageRoot,
+                    isDraftResume: false
+                )
+            }
+        }
     }
 
     private func clearFastRuntimeDrafts() {
@@ -13760,6 +14069,83 @@ private struct DebugToolsView: View {
                 isClearingFastRuntimeDrafts = false
             }
         }
+    }
+
+    private func fastLaneLauncherResultBlock(
+        _ result: AppState.FastRuntimePrototypeResult
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 5) {
+            Text("Fast-Lane Launcher Result")
+                .font(.system(size: 14, weight: .bold))
+                .foregroundColor(buttonLabel)
+            Text([
+                "property=\(result.propertyName)",
+                "session_type=\(result.sessionType.rawValue)",
+                "entry_state=\(result.entryState?.rawValue ?? "none")",
+                "fallback=\(result.requiresFallback)",
+                "context=\(result.context == nil ? "none" : result.contextSource)",
+                "total=\(String(format: "%.1f", result.timings.totalMilliseconds))ms"
+            ].joined(separator: "\n"))
+            .font(.system(size: 12, weight: .medium, design: .monospaced))
+            .foregroundColor(buttonLabel.opacity(0.80))
+            .textSelection(.enabled)
+
+            if let reason = result.reason {
+                Text(reason)
+                    .font(.system(size: 12, weight: .regular, design: .monospaced))
+                    .foregroundColor(buttonLabel.opacity(0.70))
+                    .textSelection(.enabled)
+            }
+
+            if result.entryState != .unlockedAndClaimed || result.requiresFallback || result.context == nil {
+                Text("Fast-lane preview did not open. Use Release/Clear Fast-Lane State above if this is a stale current-user claim, then retry. No legacy path was opened.")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundColor(.orange)
+            }
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(buttonFill)
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(buttonStroke, lineWidth: 1)
+        )
+    }
+
+    private func fastLaneLauncherCloseResultBlock(
+        _ result: AppState.FastRuntimePrototypeCloseResult
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 5) {
+            Text("Fast-Lane Close Result")
+                .font(.system(size: 14, weight: .bold))
+                .foregroundColor(buttonLabel)
+            Text([
+                "property=\(result.propertyName)",
+                "session=\(result.sessionID.uuidString)",
+                "draft=\(result.draftPersisted)",
+                "photos=\(result.photoCount)",
+                "lock=\(result.lockAction)",
+                "total=\(String(format: "%.1f", result.timings.totalMilliseconds))ms"
+            ].joined(separator: "\n"))
+            .font(.system(size: 12, weight: .medium, design: .monospaced))
+            .foregroundColor(buttonLabel.opacity(0.80))
+            .textSelection(.enabled)
+            if let error = result.errorMessage {
+                Text(error)
+                    .font(.system(size: 12, weight: .regular, design: .monospaced))
+                    .foregroundColor(buttonLabel.opacity(0.70))
+                    .textSelection(.enabled)
+            }
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(buttonFill)
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(buttonStroke, lineWidth: 1)
+        )
     }
 
     private func fastRuntimeCleanupResultBlock(
