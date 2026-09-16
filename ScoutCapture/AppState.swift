@@ -5124,6 +5124,62 @@ final class AppState: ObservableObject {
         }
     }
 
+    struct FastRuntimeReportPackageFileCandidate: Equatable, Identifiable {
+        let id = UUID()
+        let reportType: String
+        let storageBucket: String
+        let storagePath: String
+        let filename: String
+    }
+
+    struct FastRuntimeReportPackageDryRunShot: Equatable, Identifiable {
+        let id: UUID
+        let captureKind: String?
+        let storageBucket: String?
+        let storagePath: String?
+        let storageObjectExists: Bool
+        let shotByteSize: Int?
+        let storageByteSize: Int?
+        let checksumSHA256: String?
+        let uploadState: String
+    }
+
+    struct FastRuntimeReportPackageDryRunResult: Equatable, Identifiable {
+        let id = UUID()
+        let isValid: Bool
+        let propertyID: UUID
+        let sessionID: UUID?
+        let sessionType: SessionType
+        let orgID: UUID?
+        let sessionStatus: String?
+        let propertyStatus: String?
+        let propertyStatusPendingExportSessionID: UUID?
+        let snapshotID: UUID?
+        let snapshotStorageBucket: String?
+        let snapshotStoragePath: String?
+        let snapshotPayloadBytes: Int?
+        let rawSessionJSONSHA256: String?
+        let snapshotPayloadSHA256: String?
+        let reportPackageID: UUID?
+        let reportPackageIdempotencyKey: String?
+        let reportMode: String
+        let emailWordingType: String
+        let shotCount: Int
+        let storageObjectCount: Int
+        let missingFields: [String]
+        let errors: [String]
+        let warnings: [String]
+        let wouldCreate: [String]
+        let fileCandidates: [FastRuntimeReportPackageFileCandidate]
+        let shots: [FastRuntimeReportPackageDryRunShot]
+        let sideEffectCounts: [String: Int]
+        let totalMilliseconds: Double
+
+        var title: String {
+            isValid ? "Report Package Dry Run Valid" : "Report Package Dry Run Failed"
+        }
+    }
+
     struct PropertyStatusDerivedSummary: Equatable {
         let draftBadgeDecision: Bool
         let pendingExportDecision: Bool
@@ -6643,6 +6699,38 @@ final class AppState: ObservableObject {
             case uploadState = "upload_state"
             case uploadAttempts = "upload_attempts"
             case lastUploadError = "last_upload_error"
+        }
+    }
+
+    private struct FastRuntimeReportRemoteSessionRecord: Decodable {
+        let id: UUID
+        let orgID: UUID
+        let propertyID: UUID
+        let title: String?
+        let status: String?
+        let startedAt: Date?
+        let completedAt: Date?
+        let exportedAt: Date?
+        let isSealed: Bool?
+        let firstDeliveredAt: Date?
+        let captureProfile: String?
+        let updatedBy: UUID?
+        let deletedAt: Date?
+
+        enum CodingKeys: String, CodingKey {
+            case id
+            case orgID = "org_id"
+            case propertyID = "property_id"
+            case title
+            case status
+            case startedAt = "started_at"
+            case completedAt = "completed_at"
+            case exportedAt = "exported_at"
+            case isSealed = "is_sealed"
+            case firstDeliveredAt = "first_delivered_at"
+            case captureProfile = "capture_profile"
+            case updatedBy = "updated_by"
+            case deletedAt = "deleted_at"
         }
     }
 
@@ -42918,6 +43006,778 @@ final class AppState: ObservableObject {
             shots: shots,
             totalMilliseconds: Date().timeIntervalSince(startedAt) * 1_000
         )
+    }
+
+    @MainActor
+    func runFastRuntimeReportPackageDryRun(
+        context: ActiveCaptureContext
+    ) async -> FastRuntimeReportPackageDryRunResult {
+        await runFastRuntimeReportPackageDryRun(
+            propertyID: context.propertyID,
+            sessionID: context.sessionID,
+            sessionType: context.sessionType,
+            orgID: context.orgID,
+            ownerUserID: context.ownerUserID,
+            ownerEmail: context.ownerEmail,
+            source: "active_capture_context"
+        )
+    }
+
+    @MainActor
+    func runFastRuntimeReportPackageDryRun(
+        propertyID: UUID,
+        sessionType: SessionType
+    ) async -> FastRuntimeReportPackageDryRunResult {
+        let startedAt = Date()
+        guard backendFeatureFlags.supabaseEnabled,
+              let client = supabaseClient else {
+            return makeFastRuntimeReportPackageDryRunBlockedResult(
+                startedAt: startedAt,
+                propertyID: propertyID,
+                sessionID: nil,
+                sessionType: sessionType,
+                reason: "missing_supabase_client"
+            )
+        }
+
+        do {
+            let statuses: [PropertyStatusRecord] = try await client
+                .from("property_status")
+                .select(
+                    """
+                    property_id,
+                    org_id,
+                    status,
+                    active_session_id,
+                    draft_session_id,
+                    pending_export_session_id,
+                    last_exported_session_id,
+                    owner_user_id,
+                    owner_device_id,
+                    heartbeat_at,
+                    updated_at,
+                    updated_by,
+                    status_reason,
+                    revision
+                    """
+                )
+                .eq("property_id", value: propertyID.uuidString.lowercased())
+                .limit(1)
+                .execute()
+                .value
+            guard let status = statuses.first,
+                  let sessionID = status.pendingExportSessionID else {
+                return makeFastRuntimeReportPackageDryRunBlockedResult(
+                    startedAt: startedAt,
+                    propertyID: propertyID,
+                    sessionID: nil,
+                    sessionType: sessionType,
+                    orgID: statuses.first?.orgID,
+                    propertyStatus: statuses.first?.status.rawValue,
+                    reason: "property_status_missing_pending_export_session"
+                )
+            }
+            return await runFastRuntimeReportPackageDryRun(
+                propertyID: propertyID,
+                sessionID: sessionID,
+                sessionType: sessionType,
+                orgID: status.orgID,
+                ownerUserID: status.updatedBy,
+                ownerEmail: authenticatedSupabaseUser?.email,
+                source: "property_status_pending_export"
+            )
+        } catch {
+            return makeFastRuntimeReportPackageDryRunBlockedResult(
+                startedAt: startedAt,
+                propertyID: propertyID,
+                sessionID: nil,
+                sessionType: sessionType,
+                reason: "property_status_read_failed: \(error.localizedDescription)"
+            )
+        }
+    }
+
+    private func runFastRuntimeReportPackageDryRun(
+        propertyID: UUID,
+        sessionID: UUID,
+        sessionType: SessionType,
+        orgID contextOrgID: UUID?,
+        ownerUserID: UUID?,
+        ownerEmail: String?,
+        source: String
+    ) async -> FastRuntimeReportPackageDryRunResult {
+        let startedAt = Date()
+        guard backendFeatureFlags.supabaseEnabled,
+              let client = supabaseClient else {
+            return makeFastRuntimeReportPackageDryRunBlockedResult(
+                startedAt: startedAt,
+                propertyID: propertyID,
+                sessionID: sessionID,
+                sessionType: sessionType,
+                orgID: contextOrgID,
+                reason: "missing_supabase_client"
+            )
+        }
+
+        var missingFields: [String] = []
+        var errors: [String] = []
+        var warnings: [String] = ["source=\(source)", "session_type_source=fast_lane_context_or_debug_selection"]
+        var sideEffectCounts: [String: Int] = [:]
+        var storageObjectCount = 0
+        var shotResults: [FastRuntimeReportPackageDryRunShot] = []
+
+        do {
+            let sessions: [FastRuntimeReportRemoteSessionRecord] = try await client
+                .from("sessions")
+                .select("id, org_id, property_id, title, status, started_at, completed_at, exported_at, is_sealed, first_delivered_at, capture_profile, updated_by, deleted_at")
+                .eq("id", value: sessionID.uuidString.lowercased())
+                .eq("property_id", value: propertyID.uuidString.lowercased())
+                .limit(1)
+                .execute()
+                .value
+            let statusRows: [PropertyStatusRecord] = try await client
+                .from("property_status")
+                .select(
+                    """
+                    property_id,
+                    org_id,
+                    status,
+                    active_session_id,
+                    draft_session_id,
+                    pending_export_session_id,
+                    last_exported_session_id,
+                    owner_user_id,
+                    owner_device_id,
+                    heartbeat_at,
+                    updated_at,
+                    updated_by,
+                    status_reason,
+                    revision
+                    """
+                )
+                .eq("property_id", value: propertyID.uuidString.lowercased())
+                .limit(1)
+                .execute()
+                .value
+            let shots: [SupabaseShotStorageRecord] = try await client
+                .from("shots")
+                .select(
+                    """
+                    id,
+                    org_id,
+                    property_id,
+                    session_id,
+                    created_at,
+                    updated_at,
+                    updated_by,
+                    revision,
+                    deleted_at,
+                    building,
+                    elevation,
+                    detail_type,
+                    angle_index,
+                    shot_key,
+                    logical_shot_identity,
+                    capture_kind,
+                    first_capture_kind,
+                    is_guided,
+                    is_flagged,
+                    issue_id,
+                    issue_status,
+                    trade,
+                    reason,
+                    priority,
+                    capture_mode,
+                    lens,
+                    latitude,
+                    longitude,
+                    accuracy_meters,
+                    image_width,
+                    image_height,
+                    lifecycle_state,
+                    retired_at,
+                    retired_reason,
+                    retired_by,
+                    superseded_by_shot_id,
+                    supersedes_shot_id,
+                    replacement_reason,
+                    hidden_from_reports,
+                    hidden_from_gallery,
+                    lifecycle_updated_at,
+                    storage_bucket,
+                    storage_path,
+                    checksum_sha256,
+                    byte_size,
+                    upload_state,
+                    upload_attempts,
+                    last_upload_error
+                    """
+                )
+                .eq("session_id", value: sessionID.uuidString.lowercased())
+                .eq("property_id", value: propertyID.uuidString.lowercased())
+                .is("deleted_at", value: nil)
+                .execute()
+                .value
+            do {
+                let snapshotRows: [SessionIDOnlyRecord] = try await client
+                    .from("session_snapshots")
+                    .select("id")
+                    .eq("session_id", value: sessionID.uuidString.lowercased())
+                    .is("deleted_at", value: nil)
+                    .execute()
+                    .value
+                sideEffectCounts["session_snapshots"] = snapshotRows.count
+            } catch {
+                warnings.append("session_snapshots=server_owned_not_read_by_mobile")
+            }
+            do {
+                let packageRows: [SessionIDOnlyRecord] = try await client
+                    .from("report_packages")
+                    .select("id")
+                    .eq("session_id", value: sessionID.uuidString.lowercased())
+                    .is("deleted_at", value: nil)
+                    .execute()
+                    .value
+                sideEffectCounts["report_packages"] = packageRows.count
+            } catch {
+                warnings.append("report_packages=server_owned_not_read_by_mobile")
+            }
+            do {
+                let packageFileRows: [SessionIDOnlyRecord] = try await client
+                    .from("report_package_files")
+                    .select("id")
+                    .eq("session_id", value: sessionID.uuidString.lowercased())
+                    .is("deleted_at", value: nil)
+                    .execute()
+                    .value
+                sideEffectCounts["report_package_files"] = packageFileRows.count
+            } catch {
+                warnings.append("report_package_files=server_owned_not_read_by_mobile")
+            }
+            warnings.append("report_package_email_notifications=server_owned_not_read_by_mobile")
+
+            guard let session = sessions.first else {
+                return makeFastRuntimeReportPackageDryRunBlockedResult(
+                    startedAt: startedAt,
+                    propertyID: propertyID,
+                    sessionID: sessionID,
+                    sessionType: sessionType,
+                    orgID: contextOrgID,
+                    reason: "session_row_missing"
+                )
+            }
+            let propertyStatus = statusRows.first
+            let resolvedOrgID = session.orgID
+            if contextOrgID != nil, contextOrgID != resolvedOrgID {
+                warnings.append("context_org_id_mismatch")
+            }
+            if session.propertyID != propertyID { missingFields.append("session.propertyID") }
+            if normalizedSupabaseText(session.status)?.lowercased() != Session.Status.completed.rawValue {
+                missingFields.append("session.status.completed")
+            }
+            if session.isSealed != true { missingFields.append("session.isSealed") }
+            if session.completedAt == nil { missingFields.append("session.completedAt") }
+            if session.deletedAt != nil { missingFields.append("session.deletedAt.nil") }
+            if propertyStatus == nil {
+                missingFields.append("property_status")
+            } else {
+                if propertyStatus?.status != .pendingExport { missingFields.append("property_status.pending_export") }
+                if propertyStatus?.pendingExportSessionID != sessionID { missingFields.append("property_status.pending_export_session_id") }
+                if propertyStatus?.ownerUserID != nil || normalizedSupabaseText(propertyStatus?.ownerDeviceID) != nil {
+                    warnings.append("property_status_owner_fields_present")
+                }
+            }
+            if shots.isEmpty {
+                missingFields.append("shots")
+            }
+            let expectedCaptureKind = sessionType == .punchlistVisit ? "follow_up_capture" : "captured"
+            for shot in shots.sorted(by: fastRuntimeReportShotSort) {
+                var storageObjectExists = false
+                var storageByteSize: Int?
+                let bucket = normalizedSupabaseText(shot.storageBucket)
+                let path = normalizedSupabaseText(shot.storagePath)
+                if bucket == nil { missingFields.append("shot[\(shot.id.uuidString.prefix(8))].storageBucket") }
+                if path == nil { missingFields.append("shot[\(shot.id.uuidString.prefix(8))].storagePath") }
+                if normalizedSupabaseText(shot.captureKind)?.lowercased() != expectedCaptureKind {
+                    missingFields.append("shot[\(shot.id.uuidString.prefix(8))].captureKind.expected_\(expectedCaptureKind)")
+                }
+                if normalizedSupabaseText(shot.uploadState)?.lowercased() != "uploaded" {
+                    missingFields.append("shot[\(shot.id.uuidString.prefix(8))].uploadState")
+                }
+                if normalizedSupabaseText(shot.checksumSHA256) == nil {
+                    missingFields.append("shot[\(shot.id.uuidString.prefix(8))].checksum")
+                }
+                if shot.byteSize == nil || (shot.byteSize ?? 0) <= 0 {
+                    missingFields.append("shot[\(shot.id.uuidString.prefix(8))].byteSize")
+                }
+                if let bucket, let path {
+                    do {
+                        let data = try await client.storage.from(bucket).download(path: path)
+                        storageObjectExists = true
+                        storageByteSize = data.count
+                        storageObjectCount += 1
+                        if let shotByteSize = shot.byteSize, shotByteSize != data.count {
+                            warnings.append("shot[\(shot.id.uuidString.prefix(8))].storage_byte_size_mismatch")
+                        }
+                        if let checksum = normalizedSupabaseText(shot.checksumSHA256),
+                           sha256Hex(for: data).lowercased() != checksum.lowercased() {
+                            warnings.append("shot[\(shot.id.uuidString.prefix(8))].storage_checksum_mismatch")
+                        }
+                    } catch {
+                        missingFields.append("shot[\(shot.id.uuidString.prefix(8))].storageObject")
+                        errors.append("storage_read_failed[\(shot.id.uuidString.prefix(8))]: \(error.localizedDescription)")
+                    }
+                }
+                shotResults.append(FastRuntimeReportPackageDryRunShot(
+                    id: shot.id,
+                    captureKind: shot.captureKind,
+                    storageBucket: shot.storageBucket,
+                    storagePath: shot.storagePath,
+                    storageObjectExists: storageObjectExists,
+                    shotByteSize: shot.byteSize,
+                    storageByteSize: storageByteSize,
+                    checksumSHA256: shot.checksumSHA256,
+                    uploadState: shot.uploadState
+                ))
+            }
+
+            let metadata = makeFastRuntimeReportPackageSessionMetadata(
+                session: session,
+                shots: shots,
+                sessionType: sessionType,
+                ownerUserID: ownerUserID,
+                ownerEmail: ownerEmail
+            )
+            let buildResult = try makeFastRuntimeRemoteSessionSnapshotBuildResult(
+                metadata: metadata,
+                propertyID: propertyID,
+                sessionID: sessionID,
+                generatedAt: Date(),
+                trigger: "fast_lane_report_package_dry_run"
+            )
+            guard let snapshotOrgID = buildResult.envelope.orgID else {
+                missingFields.append("snapshot.orgID")
+                return makeFastRuntimeReportPackageDryRunBlockedResult(
+                    startedAt: startedAt,
+                    propertyID: propertyID,
+                    sessionID: sessionID,
+                    sessionType: sessionType,
+                    orgID: nil,
+                    sessionStatus: session.status,
+                    propertyStatus: propertyStatus?.status.rawValue,
+                    reason: "snapshot_org_id_missing"
+                )
+            }
+            let snapshotID = UUID()
+            let packageID = UUID()
+            let snapshotStoragePath = Self.sessionSnapshotStoragePath(
+                orgID: snapshotOrgID,
+                propertyID: propertyID,
+                sessionID: sessionID,
+                snapshotKind: .completed,
+                snapshotID: snapshotID
+            )
+            let snapshotRow = makeSessionSnapshotUploadRow(
+                snapshotID: snapshotID,
+                kind: .completed,
+                orgID: snapshotOrgID,
+                envelope: buildResult.envelope,
+                storagePath: snapshotStoragePath
+            )
+            if snapshotRow.sessionStatus != Session.Status.completed.rawValue {
+                missingFields.append("snapshot.sessionStatus")
+            }
+            if snapshotRow.isSealed != true {
+                missingFields.append("snapshot.isSealed")
+            }
+            if buildResult.envelope.sessionType != sessionType {
+                missingFields.append("snapshot.sessionType")
+            }
+            let reportMode = sessionType == .punchlistVisit ? "punchlist" : "all"
+            let reportTypes = sessionType == .punchlistVisit
+                ? ["flagged_observations", "flagged_comparison"]
+                : ["property_report", "flagged_observations", "flagged_comparison"]
+            let fileCandidates = reportTypes.map { reportType in
+                FastRuntimeReportPackageFileCandidate(
+                    reportType: reportType,
+                    storageBucket: "scoutcapture-deliverables",
+                    storagePath: fastRuntimeReportPackagePDFPath(
+                        orgID: snapshotOrgID,
+                        propertyID: propertyID,
+                        sessionID: sessionID,
+                        packageID: packageID,
+                        reportType: reportType
+                    ),
+                    filename: "\(reportType).pdf"
+                )
+            }
+            let packageIdempotencyKey = "pdf-package:\(snapshotID.uuidString.lowercased()):phase2c-shadow-reportlab-refinement-1"
+            let emailWordingType = sessionType == .punchlistVisit ? "punchlist update" : "report"
+            let wouldCreate = [
+                "session_snapshots row id=\(snapshotID.uuidString)",
+                "session snapshot payload object \(sessionSnapshotStorageBucket)/\(snapshotStoragePath)",
+                "report_packages row id=\(packageID.uuidString)",
+                "report package manifest sessionType=\(sessionType.rawValue)",
+                "report worker input report=\(reportMode)",
+                "report_package_files candidates=\(fileCandidates.count)",
+                "email wording=\(emailWordingType)",
+                "report_package_email_notifications server_owned_not_read_by_mobile"
+            ]
+            if (sideEffectCounts["session_snapshots"] ?? 0) > 0 {
+                warnings.append("existing_session_snapshots=\(sideEffectCounts["session_snapshots"] ?? 0)")
+            }
+            if (sideEffectCounts["report_packages"] ?? 0) > 0 {
+                warnings.append("existing_report_packages=\(sideEffectCounts["report_packages"] ?? 0)")
+            }
+            if (sideEffectCounts["report_package_files"] ?? 0) > 0 {
+                warnings.append("existing_report_package_files=\(sideEffectCounts["report_package_files"] ?? 0)")
+            }
+
+            let uniqueMissing = Array(Set(missingFields)).sorted()
+            let uniqueErrors = Array(Set(errors)).sorted()
+            let uniqueWarnings = Array(Set(warnings)).sorted()
+            let isValid = uniqueMissing.isEmpty &&
+                uniqueErrors.isEmpty &&
+                shots.count > 0 &&
+                storageObjectCount == shots.count &&
+                snapshotRow.shotCount == shots.count &&
+                buildResult.envelope.sessionType == sessionType
+
+            return FastRuntimeReportPackageDryRunResult(
+                isValid: isValid,
+                propertyID: propertyID,
+                sessionID: sessionID,
+                sessionType: sessionType,
+                orgID: snapshotOrgID,
+                sessionStatus: session.status,
+                propertyStatus: propertyStatus?.status.rawValue,
+                propertyStatusPendingExportSessionID: propertyStatus?.pendingExportSessionID,
+                snapshotID: snapshotID,
+                snapshotStorageBucket: sessionSnapshotStorageBucket,
+                snapshotStoragePath: snapshotStoragePath,
+                snapshotPayloadBytes: buildResult.payloadData.count,
+                rawSessionJSONSHA256: buildResult.envelope.rawSessionJSONSHA256,
+                snapshotPayloadSHA256: buildResult.envelope.snapshotPayloadSHA256,
+                reportPackageID: packageID,
+                reportPackageIdempotencyKey: packageIdempotencyKey,
+                reportMode: reportMode,
+                emailWordingType: emailWordingType,
+                shotCount: shots.count,
+                storageObjectCount: storageObjectCount,
+                missingFields: uniqueMissing,
+                errors: uniqueErrors,
+                warnings: uniqueWarnings,
+                wouldCreate: wouldCreate,
+                fileCandidates: fileCandidates,
+                shots: shotResults,
+                sideEffectCounts: sideEffectCounts,
+                totalMilliseconds: Date().timeIntervalSince(startedAt) * 1_000
+            )
+        } catch {
+            return makeFastRuntimeReportPackageDryRunBlockedResult(
+                startedAt: startedAt,
+                propertyID: propertyID,
+                sessionID: sessionID,
+                sessionType: sessionType,
+                orgID: contextOrgID,
+                reason: "remote_read_or_payload_build_failed: \(error.localizedDescription)"
+            )
+        }
+    }
+
+    private func makeFastRuntimeReportPackageDryRunBlockedResult(
+        startedAt: Date,
+        propertyID: UUID,
+        sessionID: UUID?,
+        sessionType: SessionType,
+        orgID: UUID? = nil,
+        sessionStatus: String? = nil,
+        propertyStatus: String? = nil,
+        reason: String
+    ) -> FastRuntimeReportPackageDryRunResult {
+        FastRuntimeReportPackageDryRunResult(
+            isValid: false,
+            propertyID: propertyID,
+            sessionID: sessionID,
+            sessionType: sessionType,
+            orgID: orgID,
+            sessionStatus: sessionStatus,
+            propertyStatus: propertyStatus,
+            propertyStatusPendingExportSessionID: nil,
+            snapshotID: nil,
+            snapshotStorageBucket: nil,
+            snapshotStoragePath: nil,
+            snapshotPayloadBytes: nil,
+            rawSessionJSONSHA256: nil,
+            snapshotPayloadSHA256: nil,
+            reportPackageID: nil,
+            reportPackageIdempotencyKey: nil,
+            reportMode: sessionType == .punchlistVisit ? "punchlist" : "all",
+            emailWordingType: sessionType == .punchlistVisit ? "punchlist update" : "report",
+            shotCount: 0,
+            storageObjectCount: 0,
+            missingFields: [reason],
+            errors: [reason],
+            warnings: [],
+            wouldCreate: [],
+            fileCandidates: [],
+            shots: [],
+            sideEffectCounts: [:],
+            totalMilliseconds: Date().timeIntervalSince(startedAt) * 1_000
+        )
+    }
+
+    private func makeFastRuntimeRemoteSessionSnapshotBuildResult(
+        metadata rawMetadata: SessionMetadata,
+        propertyID: UUID,
+        sessionID: UUID,
+        generatedAt: Date,
+        trigger: String
+    ) throws -> SessionSnapshotBuildResult {
+        let actor = sessionSnapshotActorIdentity(for: rawMetadata)
+        let metadata = Self.sessionSnapshotMetadata(rawMetadata, stampedWith: actor)
+        let rawData = try Self.encodeSessionSnapshotRawSessionJSON(metadata)
+        let rawSessionJSON = String(data: rawData, encoding: .utf8) ?? rawData.base64EncodedString()
+        let rawChecksum = Self.sessionSnapshotSHA256Hex(for: rawData)
+        let manifest = metadata.shots.map { shot in
+            SessionSnapshotMediaManifestItem(
+                id: shot.shotID,
+                originalFilenamePreview: normalizedSupabaseText(shot.originalFilename),
+                originalRelativePathPresent: normalizedSupabaseText(shot.originalRelativePath) != nil,
+                originalByteSize: shot.originalByteSize ?? shot.byteSize,
+                localOriginalExists: false,
+                storageBucketPresent: normalizedSupabaseText(shot.storageBucket) != nil,
+                storagePathPresent: normalizedSupabaseText(shot.storagePath) != nil,
+                checksumPresent: normalizedSupabaseText(shot.checksumSHA256) != nil,
+                storageByteSize: shot.byteSize,
+                capturedByUserID: shot.capturedByUserID,
+                capturedByEmail: shot.capturedByEmail,
+                uploadedByUserID: shot.uploadedByUserID,
+                uploadedByEmail: shot.uploadedByEmail
+            )
+        }
+        let payload = SessionSnapshotPayloadForChecksum(
+            snapshotSchemaVersion: 1,
+            sessionMetadataSchemaVersion: metadata.schemaVersion,
+            trigger: trigger,
+            generatedAt: generatedAt,
+            appVersion: Self.trimmedNonEmpty(metadata.appVersion),
+            sourceDeviceID: currentDeviceIdentifier(),
+            orgID: metadata.orgID,
+            propertyID: propertyID,
+            sessionID: sessionID,
+            sessionType: metadata.sessionType,
+            status: metadata.status,
+            isSealed: metadata.isSealed,
+            exportedAt: metadata.exportedAt,
+            firstDeliveredAt: metadata.firstDeliveredAt,
+            reExportExpiresAt: metadata.reExportExpiresAt,
+            actor: actor,
+            capturedBy: actor,
+            uploadedBy: actor,
+            shotCount: metadata.shots.count,
+            issueCount: metadata.issues.count,
+            guidedCount: metadata.guidedShots.count,
+            mediaManifestCount: manifest.count,
+            missingLocalOriginalsCount: 0,
+            supabaseStorageMetadataCount: manifest.filter { $0.storageBucketPresent && $0.storagePathPresent }.count,
+            rawSessionJSON: rawSessionJSON,
+            rawSessionJSONSHA256: rawChecksum,
+            rawSessionJSONByteCount: rawData.count,
+            mediaManifest: manifest
+        )
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        encoder.outputFormatting = [.sortedKeys]
+        let payloadData = try encoder.encode(payload)
+        let envelope = SessionSnapshotEnvelope(
+            id: sessionID,
+            snapshotSchemaVersion: payload.snapshotSchemaVersion,
+            sessionMetadataSchemaVersion: payload.sessionMetadataSchemaVersion,
+            trigger: payload.trigger,
+            generatedAt: payload.generatedAt,
+            appVersion: payload.appVersion,
+            sourceDeviceID: payload.sourceDeviceID,
+            orgID: payload.orgID,
+            propertyID: payload.propertyID,
+            sessionID: payload.sessionID,
+            sessionType: payload.sessionType,
+            status: payload.status,
+            isSealed: payload.isSealed,
+            exportedAt: payload.exportedAt,
+            firstDeliveredAt: payload.firstDeliveredAt,
+            reExportExpiresAt: payload.reExportExpiresAt,
+            actor: payload.actor,
+            capturedBy: payload.capturedBy,
+            uploadedBy: payload.uploadedBy,
+            shotCount: payload.shotCount,
+            issueCount: payload.issueCount,
+            guidedCount: payload.guidedCount,
+            mediaManifestCount: payload.mediaManifestCount,
+            missingLocalOriginalsCount: payload.missingLocalOriginalsCount,
+            supabaseStorageMetadataCount: payload.supabaseStorageMetadataCount,
+            rawSessionJSON: rawSessionJSON,
+            rawSessionJSONSHA256: rawChecksum,
+            snapshotPayloadSHA256: Self.sessionSnapshotSHA256Hex(for: payloadData),
+            rawSessionJSONByteCount: rawData.count,
+            snapshotPayloadByteCount: payloadData.count,
+            mediaManifest: manifest
+        )
+        return SessionSnapshotBuildResult(envelope: envelope, payloadData: payloadData)
+    }
+
+    private func makeFastRuntimeReportPackageSessionMetadata(
+        session: FastRuntimeReportRemoteSessionRecord,
+        shots: [SupabaseShotStorageRecord],
+        sessionType: SessionType,
+        ownerUserID: UUID?,
+        ownerEmail: String?
+    ) -> SessionMetadata {
+        let startedAt = session.startedAt ?? Date()
+        let completedAt = session.completedAt ?? startedAt
+        let actorUserID = session.updatedBy ?? ownerUserID ?? authenticatedSupabaseUser?.id
+        let actorEmail = authenticatedSupabaseUser?.email ?? ownerEmail
+        return SessionMetadata(
+            schemaVersion: 12,
+            propertyID: session.propertyID,
+            sessionID: session.id,
+            sessionType: sessionType,
+            orgID: session.orgID,
+            propertyNameAtCapture: session.title,
+            propertyNameAtExport: session.title,
+            captureProfile: session.captureProfile,
+            capturedByUserID: ownerUserID ?? actorUserID,
+            capturedByEmail: ownerEmail ?? actorEmail,
+            uploadedByUserID: actorUserID,
+            uploadedByEmail: actorEmail,
+            actorUserID: actorUserID,
+            actorEmail: actorEmail,
+            startedAt: startedAt,
+            sessionStartedAtLocal: startedAt.formatted(date: .numeric, time: .standard),
+            endedAt: completedAt,
+            sessionEndedAtLocal: completedAt.formatted(date: .numeric, time: .standard),
+            status: .completed,
+            isBaselineSession: false,
+            exportedAt: session.exportedAt,
+            isSealed: session.isSealed ?? false,
+            firstDeliveredAt: session.firstDeliveredAt,
+            appVersion: "fast-lane-report-package-dry-run",
+            deviceModel: "fast-lane",
+            osVersion: ProcessInfo.processInfo.operatingSystemVersionString,
+            shots: shots.sorted(by: fastRuntimeReportShotSort).enumerated().map { index, shot in
+                makeFastRuntimeReportPackageShotMetadata(
+                    session: session,
+                    shot: shot,
+                    sessionType: sessionType,
+                    position: index,
+                    actorUserID: actorUserID,
+                    actorEmail: actorEmail
+                )
+            },
+            issues: [],
+            guidedShots: []
+        )
+    }
+
+    private func makeFastRuntimeReportPackageShotMetadata(
+        session: FastRuntimeReportRemoteSessionRecord,
+        shot: SupabaseShotStorageRecord,
+        sessionType: SessionType,
+        position: Int,
+        actorUserID: UUID?,
+        actorEmail: String?
+    ) -> ShotMetadata {
+        let capturedAt = shot.createdAt ?? session.completedAt ?? session.startedAt ?? Date()
+        let storagePath = normalizedSupabaseText(shot.storagePath)
+        let detailType = shot.detailType ?? (sessionType == .punchlistVisit ? "Punchlist Capture" : "Fast Lane Capture")
+        let angleIndex = shot.angleIndex ?? (position + 1)
+        let building = shot.building ?? ""
+        let elevation = shot.elevation ?? ""
+        let shotKey = shot.shotKey ?? ShotMetadata.makeShotKey(
+            building: building,
+            elevation: elevation,
+            detailType: detailType,
+            angleIndex: angleIndex
+        )
+        let originalFilename = storagePath.map { URL(fileURLWithPath: $0).lastPathComponent } ?? "\(shot.id.uuidString).jpg"
+        let originalRelativePath = storagePath ?? ""
+        let updatedAt = shot.updatedAt ?? capturedAt
+        let uploadedByUserID = shot.updatedBy ?? actorUserID
+        let metadata = ShotMetadata(
+            shotID: shot.id,
+            propertyID: session.propertyID,
+            sessionID: session.id,
+            createdAt: capturedAt,
+            capturedAtLocal: capturedAt.formatted(date: .numeric, time: .standard),
+            updatedAt: updatedAt,
+            capturedByUserID: actorUserID,
+            capturedByEmail: actorEmail,
+            uploadedByUserID: uploadedByUserID,
+            uploadedByEmail: actorEmail,
+            building: building,
+            elevation: elevation,
+            detailType: detailType,
+            angleIndex: angleIndex,
+            trade: shot.trade,
+            priority: shot.priority,
+            shotKey: shotKey,
+            isGuided: shot.isGuided ?? false,
+            isFlagged: shot.isFlagged ?? false,
+            issueID: shot.issueID,
+            issueStatus: shot.issueStatus,
+            captureKind: shot.captureKind,
+            firstCaptureKind: shot.firstCaptureKind,
+            noteText: shot.reason,
+            noteCategory: nil,
+            originalFilename: originalFilename,
+            originalRelativePath: originalRelativePath,
+            originalByteSize: shot.byteSize,
+            storageBucket: shot.storageBucket,
+            storagePath: shot.storagePath,
+            checksumSHA256: shot.checksumSHA256,
+            byteSize: shot.byteSize,
+            uploadState: shot.uploadState,
+            uploadAttempts: shot.uploadAttempts,
+            lastUploadError: shot.lastUploadError,
+            stampedFilename: nil,
+            stampedRelativePath: nil,
+            captureMode: shot.captureMode,
+            lens: shot.lens,
+            exifOrientation: nil,
+            latitude: shot.latitude,
+            longitude: shot.longitude,
+            accuracyMeters: shot.accuracyMeters,
+            imageWidth: shot.imageWidth,
+            imageHeight: shot.imageHeight
+        )
+        return metadata
+    }
+
+    private func fastRuntimeReportShotSort(
+        _ lhs: SupabaseShotStorageRecord,
+        _ rhs: SupabaseShotStorageRecord
+    ) -> Bool {
+        let lhsPosition = lhs.angleIndex ?? lhs.revision.flatMap { Int($0) } ?? 0
+        let rhsPosition = rhs.angleIndex ?? rhs.revision.flatMap { Int($0) } ?? 0
+        if lhsPosition != rhsPosition { return lhsPosition < rhsPosition }
+        if lhs.createdAt != rhs.createdAt { return (lhs.createdAt ?? .distantPast) < (rhs.createdAt ?? .distantPast) }
+        return lhs.id.uuidString < rhs.id.uuidString
+    }
+
+    private func fastRuntimeReportPackagePDFPath(
+        orgID: UUID,
+        propertyID: UUID,
+        sessionID: UUID,
+        packageID: UUID,
+        reportType: String
+    ) -> String {
+        [
+            "orgs/\(orgID.uuidString.lowercased())",
+            "properties/\(propertyID.uuidString.lowercased())",
+            "sessions/\(sessionID.uuidString.lowercased())",
+            "packages/\(packageID.uuidString.lowercased())",
+            "pdfs/\(reportType).pdf"
+        ].joined(separator: "/")
     }
 
     private func makeFastRuntimeCompleteSessionMetadata(

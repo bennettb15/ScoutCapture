@@ -12741,9 +12741,11 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
     @State private var isTimingExpanded: Bool = false
     @State private var isRunningCompleteDryRun: Bool = false
     @State private var isRunningCompleteUpload: Bool = false
+    @State private var isRunningReportPackageDryRun: Bool = false
     @State private var didCompleteUpload: Bool = false
     @State private var completeDryRunResult: AppState.FastRuntimeCompleteDryRunResult?
     @State private var completeUploadResult: AppState.FastRuntimeCompleteUploadResult?
+    @State private var reportPackageDryRunResult: AppState.FastRuntimeReportPackageDryRunResult?
 
     var body: some View {
         ZStack {
@@ -12787,6 +12789,9 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
         }
         .sheet(item: $completeUploadResult) { result in
             FastRuntimeCompleteUploadResultView(result: result)
+        }
+        .sheet(item: $reportPackageDryRunResult) { result in
+            FastRuntimeReportPackageDryRunResultView(result: result)
         }
     }
 
@@ -12900,6 +12905,23 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                     )
                     .disabled(didCompleteUpload || isRunningCompleteDryRun || isRunningCompleteUpload || isClosing || isSavingFastCapture || camera.isCapturing)
                 }
+            }
+
+            if didCompleteUpload {
+                Button(isRunningReportPackageDryRun ? "Checking Report..." : "Fast Report Package Dry Run") {
+                    runReportPackageDryRun()
+                }
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundColor(.white.opacity(0.96))
+                .padding(.horizontal, 14)
+                .frame(height: 34)
+                .background(Color.green.opacity(0.68))
+                .clipShape(Capsule())
+                .overlay(
+                    Capsule()
+                        .stroke(Color.white.opacity(0.24), lineWidth: 1)
+                )
+                .disabled(isRunningReportPackageDryRun || isRunningCompleteDryRun || isRunningCompleteUpload || isClosing || isSavingFastCapture || camera.isCapturing)
             }
 
             HStack(spacing: 18) {
@@ -13085,6 +13107,18 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                     didCompleteUpload = true
                 }
                 isRunningCompleteUpload = false
+            }
+        }
+    }
+
+    private func runReportPackageDryRun() {
+        guard didCompleteUpload, !isRunningReportPackageDryRun else { return }
+        isRunningReportPackageDryRun = true
+        Task {
+            let result = await appState.runFastRuntimeReportPackageDryRun(context: context)
+            await MainActor.run {
+                reportPackageDryRunResult = result
+                isRunningReportPackageDryRun = false
             }
         }
     }
@@ -13338,6 +13372,136 @@ private struct FastRuntimeCompleteUploadResultView: View {
     }
 }
 
+private struct FastRuntimeReportPackageDryRunResultView: View {
+    @Environment(\.dismiss) private var dismiss
+    let result: AppState.FastRuntimeReportPackageDryRunResult
+
+    var body: some View {
+        NavigationStack {
+            List {
+                Section("Result") {
+                    diagnosticRow("Valid", result.isValid ? "true" : "false")
+                    diagnosticRow("Session Type", result.sessionType.rawValue)
+                    diagnosticRow("Session Status", result.sessionStatus ?? "missing")
+                    diagnosticRow("Property Status", result.propertyStatus ?? "missing")
+                    diagnosticRow("Shot Count", "\(result.shotCount)")
+                    diagnosticRow("Storage Objects", "\(result.storageObjectCount)")
+                    diagnosticRow("Report Mode", result.reportMode)
+                    diagnosticRow("Email Wording", result.emailWordingType)
+                    diagnosticRow("Total", String(format: "%.1f ms", result.totalMilliseconds))
+                }
+
+                Section("Identity") {
+                    diagnosticRow("Org ID", result.orgID?.uuidString ?? "missing")
+                    diagnosticRow("Property ID", result.propertyID.uuidString)
+                    diagnosticRow("Session ID", result.sessionID?.uuidString ?? "missing")
+                    diagnosticRow("Pending Export Session", result.propertyStatusPendingExportSessionID?.uuidString ?? "missing")
+                }
+
+                Section("Snapshot Candidate") {
+                    diagnosticRow("Snapshot ID", result.snapshotID?.uuidString ?? "missing")
+                    diagnosticRow("Bucket", result.snapshotStorageBucket ?? "missing")
+                    diagnosticBlock("Path", result.snapshotStoragePath ?? "missing")
+                    diagnosticRow("Payload Bytes", result.snapshotPayloadBytes.map(String.init) ?? "missing")
+                    diagnosticBlock("Raw JSON SHA", result.rawSessionJSONSHA256 ?? "missing")
+                    diagnosticBlock("Payload SHA", result.snapshotPayloadSHA256 ?? "missing")
+                }
+
+                Section("Package Candidate") {
+                    diagnosticRow("Package ID", result.reportPackageID?.uuidString ?? "missing")
+                    diagnosticBlock("Idempotency Key", result.reportPackageIdempotencyKey ?? "missing")
+                    if result.fileCandidates.isEmpty {
+                        Text("No package file candidates.")
+                            .foregroundStyle(.secondary)
+                    } else {
+                        ForEach(result.fileCandidates) { file in
+                            VStack(alignment: .leading, spacing: 5) {
+                                diagnosticRow("Report Type", file.reportType)
+                                diagnosticRow("Bucket", file.storageBucket)
+                                diagnosticRow("Filename", file.filename)
+                                diagnosticBlock("Path", file.storagePath)
+                            }
+                            .padding(.vertical, 4)
+                        }
+                    }
+                }
+
+                Section("Would Create") {
+                    if result.wouldCreate.isEmpty {
+                        Text("No create candidates.")
+                            .foregroundStyle(.secondary)
+                    } else {
+                        diagnosticBlock("Dry Run Only", result.wouldCreate.joined(separator: "\n"))
+                    }
+                }
+
+                if !result.sideEffectCounts.isEmpty {
+                    Section("Existing Side Effects") {
+                        ForEach(result.sideEffectCounts.keys.sorted(), id: \.self) { key in
+                            diagnosticRow(key, "\(result.sideEffectCounts[key] ?? 0)")
+                        }
+                    }
+                }
+
+                if !result.missingFields.isEmpty {
+                    Section("Missing Fields") {
+                        diagnosticBlock("Fields", result.missingFields.joined(separator: "\n"))
+                    }
+                }
+
+                if !result.errors.isEmpty {
+                    Section("Errors") {
+                        diagnosticBlock("Errors", result.errors.joined(separator: "\n"))
+                    }
+                }
+
+                if !result.warnings.isEmpty {
+                    Section("Warnings") {
+                        diagnosticBlock("Warnings", result.warnings.joined(separator: "\n"))
+                    }
+                }
+
+                Section("Shots") {
+                    if result.shots.isEmpty {
+                        Text("No shots.")
+                            .foregroundStyle(.secondary)
+                    } else {
+                        ForEach(result.shots) { shot in
+                            VStack(alignment: .leading, spacing: 5) {
+                                diagnosticRow("Shot", shot.id.uuidString)
+                                diagnosticRow("Capture Kind", shot.captureKind ?? "missing")
+                                diagnosticRow("Upload State", shot.uploadState)
+                                diagnosticRow("Object Exists", shot.storageObjectExists ? "true" : "false")
+                                diagnosticRow("Shot Bytes", shot.shotByteSize.map(String.init) ?? "missing")
+                                diagnosticRow("Storage Bytes", shot.storageByteSize.map(String.init) ?? "missing")
+                                diagnosticRow("Bucket", shot.storageBucket ?? "missing")
+                                diagnosticBlock("Path", shot.storagePath ?? "missing")
+                                diagnosticBlock("Checksum", shot.checksumSHA256 ?? "missing")
+                            }
+                            .padding(.vertical, 4)
+                        }
+                    }
+                }
+
+                Section("Safety") {
+                    Text("Dry run only. No session snapshot row, report package, package file, storage upload, worker dispatch, email, property status update, or local deletion was performed.")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .navigationTitle(result.title)
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Done") {
+                        dismiss()
+                    }
+                }
+            }
+        }
+    }
+}
+
 private struct DebugToolsView: View {
     @EnvironmentObject private var appState: AppState
     @Environment(\.dismiss) private var dismiss
@@ -13377,6 +13541,8 @@ private struct DebugToolsView: View {
     @State private var fastLaneLauncherResult: AppState.FastRuntimePrototypeResult? = nil
     @State private var fastLaneLauncherPreviewRequest: FastRuntimeCameraPreviewRequest? = nil
     @State private var fastLaneLauncherCloseResult: AppState.FastRuntimePrototypeCloseResult? = nil
+    @State private var isRunningFastLaneReportDryRun: Bool = false
+    @State private var fastLaneReportDryRunResult: AppState.FastRuntimeReportPackageDryRunResult? = nil
     @State private var isClearingFastRuntimeDrafts: Bool = false
     @State private var fastRuntimeCleanupResult: AppState.FastRuntimePrototypeCleanupResult? = nil
     @State private var showCaptureProfileMaintenanceBackfillConfirm: Bool = false
@@ -13480,6 +13646,8 @@ private struct DebugToolsView: View {
                         }
 
                         fastLaneLauncherCard
+
+                        fastLaneReportPackageDryRunCard
 
                         debugActionCard(
                             title: "Clear Fast-Lane Drafts",
@@ -13921,6 +14089,9 @@ private struct DebugToolsView: View {
             DebugFastRuntimePrototypeView()
                 .environmentObject(appState)
         }
+        .sheet(item: $fastLaneReportDryRunResult) { result in
+            FastRuntimeReportPackageDryRunResultView(result: result)
+        }
         .fullScreenCover(item: $fastLaneLauncherPreviewRequest) { request in
             DebugFastRuntimePrototypeCameraPreviewView(
                 context: request.context,
@@ -13940,6 +14111,61 @@ private struct DebugToolsView: View {
             .environmentObject(appState)
             .interactiveDismissDisabled(true)
         }
+    }
+
+    private var fastLaneReportPackageDryRunCard: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Fast Report Package Dry Run")
+                .font(.system(size: 16, weight: .semibold))
+                .foregroundColor(.primary)
+            Text("Debug-only read from completed fast-lane pending-export rows. Builds in-memory session snapshot, report package, file, and worker/email candidates. It does not insert snapshots, create packages, dispatch workers, email, upload, or change property state.")
+                .font(.system(size: 13, weight: .medium))
+                .foregroundColor(.secondary)
+
+            if fastLaneLauncherProperties.isEmpty {
+                Text("No active properties loaded.")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundColor(.secondary)
+            } else {
+                Picker("Property", selection: $selectedFastLaneLauncherPropertyID) {
+                    ForEach(fastLaneLauncherProperties) { property in
+                        Text(property.name)
+                            .tag(Optional(property.id))
+                    }
+                }
+                .pickerStyle(.menu)
+            }
+
+            HStack(spacing: 10) {
+                customCapsuleButton(
+                    title: isRunningFastLaneReportDryRun ? "Checking..." : "Report Dry Run Full",
+                    isEnabled: !isRunningFastLaneReportDryRun && selectedFastLaneLauncherPropertyID != nil,
+                    fill: Color.green.opacity(0.78),
+                    stroke: Color.green.opacity(0.90),
+                    label: .white
+                ) {
+                    runFastLaneReportPackageDryRun(sessionType: .fullDocumentation)
+                }
+
+                customCapsuleButton(
+                    title: isRunningFastLaneReportDryRun ? "Checking..." : "Report Dry Run Punch",
+                    isEnabled: !isRunningFastLaneReportDryRun && selectedFastLaneLauncherPropertyID != nil,
+                    fill: Color.indigo.opacity(0.78),
+                    stroke: Color.indigo.opacity(0.90),
+                    label: .white
+                ) {
+                    runFastLaneReportPackageDryRun(sessionType: .punchlistVisit)
+                }
+            }
+
+            if let result = fastLaneReportDryRunResult {
+                fastLaneReportPackageDryRunResultBlock(result)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .topLeading)
+        .padding(12)
+        .background(Color(uiColor: .secondarySystemBackground))
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
     }
 
     private var fastLaneLauncherCard: some View {
@@ -14011,6 +14237,25 @@ private struct DebugToolsView: View {
         .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
     }
 
+    private func runFastLaneReportPackageDryRun(sessionType: SessionType) {
+        guard !isRunningFastLaneReportDryRun,
+              let propertyID = selectedFastLaneLauncherPropertyID else {
+            return
+        }
+        isRunningFastLaneReportDryRun = true
+        fastLaneReportDryRunResult = nil
+        Task {
+            let result = await appState.runFastRuntimeReportPackageDryRun(
+                propertyID: propertyID,
+                sessionType: sessionType
+            )
+            await MainActor.run {
+                fastLaneReportDryRunResult = result
+                isRunningFastLaneReportDryRun = false
+            }
+        }
+    }
+
     private func startFastLaneLauncher(sessionType: SessionType) {
         guard !isStartingFastLaneSession,
               let propertyID = selectedFastLaneLauncherPropertyID,
@@ -14069,6 +14314,43 @@ private struct DebugToolsView: View {
                 isClearingFastRuntimeDrafts = false
             }
         }
+    }
+
+    private func fastLaneReportPackageDryRunResultBlock(
+        _ result: AppState.FastRuntimeReportPackageDryRunResult
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 5) {
+            Text("Report Package Dry Run")
+                .font(.system(size: 14, weight: .bold))
+                .foregroundColor(buttonLabel)
+            Text([
+                "valid=\(result.isValid)",
+                "session_type=\(result.sessionType.rawValue)",
+                "session=\(result.sessionID?.uuidString ?? "missing")",
+                "shots=\(result.shotCount)",
+                "storage=\(result.storageObjectCount)",
+                "report_mode=\(result.reportMode)",
+                "total=\(String(format: "%.1f", result.totalMilliseconds))ms"
+            ].joined(separator: "\n"))
+            .font(.system(size: 12, weight: .medium, design: .monospaced))
+            .foregroundColor(buttonLabel.opacity(0.80))
+            .textSelection(.enabled)
+
+            if !result.errors.isEmpty {
+                Text(result.errors.joined(separator: "\n"))
+                    .font(.system(size: 11, weight: .regular, design: .monospaced))
+                    .foregroundColor(.orange)
+                    .textSelection(.enabled)
+            }
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(buttonFill)
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(buttonStroke, lineWidth: 1)
+        )
     }
 
     private func fastLaneLauncherResultBlock(
