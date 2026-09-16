@@ -5207,6 +5207,20 @@ final class AppState: ObservableObject {
         }
     }
 
+    struct FastRuntimePendingExportCleanupResult: Equatable, Identifiable {
+        let id = UUID()
+        let success: Bool
+        let dryRun: FastRuntimeReportPackageDryRunResult
+        let sessionID: UUID?
+        let propertyStatus: String?
+        let errorMessage: String?
+        let totalMilliseconds: Double
+
+        var title: String {
+            success ? "Pending Export Marked Delivered" : "Pending Export Cleanup Failed"
+        }
+    }
+
     private struct FastRuntimeReportHandoffPayload: Encodable {
         let orgID: String
         let propertyID: String
@@ -41499,9 +41513,7 @@ final class AppState: ObservableObject {
                 currentUserID: currentUserID,
                 currentDeviceID: currentDeviceID
             )
-            let propertyStatusShowsLock =
-                propertyStatusBadgeState == .locked ||
-                (propertyStatus.status == .pendingExport && propertyStatusAnswer.entryBlocked)
+            let propertyStatusShowsLock = propertyStatusBadgeState == .locked
             let propertyStatusSourceSessionID: UUID? = {
                 switch propertyStatus.status {
                 case .occupied:
@@ -43290,6 +43302,64 @@ final class AppState: ObservableObject {
             reused: nil,
             functionStatus: functionStatus,
             errorMessage: errorMessage,
+            totalMilliseconds: Date().timeIntervalSince(startedAt) * 1_000
+        )
+    }
+
+    @MainActor
+    func runFastRuntimeDebugMarkPendingExportDelivered(
+        propertyID: UUID,
+        sessionType: SessionType
+    ) async -> FastRuntimePendingExportCleanupResult {
+        let startedAt = Date()
+        let dryRun = await runFastRuntimeReportPackageDryRun(
+            propertyID: propertyID,
+            sessionType: sessionType
+        )
+        guard dryRun.isValid,
+              let sessionID = dryRun.sessionID else {
+            let dryRunErrorMessage = (dryRun.errors + dryRun.missingFields).joined(separator: "\n")
+            return FastRuntimePendingExportCleanupResult(
+                success: false,
+                dryRun: dryRun,
+                sessionID: dryRun.sessionID,
+                propertyStatus: dryRun.propertyStatus,
+                errorMessage: dryRunErrorMessage.isEmpty
+                    ? "Fast-lane report dry run must be valid before cleanup."
+                    : dryRunErrorMessage,
+                totalMilliseconds: Date().timeIntervalSince(startedAt) * 1_000
+            )
+        }
+
+        let reportSideEffectCount =
+            (dryRun.sideEffectCounts["session_snapshots"] ?? 0) +
+            (dryRun.sideEffectCounts["report_packages"] ?? 0) +
+            (dryRun.sideEffectCounts["report_package_files"] ?? 0)
+        guard reportSideEffectCount > 0 else {
+            return FastRuntimePendingExportCleanupResult(
+                success: false,
+                dryRun: dryRun,
+                sessionID: sessionID,
+                propertyStatus: dryRun.propertyStatus,
+                errorMessage: "No report/package side effects were readable for this session. Run report handoff first or inspect in Debug Tools.",
+                totalMilliseconds: Date().timeIntervalSince(startedAt) * 1_000
+            )
+        }
+
+        let didMarkExported = await performPropertyStatusShadowWrite(
+            transition: .exported,
+            propertyID: propertyID,
+            sessionID: sessionID,
+            deviceID: currentDeviceIdentifier(),
+            reason: "debug_fast_lane_test_cleanup_mark_delivered"
+        )
+        let status = propertyStatusByPropertyID[propertyID]?.status.rawValue
+        return FastRuntimePendingExportCleanupResult(
+            success: didMarkExported,
+            dryRun: dryRun,
+            sessionID: sessionID,
+            propertyStatus: status ?? dryRun.propertyStatus,
+            errorMessage: didMarkExported ? nil : "set_property_status_exported did not update local property status.",
             totalMilliseconds: Date().timeIntervalSince(startedAt) * 1_000
         )
     }
