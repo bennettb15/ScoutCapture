@@ -411,6 +411,32 @@ class ReportWorkerEmailNotificationTests(unittest.TestCase):
         self.assertFalse(any("property_report.pdf" in path for path in upload_paths))
         self.assertNotIn("property_report", package_report_types)
 
+    def test_punchlist_visit_package_accepts_punchlist_update_fallback(self) -> None:
+        client = FakeSupabaseClient()
+        original_run_step = worker.run_step
+        with tempfile.TemporaryDirectory() as tmp:
+            worker.run_step = fake_worker_run_step("punchlist_visit", ["punchlist_update"])
+            try:
+                summary = worker.process_session(
+                    worker_args(pathlib.Path(tmp)),
+                    client,
+                    ROOT,
+                    SESSION_ID,
+                    SNAPSHOT_ID,
+                )
+            finally:
+                worker.run_step = original_run_step
+
+        package_row = client.tables["report_packages"][0]
+        package_report_types = [item["report_type"] for item in package_row["manifest"]["reports"]]
+        file_report_types = [row["report_type"] for row in client.tables["report_package_files"]]
+
+        self.assertEqual("ready", package_row["status"])
+        self.assertEqual("punchlist_visit", package_row["manifest"]["sessionType"])
+        self.assertEqual(["punchlist_update"], package_report_types)
+        self.assertEqual(["punchlist_update"], file_report_types)
+        self.assertEqual(["punchlist_update"], [item["report_type"] for item in summary["uploaded_files"]])
+
     def test_full_documentation_package_includes_property_report(self) -> None:
         client = FakeSupabaseClient()
         original_run_step = worker.run_step

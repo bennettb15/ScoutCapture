@@ -276,6 +276,8 @@ def output_filename(session: dict[str, Any], report_type: str) -> str:
         suffix = "Priority Report"
     elif report_type == "comparison":
         suffix = "Flagged Comparison Report"
+    elif report_type == "punchlist_update":
+        suffix = "Punchlist Update"
     else:
         raise Phase2BError(f"Unknown report type: {report_type}")
     return f"{descriptor} - {suffix} - {date}.pdf"
@@ -1424,6 +1426,111 @@ def build_comparison_plan(
     return plan
 
 
+def is_punchlist_update_shot(shot: dict[str, Any]) -> bool:
+    values = [
+        trim(shot.get("capture_kind")),
+        trim(shot.get("shot_type")),
+        trim(shot.get("first_capture_kind")),
+        trim(shot.get("detail_type")),
+    ]
+    normalized = {str(value or "").strip().lower().replace(" ", "_") for value in values if value}
+    return bool(normalized & {"follow_up_capture", "punchlist_capture", "punchlist_update"})
+
+
+def build_punchlist_update_plan(
+    validation: dict[str, Any],
+    lookup: MediaLookup,
+    report_date: str,
+    logo: dict[str, Any],
+    weather: dict[str, Any],
+) -> dict[str, Any]:
+    session = validation.get("inputs", {}).get("session") or {}
+    shots = validation.get("inputs", {}).get("ordered_shots") or []
+    entries = []
+    for shot in shots:
+        if not is_punchlist_update_shot(shot):
+            continue
+        media = media_for(lookup, "current", shot.get("shot_id"))
+        entry = {
+            **shot,
+            "kind": "photo",
+            "media": media,
+            "media_path": trim(media.get("temporary_prepared_path")) if media else None,
+            "caption": caption_identity(shot),
+            "visual_state": visual_state(shot),
+            "captured_at_display": display_datetime(shot.get("captured_at_utc")) or "Unknown",
+            "slot_key": slot_key(shot),
+        }
+        entries.append(entry)
+    entries.sort(
+        key=lambda entry: (
+            friendly_building(entry.get("building")).upper(),
+            (trim(entry.get("elevation")) or "Unknown").upper(),
+            detail_sort_priority(entry.get("detail_type")),
+            (trim(entry.get("detail_type")) or "General Elevation").upper(),
+            safe_int(entry.get("angle_index")),
+            parse_date(entry.get("captured_at_utc")) or dt.datetime.max.replace(tzinfo=dt.timezone.utc),
+            trim(entry.get("original_filename")) or "",
+        )
+    )
+    if not entries:
+        raise Phase2BError("Punchlist update report is not applicable: no punchlist follow-up captures.")
+
+    lines = [
+        {
+            "kind": "sectionHeader",
+            "text": "Punchlist Update Photos",
+            "page_number": None,
+            "is_flagged": False,
+            "visual_state": "none",
+        }
+    ]
+    page_number = 3
+    for entry in entries:
+        lines.append(
+            {
+                "kind": "photoItem",
+                "text": f"{entry['caption']} | {entry['captured_at_display']}",
+                "page_number": page_number,
+                "is_flagged": boolish(entry.get("is_flagged")),
+                "visual_state": entry.get("visual_state") or "none",
+            }
+        )
+        if len(lines) > 1 and (len(lines) - 1) % 2 == 0:
+            page_number += 1
+    index_pages = index_page_plans(lines)
+    if not index_pages:
+        index_pages = [[]]
+    cover_entry = next((entry for entry in entries if entry.get("media_path")), entries[0])
+    pages = [
+        {
+            "number": 1,
+            "kind": "cover",
+            "title": "Punchlist Update",
+            "subtitle": f"{len(entries)} photo{'' if len(entries) == 1 else 's'} documented",
+            "supporting_line": "Fast follow-up capture package for portal review.",
+            "cover_media_path": cover_entry.get("media_path"),
+        },
+    ]
+    number = 2
+    for page_lines in index_pages:
+        pages.append(
+            {
+                "number": number,
+                "kind": "index",
+                "supporting_line": "Punchlist follow-up photos included in this update.",
+                "lines": page_lines,
+            }
+        )
+        number += 1
+    for index in range(0, len(entries), 2):
+        page = {"number": number, "kind": "photo"}
+        add_photo_slots_to_page(page, entries[index : index + 2])
+        pages.append(page)
+        number += 1
+    return make_plan("punchlist_update", session, validation, lookup, report_date, pages, logo, weather)
+
+
 def make_plan(
     report_type: str,
     session: dict[str, Any],
@@ -2240,6 +2347,8 @@ def build_plan(
         return build_priority_plan(validation, lookup, report_date, logo, weather)
     if report_type == "comparison":
         return build_comparison_plan(validation, lookup, report_date, logo, weather, validation_lookup_dir)
+    if report_type == "punchlist_update":
+        return build_punchlist_update_plan(validation, lookup, report_date, logo, weather)
     raise Phase2BError(f"Unknown report type {report_type}")
 
 
@@ -2287,7 +2396,7 @@ def main() -> int:
         try:
             plan = build_plan(report_type, validation, lookup, report_date, logo, weather, validation_path.parent)
         except Phase2BError as error:
-            if args.report == "all" and is_not_applicable_error(error):
+            if args.report in {"all", "punchlist"} and is_not_applicable_error(error):
                 skip = {"report_type": report_type, "reason": str(error)}
                 summary["skipped_reports"].append(skip)
                 print(f"Skipping {report_type} report: {error}", file=sys.stderr)
@@ -2334,6 +2443,61 @@ def main() -> int:
                 "validation_failures": failures,
             }
         )
+    if args.report == "punchlist" and not summary["reports"]:
+        report_type = "punchlist_update"
+        report_dir = output_dir / report_type
+        report_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            plan = build_plan(report_type, validation, lookup, report_date, logo, weather, validation_path.parent)
+        except Phase2BError as error:
+            if is_not_applicable_error(error):
+                skip = {"report_type": report_type, "reason": str(error)}
+                summary["skipped_reports"].append(skip)
+                print(f"Skipping {report_type} report: {error}", file=sys.stderr)
+            else:
+                raise
+        else:
+            plan_path = report_dir / f"report_plan_{report_type}.json"
+            write_json(plan_path, plan, args.pretty)
+            pdf_path = report_dir / plan["output_filename"]
+            render_info = render_pdf(plan, pdf_path)
+            validation_info = pdf_validation(pdf_path)
+            failures = validate_dimensions(validation_info["page_dimensions"])
+            manifest = {
+                "schema_version": SCHEMA_VERSION,
+                "phase": "ScoutCapture Phase 2C PDF Validation",
+                "session_id": plan.get("session_id"),
+                "source_snapshot_id": plan.get("source_snapshot_id"),
+                "session_type": plan.get("session_type"),
+                "sessionType": plan.get("sessionType"),
+                "report_type": report_type,
+                "output_filename": plan["output_filename"],
+                "generator_version": GENERATOR_VERSION,
+                "report_plan_path": str(plan_path),
+                "report_plan_sha256": plan["report_plan_sha256"],
+                "prepared_media_hashes": plan["prepared_media_hashes"],
+                "pdf_path": str(pdf_path),
+                **validation_info,
+                "warnings": sorted(set(plan.get("warnings", []) + render_info.get("warnings", []))),
+                "validation_failures": failures,
+            }
+            validation_path_out = report_dir / f"validation_{report_type}.json"
+            write_json(validation_path_out, manifest, args.pretty)
+            preview = render_previews(pdf_path, report_dir)
+            summary["reports"].append(
+                {
+                    "report_type": report_type,
+                    "plan_path": str(plan_path),
+                    "validation_path": str(validation_path_out),
+                    "pdf_path": str(pdf_path),
+                    "report_plan_sha256": plan["report_plan_sha256"],
+                    "pdf_sha256": validation_info["pdf_sha256"],
+                    "page_count": validation_info["page_count"],
+                    **preview,
+                    "warnings": manifest["warnings"],
+                    "validation_failures": failures,
+                }
+            )
     if args.historical_oracle:
         summary["historical_oracles"] = render_historical_oracles(args.historical_oracle, output_dir)
     if args.stamped_oracle:

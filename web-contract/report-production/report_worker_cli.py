@@ -45,6 +45,7 @@ REPORT_TYPE_MAP = {
     "property": "property_report",
     "priority": "flagged_observations",
     "comparison": "flagged_comparison",
+    "punchlist_update": "punchlist_update",
 }
 REQUIRED_RUNTIME_PATHS = [
     pathlib.Path("web-contract/report-input/report_input_phase1.py"),
