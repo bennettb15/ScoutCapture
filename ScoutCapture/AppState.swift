@@ -8074,6 +8074,7 @@ final class AppState: ObservableObject {
     private lazy var localStore: LocalStore = injectedLocalStore ?? LocalStore()
     private var supabaseClient: SupabaseClient?
     private let userDefaults: UserDefaults
+    private let cachedDeviceIdentifier: String
     private let cloudBackupManager: CloudBackupManager?
     private let propertyShadowWriteOverride: PropertyShadowWriteOverride?
     private let propertyRemoteInsertOverride: PropertyRemoteInsertOverride?
@@ -8483,6 +8484,10 @@ final class AppState: ObservableObject {
     ) {
         self.injectedLocalStore = localStore
         self.userDefaults = userDefaults
+        self.cachedDeviceIdentifier = Self.resolvedDeviceIdentifier(
+            userDefaults: userDefaults,
+            key: "scoutcapture.deviceIdentifier.v1"
+        )
         #if DEBUG
         if disableCloudBackupForTests || AppStateTestEnvironment.isRunningUnderXCTest {
             self.cloudBackupManager = nil
@@ -37529,11 +37534,17 @@ final class AppState: ObservableObject {
     }
 
     private func currentDeviceIdentifier() -> String {
-        if let existing = normalizedSupabaseText(userDefaults.string(forKey: deviceIdentifierDefaultsKey)) {
+        cachedDeviceIdentifier
+    }
+
+    private static func resolvedDeviceIdentifier(userDefaults: UserDefaults, key: String) -> String {
+        let existing = userDefaults.string(forKey: key)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if let existing, !existing.isEmpty {
             return existing
         }
         let generated = UUID().uuidString.lowercased()
-        userDefaults.set(generated, forKey: deviceIdentifierDefaultsKey)
+        userDefaults.set(generated, forKey: key)
         return generated
     }
 
@@ -42019,7 +42030,12 @@ final class AppState: ObservableObject {
                 _ = setPropertyRowSession(snapshot.pendingSession, for: snapshot.propertyID, in: &nextRowPending)
                 _ = setPropertyRowSession(snapshot.reExportSession, for: snapshot.propertyID, in: &nextRowReExport)
                 if batch.updatesCloudStatus {
-                    _ = setPropertyRowSnapshotCloudStatus(snapshot.cloudStatus, for: snapshot.propertyID, in: &nextRowCloud)
+                    let mergedCloudStatus = Self.mergedPropertyRowSnapshotCloudStatus(
+                        hydratedStatus: snapshot.cloudStatus,
+                        existingStatus: nextRowCloud[snapshot.propertyID],
+                        propertyStatus: propertyStatusByPropertyID[snapshot.propertyID]
+                    )
+                    _ = setPropertyRowSnapshotCloudStatus(mergedCloudStatus, for: snapshot.propertyID, in: &nextRowCloud)
                 }
             }
             propertyRowDetailsHydratedAtByPropertyID[snapshot.propertyID] = hydratedAt
@@ -42051,6 +42067,47 @@ final class AppState: ObservableObject {
         }
         if propertyRowSnapshotCloudStatusByPropertyID != nextRowCloud {
             propertyRowSnapshotCloudStatusByPropertyID = nextRowCloud
+        }
+    }
+
+    private static func mergedPropertyRowSnapshotCloudStatus(
+        hydratedStatus: SessionSnapshotCloudStatus?,
+        existingStatus: SessionSnapshotCloudStatus?,
+        propertyStatus: PropertyStatusRecord?
+    ) -> SessionSnapshotCloudStatus? {
+        guard let existingStatus else {
+            return hydratedStatus
+        }
+
+        if let hydratedStatus {
+            return sessionSnapshotCloudStatus(hydratedStatus, isNewerThan: existingStatus)
+                ? hydratedStatus
+                : existingStatus
+        }
+
+        guard shouldPreserveExistingPropertyRowCloudStatus(
+            existingStatus,
+            propertyStatus: propertyStatus
+        ) else {
+            return nil
+        }
+        return existingStatus
+    }
+
+    private static func shouldPreserveExistingPropertyRowCloudStatus(
+        _ status: SessionSnapshotCloudStatus,
+        propertyStatus: PropertyStatusRecord?
+    ) -> Bool {
+        switch status.state {
+        case .queued:
+            return false
+        case .uploading:
+            return true
+        case .retryScheduled, .failed, .uploaded:
+            if propertyStatus?.status == .pendingExport {
+                return false
+            }
+            return true
         }
     }
 
@@ -42115,7 +42172,12 @@ final class AppState: ObservableObject {
             for: propertyID,
             in: &propertyRowReExportSessionByPropertyID
         ) || didChange
-        didChange = setPropertyRowSnapshotCloudStatus(cloudStatus, for: propertyID) || didChange
+        let mergedCloudStatus = Self.mergedPropertyRowSnapshotCloudStatus(
+            hydratedStatus: cloudStatus,
+            existingStatus: propertyRowSnapshotCloudStatusByPropertyID[propertyID],
+            propertyStatus: propertyStatusByPropertyID[propertyID]
+        )
+        didChange = setPropertyRowSnapshotCloudStatus(mergedCloudStatus, for: propertyID) || didChange
         return didChange
     }
 
