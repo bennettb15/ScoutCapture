@@ -12742,10 +12742,12 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
     @State private var isRunningCompleteDryRun: Bool = false
     @State private var isRunningCompleteUpload: Bool = false
     @State private var isRunningReportPackageDryRun: Bool = false
+    @State private var isRunningReportHandoff: Bool = false
     @State private var didCompleteUpload: Bool = false
     @State private var completeDryRunResult: AppState.FastRuntimeCompleteDryRunResult?
     @State private var completeUploadResult: AppState.FastRuntimeCompleteUploadResult?
     @State private var reportPackageDryRunResult: AppState.FastRuntimeReportPackageDryRunResult?
+    @State private var reportHandoffResult: AppState.FastRuntimeReportHandoffResult?
 
     var body: some View {
         ZStack {
@@ -12792,6 +12794,9 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
         }
         .sheet(item: $reportPackageDryRunResult) { result in
             FastRuntimeReportPackageDryRunResultView(result: result)
+        }
+        .sheet(item: $reportHandoffResult) { result in
+            FastRuntimeReportHandoffResultView(result: result)
         }
     }
 
@@ -12908,20 +12913,37 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             }
 
             if didCompleteUpload {
-                Button(isRunningReportPackageDryRun ? "Checking Report..." : "Fast Report Package Dry Run") {
-                    runReportPackageDryRun()
+                HStack(spacing: 10) {
+                    Button(isRunningReportPackageDryRun ? "Checking Report..." : "Fast Report Package Dry Run") {
+                        runReportPackageDryRun()
+                    }
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundColor(.white.opacity(0.96))
+                    .padding(.horizontal, 14)
+                    .frame(height: 34)
+                    .background(Color.green.opacity(0.68))
+                    .clipShape(Capsule())
+                    .overlay(
+                        Capsule()
+                            .stroke(Color.white.opacity(0.24), lineWidth: 1)
+                    )
+                    .disabled(isRunningReportPackageDryRun || isRunningReportHandoff || isRunningCompleteDryRun || isRunningCompleteUpload || isClosing || isSavingFastCapture || camera.isCapturing)
+
+                    Button(isRunningReportHandoff ? "Handing Off..." : "Fast Report Handoff (Experimental)") {
+                        runReportHandoff()
+                    }
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundColor(.white.opacity(0.96))
+                    .padding(.horizontal, 14)
+                    .frame(height: 34)
+                    .background(Color.teal.opacity(0.72))
+                    .clipShape(Capsule())
+                    .overlay(
+                        Capsule()
+                            .stroke(Color.white.opacity(0.24), lineWidth: 1)
+                    )
+                    .disabled(isRunningReportHandoff || isRunningReportPackageDryRun || isRunningCompleteDryRun || isRunningCompleteUpload || isClosing || isSavingFastCapture || camera.isCapturing)
                 }
-                .font(.system(size: 13, weight: .semibold))
-                .foregroundColor(.white.opacity(0.96))
-                .padding(.horizontal, 14)
-                .frame(height: 34)
-                .background(Color.green.opacity(0.68))
-                .clipShape(Capsule())
-                .overlay(
-                    Capsule()
-                        .stroke(Color.white.opacity(0.24), lineWidth: 1)
-                )
-                .disabled(isRunningReportPackageDryRun || isRunningCompleteDryRun || isRunningCompleteUpload || isClosing || isSavingFastCapture || camera.isCapturing)
             }
 
             HStack(spacing: 18) {
@@ -13119,6 +13141,21 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             await MainActor.run {
                 reportPackageDryRunResult = result
                 isRunningReportPackageDryRun = false
+            }
+        }
+    }
+
+    private func runReportHandoff() {
+        guard didCompleteUpload, !isRunningReportHandoff else { return }
+        isRunningReportHandoff = true
+        Task {
+            let result = await appState.runFastRuntimeReportHandoff(
+                propertyID: context.propertyID,
+                sessionType: context.sessionType
+            )
+            await MainActor.run {
+                reportHandoffResult = result
+                isRunningReportHandoff = false
             }
         }
     }
@@ -13502,6 +13539,78 @@ private struct FastRuntimeReportPackageDryRunResultView: View {
     }
 }
 
+private struct FastRuntimeReportHandoffResultView: View {
+    @Environment(\.dismiss) private var dismiss
+    let result: AppState.FastRuntimeReportHandoffResult
+
+    var body: some View {
+        NavigationStack {
+            List {
+                Section("Result") {
+                    diagnosticRow("Success", result.success ? "true" : "false")
+                    diagnosticRow("Function Status", result.functionStatus)
+                    diagnosticRow("Session Type", result.sessionType.rawValue)
+                    diagnosticRow("Report Mode", result.reportMode)
+                    diagnosticRow("Shot Count", result.shotCount.map(String.init) ?? "missing")
+                    diagnosticRow("Reused Snapshot", result.reused.map { $0 ? "true" : "false" } ?? "unknown")
+                    diagnosticRow("Dispatch Expected", result.dispatchExpected.map { $0 ? "true" : "false" } ?? "unknown")
+                    diagnosticRow("Dispatch Status", result.dispatchStatus ?? "unknown")
+                    diagnosticRow("Total", String(format: "%.1f ms", result.totalMilliseconds))
+                    if let errorMessage = result.errorMessage, !errorMessage.isEmpty {
+                        diagnosticBlock("Error", errorMessage)
+                    }
+                }
+
+                Section("Snapshot") {
+                    diagnosticRow("Snapshot ID", result.snapshotID?.uuidString ?? "missing")
+                    diagnosticRow("Bucket", result.snapshotBucket ?? "missing")
+                    diagnosticBlock("Path", result.snapshotPath ?? "missing")
+                    diagnosticBlock("Payload SHA", result.snapshotPayloadSHA256 ?? "missing")
+                    diagnosticBlock("Raw JSON SHA", result.rawSessionJSONSHA256 ?? "missing")
+                }
+
+                Section("Identity") {
+                    diagnosticRow("Org ID", result.dryRun.orgID?.uuidString ?? "missing")
+                    diagnosticRow("Property ID", result.dryRun.propertyID.uuidString)
+                    diagnosticRow("Session ID", result.sessionID?.uuidString ?? result.dryRun.sessionID?.uuidString ?? "missing")
+                    diagnosticBlock("Idempotency Key", result.idempotencyKey ?? "missing")
+                }
+
+                Section("Dry Run Gate") {
+                    diagnosticRow("Valid", result.dryRun.isValid ? "true" : "false")
+                    diagnosticRow("Session Status", result.dryRun.sessionStatus ?? "missing")
+                    diagnosticRow("Property Status", result.dryRun.propertyStatus ?? "missing")
+                    diagnosticRow("Storage Objects", "\(result.dryRun.storageObjectCount)")
+                    if !result.dryRun.errors.isEmpty {
+                        diagnosticBlock("Dry Run Errors", result.dryRun.errors.joined(separator: "\n"))
+                    }
+                    if !result.dryRun.missingFields.isEmpty {
+                        diagnosticBlock("Missing Fields", result.dryRun.missingFields.joined(separator: "\n"))
+                    }
+                    if !result.dryRun.warnings.isEmpty {
+                        diagnosticBlock("Warnings", result.dryRun.warnings.joined(separator: "\n"))
+                    }
+                }
+
+                Section("Safety") {
+                    Text("Debug-only handoff. The app ran the report dry run first, then called the authenticated fast-lane-report-handoff Edge Function. It did not use a service-role key, delete local files, hide pending export, or touch legacy sessions.")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .navigationTitle(result.title)
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Done") {
+                        dismiss()
+                    }
+                }
+            }
+        }
+    }
+}
+
 private struct DebugToolsView: View {
     @EnvironmentObject private var appState: AppState
     @Environment(\.dismiss) private var dismiss
@@ -13543,6 +13652,8 @@ private struct DebugToolsView: View {
     @State private var fastLaneLauncherCloseResult: AppState.FastRuntimePrototypeCloseResult? = nil
     @State private var isRunningFastLaneReportDryRun: Bool = false
     @State private var fastLaneReportDryRunResult: AppState.FastRuntimeReportPackageDryRunResult? = nil
+    @State private var isRunningFastLaneReportHandoff: Bool = false
+    @State private var fastLaneReportHandoffResult: AppState.FastRuntimeReportHandoffResult? = nil
     @State private var isClearingFastRuntimeDrafts: Bool = false
     @State private var fastRuntimeCleanupResult: AppState.FastRuntimePrototypeCleanupResult? = nil
     @State private var showCaptureProfileMaintenanceBackfillConfirm: Bool = false
@@ -14092,6 +14203,9 @@ private struct DebugToolsView: View {
         .sheet(item: $fastLaneReportDryRunResult) { result in
             FastRuntimeReportPackageDryRunResultView(result: result)
         }
+        .sheet(item: $fastLaneReportHandoffResult) { result in
+            FastRuntimeReportHandoffResultView(result: result)
+        }
         .fullScreenCover(item: $fastLaneLauncherPreviewRequest) { request in
             DebugFastRuntimePrototypeCameraPreviewView(
                 context: request.context,
@@ -14139,7 +14253,7 @@ private struct DebugToolsView: View {
             HStack(spacing: 10) {
                 customCapsuleButton(
                     title: isRunningFastLaneReportDryRun ? "Checking..." : "Report Dry Run Full",
-                    isEnabled: !isRunningFastLaneReportDryRun && selectedFastLaneLauncherPropertyID != nil,
+                    isEnabled: !isRunningFastLaneReportDryRun && !isRunningFastLaneReportHandoff && selectedFastLaneLauncherPropertyID != nil,
                     fill: Color.green.opacity(0.78),
                     stroke: Color.green.opacity(0.90),
                     label: .white
@@ -14149,7 +14263,7 @@ private struct DebugToolsView: View {
 
                 customCapsuleButton(
                     title: isRunningFastLaneReportDryRun ? "Checking..." : "Report Dry Run Punch",
-                    isEnabled: !isRunningFastLaneReportDryRun && selectedFastLaneLauncherPropertyID != nil,
+                    isEnabled: !isRunningFastLaneReportDryRun && !isRunningFastLaneReportHandoff && selectedFastLaneLauncherPropertyID != nil,
                     fill: Color.indigo.opacity(0.78),
                     stroke: Color.indigo.opacity(0.90),
                     label: .white
@@ -14158,8 +14272,34 @@ private struct DebugToolsView: View {
                 }
             }
 
+            HStack(spacing: 10) {
+                customCapsuleButton(
+                    title: isRunningFastLaneReportHandoff ? "Handing Off..." : "Fast Report Handoff Full",
+                    isEnabled: !isRunningFastLaneReportDryRun && !isRunningFastLaneReportHandoff && selectedFastLaneLauncherPropertyID != nil,
+                    fill: Color.teal.opacity(0.80),
+                    stroke: Color.teal.opacity(0.92),
+                    label: .white
+                ) {
+                    runFastLaneReportHandoff(sessionType: .fullDocumentation)
+                }
+
+                customCapsuleButton(
+                    title: isRunningFastLaneReportHandoff ? "Handing Off..." : "Fast Report Handoff Punch",
+                    isEnabled: !isRunningFastLaneReportDryRun && !isRunningFastLaneReportHandoff && selectedFastLaneLauncherPropertyID != nil,
+                    fill: Color.cyan.opacity(0.78),
+                    stroke: Color.cyan.opacity(0.90),
+                    label: .white
+                ) {
+                    runFastLaneReportHandoff(sessionType: .punchlistVisit)
+                }
+            }
+
             if let result = fastLaneReportDryRunResult {
                 fastLaneReportPackageDryRunResultBlock(result)
+            }
+
+            if let result = fastLaneReportHandoffResult {
+                fastLaneReportHandoffResultBlock(result)
             }
         }
         .frame(maxWidth: .infinity, alignment: .topLeading)
@@ -14256,6 +14396,27 @@ private struct DebugToolsView: View {
         }
     }
 
+    private func runFastLaneReportHandoff(sessionType: SessionType) {
+        guard !isRunningFastLaneReportHandoff,
+              let propertyID = selectedFastLaneLauncherPropertyID else {
+            return
+        }
+        isRunningFastLaneReportHandoff = true
+        fastLaneReportDryRunResult = nil
+        fastLaneReportHandoffResult = nil
+        Task {
+            let result = await appState.runFastRuntimeReportHandoff(
+                propertyID: propertyID,
+                sessionType: sessionType
+            )
+            await MainActor.run {
+                fastLaneReportDryRunResult = result.dryRun
+                fastLaneReportHandoffResult = result
+                isRunningFastLaneReportHandoff = false
+            }
+        }
+    }
+
     private func startFastLaneLauncher(sessionType: SessionType) {
         guard !isStartingFastLaneSession,
               let propertyID = selectedFastLaneLauncherPropertyID,
@@ -14338,6 +14499,43 @@ private struct DebugToolsView: View {
 
             if !result.errors.isEmpty {
                 Text(result.errors.joined(separator: "\n"))
+                    .font(.system(size: 11, weight: .regular, design: .monospaced))
+                    .foregroundColor(.orange)
+                    .textSelection(.enabled)
+            }
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(buttonFill)
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(buttonStroke, lineWidth: 1)
+        )
+    }
+
+    private func fastLaneReportHandoffResultBlock(
+        _ result: AppState.FastRuntimeReportHandoffResult
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 5) {
+            Text("Fast Report Handoff")
+                .font(.system(size: 14, weight: .bold))
+                .foregroundColor(buttonLabel)
+            Text([
+                "success=\(result.success)",
+                "status=\(result.functionStatus)",
+                "session_type=\(result.sessionType.rawValue)",
+                "session=\(result.sessionID?.uuidString ?? "missing")",
+                "snapshot=\(result.snapshotID?.uuidString ?? "missing")",
+                "dispatch=\(result.dispatchStatus ?? "unknown")",
+                "total=\(String(format: "%.1f", result.totalMilliseconds))ms"
+            ].joined(separator: "\n"))
+            .font(.system(size: 12, weight: .medium, design: .monospaced))
+            .foregroundColor(buttonLabel.opacity(0.80))
+            .textSelection(.enabled)
+
+            if let errorMessage = result.errorMessage, !errorMessage.isEmpty {
+                Text(errorMessage)
                     .font(.system(size: 11, weight: .regular, design: .monospaced))
                     .foregroundColor(.orange)
                     .textSelection(.enabled)

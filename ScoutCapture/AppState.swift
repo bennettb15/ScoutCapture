@@ -1,6 +1,7 @@
 import Foundation
 import Combine
 import CryptoKit
+import Functions
 import Supabase
 #if canImport(UniformTypeIdentifiers)
 import UniformTypeIdentifiers
@@ -5177,6 +5178,78 @@ final class AppState: ObservableObject {
 
         var title: String {
             isValid ? "Report Package Dry Run Valid" : "Report Package Dry Run Failed"
+        }
+    }
+
+    struct FastRuntimeReportHandoffResult: Equatable, Identifiable {
+        let id = UUID()
+        let success: Bool
+        let dryRun: FastRuntimeReportPackageDryRunResult
+        let snapshotID: UUID?
+        let snapshotPath: String?
+        let snapshotBucket: String?
+        let snapshotPayloadSHA256: String?
+        let rawSessionJSONSHA256: String?
+        let sessionID: UUID?
+        let sessionType: SessionType
+        let reportMode: String
+        let shotCount: Int?
+        let idempotencyKey: String?
+        let dispatchExpected: Bool?
+        let dispatchStatus: String?
+        let reused: Bool?
+        let functionStatus: String
+        let errorMessage: String?
+        let totalMilliseconds: Double
+
+        var title: String {
+            success ? "Fast Report Handoff Succeeded" : "Fast Report Handoff Failed"
+        }
+    }
+
+    private struct FastRuntimeReportHandoffPayload: Encodable {
+        let orgID: String
+        let propertyID: String
+        let sessionID: String
+        let sessionType: String
+        let reportMode: String
+    }
+
+    private struct FastRuntimeReportHandoffFunctionResponse: Decodable {
+        let ok: Bool?
+        let reused: Bool?
+        let snapshotID: UUID?
+        let snapshotPath: String?
+        let snapshotBucket: String?
+        let snapshotPayloadSHA256: String?
+        let rawSessionJSONSHA256: String?
+        let sessionID: UUID?
+        let sessionType: String?
+        let reportMode: String?
+        let shotCount: Int?
+        let idempotencyKey: String?
+        let dispatchExpected: Bool?
+        let dispatchStatus: String?
+        let error: String?
+        let retrySafe: Bool?
+
+        enum CodingKeys: String, CodingKey {
+            case ok
+            case reused
+            case snapshotID = "snapshot_id"
+            case snapshotPath = "snapshot_path"
+            case snapshotBucket = "snapshot_bucket"
+            case snapshotPayloadSHA256 = "snapshot_payload_sha256"
+            case rawSessionJSONSHA256 = "raw_session_json_sha256"
+            case sessionID = "session_id"
+            case sessionType = "session_type"
+            case reportMode = "report_mode"
+            case shotCount = "shot_count"
+            case idempotencyKey = "idempotency_key"
+            case dispatchExpected = "dispatch_expected"
+            case dispatchStatus = "dispatch_status"
+            case error
+            case retrySafe = "retry_safe"
         }
     }
 
@@ -43094,6 +43167,151 @@ final class AppState: ObservableObject {
                 sessionType: sessionType,
                 reason: "property_status_read_failed: \(error.localizedDescription)"
             )
+        }
+    }
+
+    @MainActor
+    func runFastRuntimeReportHandoff(
+        propertyID: UUID,
+        sessionType: SessionType
+    ) async -> FastRuntimeReportHandoffResult {
+        let startedAt = Date()
+        let dryRun = await runFastRuntimeReportPackageDryRun(
+            propertyID: propertyID,
+            sessionType: sessionType
+        )
+        guard dryRun.isValid else {
+            return makeFastRuntimeReportHandoffFailure(
+                dryRun: dryRun,
+                startedAt: startedAt,
+                functionStatus: "dry_run_invalid",
+                errorMessage: (dryRun.errors + dryRun.missingFields).joined(separator: "\n")
+            )
+        }
+        guard backendFeatureFlags.supabaseEnabled,
+              let client = supabaseClient else {
+            return makeFastRuntimeReportHandoffFailure(
+                dryRun: dryRun,
+                startedAt: startedAt,
+                functionStatus: "missing_supabase_client",
+                errorMessage: "Supabase client is not available."
+            )
+        }
+        guard let orgID = dryRun.orgID,
+              let sessionID = dryRun.sessionID else {
+            return makeFastRuntimeReportHandoffFailure(
+                dryRun: dryRun,
+                startedAt: startedAt,
+                functionStatus: "missing_required_ids",
+                errorMessage: "Dry run did not return orgID/sessionID."
+            )
+        }
+
+        let payload = FastRuntimeReportHandoffPayload(
+            orgID: orgID.uuidString.lowercased(),
+            propertyID: dryRun.propertyID.uuidString.lowercased(),
+            sessionID: sessionID.uuidString.lowercased(),
+            sessionType: dryRun.sessionType.rawValue,
+            reportMode: dryRun.reportMode
+        )
+
+        do {
+            let response: FastRuntimeReportHandoffFunctionResponse = try await client.functions.invoke(
+                "fast-lane-report-handoff",
+                options: .init(body: payload)
+            )
+            guard response.ok == true else {
+                return makeFastRuntimeReportHandoffFailure(
+                    dryRun: dryRun,
+                    startedAt: startedAt,
+                    functionStatus: "function_returned_not_ok",
+                    errorMessage: response.error ?? "fast-lane-report-handoff returned ok=false."
+                )
+            }
+            return FastRuntimeReportHandoffResult(
+                success: true,
+                dryRun: dryRun,
+                snapshotID: response.snapshotID,
+                snapshotPath: response.snapshotPath,
+                snapshotBucket: response.snapshotBucket,
+                snapshotPayloadSHA256: response.snapshotPayloadSHA256,
+                rawSessionJSONSHA256: response.rawSessionJSONSHA256,
+                sessionID: response.sessionID ?? sessionID,
+                sessionType: sessionType,
+                reportMode: response.reportMode ?? dryRun.reportMode,
+                shotCount: response.shotCount,
+                idempotencyKey: response.idempotencyKey,
+                dispatchExpected: response.dispatchExpected,
+                dispatchStatus: response.dispatchStatus,
+                reused: response.reused,
+                functionStatus: "success",
+                errorMessage: nil,
+                totalMilliseconds: Date().timeIntervalSince(startedAt) * 1_000
+            )
+        } catch let error as FunctionsError {
+            let details = Self.decodeFastRuntimeReportHandoffError(error)
+            return makeFastRuntimeReportHandoffFailure(
+                dryRun: dryRun,
+                startedAt: startedAt,
+                functionStatus: details.status,
+                errorMessage: details.message
+            )
+        } catch {
+            return makeFastRuntimeReportHandoffFailure(
+                dryRun: dryRun,
+                startedAt: startedAt,
+                functionStatus: "invoke_failed",
+                errorMessage: error.localizedDescription
+            )
+        }
+    }
+
+    private func makeFastRuntimeReportHandoffFailure(
+        dryRun: FastRuntimeReportPackageDryRunResult,
+        startedAt: Date,
+        functionStatus: String,
+        errorMessage: String
+    ) -> FastRuntimeReportHandoffResult {
+        FastRuntimeReportHandoffResult(
+            success: false,
+            dryRun: dryRun,
+            snapshotID: nil,
+            snapshotPath: nil,
+            snapshotBucket: nil,
+            snapshotPayloadSHA256: nil,
+            rawSessionJSONSHA256: nil,
+            sessionID: dryRun.sessionID,
+            sessionType: dryRun.sessionType,
+            reportMode: dryRun.reportMode,
+            shotCount: dryRun.shotCount,
+            idempotencyKey: dryRun.reportPackageIdempotencyKey,
+            dispatchExpected: nil,
+            dispatchStatus: nil,
+            reused: nil,
+            functionStatus: functionStatus,
+            errorMessage: errorMessage,
+            totalMilliseconds: Date().timeIntervalSince(startedAt) * 1_000
+        )
+    }
+
+    private static func decodeFastRuntimeReportHandoffError(
+        _ error: FunctionsError
+    ) -> (status: String, message: String) {
+        switch error {
+        case .relayError:
+            return ("relay_error", error.localizedDescription)
+        case let .httpError(code, data):
+            let status = "http_\(code)"
+            if let response = try? JSONDecoder().decode(FastRuntimeReportHandoffFunctionResponse.self, from: data),
+               let message = response.error,
+               !message.isEmpty {
+                return (status, message)
+            }
+            if let body = String(data: data, encoding: .utf8),
+               !body.isEmpty {
+                return (status, body)
+            }
+            return (status, error.localizedDescription)
         }
     }
 
