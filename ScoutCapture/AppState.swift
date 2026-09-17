@@ -7555,9 +7555,11 @@ final class AppState: ObservableObject {
     @Published private(set) var fastRuntimeDraftsByPropertyID: [UUID: FastRuntimeDraftSummary] = AppState.loadFastRuntimeDraftIndexFromDisk() {
         didSet { refreshPropertyRowDraftBadgeCache() }
     }
+    @Published private(set) var propertyRowDraftCount: Int = 0
     @Published private(set) var propertyRowDraftBadgeByPropertyID: [UUID: Bool] = [:]
     @Published private(set) var propertyRowCloudGlyphByPropertyID: [UUID: PropertyRowCloudGlyphState] = [:]
     @Published private(set) var propertyRowStatusChipByPropertyID: [UUID: PropertyRowStatusChipState] = [:]
+    @Published private(set) var propertyRowSubtitleByPropertyID: [UUID: String] = [:]
     @Published private(set) var cloudBackupStatus: CloudBackupStatus
     @Published private(set) var supabaseConfiguration: SupabaseRuntimeConfiguration
     @Published private(set) var backendFeatureFlags: BackendFeatureFlags
@@ -8648,6 +8650,7 @@ final class AppState: ObservableObject {
         refreshPropertyRowDraftBadgeCache()
         refreshPropertyRowCloudGlyphCache()
         refreshPropertyRowStatusChipCache()
+        refreshPropertyRowSubtitleCache(properties: properties, organizations: organizations)
 
         if let cloudBackupManager {
             cloudBackupManager.$status
@@ -10796,18 +10799,28 @@ final class AppState: ObservableObject {
         let scopedPending = allPendingExportSessionByProperty.filter { scopedPropertyIDs.contains($0.key) && $0.value.deletedAt == nil }
         let scopedMeta = allHubMetaByProperty.filter { scopedPropertyIDs.contains($0.key) }
         let scopedSessionIDs = Set(scopedSessionIndex.values.flatMap { $0.map(\.id) })
+        refreshPropertyRowSubtitleCache(
+            properties: scopedProperties,
+            organizations: scopedOrganizations
+        )
 
         if organizations != scopedOrganizations {
             organizations = scopedOrganizations
         }
-        if properties != scopedProperties {
+        let visiblePropertiesChanged = properties != scopedProperties
+        var draftInputsChanged = visiblePropertiesChanged
+        if visiblePropertiesChanged {
             properties = scopedProperties
         }
         if sessionIndexByProperty != scopedSessionIndex {
             sessionIndexByProperty = scopedSessionIndex
         }
         if draftSessionByProperty != scopedDrafts {
+            draftInputsChanged = false
             draftSessionByProperty = scopedDrafts
+        }
+        if draftInputsChanged {
+            refreshPropertyRowDraftBadgeCache()
         }
         if pendingExportSessionByProperty != scopedPending {
             pendingExportSessionByProperty = scopedPending
@@ -41862,6 +41875,12 @@ final class AppState: ObservableObject {
         if propertyRowDraftBadgeByPropertyID != next {
             propertyRowDraftBadgeByPropertyID = next
         }
+        let nextDraftCount = properties.reduce(0) { count, property in
+            count + (next[property.id] == true ? 1 : 0)
+        }
+        if propertyRowDraftCount != nextDraftCount {
+            propertyRowDraftCount = nextDraftCount
+        }
     }
 
     private func refreshPropertyRowCloudGlyphCache() {
@@ -41929,6 +41948,55 @@ final class AppState: ObservableObject {
         _ status: SessionSnapshotCloudStatus
     ) -> Bool {
         status.state == .uploading && !status.isConfigurationBlocked
+    }
+
+    private func refreshPropertyRowSubtitleCache(
+        properties: [Property],
+        organizations: [Organization]
+    ) {
+        var subtitleOrganizations = organizations
+        subtitleOrganizations.append(contentsOf: organizationSelectionOptions)
+        subtitleOrganizations.append(
+            contentsOf: accessibleOrganizations.map { membership in
+                Organization(id: membership.id, name: membership.name)
+            }
+        )
+
+        let subtitleOrganizationList = deduplicatedOrganizationsByIDPreservingOrder(subtitleOrganizations)
+        let organizationNameByID = subtitleOrganizationList.reduce(into: [UUID: String]()) { partial, organization in
+            let name = organization.name.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !name.isEmpty {
+                partial[organization.id] = name
+            }
+        }
+        let activeOrganizationName = activeOrganizationID.flatMap { organizationNameByID[$0] }
+        let singleOrganizationName = subtitleOrganizationList.count == 1
+            ? subtitleOrganizationList.first?.name.trimmingCharacters(in: .whitespacesAndNewlines)
+            : nil
+
+        var next: [UUID: String] = [:]
+        for property in properties {
+            let client = property.clientName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let organization = property.orgId.flatMap { organizationNameByID[$0] }
+                ?? activeOrganizationName
+                ?? singleOrganizationName
+                ?? ""
+            let subtitle: String
+            if client.isEmpty {
+                subtitle = organization
+            } else if organization.isEmpty {
+                subtitle = client
+            } else {
+                subtitle = "\(client) (\(organization))"
+            }
+            if !subtitle.isEmpty {
+                next[property.id] = subtitle
+            }
+        }
+
+        if propertyRowSubtitleByPropertyID != next {
+            propertyRowSubtitleByPropertyID = next
+        }
     }
 
     func reExportCandidateSession(for propertyID: UUID, now: Date = Date()) -> Session? {
@@ -53105,20 +53173,7 @@ final class AppState: ObservableObject {
     }
 
     func draftPropertyCount() -> Int {
-        let currentUserID = authenticatedSupabaseUser?.id
-        let currentDeviceID = currentDeviceIdentifier()
-        return properties.reduce(0) { count, property in
-            guard let record = propertyStatusByPropertyID[property.id] else {
-                return count
-            }
-            let answer = makePropertyStatusCompareAnswer(
-                record: record,
-                propertyID: property.id,
-                currentUserID: currentUserID,
-                currentDeviceID: currentDeviceID
-            )
-            return count + (answer.draftCountIncluded ? 1 : 0)
-        }
+        propertyRowDraftCount
     }
 
     func draftCountSource() -> String {

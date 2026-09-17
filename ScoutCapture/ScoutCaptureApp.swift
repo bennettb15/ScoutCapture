@@ -1361,6 +1361,7 @@ struct SessionHubView: View {
         let isUploading = statusChip == .uploading
         let hasDraft = appState.propertyRowDraftBadgeByPropertyID[property.id] == true && statusChip == nil
         let cloudGlyph = appState.propertyRowCloudGlyphByPropertyID[property.id]
+        let subtitleLine = appState.propertyRowSubtitleByPropertyID[property.id]
         let addressLine = propertyAddressLine(property) ?? property.address
 
         return Button {
@@ -1377,6 +1378,15 @@ struct SessionHubView: View {
                         if let cloudGlyph, !isUploading {
                             propertyRowCloudGlyphIcon(cloudGlyph)
                         }
+                    }
+
+                    if let subtitleLine,
+                       !subtitleLine.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        Text(subtitleLine)
+                            .font(.system(size: 13, weight: .medium))
+                            .foregroundColor(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
                     }
 
                     if let addressLine,
