@@ -4925,6 +4925,8 @@ final class AppState: ObservableObject {
         let propertyName: String
         let sessionType: SessionType
         let entryState: LightweightPropertyEntryState?
+        let lockSessionID: UUID?
+        let isCurrentDeviceOccupiedClaim: Bool
         let requiresFallback: Bool
         let reason: String?
         let contextSource: String
@@ -42449,6 +42451,8 @@ final class AppState: ObservableObject {
             propertyName: propertyName,
             sessionType: sessionType,
             entryState: status?.entryState,
+            lockSessionID: status?.lockSessionID,
+            isCurrentDeviceOccupiedClaim: status.map(prototypeStatusIsCurrentUserOccupiedByThisDevice) ?? false,
             requiresFallback: status?.requiresFallback ?? true,
             reason: reason.isEmpty ? nil : reason,
             contextSource: contextSource,
@@ -42468,7 +42472,8 @@ final class AppState: ObservableObject {
     }
 
     func releaseFastRuntimePrototypeCurrentUserClaim(
-        propertyID: UUID
+        propertyID: UUID,
+        requireCurrentDeviceMatch: Bool = false
     ) async -> FastRuntimePrototypeReleaseResult {
         let startedAt = Date()
         let probeSessionID = UUID()
@@ -42499,8 +42504,11 @@ final class AppState: ObservableObject {
             )
         }
 
+        let isOwnedByThisClient = prototypeStatusIsCurrentUserOccupiedByThisClient(status)
+        let isOwnedByThisDevice = prototypeStatusIsCurrentUserOccupiedByThisDevice(status)
         guard status.entryState == .lockedByCurrentUser,
-              prototypeStatusIsCurrentUserOccupiedByThisClient(status) else {
+              isOwnedByThisClient,
+              (!requireCurrentDeviceMatch || isOwnedByThisDevice) else {
             return FastRuntimePrototypeReleaseResult(
                 propertyID: propertyID,
                 propertyName: propertyName,
@@ -42509,7 +42517,9 @@ final class AppState: ObservableObject {
                 entryState: status.entryState,
                 reason: status.reason,
                 didRelease: false,
-                message: "Selected property is not a current-user occupied claim owned by this client.",
+                message: requireCurrentDeviceMatch
+                    ? "Selected property is not a current-device fast-lane claim."
+                    : "Selected property is not a current-user occupied claim owned by this client.",
                 rpcMilliseconds: rpcMilliseconds,
                 releaseMilliseconds: nil,
                 totalMilliseconds: Date().timeIntervalSince(startedAt) * 1_000
@@ -44539,6 +44549,20 @@ final class AppState: ObservableObject {
         let userMatches = status.lockedByUserID != nil && status.lockedByUserID == authenticatedSupabaseUser?.id
         let deviceMatches = normalizedSupabaseText(status.lockedByDeviceID) == currentDeviceIdentifier()
         return userMatches || deviceMatches
+    }
+
+    private func prototypeStatusIsCurrentUserOccupiedByThisDevice(
+        _ status: LightweightPropertyEntryStatus
+    ) -> Bool {
+        guard status.entryState == .lockedByCurrentUser,
+              normalizedSupabaseText(status.reason) == "current_user_occupied",
+              normalizedSupabaseText(status.lockedByDeviceID) == currentDeviceIdentifier() else {
+            return false
+        }
+        if let lockedByUserID = status.lockedByUserID {
+            return lockedByUserID == authenticatedSupabaseUser?.id
+        }
+        return true
     }
 
     private func fastRuntimeDraftBadgeSummary(

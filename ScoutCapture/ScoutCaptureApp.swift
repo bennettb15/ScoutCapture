@@ -3821,6 +3821,8 @@ struct SessionHubView: View {
                 propertyName: property.name,
                 sessionType: summary.sessionType,
                 entryState: .lockedByCurrentUser,
+                lockSessionID: summary.sessionID,
+                isCurrentDeviceOccupiedClaim: true,
                 requiresFallback: false,
                 reason: "fast_runtime_draft_index",
                 contextSource: "fast_runtime_draft_index",
@@ -3939,27 +3941,73 @@ struct SessionHubView: View {
         fastLaneCloseResult = nil
         fastLaneOpeningProperty = property
         Task {
-            let result = await appState.runFastRuntimePrototype(
+            var result = await appState.runFastRuntimePrototype(
                 propertyID: property.id,
                 sessionType: sessionType,
                 prepareTempStorage: true,
                 releaseClaim: false,
                 allowCurrentUserOccupiedContext: false
             )
-            let contextReadyAt = Date()
+            var contextReadyAt = Date()
+            var blockedMessage: String?
+
+            if !fastLaneInitialEntryIsOpenable(result, property: property, sessionType: sessionType),
+               result.entryState == .lockedByCurrentUser,
+               result.isCurrentDeviceOccupiedClaim {
+                if let resumeState = appState.fastRuntimeDraftResumeState(for: property.id),
+                   resumeState.canResume,
+                   let context = resumeState.context,
+                   let storageRoot = resumeState.storageRoot,
+                   let summary = resumeState.summary,
+                   result.lockSessionID == nil || result.lockSessionID == summary.sessionID {
+                    await MainActor.run {
+                        guard fastLaneOpeningProperty?.id == property.id else { return }
+                        fastLaneOpeningProperty = nil
+                        isOpeningProperty = false
+                        if pressedPropertyID == property.id {
+                            pressedPropertyID = nil
+                        }
+                        beginFastLaneDraftResume(
+                            property: property,
+                            context: context,
+                            summary: summary,
+                            storageRoot: storageRoot
+                        )
+                    }
+                    return
+                }
+
+                let release = await appState.releaseFastRuntimePrototypeCurrentUserClaim(
+                    propertyID: property.id,
+                    requireCurrentDeviceMatch: true
+                )
+                if release.didRelease {
+                    result = await appState.runFastRuntimePrototype(
+                        propertyID: property.id,
+                        sessionType: sessionType,
+                        prepareTempStorage: true,
+                        releaseClaim: false,
+                        allowCurrentUserOccupiedContext: false
+                    )
+                    contextReadyAt = Date()
+                    if !fastLaneInitialEntryIsOpenable(result, property: property, sessionType: sessionType) {
+                        blockedMessage = "Cleared the stale fast-camera claim, but this property is still not ready to open. Please try again."
+                    }
+                } else {
+                    blockedMessage = "This property is already open on this device, and the stale fast-camera claim could not be cleared. Use Debug Tools to clear fast-lane state, then try again."
+                }
+            }
 
             await MainActor.run {
                 guard fastLaneOpeningProperty?.id == property.id else { return }
-                guard result.entryState == .unlockedAndClaimed,
-                      result.requiresFallback == false,
-                      result.contextSource == "unlocked_and_claimed",
-                      let context = result.context,
-                      context.propertyID == property.id,
-                      context.sessionID == result.timings.targetSessionID,
-                      context.sessionType == sessionType,
-                      context.canCapture else {
+                guard fastLaneInitialEntryIsOpenable(result, property: property, sessionType: sessionType),
+                      let context = result.context else {
                     fastLaneOpeningProperty = nil
-                    openProperty(property, initialSessionType: sessionType)
+                    isOpeningProperty = false
+                    if pressedPropertyID == property.id {
+                        pressedPropertyID = nil
+                    }
+                    appState.showHubTransientStatusMessage(blockedMessage ?? fastLaneInitialEntryBlockedMessage(for: result))
                     return
                 }
 
@@ -3976,6 +4024,53 @@ struct SessionHubView: View {
                     isDraftResume: false
                 )
             }
+        }
+    }
+
+    private func fastLaneInitialEntryIsOpenable(
+        _ result: AppState.FastRuntimePrototypeResult,
+        property: Property,
+        sessionType: SessionType
+    ) -> Bool {
+        guard result.entryState == .unlockedAndClaimed,
+              result.requiresFallback == false,
+              result.contextSource == "unlocked_and_claimed",
+              let context = result.context,
+              context.propertyID == property.id,
+              context.sessionID == result.timings.targetSessionID,
+              context.sessionType == sessionType,
+              context.canCapture else {
+            return false
+        }
+        return true
+    }
+
+    private func fastLaneInitialEntryBlockedMessage(for result: AppState.FastRuntimePrototypeResult) -> String {
+        let reason = result.reason?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalizedReason = reason?.lowercased()
+
+        switch result.entryState {
+        case .lockedByCurrentUser?:
+            if normalizedReason == "current_user_occupied" {
+                if result.isCurrentDeviceOccupiedClaim {
+                    return "This property is already open on this device. Use the Draft badge or clear fast-lane state from Debug Tools."
+                }
+                return "This property is already open on your account. Close it on the other device, then try again."
+            }
+            return "This property is already open on this account. Use the draft or clear the fast-lane test state."
+        case .lockedByOtherUser?:
+            return "This property is locked by another user."
+        case .pendingExport?:
+            return "This property is waiting for export to finish."
+        case .staleClaimable?:
+            return "This property needs a quick refresh before opening."
+        case .unlockedAndClaimed?:
+            return "Fast camera could not open cleanly. Please try again."
+        case .unknownRequiresFallback?, nil:
+            if let reason, !reason.isEmpty {
+                return "Unable to confirm property availability: \(reason)"
+            }
+            return "Unable to confirm property availability."
         }
     }
 
@@ -12788,29 +12883,31 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
     @State private var completeUploadResult: AppState.FastRuntimeCompleteUploadResult?
     @State private var reportPackageDryRunResult: AppState.FastRuntimeReportPackageDryRunResult?
     @State private var reportHandoffResult: AppState.FastRuntimeReportHandoffResult?
+    @State private var chromeLocationMode: CameraChromeLocationMode = .interior
+    @State private var lastValidDeviceOrientation: UIDeviceOrientation = .portrait
+    @State private var glyphAngleDegrees: Double = 0
+    private let glyphRotationAnimation = Animation.interactiveSpring(
+        response: 0.48,
+        dampingFraction: 0.90,
+        blendDuration: 0.18
+    )
 
     var body: some View {
-        ZStack {
-            Color.black
-                .ignoresSafeArea()
-
-            CameraPreviewView(session: camera.session)
-                .ignoresSafeArea()
-
-            if captureFlashVisible {
-                Color.white
-                    .opacity(0.32)
-                    .ignoresSafeArea()
-                    .transition(.opacity)
+        CameraChromeView(
+            display: cameraChromeDisplay,
+            zoomSteps: camera.zoomSteps,
+            selectedZoomID: camera.selectedZoomId,
+            actions: cameraChromeActions,
+            previewContent: {
+                CameraPreviewView(session: camera.session)
+            },
+            overlayContent: {
+                fastLanePreviewOverlays
             }
-
-            VStack(spacing: 0) {
-                headerPanel
-                Spacer(minLength: 0)
-                shutterPanel
-            }
-        }
+        )
         .onAppear {
+            UIDevice.current.beginGeneratingDeviceOrientationNotifications()
+            refreshCameraChromeGlyphRotation()
             fastStorageRoot = storageRoot ?? prototypeResult.tempStorageRoot
             if capturedCount < initialCapturedCount {
                 capturedCount = initialCapturedCount
@@ -12822,9 +12919,15 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                 previewRunningAt = Date()
             }
         }
+        .onReceive(NotificationCenter.default.publisher(for: UIDevice.orientationDidChangeNotification)) { _ in
+            refreshCameraChromeGlyphRotation()
+        }
         .onReceive(camera.$isPreviewRunning.removeDuplicates()) { isRunning in
             guard isRunning, previewRunningAt == nil else { return }
             previewRunningAt = Date()
+        }
+        .onDisappear {
+            UIDevice.current.endGeneratingDeviceOrientationNotifications()
         }
         .sheet(item: $completeDryRunResult) { result in
             FastRuntimeCompleteDryRunResultView(result: result)
@@ -12837,6 +12940,221 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
         }
         .sheet(item: $reportHandoffResult) { result in
             FastRuntimeReportHandoffResultView(result: result)
+        }
+    }
+
+    private var cameraChromeDisplay: CameraChromeDisplayModel {
+        let profile = fastLaneCaptureProfile
+        let accent = fastLaneCaptureProfileAccentColor
+        return CameraChromeDisplayModel(
+            profileTitle: profile.title,
+            profileSystemImage: profile == .residential ? "house.fill" : "building.2.fill",
+            profileAccentColor: accent,
+            isProfileLocked: true,
+            propertyName: propertyName,
+            cloudStatus: fastLaneChromeCloudStatus,
+            showsPunchlistBadge: context.sessionType == .punchlistVisit,
+            metadata: CameraChromeMetadataModel(
+                building: "B1",
+                orientation: "N",
+                showsOrientationDot: true,
+                orientationDotColor: .white,
+                detailType: "Overview",
+                angle: "A4",
+                trade: nil,
+                isFilterAvailable: false
+            ),
+            previewStatusTitle: previewStatusTitle,
+            previewStatusColor: previewStatusColor,
+            isPreviewRunning: camera.isPreviewRunning,
+            isShutterEnabled: canUseFastShutter,
+            isHDVisible: camera.hdSupported,
+            isHDEnabled: camera.effectiveHDEnabled,
+            locationMode: chromeLocationMode,
+            sideControls: fastLaneChromeSideControls,
+            savedCount: capturedCount,
+            thumbnail: nil,
+            ellipsisEnabled: isDebugMode,
+            deviceOrientation: lastValidDeviceOrientation,
+            glyphRotationAngle: .degrees(glyphAngleDegrees)
+        )
+    }
+
+    private func refreshCameraChromeGlyphRotation() {
+        let orientation = UIDevice.current.orientation
+        let newValue: UIDeviceOrientation? = {
+            switch orientation {
+            case .portrait, .portraitUpsideDown:
+                return .portrait
+            case .landscapeLeft, .landscapeRight:
+                return orientation
+            default:
+                return nil
+            }
+        }()
+
+        guard let newValue else { return }
+        let target: Double
+        switch newValue {
+        case .landscapeLeft:
+            target = 90
+        case .landscapeRight:
+            target = -90
+        default:
+            target = 0
+        }
+        guard newValue != lastValidDeviceOrientation || abs(glyphAngleDegrees - target) > 0.5 else {
+            return
+        }
+
+        lastValidDeviceOrientation = newValue
+
+        withAnimation(glyphRotationAnimation) {
+            glyphAngleDegrees = target
+        }
+    }
+
+    private var cameraChromeActions: CameraChromeActions {
+        CameraChromeActions(
+            onProfileTapped: {},
+            onEndTapped: {
+                closePreview()
+            },
+            onMetadataTapped: {},
+            onSideControlTapped: { _ in },
+            onZoomTapped: { step in
+                camera.setZoomStep(step)
+            },
+            onHDTapped: {
+                guard camera.hdSupported, !camera.isCapturing, !isSavingFastCapture else { return }
+                shutterHaptic.impactOccurred(intensity: 0.55)
+                shutterHaptic.prepare()
+                camera.manualHDEnabled.toggle()
+            },
+            onShutterTapped: {
+                shutterHaptic.impactOccurred()
+                shutterHaptic.prepare()
+                beginFastLaneShutter()
+            },
+            onThumbnailTapped: {},
+            onLocationModeChanged: { mode in
+                chromeLocationMode = mode
+            },
+            onEllipsisTapped: {
+                guard isDebugMode else { return }
+                withAnimation(.easeInOut(duration: 0.18)) {
+                    isTimingExpanded.toggle()
+                }
+            }
+        )
+    }
+
+    private var fastLaneChromeCloudStatus: CameraChromeStatusModel? {
+        if let freshness = appState.propertyOpenFreshness(for: context.propertyID) {
+            return CameraChromeStatusModel(
+                title: AppState.propertyOpenFreshnessDisplayLabel(for: freshness.status),
+                systemImage: AppState.propertyOpenFreshnessSymbolName(for: freshness.status),
+                color: fastLaneCloudStatusColor(for: freshness.status)
+            )
+        }
+        return CameraChromeStatusModel(
+            title: previewStatusTitle,
+            systemImage: camera.isPreviewRunning ? "checkmark.circle.fill" : "camera.fill",
+            color: previewStatusColor
+        )
+    }
+
+    private func fastLaneCloudStatusColor(for status: AppState.PropertyOpenFreshnessStatus) -> Color {
+        switch status {
+        case .checkingCloudStatus, .usingLocalCache, .offline, .unknown:
+            return .white.opacity(0.72)
+        case .current:
+            return .green.opacity(0.9)
+        case .remoteUpdatesAvailable:
+            return .blue.opacity(0.95)
+        case .needsReview:
+            return .orange.opacity(0.95)
+        }
+    }
+
+    private var fastLaneCaptureProfile: CaptureProfile {
+        appState.properties.first(where: { $0.id == context.propertyID })?.captureProfile ??
+            appState.selectedProperty?.captureProfile ??
+            .residential
+    }
+
+    private var fastLaneCaptureProfileAccentColor: Color {
+        switch fastLaneCaptureProfile {
+        case .residential:
+            return Color(red: 0.95, green: 0.56, blue: 0.15)
+        case .commercial:
+            return Color(red: 0.12, green: 0.66, blue: 1.0)
+        }
+    }
+
+    private var fastLaneChromeSideControls: [CameraChromeSideControl] {
+        [
+            CameraChromeSideControl(
+                id: "resolution_required",
+                systemImage: "flag.checkered",
+                accessibilityLabel: "Resolution required"
+            ),
+            CameraChromeSideControl(
+                id: "active_issues",
+                systemImage: "flag.fill",
+                accessibilityLabel: "Active issues"
+            ),
+            CameraChromeSideControl(
+                id: "guided",
+                systemImage: "safari",
+                accessibilityLabel: "Guided",
+                isVisible: context.sessionType != .punchlistVisit
+            ),
+            CameraChromeSideControl(
+                id: "checklist",
+                systemImage: "checkmark",
+                accessibilityLabel: "Checklist",
+                isVisible: context.sessionType != .punchlistVisit
+            )
+        ]
+    }
+
+    @ViewBuilder
+    private var fastLanePreviewOverlays: some View {
+        if captureFlashVisible {
+            Color.white
+                .opacity(0.32)
+                .transition(.opacity)
+                .allowsHitTesting(false)
+                .zIndex(24)
+        }
+
+        if let captureErrorMessage {
+            Text(captureErrorMessage)
+                .font(.system(size: 14, weight: .medium))
+                .foregroundColor(.white)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, 16)
+                .padding(.vertical, 10)
+                .background(Color.black.opacity(0.55))
+                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .stroke(Color.white.opacity(0.18), lineWidth: 1)
+                )
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+                .padding(.horizontal, 18)
+                .allowsHitTesting(false)
+                .zIndex(25)
+        }
+
+        if isDebugMode && isTimingExpanded {
+            timingPanel
+                .padding(.horizontal, 12)
+                .padding(.top, 12)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                .transition(.opacity.combined(with: .move(edge: .top)))
+                .zIndex(18)
         }
     }
 
