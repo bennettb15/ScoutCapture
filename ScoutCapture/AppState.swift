@@ -1003,7 +1003,7 @@ final class AppState: ObservableObject {
         let capturedBy: SessionSnapshotActorIdentity?
         let uploadedBy: SessionSnapshotActorIdentity?
 
-        init(
+        nonisolated init(
             media: [SessionSnapshotMediaManifestItem],
             actor: SessionSnapshotActorIdentity? = nil,
             capturedBy: SessionSnapshotActorIdentity? = nil,
@@ -3716,7 +3716,7 @@ final class AppState: ObservableObject {
         let failedCount: Int
         let message: String
 
-        init(
+        nonisolated init(
             insertedCount: Int,
             duplicateSkippedCount: Int,
             remoteNewerConflictCount: Int = 0,
@@ -4958,6 +4958,65 @@ final class AppState: ObservableObject {
         let totalMilliseconds: Double
     }
 
+    struct FastRuntimeCaptureMetadataContext: Codable, Equatable {
+        let locationMode: String
+        let building: String
+        let elevation: String
+        let detailType: String
+        let trade: String?
+        let angleIndex: Int
+        let shotKey: String
+
+        nonisolated init(
+            locationMode: String? = nil,
+            building: String? = nil,
+            elevation: String? = nil,
+            detailType: String? = nil,
+            trade: String? = nil,
+            angleIndex: Int? = nil,
+            shotKey: String? = nil
+        ) {
+            let normalizedLocationMode = AppState.normalizedFastRuntimeLocationMode(locationMode)
+            let normalizedBuilding = AppState.normalizedFastRuntimeMetadataText(building, fallback: "B1")
+            let normalizedElevation = AppState.normalizedFastRuntimeMetadataText(
+                elevation,
+                fallback: normalizedLocationMode == "Interior" ? "Interior" : "North"
+            )
+            let normalizedDetailType = AppState.normalizedFastRuntimeMetadataText(detailType, fallback: "Overview")
+            let normalizedTrade = AppState.normalizedFastRuntimeMetadataText(trade, fallback: "")
+            let normalizedAngleIndex = max(1, angleIndex ?? 1)
+            let normalizedShotKey = AppState.normalizedFastRuntimeMetadataText(
+                shotKey,
+                fallback: AppState.makeFastRuntimeMetadataShotKey(
+                    building: normalizedBuilding,
+                    elevation: normalizedElevation,
+                    detailType: normalizedDetailType,
+                    angleIndex: normalizedAngleIndex
+                )
+            )
+
+            self.locationMode = normalizedLocationMode
+            self.building = normalizedBuilding
+            self.elevation = normalizedElevation
+            self.detailType = normalizedDetailType
+            self.trade = normalizedTrade.isEmpty ? nil : normalizedTrade
+            self.angleIndex = normalizedAngleIndex
+            self.shotKey = normalizedShotKey
+        }
+
+        nonisolated func withAngleIndex(_ angleIndex: Int) -> FastRuntimeCaptureMetadataContext {
+            FastRuntimeCaptureMetadataContext(
+                locationMode: locationMode,
+                building: building,
+                elevation: elevation,
+                detailType: detailType,
+                trade: trade,
+                angleIndex: max(1, angleIndex),
+                shotKey: nil
+            )
+        }
+    }
+
     struct FastRuntimePrototypeShotRecord: Codable, Equatable, Identifiable {
         let id: UUID
         let sessionID: UUID
@@ -4969,6 +5028,8 @@ final class AppState: ObservableObject {
         let originalRelativePath: String
         let captureKind: String
         let firstCaptureKind: String
+        let captureLocationMode: String?
+        let metadataContext: FastRuntimeCaptureMetadataContext?
     }
 
     struct FastRuntimePrototypeCaptureSaveResult: Equatable {
@@ -4992,6 +5053,8 @@ final class AppState: ObservableObject {
         let createdAt: Date
         let updatedAt: Date
         let photoCount: Int
+        let lastLocationMode: String?
+        let lastMetadataContext: FastRuntimeCaptureMetadataContext?
         let draftRootPath: String
         let metadataPath: String
     }
@@ -5051,6 +5114,8 @@ final class AppState: ObservableObject {
         let id: UUID
         let capturedAt: Date
         let captureKind: String
+        let captureLocationMode: String?
+        let metadataContext: FastRuntimeCaptureMetadataContext?
         let originalRelativePath: String
         let resolvedLocalFilePath: String?
         let metadataLocalFilePath: String
@@ -42596,7 +42661,8 @@ final class AppState: ObservableObject {
         data: Data,
         context: ActiveCaptureContext,
         capturedAt: Date,
-        storageRootOverride: URL? = nil
+        storageRootOverride: URL? = nil,
+        metadataContext: FastRuntimeCaptureMetadataContext? = nil
     ) async -> FastRuntimePrototypeCaptureSaveResult {
         let startedAt = Date()
         let target = ActiveCaptureTarget(context: context)
@@ -42670,19 +42736,7 @@ final class AppState: ObservableObject {
             let fileWriteMilliseconds = Date().timeIntervalSince(fileWriteStartedAt) * 1_000
 
             let metadataStartedAt = Date()
-            let shot = FastRuntimePrototypeShotRecord(
-                id: shotID,
-                sessionID: target.sessionID,
-                propertyID: target.propertyID,
-                orgID: context.orgID,
-                sessionType: target.sessionType,
-                capturedAt: capturedAt,
-                localFilePath: originalURL.path,
-                originalRelativePath: originalRelativePath,
-                captureKind: captureKind,
-                firstCaptureKind: "captured"
-            )
-
+            var savedShot: FastRuntimePrototypeShotRecord?
             do {
                 let decoder = JSONDecoder()
                 decoder.dateDecodingStrategy = .iso8601
@@ -42691,6 +42745,25 @@ final class AppState: ObservableObject {
                     let existingData = try Data(contentsOf: metadataURL)
                     shots = (try? decoder.decode([FastRuntimePrototypeShotRecord].self, from: existingData)) ?? []
                 }
+                let normalizedMetadataContext = AppState.fastRuntimeMetadataContextForCapture(
+                    metadataContext,
+                    existingShots: shots
+                )
+                let shot = FastRuntimePrototypeShotRecord(
+                    id: shotID,
+                    sessionID: target.sessionID,
+                    propertyID: target.propertyID,
+                    orgID: context.orgID,
+                    sessionType: target.sessionType,
+                    capturedAt: capturedAt,
+                    localFilePath: originalURL.path,
+                    originalRelativePath: originalRelativePath,
+                    captureKind: captureKind,
+                    firstCaptureKind: "captured",
+                    captureLocationMode: normalizedMetadataContext.locationMode,
+                    metadataContext: normalizedMetadataContext
+                )
+                savedShot = shot
                 shots.append(shot)
 
                 let encoder = JSONEncoder()
@@ -42699,6 +42772,21 @@ final class AppState: ObservableObject {
                 let metadataData = try encoder.encode(shots)
                 try metadataData.write(to: metadataURL, options: .atomic)
             } catch {
+                let fallbackMetadataContext = AppState.normalizedFastRuntimeMetadataContext(metadataContext)
+                let shot = FastRuntimePrototypeShotRecord(
+                    id: shotID,
+                    sessionID: target.sessionID,
+                    propertyID: target.propertyID,
+                    orgID: context.orgID,
+                    sessionType: target.sessionType,
+                    capturedAt: capturedAt,
+                    localFilePath: originalURL.path,
+                    originalRelativePath: originalRelativePath,
+                    captureKind: captureKind,
+                    firstCaptureKind: "captured",
+                    captureLocationMode: fallbackMetadataContext.locationMode,
+                    metadataContext: fallbackMetadataContext
+                )
                 return FastRuntimePrototypeCaptureSaveResult(
                     success: false,
                     shot: shot,
@@ -42716,7 +42804,7 @@ final class AppState: ObservableObject {
             let metadataMilliseconds = Date().timeIntervalSince(metadataStartedAt) * 1_000
             return FastRuntimePrototypeCaptureSaveResult(
                 success: true,
-                shot: shot,
+                shot: savedShot,
                 storageRoot: storageRoot,
                 errorMessage: nil,
                 timings: FastRuntimePrototypeCaptureTimings(
@@ -42732,7 +42820,8 @@ final class AppState: ObservableObject {
     func closeFastRuntimePrototypePreview(
         context: ActiveCaptureContext,
         tempStorageRoot: URL?,
-        capturedPhotoCount: Int
+        capturedPhotoCount: Int,
+        lastMetadataContext: FastRuntimeCaptureMetadataContext? = nil
     ) async -> FastRuntimePrototypeCloseResult {
         let startedAt = Date()
         let property = properties.first(where: { $0.id == context.propertyID }) ??
@@ -42777,7 +42866,8 @@ final class AppState: ObservableObject {
             let summary = try await Self.persistFastRuntimeDraftStorage(
                 context: context,
                 tempStorageRoot: tempStorageRoot,
-                photoCount: photoCount
+                photoCount: photoCount,
+                lastMetadataContext: lastMetadataContext
             )
             var nextDrafts = fastRuntimeDraftsByPropertyID
             nextDrafts[context.propertyID] = summary
@@ -42921,6 +43011,11 @@ final class AppState: ObservableObject {
                 id: shot.id,
                 capturedAt: shot.capturedAt,
                 captureKind: shot.captureKind,
+                captureLocationMode: Self.normalizedFastRuntimeLocationMode(shot.captureLocationMode),
+                metadataContext: Self.normalizedFastRuntimeMetadataContext(
+                    shot.metadataContext,
+                    fallbackLocationMode: shot.captureLocationMode
+                ),
                 originalRelativePath: shot.originalRelativePath,
                 resolvedLocalFilePath: resolvedURL?.path,
                 metadataLocalFilePath: shot.localFilePath,
@@ -44487,7 +44582,12 @@ final class AppState: ObservableObject {
         checksumSHA256: String?,
         storagePath: String?
     ) -> ShotMetadata {
-        ShotMetadata(
+        let metadataContext = Self.normalizedFastRuntimeMetadataContext(
+            dryRunShot.metadataContext,
+            fallbackLocationMode: dryRunShot.captureLocationMode,
+            fallbackPosition: position + 1
+        )
+        return ShotMetadata(
             shotID: dryRunShot.id,
             propertyID: context.propertyID,
             sessionID: context.sessionID,
@@ -44498,16 +44598,13 @@ final class AppState: ObservableObject {
             capturedByEmail: context.ownerEmail,
             uploadedByUserID: authenticatedSupabaseUser?.id,
             uploadedByEmail: authenticatedSupabaseUser?.email,
-            building: "",
-            elevation: "",
-            detailType: context.sessionType == .punchlistVisit ? "Punchlist Capture" : "Fast Lane Capture",
-            angleIndex: position + 1,
-            shotKey: ShotMetadata.makeShotKey(
-                building: "",
-                elevation: "",
-                detailType: context.sessionType == .punchlistVisit ? "Punchlist Capture" : "Fast Lane Capture",
-                angleIndex: position + 1
-            ),
+            building: metadataContext.building,
+            elevation: metadataContext.elevation,
+            detailType: metadataContext.detailType,
+            angleIndex: metadataContext.angleIndex,
+            trade: metadataContext.trade,
+            priority: nil,
+            shotKey: metadataContext.shotKey,
             isGuided: false,
             isFlagged: false,
             issueID: nil,
@@ -44724,6 +44821,74 @@ final class AppState: ObservableObject {
         return false
     }
 
+    nonisolated private static func normalizedFastRuntimeLocationMode(_ value: String?) -> String {
+        let normalized = (value ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        switch normalized {
+        case "interior":
+            return "Interior"
+        case "exterior":
+            return "Exterior"
+        default:
+            return "Exterior"
+        }
+    }
+
+    nonisolated fileprivate static func normalizedFastRuntimeMetadataText(_ value: String?, fallback: String) -> String {
+        let trimmed = (value ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? fallback : trimmed
+    }
+
+    nonisolated private static func makeFastRuntimeMetadataShotKey(
+        building: String,
+        elevation: String,
+        detailType: String,
+        angleIndex: Int
+    ) -> String {
+        func normalize(_ value: String) -> String {
+            value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        }
+        let normalizedElevation = CanonicalElevation.normalize(elevation) ?? elevation
+        return "\(normalize(building))|\(normalize(normalizedElevation))|\(normalize(detailType))|\(max(1, angleIndex))"
+    }
+
+    nonisolated static func normalizedFastRuntimeMetadataContext(
+        _ value: FastRuntimeCaptureMetadataContext?,
+        fallbackLocationMode: String? = nil,
+        fallbackPosition: Int = 1
+    ) -> FastRuntimeCaptureMetadataContext {
+        FastRuntimeCaptureMetadataContext(
+            locationMode: value?.locationMode ?? fallbackLocationMode,
+            building: value?.building,
+            elevation: value?.elevation,
+            detailType: value?.detailType,
+            trade: value?.trade,
+            angleIndex: value?.angleIndex ?? fallbackPosition,
+            shotKey: value?.shotKey
+        )
+    }
+
+    nonisolated private static func fastRuntimeMetadataContextForCapture(
+        _ value: FastRuntimeCaptureMetadataContext?,
+        existingShots: [FastRuntimePrototypeShotRecord]
+    ) -> FastRuntimeCaptureMetadataContext {
+        let normalized = normalizedFastRuntimeMetadataContext(value)
+        let maxExistingAngle = existingShots.compactMap { shot -> Int? in
+            let shotContext = normalizedFastRuntimeMetadataContext(
+                shot.metadataContext,
+                fallbackLocationMode: shot.captureLocationMode
+            )
+            guard shotContext.building.caseInsensitiveCompare(normalized.building) == .orderedSame,
+                  shotContext.elevation.caseInsensitiveCompare(normalized.elevation) == .orderedSame,
+                  shotContext.detailType.caseInsensitiveCompare(normalized.detailType) == .orderedSame else {
+                return nil
+            }
+            return max(1, shotContext.angleIndex)
+        }.max() ?? 0
+        return normalized.withAngleIndex(max(maxExistingAngle + 1, normalized.angleIndex))
+    }
+
     private func prepareFastRuntimePrototypeTempStorage(context: ActiveCaptureContext) throws -> URL {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("ScoutCaptureFastRuntimePrototype", isDirectory: true)
@@ -44835,7 +45000,8 @@ final class AppState: ObservableObject {
     private static func persistFastRuntimeDraftStorage(
         context: ActiveCaptureContext,
         tempStorageRoot: URL?,
-        photoCount: Int
+        photoCount: Int,
+        lastMetadataContext: FastRuntimeCaptureMetadataContext? = nil
     ) async throws -> FastRuntimeDraftSummary {
         let stableRoot = try stableFastRuntimeDraftRoot(context: context)
         return try await Task.detached(priority: .userInitiated) {
@@ -44887,6 +45053,8 @@ final class AppState: ObservableObject {
                 createdAt: context.createdAt,
                 updatedAt: Date(),
                 photoCount: photoCount,
+                lastLocationMode: Self.normalizedFastRuntimeMetadataContext(lastMetadataContext).locationMode,
+                lastMetadataContext: Self.normalizedFastRuntimeMetadataContext(lastMetadataContext),
                 draftRootPath: stableRoot.path,
                 metadataPath: metadataPath
             )

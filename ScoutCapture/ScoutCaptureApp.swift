@@ -1045,6 +1045,8 @@ struct SessionHubView: View {
                     initialCapturedCount: request.initialCapturedCount,
                     storageRoot: request.storageRoot,
                     isDraftResume: request.isDraftResume,
+                    initialLocationMode: request.initialLocationMode,
+                    initialMetadataContext: request.initialMetadataContext,
                     isDebugMode: false,
                     onDismiss: { closeResult in
                         if closeResult.errorMessage != nil {
@@ -3844,7 +3846,9 @@ struct SessionHubView: View {
             previewRequestedAt: Date(),
             initialCapturedCount: summary.photoCount,
             storageRoot: storageRoot,
-            isDraftResume: true
+            isDraftResume: true,
+            initialLocationMode: CameraChromeLocationMode(fastRuntimeRawValue: summary.lastMetadataContext?.locationMode ?? summary.lastLocationMode),
+            initialMetadataContext: summary.lastMetadataContext
         )
     }
 
@@ -4021,7 +4025,9 @@ struct SessionHubView: View {
                     previewRequestedAt: Date(),
                     initialCapturedCount: 0,
                     storageRoot: result.tempStorageRoot,
-                    isDraftResume: false
+                    isDraftResume: false,
+                    initialLocationMode: .exterior,
+                    initialMetadataContext: nil
                 )
             }
         }
@@ -12528,6 +12534,21 @@ private struct FastRuntimeCameraPreviewRequest: Identifiable {
     let initialCapturedCount: Int
     let storageRoot: URL?
     let isDraftResume: Bool
+    let initialLocationMode: CameraChromeLocationMode?
+    let initialMetadataContext: AppState.FastRuntimeCaptureMetadataContext?
+}
+
+private extension CameraChromeLocationMode {
+    init(fastRuntimeRawValue value: String?) {
+        switch value?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "interior":
+            self = .interior
+        case "exterior":
+            self = .exterior
+        default:
+            self = .exterior
+        }
+    }
 }
 
 private struct FastLaneDraftIssue: Identifiable {
@@ -12723,6 +12744,8 @@ private struct DebugFastRuntimePrototypeView: View {
                     initialCapturedCount: request.initialCapturedCount,
                     storageRoot: request.storageRoot,
                     isDraftResume: request.isDraftResume,
+                    initialLocationMode: request.initialLocationMode,
+                    initialMetadataContext: request.initialMetadataContext,
                     isDebugMode: true,
                     onDismiss: { closeResult in
                         previewCloseResult = closeResult
@@ -12788,7 +12811,9 @@ private struct DebugFastRuntimePrototypeView: View {
                     previewRequestedAt: Date(),
                     initialCapturedCount: 0,
                     storageRoot: prototypeResult.tempStorageRoot,
-                    isDraftResume: false
+                    isDraftResume: false,
+                    initialLocationMode: .exterior,
+                    initialMetadataContext: nil
                 )
                 isOpeningPrototypePreview = false
             }
@@ -12859,6 +12884,8 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
     let initialCapturedCount: Int
     let storageRoot: URL?
     let isDraftResume: Bool
+    let initialLocationMode: CameraChromeLocationMode?
+    let initialMetadataContext: AppState.FastRuntimeCaptureMetadataContext?
     let isDebugMode: Bool
     let onDismiss: (AppState.FastRuntimePrototypeCloseResult) -> Void
 
@@ -12883,9 +12910,24 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
     @State private var completeUploadResult: AppState.FastRuntimeCompleteUploadResult?
     @State private var reportPackageDryRunResult: AppState.FastRuntimeReportPackageDryRunResult?
     @State private var reportHandoffResult: AppState.FastRuntimeReportHandoffResult?
-    @State private var chromeLocationMode: CameraChromeLocationMode = .interior
+    @State private var chromeLocationMode: CameraChromeLocationMode = .exterior
+    @StateObject private var fastDetailTypesModel = FastLaneDetailTypesModel()
+    @StateObject private var locationManager = LocationManager()
+    @State private var fastMetadataContext: AppState.FastRuntimeCaptureMetadataContext = AppState.FastRuntimeCaptureMetadataContext(
+        locationMode: "Exterior",
+        building: "B1",
+        elevation: "North",
+        detailType: "Overview",
+        angleIndex: 4
+    )
+    @State private var isShowingFastMetadataPicker: Bool = false
+    @State private var didApplyInitialLocationMode: Bool = false
+    @State private var didLoadFastMetadataOptions: Bool = false
+    @State private var fastBuildingOptions: [String] = FastLaneMetadataOptions.defaultBuildingOptions
+    @State private var fastTradeOptions: [String] = FastLaneMetadataOptions.defaultTradeOptions
     @State private var lastValidDeviceOrientation: UIDeviceOrientation = .portrait
     @State private var glyphAngleDegrees: Double = 0
+    @State private var didWarmFastMetadataLists: Bool = false
     private let glyphRotationAnimation = Animation.interactiveSpring(
         response: 0.48,
         dampingFraction: 0.90,
@@ -12908,11 +12950,23 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
         .onAppear {
             UIDevice.current.beginGeneratingDeviceOrientationNotifications()
             refreshCameraChromeGlyphRotation()
+            loadFastLaneMetadataOptionsIfNeeded()
+            warmFastLaneMetadataListsIfNeeded()
+            if !didApplyInitialLocationMode {
+                let initialContext = AppState.normalizedFastRuntimeMetadataContext(
+                    initialMetadataContext,
+                    fallbackLocationMode: initialLocationMode?.rawValue,
+                    fallbackPosition: 4
+                )
+                applyFastLaneMetadataContext(initialContext)
+                didApplyInitialLocationMode = true
+            }
             fastStorageRoot = storageRoot ?? prototypeResult.tempStorageRoot
             if capturedCount < initialCapturedCount {
                 capturedCount = initialCapturedCount
             }
             shutterHaptic.prepare()
+            locationManager.start()
             camera.prepareForPreviewAsync()
             camera.ensurePreviewRunningAsync()
             if camera.isPreviewRunning, previewRunningAt == nil {
@@ -12928,6 +12982,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
         }
         .onDisappear {
             UIDevice.current.endGeneratingDeviceOrientationNotifications()
+            locationManager.stop()
         }
         .sheet(item: $completeDryRunResult) { result in
             FastRuntimeCompleteDryRunResultView(result: result)
@@ -12940,6 +12995,22 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
         }
         .sheet(item: $reportHandoffResult) { result in
             FastRuntimeReportHandoffResultView(result: result)
+        }
+        .sheet(isPresented: $isShowingFastMetadataPicker) {
+            FastLaneMetadataFilterSheet(
+                profile: fastLaneCaptureProfile,
+                context: fastMetadataContext,
+                buildingOptions: $fastBuildingOptions,
+                tradeOptions: $fastTradeOptions,
+                detailTypesModel: fastDetailTypesModel,
+                onCancel: {
+                    isShowingFastMetadataPicker = false
+                },
+                onConfirm: { updatedContext in
+                    applyFastLaneMetadataContext(updatedContext)
+                    isShowingFastMetadataPicker = false
+                }
+            )
         }
     }
 
@@ -12955,14 +13026,14 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             cloudStatus: fastLaneChromeCloudStatus,
             showsPunchlistBadge: context.sessionType == .punchlistVisit,
             metadata: CameraChromeMetadataModel(
-                building: "B1",
-                orientation: "N",
-                showsOrientationDot: true,
-                orientationDotColor: .white,
-                detailType: "Overview",
-                angle: "A4",
-                trade: nil,
-                isFilterAvailable: false
+                building: fastMetadataContext.building,
+                orientation: fastMetadataOrientationLabel(for: fastMetadataContext.elevation),
+                showsOrientationDot: chromeLocationMode == .exterior,
+                orientationDotColor: isFastLaneElevationHeadingAligned ? .green : .white,
+                detailType: fastLaneShortShotTypeLabel(fastMetadataContext.detailType),
+                angle: "A\(max(1, fastMetadataContext.angleIndex))",
+                trade: fastMetadataContext.trade,
+                isFilterAvailable: true
             ),
             previewStatusTitle: previewStatusTitle,
             previewStatusColor: previewStatusColor,
@@ -13020,7 +13091,9 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             onEndTapped: {
                 closePreview()
             },
-            onMetadataTapped: {},
+            onMetadataTapped: {
+                isShowingFastMetadataPicker = true
+            },
             onSideControlTapped: { _ in },
             onZoomTapped: { step in
                 camera.setZoomStep(step)
@@ -13038,7 +13111,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             },
             onThumbnailTapped: {},
             onLocationModeChanged: { mode in
-                chromeLocationMode = mode
+                applyFastLaneLocationMode(mode)
             },
             onEllipsisTapped: {
                 guard isDebugMode else { return }
@@ -13536,7 +13609,8 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                         data: data,
                         context: context,
                         capturedAt: imageCapturedAt,
-                        storageRootOverride: fastStorageRoot
+                        storageRootOverride: fastStorageRoot,
+                        metadataContext: fastMetadataContext
                     )
                     await MainActor.run {
                         lastCapture = FastRuntimePreviewCaptureTiming(
@@ -13549,6 +13623,10 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                         if saveResult.success {
                             capturedCount += 1
                             fastStorageRoot = saveResult.storageRoot ?? fastStorageRoot
+                            if let savedContext = saveResult.shot?.metadataContext {
+                                fastMetadataContext = savedContext.withAngleIndex(savedContext.angleIndex + 1)
+                                chromeLocationMode = CameraChromeLocationMode(fastRuntimeRawValue: savedContext.locationMode)
+                            }
                             captureErrorMessage = nil
                         } else {
                             captureErrorMessage = saveResult.errorMessage ?? "Capture save failed."
@@ -13745,6 +13823,143 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
         ))
     }
 
+    private func applyFastLaneLocationMode(_ mode: CameraChromeLocationMode) {
+        let current = fastMetadataContext
+        let nextElevation: String
+        switch mode {
+        case .interior:
+            nextElevation = "Interior"
+        case .exterior:
+            nextElevation = Self.exteriorElevationOptions.contains(current.elevation) ? current.elevation : "North"
+        }
+        let details = fastDetailTypesModel.names(for: mode, profile: fastLaneCaptureProfile)
+        let nextDetail = details.contains(current.detailType) ? current.detailType : (details.first ?? "Overview")
+        applyFastLaneMetadataContext(AppState.FastRuntimeCaptureMetadataContext(
+            locationMode: mode.rawValue,
+            building: current.building,
+            elevation: nextElevation,
+            detailType: nextDetail,
+            trade: current.trade,
+            angleIndex: current.angleIndex
+        ))
+    }
+
+    private func applyFastLaneMetadataContext(_ context: AppState.FastRuntimeCaptureMetadataContext) {
+        let normalized = AppState.normalizedFastRuntimeMetadataContext(context, fallbackPosition: 4)
+        let mode = CameraChromeLocationMode(fastRuntimeRawValue: normalized.locationMode)
+        let elevation = mode == .interior
+            ? "Interior"
+            : (Self.exteriorElevationOptions.contains(normalized.elevation) ? normalized.elevation : "North")
+        let details = fastDetailTypesModel.names(for: mode, profile: fastLaneCaptureProfile)
+        let detail = details.contains(normalized.detailType) ? normalized.detailType : (details.first ?? "Overview")
+        fastMetadataContext = AppState.FastRuntimeCaptureMetadataContext(
+            locationMode: mode.rawValue,
+            building: normalizedFastLaneBuilding(normalized.building),
+            elevation: elevation,
+            detailType: detail,
+            trade: FastLaneMetadataOptions.canonicalTradeLabel(normalized.trade, preferredOptions: fastTradeOptions),
+            angleIndex: normalized.angleIndex
+        )
+        chromeLocationMode = mode
+    }
+
+    private func fastMetadataOrientationLabel(for elevation: String) -> String {
+        switch elevation.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "interior":
+            return "Interior"
+        case "south":
+            return "S"
+        case "east":
+            return "E"
+        case "west":
+            return "W"
+        default:
+            return "N"
+        }
+    }
+
+    private var isFastLaneElevationHeadingAligned: Bool {
+        guard chromeLocationMode == .exterior else { return false }
+        guard let rawHeading = locationManager.headingDegrees else { return false }
+        let currentHeading = normalizedFastLaneHeadingForAlignment(rawHeading)
+        guard let ideal = idealFastLaneFacingHeading(for: CanonicalElevation.normalize(fastMetadataContext.elevation) ?? fastMetadataContext.elevation) else {
+            return false
+        }
+        return angularFastLaneDifferenceDegrees(currentHeading, ideal) <= 45
+    }
+
+    private func normalizedFastLaneHeadingForAlignment(_ heading: Double) -> Double {
+        let adjusted: Double
+        switch lastValidDeviceOrientation {
+        case .landscapeLeft:
+            adjusted = heading + 90
+        case .landscapeRight:
+            adjusted = heading - 90
+        case .portraitUpsideDown:
+            adjusted = heading + 180
+        default:
+            adjusted = heading
+        }
+        let wrapped = adjusted.truncatingRemainder(dividingBy: 360)
+        return wrapped >= 0 ? wrapped : wrapped + 360
+    }
+
+    private func idealFastLaneFacingHeading(for normalizedElevation: String) -> Double? {
+        switch normalizedElevation {
+        case "North":
+            return 180
+        case "South":
+            return 0
+        case "East":
+            return 270
+        case "West":
+            return 90
+        default:
+            return nil
+        }
+    }
+
+    private func angularFastLaneDifferenceDegrees(_ lhs: Double, _ rhs: Double) -> Double {
+        let a = lhs.truncatingRemainder(dividingBy: 360)
+        let b = rhs.truncatingRemainder(dividingBy: 360)
+        let diff = abs(a - b)
+        return min(diff, 360 - diff)
+    }
+
+    private func fastLaneShortShotTypeLabel(_ value: String) -> String {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.caseInsensitiveCompare("General Elevation") == .orderedSame {
+            return "General"
+        }
+        return trimmed.isEmpty ? "Shot" : trimmed
+    }
+
+    private func normalizedFastLaneBuilding(_ value: String) -> String {
+        let code = FastLaneMetadataOptions.buildingCode(from: value)
+        if fastBuildingOptions.contains(where: { FastLaneMetadataOptions.buildingCode(from: $0) == code }) {
+            return code
+        }
+        return fastBuildingOptions.first.map(FastLaneMetadataOptions.buildingCode(from:)) ?? "B1"
+    }
+
+    private func loadFastLaneMetadataOptionsIfNeeded() {
+        guard !didLoadFastMetadataOptions else { return }
+        didLoadFastMetadataOptions = true
+        fastBuildingOptions = FastLaneMetadataOptions.loadBuildingOptions()
+        fastTradeOptions = FastLaneMetadataOptions.loadTradeOptions(selectedTrade: fastMetadataContext.trade)
+    }
+
+    private func warmFastLaneMetadataListsIfNeeded() {
+        guard !didWarmFastMetadataLists else { return }
+        didWarmFastMetadataLists = true
+        _ = fastDetailTypesModel.names(for: .interior, profile: fastLaneCaptureProfile)
+        _ = fastDetailTypesModel.names(for: .exterior, profile: fastLaneCaptureProfile)
+        _ = FastLaneMetadataOptions.canonicalTradeOptions(fastTradeOptions, selectedTrade: fastMetadataContext.trade)
+        _ = fastBuildingOptions.map(FastLaneMetadataOptions.buildingDisplayName(for:))
+    }
+
+    private static let exteriorElevationOptions = ["North", "South", "East", "West"]
+
     private func closePreview() {
         guard !isClosing else { return }
         isClosing = true
@@ -13775,11 +13990,1146 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             let closeResult = await appState.closeFastRuntimePrototypePreview(
                 context: context,
                 tempStorageRoot: fastStorageRoot ?? prototypeResult.tempStorageRoot,
-                capturedPhotoCount: capturedCount
+                capturedPhotoCount: capturedCount,
+                lastMetadataContext: fastMetadataContext
             )
             await MainActor.run {
                 releaseFinishedAt = Date()
                 onDismiss(closeResult)
+            }
+        }
+    }
+}
+
+private enum FastLaneMetadataOptions {
+    nonisolated static let buildingOptionsDefaultsKey = "scout.capture.building.options.v1"
+    nonisolated static let tradeOptionsDefaultsKey = "scout.capture.trade.options.v1"
+    nonisolated static let defaultBuildingOptions = ["B1", "B2", "B3", "B4", "B5", "Add"]
+    nonisolated static let defaultTradeOptions = [
+        "Masonry", "Roofing", "Siding", "Windows", "Doors", "Stucco", "Foundation",
+        "Framing", "Electrical", "Plumbing", "HVAC", "Landscaping", "Interior Finish"
+    ]
+
+    nonisolated static func buildingCode(from option: String) -> String {
+        let trimmed = option.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return "" }
+        let rawCode: String
+        if let dashRange = trimmed.range(of: "-") {
+            rawCode = String(trimmed[..<dashRange.lowerBound]).trimmingCharacters(in: .whitespacesAndNewlines)
+        } else {
+            rawCode = trimmed
+        }
+        if rawCode.compare("add", options: .caseInsensitive) == .orderedSame {
+            return "Add"
+        }
+        return rawCode.uppercased()
+    }
+
+    nonisolated static func buildingDisplayName(for option: String) -> String {
+        let trimmed = option.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.contains(" - ") { return trimmed }
+        let code = buildingCode(from: trimmed)
+        if code == "Add" { return "Add - Additional" }
+        if code.hasPrefix("B") {
+            let suffix = code.dropFirst()
+            if !suffix.isEmpty, suffix.allSatisfy(\.isNumber) {
+                return "\(code) - Building \(suffix)"
+            }
+        }
+        return code
+    }
+
+    static func loadBuildingOptions() -> [String] {
+        guard let data = UserDefaults.standard.data(forKey: buildingOptionsDefaultsKey),
+              let decoded = try? JSONDecoder().decode([String].self, from: data) else {
+            return defaultBuildingOptions
+        }
+        let cleaned = decoded.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
+        return cleaned.isEmpty ? defaultBuildingOptions : cleaned
+    }
+
+    static func persistBuildingOptions(_ options: [String], selectedBuilding: inout String) {
+        let cleaned = options.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
+        let final = cleaned.isEmpty ? defaultBuildingOptions : cleaned
+        let selectedCode = buildingCode(from: selectedBuilding)
+        selectedBuilding = final.contains(where: { buildingCode(from: $0) == selectedCode })
+            ? selectedCode
+            : buildingCode(from: final[0])
+        if let data = try? JSONEncoder().encode(final) {
+            UserDefaults.standard.set(data, forKey: buildingOptionsDefaultsKey)
+        }
+    }
+
+    nonisolated static func tradeKey(_ value: String?) -> String {
+        (value ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            .lowercased()
+    }
+
+    nonisolated static func canonicalTradeLabel(_ value: String?, preferredOptions: [String] = []) -> String {
+        let trimmed = (value ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+        let key = tradeKey(trimmed)
+        guard !key.isEmpty else { return "" }
+        if let builtIn = defaultTradeOptions.first(where: { tradeKey($0) == key }) { return builtIn }
+        if let preferred = preferredOptions.first(where: { tradeKey($0) == key }) {
+            return preferred.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        return trimmed
+    }
+
+    nonisolated static func canonicalTradeOptions(_ values: [String], selectedTrade: String? = nil) -> [String] {
+        var output: [String] = []
+        var seen: Set<String> = []
+        func append(_ raw: String?) {
+            let canonical = canonicalTradeLabel(raw, preferredOptions: output)
+            let key = tradeKey(canonical)
+            guard !key.isEmpty, seen.insert(key).inserted else { return }
+            output.append(canonical)
+        }
+        values.forEach { append($0) }
+        append(selectedTrade)
+        return output
+    }
+
+    static func loadTradeOptions(selectedTrade: String?) -> [String] {
+        guard let data = UserDefaults.standard.data(forKey: tradeOptionsDefaultsKey),
+              let decoded = try? JSONDecoder().decode([String].self, from: data) else {
+            return canonicalTradeOptions(defaultTradeOptions, selectedTrade: selectedTrade)
+        }
+        let cleaned = canonicalTradeOptions(decoded, selectedTrade: selectedTrade)
+        return cleaned.isEmpty ? defaultTradeOptions : cleaned
+    }
+
+    static func persistTradeOptions(_ options: inout [String], selectedTrade: inout String) {
+        let cleaned = canonicalTradeOptions(options, selectedTrade: selectedTrade)
+        options = cleaned.isEmpty ? defaultTradeOptions : cleaned
+        selectedTrade = canonicalTradeLabel(selectedTrade, preferredOptions: options)
+        if !selectedTrade.isEmpty,
+           options.contains(where: { tradeKey($0) == tradeKey(selectedTrade) }) == false {
+            selectedTrade = ""
+        }
+        if let data = try? JSONEncoder().encode(options) {
+            UserDefaults.standard.set(data, forKey: tradeOptionsDefaultsKey)
+        }
+    }
+}
+
+private final class FastLaneDetailTypesModel: ObservableObject {
+    struct DetailTypeItem: Identifiable, Codable, Equatable {
+        var id: UUID = UUID()
+        var name: String
+    }
+
+    @Published var residentialInteriorTypes: [DetailTypeItem] = []
+    @Published var residentialExteriorTypes: [DetailTypeItem] = []
+    @Published var commercialInteriorTypes: [DetailTypeItem] = []
+    @Published var commercialExteriorTypes: [DetailTypeItem] = []
+    @Published var selectedResidentialInterior: String = ""
+    @Published var selectedResidentialExterior: String = ""
+    @Published var selectedCommercialInterior: String = ""
+    @Published var selectedCommercialExterior: String = ""
+
+    private let residentialInteriorTypesKey = "scout.detailTypes.residential.interior.list.v1"
+    private let residentialExteriorTypesKey = "scout.detailTypes.residential.exterior.list.v1"
+    private let commercialInteriorTypesKey = "scout.detailTypes.commercial.interior.list.v1"
+    private let commercialExteriorTypesKey = "scout.detailTypes.commercial.exterior.list.v1"
+    private let selectedResidentialInteriorKey = "scout.detailTypes.residential.interior.selected.v1"
+    private let selectedResidentialExteriorKey = "scout.detailTypes.residential.exterior.selected.v1"
+    private let selectedCommercialInteriorKey = "scout.detailTypes.commercial.interior.selected.v1"
+    private let selectedCommercialExteriorKey = "scout.detailTypes.commercial.exterior.selected.v1"
+    private let legacyResidentialInteriorTypesKey = "scout.detailTypes.interior.list.v4"
+    private let legacyResidentialExteriorTypesKey = "scout.detailTypes.exterior.list.v4"
+    private let legacySelectedResidentialInteriorKey = "scout.detailTypes.interior.selected.v4"
+    private let legacySelectedResidentialExteriorKey = "scout.detailTypes.exterior.selected.v4"
+    private let legacyInteriorTypesKey = "scout.detailTypes.interior.list.v2"
+    private let legacyExteriorTypesKey = "scout.detailTypes.exterior.list.v2"
+    private let legacySelectedInteriorKey = "scout.detailTypes.interior.selected.v2"
+    private let legacySelectedExteriorKey = "scout.detailTypes.exterior.selected.v2"
+    private var pendingPersist: DispatchWorkItem?
+
+    private let defaultResidentialInteriorTypes = [
+        "Overview", "Entry / Foyer", "Living Room", "Kitchen", "Dining Area", "Primary Bedroom",
+        "Bedroom 2", "Bedroom 3", "Bedroom 4", "Bedroom 5", "Bathroom", "Hallway",
+        "Stairs", "Laundry", "Garage", "Mechanical / HVAC", "Storage"
+    ]
+    private let defaultResidentialExteriorTypes = [
+        "Overview", "Elevation", "Entry / Porch", "Window", "Roofline", "Cladding / Siding",
+        "Driveway / Garage", "Backyard / Patio", "Landscaping", "Fence / Gate", "Utility / HVAC",
+        "Pool / Outdoor Amenities", "Sidewalk", "Exterior Stairs / Ramp", "Downspout", "Chimney", "Foundation"
+    ]
+    private let defaultCommercialInteriorTypes = [
+        "Overview", "Lobby / Reception", "Corridor", "Stairs", "Elevator", "Office",
+        "Conference Room", "Open Workspace", "Break Room / Kitchenette", "Restroom", "Storage",
+        "Electrical Room", "Mechanical Room", "IT / Server Room", "Janitorial / Service Room",
+        "Retail Floor", "Suite Entry", "Leasing / Amenity Area"
+    ]
+    private let defaultCommercialExteriorTypes = [
+        "Overview", "Elevation", "Entry", "Storefront", "Loading Dock", "Parking Area",
+        "Site Circulation", "Signage", "Window / Glazing", "Roofline", "Cladding / Facade",
+        "Canopy / Awning", "Exterior Stairs / Ramp", "Trash / Service Area", "Fence / Gate",
+        "Utility / HVAC", "Mechanical Equipment", "Landscape / Hardscape", "Downspout", "Foundation"
+    ]
+
+    init() {
+        load()
+        normalizeDefaultsIfNeeded()
+    }
+
+    func items(for mode: CameraChromeLocationMode, profile: CaptureProfile) -> [DetailTypeItem] {
+        switch (profile, mode) {
+        case (.residential, .interior): return residentialInteriorTypes
+        case (.residential, .exterior): return residentialExteriorTypes
+        case (.commercial, .interior): return commercialInteriorTypes
+        case (.commercial, .exterior): return commercialExteriorTypes
+        }
+    }
+
+    func names(for mode: CameraChromeLocationMode, profile: CaptureProfile) -> [String] {
+        items(for: mode, profile: profile).map(\.name).map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
+    }
+
+    func selected(for mode: CameraChromeLocationMode, profile: CaptureProfile) -> String {
+        switch (profile, mode) {
+        case (.residential, .interior): return selectedResidentialInterior
+        case (.residential, .exterior): return selectedResidentialExterior
+        case (.commercial, .interior): return selectedCommercialInterior
+        case (.commercial, .exterior): return selectedCommercialExterior
+        }
+    }
+
+    func setSelected(_ value: String, for mode: CameraChromeLocationMode, profile: CaptureProfile) {
+        switch (profile, mode) {
+        case (.residential, .interior): selectedResidentialInterior = value
+        case (.residential, .exterior): selectedResidentialExterior = value
+        case (.commercial, .interior): selectedCommercialInterior = value
+        case (.commercial, .exterior): selectedCommercialExterior = value
+        }
+        persistSelected()
+    }
+
+    @discardableResult
+    func insertBlankItem(for mode: CameraChromeLocationMode, profile: CaptureProfile) -> UUID {
+        let newItem = DetailTypeItem(name: "")
+        switch (profile, mode) {
+        case (.residential, .interior): residentialInteriorTypes.append(newItem)
+        case (.residential, .exterior): residentialExteriorTypes.append(newItem)
+        case (.commercial, .interior): commercialInteriorTypes.append(newItem)
+        case (.commercial, .exterior): commercialExteriorTypes.append(newItem)
+        }
+        persistAll()
+        return newItem.id
+    }
+
+    func updateItem(_ value: String, id: UUID, for mode: CameraChromeLocationMode, profile: CaptureProfile) {
+        let cleaned = value.trimmingCharacters(in: .newlines)
+        switch (profile, mode) {
+        case (.residential, .interior):
+            guard let idx = residentialInteriorTypes.firstIndex(where: { $0.id == id }) else { return }
+            residentialInteriorTypes[idx].name = cleaned
+        case (.residential, .exterior):
+            guard let idx = residentialExteriorTypes.firstIndex(where: { $0.id == id }) else { return }
+            residentialExteriorTypes[idx].name = cleaned
+        case (.commercial, .interior):
+            guard let idx = commercialInteriorTypes.firstIndex(where: { $0.id == id }) else { return }
+            commercialInteriorTypes[idx].name = cleaned
+        case (.commercial, .exterior):
+            guard let idx = commercialExteriorTypes.firstIndex(where: { $0.id == id }) else { return }
+            commercialExteriorTypes[idx].name = cleaned
+        }
+        normalizeDefaultsIfNeeded()
+        persistAll()
+    }
+
+    func delete(at offsets: IndexSet, for mode: CameraChromeLocationMode, profile: CaptureProfile) {
+        switch (profile, mode) {
+        case (.residential, .interior):
+            let deleting = offsets.compactMap { residentialInteriorTypes.indices.contains($0) ? residentialInteriorTypes[$0].name : nil }
+            residentialInteriorTypes.remove(atOffsets: offsets)
+            if deleting.contains(selectedResidentialInterior) { selectedResidentialInterior = residentialInteriorTypes.first?.name ?? "" }
+        case (.residential, .exterior):
+            let deleting = offsets.compactMap { residentialExteriorTypes.indices.contains($0) ? residentialExteriorTypes[$0].name : nil }
+            residentialExteriorTypes.remove(atOffsets: offsets)
+            if deleting.contains(selectedResidentialExterior) { selectedResidentialExterior = residentialExteriorTypes.first?.name ?? "" }
+        case (.commercial, .interior):
+            let deleting = offsets.compactMap { commercialInteriorTypes.indices.contains($0) ? commercialInteriorTypes[$0].name : nil }
+            commercialInteriorTypes.remove(atOffsets: offsets)
+            if deleting.contains(selectedCommercialInterior) { selectedCommercialInterior = commercialInteriorTypes.first?.name ?? "" }
+        case (.commercial, .exterior):
+            let deleting = offsets.compactMap { commercialExteriorTypes.indices.contains($0) ? commercialExteriorTypes[$0].name : nil }
+            commercialExteriorTypes.remove(atOffsets: offsets)
+            if deleting.contains(selectedCommercialExterior) { selectedCommercialExterior = commercialExteriorTypes.first?.name ?? "" }
+        }
+        normalizeDefaultsIfNeeded()
+        persistAll()
+    }
+
+    func move(from source: IndexSet, to destination: Int, for mode: CameraChromeLocationMode, profile: CaptureProfile) {
+        switch (profile, mode) {
+        case (.residential, .interior): residentialInteriorTypes.move(fromOffsets: source, toOffset: destination)
+        case (.residential, .exterior): residentialExteriorTypes.move(fromOffsets: source, toOffset: destination)
+        case (.commercial, .interior): commercialInteriorTypes.move(fromOffsets: source, toOffset: destination)
+        case (.commercial, .exterior): commercialExteriorTypes.move(fromOffsets: source, toOffset: destination)
+        }
+        schedulePersist()
+    }
+
+    private func schedulePersist() {
+        pendingPersist?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.normalizeDefaultsIfNeeded()
+            self.persistAll()
+        }
+        pendingPersist = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.22, execute: work)
+    }
+
+    private func load() {
+        residentialInteriorTypes = loadItems(key: residentialInteriorTypesKey, legacyKeys: [legacyResidentialInteriorTypesKey, legacyInteriorTypesKey])
+        residentialExteriorTypes = loadItems(key: residentialExteriorTypesKey, legacyKeys: [legacyResidentialExteriorTypesKey, legacyExteriorTypesKey])
+        commercialInteriorTypes = loadItems(key: commercialInteriorTypesKey, legacyKeys: [])
+        commercialExteriorTypes = loadItems(key: commercialExteriorTypesKey, legacyKeys: [])
+        selectedResidentialInterior = UserDefaults.standard.string(forKey: selectedResidentialInteriorKey)
+            ?? UserDefaults.standard.string(forKey: legacySelectedResidentialInteriorKey)
+            ?? UserDefaults.standard.string(forKey: legacySelectedInteriorKey)
+            ?? ""
+        selectedResidentialExterior = UserDefaults.standard.string(forKey: selectedResidentialExteriorKey)
+            ?? UserDefaults.standard.string(forKey: legacySelectedResidentialExteriorKey)
+            ?? UserDefaults.standard.string(forKey: legacySelectedExteriorKey)
+            ?? ""
+        selectedCommercialInterior = UserDefaults.standard.string(forKey: selectedCommercialInteriorKey) ?? ""
+        selectedCommercialExterior = UserDefaults.standard.string(forKey: selectedCommercialExteriorKey) ?? ""
+    }
+
+    private func persistAll() {
+        saveItems(residentialInteriorTypes, key: residentialInteriorTypesKey)
+        saveItems(residentialExteriorTypes, key: residentialExteriorTypesKey)
+        saveItems(commercialInteriorTypes, key: commercialInteriorTypesKey)
+        saveItems(commercialExteriorTypes, key: commercialExteriorTypesKey)
+        persistSelected()
+    }
+
+    private func persistSelected() {
+        UserDefaults.standard.set(selectedResidentialInterior, forKey: selectedResidentialInteriorKey)
+        UserDefaults.standard.set(selectedResidentialExterior, forKey: selectedResidentialExteriorKey)
+        UserDefaults.standard.set(selectedCommercialInterior, forKey: selectedCommercialInteriorKey)
+        UserDefaults.standard.set(selectedCommercialExterior, forKey: selectedCommercialExteriorKey)
+    }
+
+    private func normalizeDefaultsIfNeeded() {
+        if residentialInteriorTypes.isEmpty { residentialInteriorTypes = defaultResidentialInteriorTypes.map { DetailTypeItem(name: $0) } }
+        if residentialExteriorTypes.isEmpty { residentialExteriorTypes = defaultResidentialExteriorTypes.map { DetailTypeItem(name: $0) } }
+        if commercialInteriorTypes.isEmpty { commercialInteriorTypes = defaultCommercialInteriorTypes.map { DetailTypeItem(name: $0) } }
+        if commercialExteriorTypes.isEmpty { commercialExteriorTypes = defaultCommercialExteriorTypes.map { DetailTypeItem(name: $0) } }
+        if selectedResidentialInterior.isEmpty { selectedResidentialInterior = firstNonEmpty(from: residentialInteriorTypes) ?? "" }
+        if selectedResidentialExterior.isEmpty { selectedResidentialExterior = firstNonEmpty(from: residentialExteriorTypes) ?? "" }
+        if selectedCommercialInterior.isEmpty { selectedCommercialInterior = firstNonEmpty(from: commercialInteriorTypes) ?? "" }
+        if selectedCommercialExterior.isEmpty { selectedCommercialExterior = firstNonEmpty(from: commercialExteriorTypes) ?? "" }
+        if !residentialInteriorTypes.contains(where: { $0.name == selectedResidentialInterior }) { selectedResidentialInterior = firstNonEmpty(from: residentialInteriorTypes) ?? "" }
+        if !residentialExteriorTypes.contains(where: { $0.name == selectedResidentialExterior }) { selectedResidentialExterior = firstNonEmpty(from: residentialExteriorTypes) ?? "" }
+        if !commercialInteriorTypes.contains(where: { $0.name == selectedCommercialInterior }) { selectedCommercialInterior = firstNonEmpty(from: commercialInteriorTypes) ?? "" }
+        if !commercialExteriorTypes.contains(where: { $0.name == selectedCommercialExterior }) { selectedCommercialExterior = firstNonEmpty(from: commercialExteriorTypes) ?? "" }
+    }
+
+    private func firstNonEmpty(from list: [DetailTypeItem]) -> String? {
+        list.first(where: { !$0.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty })?.name
+    }
+
+    private func loadItems(key: String, legacyKeys: [String]) -> [DetailTypeItem] {
+        if let data = UserDefaults.standard.data(forKey: key),
+           let decoded = try? JSONDecoder().decode([DetailTypeItem].self, from: data) {
+            return decoded
+        }
+        for legacyKey in legacyKeys {
+            if let legacyData = UserDefaults.standard.data(forKey: legacyKey),
+               let decodedItems = try? JSONDecoder().decode([DetailTypeItem].self, from: legacyData) {
+                return decodedItems
+            }
+            if let legacyData = UserDefaults.standard.data(forKey: legacyKey),
+               let decodedStrings = try? JSONDecoder().decode([String].self, from: legacyData) {
+                return decodedStrings.map { DetailTypeItem(name: $0) }
+            }
+        }
+        return []
+    }
+
+    private func saveItems(_ items: [DetailTypeItem], key: String) {
+        guard let data = try? JSONEncoder().encode(items) else { return }
+        UserDefaults.standard.set(data, forKey: key)
+    }
+}
+
+private struct FastLaneSheetControlTheme {
+    let fill: Color
+    let stroke: Color
+    let label: Color
+
+    static func forScheme(_ scheme: ColorScheme) -> FastLaneSheetControlTheme {
+        if scheme == .light {
+            return FastLaneSheetControlTheme(fill: Color.white.opacity(0.90), stroke: Color.black.opacity(0.14), label: Color.black.opacity(0.88))
+        }
+        return FastLaneSheetControlTheme(fill: Color.black.opacity(0.55), stroke: Color.white.opacity(0.28), label: Color.white)
+    }
+}
+
+private enum FastLaneMetadataSelectionKind: Hashable {
+    case building
+    case elevation
+    case detailType
+    case trade
+}
+
+private enum FastLanePendingManageDestination {
+    case buildings
+    case interior
+    case exterior
+    case trades
+}
+
+private struct FastLaneMetadataSelectionContext: Identifiable, Hashable {
+    let id = UUID()
+    let kind: FastLaneMetadataSelectionKind
+    let title: String
+}
+
+private struct FastLaneMetadataFilterSheet: View {
+    let profile: CaptureProfile
+    let context: AppState.FastRuntimeCaptureMetadataContext
+    @Binding var buildingOptions: [String]
+    @Binding var tradeOptions: [String]
+    @ObservedObject var detailTypesModel: FastLaneDetailTypesModel
+    let onCancel: () -> Void
+    let onConfirm: (AppState.FastRuntimeCaptureMetadataContext) -> Void
+
+    @State private var selectedBuilding: String
+    @State private var selectedElevation: String
+    @State private var selectedDetailType: String
+    @State private var selectedTrade: String
+    @State private var selectionContext: FastLaneMetadataSelectionContext?
+    @State private var showManageBuildingsSheet = false
+    @State private var showManageTradesSheet = false
+    @State private var manageDetailMode: CameraChromeLocationMode?
+    @Environment(\.colorScheme) private var colorScheme
+    private var sheetTheme: FastLaneSheetControlTheme { .forScheme(colorScheme) }
+
+    init(
+        profile: CaptureProfile,
+        context: AppState.FastRuntimeCaptureMetadataContext,
+        buildingOptions: Binding<[String]>,
+        tradeOptions: Binding<[String]>,
+        detailTypesModel: FastLaneDetailTypesModel,
+        onCancel: @escaping () -> Void,
+        onConfirm: @escaping (AppState.FastRuntimeCaptureMetadataContext) -> Void
+    ) {
+        let normalized = AppState.normalizedFastRuntimeMetadataContext(context, fallbackPosition: 4)
+        self.profile = profile
+        self.context = normalized
+        self._buildingOptions = buildingOptions
+        self._tradeOptions = tradeOptions
+        self.detailTypesModel = detailTypesModel
+        self.onCancel = onCancel
+        self.onConfirm = onConfirm
+        _selectedBuilding = State(initialValue: normalized.building)
+        _selectedElevation = State(initialValue: normalized.elevation)
+        _selectedDetailType = State(initialValue: normalized.detailType)
+        _selectedTrade = State(initialValue: FastLaneMetadataOptions.canonicalTradeLabel(normalized.trade, preferredOptions: tradeOptions.wrappedValue))
+    }
+
+    private var selectedLocationMode: CameraChromeLocationMode {
+        selectedElevation.trimmingCharacters(in: .whitespacesAndNewlines).caseInsensitiveCompare("Interior") == .orderedSame
+            ? .interior
+            : .exterior
+    }
+
+    private var tradePickerOptions: [String] {
+        FastLaneMetadataOptions.canonicalTradeOptions(tradeOptions, selectedTrade: selectedTrade)
+    }
+
+    private var buildingSelectionLabel: String {
+        guard let option = buildingOptions.first(where: { FastLaneMetadataOptions.buildingCode(from: $0) == selectedBuilding }) else {
+            return selectedBuilding.isEmpty ? "Select" : selectedBuilding
+        }
+        return FastLaneMetadataOptions.buildingDisplayName(for: option)
+    }
+
+    private var detailTypeSelectionLabel: String {
+        let trimmed = selectedDetailType.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.caseInsensitiveCompare("General Elevation") == .orderedSame { return "General" }
+        return trimmed.isEmpty ? "Select" : trimmed
+    }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("Metadata") {
+                    metadataSelectorRow(
+                        title: "Building",
+                        value: buildingSelectionLabel,
+                        context: FastLaneMetadataSelectionContext(kind: .building, title: "Building"),
+                        manageDestination: .buildings
+                    )
+
+                    if selectedLocationMode == .exterior {
+                        metadataSelectorRow(
+                            title: "Elevation",
+                            value: selectedElevation,
+                            context: FastLaneMetadataSelectionContext(kind: .elevation, title: "Elevation"),
+                            titleColor: .white
+                        )
+                    }
+
+                    metadataSelectorRow(
+                        title: "Detail Type",
+                        value: detailTypeSelectionLabel,
+                        context: FastLaneMetadataSelectionContext(
+                            kind: .detailType,
+                            title: selectedLocationMode == .interior ? "Interior Detail Type" : "Exterior Detail Type"
+                        ),
+                        titleColor: .blue,
+                        manageDestination: selectedLocationMode == .interior ? .interior : .exterior
+                    )
+
+                    metadataSelectorRow(
+                        title: "Trade",
+                        value: selectedTrade.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "None" : selectedTrade,
+                        context: FastLaneMetadataSelectionContext(kind: .trade, title: "Trade"),
+                        titleColor: .blue,
+                        manageDestination: .trades
+                    )
+                }
+            }
+            .navigationDestination(item: $selectionContext) { context in
+                FastLaneMetadataSelectionListView(
+                    title: context.title,
+                    options: selectionOptions(for: context.kind),
+                    selectedValue: currentSelectionValue(for: context.kind),
+                    onSelect: { value in applySelection(value, for: context.kind) }
+                )
+            }
+            .toolbar(.hidden, for: .navigationBar)
+            .safeAreaInset(edge: .top, spacing: 0) {
+                HStack(spacing: 10) {
+                    Color.clear.frame(width: 78, height: 42)
+                    Spacer(minLength: 0)
+                    Text("Filter")
+                        .font(.system(size: 18, weight: .medium))
+                        .foregroundColor(.primary)
+                        .lineLimit(1)
+                    Spacer(minLength: 0)
+                    Button {
+                        onConfirm(AppState.FastRuntimeCaptureMetadataContext(
+                            locationMode: selectedLocationMode.rawValue,
+                            building: selectedBuilding,
+                            elevation: selectedLocationMode == .interior ? "Interior" : selectedElevation,
+                            detailType: selectedDetailType,
+                            trade: selectedTrade,
+                            angleIndex: context.angleIndex
+                        ))
+                    } label: {
+                        Text("Done")
+                            .font(.system(size: 17, weight: .medium))
+                            .foregroundColor(sheetTheme.label)
+                            .frame(minHeight: 42)
+                            .padding(.horizontal, 14)
+                            .background(sheetTheme.fill)
+                            .clipShape(Capsule())
+                            .overlay(Capsule().stroke(sheetTheme.stroke, lineWidth: 1))
+                    }
+                    .buttonStyle(.plain)
+                }
+                .padding(.horizontal, 14)
+                .padding(.top, 14)
+                .padding(.bottom, 4)
+                .background(Color.clear)
+            }
+            .sheet(isPresented: $showManageBuildingsSheet, onDismiss: normalizeBuildingSelection) {
+                FastLaneManageBuildingsSheet(
+                    options: $buildingOptions,
+                    selectedBuilding: $selectedBuilding,
+                    onClose: { showManageBuildingsSheet = false }
+                )
+            }
+            .sheet(item: $manageDetailMode, onDismiss: normalizeDetailSelection) { mode in
+                FastLaneManageDetailTypesView(mode: mode, profile: profile, model: detailTypesModel)
+            }
+            .sheet(isPresented: $showManageTradesSheet, onDismiss: normalizeTradeOptions) {
+                FastLaneManageTradesSheet(
+                    options: $tradeOptions,
+                    selectedTrade: $selectedTrade,
+                    onClose: { showManageTradesSheet = false }
+                )
+            }
+            .onAppear {
+                normalizeBuildingSelection()
+                normalizeDetailSelection()
+                normalizeTradeOptions()
+            }
+            .onChange(of: selectedElevation) { _, _ in normalizeDetailSelection() }
+            .onChange(of: buildingOptions) { _, _ in normalizeBuildingSelection() }
+        }
+    }
+
+    @ViewBuilder
+    private func metadataFieldLabel(
+        _ title: String,
+        titleColor: Color = .primary,
+        manageDestination: FastLanePendingManageDestination? = nil
+    ) -> some View {
+        HStack(spacing: 6) {
+            Text(title).foregroundColor(titleColor)
+            if let manageDestination {
+                Button {
+                    switch manageDestination {
+                    case .buildings:
+                        showManageBuildingsSheet = true
+                    case .interior:
+                        manageDetailMode = .interior
+                    case .exterior:
+                        manageDetailMode = .exterior
+                    case .trades:
+                        showManageTradesSheet = true
+                    }
+                } label: {
+                    Image(systemName: "ellipsis.circle")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundColor(.white.opacity(0.86))
+                }
+                .buttonStyle(.plain)
+                .contentShape(Circle())
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func metadataSelectorRow(
+        title: String,
+        value: String,
+        context: FastLaneMetadataSelectionContext,
+        titleColor: Color = .primary,
+        manageDestination: FastLanePendingManageDestination? = nil
+    ) -> some View {
+        HStack(spacing: 12) {
+            metadataFieldLabel(title, titleColor: titleColor, manageDestination: manageDestination)
+            Spacer(minLength: 0)
+            Button {
+                selectionContext = context
+            } label: {
+                HStack(spacing: 8) {
+                    Text(value)
+                        .foregroundColor(.secondary)
+                        .lineLimit(1)
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundColor(.secondary.opacity(0.8))
+                }
+            }
+            .buttonStyle(.plain)
+        }
+    }
+
+    private func selectionOptions(for kind: FastLaneMetadataSelectionKind) -> [(title: String, value: String)] {
+        switch kind {
+        case .building:
+            return buildingOptions.map { option in
+                (FastLaneMetadataOptions.buildingDisplayName(for: option), FastLaneMetadataOptions.buildingCode(from: option))
+            }
+        case .elevation:
+            return Self.exteriorElevationOptions.map { ($0, $0) }
+        case .detailType:
+            return detailTypesModel.items(for: selectedLocationMode, profile: profile).compactMap { item in
+                let name = item.name.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !name.isEmpty else { return nil }
+                return (name.caseInsensitiveCompare("General Elevation") == .orderedSame ? "General" : name, name)
+            }
+        case .trade:
+            return [("None", "")] + tradePickerOptions.map { ($0, $0) }
+        }
+    }
+
+    private func currentSelectionValue(for kind: FastLaneMetadataSelectionKind) -> String {
+        switch kind {
+        case .building: return selectedBuilding
+        case .elevation: return selectedElevation
+        case .detailType: return selectedDetailType
+        case .trade: return selectedTrade
+        }
+    }
+
+    private func applySelection(_ value: String, for kind: FastLaneMetadataSelectionKind) {
+        switch kind {
+        case .building:
+            selectedBuilding = value
+        case .elevation:
+            selectedElevation = value
+        case .detailType:
+            selectedDetailType = value
+            detailTypesModel.setSelected(value, for: selectedLocationMode, profile: profile)
+        case .trade:
+            selectedTrade = FastLaneMetadataOptions.canonicalTradeLabel(value, preferredOptions: tradeOptions)
+        }
+    }
+
+    private func normalizeBuildingSelection() {
+        FastLaneMetadataOptions.persistBuildingOptions(buildingOptions, selectedBuilding: &selectedBuilding)
+        let code = FastLaneMetadataOptions.buildingCode(from: selectedBuilding)
+        selectedBuilding = buildingOptions.contains(where: { FastLaneMetadataOptions.buildingCode(from: $0) == code })
+            ? code
+            : (buildingOptions.first.map(FastLaneMetadataOptions.buildingCode(from:)) ?? "B1")
+    }
+
+    private func normalizeTradeOptions() {
+        FastLaneMetadataOptions.persistTradeOptions(&tradeOptions, selectedTrade: &selectedTrade)
+    }
+
+    private func normalizeDetailSelection() {
+        let options = detailTypesModel.names(for: selectedLocationMode, profile: profile)
+        guard !options.contains(selectedDetailType) else { return }
+        selectedDetailType = options.first ?? "Overview"
+        detailTypesModel.setSelected(selectedDetailType, for: selectedLocationMode, profile: profile)
+    }
+
+    private static let exteriorElevationOptions = ["North", "South", "East", "West"]
+}
+
+private struct FastLaneMetadataSelectionListView: View {
+    let title: String
+    let options: [(title: String, value: String)]
+    let selectedValue: String
+    let onSelect: (String) -> Void
+    @Environment(\.dismiss) private var dismiss
+    @Environment(\.colorScheme) private var colorScheme
+    private var theme: FastLaneSheetControlTheme { .forScheme(colorScheme) }
+
+    var body: some View {
+        List(options, id: \.value) { option in
+            Button {
+                dismiss()
+                DispatchQueue.main.async { onSelect(option.value) }
+            } label: {
+                HStack(spacing: 10) {
+                    Text(option.title)
+                        .font(.system(size: 16, weight: .medium))
+                        .foregroundColor(.primary)
+                        .lineLimit(2)
+                    Spacer(minLength: 0)
+                    if selectedValue == option.value {
+                        Image(systemName: "checkmark")
+                            .font(.system(size: 14, weight: .medium))
+                            .foregroundColor(.blue)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+        }
+        .listStyle(.insetGrouped)
+        .toolbar(.hidden, for: .navigationBar)
+        .safeAreaInset(edge: .top, spacing: 0) {
+            HStack(spacing: 12) {
+                Button { dismiss() } label: {
+                    Image(systemName: "chevron.left")
+                        .font(.system(size: 22, weight: .semibold))
+                        .foregroundColor(theme.label)
+                        .frame(width: 44, height: 44)
+                        .background(theme.fill)
+                        .clipShape(Circle())
+                        .overlay(Circle().stroke(theme.stroke, lineWidth: 1))
+                }
+                .buttonStyle(.plain)
+                Spacer(minLength: 0)
+                Text(title)
+                    .font(.system(size: 18, weight: .medium))
+                    .foregroundColor(theme.label)
+                    .lineLimit(1)
+                Spacer(minLength: 0)
+                Color.clear.frame(width: 44, height: 44)
+            }
+            .padding(.horizontal, 14)
+            .padding(.top, 14)
+            .padding(.bottom, 4)
+            .background(Color(uiColor: .systemGroupedBackground))
+        }
+    }
+}
+
+private struct FastLaneManageDetailTypesView: View {
+    let mode: CameraChromeLocationMode
+    let profile: CaptureProfile
+    @ObservedObject var model: FastLaneDetailTypesModel
+    @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.dismiss) private var dismiss
+    @State private var editModeState: EditMode = .inactive
+    @FocusState private var focusedRow: UUID?
+    private var theme: FastLaneSheetControlTheme { .forScheme(colorScheme) }
+    private var titleText: String { "\(profile.title) \(mode == .interior ? "Interior Detail Types" : "Exterior Detail Types")" }
+    private var isEditing: Bool { editModeState == .active }
+
+    var body: some View {
+        NavigationStack {
+            List {
+                ForEach(model.items(for: mode, profile: profile)) { item in
+                    rowView(item: item)
+                }
+                .onDelete { offsets in
+                    withAnimation(.none) { model.delete(at: offsets, for: mode, profile: profile) }
+                }
+                .onMove { source, destination in
+                    withAnimation(.none) { model.move(from: source, to: destination, for: mode, profile: profile) }
+                }
+            }
+            .environment(\.editMode, $editModeState)
+            .listStyle(.insetGrouped)
+            .toolbar(.hidden, for: .navigationBar)
+            .safeAreaInset(edge: .top, spacing: 0) {
+                HStack(spacing: 10) {
+                    Button { dismiss() } label: {
+                        toolbarCapsuleLabel {
+                            Text("Done")
+                                .font(.system(size: 17, weight: .medium))
+                        }
+                    }
+                    .buttonStyle(.plain)
+
+                    Spacer(minLength: 0)
+
+                    Text(titleText)
+                        .font(.system(size: 18, weight: .medium))
+                        .foregroundColor(theme.label)
+                        .minimumScaleFactor(0.72)
+                        .lineLimit(1)
+
+                    Spacer(minLength: 0)
+
+                    HStack(spacing: 0) {
+                        Button {
+                            if editModeState != .active { editModeState = .active }
+                            let newId = model.insertBlankItem(for: mode, profile: profile)
+                            DispatchQueue.main.async { focusedRow = newId }
+                        } label: {
+                            Image(systemName: "plus")
+                                .font(.system(size: 17, weight: .medium))
+                                .foregroundColor(theme.label)
+                                .frame(width: 44, height: 42)
+                                .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+
+                        Button {
+                            if editModeState == .active {
+                                editModeState = .inactive
+                                focusedRow = nil
+                            } else {
+                                editModeState = .active
+                            }
+                        } label: {
+                            Group {
+                                if editModeState == .active {
+                                    Image(systemName: "checkmark.circle.fill")
+                                        .font(.system(size: 17, weight: .medium))
+                                } else {
+                                    Text("Edit")
+                                        .font(.system(size: 17, weight: .medium))
+                                }
+                            }
+                            .foregroundColor(theme.label)
+                            .frame(width: 72, height: 42)
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                    }
+                    .padding(.horizontal, 4)
+                    .padding(.vertical, 2)
+                    .background(theme.fill)
+                    .clipShape(Capsule())
+                    .overlay(Capsule().stroke(theme.stroke, lineWidth: 1))
+                }
+                .padding(.horizontal, 14)
+                .padding(.top, 14)
+                .padding(.bottom, 4)
+                .background(Color.clear)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func toolbarCapsuleLabel<Content: View>(@ViewBuilder content: () -> Content) -> some View {
+        content()
+            .foregroundColor(theme.label)
+            .frame(minHeight: 42)
+            .padding(.horizontal, 14)
+            .background(theme.fill)
+            .clipShape(Capsule())
+            .overlay(Capsule().stroke(theme.stroke, lineWidth: 1))
+    }
+
+    @ViewBuilder
+    private func rowView(item: FastLaneDetailTypesModel.DetailTypeItem) -> some View {
+        if isEditing {
+            TextField("Name", text: bindingForRow(id: item.id))
+                .focused($focusedRow, equals: item.id)
+                .submitLabel(.done)
+                .onSubmit { focusedRow = nil }
+        } else {
+            HStack(spacing: 10) {
+                Text(item.name.isEmpty ? " " : item.name)
+                    .font(.system(size: 16, weight: .regular))
+                    .foregroundColor(.primary)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
+                Spacer(minLength: 0)
+            }
+        }
+    }
+
+    private func bindingForRow(id: UUID) -> Binding<String> {
+        Binding(
+            get: { model.items(for: mode, profile: profile).first(where: { $0.id == id })?.name ?? "" },
+            set: { newValue in
+                withAnimation(.none) {
+                    model.updateItem(newValue, id: id, for: mode, profile: profile)
+                }
+            }
+        )
+    }
+}
+
+private struct FastLaneManageTradesSheet: View {
+    @Environment(\.colorScheme) private var colorScheme
+    private var theme: FastLaneSheetControlTheme { .forScheme(colorScheme) }
+    @State private var editModeState: EditMode = .inactive
+    @FocusState private var focusedIndex: Int?
+    @Binding var options: [String]
+    @Binding var selectedTrade: String
+    let onClose: () -> Void
+
+    var body: some View {
+        NavigationStack {
+            List {
+                ForEach(Array(options.indices), id: \.self) { index in
+                    if editModeState == .active {
+                        TextField("Trade", text: Binding(
+                            get: { options.indices.contains(index) ? options[index] : "" },
+                            set: { newValue in
+                                guard options.indices.contains(index) else { return }
+                                options[index] = newValue
+                            }
+                        ))
+                        .focused($focusedIndex, equals: index)
+                        .submitLabel(.done)
+                    } else {
+                        HStack(spacing: 10) {
+                            Text(options[index])
+                                .font(.system(size: 16, weight: .medium))
+                                .foregroundColor(.primary)
+                                .lineLimit(1)
+                                .minimumScaleFactor(0.8)
+                            Spacer(minLength: 0)
+                        }
+                    }
+                }
+                .onDelete { offsets in options.remove(atOffsets: offsets) }
+                .onMove { source, destination in options.move(fromOffsets: source, toOffset: destination) }
+            }
+            .listStyle(.insetGrouped)
+            .environment(\.editMode, $editModeState)
+            .toolbar(.hidden, for: .navigationBar)
+            .safeAreaInset(edge: .top, spacing: 0) {
+                manageToolbar(title: "Trades")
+            }
+            .onDisappear {
+                FastLaneMetadataOptions.persistTradeOptions(&options, selectedTrade: &selectedTrade)
+            }
+        }
+    }
+
+    private func manageToolbar(title: String) -> some View {
+        HStack(spacing: 10) {
+            Button(action: onClose) {
+                Text("Done")
+                    .font(.system(size: 17, weight: .medium))
+                    .foregroundColor(theme.label)
+                    .frame(minHeight: 42)
+                    .padding(.horizontal, 14)
+                    .background(theme.fill)
+                    .clipShape(Capsule())
+                    .overlay(Capsule().stroke(theme.stroke, lineWidth: 1))
+            }
+            .buttonStyle(.plain)
+
+            Spacer(minLength: 0)
+
+            Text(title)
+                .font(.system(size: 18, weight: .medium))
+                .foregroundColor(theme.label)
+                .lineLimit(1)
+
+            Spacer(minLength: 0)
+
+            HStack(spacing: 0) {
+                Button {
+                    if editModeState != .active { editModeState = .active }
+                    options.append("New Trade")
+                    focusedIndex = max(0, options.count - 1)
+                } label: {
+                    Image(systemName: "plus")
+                        .font(.system(size: 17, weight: .medium))
+                        .foregroundColor(theme.label)
+                        .frame(width: 44, height: 42)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+
+                Button {
+                    if editModeState == .active {
+                        editModeState = .inactive
+                        focusedIndex = nil
+                    } else {
+                        editModeState = .active
+                    }
+                } label: {
+                    Group {
+                        if editModeState == .active {
+                            Image(systemName: "checkmark.circle.fill")
+                                .font(.system(size: 17, weight: .medium))
+                        } else {
+                            Text("Edit")
+                                .font(.system(size: 17, weight: .medium))
+                        }
+                    }
+                    .foregroundColor(theme.label)
+                    .frame(width: 72, height: 42)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
+            .padding(.horizontal, 4)
+            .padding(.vertical, 2)
+            .background(theme.fill)
+            .clipShape(Capsule())
+            .overlay(Capsule().stroke(theme.stroke, lineWidth: 1))
+        }
+        .padding(.horizontal, 14)
+        .padding(.top, 14)
+        .padding(.bottom, 4)
+    }
+}
+
+private struct FastLaneManageBuildingsSheet: View {
+    @Environment(\.colorScheme) private var colorScheme
+    private var theme: FastLaneSheetControlTheme { .forScheme(colorScheme) }
+    @State private var editModeState: EditMode = .inactive
+    @FocusState private var focusedIndex: Int?
+    @Binding var options: [String]
+    @Binding var selectedBuilding: String
+    let onClose: () -> Void
+
+    var body: some View {
+        NavigationStack {
+            List {
+                ForEach(Array(options.indices), id: \.self) { index in
+                    if editModeState == .active {
+                        TextField("Building", text: Binding(
+                            get: { options.indices.contains(index) ? options[index] : "" },
+                            set: { newValue in
+                                guard options.indices.contains(index) else { return }
+                                options[index] = newValue
+                            }
+                        ))
+                        .focused($focusedIndex, equals: index)
+                        .submitLabel(.done)
+                    } else {
+                        HStack(spacing: 10) {
+                            Text(FastLaneMetadataOptions.buildingDisplayName(for: options[index]))
+                                .font(.system(size: 16, weight: .medium))
+                                .foregroundColor(.primary)
+                                .lineLimit(1)
+                                .minimumScaleFactor(0.8)
+                            Spacer(minLength: 0)
+                        }
+                    }
+                }
+                .onDelete { offsets in options.remove(atOffsets: offsets) }
+                .onMove { source, destination in options.move(fromOffsets: source, toOffset: destination) }
+            }
+            .listStyle(.insetGrouped)
+            .environment(\.editMode, $editModeState)
+            .toolbar(.hidden, for: .navigationBar)
+            .safeAreaInset(edge: .top, spacing: 0) {
+                HStack(spacing: 10) {
+                    Button(action: onClose) {
+                        Text("Done")
+                            .font(.system(size: 17, weight: .medium))
+                            .foregroundColor(theme.label)
+                            .frame(minHeight: 42)
+                            .padding(.horizontal, 14)
+                            .background(theme.fill)
+                            .clipShape(Capsule())
+                            .overlay(Capsule().stroke(theme.stroke, lineWidth: 1))
+                    }
+                    .buttonStyle(.plain)
+
+                    Spacer(minLength: 0)
+
+                    Text("Buildings")
+                        .font(.system(size: 18, weight: .medium))
+                        .foregroundColor(theme.label)
+                        .lineLimit(1)
+
+                    Spacer(minLength: 0)
+
+                    HStack(spacing: 0) {
+                        Button {
+                            if editModeState != .active { editModeState = .active }
+                            options.append("New Building")
+                            focusedIndex = max(0, options.count - 1)
+                        } label: {
+                            Image(systemName: "plus")
+                                .font(.system(size: 17, weight: .medium))
+                                .foregroundColor(theme.label)
+                                .frame(width: 44, height: 42)
+                                .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+
+                        Button {
+                            if editModeState == .active {
+                                editModeState = .inactive
+                                focusedIndex = nil
+                            } else {
+                                editModeState = .active
+                            }
+                        } label: {
+                            Group {
+                                if editModeState == .active {
+                                    Image(systemName: "checkmark.circle.fill")
+                                        .font(.system(size: 17, weight: .medium))
+                                } else {
+                                    Text("Edit")
+                                        .font(.system(size: 17, weight: .medium))
+                                }
+                            }
+                            .foregroundColor(theme.label)
+                            .frame(width: 72, height: 42)
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                    }
+                    .padding(.horizontal, 4)
+                    .padding(.vertical, 2)
+                    .background(theme.fill)
+                    .clipShape(Capsule())
+                    .overlay(Capsule().stroke(theme.stroke, lineWidth: 1))
+                }
+                .padding(.horizontal, 14)
+                .padding(.top, 14)
+                .padding(.bottom, 4)
+            }
+            .onDisappear {
+                FastLaneMetadataOptions.persistBuildingOptions(options, selectedBuilding: &selectedBuilding)
             }
         }
     }
@@ -14801,10 +16151,12 @@ private struct DebugToolsView: View {
                 buttonTappedAt: request.buttonTappedAt,
                 contextReadyAt: request.contextReadyAt,
                 previewRequestedAt: request.previewRequestedAt,
-                initialCapturedCount: request.initialCapturedCount,
-                storageRoot: request.storageRoot,
-                isDraftResume: request.isDraftResume,
-                isDebugMode: true,
+                    initialCapturedCount: request.initialCapturedCount,
+                    storageRoot: request.storageRoot,
+                    isDraftResume: request.isDraftResume,
+                    initialLocationMode: request.initialLocationMode,
+                    initialMetadataContext: request.initialMetadataContext,
+                    isDebugMode: true,
                 onDismiss: { closeResult in
                     fastLaneLauncherCloseResult = closeResult
                     fastLaneLauncherPreviewRequest = nil
@@ -15099,7 +16451,9 @@ private struct DebugToolsView: View {
                     previewRequestedAt: Date(),
                     initialCapturedCount: 0,
                     storageRoot: result.tempStorageRoot,
-                    isDraftResume: false
+                    isDraftResume: false,
+                    initialLocationMode: .exterior,
+                    initialMetadataContext: nil
                 )
             }
         }
