@@ -558,7 +558,11 @@ struct CameraChromeView<PreviewContent: View, OverlayContent: View>: View {
                 let label = selected ? "\(base)x" : base
 
                 Button {
-                    actions.onZoomTapped(step)
+                    var transaction = Transaction()
+                    transaction.disablesAnimations = true
+                    withTransaction(transaction) {
+                        actions.onZoomTapped(step)
+                    }
                 } label: {
                     Text(label)
                         .font(.system(size: 15, weight: selected ? .semibold : .regular))
@@ -583,6 +587,8 @@ struct CameraChromeView<PreviewContent: View, OverlayContent: View>: View {
                                 }
                             }
                         )
+                        .rotationEffect(display.glyphRotationAngle)
+                        .animation(glyphRotationAnimation, value: glyphRotationDegrees)
                 }
                 .buttonStyle(.plain)
             }
@@ -647,7 +653,8 @@ struct CameraChromeView<PreviewContent: View, OverlayContent: View>: View {
 
                 HStack(alignment: .center) {
                     thumbnailCircle(size: 44)
-                        .frame(width: 44, height: 44)
+                        .frame(width: 58, height: 58)
+                        .padding(.horizontal, -7)
                         .rotationEffect(display.glyphRotationAngle)
                         .animation(glyphRotationAnimation, value: glyphRotationDegrees)
 
@@ -716,35 +723,42 @@ struct CameraChromeView<PreviewContent: View, OverlayContent: View>: View {
     private func thumbnailCircle(size: CGFloat) -> some View {
         Button(action: actions.onThumbnailTapped) {
             ZStack {
-                Circle()
-                    .fill(Color.white.opacity(0.14))
-                if let thumbnail = display.thumbnail {
-                    Image(uiImage: thumbnail)
-                        .resizable()
-                        .scaledToFill()
-                        .clipShape(Circle())
-                } else {
-                    Image(systemName: "photo.on.rectangle")
-                        .font(.system(size: proportionalCircleGlyphSize(for: size), weight: .medium))
-                        .foregroundColor(.white.opacity(0.92))
+                ZStack {
+                    Circle()
+                        .fill(Color.white.opacity(0.14))
+                    if let thumbnail = display.thumbnail {
+                        Image(uiImage: thumbnail)
+                            .resizable()
+                            .scaledToFill()
+                            .frame(width: size, height: size)
+                            .clipShape(Circle())
+                    } else {
+                        Image(systemName: "photo.on.rectangle")
+                            .font(.system(size: proportionalCircleGlyphSize(for: size), weight: .medium))
+                            .foregroundColor(.white.opacity(0.92))
+                    }
                 }
-                if display.savedCount > 0 {
-                    Text("\(display.savedCount)")
-                        .font(.system(size: 11, weight: .bold))
-                        .foregroundColor(.black)
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.75)
-                        .frame(minWidth: 20, minHeight: 20)
-                        .background(Color.white)
-                        .clipShape(Circle())
-                        .offset(x: size * 0.32, y: -size * 0.32)
+                .frame(width: size, height: size)
+                .overlay(alignment: .topTrailing) {
+                    if display.savedCount > 0 {
+                        Text("\(display.savedCount)")
+                            .font(.system(size: 11, weight: .bold))
+                            .foregroundColor(.black)
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.75)
+                            .frame(minWidth: 20, minHeight: 20)
+                            .background(Color.white)
+                            .clipShape(Circle())
+                            .offset(x: 5, y: -5)
+                            .zIndex(1)
+                    }
                 }
             }
-            .frame(width: size, height: size)
+            .frame(width: size + 14, height: size + 14)
             .contentShape(Circle())
         }
         .buttonStyle(.plain)
-        .frame(width: size, height: size)
+        .frame(width: size + 14, height: size + 14)
     }
 
     private func locationModeSlider() -> some View {
