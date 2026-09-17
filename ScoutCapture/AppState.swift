@@ -720,6 +720,17 @@ final class AppState: ObservableObject {
         case uploaded
     }
 
+    enum PropertyRowCloudGlyphState: String, Equatable {
+        case current
+        case uploading
+        case warning
+    }
+
+    enum PropertyRowStatusChipState: String, Equatable {
+        case pendingExport = "pending_export"
+        case uploading
+    }
+
     struct SessionSnapshotCloudStatus: Equatable {
         enum Tint: String, Equatable {
             case neutral
@@ -7522,26 +7533,49 @@ final class AppState: ObservableObject {
     @Published var organizations: [Organization] = []
     @Published private(set) var isLoading: Bool = true
     @Published private(set) var sessionIndexByProperty: [UUID: [Session]] = [:]
-    @Published private(set) var draftSessionByProperty: [UUID: Session] = [:]
-    @Published private(set) var pendingExportSessionByProperty: [UUID: Session] = [:]
+    @Published private(set) var draftSessionByProperty: [UUID: Session] = [:] {
+        didSet { refreshPropertyRowDraftBadgeCache() }
+    }
+    @Published private(set) var pendingExportSessionByProperty: [UUID: Session] = [:] {
+        didSet { refreshPropertyRowStatusChipCache() }
+    }
     @Published private(set) var hubMetaByProperty: [UUID: HubPropertyMeta] = [:]
     @Published private(set) var hubRowRefreshToken: UUID = UUID()
     @Published private(set) var sessionSnapshotCloudStatusBySessionID: [UUID: SessionSnapshotCloudStatus] = [:]
     @Published private(set) var propertyRowReExportSessionByPropertyID: [UUID: Session] = [:]
-    @Published private(set) var propertyRowPendingDeliverySessionByPropertyID: [UUID: Session] = [:]
-    @Published private(set) var propertyRowSnapshotCloudStatusByPropertyID: [UUID: SessionSnapshotCloudStatus] = [:]
-    @Published private(set) var fastRuntimeDraftsByPropertyID: [UUID: FastRuntimeDraftSummary] = AppState.loadFastRuntimeDraftIndexFromDisk()
+    @Published private(set) var propertyRowPendingDeliverySessionByPropertyID: [UUID: Session] = [:] {
+        didSet { refreshPropertyRowStatusChipCache() }
+    }
+    @Published private(set) var propertyRowSnapshotCloudStatusByPropertyID: [UUID: SessionSnapshotCloudStatus] = [:] {
+        didSet {
+            refreshPropertyRowCloudGlyphCache()
+            refreshPropertyRowStatusChipCache()
+        }
+    }
+    @Published private(set) var fastRuntimeDraftsByPropertyID: [UUID: FastRuntimeDraftSummary] = AppState.loadFastRuntimeDraftIndexFromDisk() {
+        didSet { refreshPropertyRowDraftBadgeCache() }
+    }
+    @Published private(set) var propertyRowDraftBadgeByPropertyID: [UUID: Bool] = [:]
+    @Published private(set) var propertyRowCloudGlyphByPropertyID: [UUID: PropertyRowCloudGlyphState] = [:]
+    @Published private(set) var propertyRowStatusChipByPropertyID: [UUID: PropertyRowStatusChipState] = [:]
     @Published private(set) var cloudBackupStatus: CloudBackupStatus
     @Published private(set) var supabaseConfiguration: SupabaseRuntimeConfiguration
     @Published private(set) var backendFeatureFlags: BackendFeatureFlags
     @Published private(set) var isAuthenticationReady: Bool = false
     @Published private(set) var isAuthenticating: Bool = false
     @Published private(set) var isLoadingPropertiesForOrgSwitch: Bool = false
-    @Published private(set) var authenticatedSupabaseUser: AuthenticatedSupabaseUser?
+    @Published private(set) var authenticatedSupabaseUser: AuthenticatedSupabaseUser? {
+        didSet { refreshPropertyRowDraftBadgeCache() }
+    }
     @Published var authenticationErrorMessage: String?
     @Published var locallyLockedPropertyIDs: Set<UUID> = []
     @Published private var propertySessionOccupancyByPropertyID: [UUID: PropertySessionOccupancyState] = [:]
-    @Published private(set) var propertyStatusByPropertyID: [UUID: PropertyStatusRecord] = [:]
+    @Published private(set) var propertyStatusByPropertyID: [UUID: PropertyStatusRecord] = [:] {
+        didSet {
+            refreshPropertyRowDraftBadgeCache()
+            refreshPropertyRowStatusChipCache()
+        }
+    }
     private var fastRuntimeReportHandoffAcceptedSessionByPropertyID: [UUID: UUID] = [:]
     private var fastRuntimeCompletionCloudStatusByPropertyID: [UUID: SessionSnapshotCloudStatus] = [:]
     private(set) var lastPropertyStatusRefreshAt: Date?
@@ -8611,6 +8645,9 @@ final class AppState: ObservableObject {
         self.propertyRowSnapshotCloudStatusByPropertyID = Self.makePropertyRowSnapshotCloudStatusByPropertyID(
             statuses: Array(initialSessionSnapshotCloudStatusBySessionID.values)
         )
+        refreshPropertyRowDraftBadgeCache()
+        refreshPropertyRowCloudGlyphCache()
+        refreshPropertyRowStatusChipCache()
 
         if let cloudBackupManager {
             cloudBackupManager.$status
@@ -41774,6 +41811,124 @@ final class AppState: ObservableObject {
             reExportReason: reExportReason,
             badgeSource: fastRuntimeDraft == nil ? "property_status_missing" : "fast_runtime_draft_index"
         )
+    }
+
+    private func refreshPropertyRowDraftBadgeCache() {
+        let currentUserID = authenticatedSupabaseUser?.id
+        let currentDeviceID = currentDeviceIdentifier()
+        var next: [UUID: Bool] = [:]
+
+        let propertyIDs = Set(propertyStatusByPropertyID.keys)
+            .union(draftSessionByProperty.keys)
+            .union(fastRuntimeDraftsByPropertyID.keys)
+
+        for propertyID in propertyIDs {
+            let fastRuntimeDraft = fastRuntimeDraftBadgeSummary(
+                for: propertyID,
+                currentUserID: currentUserID,
+                currentDeviceID: currentDeviceID
+            )
+
+            if let propertyStatus = propertyStatusByPropertyID[propertyID] {
+                let basePropertyStatusAnswer = Self.makePropertyStatusCompareAnswer(
+                    record: propertyStatus,
+                    currentUserID: currentUserID,
+                    currentDeviceID: currentDeviceID
+                )
+                let canOverlayFastRuntimeDraft = fastRuntimeDraft != nil &&
+                    basePropertyStatusAnswer.visibleBadgeState != .locked &&
+                    basePropertyStatusAnswer.visibleBadgeState != .pendingExport
+                let propertyStatusAnswer = canOverlayFastRuntimeDraft
+                    ? PropertyStatusCompareAnswer(
+                        visibleBadgeState: .draft,
+                        draftCountIncluded: true,
+                        pendingExportCountIncluded: false,
+                        entryBlocked: false,
+                        deleteEligible: false
+                    )
+                    : Self.makePropertyStatusCompareAnswer(
+                        record: propertyStatus,
+                        currentUserID: currentUserID,
+                        currentDeviceID: currentDeviceID
+                    )
+                if propertyStatusAnswer.visibleBadgeState == .draft {
+                    next[propertyID] = true
+                }
+            } else if draftSessionByProperty[propertyID] != nil || fastRuntimeDraft != nil {
+                next[propertyID] = true
+            }
+        }
+
+        if propertyRowDraftBadgeByPropertyID != next {
+            propertyRowDraftBadgeByPropertyID = next
+        }
+    }
+
+    private func refreshPropertyRowCloudGlyphCache() {
+        let next = propertyRowSnapshotCloudStatusByPropertyID.reduce(into: [UUID: PropertyRowCloudGlyphState]()) { partial, entry in
+            partial[entry.key] = Self.propertyRowCloudGlyphState(for: entry.value)
+        }
+        if propertyRowCloudGlyphByPropertyID != next {
+            propertyRowCloudGlyphByPropertyID = next
+        }
+    }
+
+    private static func propertyRowCloudGlyphState(
+        for status: SessionSnapshotCloudStatus
+    ) -> PropertyRowCloudGlyphState {
+        if status.isConfigurationBlocked {
+            return .warning
+        }
+        switch status.state {
+        case .uploaded:
+            return .current
+        case .uploading:
+            return .uploading
+        case .queued, .retryScheduled, .failed:
+            return .warning
+        }
+    }
+
+    private func refreshPropertyRowStatusChipCache() {
+        var next: [UUID: PropertyRowStatusChipState] = [:]
+        let propertyIDs = Set(propertyStatusByPropertyID.keys)
+            .union(pendingExportSessionByProperty.keys)
+            .union(propertyRowPendingDeliverySessionByPropertyID.keys)
+            .union(propertyRowSnapshotCloudStatusByPropertyID.keys)
+
+        for propertyID in propertyIDs {
+            if let cloudStatus = propertyRowSnapshotCloudStatusByPropertyID[propertyID],
+               Self.propertyRowStatusChipShowsUploading(cloudStatus) {
+                next[propertyID] = .uploading
+                continue
+            }
+
+            if let propertyStatus = propertyStatusByPropertyID[propertyID],
+               propertyStatus.status == .pendingExport {
+                let handoffAccepted =
+                    propertyStatus.pendingExportSessionID != nil &&
+                    fastRuntimeReportHandoffAcceptedSessionByPropertyID[propertyID] == propertyStatus.pendingExportSessionID
+                if !handoffAccepted {
+                    next[propertyID] = .pendingExport
+                }
+                continue
+            }
+
+            if pendingExportSessionByProperty[propertyID] != nil ||
+                propertyRowPendingDeliverySessionByPropertyID[propertyID] != nil {
+                next[propertyID] = .pendingExport
+            }
+        }
+
+        if propertyRowStatusChipByPropertyID != next {
+            propertyRowStatusChipByPropertyID = next
+        }
+    }
+
+    private static func propertyRowStatusChipShowsUploading(
+        _ status: SessionSnapshotCloudStatus
+    ) -> Bool {
+        status.state == .uploading && !status.isConfigurationBlocked
     }
 
     func reExportCandidateSession(for propertyID: UUID, now: Date = Date()) -> Session? {

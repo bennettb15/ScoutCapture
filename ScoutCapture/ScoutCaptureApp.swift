@@ -746,6 +746,7 @@ struct SessionHubView: View {
     private let selectionHaptic = UIImpactFeedbackGenerator(style: .light)
     private let hiddenDebugTapWindow: TimeInterval = 1.5
     private let startupPlaceholderHoldSeconds: TimeInterval = 8.0
+    private let diagnosticMinimalHomeRows: Bool = true
 
     private enum HubRoute: Hashable {
         case propertySession(propertyID: UUID, resumeDraft: Bool, initialSessionType: SessionType?)
@@ -876,7 +877,7 @@ struct SessionHubView: View {
                     pendingInvitationPrompt(invitation)
                 }
 
-                if initialPropertyListTimedOut {
+                if initialPropertyListTimedOut && !diagnosticMinimalHomeRows {
                     initialPropertyListUpdatingBanner
                 }
 
@@ -920,7 +921,7 @@ struct SessionHubView: View {
                             if !filteredActiveProperties.isEmpty {
                                 Section {
                                     ForEach(filteredActiveProperties) { property in
-                                        propertyRow(property)
+                                        diagnosticPropertyRow(property)
                                     }
                                 }
                             }
@@ -928,7 +929,7 @@ struct SessionHubView: View {
                             if showArchivedSection && !filteredArchivedProperties.isEmpty {
                                 Section("Archived") {
                                     ForEach(filteredArchivedProperties) { property in
-                                        propertyRow(property)
+                                        diagnosticPropertyRow(property)
                                     }
                                 }
                             }
@@ -1229,15 +1230,17 @@ struct SessionHubView: View {
                 }
             }
             .overlay(alignment: .top) {
-                VStack(spacing: 8) {
-                    if let hubTransientStatusMessage = appState.hubTransientStatusMessage {
-                        toastCapsule(hubTransientStatusMessage)
-                    }
-                    if showMapsErrorToast {
-                        toastCapsule("Unable to open Maps for this address.")
-                    }
-                    if showPhoneNumberErrorToast {
-                        toastCapsule("No phone number on file")
+                if !diagnosticMinimalHomeRows {
+                    VStack(spacing: 8) {
+                        if let hubTransientStatusMessage = appState.hubTransientStatusMessage {
+                            toastCapsule(hubTransientStatusMessage)
+                        }
+                        if showMapsErrorToast {
+                            toastCapsule("Unable to open Maps for this address.")
+                        }
+                        if showPhoneNumberErrorToast {
+                            toastCapsule("No phone number on file")
+                        }
                     }
                 }
             }
@@ -1342,6 +1345,92 @@ struct SessionHubView: View {
         }
         .opacity(0.95 - (Double(index) * 0.08))
         .redacted(reason: .placeholder)
+    }
+
+    @ViewBuilder
+    private func diagnosticPropertyRow(_ property: Property) -> some View {
+        if diagnosticMinimalHomeRows {
+            minimalPropertyRow(property)
+        } else {
+            propertyRow(property)
+        }
+    }
+
+    private func minimalPropertyRow(_ property: Property) -> some View {
+        let statusChip = appState.propertyRowStatusChipByPropertyID[property.id]
+        let isUploading = statusChip == .uploading
+        let hasDraft = appState.propertyRowDraftBadgeByPropertyID[property.id] == true && statusChip == nil
+        let cloudGlyph = appState.propertyRowCloudGlyphByPropertyID[property.id]
+        let addressLine = propertyAddressLine(property) ?? property.address
+
+        return Button {
+            handlePropertyTap(property)
+        } label: {
+            HStack(alignment: .top, spacing: 10) {
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack(alignment: .firstTextBaseline, spacing: 6) {
+                        Text(property.name)
+                            .font(.system(size: 18, weight: .semibold))
+                            .foregroundColor(.primary)
+                            .lineLimit(1)
+
+                        if let cloudGlyph, !isUploading {
+                            propertyRowCloudGlyphIcon(cloudGlyph)
+                        }
+                    }
+
+                    if let addressLine,
+                       !addressLine.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        Text(addressLine)
+                            .font(.system(size: 13, weight: .medium))
+                            .foregroundColor(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                    }
+                }
+
+                Spacer(minLength: 8)
+
+                if let statusChip {
+                    propertyRowStatusChip(statusChip)
+                } else if hasDraft {
+                    chipLabel("Draft", tint: .orange)
+                }
+            }
+            .padding(.vertical, 8)
+            .padding(.horizontal, 10)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .opacity(pressedPropertyID == property.id ? 0.70 : 1.0)
+        .animation(.easeOut(duration: 0.10), value: pressedPropertyID)
+    }
+
+    @ViewBuilder
+    private func propertyRowStatusChip(_ state: AppState.PropertyRowStatusChipState) -> some View {
+        Text(state == .uploading ? "Uploading" : "Pending Export")
+            .font(.system(size: 12, weight: .semibold))
+            .foregroundColor(.blue)
+            .lineLimit(1)
+            .fixedSize(horizontal: true, vertical: false)
+    }
+
+    @ViewBuilder
+    private func propertyRowCloudGlyphIcon(_ state: AppState.PropertyRowCloudGlyphState) -> some View {
+        switch state {
+        case .current:
+            Image(systemName: "checkmark.icloud.fill")
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundColor(.blue)
+        case .uploading:
+            Image(systemName: "icloud.and.arrow.up")
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundColor(.blue)
+        case .warning:
+            Image(systemName: "exclamationmark.icloud")
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundColor(.orange)
+        }
     }
 
     @ViewBuilder
