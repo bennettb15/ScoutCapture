@@ -13451,6 +13451,135 @@ private enum FastRuntimeProductionCompleteState: Equatable {
     }
 }
 
+private enum FastLaneSideControlSheetMode: Identifiable {
+    case activeIssues
+    case resolutionRequired
+    case guided
+
+    var id: String {
+        switch self {
+        case .activeIssues: return "active_issues"
+        case .resolutionRequired: return "resolution_required"
+        case .guided: return "guided"
+        }
+    }
+}
+
+private enum FastLaneCoreChecklistCategory: String, CaseIterable, Identifiable {
+    case overview
+    case elevation
+    case roofline
+    case cladding
+    case foundation
+    case entry
+    case openings
+    case drainage
+    case hardscape
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .overview:
+            return "Overview"
+        case .elevation:
+            return "Elevation (Center / Left / Right)"
+        case .roofline:
+            return "Roofline / Top"
+        case .cladding:
+            return "Cladding / Facade"
+        case .foundation:
+            return "Foundation / Ground Line"
+        case .entry:
+            return "Entry / Access"
+        case .openings:
+            return "Openings"
+        case .drainage:
+            return "Drainage"
+        case .hardscape:
+            return "Hardscape Interface"
+        }
+    }
+
+    var note: String? {
+        switch self {
+        case .overview, .elevation:
+            return nil
+        case .roofline:
+            return "soffit, fascia, gutter edge"
+        case .cladding:
+            return "siding, facade, wall material"
+        case .foundation:
+            return "foundation, grade, wall interface"
+        case .entry:
+            return "doors, stairs, overhangs"
+        case .openings:
+            return "windows, trim, sealant"
+        case .drainage:
+            return "outlets + termination"
+        case .hardscape:
+            return "paving + slope"
+        }
+    }
+
+    var requiredCount: Int {
+        switch self {
+        case .overview:
+            return 1
+        case .elevation:
+            return 3
+        default:
+            return 0
+        }
+    }
+
+    var showsCompletionIndicator: Bool {
+        self == .overview || self == .elevation
+    }
+
+    static func category(for detailType: String) -> FastLaneCoreChecklistCategory? {
+        switch detailType.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "overview":
+            return .overview
+        case "elevation":
+            return .elevation
+        case "roofline", "chimney", "canopy / awning":
+            return .roofline
+        case "cladding / siding", "cladding / facade":
+            return .cladding
+        case "foundation":
+            return .foundation
+        case "entry / porch", "porch", "entry", "storefront", "loading dock":
+            return .entry
+        case "window", "window / glazing":
+            return .openings
+        case "downspout", "downspouts", "utility / hvac", "mechanical equipment", "trash / service area":
+            return .drainage
+        case "driveway / garage", "backyard / patio", "landscaping", "fence / gate", "pool / outdoor amenities", "sidewalk", "exterior stairs / ramp", "exterior stairs", "parking area", "site circulation", "landscape / hardscape", "signage":
+            return .hardscape
+        default:
+            return nil
+        }
+    }
+}
+
+private struct FastLaneCoreChecklistRowState: Identifiable, Equatable {
+    let category: FastLaneCoreChecklistCategory
+    let count: Int
+
+    var id: FastLaneCoreChecklistCategory { category }
+
+    var isComplete: Bool {
+        guard category.requiredCount > 0 else { return false }
+        return count >= category.requiredCount
+    }
+
+    var countLabel: String {
+        guard category.requiredCount > 0 else { return "\(count)" }
+        return "\(min(count, category.requiredCount))/\(category.requiredCount)"
+    }
+}
+
 private struct DebugFastRuntimePrototypeCameraPreviewView: View {
     @EnvironmentObject private var appState: AppState
     @ObservedObject private var camera = CameraManager.shared
@@ -13522,6 +13651,12 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
     @State private var showFastLaneDetailNoteOverlay: Bool = false
     @State private var showFastLaneSessionActionsSheet: Bool = false
     @State private var fastLaneSideControlCounts: AppState.FastRuntimePreviewSideControlCounts = .empty
+    @State private var fastLaneSideControlPayload: AppState.FastRuntimePreviewSideControlPayload = .empty
+    @State private var isLoadingFastLaneSideControlSheet: Bool = false
+    @State private var fastLaneSideControlSheetMode: FastLaneSideControlSheetMode?
+    @State private var showFastLaneCoreChecklist: Bool = false
+    @State private var fastLaneCoreChecklistRows: [FastLaneCoreChecklistRowState] =
+        FastLaneCoreChecklistCategory.allCases.map { FastLaneCoreChecklistRowState(category: $0, count: 0) }
     @State private var didRefreshFastLaneSideControlCounts: Bool = false
     @State private var fastLaneSideControlToastText: String?
     @State private var fastLaneSideControlToastToken: Int = 0
@@ -13583,6 +13718,25 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                     }
                 )
                 .zIndex(500)
+            }
+
+            if showFastLaneCoreChecklist {
+                Color.black.opacity(0.42)
+                    .ignoresSafeArea()
+                    .onTapGesture {
+                        showFastLaneCoreChecklist = false
+                    }
+                    .zIndex(520)
+
+                FastLaneCoreChecklistSheet(
+                    elevationTitle: CanonicalElevation.normalize(fastMetadataContext.elevation) ?? fastMetadataContext.elevation,
+                    rows: fastLaneCoreChecklistRows,
+                    onClose: {
+                        showFastLaneCoreChecklist = false
+                    }
+                )
+                .padding(.horizontal, 18)
+                .zIndex(525)
             }
         }
         .onAppear {
@@ -13715,6 +13869,42 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                 assets: fastLaneGalleryAssets,
                 cache: fastLaneGalleryImageCache,
                 thumbnailRefreshToken: fastLaneGalleryRefreshToken
+            )
+        }
+        .fullScreenCover(item: $fastLaneSideControlSheetMode) { mode in
+            fastLaneSideControlSheet(for: mode)
+        }
+    }
+
+    @ViewBuilder
+    private func fastLaneSideControlSheet(for mode: FastLaneSideControlSheetMode) -> some View {
+        switch mode {
+        case .activeIssues:
+            FastLaneIssueListSheet(
+                mode: .activeIssues,
+                observations: fastLaneSideControlPayload.activeObservations,
+                isLoading: isLoadingFastLaneSideControlSheet,
+                onClose: {
+                    fastLaneSideControlSheetMode = nil
+                }
+            )
+        case .resolutionRequired:
+            FastLaneIssueListSheet(
+                mode: .resolutionRequired,
+                observations: fastLaneSideControlPayload.resolutionRequiredObservations,
+                isLoading: isLoadingFastLaneSideControlSheet,
+                onClose: {
+                    fastLaneSideControlSheetMode = nil
+                }
+            )
+        case .guided:
+            FastLaneGuidedChecklistSheet(
+                guidedShots: fastLaneSideControlPayload.guidedShots,
+                retiredGuidedShots: fastLaneSideControlPayload.retiredGuidedShots,
+                isLoading: isLoadingFastLaneSideControlSheet,
+                onClose: {
+                    fastLaneSideControlSheetMode = nil
+                }
             )
         }
     }
@@ -14707,35 +14897,104 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
 
         switch controlID {
         case "resolution_required":
-            showFastLaneSideControlToast(
-                fastLaneSideControlCounts.resolutionRequiredCount > 0
-                    ? "Resolution list opens in the next fast-lane slice"
-                    : "No resolution required"
-            )
+            presentFastLaneIssueList(.resolutionRequired)
         case "active_issues":
-            showFastLaneSideControlToast(
-                fastLaneSideControlCounts.activeIssueCount > 0
-                    ? "Active issues list opens in the next fast-lane slice"
-                    : "No active flagged issues"
-            )
+            presentFastLaneIssueList(.activeIssues)
         case "guided":
             guard context.sessionType != .punchlistVisit else {
                 showFastLaneSideControlToast("No guided requirements")
                 return
             }
-            showFastLaneSideControlToast(
-                fastLaneSideControlCounts.guidedRemainingCount > 0
-                    ? "Guided list opens in the next fast-lane slice"
-                    : "No guided photos"
-            )
+            presentFastLaneGuidedChecklist()
         case "checklist":
             guard context.sessionType != .punchlistVisit else {
                 showFastLaneSideControlToast("Checklist is not available for Punchlist Visit")
                 return
             }
-            showFastLaneSideControlToast("Checklist opens in the next fast-lane slice")
+            presentFastLaneCoreChecklist()
         default:
             break
+        }
+    }
+
+    private func presentFastLaneIssueList(_ mode: FastLaneSideControlSheetMode) {
+        let expectedEmptyText = mode == .resolutionRequired ? "No resolution required" : "No active flagged issues"
+        let knownCount = mode == .resolutionRequired
+            ? fastLaneSideControlCounts.resolutionRequiredCount
+            : fastLaneSideControlCounts.activeIssueCount
+        let cachedRows = mode == .resolutionRequired
+            ? fastLaneSideControlPayload.resolutionRequiredObservations
+            : fastLaneSideControlPayload.activeObservations
+
+        if !cachedRows.isEmpty || knownCount > 0 || !didRefreshFastLaneSideControlCounts {
+            fastLaneSideControlSheetMode = mode
+            isLoadingFastLaneSideControlSheet = true
+        } else {
+            showFastLaneSideControlToast(expectedEmptyText)
+        }
+
+        refreshFastLaneSideControlPayload { payload in
+            let rows = mode == .resolutionRequired
+                ? payload.resolutionRequiredObservations
+                : payload.activeObservations
+            if rows.isEmpty {
+                if fastLaneSideControlSheetMode == mode {
+                    fastLaneSideControlSheetMode = nil
+                    showFastLaneSideControlToast(expectedEmptyText)
+                }
+            } else {
+                fastLaneSideControlSheetMode = mode
+            }
+            isLoadingFastLaneSideControlSheet = false
+        }
+    }
+
+    private func presentFastLaneGuidedChecklist() {
+        if !fastLaneSideControlPayload.guidedShots.isEmpty ||
+            fastLaneSideControlCounts.guidedRemainingCount > 0 ||
+            !didRefreshFastLaneSideControlCounts {
+            fastLaneSideControlSheetMode = .guided
+            isLoadingFastLaneSideControlSheet = true
+        } else {
+            showFastLaneSideControlToast("No guided photos")
+        }
+
+        refreshFastLaneSideControlPayload { payload in
+            if payload.guidedShots.isEmpty {
+                if fastLaneSideControlSheetMode == .guided {
+                    fastLaneSideControlSheetMode = nil
+                    showFastLaneSideControlToast("No guided photos")
+                }
+            } else {
+                fastLaneSideControlSheetMode = .guided
+            }
+            isLoadingFastLaneSideControlSheet = false
+        }
+    }
+
+    private func presentFastLaneCoreChecklist() {
+        refreshFastLaneCoreChecklistRows()
+        showFastLaneCoreChecklist = true
+    }
+
+    private func refreshFastLaneSideControlPayload(completion: @escaping (AppState.FastRuntimePreviewSideControlPayload) -> Void) {
+        isLoadingFastLaneSideControlSheet = true
+        Task {
+            let payload = appState.fastRuntimePreviewSideControlPayload(
+                propertyID: context.propertyID,
+                sessionType: context.sessionType
+            )
+            let counts = AppState.FastRuntimePreviewSideControlCounts(
+                resolutionRequiredCount: payload.resolutionRequiredObservations.count,
+                activeIssueCount: payload.activeObservations.count,
+                guidedRemainingCount: payload.guidedShots.filter { !$0.isCompleted && $0.skipReason == nil }.count,
+                checklistCount: 0
+            )
+            await MainActor.run {
+                fastLaneSideControlPayload = payload
+                fastLaneSideControlCounts = counts
+                completion(payload)
+            }
         }
     }
 
@@ -14747,6 +15006,51 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             guard token == fastLaneSideControlToastToken else { return }
             fastLaneSideControlToastText = nil
         }
+    }
+
+    private func refreshFastLaneCoreChecklistRows() {
+        let root = fastStorageRoot ?? storageRoot ?? prototypeResult.tempStorageRoot
+        guard let root else {
+            fastLaneCoreChecklistRows = Self.emptyFastLaneCoreChecklistRows
+            return
+        }
+
+        let metadataURL = root
+            .appendingPathComponent("Metadata", isDirectory: true)
+            .appendingPathComponent("fast-lane-shots.json", isDirectory: false)
+
+        DispatchQueue.global(qos: .utility).async {
+            let rows: [FastLaneCoreChecklistRowState] = {
+                guard let data = try? Data(contentsOf: metadataURL) else {
+                    return Self.emptyFastLaneCoreChecklistRows
+                }
+                let decoder = JSONDecoder()
+                decoder.dateDecodingStrategy = .iso8601
+                guard let shots = try? decoder.decode([AppState.FastRuntimePrototypeShotRecord].self, from: data) else {
+                    return Self.emptyFastLaneCoreChecklistRows
+                }
+
+                let counts = shots
+                    .filter { $0.sessionID == context.sessionID && $0.propertyID == context.propertyID }
+                    .reduce(into: [FastLaneCoreChecklistCategory: Int]()) { partial, shot in
+                        let detailType = shot.metadataContext?.detailType ?? ""
+                        guard let category = FastLaneCoreChecklistCategory.category(for: detailType) else { return }
+                        partial[category, default: 0] += 1
+                    }
+
+                return FastLaneCoreChecklistCategory.allCases.map { category in
+                    FastLaneCoreChecklistRowState(category: category, count: counts[category, default: 0])
+                }
+            }()
+
+            DispatchQueue.main.async {
+                fastLaneCoreChecklistRows = rows
+            }
+        }
+    }
+
+    private static var emptyFastLaneCoreChecklistRows: [FastLaneCoreChecklistRowState] {
+        FastLaneCoreChecklistCategory.allCases.map { FastLaneCoreChecklistRowState(category: $0, count: 0) }
     }
 
     private func reloadFastLaneGalleryAssets() {
@@ -15778,6 +16082,781 @@ private struct FastLaneSessionActionsSheet: View {
         .opacity(isEnabled ? 1.0 : 0.72)
         .buttonStyle(.plain)
         .disabled(!isEnabled)
+    }
+}
+
+private struct FastLaneIssueListSheet: View {
+    enum Mode {
+        case activeIssues
+        case resolutionRequired
+
+        var title: String {
+            switch self {
+            case .activeIssues: return "Active Issues"
+            case .resolutionRequired: return "Resolution Required"
+            }
+        }
+
+        var emptyIcon: String {
+            switch self {
+            case .activeIssues: return "flag.slash"
+            case .resolutionRequired: return "flag.checkered"
+            }
+        }
+
+        var emptyText: String {
+            switch self {
+            case .activeIssues: return "No active issues"
+            case .resolutionRequired: return "No resolution required"
+            }
+        }
+
+        var accent: Color {
+            switch self {
+            case .activeIssues: return .red
+            case .resolutionRequired: return .green
+            }
+        }
+    }
+
+    let mode: Mode
+    let observations: [Observation]
+    let isLoading: Bool
+    let onClose: () -> Void
+
+    @State private var lastValidOrientation: UIDeviceOrientation = .portrait
+    @State private var inlineToastText: String?
+    @State private var inlineToastToken: Int = 0
+
+    private var isLandscape: Bool {
+        lastValidOrientation == .landscapeLeft || lastValidOrientation == .landscapeRight
+    }
+
+    private var rotationDegrees: Double {
+        switch lastValidOrientation {
+        case .landscapeLeft:
+            return 90
+        case .landscapeRight:
+            return -90
+        default:
+            return 0
+        }
+    }
+
+    var body: some View {
+        GeometryReader { geo in
+            let contentW = isLandscape ? geo.size.height : geo.size.width
+            let contentH = isLandscape ? geo.size.width : geo.size.height
+
+            NavigationStack {
+                ZStack {
+                    Color(uiColor: .secondarySystemGroupedBackground)
+                        .ignoresSafeArea()
+
+                    if observations.isEmpty && isLoading {
+                        loadingState
+                    } else if observations.isEmpty {
+                        emptyState
+                    } else {
+                        List(observations) { observation in
+                            FastLaneIssueListRow(
+                                observation: observation,
+                                mode: mode,
+                                onTap: {
+                                    showInlineToast(mode == .resolutionRequired
+                                        ? "Resolution capture opens in a follow-up slice"
+                                        : "Issue capture opens in a follow-up slice"
+                                    )
+                                }
+                            )
+                        }
+                        .listStyle(.insetGrouped)
+                        .scrollIndicators(.hidden)
+                        .scrollContentBackground(.hidden)
+                        .background(Color.clear)
+                    }
+                }
+                .overlay(alignment: .top) {
+                    if isLoading && !observations.isEmpty {
+                        ProgressView()
+                            .progressViewStyle(.circular)
+                            .tint(.secondary)
+                            .scaleEffect(0.82)
+                            .padding(8)
+                            .background(.thinMaterial)
+                            .clipShape(Circle())
+                            .padding(.top, 66)
+                    }
+                }
+                .overlay(alignment: .top) {
+                    if let inlineToastText {
+                        Text(inlineToastText)
+                            .font(.system(size: 13, weight: .medium))
+                            .foregroundColor(.white)
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 9)
+                            .background(Color.black.opacity(0.72))
+                            .clipShape(Capsule())
+                            .overlay(
+                                Capsule()
+                                    .stroke(Color.white.opacity(0.15), lineWidth: 1)
+                            )
+                            .padding(.top, 64)
+                            .transition(.opacity)
+                    }
+                }
+                .toolbar(.hidden, for: .navigationBar)
+                .safeAreaInset(edge: .top, spacing: 0) {
+                    sheetHeader(title: mode.title)
+                }
+            }
+            .frame(width: contentW, height: contentH, alignment: .center)
+            .rotationEffect(.degrees(rotationDegrees))
+            .position(x: geo.size.width * 0.5, y: geo.size.height * 0.5)
+            .statusBarHidden(isLandscape)
+            .onAppear {
+                UIDevice.current.beginGeneratingDeviceOrientationNotifications()
+                refreshOrientation()
+            }
+            .onReceive(NotificationCenter.default.publisher(for: UIDevice.orientationDidChangeNotification)) { _ in
+                refreshOrientation()
+            }
+            .onDisappear {
+                UIDevice.current.endGeneratingDeviceOrientationNotifications()
+            }
+        }
+    }
+
+    private var loadingState: some View {
+        VStack(spacing: 10) {
+            ProgressView()
+                .progressViewStyle(.circular)
+                .tint(.secondary)
+            Text("Loading")
+                .font(.system(size: 15, weight: .medium))
+                .foregroundColor(.secondary)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private var emptyState: some View {
+        VStack(spacing: 10) {
+            Image(systemName: mode.emptyIcon)
+                .font(.system(size: 28, weight: .medium))
+                .foregroundColor(.secondary)
+            Text(mode.emptyText)
+                .font(.system(size: 16, weight: .medium))
+                .foregroundColor(.secondary)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private func sheetHeader(title: String) -> some View {
+        ZStack {
+            Text(title)
+                .font(.system(size: 18, weight: .medium))
+                .foregroundColor(.primary)
+                .minimumScaleFactor(0.75)
+                .lineLimit(1)
+                .frame(maxWidth: .infinity, alignment: .center)
+
+            HStack(spacing: 10) {
+                Spacer(minLength: 0)
+
+                Button(action: onClose) {
+                    Text("Done")
+                        .font(.system(size: 18, weight: .medium))
+                        .foregroundColor(.primary)
+                        .frame(width: 72, height: 42)
+                        .background(Color(uiColor: .secondarySystemBackground))
+                        .clipShape(Capsule())
+                        .overlay(
+                            Capsule()
+                                .stroke(Color.primary.opacity(0.12), lineWidth: 1)
+                        )
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.top, 14)
+        .padding(.bottom, 4)
+    }
+
+    private func refreshOrientation() {
+        let orientation = UIDevice.current.orientation
+        switch orientation {
+        case .portrait, .portraitUpsideDown, .landscapeLeft, .landscapeRight:
+            lastValidOrientation = orientation
+        default:
+            break
+        }
+    }
+
+    private func showInlineToast(_ text: String) {
+        inlineToastText = text
+        inlineToastToken += 1
+        let token = inlineToastToken
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
+            guard token == inlineToastToken else { return }
+            inlineToastText = nil
+        }
+    }
+}
+
+private struct FastLaneIssueListRow: View {
+    let observation: Observation
+    let mode: FastLaneIssueListSheet.Mode
+    let onTap: () -> Void
+
+    private var contextLabel: String {
+        let parts = [
+            observation.building,
+            observation.targetElevation,
+            observation.detailType
+        ]
+            .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        return parts.joined(separator: " | ")
+    }
+
+    private var reasonText: String {
+        let candidates = [
+            observation.currentReason,
+            observation.resolutionStatement,
+            observation.note,
+            observation.statement
+        ]
+        return candidates
+            .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .first { !$0.isEmpty } ?? "No reason"
+    }
+
+    private var statusLabel: String {
+        switch observation.status {
+        case .resolutionRequired:
+            return "Resolution Required"
+        case .pendingReview:
+            return "Pending Review"
+        case .resolved:
+            return "Resolved"
+        case .active:
+            return "Active"
+        }
+    }
+
+    private var statusColor: Color {
+        switch observation.status {
+        case .resolutionRequired, .resolved:
+            return .green
+        case .pendingReview:
+            return .blue
+        case .active:
+            return .orange
+        }
+    }
+
+    private var priorityText: String {
+        normalizedFastLaneDetailPriority(observation.priority)
+    }
+
+    private var tradeText: String {
+        FastLaneMetadataOptions.canonicalTradeLabel(observation.trade)
+    }
+
+    var body: some View {
+        HStack(spacing: 12) {
+            ZStack {
+                Color.white.opacity(0.08)
+                Image(systemName: mode == .activeIssues ? "flag.fill" : "flag.checkered")
+                    .font(.system(size: 19, weight: .semibold))
+                    .foregroundColor(mode.accent)
+            }
+            .frame(width: 56, height: 56)
+            .clipShape(RoundedRectangle(cornerRadius: 8))
+            .overlay(
+                RoundedRectangle(cornerRadius: 8)
+                    .stroke(Color.white.opacity(0.12), lineWidth: 1)
+            )
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text(contextLabel.isEmpty ? "Flagged Issue" : contextLabel)
+                    .font(.system(size: 15, weight: .medium))
+                    .foregroundColor(observation.status == .resolved ? .secondary : .primary)
+                    .lineLimit(1)
+
+                Text(statusLabel)
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundColor(statusColor)
+
+                if !priorityText.isEmpty || !tradeText.isEmpty {
+                    HStack(spacing: 8) {
+                        if !priorityText.isEmpty {
+                            HStack(spacing: 6) {
+                                Circle()
+                                    .fill(fastLaneDetailPriorityColor(priorityText))
+                                    .frame(width: 8, height: 8)
+                                Text(priorityText)
+                            }
+                        }
+                        if !tradeText.isEmpty {
+                            HStack(spacing: 5) {
+                                Image(systemName: "wrench.adjustable")
+                                    .font(.system(size: 11, weight: .semibold))
+                                Text(tradeText)
+                                    .lineLimit(1)
+                                    .minimumScaleFactor(0.75)
+                            }
+                        }
+                    }
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundColor(.white.opacity(0.92))
+                }
+
+                Text("\(Text("Reason: ").font(.system(size: 12, weight: .semibold)))\(Text(reasonText).font(.system(size: 12, weight: .regular)))")
+                    .foregroundColor(.white.opacity(0.86))
+                    .lineLimit(2)
+            }
+
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .background(Color.black.opacity(0.35))
+        .clipShape(RoundedRectangle(cornerRadius: 14))
+        .overlay(
+            RoundedRectangle(cornerRadius: 14)
+                .stroke(Color.white.opacity(0.12), lineWidth: 1)
+        )
+        .opacity(observation.status == .resolved ? 0.70 : 1.0)
+        .contentShape(Rectangle())
+        .onTapGesture(perform: onTap)
+        .listRowInsets(EdgeInsets(top: 6, leading: 12, bottom: 6, trailing: 12))
+        .listRowBackground(Color.clear)
+    }
+}
+
+private struct FastLaneGuidedChecklistSheet: View {
+    let guidedShots: [GuidedShot]
+    let retiredGuidedShots: [GuidedShot]
+    let isLoading: Bool
+    let onClose: () -> Void
+
+    @State private var lastValidOrientation: UIDeviceOrientation = .portrait
+    @State private var inlineToastText: String?
+    @State private var inlineToastToken: Int = 0
+
+    private var isLandscape: Bool {
+        lastValidOrientation == .landscapeLeft || lastValidOrientation == .landscapeRight
+    }
+
+    private var rotationDegrees: Double {
+        switch lastValidOrientation {
+        case .landscapeLeft:
+            return 90
+        case .landscapeRight:
+            return -90
+        default:
+            return 0
+        }
+    }
+
+    var body: some View {
+        GeometryReader { geo in
+            let contentW = isLandscape ? geo.size.height : geo.size.width
+            let contentH = isLandscape ? geo.size.width : geo.size.height
+
+            NavigationStack {
+                ZStack {
+                    Color(uiColor: .secondarySystemGroupedBackground)
+                        .ignoresSafeArea()
+
+                    if guidedShots.isEmpty && isLoading {
+                        VStack(spacing: 10) {
+                            ProgressView()
+                                .progressViewStyle(.circular)
+                                .tint(.secondary)
+                            Text("Loading")
+                                .font(.system(size: 15, weight: .medium))
+                                .foregroundColor(.secondary)
+                        }
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    } else if guidedShots.isEmpty {
+                        VStack(spacing: 10) {
+                            Image(systemName: "safari")
+                                .font(.system(size: 28, weight: .medium))
+                                .foregroundColor(.secondary)
+                            Text("No guided photos")
+                                .font(.system(size: 16, weight: .medium))
+                                .foregroundColor(.secondary)
+                        }
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    } else {
+                        List {
+                            Section {
+                                ForEach(guidedShots) { guidedShot in
+                                    FastLaneGuidedChecklistRow(
+                                        guidedShot: guidedShot,
+                                        onTap: {
+                                            showInlineToast("Guided capture opens in a follow-up slice")
+                                        }
+                                    )
+                                }
+                            }
+
+                            if !retiredGuidedShots.isEmpty {
+                                Section("Retired") {
+                                    ForEach(retiredGuidedShots) { guidedShot in
+                                        FastLaneGuidedChecklistRow(
+                                            guidedShot: guidedShot,
+                                            onTap: {
+                                                showInlineToast("Restore retired guided items is deferred")
+                                            }
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                        .listStyle(.insetGrouped)
+                        .scrollIndicators(.hidden)
+                        .scrollContentBackground(.hidden)
+                        .background(Color.clear)
+                    }
+                }
+                .overlay(alignment: .top) {
+                    if let inlineToastText {
+                        Text(inlineToastText)
+                            .font(.system(size: 13, weight: .medium))
+                            .foregroundColor(.white)
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 9)
+                            .background(Color.black.opacity(0.72))
+                            .clipShape(Capsule())
+                            .overlay(
+                                Capsule()
+                                    .stroke(Color.white.opacity(0.15), lineWidth: 1)
+                            )
+                            .padding(.top, 64)
+                    }
+                }
+                .toolbar(.hidden, for: .navigationBar)
+                .safeAreaInset(edge: .top, spacing: 0) {
+                    ZStack {
+                        Text("Guided Checklist")
+                            .font(.system(size: 18, weight: .medium))
+                            .foregroundColor(.primary)
+                            .minimumScaleFactor(0.75)
+                            .lineLimit(1)
+                            .frame(maxWidth: .infinity, alignment: .center)
+
+                        HStack(spacing: 10) {
+                            Spacer(minLength: 0)
+
+                            Button(action: onClose) {
+                                Text("Done")
+                                    .font(.system(size: 18, weight: .medium))
+                                    .foregroundColor(.primary)
+                                    .frame(width: 72, height: 42)
+                                    .background(Color(uiColor: .secondarySystemBackground))
+                                    .clipShape(Capsule())
+                                    .overlay(
+                                        Capsule()
+                                            .stroke(Color.primary.opacity(0.12), lineWidth: 1)
+                                    )
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                    .padding(.horizontal, 14)
+                    .padding(.top, 14)
+                    .padding(.bottom, 4)
+                }
+            }
+            .frame(width: contentW, height: contentH, alignment: .center)
+            .rotationEffect(.degrees(rotationDegrees))
+            .position(x: geo.size.width * 0.5, y: geo.size.height * 0.5)
+            .statusBarHidden(isLandscape)
+            .onAppear {
+                UIDevice.current.beginGeneratingDeviceOrientationNotifications()
+                refreshOrientation()
+            }
+            .onReceive(NotificationCenter.default.publisher(for: UIDevice.orientationDidChangeNotification)) { _ in
+                refreshOrientation()
+            }
+            .onDisappear {
+                UIDevice.current.endGeneratingDeviceOrientationNotifications()
+            }
+        }
+    }
+
+    private func refreshOrientation() {
+        let orientation = UIDevice.current.orientation
+        switch orientation {
+        case .portrait, .portraitUpsideDown, .landscapeLeft, .landscapeRight:
+            lastValidOrientation = orientation
+        default:
+            break
+        }
+    }
+
+    private func showInlineToast(_ text: String) {
+        inlineToastText = text
+        inlineToastToken += 1
+        let token = inlineToastToken
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
+            guard token == inlineToastToken else { return }
+            inlineToastText = nil
+        }
+    }
+}
+
+private struct FastLaneGuidedChecklistRow: View {
+    let guidedShot: GuidedShot
+    let onTap: () -> Void
+
+    private var titleLabel: String {
+        let title = guidedShot.title.trimmingCharacters(in: .whitespacesAndNewlines)
+        return title.isEmpty ? "Guided Shot" : title
+    }
+
+    private var contextLabel: String {
+        let parts = [
+            guidedShot.building,
+            guidedShot.targetElevation,
+            guidedShot.detailType
+        ]
+            .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        if !parts.isEmpty {
+            return parts.joined(separator: " | ")
+        }
+        return titleLabel
+    }
+
+    private var statusLabel: String {
+        if guidedShot.isRetired || guidedShot.status == .retired {
+            return "Retired"
+        }
+        if guidedShot.skipReason != nil {
+            return "Skipped"
+        }
+        if guidedShot.isCompleted {
+            return "Captured"
+        }
+        return "Pending"
+    }
+
+    private var statusColor: Color {
+        switch statusLabel {
+        case "Captured":
+            return .green
+        case "Skipped", "Retired":
+            return .gray
+        default:
+            return .orange
+        }
+    }
+
+    var body: some View {
+        HStack(spacing: 12) {
+            ZStack {
+                Color.white.opacity(0.08)
+                Image(systemName: "photo")
+                    .font(.system(size: 14, weight: .medium))
+                    .foregroundColor(.secondary)
+            }
+            .frame(width: 56, height: 56)
+            .clipShape(RoundedRectangle(cornerRadius: 8))
+            .overlay(
+                RoundedRectangle(cornerRadius: 8)
+                    .stroke(Color.white.opacity(0.12), lineWidth: 1)
+            )
+            .overlay(alignment: .topTrailing) {
+                if statusLabel == "Captured" {
+                    Image(systemName: "checkmark.circle.fill")
+                        .font(.system(size: 16, weight: .semibold))
+                        .foregroundColor(.white)
+                        .shadow(color: .black.opacity(0.45), radius: 1.5, x: 0, y: 1)
+                        .padding(4)
+                }
+            }
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text(titleLabel)
+                    .font(.system(size: 15, weight: .medium))
+                    .foregroundColor(.primary)
+                    .lineLimit(1)
+
+                if contextLabel != titleLabel {
+                    Text(contextLabel)
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundColor(.white.opacity(0.82))
+                        .lineLimit(1)
+                }
+
+                Text("Angle \(max(1, guidedShot.angleIndex ?? 1))")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundColor(.white.opacity(0.86))
+
+                Text(statusLabel)
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundColor(statusColor)
+            }
+
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.black.opacity(0.55))
+        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .stroke(Color.white.opacity(0.12), lineWidth: 1)
+        )
+        .contentShape(Rectangle())
+        .onTapGesture(perform: onTap)
+        .listRowInsets(EdgeInsets(top: 6, leading: 12, bottom: 6, trailing: 12))
+        .listRowBackground(Color.clear)
+    }
+}
+
+private struct FastLaneCoreChecklistSheet: View {
+    let elevationTitle: String
+    let rows: [FastLaneCoreChecklistRowState]
+    let onClose: () -> Void
+    @State private var lastValidOrientation: UIDeviceOrientation = .portrait
+
+    private var rotationAngle: Angle {
+        guard UIDevice.current.userInterfaceIdiom == .pad else { return .zero }
+        switch lastValidOrientation {
+        case .landscapeLeft:
+            return .degrees(90)
+        case .landscapeRight:
+            return .degrees(-90)
+        default:
+            return .zero
+        }
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 10) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Core Elevation Checklist")
+                        .font(.system(size: 18, weight: .semibold))
+                        .foregroundStyle(.primary)
+                        .lineLimit(1)
+
+                    if !elevationTitle.isEmpty {
+                        Text(elevationTitle)
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                Spacer(minLength: 12)
+
+                Button(action: onClose) {
+                    Text("Done")
+                        .font(.system(size: 16, weight: .semibold))
+                        .foregroundStyle(.primary)
+                        .padding(.horizontal, 14)
+                        .frame(height: 36)
+                        .background(Color(uiColor: .secondarySystemBackground))
+                        .clipShape(Capsule())
+                        .overlay(
+                            Capsule()
+                                .stroke(Color.primary.opacity(0.12), lineWidth: 1)
+                        )
+                }
+                .buttonStyle(.plain)
+            }
+            .padding(.horizontal, 18)
+            .padding(.top, 18)
+            .padding(.bottom, 12)
+
+            VStack(spacing: 0) {
+                ForEach(rows) { row in
+                    coreChecklistRow(row)
+                    if row.id != rows.last?.id {
+                        Divider()
+                            .padding(.leading, 14)
+                    }
+                }
+            }
+            .background(Color(uiColor: .secondarySystemBackground))
+            .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .stroke(Color.primary.opacity(0.12), lineWidth: 1)
+            )
+            .padding(.horizontal, 18)
+            .padding(.bottom, 18)
+        }
+        .frame(maxWidth: 450)
+        .background(Color(uiColor: .secondarySystemGroupedBackground))
+        .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 24, style: .continuous)
+                .stroke(Color.primary.opacity(0.12), lineWidth: 1)
+        )
+        .shadow(color: Color.black.opacity(0.35), radius: 24, x: 0, y: 16)
+        .rotationEffect(rotationAngle)
+        .onAppear {
+            UIDevice.current.beginGeneratingDeviceOrientationNotifications()
+            refreshOrientation()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: UIDevice.orientationDidChangeNotification)) { _ in
+            refreshOrientation()
+        }
+        .onDisappear {
+            UIDevice.current.endGeneratingDeviceOrientationNotifications()
+        }
+    }
+
+    private func coreChecklistRow(_ row: FastLaneCoreChecklistRowState) -> some View {
+        HStack(alignment: .center, spacing: 12) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(row.category.title)
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundStyle(.primary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                if let note = row.category.note {
+                    Text(note)
+                        .font(.system(size: 12, weight: .regular))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+
+            Spacer(minLength: 12)
+
+            Text(row.countLabel)
+                .font(.system(size: 16, weight: .semibold, design: .rounded))
+                .foregroundStyle(.primary)
+                .frame(minWidth: 36, alignment: .trailing)
+
+            if row.category.showsCompletionIndicator {
+                Image(systemName: row.isComplete ? "checkmark.circle.fill" : "checkmark.circle")
+                    .font(.system(size: 18, weight: .semibold))
+                    .foregroundStyle(row.isComplete ? Color.green : Color.gray)
+                    .frame(width: 22)
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+    }
+
+    private func refreshOrientation() {
+        let orientation = UIDevice.current.orientation
+        switch orientation {
+        case .portrait, .portraitUpsideDown, .landscapeLeft, .landscapeRight:
+            lastValidOrientation = orientation
+        default:
+            break
+        }
     }
 }
 

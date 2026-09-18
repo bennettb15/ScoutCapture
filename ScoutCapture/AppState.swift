@@ -4976,6 +4976,20 @@ final class AppState: ObservableObject {
         )
     }
 
+    struct FastRuntimePreviewSideControlPayload: Equatable {
+        let resolutionRequiredObservations: [Observation]
+        let activeObservations: [Observation]
+        let guidedShots: [GuidedShot]
+        let retiredGuidedShots: [GuidedShot]
+
+        static let empty = FastRuntimePreviewSideControlPayload(
+            resolutionRequiredObservations: [],
+            activeObservations: [],
+            guidedShots: [],
+            retiredGuidedShots: []
+        )
+    }
+
     struct FastRuntimePrototypeCaptureTimings: Equatable {
         let storageMilliseconds: Double
         let fileWriteMilliseconds: Double
@@ -51579,6 +51593,53 @@ final class AppState: ObservableObject {
             activeIssueCount: activeIssueCount,
             guidedRemainingCount: guidedRemainingCount,
             checklistCount: 0
+        )
+    }
+
+    func fastRuntimePreviewSideControlPayload(
+        propertyID: UUID,
+        sessionType: SessionType
+    ) -> FastRuntimePreviewSideControlPayload {
+        guard canAccessProperty(propertyID) else {
+            return .empty
+        }
+
+        let observations = (try? localStore.fetchObservations(propertyID: propertyID)) ?? []
+        let sortedObservations = observations.sorted { lhs, rhs in
+            if lhs.updatedAt != rhs.updatedAt {
+                return lhs.updatedAt > rhs.updatedAt
+            }
+            return lhs.id.uuidString < rhs.id.uuidString
+        }
+        let resolutionRequired = sortedObservations.filter { $0.status == .resolutionRequired }
+        let active = sortedObservations.filter { $0.status == .active }
+
+        guard sessionType != .punchlistVisit else {
+            return FastRuntimePreviewSideControlPayload(
+                resolutionRequiredObservations: resolutionRequired,
+                activeObservations: active,
+                guidedShots: [],
+                retiredGuidedShots: []
+            )
+        }
+
+        let guidedRows = (try? localStore.fetchGuidedShots(propertyID: propertyID)) ?? []
+        let sortedGuidedRows = guidedRows.sorted { lhs, rhs in
+            let lhsTitle = lhs.title.trimmingCharacters(in: .whitespacesAndNewlines)
+            let rhsTitle = rhs.title.trimmingCharacters(in: .whitespacesAndNewlines)
+            if lhsTitle != rhsTitle {
+                return lhsTitle.localizedCaseInsensitiveCompare(rhsTitle) == .orderedAscending
+            }
+            return lhs.id.uuidString < rhs.id.uuidString
+        }
+        let activeGuided = sortedGuidedRows.filter { !$0.isRetired && $0.status != .retired }
+        let retiredGuided = sortedGuidedRows.filter { $0.isRetired || $0.status == .retired }
+
+        return FastRuntimePreviewSideControlPayload(
+            resolutionRequiredObservations: resolutionRequired,
+            activeObservations: active,
+            guidedShots: activeGuided,
+            retiredGuidedShots: retiredGuided
         )
     }
 
