@@ -3613,9 +3613,26 @@ struct SessionHubView: View {
                 .ignoresSafeArea()
 
             VStack(spacing: 16) {
-                Text("Session Type")
-                    .font(.system(size: 24, weight: .bold))
-                    .foregroundColor(headerPrimaryLabel)
+                VStack(spacing: 5) {
+                    Text("Session Type")
+                        .font(.system(size: 24, weight: .bold))
+                        .foregroundColor(headerPrimaryLabel)
+
+                    Text(property.name)
+                        .font(.system(size: 17, weight: .semibold))
+                        .foregroundColor(headerPrimaryLabel)
+                        .multilineTextAlignment(.center)
+                        .lineLimit(2)
+
+                    if let addressLine = propertyAddressLine(property) ?? property.address,
+                       !addressLine.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        Text(addressLine)
+                            .font(.system(size: 13, weight: .medium))
+                            .foregroundColor(.secondary)
+                            .multilineTextAlignment(.center)
+                            .lineLimit(2)
+                    }
+                }
 
                 VStack(spacing: 10) {
                     initialSessionChoiceButton(
