@@ -8213,6 +8213,8 @@ final class AppState: ObservableObject {
     private let supabaseMediaOperationQueue = DispatchQueue(label: "ScoutCapture.AppState.supabaseMediaOperations")
     private let offlineReplayStateQueue = DispatchQueue(label: "ScoutCapture.AppState.offlineReplay")
     private let sessionSnapshotUploadRetryStateQueue = DispatchQueue(label: "ScoutCapture.AppState.sessionSnapshotUploadRetry")
+    private let launchOfflineReplaySettlingDelay: TimeInterval = 20
+    private let automaticLaunchOfflineReplayAttemptLimit = 5
     private var cloudBackupLogRunOpen: Bool = false
     private var cloudBackupLogHasPrintedStart: Bool = false
     private var cloudBackupLogHasPrintedTerminal: Bool = false
@@ -9106,7 +9108,7 @@ final class AppState: ObservableObject {
             if !previousReady {
                 Task { @MainActor [weak self] in
                     guard let self else { return }
-                    await self.performRemoteConvergenceCycle(source: "launch")
+                    await self.performLaunchRemoteConvergenceAfterHomeSettles()
                 }
             } else if let resolvedActiveOrganizationID = activeOrganizationID,
                       previousActiveOrganizationID != resolvedActiveOrganizationID {
@@ -12138,6 +12140,13 @@ final class AppState: ObservableObject {
         )
     }
 
+    @MainActor
+    private func performLaunchRemoteConvergenceAfterHomeSettles() async {
+        try? await Task.sleep(nanoseconds: UInt64(launchOfflineReplaySettlingDelay * 1_000_000_000))
+        guard !Task.isCancelled else { return }
+        await performRemoteConvergenceCycle(source: "launch_deferred")
+    }
+
     private func offlineReplayNotReadySummary(source: String, reason: String) -> OfflineReplayRunSummary {
         print("[OfflineReplay] skipped source=\(source) reason=not_ready detail=\(reason)")
         let summary = OfflineReplayRunSummary(
@@ -12262,17 +12271,8 @@ final class AppState: ObservableObject {
         let orgMutations = queuedMutations.filter { $0.organizationID == orgID && $0.status != .completed }
         let now = Date()
         var skippedBackoffCount = 0
-        let replayable = orgMutations.filter { mutation in
+        let replayableCandidates = orgMutations.filter { mutation in
             if mutation.isAcknowledgedHistoricalDebt {
-                print(
-                    "[OfflineReplay] skipped " +
-                    "source=\(source) " +
-                    "reason=acknowledged_historical_queue_debt " +
-                    "queueItemID=\(mutation.id.uuidString) " +
-                    "entityType=\(mutation.entityType) " +
-                    "entityID=\(mutation.entityID.uuidString) " +
-                    "operation=\(mutation.operation)"
-                )
                 return false
             }
             if mutation.status == .failed,
@@ -12289,13 +12289,41 @@ final class AppState: ObservableObject {
             }
             return lhs.id.uuidString < rhs.id.uuidString
         }
+        let replayLimit = automaticOfflineReplayAttemptLimit(for: source)
+        let replayable: [LocalStore.QueuedMutation]
+        let cappedReplayCount: Int
+        if let replayLimit, replayableCandidates.count > replayLimit {
+            replayable = Array(replayableCandidates.prefix(replayLimit))
+            cappedReplayCount = replayableCandidates.count - replayLimit
+        } else {
+            replayable = replayableCandidates
+            cappedReplayCount = 0
+        }
+        let acknowledgedHistoricalDebtCount = orgMutations.filter(\.isAcknowledgedHistoricalDebt).count
+        if acknowledgedHistoricalDebtCount > 0 {
+            print(
+                "[OfflineReplay] skipped_summary " +
+                "source=\(source) " +
+                "reason=acknowledged_historical_queue_debt " +
+                "count=\(acknowledgedHistoricalDebtCount)"
+            )
+        }
+        if cappedReplayCount > 0 {
+            print(
+                "[OfflineReplay] capped " +
+                "source=\(source) " +
+                "limit=\(replayLimit ?? 0) " +
+                "deferredCount=\(cappedReplayCount)"
+            )
+        }
 
         print(
             "[OfflineReplay] start " +
             "source=\(source) " +
             "orgID=\(orgID.uuidString) " +
             "discoveredCount=\(orgMutations.count) " +
-            "eligibleCount=\(replayable.count) " +
+            "eligibleCount=\(replayableCandidates.count) " +
+            "attemptLimit=\(replayLimit.map(String.init) ?? "none") " +
             "preAcknowledgedHistoricalDebtCount=\(preAcknowledgedHistoricalDebtCount) " +
             "normalizedInFlightCount=\(normalizedInFlightCount)"
         )
@@ -12530,19 +12558,6 @@ final class AppState: ObservableObject {
             updatedQueue[index] = acknowledged
         }
 
-        for item in acknowledgedItems {
-            print(
-                "[OfflineReplay] item_terminal_preacknowledged " +
-                "source=\(source) " +
-                "queueItemID=\(item.id.uuidString) " +
-                "entityType=\(item.entityType) " +
-                "entityID=\(item.entityID.uuidString) " +
-                "operation=\(item.operation) " +
-                "attemptCount=\(item.attemptCount) " +
-                "classification=\(item.acknowledgedClassification ?? "unknown")"
-            )
-        }
-
         print(
             "[OfflineReplay] historical_debt_preacknowledged " +
             "source=\(source) " +
@@ -12597,7 +12612,7 @@ final class AppState: ObservableObject {
                 message.contains("rls") else {
             return false
         }
-        guard message.contains("properties") else { return false }
+        guard message.contains("properties") || message.contains("sessions") else { return false }
         if Self.isTransientReplayErrorMessage(message) {
             return false
         }
@@ -12897,6 +12912,10 @@ final class AppState: ObservableObject {
         default:
             return 1800
         }
+    }
+
+    private func automaticOfflineReplayAttemptLimit(for source: String) -> Int? {
+        source.hasPrefix("launch") ? automaticLaunchOfflineReplayAttemptLimit : nil
     }
 
     private func beginOfflineReplayRun() -> Bool {
