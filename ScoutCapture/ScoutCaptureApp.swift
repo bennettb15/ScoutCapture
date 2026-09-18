@@ -918,10 +918,18 @@ struct SessionHubView: View {
                         }
                     } else {
                         List {
+                            let rowDraftBadges = appState.propertyRowDraftBadgeByPropertyID
+                            let rowSubtitles = appState.propertyRowSubtitleByPropertyID
+                            let rowCloudGlyphs = appState.propertyRowCloudGlyphByPropertyID
                             if !filteredActiveProperties.isEmpty {
                                 Section {
                                     ForEach(filteredActiveProperties) { property in
-                                        diagnosticPropertyRow(property)
+                                        diagnosticPropertyRow(
+                                            property,
+                                            hasDraft: rowDraftBadges[property.id] == true,
+                                            subtitleLine: rowSubtitles[property.id],
+                                            cloudGlyph: rowCloudGlyphs[property.id]
+                                        )
                                     }
                                 }
                             }
@@ -929,7 +937,12 @@ struct SessionHubView: View {
                             if showArchivedSection && !filteredArchivedProperties.isEmpty {
                                 Section("Archived") {
                                     ForEach(filteredArchivedProperties) { property in
-                                        diagnosticPropertyRow(property)
+                                        diagnosticPropertyRow(
+                                            property,
+                                            hasDraft: rowDraftBadges[property.id] == true,
+                                            subtitleLine: rowSubtitles[property.id],
+                                            cloudGlyph: rowCloudGlyphs[property.id]
+                                        )
                                     }
                                 }
                             }
@@ -1348,20 +1361,30 @@ struct SessionHubView: View {
     }
 
     @ViewBuilder
-    private func diagnosticPropertyRow(_ property: Property) -> some View {
+    private func diagnosticPropertyRow(
+        _ property: Property,
+        hasDraft: Bool,
+        subtitleLine: String?,
+        cloudGlyph: AppState.PropertyRowCloudGlyphState?
+    ) -> some View {
         if diagnosticMinimalHomeRows {
-            minimalPropertyRow(property)
+            minimalPropertyRow(
+                property,
+                hasDraft: hasDraft,
+                subtitleLine: subtitleLine,
+                cloudGlyph: cloudGlyph
+            )
         } else {
             propertyRow(property)
         }
     }
 
-    private func minimalPropertyRow(_ property: Property) -> some View {
-        let statusChip = appState.propertyRowStatusChipByPropertyID[property.id]
-        let isUploading = statusChip == .uploading
-        let hasDraft = appState.propertyRowDraftBadgeByPropertyID[property.id] == true && statusChip == nil
-        let cloudGlyph = appState.propertyRowCloudGlyphByPropertyID[property.id]
-        let subtitleLine = appState.propertyRowSubtitleByPropertyID[property.id]
+    private func minimalPropertyRow(
+        _ property: Property,
+        hasDraft: Bool,
+        subtitleLine: String?,
+        cloudGlyph: AppState.PropertyRowCloudGlyphState?
+    ) -> some View {
         let addressLine = propertyAddressLine(property) ?? property.address
 
         return Button {
@@ -1369,16 +1392,10 @@ struct SessionHubView: View {
         } label: {
             HStack(alignment: .top, spacing: 10) {
                 VStack(alignment: .leading, spacing: 4) {
-                    HStack(alignment: .firstTextBaseline, spacing: 6) {
-                        Text(property.name)
-                            .font(.system(size: 18, weight: .semibold))
-                            .foregroundColor(.primary)
-                            .lineLimit(1)
-
-                        if let cloudGlyph, !isUploading {
-                            propertyRowCloudGlyphIcon(cloudGlyph)
-                        }
-                    }
+                    Text(propertyRowTitle(property.name, cloudGlyph: cloudGlyph))
+                        .font(.system(size: 18, weight: .semibold))
+                        .foregroundColor(.primary)
+                        .lineLimit(1)
 
                     if let subtitleLine,
                        !subtitleLine.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -1401,9 +1418,7 @@ struct SessionHubView: View {
 
                 Spacer(minLength: 8)
 
-                if let statusChip {
-                    propertyRowStatusChip(statusChip)
-                } else if hasDraft {
+                if hasDraft {
                     chipLabel("Draft", tint: .orange)
                 }
             }
@@ -1425,21 +1440,22 @@ struct SessionHubView: View {
             .fixedSize(horizontal: true, vertical: false)
     }
 
-    @ViewBuilder
-    private func propertyRowCloudGlyphIcon(_ state: AppState.PropertyRowCloudGlyphState) -> some View {
+    private func propertyRowTitle(
+        _ title: String,
+        cloudGlyph: AppState.PropertyRowCloudGlyphState?
+    ) -> String {
+        guard let cloudGlyph else { return title }
+        return "\(title) \(propertyRowCloudGlyphText(cloudGlyph))"
+    }
+
+    private func propertyRowCloudGlyphText(_ state: AppState.PropertyRowCloudGlyphState) -> String {
         switch state {
         case .current:
-            Image(systemName: "checkmark.icloud.fill")
-                .font(.system(size: 15, weight: .semibold))
-                .foregroundColor(.blue)
+            return "✓"
         case .uploading:
-            Image(systemName: "icloud.and.arrow.up")
-                .font(.system(size: 15, weight: .semibold))
-                .foregroundColor(.blue)
+            return "↑"
         case .warning:
-            Image(systemName: "exclamationmark.icloud")
-                .font(.system(size: 15, weight: .semibold))
-                .foregroundColor(.orange)
+            return "!"
         }
     }
 
