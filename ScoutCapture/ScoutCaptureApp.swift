@@ -916,49 +916,34 @@ struct SessionHubView: View {
                                 }
                             }
                         }
-                    } else {
+                    } else if hasNoMatches {
                         List {
-                            let rowDraftBadges = appState.propertyRowDraftBadgeByPropertyID
-                            let rowSubtitles = appState.propertyRowSubtitleByPropertyID
-                            let rowCloudGlyphs = appState.propertyRowCloudGlyphByPropertyID
-                            if !filteredActiveProperties.isEmpty {
-                                Section {
-                                    ForEach(filteredActiveProperties) { property in
-                                        diagnosticPropertyRow(
-                                            property,
-                                            hasDraft: rowDraftBadges[property.id] == true,
-                                            subtitleLine: rowSubtitles[property.id],
-                                            cloudGlyph: rowCloudGlyphs[property.id]
-                                        )
-                                    }
-                                }
-                            }
-
-                            if showArchivedSection && !filteredArchivedProperties.isEmpty {
-                                Section("Archived") {
-                                    ForEach(filteredArchivedProperties) { property in
-                                        diagnosticPropertyRow(
-                                            property,
-                                            hasDraft: rowDraftBadges[property.id] == true,
-                                            subtitleLine: rowSubtitles[property.id],
-                                            cloudGlyph: rowCloudGlyphs[property.id]
-                                        )
-                                    }
-                                }
-                            }
-
-                            if hasNoMatches {
-                                Section {
-                                    Text("No matching properties")
-                                        .font(.system(size: 14, weight: .medium))
-                                        .foregroundColor(.secondary)
-                                        .frame(maxWidth: .infinity, alignment: .center)
-                                        .padding(.vertical, 10)
-                                }
+                            Section {
+                                Text("No matching properties")
+                                    .font(.system(size: 14, weight: .medium))
+                                    .foregroundColor(.secondary)
+                                    .frame(maxWidth: .infinity, alignment: .center)
+                                    .padding(.vertical, 10)
                             }
                         }
-                        .id(appState.hubRowRefreshToken)
                         .listStyle(.plain)
+                    } else {
+                        PropertyListTableView(
+                            sections: propertyTableSections(showArchivedSection: showArchivedSection),
+                            onTap: { property in
+                                handlePropertyTap(property)
+                            },
+                            onMaps: { property in
+                                openMaps(for: property)
+                            },
+                            onMessage: { property in
+                                triggerPhoneAction(.message, for: property)
+                            },
+                            onCall: { property in
+                                triggerPhoneAction(.call, for: property)
+                            }
+                        )
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
                     }
                 }
             }
@@ -1431,6 +1416,66 @@ struct SessionHubView: View {
         .buttonStyle(.plain)
         .opacity(pressedPropertyID == property.id ? 0.70 : 1.0)
         .animation(.easeOut(duration: 0.10), value: pressedPropertyID)
+    }
+
+    private func propertyTableSections(showArchivedSection: Bool) -> [PropertyListTableSection] {
+        let rowDraftBadges = appState.propertyRowDraftBadgeByPropertyID
+        let rowSubtitles = appState.propertyRowSubtitleByPropertyID
+        let rowCloudGlyphs = appState.propertyRowCloudGlyphByPropertyID
+        var sections: [PropertyListTableSection] = []
+
+        if !filteredActiveProperties.isEmpty {
+            sections.append(
+                PropertyListTableSection(
+                    id: "active",
+                    title: nil,
+                    rows: propertyTableRows(
+                        for: filteredActiveProperties,
+                        rowDraftBadges: rowDraftBadges,
+                        rowSubtitles: rowSubtitles,
+                        rowCloudGlyphs: rowCloudGlyphs
+                    )
+                )
+            )
+        }
+
+        if showArchivedSection && !filteredArchivedProperties.isEmpty {
+            sections.append(
+                PropertyListTableSection(
+                    id: "archived",
+                    title: "Archived",
+                    rows: propertyTableRows(
+                        for: filteredArchivedProperties,
+                        rowDraftBadges: rowDraftBadges,
+                        rowSubtitles: rowSubtitles,
+                        rowCloudGlyphs: rowCloudGlyphs
+                    )
+                )
+            )
+        }
+
+        return sections
+    }
+
+    private func propertyTableRows(
+        for properties: [Property],
+        rowDraftBadges: [UUID: Bool],
+        rowSubtitles: [UUID: String],
+        rowCloudGlyphs: [UUID: AppState.PropertyRowCloudGlyphState]
+    ) -> [PropertyListTableRowModel] {
+        properties.map { property in
+            PropertyListTableRowModel(
+                property: property,
+                title: property.name,
+                subtitle: rowSubtitles[property.id],
+                address: propertyAddressLine(property) ?? property.address,
+                hasDraft: rowDraftBadges[property.id] == true,
+                cloudGlyph: rowCloudGlyphs[property.id],
+                canOpenMaps: mapsAddressQuery(for: property) != nil,
+                canMessage: hasValidPhoneNumber(property),
+                canCall: hasValidPhoneNumber(property)
+            )
+        }
     }
 
     @ViewBuilder
@@ -5305,6 +5350,323 @@ struct SessionHubView: View {
         .buttonStyle(.plain)
         .tint(.clear)
         .disabled(!isEnabled)
+    }
+}
+
+private struct PropertyListTableSection: Equatable, Identifiable {
+    let id: String
+    let title: String?
+    let rows: [PropertyListTableRowModel]
+}
+
+private struct PropertyListTableRowModel: Identifiable {
+    let property: Property
+    let title: String
+    let subtitle: String?
+    let address: String?
+    let hasDraft: Bool
+    let cloudGlyph: AppState.PropertyRowCloudGlyphState?
+    let canOpenMaps: Bool
+    let canMessage: Bool
+    let canCall: Bool
+
+    var id: UUID { property.id }
+}
+
+extension PropertyListTableRowModel: Equatable {
+    static func == (lhs: PropertyListTableRowModel, rhs: PropertyListTableRowModel) -> Bool {
+        lhs.property.id == rhs.property.id &&
+            lhs.property.orgId == rhs.property.orgId &&
+            lhs.property.clientPhone == rhs.property.clientPhone &&
+            lhs.title == rhs.title &&
+            lhs.subtitle == rhs.subtitle &&
+            lhs.address == rhs.address &&
+            lhs.hasDraft == rhs.hasDraft &&
+            lhs.cloudGlyph == rhs.cloudGlyph &&
+            lhs.canOpenMaps == rhs.canOpenMaps &&
+            lhs.canMessage == rhs.canMessage &&
+            lhs.canCall == rhs.canCall
+    }
+}
+
+private struct PropertyListTableView: UIViewRepresentable {
+    let sections: [PropertyListTableSection]
+    let onTap: (Property) -> Void
+    let onMaps: (Property) -> Void
+    let onMessage: (Property) -> Void
+    let onCall: (Property) -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(
+            sections: sections,
+            onTap: onTap,
+            onMaps: onMaps,
+            onMessage: onMessage,
+            onCall: onCall
+        )
+    }
+
+    func makeUIView(context: Context) -> UITableView {
+        let tableView = UITableView(frame: .zero, style: .plain)
+        tableView.register(PropertyListTableCell.self, forCellReuseIdentifier: PropertyListTableCell.reuseIdentifier)
+        tableView.dataSource = context.coordinator
+        tableView.delegate = context.coordinator
+        tableView.backgroundColor = .systemBackground
+        tableView.separatorColor = .separator
+        tableView.separatorInset = UIEdgeInsets(top: 0, left: 26, bottom: 0, right: 10)
+        tableView.rowHeight = 82
+        tableView.estimatedRowHeight = 82
+        tableView.sectionHeaderTopPadding = 0
+        tableView.keyboardDismissMode = .onDrag
+        tableView.delaysContentTouches = false
+        return tableView
+    }
+
+    func updateUIView(_ tableView: UITableView, context: Context) {
+        context.coordinator.onTap = onTap
+        context.coordinator.onMaps = onMaps
+        context.coordinator.onMessage = onMessage
+        context.coordinator.onCall = onCall
+
+        guard context.coordinator.sections != sections else { return }
+        context.coordinator.sections = sections
+        tableView.reloadData()
+    }
+
+    final class Coordinator: NSObject, UITableViewDataSource, UITableViewDelegate {
+        var sections: [PropertyListTableSection]
+        var onTap: (Property) -> Void
+        var onMaps: (Property) -> Void
+        var onMessage: (Property) -> Void
+        var onCall: (Property) -> Void
+
+        init(
+            sections: [PropertyListTableSection],
+            onTap: @escaping (Property) -> Void,
+            onMaps: @escaping (Property) -> Void,
+            onMessage: @escaping (Property) -> Void,
+            onCall: @escaping (Property) -> Void
+        ) {
+            self.sections = sections
+            self.onTap = onTap
+            self.onMaps = onMaps
+            self.onMessage = onMessage
+            self.onCall = onCall
+        }
+
+        func numberOfSections(in tableView: UITableView) -> Int {
+            sections.count
+        }
+
+        func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int {
+            sections[section].rows.count
+        }
+
+        func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
+            guard let cell = tableView.dequeueReusableCell(
+                withIdentifier: PropertyListTableCell.reuseIdentifier,
+                for: indexPath
+            ) as? PropertyListTableCell else {
+                return UITableViewCell(style: .default, reuseIdentifier: nil)
+            }
+            let row = sections[indexPath.section].rows[indexPath.row]
+            cell.configure(row)
+            return cell
+        }
+
+        func tableView(_ tableView: UITableView, titleForHeaderInSection section: Int) -> String? {
+            sections[section].title
+        }
+
+        func tableView(_ tableView: UITableView, heightForHeaderInSection section: Int) -> CGFloat {
+            guard let title = sections[section].title, !title.isEmpty else {
+                return .leastNormalMagnitude
+            }
+            return 30
+        }
+
+        func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
+            tableView.deselectRow(at: indexPath, animated: true)
+            let row = sections[indexPath.section].rows[indexPath.row]
+            onTap(row.property)
+        }
+
+        func tableView(
+            _ tableView: UITableView,
+            trailingSwipeActionsConfigurationForRowAt indexPath: IndexPath
+        ) -> UISwipeActionsConfiguration? {
+            let row = sections[indexPath.section].rows[indexPath.row]
+            var actions: [UIContextualAction] = []
+
+            if row.canCall {
+                let action = UIContextualAction(style: .normal, title: "Call") { [weak self] _, _, completion in
+                    self?.onCall(row.property)
+                    completion(true)
+                }
+                action.image = UIImage(systemName: "phone.fill")
+                action.backgroundColor = .systemGreen
+                actions.append(action)
+            }
+
+            if row.canMessage {
+                let action = UIContextualAction(style: .normal, title: "Message") { [weak self] _, _, completion in
+                    self?.onMessage(row.property)
+                    completion(true)
+                }
+                action.image = UIImage(systemName: "message.fill")
+                action.backgroundColor = .systemGreen
+                actions.append(action)
+            }
+
+            if row.canOpenMaps {
+                let action = UIContextualAction(style: .normal, title: "Maps") { [weak self] _, _, completion in
+                    self?.onMaps(row.property)
+                    completion(true)
+                }
+                action.image = UIImage(systemName: "map.fill")
+                action.backgroundColor = .systemBlue
+                actions.append(action)
+            }
+
+            guard !actions.isEmpty else { return nil }
+            let configuration = UISwipeActionsConfiguration(actions: actions)
+            configuration.performsFirstActionWithFullSwipe = false
+            return configuration
+        }
+    }
+}
+
+private final class PropertyListTableCell: UITableViewCell {
+    static let reuseIdentifier = "PropertyListTableCell"
+
+    private let titleLabel = UILabel()
+    private let subtitleLabel = UILabel()
+    private let addressLabel = UILabel()
+    private let draftLabel = UILabel()
+    private let textStack = UIStackView()
+    private let rootStack = UIStackView()
+
+    override init(style: UITableViewCell.CellStyle, reuseIdentifier: String?) {
+        super.init(style: style, reuseIdentifier: reuseIdentifier)
+        configureViews()
+    }
+
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        configureViews()
+    }
+
+    override func prepareForReuse() {
+        super.prepareForReuse()
+        titleLabel.attributedText = nil
+        subtitleLabel.text = nil
+        addressLabel.text = nil
+        draftLabel.isHidden = true
+    }
+
+    func configure(_ row: PropertyListTableRowModel) {
+        titleLabel.attributedText = attributedTitle(row.title, cloudGlyph: row.cloudGlyph)
+        subtitleLabel.text = row.subtitle?.trimmingCharacters(in: .whitespacesAndNewlines)
+        subtitleLabel.isHidden = (subtitleLabel.text ?? "").isEmpty
+        addressLabel.text = row.address?.trimmingCharacters(in: .whitespacesAndNewlines)
+        addressLabel.isHidden = (addressLabel.text ?? "").isEmpty
+        draftLabel.isHidden = !row.hasDraft
+    }
+
+    private func configureViews() {
+        backgroundColor = .systemBackground
+        contentView.backgroundColor = .systemBackground
+        selectionStyle = .default
+
+        titleLabel.font = .systemFont(ofSize: 18, weight: .semibold)
+        titleLabel.textColor = .label
+        titleLabel.lineBreakMode = .byTruncatingTail
+        titleLabel.numberOfLines = 1
+
+        [subtitleLabel, addressLabel].forEach { label in
+            label.font = .systemFont(ofSize: 13, weight: .medium)
+            label.textColor = .secondaryLabel
+            label.lineBreakMode = .byTruncatingTail
+            label.numberOfLines = 1
+        }
+
+        draftLabel.text = "Draft"
+        draftLabel.font = .systemFont(ofSize: 12, weight: .semibold)
+        draftLabel.textColor = .systemOrange
+        draftLabel.textAlignment = .center
+        draftLabel.backgroundColor = UIColor.systemOrange.withAlphaComponent(0.15)
+        draftLabel.layer.cornerRadius = 14
+        draftLabel.layer.borderWidth = 1
+        draftLabel.layer.borderColor = UIColor.systemOrange.withAlphaComponent(0.35).cgColor
+        draftLabel.layer.masksToBounds = true
+        draftLabel.isHidden = true
+
+        textStack.axis = .vertical
+        textStack.alignment = .fill
+        textStack.spacing = 4
+        textStack.translatesAutoresizingMaskIntoConstraints = false
+        textStack.addArrangedSubview(titleLabel)
+        textStack.addArrangedSubview(subtitleLabel)
+        textStack.addArrangedSubview(addressLabel)
+
+        rootStack.axis = .horizontal
+        rootStack.alignment = .top
+        rootStack.spacing = 10
+        rootStack.translatesAutoresizingMaskIntoConstraints = false
+        rootStack.addArrangedSubview(textStack)
+        rootStack.addArrangedSubview(draftLabel)
+
+        contentView.addSubview(rootStack)
+        draftLabel.setContentHuggingPriority(.required, for: .horizontal)
+        draftLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
+        textStack.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+
+        NSLayoutConstraint.activate([
+            rootStack.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 26),
+            rootStack.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -26),
+            rootStack.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 8),
+            rootStack.bottomAnchor.constraint(lessThanOrEqualTo: contentView.bottomAnchor, constant: -8),
+            draftLabel.widthAnchor.constraint(greaterThanOrEqualToConstant: 78),
+            draftLabel.heightAnchor.constraint(equalToConstant: 28)
+        ])
+    }
+
+    private func attributedTitle(
+        _ title: String,
+        cloudGlyph: AppState.PropertyRowCloudGlyphState?
+    ) -> NSAttributedString {
+        let result = NSMutableAttributedString(
+            string: title,
+            attributes: [
+                .font: UIFont.systemFont(ofSize: 18, weight: .semibold),
+                .foregroundColor: UIColor.label
+            ]
+        )
+
+        guard let cloudGlyph else { return result }
+        let glyphColor: UIColor
+        let glyph: String
+        switch cloudGlyph {
+        case .current:
+            glyph = " ✓"
+            glyphColor = .systemBlue
+        case .uploading:
+            glyph = " ↑"
+            glyphColor = .systemBlue
+        case .warning:
+            glyph = " !"
+            glyphColor = .systemOrange
+        }
+        result.append(
+            NSAttributedString(
+                string: glyph,
+                attributes: [
+                    .font: UIFont.systemFont(ofSize: 18, weight: .semibold),
+                    .foregroundColor: glyphColor
+                ]
+            )
+        )
+        return result
     }
 }
 
