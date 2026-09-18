@@ -653,8 +653,7 @@ struct CameraChromeView<PreviewContent: View, OverlayContent: View>: View {
 
                 HStack(alignment: .center) {
                     thumbnailCircle(size: 44)
-                        .frame(width: 58, height: 58)
-                        .padding(.horizontal, -7)
+                        .frame(width: 44, height: 44)
                         .rotationEffect(display.glyphRotationAngle)
                         .animation(glyphRotationAnimation, value: glyphRotationDegrees)
 

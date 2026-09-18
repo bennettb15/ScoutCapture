@@ -11,6 +11,7 @@ import MapKit
 import Combine
 import ImageIO
 import UniformTypeIdentifiers
+import CoreMotion
 
 private let isVerboseConsoleLoggingEnabled = false
 
@@ -13508,6 +13509,14 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
     @State private var lastValidDeviceOrientation: UIDeviceOrientation = .portrait
     @State private var glyphAngleDegrees: Double = 0
     @State private var didWarmFastMetadataLists: Bool = false
+    @State private var showFastLaneControlsMenu: Bool = false
+    @State private var showFastLaneGrid: Bool = false
+    @State private var showFastLaneLevel: Bool = false
+    @State private var isFastLaneFrontCamera: Bool = false
+    @State private var showFastLaneManageBuildingsSheet: Bool = false
+    @State private var showFastLaneManageTradesSheet: Bool = false
+    @State private var fastLaneManageDetailMode: CameraChromeLocationMode?
+    @StateObject private var fastLaneLevelModel = FastLaneLevelMotionModel()
     private let glyphRotationAnimation = Animation.interactiveSpring(
         response: 0.48,
         dampingFraction: 0.90,
@@ -13515,18 +13524,25 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
     )
 
     var body: some View {
-        CameraChromeView(
-            display: cameraChromeDisplay,
-            zoomSteps: camera.zoomSteps,
-            selectedZoomID: camera.selectedZoomId,
-            actions: cameraChromeActions,
-            previewContent: {
-                CameraPreviewView(session: camera.session)
-            },
-            overlayContent: {
-                fastLanePreviewOverlays
+        ZStack {
+            CameraChromeView(
+                display: cameraChromeDisplay,
+                zoomSteps: camera.zoomSteps,
+                selectedZoomID: camera.selectedZoomId,
+                actions: cameraChromeActions,
+                previewContent: {
+                    CameraPreviewView(session: camera.session)
+                },
+                overlayContent: {
+                    fastLanePreviewOverlays
+                }
+            )
+
+            if showFastLaneControlsMenu {
+                fastLaneControlsOverlay
+                    .zIndex(80)
             }
-        )
+        }
         .onAppear {
             UIDevice.current.beginGeneratingDeviceOrientationNotifications()
             refreshCameraChromeGlyphRotation()
@@ -13563,6 +13579,14 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
         .onDisappear {
             UIDevice.current.endGeneratingDeviceOrientationNotifications()
             locationManager.stop()
+            fastLaneLevelModel.stop()
+        }
+        .onChange(of: showFastLaneLevel) { _, isShowing in
+            if isShowing {
+                fastLaneLevelModel.start()
+            } else {
+                fastLaneLevelModel.stop()
+            }
         }
         .sheet(item: $completeDryRunResult) { result in
             FastRuntimeCompleteDryRunResultView(result: result)
@@ -13590,6 +13614,47 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                     applyFastLaneMetadataContext(updatedContext)
                     isShowingFastMetadataPicker = false
                 }
+            )
+        }
+        .sheet(isPresented: $showFastLaneManageBuildingsSheet) {
+            FastLaneManageBuildingsSheet(
+                options: $fastBuildingOptions,
+                selectedBuilding: Binding(
+                    get: { fastMetadataContext.building },
+                    set: { newValue in
+                        applyFastLaneMetadataContext(AppState.FastRuntimeCaptureMetadataContext(
+                            locationMode: fastMetadataContext.locationMode,
+                            building: newValue,
+                            elevation: fastMetadataContext.elevation,
+                            detailType: fastMetadataContext.detailType,
+                            trade: fastMetadataContext.trade,
+                            angleIndex: fastMetadataContext.angleIndex
+                        ))
+                    }
+                ),
+                onClose: { showFastLaneManageBuildingsSheet = false }
+            )
+        }
+        .sheet(item: $fastLaneManageDetailMode) { mode in
+            FastLaneManageDetailTypesView(mode: mode, profile: fastLaneCaptureProfile, model: fastDetailTypesModel)
+        }
+        .sheet(isPresented: $showFastLaneManageTradesSheet) {
+            FastLaneManageTradesSheet(
+                options: $fastTradeOptions,
+                selectedTrade: Binding(
+                    get: { fastMetadataContext.trade ?? "" },
+                    set: { newValue in
+                        applyFastLaneMetadataContext(AppState.FastRuntimeCaptureMetadataContext(
+                            locationMode: fastMetadataContext.locationMode,
+                            building: fastMetadataContext.building,
+                            elevation: fastMetadataContext.elevation,
+                            detailType: fastMetadataContext.detailType,
+                            trade: newValue,
+                            angleIndex: fastMetadataContext.angleIndex
+                        ))
+                    }
+                ),
+                onClose: { showFastLaneManageTradesSheet = false }
             )
         }
     }
@@ -13625,7 +13690,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             sideControls: fastLaneChromeSideControls,
             savedCount: capturedCount,
             thumbnail: nil,
-            ellipsisEnabled: isDebugMode,
+            ellipsisEnabled: true,
             deviceOrientation: lastValidDeviceOrientation,
             glyphRotationAngle: .degrees(glyphAngleDegrees)
         )
@@ -13694,10 +13759,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                 applyFastLaneLocationMode(mode)
             },
             onEllipsisTapped: {
-                guard isDebugMode else { return }
-                withAnimation(.easeInOut(duration: 0.18)) {
-                    isTimingExpanded.toggle()
-                }
+                showFastLaneControlsMenu = true
             }
         )
     }
@@ -13774,6 +13836,23 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
 
     @ViewBuilder
     private var fastLanePreviewOverlays: some View {
+        if showFastLaneGrid {
+            FastLaneGridOverlay()
+                .stroke(Color.white.opacity(0.44), lineWidth: 1)
+                .allowsHitTesting(false)
+                .zIndex(7)
+        }
+
+        if showFastLaneLevel {
+            FastLaneLevelOverlay(
+                rollDegrees: fastLaneLevelModel.rollDegrees,
+                isLevel: fastLaneLevelModel.isLevel
+            )
+            .rotationEffect(.degrees(glyphAngleDegrees))
+            .allowsHitTesting(false)
+            .zIndex(8)
+        }
+
         if captureFlashVisible {
             Color.white
                 .opacity(0.32)
@@ -13808,6 +13887,76 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
                 .transition(.opacity.combined(with: .move(edge: .top)))
                 .zIndex(18)
+        }
+
+    }
+
+    private var fastLaneControlsOverlay: some View {
+        GeometryReader { geo in
+            let panelWidth = min(max(320, geo.size.width - 24), 560)
+            let panelHeight: CGFloat = UIDevice.current.userInterfaceIdiom == .pad ? 430 : 360
+
+            ZStack {
+                Color.black.opacity(0.46)
+                    .ignoresSafeArea()
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        showFastLaneControlsMenu = false
+                    }
+
+                VStack {
+                    Spacer(minLength: 0)
+
+                    FastLaneCameraControlsSheet(
+                        glyphRotationAngle: .degrees(glyphAngleDegrees),
+                        flashSetting: camera.flashSetting,
+                        isFrontCamera: isFastLaneFrontCamera,
+                        isGridOn: $showFastLaneGrid,
+                        isLevelOn: $showFastLaneLevel,
+                        onBuildingList: {
+                            showFastLaneControlsMenu = false
+                            DispatchQueue.main.async {
+                                showFastLaneManageBuildingsSheet = true
+                            }
+                        },
+                        onInteriorList: {
+                            showFastLaneControlsMenu = false
+                            DispatchQueue.main.async {
+                                fastLaneManageDetailMode = .interior
+                            }
+                        },
+                        onExteriorList: {
+                            showFastLaneControlsMenu = false
+                            DispatchQueue.main.async {
+                                fastLaneManageDetailMode = .exterior
+                            }
+                        },
+                        onTrades: {
+                            showFastLaneControlsMenu = false
+                            DispatchQueue.main.async {
+                                showFastLaneManageTradesSheet = true
+                            }
+                        },
+                        onFlash: {
+                            camera.cycleFlash()
+                        },
+                        onCameraSwap: {
+                            isFastLaneFrontCamera.toggle()
+                            camera.toggleCamera()
+                        }
+                    )
+                    .frame(width: panelWidth, height: panelHeight)
+                    .background(.ultraThinMaterial)
+                    .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 18, style: .continuous)
+                            .stroke(Color.white.opacity(0.18), lineWidth: 1)
+                    )
+                    .shadow(color: Color.black.opacity(0.45), radius: 18, x: 0, y: 10)
+                    .padding(.bottom, max(16, geo.safeAreaInsets.bottom + 12))
+                }
+                .padding(.horizontal, 12)
+            }
         }
     }
 
@@ -15712,6 +15861,320 @@ private struct FastLaneManageBuildingsSheet: View {
                 FastLaneMetadataOptions.persistBuildingOptions(options, selectedBuilding: &selectedBuilding)
             }
         }
+    }
+}
+
+private struct FastLaneCameraControlsSheet: View {
+    @Environment(\.colorScheme) private var colorScheme
+    private var theme: FastLaneSheetControlTheme { .forScheme(colorScheme) }
+
+    let glyphRotationAngle: Angle
+    let flashSetting: CameraManager.FlashSetting
+    let isFrontCamera: Bool
+
+    @Binding var isGridOn: Bool
+    @Binding var isLevelOn: Bool
+
+    let onBuildingList: () -> Void
+    let onInteriorList: () -> Void
+    let onExteriorList: () -> Void
+    let onTrades: () -> Void
+    let onFlash: () -> Void
+    let onCameraSwap: () -> Void
+
+    var body: some View {
+        GeometryReader { geo in
+            let spacing: CGFloat = 12
+            let rawContentW = geo.size.width - 36
+            let contentW = rawContentW.isFinite ? max(0, rawContentW) : 0
+            let rawBtnW = (contentW - (spacing * 2)) / 3.0
+            let btnW = rawBtnW.isFinite ? max(0, rawBtnW) : 0
+            let rawTopBtnW = (contentW - (spacing * 3)) / 4.0
+            let topBtnW = rawTopBtnW.isFinite ? max(0, rawTopBtnW) : 0
+            let bottomInset = (btnW / 2.0) + (spacing / 2.0)
+
+            NavigationStack {
+                ZStack {
+                    Color.clear
+                        .ignoresSafeArea()
+
+                    VStack(spacing: 18) {
+                        HStack(spacing: spacing) {
+                            FastLaneCameraControlsButton(
+                                glyphRotationAngle: glyphRotationAngle,
+                                icon: "building.2",
+                                title: "BUILDINGS",
+                                isSelected: false,
+                                selectedStyle: false,
+                                theme: theme,
+                                action: onBuildingList
+                            )
+                            .frame(width: topBtnW)
+
+                            FastLaneCameraControlsButton(
+                                glyphRotationAngle: glyphRotationAngle,
+                                icon: "list.bullet",
+                                title: "INTERIOR",
+                                isSelected: false,
+                                selectedStyle: false,
+                                theme: theme,
+                                action: onInteriorList
+                            )
+                            .frame(width: topBtnW)
+
+                            FastLaneCameraControlsButton(
+                                glyphRotationAngle: glyphRotationAngle,
+                                icon: "list.bullet",
+                                title: "EXTERIOR",
+                                isSelected: false,
+                                selectedStyle: false,
+                                theme: theme,
+                                action: onExteriorList
+                            )
+                            .frame(width: topBtnW)
+
+                            FastLaneCameraControlsButton(
+                                glyphRotationAngle: glyphRotationAngle,
+                                icon: "wrench.and.screwdriver",
+                                title: "TRADES",
+                                isSelected: false,
+                                selectedStyle: false,
+                                theme: theme,
+                                action: onTrades
+                            )
+                            .frame(width: topBtnW)
+                        }
+
+                        Rectangle()
+                            .fill(theme.stroke.opacity(0.55))
+                            .frame(height: 1)
+                            .padding(.horizontal, 10)
+                            .padding(.top, 2)
+                            .padding(.bottom, 8)
+
+                        HStack(spacing: spacing) {
+                            FastLaneCameraControlsButton(
+                                glyphRotationAngle: glyphRotationAngle,
+                                icon: flashIcon,
+                                title: "FLASH",
+                                isSelected: flashSetting != .off,
+                                selectedStyle: true,
+                                theme: theme,
+                                action: onFlash
+                            )
+                            .frame(width: btnW)
+
+                            FastLaneCameraControlsButton(
+                                glyphRotationAngle: glyphRotationAngle,
+                                icon: "square.grid.3x3",
+                                title: "GRID",
+                                isSelected: isGridOn,
+                                selectedStyle: true,
+                                theme: theme
+                            ) {
+                                isGridOn.toggle()
+                            }
+                            .frame(width: btnW)
+
+                            FastLaneCameraControlsButton(
+                                glyphRotationAngle: glyphRotationAngle,
+                                icon: "level",
+                                title: "LEVEL",
+                                isSelected: isLevelOn,
+                                selectedStyle: true,
+                                theme: theme
+                            ) {
+                                isLevelOn.toggle()
+                            }
+                            .frame(width: btnW)
+                        }
+                        .padding(.horizontal, bottomInset)
+
+                        HStack(spacing: 0) {
+                            Spacer(minLength: 0)
+                            FastLaneCameraControlsButton(
+                                glyphRotationAngle: glyphRotationAngle,
+                                icon: "camera.rotate",
+                                title: "CAMERA",
+                                isSelected: isFrontCamera,
+                                selectedStyle: true,
+                                theme: theme,
+                                action: onCameraSwap
+                            )
+                            .frame(width: btnW)
+                            Spacer(minLength: 0)
+                        }
+                        .frame(maxWidth: .infinity, alignment: .center)
+                        .padding(.top, 8)
+                    }
+                    .padding(.top, 30)
+                    .padding(.horizontal, 18)
+                    .padding(.bottom, 4)
+                }
+                .navigationBarTitleDisplayMode(.inline)
+            }
+        }
+    }
+
+    private var flashIcon: String {
+        switch flashSetting {
+        case .off:
+            return "bolt.slash"
+        case .auto:
+            return "bolt.badge.a"
+        case .on:
+            return "bolt"
+        }
+    }
+}
+
+private struct FastLaneCameraControlsButton: View {
+    let glyphRotationAngle: Angle
+    let icon: String
+    let title: String
+    let isSelected: Bool
+    let selectedStyle: Bool
+    let theme: FastLaneSheetControlTheme
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            VStack(spacing: 10) {
+                Circle()
+                    .fill(buttonFill)
+                    .frame(width: 74, height: 74)
+                    .overlay(
+                        Circle()
+                            .stroke(buttonStroke, lineWidth: 1)
+                    )
+                    .overlay(
+                        Image(systemName: icon)
+                            .font(.system(size: 30, weight: .medium))
+                            .foregroundColor(iconColor)
+                    )
+
+                Text(title)
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundColor(titleColor)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.72)
+            }
+            .rotationEffect(glyphRotationAngle)
+            .frame(maxWidth: .infinity)
+        }
+        .buttonStyle(.plain)
+    }
+
+    private var buttonFill: Color {
+        if isSelected { return theme.fill.opacity(0.96) }
+        return selectedStyle ? theme.fill.opacity(0.82) : theme.fill
+    }
+
+    private var iconColor: Color {
+        if isSelected { return .blue }
+        return selectedStyle ? theme.label.opacity(0.92) : theme.label
+    }
+
+    private var buttonStroke: Color {
+        isSelected ? Color.blue.opacity(0.72) : theme.stroke.opacity(0.70)
+    }
+
+    private var titleColor: Color {
+        isSelected ? Color.blue.opacity(0.96) : theme.label.opacity(0.88)
+    }
+}
+
+private struct FastLaneGridOverlay: Shape {
+    func path(in rect: CGRect) -> Path {
+        var path = Path()
+        let x1 = rect.minX + rect.width / 3
+        let x2 = rect.minX + 2 * rect.width / 3
+        let y1 = rect.minY + rect.height / 3
+        let y2 = rect.minY + 2 * rect.height / 3
+
+        path.move(to: CGPoint(x: x1, y: rect.minY))
+        path.addLine(to: CGPoint(x: x1, y: rect.maxY))
+        path.move(to: CGPoint(x: x2, y: rect.minY))
+        path.addLine(to: CGPoint(x: x2, y: rect.maxY))
+        path.move(to: CGPoint(x: rect.minX, y: y1))
+        path.addLine(to: CGPoint(x: rect.maxX, y: y1))
+        path.move(to: CGPoint(x: rect.minX, y: y2))
+        path.addLine(to: CGPoint(x: rect.maxX, y: y2))
+        return path
+    }
+}
+
+private struct FastLaneLevelOverlay: View {
+    let rollDegrees: Double
+    let isLevel: Bool
+
+    var body: some View {
+        GeometryReader { geo in
+            let size = min(geo.size.width, geo.size.height) * 0.46
+
+            Rectangle()
+                .fill(isLevel ? Color.green : Color.white)
+                .frame(width: size * 0.72, height: 3)
+                .rotationEffect(.degrees(rollDegrees))
+                .shadow(color: Color.black.opacity(0.25), radius: 2, x: 0, y: 1)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+    }
+}
+
+private final class FastLaneLevelMotionModel: ObservableObject {
+    @Published var rollDegrees: Double = 0
+    @Published var isLevel: Bool = false
+
+    private let motion = CMMotionManager()
+    private var filteredDegrees: Double = 0
+    private let alpha: Double = 0.18
+    private let levelOnThreshold: Double = 1.0
+    private let levelOffThreshold: Double = 1.4
+    private(set) var isRunning: Bool = false
+
+    func start() {
+        guard !isRunning, motion.isDeviceMotionAvailable else { return }
+
+        isRunning = true
+        motion.deviceMotionUpdateInterval = 1.0 / 60.0
+        motion.startDeviceMotionUpdates(using: .xArbitraryZVertical, to: .main) { [weak self] motion, _ in
+            guard let self, let motion else { return }
+            let gx = motion.gravity.x
+            let gy = motion.gravity.y
+            let usePortraitAxis = abs(gy) >= abs(gx)
+            var angleRad: Double
+            if usePortraitAxis {
+                angleRad = motion.attitude.roll
+                if gy < 0 { angleRad = -angleRad }
+            } else {
+                angleRad = motion.attitude.pitch
+                if gx > 0 { angleRad = -angleRad }
+            }
+
+            var degrees = angleRad * 180.0 / .pi
+            degrees = min(90, max(-90, degrees))
+            filteredDegrees += alpha * (degrees - filteredDegrees)
+            rollDegrees = filteredDegrees
+
+            let absDegrees = abs(filteredDegrees)
+            if isLevel {
+                if absDegrees > levelOffThreshold {
+                    isLevel = false
+                }
+            } else if absDegrees < levelOnThreshold {
+                isLevel = true
+            }
+        }
+    }
+
+    func stop() {
+        guard isRunning else { return }
+        isRunning = false
+        motion.stopDeviceMotionUpdates()
+        filteredDegrees = 0
+        rollDegrees = 0
+        isLevel = false
     }
 }
 
