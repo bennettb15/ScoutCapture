@@ -4962,6 +4962,20 @@ final class AppState: ObservableObject {
         let totalMilliseconds: Double
     }
 
+    struct FastRuntimePreviewSideControlCounts: Equatable {
+        let resolutionRequiredCount: Int
+        let activeIssueCount: Int
+        let guidedRemainingCount: Int
+        let checklistCount: Int
+
+        static let empty = FastRuntimePreviewSideControlCounts(
+            resolutionRequiredCount: 0,
+            activeIssueCount: 0,
+            guidedRemainingCount: 0,
+            checklistCount: 0
+        )
+    }
+
     struct FastRuntimePrototypeCaptureTimings: Equatable {
         let storageMilliseconds: Double
         let fileWriteMilliseconds: Double
@@ -51533,6 +51547,39 @@ final class AppState: ObservableObject {
         let guided = (try? localStore.fetchGuidedShots(propertyID: propertyID).count) ?? 0
         let observations = (try? localStore.fetchObservations(propertyID: propertyID).count) ?? 0
         return PropertyDataCounts(sessions: sessions, guided: guided, observations: observations)
+    }
+
+    func fastRuntimePreviewSideControlCounts(
+        propertyID: UUID,
+        sessionType: SessionType
+    ) -> FastRuntimePreviewSideControlCounts {
+        guard canAccessProperty(propertyID) else {
+            return .empty
+        }
+
+        let observations = (try? localStore.fetchObservations(propertyID: propertyID)) ?? []
+        let resolutionRequiredCount = observations.filter { $0.status == .resolutionRequired }.count
+        let activeIssueCount = observations.filter { $0.status == .active }.count
+
+        let guidedRemainingCount: Int
+        if sessionType == .punchlistVisit {
+            guidedRemainingCount = 0
+        } else {
+            let guidedRows = (try? localStore.fetchGuidedShots(propertyID: propertyID)) ?? []
+            guidedRemainingCount = guidedRows.filter {
+                !$0.isRetired &&
+                    $0.status != .retired &&
+                    !$0.isCompleted &&
+                    $0.skipReason == nil
+            }.count
+        }
+
+        return FastRuntimePreviewSideControlCounts(
+            resolutionRequiredCount: resolutionRequiredCount,
+            activeIssueCount: activeIssueCount,
+            guidedRemainingCount: guidedRemainingCount,
+            checklistCount: 0
+        )
     }
 
     func recentlyDeletedProperties() -> [Property] {

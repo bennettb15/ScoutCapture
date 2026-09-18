@@ -13521,6 +13521,10 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
     @State private var fastLaneManageDetailMode: CameraChromeLocationMode?
     @State private var showFastLaneDetailNoteOverlay: Bool = false
     @State private var showFastLaneSessionActionsSheet: Bool = false
+    @State private var fastLaneSideControlCounts: AppState.FastRuntimePreviewSideControlCounts = .empty
+    @State private var didRefreshFastLaneSideControlCounts: Bool = false
+    @State private var fastLaneSideControlToastText: String?
+    @State private var fastLaneSideControlToastToken: Int = 0
     @StateObject private var fastLaneGalleryImageCache = AssetImageCache()
     @State private var showFastLaneGallery: Bool = false
     @State private var fastLaneGalleryAssets: [ReportAsset] = []
@@ -13609,6 +13613,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             camera.ensurePreviewRunningAsync()
             if camera.isPreviewRunning, previewRunningAt == nil {
                 previewRunningAt = Date()
+                refreshFastLaneSideControlCountsIfNeeded()
             }
         }
         .onReceive(NotificationCenter.default.publisher(for: UIDevice.orientationDidChangeNotification)) { _ in
@@ -13617,6 +13622,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
         .onReceive(camera.$isPreviewRunning.removeDuplicates()) { isRunning in
             guard isRunning, previewRunningAt == nil else { return }
             previewRunningAt = Date()
+            refreshFastLaneSideControlCountsIfNeeded()
         }
         .onDisappear {
             UIDevice.current.endGeneratingDeviceOrientationNotifications()
@@ -13797,7 +13803,9 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             onMetadataTapped: {
                 isShowingFastMetadataPicker = true
             },
-            onSideControlTapped: { _ in },
+            onSideControlTapped: { controlID in
+                handleFastLaneSideControlTap(controlID)
+            },
             onZoomTapped: { step in
                 camera.setZoomStep(step)
             },
@@ -13937,28 +13945,41 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
     }
 
     private var fastLaneChromeSideControls: [CameraChromeSideControl] {
+        let resolutionCount = fastLaneSideControlCounts.resolutionRequiredCount
+        let activeIssueCount = fastLaneSideControlCounts.activeIssueCount
+        let guidedCount = fastLaneSideControlCounts.guidedRemainingCount
         return [
             CameraChromeSideControl(
                 id: "resolution_required",
                 systemImage: "flag.checkered",
-                accessibilityLabel: "Resolution required"
+                color: resolutionCount > 0 ? .green : .white,
+                badgeText: resolutionCount > 0 ? "\(resolutionCount)" : nil,
+                accessibilityLabel: "Resolution required",
+                isEnabled: true
             ),
             CameraChromeSideControl(
                 id: "active_issues",
                 systemImage: "flag.fill",
-                accessibilityLabel: "Active issues"
+                color: activeIssueCount > 0 ? .red : .white,
+                badgeText: activeIssueCount > 0 ? "\(activeIssueCount)" : nil,
+                accessibilityLabel: "Active issues",
+                isEnabled: true
             ),
             CameraChromeSideControl(
                 id: "guided",
                 systemImage: "safari",
+                color: guidedCount > 0 ? .blue : .white,
+                badgeText: guidedCount > 0 ? "\(guidedCount)" : nil,
                 accessibilityLabel: "Guided",
-                isVisible: context.sessionType != .punchlistVisit
+                isVisible: context.sessionType != .punchlistVisit,
+                isEnabled: true
             ),
             CameraChromeSideControl(
                 id: "checklist",
                 systemImage: "checkmark",
                 accessibilityLabel: "Checklist",
-                isVisible: context.sessionType != .punchlistVisit
+                isVisible: context.sessionType != .punchlistVisit,
+                isEnabled: true
             )
         ]
     }
@@ -14035,6 +14056,26 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                 )
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
                 .padding(.horizontal, 18)
+                .allowsHitTesting(false)
+                .zIndex(25)
+        }
+
+        if let fastLaneSideControlToastText {
+            Text(fastLaneSideControlToastText)
+                .font(.system(size: 14, weight: .medium))
+                .foregroundColor(.white)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, 16)
+                .padding(.vertical, 10)
+                .background(Color.black.opacity(0.55))
+                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .stroke(Color.white.opacity(0.18), lineWidth: 1)
+                )
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+                .padding(.horizontal, 18)
+                .rotationEffect(.degrees(glyphAngleDegrees))
                 .allowsHitTesting(false)
                 .zIndex(25)
         }
@@ -14643,6 +14684,69 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
         showFastLaneControlsMenu = false
         showFastLaneDetailNoteOverlay = false
         showFastLaneSessionActionsSheet = true
+    }
+
+    private func refreshFastLaneSideControlCountsIfNeeded() {
+        guard !didRefreshFastLaneSideControlCounts else { return }
+        didRefreshFastLaneSideControlCounts = true
+        Task {
+            let counts = appState.fastRuntimePreviewSideControlCounts(
+                propertyID: context.propertyID,
+                sessionType: context.sessionType
+            )
+            await MainActor.run {
+                fastLaneSideControlCounts = counts
+            }
+        }
+    }
+
+    private func handleFastLaneSideControlTap(_ controlID: CameraChromeSideControl.ID) {
+        shutterHaptic.impactOccurred(intensity: 0.42)
+        shutterHaptic.prepare()
+        refreshFastLaneSideControlCountsIfNeeded()
+
+        switch controlID {
+        case "resolution_required":
+            showFastLaneSideControlToast(
+                fastLaneSideControlCounts.resolutionRequiredCount > 0
+                    ? "Resolution list opens in the next fast-lane slice"
+                    : "No resolution required"
+            )
+        case "active_issues":
+            showFastLaneSideControlToast(
+                fastLaneSideControlCounts.activeIssueCount > 0
+                    ? "Active issues list opens in the next fast-lane slice"
+                    : "No active flagged issues"
+            )
+        case "guided":
+            guard context.sessionType != .punchlistVisit else {
+                showFastLaneSideControlToast("No guided requirements")
+                return
+            }
+            showFastLaneSideControlToast(
+                fastLaneSideControlCounts.guidedRemainingCount > 0
+                    ? "Guided list opens in the next fast-lane slice"
+                    : "No guided photos"
+            )
+        case "checklist":
+            guard context.sessionType != .punchlistVisit else {
+                showFastLaneSideControlToast("Checklist is not available for Punchlist Visit")
+                return
+            }
+            showFastLaneSideControlToast("Checklist opens in the next fast-lane slice")
+        default:
+            break
+        }
+    }
+
+    private func showFastLaneSideControlToast(_ text: String) {
+        fastLaneSideControlToastToken += 1
+        let token = fastLaneSideControlToastToken
+        fastLaneSideControlToastText = text
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.8) {
+            guard token == fastLaneSideControlToastToken else { return }
+            fastLaneSideControlToastText = nil
+        }
     }
 
     private func reloadFastLaneGalleryAssets() {
