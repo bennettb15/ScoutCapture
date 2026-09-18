@@ -72,6 +72,8 @@ struct CameraChromeDisplayModel {
     var savedCount: Int
     var thumbnail: UIImage?
     var ellipsisEnabled: Bool
+    var hasDetailNote: Bool = false
+    var detailNotePriority: String? = nil
     var deviceOrientation: UIDeviceOrientation = .portrait
     var glyphRotationAngle: Angle = .zero
 }
@@ -85,6 +87,7 @@ struct CameraChromeActions {
     var onHDTapped: () -> Void = {}
     var onShutterTapped: () -> Void = {}
     var onThumbnailTapped: () -> Void = {}
+    var onDetailNoteTapped: () -> Void = {}
     var onLocationModeChanged: (CameraChromeLocationMode) -> Void = { _ in }
     var onEllipsisTapped: () -> Void = {}
 }
@@ -702,21 +705,30 @@ struct CameraChromeView<PreviewContent: View, OverlayContent: View>: View {
     }
 
     private func detailNoteQuickButton(size: CGFloat) -> some View {
-        Button {} label: {
+        Button(action: actions.onDetailNoteTapped) {
+            let activeColor: Color = {
+                guard display.hasDetailNote else { return Color.white.opacity(0.14) }
+                let normalized = normalizedCameraChromePriority(display.detailNotePriority)
+                return normalized.isEmpty ? .blue : cameraChromePriorityColor(normalized)
+            }()
             Circle()
-                .fill(Color.white.opacity(0.14))
+                .fill(activeColor)
                 .frame(width: size, height: size)
                 .overlay(
                     CameraChromeFlaggedReasonGlyph(
                         size: size,
-                        foregroundColor: .white.opacity(0.92),
+                        foregroundColor: display.hasDetailNote ? .white : .white.opacity(0.92),
                         markColor: .black.opacity(0.86)
                     )
+                )
+                .overlay(
+                    Circle()
+                        .stroke(display.hasDetailNote ? Color.white.opacity(0.70) : Color.clear, lineWidth: 2)
+                        .frame(width: size + 6, height: size + 6)
                 )
         }
         .buttonStyle(.plain)
         .frame(width: size, height: size)
-        .disabled(true)
     }
 
     private func thumbnailCircle(size: CGFloat) -> some View {
@@ -881,4 +893,35 @@ private func proportionalCircleTextSize(for size: CGFloat) -> CGFloat {
 
 private func proportionalCircleGlyphSize(for size: CGFloat) -> CGFloat {
     min(30, max(18, (size * 0.5).rounded()))
+}
+
+private func normalizedCameraChromePriority(_ value: String?) -> String {
+    let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    switch trimmed.lowercased() {
+    case "low":
+        return "Low"
+    case "medium":
+        return "Medium"
+    case "high":
+        return "High"
+    case "critical":
+        return "Critical"
+    default:
+        return ""
+    }
+}
+
+private func cameraChromePriorityColor(_ priority: String) -> Color {
+    switch normalizedCameraChromePriority(priority) {
+    case "Critical":
+        return .red
+    case "High":
+        return .orange
+    case "Medium":
+        return .yellow
+    case "Low":
+        return .blue
+    default:
+        return .clear
+    }
 }

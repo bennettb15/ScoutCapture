@@ -4975,6 +4975,8 @@ final class AppState: ObservableObject {
         let elevation: String
         let detailType: String
         let trade: String?
+        let detailNote: String?
+        let priority: String?
         let angleIndex: Int
         let shotKey: String
 
@@ -4984,6 +4986,8 @@ final class AppState: ObservableObject {
             elevation: String? = nil,
             detailType: String? = nil,
             trade: String? = nil,
+            detailNote: String? = nil,
+            priority: String? = nil,
             angleIndex: Int? = nil,
             shotKey: String? = nil
         ) {
@@ -4995,6 +4999,8 @@ final class AppState: ObservableObject {
             )
             let normalizedDetailType = AppState.normalizedFastRuntimeMetadataText(detailType, fallback: "Overview")
             let normalizedTrade = AppState.normalizedFastRuntimeMetadataText(trade, fallback: "")
+            let normalizedDetailNote = AppState.normalizedFastRuntimeMetadataText(detailNote, fallback: "")
+            let normalizedPriority = AppState.normalizedFastRuntimePriority(priority)
             let normalizedAngleIndex = max(1, angleIndex ?? 1)
             let normalizedShotKey = AppState.normalizedFastRuntimeMetadataText(
                 shotKey,
@@ -5011,6 +5017,8 @@ final class AppState: ObservableObject {
             self.elevation = normalizedElevation
             self.detailType = normalizedDetailType
             self.trade = normalizedTrade.isEmpty ? nil : normalizedTrade
+            self.detailNote = normalizedDetailNote.isEmpty ? nil : normalizedDetailNote
+            self.priority = normalizedPriority.isEmpty ? nil : normalizedPriority
             self.angleIndex = normalizedAngleIndex
             self.shotKey = normalizedShotKey
         }
@@ -5022,6 +5030,8 @@ final class AppState: ObservableObject {
                 elevation: elevation,
                 detailType: detailType,
                 trade: trade,
+                detailNote: detailNote,
+                priority: priority,
                 angleIndex: max(1, angleIndex),
                 shotKey: nil
             )
@@ -44845,15 +44855,15 @@ final class AppState: ObservableObject {
             detailType: metadataContext.detailType,
             angleIndex: metadataContext.angleIndex,
             trade: metadataContext.trade,
-            priority: nil,
+            priority: metadataContext.priority,
             shotKey: metadataContext.shotKey,
             isGuided: false,
-            isFlagged: false,
+            isFlagged: metadataContext.detailNote != nil,
             issueID: nil,
-            issueStatus: nil,
+            issueStatus: metadataContext.detailNote == nil ? nil : "active",
             captureKind: dryRunShot.captureKind,
             firstCaptureKind: "captured",
-            noteText: nil,
+            noteText: metadataContext.detailNote,
             noteCategory: nil,
             originalFilename: originalFilename,
             originalRelativePath: dryRunShot.originalRelativePath,
@@ -45106,9 +45116,27 @@ final class AppState: ObservableObject {
             elevation: value?.elevation,
             detailType: value?.detailType,
             trade: value?.trade,
+            detailNote: value?.detailNote,
+            priority: value?.priority,
             angleIndex: value?.angleIndex ?? fallbackPosition,
             shotKey: value?.shotKey
         )
+    }
+
+    nonisolated static func normalizedFastRuntimePriority(_ value: String?) -> String {
+        let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        switch trimmed.lowercased() {
+        case "low":
+            return "Low"
+        case "medium":
+            return "Medium"
+        case "high":
+            return "High"
+        case "critical":
+            return "Critical"
+        default:
+            return ""
+        }
     }
 
     nonisolated private static func fastRuntimeMetadataContextForCapture(

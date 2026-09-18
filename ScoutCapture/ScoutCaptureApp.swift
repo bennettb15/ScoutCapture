@@ -13516,12 +13516,14 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
     @State private var showFastLaneManageBuildingsSheet: Bool = false
     @State private var showFastLaneManageTradesSheet: Bool = false
     @State private var fastLaneManageDetailMode: CameraChromeLocationMode?
+    @State private var showFastLaneDetailNoteOverlay: Bool = false
     @StateObject private var fastLaneLevelModel = FastLaneLevelMotionModel()
     private let glyphRotationAnimation = Animation.interactiveSpring(
         response: 0.48,
         dampingFraction: 0.90,
         blendDuration: 0.18
     )
+    private static let priorityOptions: [String] = ["Low", "Medium", "High", "Critical"]
 
     var body: some View {
         ZStack {
@@ -13541,6 +13543,11 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             if showFastLaneControlsMenu {
                 fastLaneControlsOverlay
                     .zIndex(80)
+            }
+
+            if showFastLaneDetailNoteOverlay {
+                fastLaneDetailNoteOverlay
+                    .zIndex(90)
             }
         }
         .onAppear {
@@ -13628,6 +13635,8 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                             elevation: fastMetadataContext.elevation,
                             detailType: fastMetadataContext.detailType,
                             trade: fastMetadataContext.trade,
+                            detailNote: fastMetadataContext.detailNote,
+                            priority: fastMetadataContext.priority,
                             angleIndex: fastMetadataContext.angleIndex
                         ))
                     }
@@ -13650,6 +13659,8 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                             elevation: fastMetadataContext.elevation,
                             detailType: fastMetadataContext.detailType,
                             trade: newValue,
+                            detailNote: fastMetadataContext.detailNote,
+                            priority: fastMetadataContext.priority,
                             angleIndex: fastMetadataContext.angleIndex
                         ))
                     }
@@ -13691,6 +13702,8 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             savedCount: capturedCount,
             thumbnail: nil,
             ellipsisEnabled: true,
+            hasDetailNote: fastMetadataContext.detailNote != nil,
+            detailNotePriority: fastMetadataContext.priority,
             deviceOrientation: lastValidDeviceOrientation,
             glyphRotationAngle: .degrees(glyphAngleDegrees)
         )
@@ -13755,6 +13768,11 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                 beginFastLaneShutter()
             },
             onThumbnailTapped: {},
+            onDetailNoteTapped: {
+                shutterHaptic.impactOccurred(intensity: 0.55)
+                shutterHaptic.prepare()
+                showFastLaneDetailNoteOverlay = true
+            },
             onLocationModeChanged: { mode in
                 applyFastLaneLocationMode(mode)
             },
@@ -13808,7 +13826,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
     }
 
     private var fastLaneChromeSideControls: [CameraChromeSideControl] {
-        [
+        return [
             CameraChromeSideControl(
                 id: "resolution_required",
                 systemImage: "flag.checkered",
@@ -13861,6 +13879,36 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                 .zIndex(24)
         }
 
+        if let stagedNote = fastMetadataContext.detailNote,
+           !stagedNote.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            let isLandscape = lastValidDeviceOrientation == .landscapeLeft || lastValidDeviceOrientation == .landscapeRight
+            if isLandscape {
+                fastLaneStagedFlagPill(
+                    text: stagedNote,
+                    priority: fastMetadataContext.priority
+                )
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+                .padding(.bottom, 96)
+                .padding(.horizontal, 18)
+                .rotationEffect(.degrees(glyphAngleDegrees))
+                .transaction { transaction in
+                    transaction.animation = nil
+                }
+                .allowsHitTesting(false)
+                .zIndex(55)
+            } else {
+                fastLaneStagedFlagPill(
+                    text: stagedNote,
+                    priority: fastMetadataContext.priority
+                )
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                .padding(.top, 10)
+                .padding(.horizontal, 18)
+                .allowsHitTesting(false)
+                .zIndex(55)
+            }
+        }
+
         if let captureErrorMessage {
             Text(captureErrorMessage)
                 .font(.system(size: 14, weight: .medium))
@@ -13889,6 +13937,25 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                 .zIndex(18)
         }
 
+    }
+
+    private func fastLaneStagedFlagPill(text: String, priority: String?) -> some View {
+        let normalizedPriority = normalizedFastLaneDetailPriority(priority)
+        return HStack(spacing: 8) {
+            if !normalizedPriority.isEmpty {
+                Circle()
+                    .fill(fastLaneDetailPriorityColor(normalizedPriority))
+                    .frame(width: 9, height: 9)
+            }
+            Text(text)
+                .font(.system(size: 14, weight: .medium))
+                .foregroundColor(.white)
+                .lineLimit(2)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .background(Color.black.opacity(0.55))
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
     }
 
     private var fastLaneControlsOverlay: some View {
@@ -13958,6 +14025,70 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                 .padding(.horizontal, 12)
             }
         }
+    }
+
+    private var fastLaneDetailNoteOverlay: some View {
+        FastLaneDetailNoteModal(
+            elevation: fastMetadataContext.elevation,
+            detailType: fastMetadataContext.detailType,
+            existingNote: fastMetadataContext.detailNote ?? "",
+            isNoteEditable: true,
+            tradeOptions: FastLaneMetadataOptions.canonicalTradeOptions(
+                fastTradeOptions,
+                selectedTrade: fastMetadataContext.trade
+            ),
+            priorityOptions: Self.priorityOptions,
+            selectedTrade: Binding(
+                get: { fastMetadataContext.trade ?? "" },
+                set: { newValue in
+                    applyFastLaneMetadataContext(AppState.FastRuntimeCaptureMetadataContext(
+                        locationMode: fastMetadataContext.locationMode,
+                        building: fastMetadataContext.building,
+                        elevation: fastMetadataContext.elevation,
+                        detailType: fastMetadataContext.detailType,
+                        trade: newValue,
+                        detailNote: fastMetadataContext.detailNote,
+                        priority: fastMetadataContext.priority,
+                        angleIndex: fastMetadataContext.angleIndex
+                    ))
+                }
+            ),
+            selectedPriority: Binding(
+                get: {
+                    fastLaneDetailPriorityOrDefault(fastMetadataContext.priority)
+                },
+                set: { newValue in
+                    applyFastLaneMetadataContext(AppState.FastRuntimeCaptureMetadataContext(
+                        locationMode: fastMetadataContext.locationMode,
+                        building: fastMetadataContext.building,
+                        elevation: fastMetadataContext.elevation,
+                        detailType: fastMetadataContext.detailType,
+                        trade: fastMetadataContext.trade,
+                        detailNote: fastMetadataContext.detailNote,
+                        priority: newValue,
+                        angleIndex: fastMetadataContext.angleIndex
+                    ))
+                }
+            ),
+            onCancel: {
+                showFastLaneDetailNoteOverlay = false
+            },
+            onSave: { newValue in
+                let trimmed = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
+                let stagedPriority = fastLaneDetailPriorityOrDefault(fastMetadataContext.priority)
+                applyFastLaneMetadataContext(AppState.FastRuntimeCaptureMetadataContext(
+                    locationMode: fastMetadataContext.locationMode,
+                    building: fastMetadataContext.building,
+                    elevation: fastMetadataContext.elevation,
+                    detailType: fastMetadataContext.detailType,
+                    trade: fastMetadataContext.trade,
+                    detailNote: trimmed.isEmpty ? nil : trimmed,
+                    priority: trimmed.isEmpty ? nil : stagedPriority,
+                    angleIndex: fastMetadataContext.angleIndex
+                ))
+                showFastLaneDetailNoteOverlay = false
+            }
+        )
     }
 
     private var headerPanel: some View {
@@ -14353,8 +14484,28 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                             capturedCount += 1
                             fastStorageRoot = saveResult.storageRoot ?? fastStorageRoot
                             if let savedContext = saveResult.shot?.metadataContext {
-                                fastMetadataContext = savedContext.withAngleIndex(savedContext.angleIndex + 1)
+                                fastMetadataContext = AppState.FastRuntimeCaptureMetadataContext(
+                                    locationMode: savedContext.locationMode,
+                                    building: savedContext.building,
+                                    elevation: savedContext.elevation,
+                                    detailType: savedContext.detailType,
+                                    trade: savedContext.trade,
+                                    detailNote: nil,
+                                    priority: nil,
+                                    angleIndex: savedContext.angleIndex + 1
+                                )
                                 chromeLocationMode = CameraChromeLocationMode(fastRuntimeRawValue: savedContext.locationMode)
+                            } else {
+                                fastMetadataContext = AppState.FastRuntimeCaptureMetadataContext(
+                                    locationMode: fastMetadataContext.locationMode,
+                                    building: fastMetadataContext.building,
+                                    elevation: fastMetadataContext.elevation,
+                                    detailType: fastMetadataContext.detailType,
+                                    trade: fastMetadataContext.trade,
+                                    detailNote: nil,
+                                    priority: nil,
+                                    angleIndex: fastMetadataContext.angleIndex + 1
+                                )
                             }
                             captureErrorMessage = nil
                         } else {
@@ -14569,6 +14720,8 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             elevation: nextElevation,
             detailType: nextDetail,
             trade: current.trade,
+            detailNote: current.detailNote,
+            priority: current.priority,
             angleIndex: current.angleIndex
         ))
     }
@@ -14587,6 +14740,8 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             elevation: elevation,
             detailType: detail,
             trade: FastLaneMetadataOptions.canonicalTradeLabel(normalized.trade, preferredOptions: fastTradeOptions),
+            detailNote: normalized.detailNote,
+            priority: normalized.priority,
             angleIndex: normalized.angleIndex
         )
         chromeLocationMode = mode
@@ -15255,6 +15410,8 @@ private struct FastLaneMetadataFilterSheet: View {
                             elevation: selectedLocationMode == .interior ? "Interior" : selectedElevation,
                             detailType: selectedDetailType,
                             trade: selectedTrade,
+                            detailNote: context.detailNote,
+                            priority: context.priority,
                             angleIndex: context.angleIndex
                         ))
                     } label: {
@@ -15861,6 +16018,279 @@ private struct FastLaneManageBuildingsSheet: View {
                 FastLaneMetadataOptions.persistBuildingOptions(options, selectedBuilding: &selectedBuilding)
             }
         }
+    }
+}
+
+private struct FastLaneDetailNoteModal: View {
+    let elevation: String
+    let detailType: String
+    let existingNote: String
+    let isNoteEditable: Bool
+    let tradeOptions: [String]
+    let priorityOptions: [String]
+    @Binding var selectedTrade: String
+    @Binding var selectedPriority: String
+
+    let onCancel: () -> Void
+    let onSave: (String) -> Void
+
+    @State private var draft: String
+    @FocusState private var isFocused: Bool
+
+    init(
+        elevation: String,
+        detailType: String,
+        existingNote: String,
+        isNoteEditable: Bool,
+        tradeOptions: [String],
+        priorityOptions: [String],
+        selectedTrade: Binding<String>,
+        selectedPriority: Binding<String>,
+        onCancel: @escaping () -> Void,
+        onSave: @escaping (String) -> Void
+    ) {
+        self.elevation = elevation
+        self.detailType = detailType
+        self.existingNote = existingNote
+        self.isNoteEditable = isNoteEditable
+        self.tradeOptions = tradeOptions
+        self.priorityOptions = priorityOptions
+        self._selectedTrade = selectedTrade
+        self._selectedPriority = selectedPriority
+        self.onCancel = onCancel
+        self.onSave = onSave
+        _draft = State(initialValue: existingNote)
+    }
+
+    private var hasExistingNote: Bool {
+        !existingNote.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private var trimmedDraft: String {
+        draft.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private var needsPrioritySelection: Bool {
+        !trimmedDraft.isEmpty
+    }
+
+    private var hasValidPriority: Bool {
+        !normalizedFastLaneDetailPriority(selectedPriority).isEmpty
+    }
+
+    private var canSave: Bool {
+        !needsPrioritySelection || hasValidPriority
+    }
+
+    private var fixedModalLift: CGFloat {
+        isNoteEditable ? 128 : 0
+    }
+
+    var body: some View {
+        ZStack {
+            Color.black.opacity(0.55)
+                .ignoresSafeArea()
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    isFocused = false
+                    onCancel()
+                }
+
+            VStack(spacing: 12) {
+                Text("\(elevation)  \(detailType)")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundColor(.white.opacity(0.92))
+                    .lineLimit(1)
+
+                ZStack(alignment: .trailing) {
+                    TextField("Enter detail note", text: $draft)
+                        .textInputAutocapitalization(.sentences)
+                        .autocorrectionDisabled(false)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 12)
+                        .padding(.trailing, draft.isEmpty ? 12 : 34)
+                        .background(Color(uiColor: .secondarySystemGroupedBackground))
+                        .clipShape(RoundedRectangle(cornerRadius: 12))
+                        .foregroundColor(.primary)
+                        .focused($isFocused)
+                        .disabled(!isNoteEditable)
+                        .submitLabel(.done)
+                        .onSubmit {
+                            guard canSave else { return }
+                            onSave(trimmedDraft)
+                        }
+
+                    if !draft.isEmpty && isNoteEditable {
+                        Button { draft = "" } label: {
+                            Image(systemName: "xmark.circle.fill")
+                                .font(.system(size: 18, weight: .medium))
+                                .foregroundColor(.secondary)
+                                .padding(.trailing, 10)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+
+                HStack(spacing: 10) {
+                    Text("Priority")
+                        .font(.system(size: 14, weight: .medium))
+                        .foregroundColor(.white.opacity(0.90))
+                        .frame(width: 62, alignment: .leading)
+
+                    Menu {
+                        ForEach(priorityOptions, id: \.self) { option in
+                            Button(option) {
+                                selectedPriority = option
+                            }
+                        }
+                    } label: {
+                        HStack(spacing: 8) {
+                            let normalizedPriority = normalizedFastLaneDetailPriority(selectedPriority)
+                            if !normalizedPriority.isEmpty {
+                                Circle()
+                                    .fill(fastLaneDetailPriorityColor(normalizedPriority))
+                                    .frame(width: 10, height: 10)
+                            }
+                            Text(normalizedPriority.isEmpty ? "Required" : normalizedPriority)
+                                .foregroundColor(.white.opacity(normalizedPriority.isEmpty ? 0.75 : 0.95))
+                                .lineLimit(1)
+                            Spacer(minLength: 0)
+                            Image(systemName: "chevron.down")
+                                .font(.system(size: 12, weight: .semibold))
+                                .foregroundColor(.white.opacity(0.72))
+                        }
+                        .padding(.horizontal, 12)
+                        .frame(height: 42)
+                        .background(Color.white.opacity(0.10))
+                        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    }
+                    .buttonStyle(.plain)
+                }
+
+                HStack(spacing: 10) {
+                    Text("Trade")
+                        .font(.system(size: 14, weight: .medium))
+                        .foregroundColor(.white.opacity(0.90))
+                        .frame(width: 62, alignment: .leading)
+
+                    Menu {
+                        Button("None") {
+                            selectedTrade = ""
+                        }
+                        ForEach(tradeOptions, id: \.self) { option in
+                            Button(option) {
+                                selectedTrade = option
+                            }
+                        }
+                    } label: {
+                        HStack(spacing: 8) {
+                            Text(selectedTrade.isEmpty ? "Optional" : selectedTrade)
+                                .foregroundColor(.white.opacity(selectedTrade.isEmpty ? 0.75 : 0.95))
+                                .lineLimit(1)
+                            Spacer(minLength: 0)
+                            Image(systemName: "chevron.down")
+                                .font(.system(size: 12, weight: .semibold))
+                                .foregroundColor(.white.opacity(0.72))
+                        }
+                        .padding(.horizontal, 12)
+                        .frame(height: 42)
+                        .background(Color.white.opacity(0.10))
+                        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    }
+                    .buttonStyle(.plain)
+                }
+
+                if needsPrioritySelection && !hasValidPriority {
+                    Text("Priority is required for flagged items.")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundColor(.red.opacity(0.95))
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+
+                HStack(spacing: 10) {
+                    Button(action: {
+                        isFocused = false
+                        onCancel()
+                    }) {
+                        Text("Cancel")
+                            .font(.system(size: 15, weight: .medium))
+                            .foregroundColor(.white.opacity(0.90))
+                            .frame(maxWidth: .infinity)
+                            .frame(height: 44)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .background(Color.white.opacity(0.10))
+                    .clipShape(RoundedRectangle(cornerRadius: 12))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 12)
+                            .stroke(Color.white.opacity(0.12), lineWidth: 1)
+                    )
+                    .contentShape(Rectangle())
+
+                    Button(action: {
+                        isFocused = false
+                        guard canSave else { return }
+                        onSave(trimmedDraft)
+                    }) {
+                        Text(hasExistingNote ? "Update" : "Save")
+                            .font(.system(size: 15, weight: .medium))
+                            .foregroundColor(canSave ? .black : .black.opacity(0.45))
+                            .frame(maxWidth: .infinity)
+                            .frame(height: 44)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .background(Color.white.opacity(canSave ? 0.92 : 0.35))
+                    .clipShape(RoundedRectangle(cornerRadius: 12))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 12)
+                            .stroke(Color.black.opacity(0.10), lineWidth: 1)
+                    )
+                    .contentShape(Rectangle())
+                    .disabled(!canSave)
+                }
+            }
+            .padding(16)
+            .background(.ultraThinMaterial)
+            .clipShape(RoundedRectangle(cornerRadius: 16))
+            .overlay(
+                RoundedRectangle(cornerRadius: 16)
+                    .stroke(Color.white.opacity(0.18), lineWidth: 1)
+            )
+            .shadow(color: Color.black.opacity(0.45), radius: 16, x: 0, y: 10)
+            .padding(.horizontal, 18)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+            .offset(y: -fixedModalLift)
+        }
+        .onAppear {
+            isFocused = isNoteEditable
+        }
+        .ignoresSafeArea(.keyboard, edges: .bottom)
+    }
+}
+
+private func normalizedFastLaneDetailPriority(_ value: String?) -> String {
+    AppState.normalizedFastRuntimePriority(value)
+}
+
+private func fastLaneDetailPriorityOrDefault(_ value: String?) -> String {
+    let normalized = normalizedFastLaneDetailPriority(value)
+    return normalized.isEmpty ? "Low" : normalized
+}
+
+private func fastLaneDetailPriorityColor(_ priority: String) -> Color {
+    switch normalizedFastLaneDetailPriority(priority) {
+    case "Critical":
+        return .red
+    case "High":
+        return .orange
+    case "Medium":
+        return .yellow
+    case "Low":
+        return .blue
+    default:
+        return .clear
     }
 }
 
