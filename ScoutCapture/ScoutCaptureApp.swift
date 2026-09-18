@@ -13519,6 +13519,12 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
     @State private var showFastLaneManageTradesSheet: Bool = false
     @State private var fastLaneManageDetailMode: CameraChromeLocationMode?
     @State private var showFastLaneDetailNoteOverlay: Bool = false
+    @StateObject private var fastLaneGalleryImageCache = AssetImageCache()
+    @State private var showFastLaneGallery: Bool = false
+    @State private var fastLaneGalleryAssets: [ReportAsset] = []
+    @State private var fastLaneGalleryThumbnail: UIImage?
+    @State private var fastLaneGalleryThumbnailAssetID: String = ""
+    @State private var fastLaneGalleryRefreshToken = UUID()
     @StateObject private var fastLaneLevelModel = FastLaneLevelMotionModel()
     private let glyphRotationAnimation = Animation.interactiveSpring(
         response: 0.48,
@@ -13573,6 +13579,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             if capturedCount < initialCapturedCount {
                 capturedCount = initialCapturedCount
             }
+            reloadFastLaneGalleryAssets()
             shutterHaptic.prepare()
             locationManager.start()
             camera.prepareForPreviewAsync()
@@ -13673,6 +13680,14 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                 onClose: { showFastLaneManageTradesSheet = false }
             )
         }
+        .fullScreenCover(isPresented: $showFastLaneGallery) {
+            FastLanePhotoLibraryFullscreen(
+                title: propertyName,
+                assets: fastLaneGalleryAssets,
+                cache: fastLaneGalleryImageCache,
+                thumbnailRefreshToken: fastLaneGalleryRefreshToken
+            )
+        }
     }
 
     private var cameraChromeDisplay: CameraChromeDisplayModel {
@@ -13705,7 +13720,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             locationMode: chromeLocationMode,
             sideControls: fastLaneChromeSideControls,
             savedCount: capturedCount,
-            thumbnail: nil,
+            thumbnail: fastLaneGalleryThumbnail,
             ellipsisEnabled: true,
             hasDetailNote: fastMetadataContext.detailNote != nil,
             detailNotePriority: fastMetadataContext.priority,
@@ -13774,7 +13789,12 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                 shutterHaptic.prepare()
                 beginFastLaneShutter()
             },
-            onThumbnailTapped: {},
+            onThumbnailTapped: {
+                shutterHaptic.impactOccurred(intensity: 0.45)
+                shutterHaptic.prepare()
+                reloadFastLaneGalleryAssets()
+                showFastLaneGallery = true
+            },
             onDetailNoteTapped: {
                 shutterHaptic.impactOccurred(intensity: 0.55)
                 shutterHaptic.prepare()
@@ -14540,6 +14560,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                                 )
                             }
                             captureErrorMessage = nil
+                            reloadFastLaneGalleryAssets()
                         } else {
                             captureErrorMessage = saveResult.errorMessage ?? "Capture save failed."
                         }
@@ -14552,6 +14573,77 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
 
     private func beginFastLaneShutter() {
         captureFastLanePhoto()
+    }
+
+    private func reloadFastLaneGalleryAssets() {
+        guard let root = fastStorageRoot ?? storageRoot ?? prototypeResult.tempStorageRoot else {
+            fastLaneGalleryAssets = []
+            fastLaneGalleryThumbnail = nil
+            fastLaneGalleryThumbnailAssetID = ""
+            fastLaneGalleryRefreshToken = UUID()
+            return
+        }
+
+        let metadataURL = root
+            .appendingPathComponent("Metadata", isDirectory: true)
+            .appendingPathComponent("fast-lane-shots.json", isDirectory: false)
+        DispatchQueue.global(qos: .utility).async {
+            let assets: [ReportAsset] = {
+                guard let data = try? Data(contentsOf: metadataURL) else { return [] }
+                let decoder = JSONDecoder()
+                decoder.dateDecodingStrategy = .iso8601
+                guard let shots = try? decoder.decode([AppState.FastRuntimePrototypeShotRecord].self, from: data) else {
+                    return []
+                }
+
+                return shots
+                    .filter { $0.sessionID == context.sessionID && $0.propertyID == context.propertyID }
+                    .sorted {
+                        if $0.capturedAt != $1.capturedAt { return $0.capturedAt < $1.capturedAt }
+                        return $0.id.uuidString < $1.id.uuidString
+                    }
+                    .compactMap { shot in
+                        let directURL = URL(fileURLWithPath: shot.localFilePath, isDirectory: false)
+                        let relativeURL = root.appendingPathComponent(shot.originalRelativePath, isDirectory: false)
+                        let url = FileManager.default.fileExists(atPath: directURL.path) ? directURL : relativeURL
+                        guard FileManager.default.fileExists(atPath: url.path) else { return nil }
+                        return ReportAsset(
+                            localIdentifier: url.path,
+                            fileURL: url,
+                            creationDate: shot.capturedAt,
+                            pixelWidth: 0,
+                            pixelHeight: 0,
+                            originalFilename: url.lastPathComponent
+                        )
+                    }
+            }()
+
+            DispatchQueue.main.async {
+                fastLaneGalleryAssets = assets
+                fastLaneGalleryRefreshToken = UUID()
+                refreshFastLaneGalleryThumbnail(from: assets)
+            }
+        }
+    }
+
+    private func refreshFastLaneGalleryThumbnail(from assets: [ReportAsset]) {
+        guard let asset = assets.last else {
+            fastLaneGalleryThumbnail = nil
+            fastLaneGalleryThumbnailAssetID = ""
+            return
+        }
+        let assetID = asset.localIdentifier
+        if assetID == fastLaneGalleryThumbnailAssetID, fastLaneGalleryThumbnail != nil {
+            return
+        }
+        fastLaneGalleryThumbnailAssetID = assetID
+        let px = max(260, 44 * UIScreen.currentScale * 3.0)
+        fastLaneGalleryImageCache.requestThumbnail(for: asset, pixelSize: px) { image in
+            DispatchQueue.main.async {
+                guard fastLaneGalleryThumbnailAssetID == assetID else { return }
+                fastLaneGalleryThumbnail = image
+            }
+        }
     }
 
     private func runCompleteDryRun() {
@@ -15294,6 +15386,687 @@ private final class FastLaneDetailTypesModel: ObservableObject {
     private func saveItems(_ items: [DetailTypeItem], key: String) {
         guard let data = try? JSONEncoder().encode(items) else { return }
         UserDefaults.standard.set(data, forKey: key)
+    }
+}
+
+private struct FastLanePhotoLibraryFullscreen: View {
+    let title: String
+    let assets: [ReportAsset]
+    @ObservedObject var cache: AssetImageCache
+    let thumbnailRefreshToken: UUID
+
+    @Environment(\.dismiss) private var dismiss
+    @State private var lastValidOrientation: UIDeviceOrientation = .portrait
+    @State private var viewerState: ViewerState?
+
+    private struct ViewerState: Identifiable {
+        let id = UUID()
+        let startIndex: Int
+    }
+
+    private var isLandscape: Bool {
+        lastValidOrientation == .landscapeLeft || lastValidOrientation == .landscapeRight
+    }
+
+    private var rotationDegrees: Double {
+        switch lastValidOrientation {
+        case .landscapeLeft:
+            return 90
+        case .landscapeRight:
+            return -90
+        default:
+            return 0
+        }
+    }
+
+    var body: some View {
+        GeometryReader { geo in
+            let w = geo.size.width
+            let h = geo.size.height
+            let contentW = isLandscape ? h : w
+            let contentH = isLandscape ? w : h
+            let columnsCount = isLandscape ? 5 : 3
+            let spacing: CGFloat = 2
+            let horizontalPadding: CGFloat = isLandscape ? 0 : 2
+            let totalSpacing = CGFloat(max(0, columnsCount - 1)) * spacing
+            let rawSide = (contentW - (horizontalPadding * 2) - totalSpacing) / CGFloat(columnsCount)
+            let side = rawSide.isFinite ? max(0, rawSide) : 0
+            let headerH: CGFloat = 80
+
+            ZStack {
+                Color.black.ignoresSafeArea()
+
+                ZStack {
+                    ScrollView(.vertical, showsIndicators: false) {
+                        LazyVGrid(
+                            columns: Array(repeating: GridItem(.fixed(side), spacing: spacing, alignment: .center), count: columnsCount),
+                            alignment: .center,
+                            spacing: spacing
+                        ) {
+                            ForEach(Array(assets.enumerated()), id: \.element.localIdentifier) { index, asset in
+                                FastLaneLibraryThumb(
+                                    asset: asset,
+                                    cache: cache,
+                                    side: side,
+                                    refreshToken: thumbnailRefreshToken
+                                )
+                                .contentShape(Rectangle())
+                                .onTapGesture {
+                                    viewerState = ViewerState(startIndex: index)
+                                }
+                            }
+                        }
+                        .padding(.horizontal, horizontalPadding)
+                        .padding(.top, headerH)
+                        .padding(.bottom, isLandscape ? 0 : 8)
+                    }
+                    .ignoresSafeArea(isLandscape ? .all : [])
+
+                    if assets.isEmpty {
+                        emptyState
+                    }
+
+                    headerOverlay()
+                        .zIndex(50)
+                }
+                .frame(width: contentW, height: contentH, alignment: .center)
+                .rotationEffect(.degrees(rotationDegrees))
+                .position(x: w * 0.5, y: h * 0.5)
+            }
+            .statusBarHidden(isLandscape)
+            .onAppear {
+                UIDevice.current.beginGeneratingDeviceOrientationNotifications()
+                refreshOrientation()
+            }
+            .onReceive(NotificationCenter.default.publisher(for: UIDevice.orientationDidChangeNotification)) { _ in
+                refreshOrientation()
+            }
+            .onDisappear {
+                UIDevice.current.endGeneratingDeviceOrientationNotifications()
+            }
+        }
+        .fullScreenCover(item: $viewerState) { state in
+            FastLanePhotoViewer(
+                title: title,
+                assets: assets,
+                startIndex: state.startIndex,
+                cache: cache,
+                viewerToken: state.startIndex
+            )
+        }
+    }
+
+    private var emptyState: some View {
+        VStack(spacing: 10) {
+            Image(systemName: "photo.on.rectangle")
+                .font(.system(size: 32, weight: .medium))
+                .foregroundColor(.white.opacity(0.55))
+            Text("No Photos")
+                .font(.system(size: 17, weight: .semibold))
+                .foregroundColor(.white.opacity(0.78))
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+        .allowsHitTesting(false)
+    }
+
+    @ViewBuilder
+    private func headerOverlay() -> some View {
+        VStack(spacing: 0) {
+            ZStack(alignment: .top) {
+                LinearGradient(
+                    colors: [
+                        Color.black.opacity(0.92),
+                        Color.black.opacity(0.70),
+                        Color.black.opacity(0.35),
+                        Color.black.opacity(0.0)
+                    ],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
+                .ignoresSafeArea(edges: .top)
+                .allowsHitTesting(false)
+
+                HStack(spacing: 10) {
+                    Button {
+                        dismiss()
+                    } label: {
+                        Image(systemName: "chevron.left")
+                            .font(.system(size: 18, weight: .semibold))
+                            .foregroundColor(.white)
+                            .frame(width: 36, height: 36)
+                            .background(Color.black.opacity(0.55))
+                            .clipShape(Circle())
+                            .overlay(
+                                Circle()
+                                    .stroke(Color.white.opacity(0.28), lineWidth: 1)
+                            )
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+
+                    Text(title)
+                        .font(.system(size: 38, weight: .medium))
+                        .foregroundColor(.white)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.4)
+                        .allowsTightening(true)
+                        .truncationMode(.tail)
+                        .layoutPriority(1)
+
+                    Spacer(minLength: 0)
+                }
+                .padding(.horizontal, 14)
+                .padding(.top, isLandscape ? 8 : 6)
+                .padding(.bottom, 8)
+            }
+            .frame(height: 96)
+
+            Spacer(minLength: 0)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .allowsHitTesting(true)
+    }
+
+    private func refreshOrientation() {
+        let orientation = UIDevice.current.orientation
+        let newValue: UIDeviceOrientation? = {
+            switch orientation {
+            case .portrait:
+                return .portrait
+            case .landscapeLeft, .landscapeRight:
+                return orientation
+            default:
+                return nil
+            }
+        }()
+        guard let newValue, newValue != lastValidOrientation else { return }
+        lastValidOrientation = newValue
+    }
+}
+
+private struct FastLaneLibraryThumb: View {
+    let asset: ReportAsset
+    @ObservedObject var cache: AssetImageCache
+    let side: CGFloat
+    let refreshToken: UUID
+
+    @State private var image: UIImage?
+
+    var body: some View {
+        ZStack {
+            Color.black
+
+            if let image {
+                Image(uiImage: image)
+                    .resizable()
+                    .scaledToFill()
+                    .frame(width: side, height: side)
+                    .clipped()
+            } else {
+                Color.white.opacity(0.06)
+                    .frame(width: side, height: side)
+            }
+        }
+        .frame(width: side, height: side)
+        .clipped()
+        .onAppear {
+            loadThumbnailIfNeeded()
+        }
+        .onChange(of: refreshToken) { _, _ in
+            image = nil
+            loadThumbnailIfNeeded()
+        }
+    }
+
+    private func loadThumbnailIfNeeded() {
+        if image != nil { return }
+        let scale = UIScreen.currentScale
+        let px = max(140, side * 1.35) * scale
+        cache.requestThumbnail(for: asset, pixelSize: px) { thumbnail in
+            DispatchQueue.main.async {
+                image = thumbnail
+            }
+        }
+    }
+}
+
+private struct FastLanePhotoViewer: View {
+    let title: String
+    let assets: [ReportAsset]
+    let startIndex: Int
+    @ObservedObject var cache: AssetImageCache
+    let viewerToken: Int
+
+    @Environment(\.dismiss) private var dismiss
+    @State private var lastValidOrientation: UIDeviceOrientation = .portrait
+    @State private var index: Int
+    @State private var barVisible: Bool = true
+    @State private var isPagingDrag: Bool = false
+
+    init(
+        title: String,
+        assets: [ReportAsset],
+        startIndex: Int,
+        cache: AssetImageCache,
+        viewerToken: Int
+    ) {
+        self.title = title
+        self.assets = assets
+        self.startIndex = startIndex
+        self.cache = cache
+        self.viewerToken = viewerToken
+        _index = State(initialValue: min(max(0, startIndex), max(0, assets.count - 1)))
+    }
+
+    private var isLandscape: Bool {
+        lastValidOrientation == .landscapeLeft || lastValidOrientation == .landscapeRight
+    }
+
+    private var rotationDegrees: Double {
+        switch lastValidOrientation {
+        case .landscapeLeft:
+            return 90
+        case .landscapeRight:
+            return -90
+        default:
+            return 0
+        }
+    }
+
+    var body: some View {
+        GeometryReader { geo in
+            let w = geo.size.width
+            let h = geo.size.height
+            let contentW = isLandscape ? h : w
+            let contentH = isLandscape ? w : h
+
+            ZStack {
+                Color.black.ignoresSafeArea()
+
+                ZStack {
+                    TabView(selection: $index) {
+                        ForEach(Array(assets.enumerated()), id: \.element.localIdentifier) { idx, asset in
+                            FastLaneFullImage(asset: asset, cache: cache)
+                                .tag(idx)
+                                .contentShape(Rectangle())
+                                .onTapGesture {
+                                    withAnimation(.easeOut(duration: 0.18)) {
+                                        barVisible.toggle()
+                                    }
+                                }
+                        }
+                    }
+                    .id(viewerToken)
+                    .tabViewStyle(.page(indexDisplayMode: .never))
+                    .ignoresSafeArea()
+                    .simultaneousGesture(
+                        DragGesture(minimumDistance: 8)
+                            .onChanged { _ in
+                                if !isPagingDrag { isPagingDrag = true }
+                            }
+                            .onEnded { _ in
+                                DispatchQueue.main.asyncAfter(deadline: .now() + 0.18) {
+                                    isPagingDrag = false
+                                }
+                            }
+                    )
+                    .overlay(alignment: .bottom) {
+                        if barVisible, assets.count > 1 {
+                            FastLaneFilmStrip(
+                                assets: assets,
+                                selectedIndex: $index,
+                                isPagingDrag: $isPagingDrag,
+                                cache: cache
+                            )
+                            .padding(.horizontal, 14)
+                            .padding(.bottom, 18)
+                            .transition(.move(edge: .bottom).combined(with: .opacity))
+                        }
+                    }
+                    .overlay(alignment: .top) {
+                        if barVisible {
+                            headerOverlay()
+                        }
+                    }
+                }
+                .frame(width: contentW, height: contentH, alignment: .center)
+                .rotationEffect(.degrees(rotationDegrees))
+                .position(x: w * 0.5, y: h * 0.5)
+            }
+            .statusBarHidden(isLandscape)
+            .onAppear {
+                UIDevice.current.beginGeneratingDeviceOrientationNotifications()
+                refreshOrientation()
+                index = min(max(0, startIndex), max(0, assets.count - 1))
+            }
+            .onReceive(NotificationCenter.default.publisher(for: UIDevice.orientationDidChangeNotification)) { _ in
+                refreshOrientation()
+            }
+            .onDisappear {
+                UIDevice.current.endGeneratingDeviceOrientationNotifications()
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func headerOverlay() -> some View {
+        VStack(spacing: 0) {
+            ZStack(alignment: .top) {
+                LinearGradient(
+                    colors: [
+                        Color.black.opacity(0.92),
+                        Color.black.opacity(0.70),
+                        Color.black.opacity(0.35),
+                        Color.black.opacity(0.0)
+                    ],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
+                .ignoresSafeArea(edges: .top)
+                .allowsHitTesting(false)
+
+                HStack(spacing: 10) {
+                    Button {
+                        dismiss()
+                    } label: {
+                        Image(systemName: "chevron.left")
+                            .font(.system(size: 18, weight: .semibold))
+                            .foregroundColor(.white)
+                            .frame(width: 36, height: 36)
+                            .background(Color.black.opacity(0.55))
+                            .clipShape(Circle())
+                            .overlay(
+                                Circle()
+                                    .stroke(Color.white.opacity(0.28), lineWidth: 1)
+                            )
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(title)
+                            .font(.system(size: 24, weight: .semibold))
+                            .foregroundColor(.white)
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.6)
+                        Text("Photo \(min(index + 1, max(assets.count, 1))) of \(max(assets.count, 1))")
+                            .font(.system(size: 13, weight: .medium))
+                            .foregroundColor(.white.opacity(0.78))
+                    }
+
+                    Spacer(minLength: 0)
+                }
+                .padding(.horizontal, 14)
+                .padding(.top, isLandscape ? 8 : 6)
+                .padding(.bottom, 8)
+            }
+            .frame(height: 96)
+
+            Spacer(minLength: 0)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .allowsHitTesting(true)
+    }
+
+    private func refreshOrientation() {
+        let orientation = UIDevice.current.orientation
+        let newValue: UIDeviceOrientation? = {
+            switch orientation {
+            case .portrait:
+                return .portrait
+            case .landscapeLeft, .landscapeRight:
+                return orientation
+            default:
+                return nil
+            }
+        }()
+        guard let newValue, newValue != lastValidOrientation else { return }
+        lastValidOrientation = newValue
+    }
+}
+
+private struct FastLaneFullImage: View {
+    let asset: ReportAsset
+    @ObservedObject var cache: AssetImageCache
+
+    @State private var full: UIImage?
+    @State private var thumb: UIImage?
+
+    var body: some View {
+        ZStack {
+            Color.black.ignoresSafeArea()
+
+            if let full {
+                Image(uiImage: full)
+                    .resizable()
+                    .scaledToFit()
+                    .ignoresSafeArea()
+            } else if let thumb {
+                Image(uiImage: thumb)
+                    .resizable()
+                    .scaledToFit()
+                    .ignoresSafeArea()
+            } else {
+                Color.black.ignoresSafeArea()
+            }
+        }
+        .onAppear {
+            loadImagesIfNeeded()
+        }
+        .onChange(of: asset.localIdentifier) { _, _ in
+            full = nil
+            thumb = nil
+            loadImagesIfNeeded()
+        }
+    }
+
+    private func loadImagesIfNeeded() {
+        if thumb == nil {
+            let px = 420 * UIScreen.currentScale
+            cache.requestThumbnail(for: asset, pixelSize: px) { image in
+                DispatchQueue.main.async {
+                    thumb = image
+                }
+            }
+        }
+        if full != nil { return }
+        cache.requestFull(for: asset) { image in
+            DispatchQueue.main.async {
+                full = image
+            }
+        }
+    }
+}
+
+private struct FastLaneFilmStrip: View {
+    let assets: [ReportAsset]
+    @Binding var selectedIndex: Int
+    @Binding var isPagingDrag: Bool
+    @ObservedObject var cache: AssetImageCache
+
+    private let thumbSide: CGFloat = 36
+    private let spacing: CGFloat = 2
+    private let selectedScale: CGFloat = 1.28
+    private let selectedExtraSidePadding: CGFloat = 10
+
+    @State private var isUserDragging: Bool = false
+    @State private var momentumHapticsUntil: Date = .distantPast
+    @State private var lastHapticIndex: Int = -1
+    @State private var hasUserInteractedWithStrip: Bool = false
+    @State private var settleWorkItem: DispatchWorkItem?
+    private let haptic = UIImpactFeedbackGenerator(style: .light)
+
+    private struct ItemMidXKey: PreferenceKey {
+        static var defaultValue: [Int: CGFloat] = [:]
+        static func reduce(value: inout [Int: CGFloat], nextValue: () -> [Int: CGFloat]) {
+            value.merge(nextValue(), uniquingKeysWith: { $1 })
+        }
+    }
+
+    var body: some View {
+        ScrollViewReader { proxy in
+            ZStack {
+                RoundedRectangle(cornerRadius: 10)
+                    .fill(Color.black.opacity(0.45))
+
+                GeometryReader { outerGeo in
+                    let width = outerGeo.size.width
+                    let maxThumbWidth = (thumbSide * selectedScale) + (selectedExtraSidePadding * 2)
+                    let sidePad = max(0, (width - maxThumbWidth) * 0.5)
+
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        LazyHStack(spacing: spacing) {
+                            ForEach(Array(assets.enumerated()), id: \.element.localIdentifier) { idx, asset in
+                                let selected = idx == selectedIndex
+                                FastLaneFilmThumb(asset: asset, isSelected: selected, cache: cache, side: thumbSide)
+                                    .scaleEffect(selected ? selectedScale : 1.0)
+                                    .padding(.horizontal, selected ? selectedExtraSidePadding : 0)
+                                    .animation(.easeOut(duration: 0.10), value: selectedIndex)
+                                    .id(idx)
+                                    .contentShape(Rectangle())
+                                    .onTapGesture {
+                                        isUserDragging = false
+                                        momentumHapticsUntil = .distantPast
+                                        selectedIndex = idx
+                                        haptic.impactOccurred()
+                                        haptic.prepare()
+                                        lastHapticIndex = idx
+                                        withAnimation(.easeOut(duration: 0.12)) {
+                                            proxy.scrollTo(idx, anchor: .center)
+                                        }
+                                    }
+                                    .background(
+                                        GeometryReader { itemGeo in
+                                            Color.clear.preference(
+                                                key: ItemMidXKey.self,
+                                                value: [idx: itemGeo.frame(in: .named("fastLaneFilmstripViewport")).midX]
+                                            )
+                                        }
+                                    )
+                            }
+                        }
+                        .padding(.horizontal, sidePad)
+                        .padding(.vertical, 6)
+                    }
+                    .scrollIndicators(.hidden)
+                    .coordinateSpace(name: "fastLaneFilmstripViewport")
+                    .onAppear {
+                        lastHapticIndex = selectedIndex
+                        hasUserInteractedWithStrip = false
+                        isUserDragging = false
+                        momentumHapticsUntil = .distantPast
+                        haptic.prepare()
+                        DispatchQueue.main.async {
+                            haptic.prepare()
+                            proxy.scrollTo(selectedIndex, anchor: .center)
+                        }
+                    }
+                    .simultaneousGesture(
+                        DragGesture(minimumDistance: 0)
+                            .onChanged { _ in
+                                if isPagingDrag { return }
+                                if !isUserDragging {
+                                    isUserDragging = true
+                                    hasUserInteractedWithStrip = true
+                                    haptic.prepare()
+                                }
+                                momentumHapticsUntil = Date().addingTimeInterval(0.90)
+                                settleWorkItem?.cancel()
+                                settleWorkItem = nil
+                            }
+                            .onEnded { _ in
+                                if isPagingDrag { return }
+                                isUserDragging = false
+                                momentumHapticsUntil = Date().addingTimeInterval(0.90)
+                            },
+                        including: .all
+                    )
+                    .onPreferenceChange(ItemMidXKey.self) { midXs in
+                        if isPagingDrag { return }
+                        guard width > 1, !midXs.isEmpty else { return }
+                        let allowSelectionUpdates = hasUserInteractedWithStrip && (isUserDragging || (Date() < momentumHapticsUntil))
+                        if !allowSelectionUpdates { return }
+
+                        let centerX = width * 0.5
+                        var bestIdx = selectedIndex
+                        var bestDist = CGFloat.greatestFiniteMagnitude
+                        for (idx, midX) in midXs {
+                            let dist = abs(midX - centerX)
+                            if dist < bestDist {
+                                bestDist = dist
+                                bestIdx = idx
+                            }
+                        }
+
+                        if bestIdx != selectedIndex {
+                            selectedIndex = bestIdx
+                            if bestIdx != lastHapticIndex {
+                                haptic.impactOccurred()
+                                haptic.prepare()
+                                lastHapticIndex = bestIdx
+                            }
+                        }
+
+                        settleWorkItem?.cancel()
+                        let work = DispatchWorkItem {
+                            guard !isUserDragging else { return }
+                            withAnimation(.easeOut(duration: 0.14)) {
+                                proxy.scrollTo(selectedIndex, anchor: .center)
+                            }
+                        }
+                        settleWorkItem = work
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.18, execute: work)
+                    }
+                }
+                .frame(height: thumbSide + 12)
+            }
+            .frame(height: thumbSide + 12)
+            .onChange(of: selectedIndex) { _, newValue in
+                if isPagingDrag || isUserDragging || Date() < momentumHapticsUntil { return }
+                withAnimation(.easeOut(duration: 0.12)) {
+                    proxy.scrollTo(newValue, anchor: .center)
+                }
+            }
+        }
+    }
+}
+
+private struct FastLaneFilmThumb: View {
+    let asset: ReportAsset
+    let isSelected: Bool
+    @ObservedObject var cache: AssetImageCache
+    let side: CGFloat
+
+    @State private var image: UIImage?
+
+    var body: some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: 2)
+                .fill(Color.white.opacity(0.10))
+                .frame(width: side, height: side)
+
+            if let image {
+                Image(uiImage: image)
+                    .resizable()
+                    .scaledToFill()
+                    .frame(width: side, height: side)
+                    .clipped()
+                    .clipShape(RoundedRectangle(cornerRadius: 2))
+            }
+        }
+        .overlay(
+            RoundedRectangle(cornerRadius: 2)
+                .stroke(isSelected ? Color.white.opacity(0.95) : Color.white.opacity(0.10), lineWidth: isSelected ? 2 : 1)
+        )
+        .onAppear {
+            if image != nil { return }
+            let px = max(180, side * 2) * UIScreen.currentScale
+            cache.requestThumbnail(for: asset, pixelSize: px) { thumbnail in
+                DispatchQueue.main.async {
+                    image = thumbnail
+                }
+            }
+        }
     }
 }
 
