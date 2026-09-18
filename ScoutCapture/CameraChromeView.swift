@@ -440,7 +440,7 @@ struct CameraChromeView<PreviewContent: View, OverlayContent: View>: View {
                     ProgressView()
                         .progressViewStyle(.circular)
                         .tint(.white)
-                    Text("Starting camera...")
+                    Text(display.previewStatusTitle == "Closing" ? "Closing..." : "Starting camera...")
                         .font(.system(size: 14, weight: .medium))
                         .foregroundColor(.white.opacity(0.95))
                 }

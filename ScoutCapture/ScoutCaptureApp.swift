@@ -13474,6 +13474,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
     @State private var releaseStartedAt: Date?
     @State private var releaseFinishedAt: Date?
     @State private var isClosing: Bool = false
+    @State private var fastLaneExitIntentActive: Bool = false
     @State private var isSavingFastCapture: Bool = false
     @State private var captureFlashVisible: Bool = false
     @State private var capturedCount: Int = 0
@@ -13519,6 +13520,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
     @State private var showFastLaneManageTradesSheet: Bool = false
     @State private var fastLaneManageDetailMode: CameraChromeLocationMode?
     @State private var showFastLaneDetailNoteOverlay: Bool = false
+    @State private var showFastLaneSessionActionsSheet: Bool = false
     @StateObject private var fastLaneGalleryImageCache = AssetImageCache()
     @State private var showFastLaneGallery: Bool = false
     @State private var fastLaneGalleryAssets: [ReportAsset] = []
@@ -13556,6 +13558,27 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             if showFastLaneDetailNoteOverlay {
                 fastLaneDetailNoteOverlay
                     .zIndex(90)
+            }
+
+            if showFastLaneSessionActionsSheet {
+                FastLaneSessionActionsSheet(
+                    summary: fastLaneSessionActionsSummary,
+                    isEndingSession: isFastLaneExiting,
+                    endingTitle: fastLaneEndingProgressTitle,
+                    onResume: {
+                        showFastLaneSessionActionsSheet = false
+                    },
+                    onSaveDraftAndExit: {
+                        fastLaneExitIntentActive = true
+                        showFastLaneSessionActionsSheet = false
+                        closePreview()
+                    },
+                    onComplete: {
+                        showFastLaneSessionActionsSheet = false
+                        runProductionComplete()
+                    }
+                )
+                .zIndex(500)
             }
         }
         .onAppear {
@@ -13769,7 +13792,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                 toggleFastLaneCaptureProfileIfAllowed()
             },
             onEndTapped: {
-                closePreview()
+                presentFastLaneSessionActionsSheet()
             },
             onMetadataTapped: {
                 isShowingFastMetadataPicker = true
@@ -13818,9 +13841,49 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
     }
 
     private var fastLaneHeaderStatusSystemImage: String {
+        if isFastLaneExiting { return "arrow.down.circle.fill" }
         if didCompleteUpload { return "checkmark.icloud.fill" }
         if camera.isPreviewRunning { return "checkmark.circle.fill" }
         return "camera.fill"
+    }
+
+    private var isFastLaneExiting: Bool {
+        isClosing || fastLaneExitIntentActive
+    }
+
+    private var fastLaneSessionActionsSummary: FastLaneSessionActionsSummary {
+        FastLaneSessionActionsSummary(
+            guidedRemainingCount: 0,
+            flaggedRemainingCount: 0,
+            currentSessionCaptureCount: capturedCount,
+            sessionType: context.sessionType,
+            canComplete: canRunProductionComplete,
+            isComplete: productionCompleteState.isComplete || didCompleteUpload,
+            disabledReason: fastLaneSessionActionsCompleteDisabledReason
+        )
+    }
+
+    private var fastLaneEndingProgressTitle: String {
+        capturedCount > 0 ? "Closing Draft..." : "Closing..."
+    }
+
+    private var fastLaneSessionActionsCompleteDisabledReason: String? {
+        if productionCompleteState.isComplete || didCompleteUpload {
+            return "Session already completed."
+        }
+        if productionCompleteState.isRunning {
+            return productionCompleteStatusText ?? "Completion is already running."
+        }
+        if isFastLaneExiting {
+            return "Session is closing."
+        }
+        if isSavingFastCapture || camera.isCapturing {
+            return "Complete is disabled while the current photo is saving."
+        }
+        if capturedCount == 0 {
+            return "\(AppState.sessionCompletionActionTitle(sessionType: context.sessionType)) is disabled until at least one photo is captured."
+        }
+        return nil
     }
 
     private var fastLaneCaptureProfile: CaptureProfile {
@@ -14206,13 +14269,13 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
     }
 
     private var previewStatusTitle: String {
-        if isClosing { return "Closing" }
+        if isFastLaneExiting { return "Closing" }
         if didCompleteUpload { return "Current" }
         return camera.isPreviewRunning ? "Ready" : "Starting"
     }
 
     private var previewStatusColor: Color {
-        if isClosing { return .white.opacity(0.82) }
+        if isFastLaneExiting { return .white.opacity(0.82) }
         if didCompleteUpload { return .green }
         return camera.isPreviewRunning ? .green : .yellow
     }
@@ -14392,7 +14455,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             camera.isPreviewRunning &&
             !camera.isCapturing &&
             !isSavingFastCapture &&
-            !isClosing &&
+            !isFastLaneExiting &&
             !didCompleteUpload &&
             !productionCompleteState.isRunning
     }
@@ -14477,7 +14540,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
         capturedCount > 0 &&
             !productionCompleteState.isRunning &&
             !productionCompleteState.isComplete &&
-            !isClosing &&
+            !isFastLaneExiting &&
             !isSavingFastCapture &&
             !camera.isCapturing
     }
@@ -14573,6 +14636,13 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
 
     private func beginFastLaneShutter() {
         captureFastLanePhoto()
+    }
+
+    private func presentFastLaneSessionActionsSheet() {
+        guard !isFastLaneExiting else { return }
+        showFastLaneControlsMenu = false
+        showFastLaneDetailNoteOverlay = false
+        showFastLaneSessionActionsSheet = true
     }
 
     private func reloadFastLaneGalleryAssets() {
@@ -14804,6 +14874,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
 
     private func finishProductionComplete() {
         guard !isClosing else { return }
+        fastLaneExitIntentActive = true
         isClosing = true
         releaseStartedAt = Date()
         camera.stopPreviewAsync()
@@ -14976,6 +15047,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
 
     private func closePreview() {
         guard !isClosing else { return }
+        fastLaneExitIntentActive = true
         isClosing = true
         releaseStartedAt = Date()
         camera.stopPreviewAsync()
@@ -15386,6 +15458,222 @@ private final class FastLaneDetailTypesModel: ObservableObject {
     private func saveItems(_ items: [DetailTypeItem], key: String) {
         guard let data = try? JSONEncoder().encode(items) else { return }
         UserDefaults.standard.set(data, forKey: key)
+    }
+}
+
+private struct FastLaneSessionActionsSummary: Equatable {
+    let guidedRemainingCount: Int
+    let flaggedRemainingCount: Int
+    let currentSessionCaptureCount: Int
+    let sessionType: SessionType
+    let canComplete: Bool
+    let isComplete: Bool
+    let disabledReason: String?
+
+    var isPunchlistVisit: Bool {
+        sessionType == .punchlistVisit
+    }
+
+    var hasCaptures: Bool {
+        currentSessionCaptureCount > 0
+    }
+
+    var exportActionTitle: String {
+        AppState.sessionCompletionActionTitle(sessionType: sessionType)
+    }
+
+    var exitActionTitle: String {
+        hasCaptures ? "Exit as Draft" : "Exit"
+    }
+
+    var isExportActionEnabled: Bool {
+        canComplete && !isComplete
+    }
+}
+
+private struct FastLaneSessionActionsSheet: View {
+    @Environment(\.colorScheme) private var colorScheme
+    let summary: FastLaneSessionActionsSummary
+    let isEndingSession: Bool
+    let endingTitle: String
+    let onResume: () -> Void
+    let onSaveDraftAndExit: () -> Void
+    let onComplete: () -> Void
+
+    private var neutralFill: Color {
+        colorScheme == .light ? Color.white.opacity(0.90) : Color.black.opacity(0.65)
+    }
+
+    private var neutralStroke: Color {
+        colorScheme == .light ? Color.black.opacity(0.14) : Color.white.opacity(0.28)
+    }
+
+    private var neutralLabel: Color {
+        colorScheme == .light ? Color.black.opacity(0.88) : .white
+    }
+
+    var body: some View {
+        GeometryReader { geo in
+            let constrainedHeight = geo.size.height < 620
+
+            ZStack {
+                Color.black.opacity(0.52)
+                    .ignoresSafeArea()
+                    .onTapGesture { }
+
+                VStack {
+                    Spacer(minLength: 0)
+
+                    VStack(spacing: 14) {
+                        Text("Session Actions")
+                            .font(.system(size: 24, weight: .bold))
+                            .foregroundColor(.white)
+
+                        VStack(spacing: 8) {
+                            summaryRow(title: "Flagged Remaining", value: summary.flaggedRemainingCount)
+                            if !summary.isPunchlistVisit {
+                                summaryRow(title: "Guided Remaining", value: summary.guidedRemainingCount)
+                            }
+                        }
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 10)
+                        .background(Color.white.opacity(0.08))
+                        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                .stroke(Color.white.opacity(0.16), lineWidth: 1)
+                        )
+
+                        if constrainedHeight {
+                            ScrollView(.vertical, showsIndicators: true) {
+                                actionButtonsStack
+                            }
+                            .frame(maxHeight: geo.size.height * 0.38)
+                        } else {
+                            actionButtonsStack
+                        }
+                    }
+                    .padding(18)
+                    .frame(width: min(max(310, geo.size.width * 0.84), 470))
+                    .background(Color.black.opacity(0.82))
+                    .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 16, style: .continuous)
+                            .stroke(Color.white.opacity(0.20), lineWidth: 1)
+                    )
+
+                    Spacer(minLength: 0)
+                }
+                .padding(.horizontal, 16)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func summaryRow(title: String, value: Int) -> some View {
+        HStack {
+            Text(title)
+                .font(.system(size: 15, weight: .medium))
+                .foregroundColor(.white.opacity(0.92))
+            Spacer(minLength: 0)
+            Text("\(value)")
+                .font(.system(size: 16, weight: .semibold))
+                .foregroundColor(.white)
+        }
+    }
+
+    @ViewBuilder
+    private var actionButtonsStack: some View {
+        VStack(spacing: 10) {
+            actionButton(
+                title: "Resume",
+                role: .primary,
+                isEnabled: !isEndingSession,
+                action: onResume
+            )
+            actionButton(
+                title: summary.exitActionTitle,
+                role: .secondary,
+                isEnabled: !isEndingSession,
+                action: onSaveDraftAndExit
+            )
+            actionButton(
+                title: isEndingSession ? endingTitle : summary.exportActionTitle,
+                role: .tertiary,
+                isEnabled: !isEndingSession && summary.isExportActionEnabled,
+                action: onComplete
+            )
+
+            if !summary.isExportActionEnabled, let disabledReason = summary.disabledReason {
+                Text(disabledReason)
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundColor(.white.opacity(0.72))
+                    .multilineTextAlignment(.center)
+                    .padding(.top, 2)
+            }
+        }
+    }
+
+    private enum ActionRole {
+        case primary
+        case secondary
+        case tertiary
+    }
+
+    @ViewBuilder
+    private func actionButton(
+        title: String,
+        role: ActionRole,
+        isEnabled: Bool,
+        action: @escaping () -> Void
+    ) -> some View {
+        let fill: Color = {
+            switch role {
+            case .primary:
+                return .blue
+            case .secondary:
+                return neutralFill
+            case .tertiary:
+                return .white
+            }
+        }()
+        let stroke: Color = {
+            switch role {
+            case .primary:
+                return .blue.opacity(0.85)
+            case .secondary:
+                return neutralStroke
+            case .tertiary:
+                return Color.red.opacity(0.30)
+            }
+        }()
+        let label: Color = {
+            switch role {
+            case .primary:
+                return .white
+            case .secondary:
+                return neutralLabel
+            case .tertiary:
+                return .red.opacity(0.88)
+            }
+        }()
+
+        Button(action: action) {
+            Text(title)
+                .font(.system(size: 17, weight: .medium))
+                .foregroundColor(isEnabled ? label : label.opacity(0.45))
+                .frame(maxWidth: .infinity)
+                .frame(height: 46)
+                .background(isEnabled ? fill : fill.opacity(0.45))
+                .clipShape(Capsule())
+                .overlay(
+                    Capsule()
+                        .stroke(isEnabled ? stroke : stroke.opacity(0.45), lineWidth: 1)
+                )
+        }
+        .opacity(isEnabled ? 1.0 : 0.72)
+        .buttonStyle(.plain)
+        .disabled(!isEnabled)
     }
 }
 
