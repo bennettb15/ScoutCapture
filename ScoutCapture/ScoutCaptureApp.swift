@@ -13494,7 +13494,9 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
     @State private var chromeLocationMode: CameraChromeLocationMode = .exterior
     @StateObject private var fastDetailTypesModel = FastLaneDetailTypesModel()
     @StateObject private var locationManager = LocationManager()
+    @State private var fastLaneCaptureProfileState: CaptureProfile = .residential
     @State private var fastMetadataContext: AppState.FastRuntimeCaptureMetadataContext = AppState.FastRuntimeCaptureMetadataContext(
+        captureProfile: CaptureProfile.residential.rawValue,
         locationMode: "Exterior",
         building: "B1",
         elevation: "North",
@@ -13561,6 +13563,9 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                     fallbackLocationMode: initialLocationMode?.rawValue,
                     fallbackPosition: 4
                 )
+                fastLaneCaptureProfileState =
+                    CaptureProfile(storedValue: initialContext.captureProfile) ??
+                    inheritedFastLaneCaptureProfile
                 applyFastLaneMetadataContext(initialContext)
                 didApplyInitialLocationMode = true
             }
@@ -13677,7 +13682,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             profileTitle: profile.title,
             profileSystemImage: profile == .residential ? "house.fill" : "building.2.fill",
             profileAccentColor: accent,
-            isProfileLocked: true,
+            isProfileLocked: isFastLaneCaptureProfileLocked,
             propertyName: propertyName,
             cloudStatus: fastLaneChromeCloudStatus,
             showsPunchlistBadge: context.sessionType == .punchlistVisit,
@@ -13745,7 +13750,9 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
 
     private var cameraChromeActions: CameraChromeActions {
         CameraChromeActions(
-            onProfileTapped: {},
+            onProfileTapped: {
+                toggleFastLaneCaptureProfileIfAllowed()
+            },
             onEndTapped: {
                 closePreview()
             },
@@ -13783,37 +13790,32 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
     }
 
     private var fastLaneChromeCloudStatus: CameraChromeStatusModel? {
-        if let freshness = appState.propertyOpenFreshness(for: context.propertyID) {
-            return CameraChromeStatusModel(
-                title: AppState.propertyOpenFreshnessDisplayLabel(for: freshness.status),
-                systemImage: AppState.propertyOpenFreshnessSymbolName(for: freshness.status),
-                color: fastLaneCloudStatusColor(for: freshness.status)
-            )
-        }
         return CameraChromeStatusModel(
             title: previewStatusTitle,
-            systemImage: camera.isPreviewRunning ? "checkmark.circle.fill" : "camera.fill",
+            systemImage: fastLaneHeaderStatusSystemImage,
             color: previewStatusColor
         )
     }
 
-    private func fastLaneCloudStatusColor(for status: AppState.PropertyOpenFreshnessStatus) -> Color {
-        switch status {
-        case .checkingCloudStatus, .usingLocalCache, .offline, .unknown:
-            return .white.opacity(0.72)
-        case .current:
-            return .green.opacity(0.9)
-        case .remoteUpdatesAvailable:
-            return .blue.opacity(0.95)
-        case .needsReview:
-            return .orange.opacity(0.95)
-        }
+    private var fastLaneHeaderStatusSystemImage: String {
+        if didCompleteUpload { return "checkmark.icloud.fill" }
+        if camera.isPreviewRunning { return "checkmark.circle.fill" }
+        return "camera.fill"
     }
 
     private var fastLaneCaptureProfile: CaptureProfile {
-        appState.properties.first(where: { $0.id == context.propertyID })?.captureProfile ??
-            appState.selectedProperty?.captureProfile ??
+        fastLaneCaptureProfileState
+    }
+
+    private var inheritedFastLaneCaptureProfile: CaptureProfile {
+        CaptureProfile(storedValue: initialMetadataContext?.captureProfile) ??
+            appState.properties.first(where: { $0.id == context.propertyID })?.captureProfile ??
+            (appState.selectedProperty?.id == context.propertyID ? appState.selectedProperty?.captureProfile : nil) ??
             .residential
+    }
+
+    private var isFastLaneCaptureProfileLocked: Bool {
+        capturedCount > 0
     }
 
     private var fastLaneCaptureProfileAccentColor: Color {
@@ -13823,6 +13825,32 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
         case .commercial:
             return Color(red: 0.12, green: 0.66, blue: 1.0)
         }
+    }
+
+    private func toggleFastLaneCaptureProfileIfAllowed() {
+        guard !isFastLaneCaptureProfileLocked else { return }
+        let targetProfile: CaptureProfile = fastLaneCaptureProfile == .residential ? .commercial : .residential
+        fastLaneCaptureProfileState = targetProfile
+        fastDetailTypesModel.resetSelectionsToOverview(for: targetProfile)
+        let currentMode = chromeLocationMode
+        let nextElevation = currentMode == .interior
+            ? "Interior"
+            : (Self.exteriorElevationOptions.contains(fastMetadataContext.elevation) ? fastMetadataContext.elevation : "North")
+        let detailOptions = fastDetailTypesModel.names(for: currentMode, profile: targetProfile)
+        let overview = detailOptions.first { $0.caseInsensitiveCompare("Overview") == .orderedSame } ??
+            detailOptions.first ??
+            "Overview"
+        applyFastLaneMetadataContext(AppState.FastRuntimeCaptureMetadataContext(
+            captureProfile: targetProfile.rawValue,
+            locationMode: currentMode.rawValue,
+            building: fastMetadataContext.building,
+            elevation: nextElevation,
+            detailType: overview,
+            trade: fastMetadataContext.trade,
+            detailNote: fastMetadataContext.detailNote,
+            priority: fastMetadataContext.priority,
+            angleIndex: fastMetadataContext.angleIndex
+        ))
     }
 
     private var fastLaneChromeSideControls: [CameraChromeSideControl] {
@@ -14159,11 +14187,13 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
 
     private var previewStatusTitle: String {
         if isClosing { return "Closing" }
+        if didCompleteUpload { return "Current" }
         return camera.isPreviewRunning ? "Ready" : "Starting"
     }
 
     private var previewStatusColor: Color {
         if isClosing { return .white.opacity(0.82) }
+        if didCompleteUpload { return .green }
         return camera.isPreviewRunning ? .green : .yellow
     }
 
@@ -14485,6 +14515,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                             fastStorageRoot = saveResult.storageRoot ?? fastStorageRoot
                             if let savedContext = saveResult.shot?.metadataContext {
                                 fastMetadataContext = AppState.FastRuntimeCaptureMetadataContext(
+                                    captureProfile: savedContext.captureProfile ?? fastLaneCaptureProfile.rawValue,
                                     locationMode: savedContext.locationMode,
                                     building: savedContext.building,
                                     elevation: savedContext.elevation,
@@ -14497,6 +14528,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                                 chromeLocationMode = CameraChromeLocationMode(fastRuntimeRawValue: savedContext.locationMode)
                             } else {
                                 fastMetadataContext = AppState.FastRuntimeCaptureMetadataContext(
+                                    captureProfile: fastLaneCaptureProfile.rawValue,
                                     locationMode: fastMetadataContext.locationMode,
                                     building: fastMetadataContext.building,
                                     elevation: fastMetadataContext.elevation,
@@ -14715,6 +14747,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
         let details = fastDetailTypesModel.names(for: mode, profile: fastLaneCaptureProfile)
         let nextDetail = details.contains(current.detailType) ? current.detailType : (details.first ?? "Overview")
         applyFastLaneMetadataContext(AppState.FastRuntimeCaptureMetadataContext(
+            captureProfile: fastLaneCaptureProfile.rawValue,
             locationMode: mode.rawValue,
             building: current.building,
             elevation: nextElevation,
@@ -14728,13 +14761,18 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
 
     private func applyFastLaneMetadataContext(_ context: AppState.FastRuntimeCaptureMetadataContext) {
         let normalized = AppState.normalizedFastRuntimeMetadataContext(context, fallbackPosition: 4)
+        let profile = CaptureProfile(storedValue: normalized.captureProfile) ?? fastLaneCaptureProfile
+        if fastLaneCaptureProfileState != profile {
+            fastLaneCaptureProfileState = profile
+        }
         let mode = CameraChromeLocationMode(fastRuntimeRawValue: normalized.locationMode)
         let elevation = mode == .interior
             ? "Interior"
             : (Self.exteriorElevationOptions.contains(normalized.elevation) ? normalized.elevation : "North")
-        let details = fastDetailTypesModel.names(for: mode, profile: fastLaneCaptureProfile)
+        let details = fastDetailTypesModel.names(for: mode, profile: profile)
         let detail = details.contains(normalized.detailType) ? normalized.detailType : (details.first ?? "Overview")
         fastMetadataContext = AppState.FastRuntimeCaptureMetadataContext(
+            captureProfile: profile.rawValue,
             locationMode: mode.rawValue,
             building: normalizedFastLaneBuilding(normalized.building),
             elevation: elevation,
@@ -15092,6 +15130,19 @@ private final class FastLaneDetailTypesModel: ObservableObject {
         case (.commercial, .exterior): selectedCommercialExterior = value
         }
         persistSelected()
+    }
+
+    func resetSelectionsToOverview(for profile: CaptureProfile) {
+        let interiorOverview = names(for: .interior, profile: profile)
+            .first { $0.caseInsensitiveCompare("Overview") == .orderedSame } ??
+            names(for: .interior, profile: profile).first ??
+            ""
+        let exteriorOverview = names(for: .exterior, profile: profile)
+            .first { $0.caseInsensitiveCompare("Overview") == .orderedSame } ??
+            names(for: .exterior, profile: profile).first ??
+            ""
+        setSelected(interiorOverview, for: .interior, profile: profile)
+        setSelected(exteriorOverview, for: .exterior, profile: profile)
     }
 
     @discardableResult

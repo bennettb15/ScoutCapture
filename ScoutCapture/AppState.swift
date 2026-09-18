@@ -4970,6 +4970,7 @@ final class AppState: ObservableObject {
     }
 
     struct FastRuntimeCaptureMetadataContext: Codable, Equatable {
+        let captureProfile: String?
         let locationMode: String
         let building: String
         let elevation: String
@@ -4981,6 +4982,7 @@ final class AppState: ObservableObject {
         let shotKey: String
 
         nonisolated init(
+            captureProfile: String? = nil,
             locationMode: String? = nil,
             building: String? = nil,
             elevation: String? = nil,
@@ -5002,6 +5004,16 @@ final class AppState: ObservableObject {
             let normalizedDetailNote = AppState.normalizedFastRuntimeMetadataText(detailNote, fallback: "")
             let normalizedPriority = AppState.normalizedFastRuntimePriority(priority)
             let normalizedAngleIndex = max(1, angleIndex ?? 1)
+            let trimmedCaptureProfile = (captureProfile ?? "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .lowercased()
+            let normalizedCaptureProfile: String?
+            switch trimmedCaptureProfile {
+            case CaptureProfile.residential.rawValue, CaptureProfile.commercial.rawValue:
+                normalizedCaptureProfile = trimmedCaptureProfile
+            default:
+                normalizedCaptureProfile = nil
+            }
             let normalizedShotKey = AppState.normalizedFastRuntimeMetadataText(
                 shotKey,
                 fallback: AppState.makeFastRuntimeMetadataShotKey(
@@ -5012,6 +5024,7 @@ final class AppState: ObservableObject {
                 )
             )
 
+            self.captureProfile = normalizedCaptureProfile
             self.locationMode = normalizedLocationMode
             self.building = normalizedBuilding
             self.elevation = normalizedElevation
@@ -5025,6 +5038,7 @@ final class AppState: ObservableObject {
 
         nonisolated func withAngleIndex(_ angleIndex: Int) -> FastRuntimeCaptureMetadataContext {
             FastRuntimeCaptureMetadataContext(
+                captureProfile: captureProfile,
                 locationMode: locationMode,
                 building: building,
                 elevation: elevation,
@@ -45111,6 +45125,7 @@ final class AppState: ObservableObject {
         fallbackPosition: Int = 1
     ) -> FastRuntimeCaptureMetadataContext {
         FastRuntimeCaptureMetadataContext(
+            captureProfile: value?.captureProfile,
             locationMode: value?.locationMode ?? fallbackLocationMode,
             building: value?.building,
             elevation: value?.elevation,
