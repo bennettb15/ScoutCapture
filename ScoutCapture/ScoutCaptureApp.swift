@@ -1392,9 +1392,11 @@ struct SessionHubView: View {
         } label: {
             HStack(alignment: .top, spacing: 10) {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text(propertyRowTitle(property.name, cloudGlyph: cloudGlyph))
+                    propertyRowTitleText(
+                        property.name,
+                        cloudGlyph: cloudGlyph
+                    )
                         .font(.system(size: 18, weight: .semibold))
-                        .foregroundColor(.primary)
                         .lineLimit(1)
 
                     if let subtitleLine,
@@ -1440,12 +1442,16 @@ struct SessionHubView: View {
             .fixedSize(horizontal: true, vertical: false)
     }
 
-    private func propertyRowTitle(
+    private func propertyRowTitleText(
         _ title: String,
         cloudGlyph: AppState.PropertyRowCloudGlyphState?
-    ) -> String {
-        guard let cloudGlyph else { return title }
-        return "\(title) \(propertyRowCloudGlyphText(cloudGlyph))"
+    ) -> Text {
+        guard let cloudGlyph else {
+            return Text(title).foregroundColor(.primary)
+        }
+        return Text(title).foregroundColor(.primary)
+            + Text(" \(propertyRowCloudGlyphText(cloudGlyph))")
+                .foregroundColor(propertyRowCloudGlyphColor(cloudGlyph))
     }
 
     private func propertyRowCloudGlyphText(_ state: AppState.PropertyRowCloudGlyphState) -> String {
@@ -1456,6 +1462,15 @@ struct SessionHubView: View {
             return "↑"
         case .warning:
             return "!"
+        }
+    }
+
+    private func propertyRowCloudGlyphColor(_ state: AppState.PropertyRowCloudGlyphState) -> Color {
+        switch state {
+        case .current, .uploading:
+            return .blue
+        case .warning:
+            return .orange
         }
     }
 
