@@ -933,6 +933,22 @@ struct SessionHubView: View {
                             onTap: { property in
                                 handlePropertyTap(property)
                             },
+                            onManageSessions: { property in
+                                manageSessionsProperty = property
+                            },
+                            onEditContact: { property in
+                                editContactProperty = property
+                            },
+                            onArchiveToggle: { property in
+                                if property.isArchived {
+                                    _ = appState.setPropertyArchived(id: property.id, archived: false)
+                                } else {
+                                    propertyToArchive = property
+                                }
+                            },
+                            onDelete: { property in
+                                requestDeleteProperty(property)
+                            },
                             onMaps: { property in
                                 openMaps(for: property)
                             },
@@ -5392,6 +5408,10 @@ extension PropertyListTableRowModel: Equatable {
 private struct PropertyListTableView: UIViewRepresentable {
     let sections: [PropertyListTableSection]
     let onTap: (Property) -> Void
+    let onManageSessions: (Property) -> Void
+    let onEditContact: (Property) -> Void
+    let onArchiveToggle: (Property) -> Void
+    let onDelete: (Property) -> Void
     let onMaps: (Property) -> Void
     let onMessage: (Property) -> Void
     let onCall: (Property) -> Void
@@ -5400,6 +5420,10 @@ private struct PropertyListTableView: UIViewRepresentable {
         Coordinator(
             sections: sections,
             onTap: onTap,
+            onManageSessions: onManageSessions,
+            onEditContact: onEditContact,
+            onArchiveToggle: onArchiveToggle,
+            onDelete: onDelete,
             onMaps: onMaps,
             onMessage: onMessage,
             onCall: onCall
@@ -5424,6 +5448,10 @@ private struct PropertyListTableView: UIViewRepresentable {
 
     func updateUIView(_ tableView: UITableView, context: Context) {
         context.coordinator.onTap = onTap
+        context.coordinator.onManageSessions = onManageSessions
+        context.coordinator.onEditContact = onEditContact
+        context.coordinator.onArchiveToggle = onArchiveToggle
+        context.coordinator.onDelete = onDelete
         context.coordinator.onMaps = onMaps
         context.coordinator.onMessage = onMessage
         context.coordinator.onCall = onCall
@@ -5436,6 +5464,10 @@ private struct PropertyListTableView: UIViewRepresentable {
     final class Coordinator: NSObject, UITableViewDataSource, UITableViewDelegate {
         var sections: [PropertyListTableSection]
         var onTap: (Property) -> Void
+        var onManageSessions: (Property) -> Void
+        var onEditContact: (Property) -> Void
+        var onArchiveToggle: (Property) -> Void
+        var onDelete: (Property) -> Void
         var onMaps: (Property) -> Void
         var onMessage: (Property) -> Void
         var onCall: (Property) -> Void
@@ -5443,12 +5475,20 @@ private struct PropertyListTableView: UIViewRepresentable {
         init(
             sections: [PropertyListTableSection],
             onTap: @escaping (Property) -> Void,
+            onManageSessions: @escaping (Property) -> Void,
+            onEditContact: @escaping (Property) -> Void,
+            onArchiveToggle: @escaping (Property) -> Void,
+            onDelete: @escaping (Property) -> Void,
             onMaps: @escaping (Property) -> Void,
             onMessage: @escaping (Property) -> Void,
             onCall: @escaping (Property) -> Void
         ) {
             self.sections = sections
             self.onTap = onTap
+            self.onManageSessions = onManageSessions
+            self.onEditContact = onEditContact
+            self.onArchiveToggle = onArchiveToggle
+            self.onDelete = onDelete
             self.onMaps = onMaps
             self.onMessage = onMessage
             self.onCall = onCall
@@ -5532,6 +5572,37 @@ private struct PropertyListTableView: UIViewRepresentable {
             let configuration = UISwipeActionsConfiguration(actions: actions)
             configuration.performsFirstActionWithFullSwipe = false
             return configuration
+        }
+
+        func tableView(
+            _ tableView: UITableView,
+            contextMenuConfigurationForRowAt indexPath: IndexPath,
+            point: CGPoint
+        ) -> UIContextMenuConfiguration? {
+            let row = sections[indexPath.section].rows[indexPath.row]
+            let property = row.property
+            return UIContextMenuConfiguration(identifier: property.id.uuidString as NSString, previewProvider: nil) { [weak self] _ in
+                guard let self else { return nil }
+                let manage = UIAction(title: "Manage Sessions", image: UIImage(systemName: "folder")) { _ in
+                    self.onManageSessions(property)
+                }
+                let edit = UIAction(title: "Edit Contact", image: UIImage(systemName: "person.crop.circle")) { _ in
+                    self.onEditContact(property)
+                }
+                let archiveTitle = property.isArchived ? "Unarchive Property" : "Archive Property"
+                let archiveImage = property.isArchived ? "archivebox" : "archivebox.fill"
+                let archive = UIAction(title: archiveTitle, image: UIImage(systemName: archiveImage)) { _ in
+                    self.onArchiveToggle(property)
+                }
+                let delete = UIAction(
+                    title: "Delete Property",
+                    image: UIImage(systemName: "trash"),
+                    attributes: .destructive
+                ) { _ in
+                    self.onDelete(property)
+                }
+                return UIMenu(children: [manage, edit, archive, delete])
+            }
         }
     }
 }
