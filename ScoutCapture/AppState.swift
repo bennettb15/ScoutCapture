@@ -5008,6 +5008,11 @@ final class AppState: ObservableObject {
         let priority: String?
         let angleIndex: Int
         let shotKey: String
+        let isGuided: Bool?
+        let isFlagged: Bool?
+        let issueID: UUID?
+        let issueStatus: String?
+        let captureIntentSource: String?
 
         nonisolated init(
             captureProfile: String? = nil,
@@ -5019,7 +5024,12 @@ final class AppState: ObservableObject {
             detailNote: String? = nil,
             priority: String? = nil,
             angleIndex: Int? = nil,
-            shotKey: String? = nil
+            shotKey: String? = nil,
+            isGuided: Bool? = nil,
+            isFlagged: Bool? = nil,
+            issueID: UUID? = nil,
+            issueStatus: String? = nil,
+            captureIntentSource: String? = nil
         ) {
             let normalizedLocationMode = AppState.normalizedFastRuntimeLocationMode(locationMode)
             let normalizedBuilding = AppState.normalizedFastRuntimeMetadataText(building, fallback: "B1")
@@ -5062,6 +5072,14 @@ final class AppState: ObservableObject {
             self.priority = normalizedPriority.isEmpty ? nil : normalizedPriority
             self.angleIndex = normalizedAngleIndex
             self.shotKey = normalizedShotKey
+            self.isGuided = isGuided
+            self.isFlagged = isFlagged
+            self.issueID = issueID
+            self.issueStatus = AppState.normalizedFastRuntimeMetadataText(issueStatus, fallback: "").isEmpty
+                ? nil
+                : AppState.normalizedFastRuntimeMetadataText(issueStatus, fallback: "")
+            let normalizedIntent = AppState.normalizedFastRuntimeMetadataText(captureIntentSource, fallback: "")
+            self.captureIntentSource = normalizedIntent.isEmpty ? nil : normalizedIntent
         }
 
         nonisolated func withAngleIndex(_ angleIndex: Int) -> FastRuntimeCaptureMetadataContext {
@@ -5075,7 +5093,12 @@ final class AppState: ObservableObject {
                 detailNote: detailNote,
                 priority: priority,
                 angleIndex: max(1, angleIndex),
-                shotKey: nil
+                shotKey: nil,
+                isGuided: isGuided,
+                isFlagged: isFlagged,
+                issueID: issueID,
+                issueStatus: issueStatus,
+                captureIntentSource: captureIntentSource
             )
         }
     }
@@ -43111,6 +43134,234 @@ final class AppState: ObservableObject {
         }.value
     }
 
+    func projectFastRuntimeCaptureToLocalCameraState(
+        context: ActiveCaptureContext,
+        shot record: FastRuntimePrototypeShotRecord,
+        guidedID: UUID? = nil
+    ) {
+        guard canAccessProperty(context.propertyID),
+              record.propertyID == context.propertyID,
+              record.sessionID == context.sessionID else {
+            return
+        }
+
+        let metadata = Self.normalizedFastRuntimeMetadataContext(
+            record.metadataContext,
+            fallbackLocationMode: record.captureLocationMode
+        )
+        let localPath = fastRuntimeResolvedLocalPath(for: record)
+        let projectedShot = Shot(
+            id: record.id,
+            capturedAt: record.capturedAt,
+            imageLocalIdentifier: localPath,
+            note: metadata.detailNote
+        )
+
+        if context.sessionType != .punchlistVisit,
+           metadata.isGuided == true {
+            projectFastRuntimeGuidedCapture(
+                context: context,
+                shot: projectedShot,
+                metadata: metadata,
+                guidedID: guidedID,
+                localPath: localPath
+            )
+        }
+
+        if metadata.isFlagged == true {
+            projectFastRuntimeObservationCapture(
+                context: context,
+                shot: projectedShot,
+                metadata: metadata,
+                localPath: localPath
+            )
+        }
+    }
+
+    private func projectFastRuntimeGuidedCapture(
+        context: ActiveCaptureContext,
+        shot: Shot,
+        metadata: FastRuntimeCaptureMetadataContext,
+        guidedID: UUID?,
+        localPath: String?
+    ) {
+        let propertyID = context.propertyID
+        let normalizedBuilding = metadata.building.trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalizedElevation = (CanonicalElevation.normalize(metadata.elevation) ?? metadata.elevation)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalizedDetail = metadata.detailType.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalizedBuilding.isEmpty,
+              !normalizedElevation.isEmpty,
+              !normalizedDetail.isEmpty else {
+            return
+        }
+
+        do {
+            var guidedRows = (try? localStore.fetchGuidedShots(propertyID: propertyID)) ?? []
+            let targetIndex: Array<GuidedShot>.Index? = {
+                if let guidedID,
+                   let index = guidedRows.firstIndex(where: { $0.id == guidedID }) {
+                    return index
+                }
+                if let index = guidedRows.firstIndex(where: { $0.shot?.id == shot.id }) {
+                    return index
+                }
+                return nil
+            }()
+            let title = fastRuntimeConciseContextLabel(
+                building: normalizedBuilding,
+                elevation: normalizedElevation,
+                detailType: normalizedDetail
+            )
+
+            if let targetIndex {
+                guidedRows[targetIndex].status = .active
+                guidedRows[targetIndex].title = title.isEmpty ? guidedRows[targetIndex].title : title
+                guidedRows[targetIndex].building = normalizedBuilding
+                guidedRows[targetIndex].targetElevation = normalizedElevation
+                guidedRows[targetIndex].detailType = normalizedDetail
+                guidedRows[targetIndex].angleIndex = max(1, metadata.angleIndex)
+                guidedRows[targetIndex].referenceImageLocalIdentifier = localPath ?? guidedRows[targetIndex].referenceImageLocalIdentifier
+                guidedRows[targetIndex].referenceImagePath = localPath ?? guidedRows[targetIndex].referenceImagePath
+                guidedRows[targetIndex].shot = shot
+                guidedRows[targetIndex].isCompleted = true
+                guidedRows[targetIndex].skipReason = nil
+                guidedRows[targetIndex].skipReasonNote = nil
+                guidedRows[targetIndex].skipSessionID = nil
+                guidedRows[targetIndex].isRetired = false
+                guidedRows[targetIndex].retiredAt = nil
+                guidedRows[targetIndex].retiredInSessionID = nil
+            } else {
+                let guided = GuidedShot(
+                    id: guidedID ?? shot.id,
+                    title: title.isEmpty ? "Guided Shot" : title,
+                    building: normalizedBuilding,
+                    targetElevation: normalizedElevation,
+                    detailType: normalizedDetail,
+                    angleIndex: max(1, metadata.angleIndex),
+                    referenceImageLocalIdentifier: localPath,
+                    referenceImagePath: localPath,
+                    shot: shot,
+                    isCompleted: true
+                )
+                guidedRows.append(guided)
+            }
+
+            try localStore.saveGuidedShots(guidedRows, propertyID: propertyID)
+        } catch {
+            print("[FastLaneProjection] guided_projection_failed propertyID=\(propertyID.uuidString) shotID=\(shot.id.uuidString) error=\(error.localizedDescription)")
+        }
+    }
+
+    private func projectFastRuntimeObservationCapture(
+        context: ActiveCaptureContext,
+        shot: Shot,
+        metadata: FastRuntimeCaptureMetadataContext,
+        localPath: String?
+    ) {
+        guard let issueID = metadata.issueID else { return }
+        let propertyID = context.propertyID
+        let status = Observation.Status.status(from: metadata.issueStatus)
+        let reason = metadata.detailNote?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let statement = reason?.isEmpty == false ? (reason ?? "") : metadata.detailType
+        let capturedEvent = ObservationHistoryEvent(
+            timestamp: shot.capturedAt,
+            sessionID: context.sessionID,
+            kind: .captured,
+            shotID: shot.id
+        )
+
+        do {
+            let observations = (try? localStore.fetchObservations(propertyID: propertyID)) ?? []
+            if var existing = observations.first(where: { $0.id == issueID }) {
+                let existingShotIDs = Set(existing.shots.map(\.id))
+                existing.status = status
+                existing.linkedShotID = shot.id
+                if !existingShotIDs.contains(shot.id) {
+                    existing.shots.append(shot)
+                }
+                if status == .resolutionRequired {
+                    existing.resolutionPhotoRef = localPath ?? existing.resolutionPhotoRef
+                    existing.resolutionStatement = reason ?? existing.resolutionStatement
+                }
+                existing.updatedInSessionID = context.sessionID
+                existing.building = fastRuntimeTrimmedNonEmpty(metadata.building) ?? existing.building
+                existing.targetElevation = fastRuntimeTrimmedNonEmpty(metadata.elevation) ?? existing.targetElevation
+                existing.detailType = fastRuntimeTrimmedNonEmpty(metadata.detailType) ?? existing.detailType
+                existing.priority = fastRuntimeTrimmedNonEmpty(metadata.priority) ?? existing.priority
+                existing.trade = fastRuntimeTrimmedNonEmpty(metadata.trade) ?? existing.trade
+                existing.currentReason = reason ?? existing.currentReason
+                existing.note = reason ?? existing.note
+                if !existing.historyEvents.contains(where: { $0.shotID == shot.id && $0.kind == .captured }) {
+                    existing.historyEvents.append(capturedEvent)
+                    existing.historyEvents.sort { $0.timestamp < $1.timestamp }
+                }
+                _ = try localStore.updateObservation(existing)
+            } else {
+                var historyEvents = [
+                    ObservationHistoryEvent(
+                        timestamp: shot.capturedAt,
+                        sessionID: context.sessionID,
+                        kind: .created,
+                        afterValue: statement,
+                        field: "reason",
+                        shotID: shot.id
+                    ),
+                    capturedEvent
+                ]
+                historyEvents.sort { $0.timestamp < $1.timestamp }
+                let observation = Observation(
+                    id: issueID,
+                    propertyID: propertyID,
+                    sessionID: context.sessionID,
+                    createdAt: shot.capturedAt,
+                    updatedAt: shot.capturedAt,
+                    statement: statement,
+                    status: status,
+                    linkedShotID: shot.id,
+                    resolutionPhotoRef: status == .resolutionRequired ? localPath : nil,
+                    resolutionStatement: status == .resolutionRequired ? reason : nil,
+                    updatedInSessionID: context.sessionID,
+                    building: metadata.building,
+                    targetElevation: metadata.elevation,
+                    detailType: metadata.detailType,
+                    priority: metadata.priority,
+                    trade: metadata.trade,
+                    currentReason: reason,
+                    historyEvents: historyEvents,
+                    note: reason,
+                    shots: [shot]
+                )
+                _ = try localStore.createObservation(observation)
+            }
+        } catch {
+            print("[FastLaneProjection] observation_projection_failed propertyID=\(propertyID.uuidString) shotID=\(shot.id.uuidString) issueID=\(issueID.uuidString) error=\(error.localizedDescription)")
+        }
+    }
+
+    private func fastRuntimeResolvedLocalPath(for shot: FastRuntimePrototypeShotRecord) -> String? {
+        let direct = shot.localFilePath.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !direct.isEmpty, FileManager.default.fileExists(atPath: direct) {
+            return direct
+        }
+        return direct.isEmpty ? nil : direct
+    }
+
+    private func fastRuntimeConciseContextLabel(
+        building: String?,
+        elevation: String?,
+        detailType: String?
+    ) -> String {
+        [building, elevation, detailType]
+            .compactMap(fastRuntimeTrimmedNonEmpty)
+            .joined(separator: " ")
+    }
+
+    private func fastRuntimeTrimmedNonEmpty(_ value: String?) -> String? {
+        let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
     func closeFastRuntimePrototypePreview(
         context: ActiveCaptureContext,
         tempStorageRoot: URL?,
@@ -44899,10 +45150,10 @@ final class AppState: ObservableObject {
             trade: metadataContext.trade,
             priority: metadataContext.priority,
             shotKey: metadataContext.shotKey,
-            isGuided: false,
-            isFlagged: metadataContext.detailNote != nil,
-            issueID: nil,
-            issueStatus: metadataContext.detailNote == nil ? nil : "active",
+            isGuided: metadataContext.isGuided ?? false,
+            isFlagged: metadataContext.isFlagged ?? (metadataContext.detailNote != nil),
+            issueID: metadataContext.issueID,
+            issueStatus: metadataContext.issueStatus ?? (metadataContext.detailNote == nil ? nil : "active"),
             captureKind: dryRunShot.captureKind,
             firstCaptureKind: "captured",
             noteText: metadataContext.detailNote,
@@ -45162,7 +45413,12 @@ final class AppState: ObservableObject {
             detailNote: value?.detailNote,
             priority: value?.priority,
             angleIndex: value?.angleIndex ?? fallbackPosition,
-            shotKey: value?.shotKey
+            shotKey: value?.shotKey,
+            isGuided: value?.isGuided,
+            isFlagged: value?.isFlagged,
+            issueID: value?.issueID,
+            issueStatus: value?.issueStatus,
+            captureIntentSource: value?.captureIntentSource
         )
     }
 
@@ -51593,6 +51849,26 @@ final class AppState: ObservableObject {
             activeIssueCount: activeIssueCount,
             guidedRemainingCount: guidedRemainingCount,
             checklistCount: 0
+        )
+    }
+
+    func fastRuntimePreviewIssueSideControlPayload(propertyID: UUID) -> FastRuntimePreviewSideControlPayload {
+        guard canAccessProperty(propertyID) else {
+            return .empty
+        }
+
+        let observations = (try? localStore.fetchObservations(propertyID: propertyID)) ?? []
+        let sortedObservations = observations.sorted { lhs, rhs in
+            if lhs.updatedAt != rhs.updatedAt {
+                return lhs.updatedAt > rhs.updatedAt
+            }
+            return lhs.id.uuidString < rhs.id.uuidString
+        }
+        return FastRuntimePreviewSideControlPayload(
+            resolutionRequiredObservations: sortedObservations.filter { $0.status == .resolutionRequired },
+            activeObservations: sortedObservations.filter { $0.status == .active },
+            guidedShots: [],
+            retiredGuidedShots: []
         )
     }
 
