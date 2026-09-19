@@ -68,14 +68,21 @@ struct CameraChromeDisplayModel {
     var isHDVisible: Bool
     var isHDEnabled: Bool
     var locationMode: CameraChromeLocationMode
+    var isLocationModeEnabled: Bool = true
     var sideControls: [CameraChromeSideControl]
     var savedCount: Int
     var thumbnail: UIImage?
     var ellipsisEnabled: Bool
     var hasDetailNote: Bool = false
     var detailNotePriority: String? = nil
+    var armedReference: CameraChromeArmedReferenceModel? = nil
     var deviceOrientation: UIDeviceOrientation = .portrait
     var glyphRotationAngle: Angle = .zero
+}
+
+struct CameraChromeArmedReferenceModel {
+    var thumbnail: UIImage?
+    var hasReferenceImage: Bool
 }
 
 struct CameraChromeActions {
@@ -90,6 +97,9 @@ struct CameraChromeActions {
     var onDetailNoteTapped: () -> Void = {}
     var onLocationModeChanged: (CameraChromeLocationMode) -> Void = { _ in }
     var onEllipsisTapped: () -> Void = {}
+    var onCancelArmedCapture: () -> Void = {}
+    var onArmedReferenceTapped: () -> Void = {}
+    var onArmedReferenceMenuTapped: () -> Void = {}
 }
 
 struct CameraChromeView<PreviewContent: View, OverlayContent: View>: View {
@@ -636,7 +646,28 @@ struct CameraChromeView<PreviewContent: View, OverlayContent: View>: View {
                     .buttonStyle(.plain)
                     .offset(y: -13)
                     .overlay(alignment: .center) {
+                        let hdOffsetX: CGFloat = -94
+                        let leftEdgeX: CGFloat = -(containerWidth * 0.5)
+                        let cancelOffsetX: CGFloat = (leftEdgeX + hdOffsetX) * 0.5
+
                         ZStack {
+                            if display.armedReference != nil {
+                                Button(action: actions.onCancelArmedCapture) {
+                                    ZStack {
+                                        Circle()
+                                            .fill(Color.red.opacity(0.95))
+                                            .frame(width: 44, height: 44)
+                                        Image(systemName: "xmark")
+                                            .font(.system(size: 16, weight: .bold))
+                                            .foregroundColor(.white)
+                                    }
+                                }
+                                .buttonStyle(.plain)
+                                .rotationEffect(display.glyphRotationAngle)
+                                .animation(glyphRotationAnimation, value: glyphRotationDegrees)
+                                .offset(x: cancelOffsetX, y: -12)
+                            }
+
                             if display.isHDVisible {
                                 hdQuickButton(size: 44)
                                     .rotationEffect(display.glyphRotationAngle)
@@ -648,6 +679,28 @@ struct CameraChromeView<PreviewContent: View, OverlayContent: View>: View {
                                 .rotationEffect(display.glyphRotationAngle)
                                 .animation(glyphRotationAnimation, value: glyphRotationDegrees)
                                 .offset(x: 94, y: -12)
+
+                            if let armedReference = display.armedReference {
+                                ZStack(alignment: .topTrailing) {
+                                    armedReferenceCard(armedReference, size: 88)
+                                        .rotationEffect(display.glyphRotationAngle)
+                                        .animation(glyphRotationAnimation, value: glyphRotationDegrees)
+
+                                    Button(action: actions.onArmedReferenceMenuTapped) {
+                                        Image(systemName: "ellipsis.circle.fill")
+                                            .font(.system(size: 18, weight: .semibold))
+                                            .foregroundColor(.white.opacity(0.90))
+                                            .background(
+                                                Circle()
+                                                    .fill(Color.black.opacity(0.45))
+                                                    .frame(width: 18, height: 18)
+                                            )
+                                    }
+                                    .buttonStyle(.plain)
+                                    .offset(x: 6, y: -6)
+                                }
+                                .offset(x: 170, y: -12)
+                            }
                         }
                     }
 
@@ -731,6 +784,36 @@ struct CameraChromeView<PreviewContent: View, OverlayContent: View>: View {
         .frame(width: size, height: size)
     }
 
+    private func armedReferenceCard(_ model: CameraChromeArmedReferenceModel, size: CGFloat = 88) -> some View {
+        Button(action: actions.onArmedReferenceTapped) {
+            Group {
+                if let thumbnail = model.thumbnail {
+                    Image(uiImage: thumbnail)
+                        .resizable()
+                        .scaledToFill()
+                } else {
+                    ZStack {
+                        Color.white.opacity(0.08)
+                        Image(systemName: "photo")
+                            .font(.system(size: 20, weight: .medium))
+                            .foregroundColor(.secondary)
+                    }
+                }
+            }
+            .frame(width: size, height: size)
+            .clipShape(RoundedRectangle(cornerRadius: 10))
+            .overlay(
+                RoundedRectangle(cornerRadius: 10)
+                    .stroke(Color.white.opacity(0.22), lineWidth: 1)
+            )
+            .frame(width: size, height: size)
+            .contentShape(RoundedRectangle(cornerRadius: 10))
+        }
+        .buttonStyle(.plain)
+        .frame(width: size, height: size)
+        .accessibilityLabel(model.hasReferenceImage ? "Reference image" : "Reference placeholder")
+    }
+
     private func thumbnailCircle(size: CGFloat) -> some View {
         Button(action: actions.onThumbnailTapped) {
             ZStack {
@@ -777,10 +860,13 @@ struct CameraChromeView<PreviewContent: View, OverlayContent: View>: View {
             selection: Binding(
                 get: { display.locationMode },
                 set: { actions.onLocationModeChanged($0) }
-            )
+            ),
+            isEnabled: display.isLocationModeEnabled
         )
         .frame(width: 190)
         .frame(height: 44)
+        .opacity(display.isLocationModeEnabled ? 1.0 : 0.45)
+        .disabled(!display.isLocationModeEnabled)
     }
 
     private func ellipsisCircle(size: CGFloat) -> some View {
@@ -802,6 +888,7 @@ struct CameraChromeView<PreviewContent: View, OverlayContent: View>: View {
 
 private struct CameraChromeLocationModeSegmentedControl: UIViewRepresentable {
     @Binding var selection: CameraChromeLocationMode
+    var isEnabled: Bool = true
 
     func makeCoordinator() -> Coordinator {
         Coordinator(parent: self)
@@ -813,6 +900,7 @@ private struct CameraChromeLocationModeSegmentedControl: UIViewRepresentable {
         control.selectedSegmentIndex = index(for: selection)
         control.addTarget(context.coordinator, action: #selector(Coordinator.changed(_:)), for: .valueChanged)
         control.selectedSegmentTintColor = UIColor.systemBlue
+        control.isEnabled = isEnabled
         control.setTitleTextAttributes([
             .foregroundColor: UIColor.white.withAlphaComponent(0.92),
             .font: UIFont.systemFont(ofSize: 19, weight: .medium)
@@ -828,6 +916,9 @@ private struct CameraChromeLocationModeSegmentedControl: UIViewRepresentable {
         let selectedIndex = index(for: selection)
         if uiView.selectedSegmentIndex != selectedIndex {
             uiView.selectedSegmentIndex = selectedIndex
+        }
+        if uiView.isEnabled != isEnabled {
+            uiView.isEnabled = isEnabled
         }
     }
 
