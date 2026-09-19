@@ -842,6 +842,13 @@ final class AppState: ObservableObject {
         }
     }
 
+    struct FastRuntimePendingExportRecoveryResult: Equatable {
+        let success: Bool
+        let sessionID: UUID?
+        let sessionType: SessionType?
+        let message: String?
+    }
+
     struct SessionSnapshotAuthPreflightRemoteParentStatus: Equatable {
         var propertyExists: Bool = false
         var sessionExists: Bool = false
@@ -7650,10 +7657,10 @@ final class AppState: ObservableObject {
     @Published private(set) var propertyStatusByPropertyID: [UUID: PropertyStatusRecord] = [:] {
         didSet {
             refreshPropertyRowDraftBadgeCache()
+            refreshPropertyRowCloudGlyphCache()
             refreshPropertyRowStatusChipCache()
         }
     }
-    private var fastRuntimeReportHandoffAcceptedSessionByPropertyID: [UUID: UUID] = [:]
     private var fastRuntimeCompletionCloudStatusByPropertyID: [UUID: SessionSnapshotCloudStatus] = [:]
     private(set) var lastPropertyStatusRefreshAt: Date?
     private(set) var propertyStatusDiagnostics: [UUID: PropertyStatusDiagnosticComparison] = [:]
@@ -41830,13 +41837,7 @@ final class AppState: ObservableObject {
                     currentUserID: currentUserID,
                     currentDeviceID: currentDeviceID
                 )
-            let fastRuntimeHandoffAccepted =
-                propertyStatus.status == .pendingExport &&
-                propertyStatus.pendingExportSessionID != nil &&
-                fastRuntimeReportHandoffAcceptedSessionByPropertyID[propertyID] == propertyStatus.pendingExportSessionID
-            let propertyStatusBadgeState: PropertyStatusCompareBadgeState = fastRuntimeHandoffAccepted
-                ? .exported
-                : propertyStatusAnswer.visibleBadgeState
+            let propertyStatusBadgeState = propertyStatusAnswer.visibleBadgeState
             let propertyStatusOwnedByCurrentActor = Self.propertyStatusActorOwnedByCurrentActor(
                 record: propertyStatus,
                 currentUserID: currentUserID,
@@ -41884,9 +41885,7 @@ final class AppState: ObservableObject {
                     : "\(propertyStatusReasonPrefix):draft_hidden_owner_match=\(propertyStatusOwnedByCurrentActor)",
                 pendingExportReason: propertyStatusBadgeState == .pendingExport
                     ? "\(propertyStatusReasonPrefix):pending_export"
-                    : fastRuntimeHandoffAccepted
-                        ? "\(propertyStatusReasonPrefix):fast_lane_report_handoff_accepted"
-                        : "\(propertyStatusReasonPrefix):pending_export_hidden",
+                    : "\(propertyStatusReasonPrefix):pending_export_hidden",
                 reExportReason: reExportReason,
                 badgeSource: "property_status"
             )
@@ -41981,8 +41980,33 @@ final class AppState: ObservableObject {
         let next = propertyRowSnapshotCloudStatusByPropertyID.reduce(into: [UUID: PropertyRowCloudGlyphState]()) { partial, entry in
             partial[entry.key] = Self.propertyRowCloudGlyphState(for: entry.value)
         }
-        if propertyRowCloudGlyphByPropertyID != next {
-            propertyRowCloudGlyphByPropertyID = next
+        var serverAwareNext = propertyStatusByPropertyID.reduce(into: next) { partial, entry in
+            switch entry.value.status {
+            case .exported:
+                partial[entry.key] = .current
+            case .pendingExport:
+                if let cloudStatus = propertyRowSnapshotCloudStatusByPropertyID[entry.key],
+                   Self.propertyRowStatusChipShowsUploading(cloudStatus) {
+                    partial[entry.key] = .uploading
+                } else {
+                    partial[entry.key] = .warning
+                }
+            case .idle, .draft, .occupied:
+                break
+            }
+        }
+        let localPendingIssuePropertyIDs = Set(pendingExportSessionByProperty.keys)
+            .union(propertyRowPendingDeliverySessionByPropertyID.keys)
+        for propertyID in localPendingIssuePropertyIDs {
+            if let cloudStatus = propertyRowSnapshotCloudStatusByPropertyID[propertyID],
+               Self.propertyRowStatusChipShowsUploading(cloudStatus) {
+                serverAwareNext[propertyID] = .uploading
+            } else {
+                serverAwareNext[propertyID] = .warning
+            }
+        }
+        if propertyRowCloudGlyphByPropertyID != serverAwareNext {
+            propertyRowCloudGlyphByPropertyID = serverAwareNext
         }
     }
 
@@ -42018,12 +42042,7 @@ final class AppState: ObservableObject {
 
             if let propertyStatus = propertyStatusByPropertyID[propertyID],
                propertyStatus.status == .pendingExport {
-                let handoffAccepted =
-                    propertyStatus.pendingExportSessionID != nil &&
-                    fastRuntimeReportHandoffAcceptedSessionByPropertyID[propertyID] == propertyStatus.pendingExportSessionID
-                if !handoffAccepted {
-                    next[propertyID] = .pendingExport
-                }
+                next[propertyID] = .pendingExport
                 continue
             }
 
@@ -43937,7 +43956,6 @@ final class AppState: ObservableObject {
 
     @MainActor
     func markFastRuntimeCompletionUploading(context: ActiveCaptureContext) {
-        fastRuntimeReportHandoffAcceptedSessionByPropertyID.removeValue(forKey: context.propertyID)
         applyFastRuntimeCompletionCloudStatus(
             context: context,
             state: .uploading,
@@ -43959,7 +43977,6 @@ final class AppState: ObservableObject {
             reason: "fast_lane_report_handoff_accepted"
         )
         guard didMarkExported else {
-            fastRuntimeReportHandoffAcceptedSessionByPropertyID.removeValue(forKey: context.propertyID)
             applyFastRuntimeCompletionCloudStatus(
                 context: context,
                 state: .failed,
@@ -43969,7 +43986,6 @@ final class AppState: ObservableObject {
             return false
         }
 
-        fastRuntimeReportHandoffAcceptedSessionByPropertyID[context.propertyID] = context.sessionID
         if let status = applyFastRuntimeCompletionCloudStatus(
             context: context,
             state: .uploaded,
@@ -43983,7 +43999,6 @@ final class AppState: ObservableObject {
 
     @MainActor
     func markFastRuntimeCompletionFailed(context: ActiveCaptureContext, message: String?) {
-        fastRuntimeReportHandoffAcceptedSessionByPropertyID.removeValue(forKey: context.propertyID)
         applyFastRuntimeCompletionCloudStatus(
             context: context,
             state: .failed,
@@ -44256,6 +44271,73 @@ final class AppState: ObservableObject {
                 errorMessage: error.localizedDescription
             )
         }
+    }
+
+    @MainActor
+    func recoverFastRuntimePendingExportReportHandoff(
+        propertyID: UUID
+    ) async -> FastRuntimePendingExportRecoveryResult {
+        var blockedMessages: [String] = []
+        for sessionType in [SessionType.fullDocumentation, .punchlistVisit] {
+            let dryRun = await runFastRuntimeReportPackageDryRun(
+                propertyID: propertyID,
+                sessionType: sessionType
+            )
+            guard dryRun.isValid else {
+                let message = (dryRun.errors + dryRun.missingFields).joined(separator: ", ")
+                blockedMessages.append("\(sessionType.rawValue): \(message.isEmpty ? "not applicable" : message)")
+                continue
+            }
+
+            let handoff = await runFastRuntimeReportHandoff(
+                propertyID: propertyID,
+                sessionType: sessionType
+            )
+            guard handoff.success,
+                  let sessionID = handoff.sessionID ?? dryRun.sessionID else {
+                return FastRuntimePendingExportRecoveryResult(
+                    success: false,
+                    sessionID: handoff.sessionID ?? dryRun.sessionID,
+                    sessionType: sessionType,
+                    message: handoff.errorMessage ?? "Report handoff retry failed."
+                )
+            }
+
+            let context = ActiveCaptureContext(
+                sessionID: sessionID,
+                propertyID: propertyID,
+                orgID: dryRun.orgID,
+                sessionType: sessionType,
+                ownerUserID: authenticatedSupabaseUser?.id,
+                ownerEmail: authenticatedSupabaseUser?.email,
+                ownerDeviceID: currentDeviceIdentifier(),
+                createdAt: Date(),
+                status: .completed,
+                statusReason: "pending_export_handoff_recovery"
+            )
+            let didRelease = await markFastRuntimeCompletionHandoffAccepted(
+                context: context,
+                snapshotID: handoff.snapshotID,
+                snapshotPath: handoff.snapshotPath
+            )
+            return FastRuntimePendingExportRecoveryResult(
+                success: didRelease,
+                sessionID: sessionID,
+                sessionType: sessionType,
+                message: didRelease
+                    ? nil
+                    : "Report handoff succeeded, but server pending export did not clear."
+            )
+        }
+
+        return FastRuntimePendingExportRecoveryResult(
+            success: false,
+            sessionID: nil,
+            sessionType: nil,
+            message: blockedMessages.isEmpty
+                ? "No pending export was ready to retry."
+                : blockedMessages.joined(separator: "\n")
+        )
     }
 
     private func makeFastRuntimeReportHandoffFailure(
@@ -46309,7 +46391,7 @@ final class AppState: ObservableObject {
                     let returnedRecord = try await (try client.rpc(transition.rpcName, params: params))
                         .execute()
                         .value as PropertyStatusRecord
-                    updateLocalPropertyStatusCacheAfterExport(
+                    localCacheApplied = updateLocalPropertyStatusCacheAfterExport(
                         returnedRecord,
                         propertyID: propertyID,
                         sessionID: sessionID,
@@ -46615,12 +46697,13 @@ final class AppState: ObservableObject {
         return true
     }
 
+    @discardableResult
     private func updateLocalPropertyStatusCacheAfterExport(
         _ record: PropertyStatusRecord,
         propertyID: UUID,
         sessionID: UUID,
         reason: String
-    ) {
+    ) -> Bool {
         guard record.propertyID == propertyID,
               record.status == .exported,
               record.lastExportedSessionID == sessionID else {
@@ -46635,7 +46718,7 @@ final class AppState: ObservableObject {
                 "reason=returned_row_not_exported_match " +
                 "statusReason=\(reason)"
             )
-            return
+            return false
         }
         let hadPendingExport = propertyStatusByPropertyID[propertyID]?.status == .pendingExport
         var nextCache = propertyStatusByPropertyID
@@ -46652,6 +46735,7 @@ final class AppState: ObservableObject {
             "had_pending_export_before_update=\(hadPendingExport) " +
             "reason=\(reason)"
         )
+        return true
     }
 
     func fetchPropertyStatusRecord(propertyID: UUID) async throws -> PropertyStatusRecord? {

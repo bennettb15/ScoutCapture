@@ -21307,6 +21307,7 @@ struct PropertySessionView: View {
     @State private var isCheckingSessionCoordination: Bool = false
     @State private var isAwaitingInitialSessionTypeSelection: Bool = false
     @State private var sessionEntryBlock: AppState.SessionEntryCoordinationBlock? = nil
+    @State private var pendingExportRecoveryMessage: String? = nil
     @State private var didSchedulePostOpenReferenceReconcile: Bool = false
     @State private var isVerifyingSessionAfterPresentation: Bool = false
     @State private var didUseLightweightFastEntry: Bool = false
@@ -21596,11 +21597,18 @@ struct PropertySessionView: View {
                         .foregroundColor(.white.opacity(0.86))
                         .multilineTextAlignment(.center)
 
+                    if let pendingExportRecoveryMessage {
+                        Text(pendingExportRecoveryMessage)
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundColor(.orange)
+                            .multilineTextAlignment(.center)
+                    }
+
                     HStack(spacing: 10) {
                         Button {
                             claimBlockedSession()
                         } label: {
-                            Text(isCheckingSessionCoordination ? "Claiming..." : "Claim Session")
+                            Text(primaryBlockedSessionActionTitle(for: sessionEntryBlock))
                                 .font(.system(size: 16, weight: .semibold))
                                 .foregroundColor(.white)
                                 .frame(maxWidth: .infinity)
@@ -21828,12 +21836,43 @@ struct PropertySessionView: View {
         if sessionEntryBlock?.blockContext == "pending_export",
            let recovery = appState.recoverLocalPendingExportForPropertyOpen(propertyID: propertyID) {
             sessionEntryBlock = nil
+            pendingExportRecoveryMessage = nil
             isCheckingSessionCoordination = false
             onPendingExportRecovered(recovery.property, recovery.session)
             exitCaptureScreen()
             return
         }
+        if sessionEntryBlock?.blockContext == "pending_export" {
+            isCheckingSessionCoordination = true
+            pendingExportRecoveryMessage = nil
+            Task {
+                let result = await appState.recoverFastRuntimePendingExportReportHandoff(propertyID: propertyID)
+                await MainActor.run {
+                    isCheckingSessionCoordination = false
+                    if result.success {
+                        sessionEntryBlock = nil
+                        pendingExportRecoveryMessage = nil
+                        exitCaptureScreen()
+                    } else {
+                        pendingExportRecoveryMessage = AppState.diagnosticsPreviewText(
+                            result.message ?? "Unable to retry export.",
+                            maxLength: 180
+                        )
+                    }
+                }
+            }
+            return
+        }
         beginSessionCoordinationFlow(forceClaim: true)
+    }
+
+    private func primaryBlockedSessionActionTitle(
+        for block: AppState.SessionEntryCoordinationBlock
+    ) -> String {
+        if block.blockContext == "pending_export" {
+            return isCheckingSessionCoordination ? "Retrying..." : "Retry Export"
+        }
+        return isCheckingSessionCoordination ? "Claiming..." : "Claim Session"
     }
 
     private func exitCaptureScreen() {
