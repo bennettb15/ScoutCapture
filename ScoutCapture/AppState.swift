@@ -45418,7 +45418,7 @@ final class AppState: ObservableObject {
         let property = properties.first(where: { $0.id == propertyID }) ??
             allProperties.first(where: { $0.id == propertyID })
         let propertyName = property?.name ?? propertyID.uuidString
-        guard let summary = fastRuntimeDraftBadgeSummary(
+        guard let draftSummary = fastRuntimeDraftBadgeSummary(
             for: propertyID,
             currentUserID: authenticatedSupabaseUser?.id,
             currentDeviceID: currentDeviceIdentifier()
@@ -45426,8 +45426,18 @@ final class AppState: ObservableObject {
             return nil
         }
 
-        let storageRoot = URL(fileURLWithPath: summary.draftRootPath, isDirectory: true)
-        let metadataURL = URL(fileURLWithPath: summary.metadataPath, isDirectory: false)
+        let resolvedDraft = Self.resolvedFastRuntimeDraftStorage(for: draftSummary)
+        let summary = resolvedDraft.summary
+        if resolvedDraft.didRelocate {
+            var nextDrafts = fastRuntimeDraftsByPropertyID
+            nextDrafts[propertyID] = summary
+            if (try? Self.writeFastRuntimeDraftIndexToDisk(Array(nextDrafts.values))) != nil {
+                fastRuntimeDraftsByPropertyID = nextDrafts
+            }
+        }
+
+        let storageRoot = resolvedDraft.storageRoot
+        let metadataURL = resolvedDraft.metadataURL
         guard FileManager.default.fileExists(atPath: storageRoot.path) else {
             return FastRuntimeDraftResumeState(
                 propertyID: propertyID,
@@ -45817,6 +45827,50 @@ final class AppState: ObservableObject {
         }.value
     }
 
+    private static func resolvedFastRuntimeDraftStorage(
+        for summary: FastRuntimeDraftSummary
+    ) -> (
+        summary: FastRuntimeDraftSummary,
+        storageRoot: URL,
+        metadataURL: URL,
+        didRelocate: Bool
+    ) {
+        let indexedRoot = URL(fileURLWithPath: summary.draftRootPath, isDirectory: true)
+        let indexedMetadataURL = URL(fileURLWithPath: summary.metadataPath, isDirectory: false)
+        if FileManager.default.fileExists(atPath: indexedRoot.path) {
+            return (summary, indexedRoot, indexedMetadataURL, false)
+        }
+
+        guard let stableRoot = try? stableFastRuntimeDraftRoot(
+            propertyID: summary.propertyID,
+            sessionID: summary.sessionID
+        ) else {
+            return (summary, indexedRoot, indexedMetadataURL, false)
+        }
+        let stableMetadataURL = fastRuntimeDraftMetadataURL(root: stableRoot)
+        guard FileManager.default.fileExists(atPath: stableRoot.path) else {
+            return (summary, indexedRoot, indexedMetadataURL, false)
+        }
+
+        let relocatedSummary = FastRuntimeDraftSummary(
+            propertyID: summary.propertyID,
+            sessionID: summary.sessionID,
+            orgID: summary.orgID,
+            sessionType: summary.sessionType,
+            ownerUserID: summary.ownerUserID,
+            ownerEmail: summary.ownerEmail,
+            ownerDeviceID: summary.ownerDeviceID,
+            createdAt: summary.createdAt,
+            updatedAt: summary.updatedAt,
+            photoCount: summary.photoCount,
+            lastLocationMode: summary.lastLocationMode,
+            lastMetadataContext: summary.lastMetadataContext,
+            draftRootPath: stableRoot.path,
+            metadataPath: stableMetadataURL.path
+        )
+        return (relocatedSummary, stableRoot, stableMetadataURL, true)
+    }
+
     private static func removeFastRuntimePrototypeStorage(at root: URL) throws {
         guard FileManager.default.fileExists(atPath: root.path) else { return }
         try FileManager.default.removeItem(at: root)
@@ -45842,10 +45896,20 @@ final class AppState: ObservableObject {
     }
 
     private static func stableFastRuntimeDraftRoot(context: ActiveCaptureContext) throws -> URL {
+        try stableFastRuntimeDraftRoot(propertyID: context.propertyID, sessionID: context.sessionID)
+    }
+
+    private static func stableFastRuntimeDraftRoot(propertyID: UUID, sessionID: UUID) throws -> URL {
         try fastRuntimeDraftsRootURL()
             .appendingPathComponent("Drafts", isDirectory: true)
-            .appendingPathComponent(context.propertyID.uuidString, isDirectory: true)
-            .appendingPathComponent(context.sessionID.uuidString, isDirectory: true)
+            .appendingPathComponent(propertyID.uuidString, isDirectory: true)
+            .appendingPathComponent(sessionID.uuidString, isDirectory: true)
+    }
+
+    private static func fastRuntimeDraftMetadataURL(root: URL) -> URL {
+        root
+            .appendingPathComponent("Metadata", isDirectory: true)
+            .appendingPathComponent("fast-lane-shots.json", isDirectory: false)
     }
 
     private static func fastRuntimeDraftIndexURL() throws -> URL {
@@ -50850,6 +50914,37 @@ final class AppState: ObservableObject {
         }
     }
 
+    func fastRuntimeCaptureProfileShouldLock(propertyID: UUID) -> Bool {
+        guard canAccessProperty(propertyID) || selectedPropertyID == propertyID else { return false }
+
+        if properties.first(where: { $0.id == propertyID })?.captureProfile != nil ||
+            allProperties.first(where: { $0.id == propertyID })?.captureProfile != nil ||
+            (selectedProperty?.id == propertyID && selectedProperty?.captureProfile != nil) {
+            return true
+        }
+
+        if let draft = fastRuntimeDraftsByPropertyID[propertyID],
+           draft.photoCount > 0 {
+            return true
+        }
+
+        if let guidedShots = try? localStore.fetchGuidedShots(propertyID: propertyID),
+           guidedShots.contains(where: { $0.shot != nil }) {
+            return true
+        }
+
+        if let observations = try? localStore.fetchObservations(propertyID: propertyID),
+           observations.contains(where: { observation in
+               observation.linkedShotID != nil ||
+                   !observation.shots.isEmpty ||
+                   observation.guidedShots.contains(where: { $0.shot != nil })
+           }) {
+            return true
+        }
+
+        return false
+    }
+
     @discardableResult
     func setSessionCaptureProfileSnapshot(
         propertyID: UUID,
@@ -52211,26 +52306,65 @@ final class AppState: ObservableObject {
         return Array(requests)
     }
 
-    func fastRuntimeIssueAngleReservations(propertyID: UUID) -> [FastRuntimeAngleReservation] {
+    func fastRuntimePropertyAngleReservations(propertyID: UUID) -> [FastRuntimeAngleReservation] {
         guard canAccessProperty(propertyID) else { return [] }
-        let sessions = (try? localStore.fetchSessions(propertyID: propertyID)) ?? []
         var reservations: [FastRuntimeAngleReservation] = []
+
+        func appendReservation(
+            building rawBuilding: String?,
+            elevation rawElevation: String?,
+            detailType rawDetailType: String?,
+            angleIndex rawAngleIndex: Int?
+        ) {
+            let building = (rawBuilding ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            let elevation = (CanonicalElevation.normalize(rawElevation ?? "") ?? (rawElevation ?? ""))
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let detail = (rawDetailType ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !building.isEmpty, !elevation.isEmpty, !detail.isEmpty else { return }
+            reservations.append(FastRuntimeAngleReservation(
+                building: building,
+                elevation: elevation,
+                detailType: detail,
+                angleIndex: max(1, rawAngleIndex ?? 1)
+            ))
+        }
+
+        if let guidedShots = try? localStore.fetchGuidedShots(propertyID: propertyID) {
+            for guidedShot in guidedShots {
+                appendReservation(
+                    building: guidedShot.building,
+                    elevation: guidedShot.targetElevation,
+                    detailType: guidedShot.detailType,
+                    angleIndex: guidedShot.angleIndex
+                )
+            }
+        }
+
+        if let observations = try? localStore.fetchObservations(propertyID: propertyID) {
+            for observation in observations {
+                for guidedShot in observation.guidedShots {
+                    appendReservation(
+                        building: guidedShot.building ?? observation.building,
+                        elevation: guidedShot.targetElevation ?? observation.targetElevation,
+                        detailType: guidedShot.detailType ?? observation.detailType,
+                        angleIndex: guidedShot.angleIndex
+                    )
+                }
+            }
+        }
+
+        let sessions = (try? localStore.fetchSessions(propertyID: propertyID)) ?? []
         for session in sessions {
             guard let metadata = try? localStore.loadSessionMetadata(propertyID: propertyID, sessionID: session.id) else {
                 continue
             }
-            for shot in metadata.shots where shot.isFlagged || shot.issueID != nil {
-                let building = shot.building.trimmingCharacters(in: .whitespacesAndNewlines)
-                let elevation = (CanonicalElevation.normalize(shot.elevation) ?? shot.elevation)
-                    .trimmingCharacters(in: .whitespacesAndNewlines)
-                let detail = shot.detailType.trimmingCharacters(in: .whitespacesAndNewlines)
-                guard !building.isEmpty, !elevation.isEmpty, !detail.isEmpty else { continue }
-                reservations.append(FastRuntimeAngleReservation(
-                    building: building,
-                    elevation: elevation,
-                    detailType: detail,
-                    angleIndex: max(1, shot.angleIndex)
-                ))
+            for shot in metadata.shots where shot.isActiveForDefaultWorkflows {
+                appendReservation(
+                    building: shot.building,
+                    elevation: shot.elevation,
+                    detailType: shot.detailType,
+                    angleIndex: shot.angleIndex
+                )
             }
         }
         return reservations

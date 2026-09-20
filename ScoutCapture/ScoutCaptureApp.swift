@@ -1063,6 +1063,7 @@ struct SessionHubView: View {
                     isDraftResume: request.isDraftResume,
                     initialLocationMode: request.initialLocationMode,
                     initialMetadataContext: request.initialMetadataContext,
+                    initialProfileLocked: request.initialProfileLocked,
                     isDebugMode: false,
                     onDismiss: { closeResult in
                         if closeResult.errorMessage != nil {
@@ -4057,7 +4058,8 @@ struct SessionHubView: View {
             storageRoot: storageRoot,
             isDraftResume: true,
             initialLocationMode: CameraChromeLocationMode(fastRuntimeRawValue: summary.lastMetadataContext?.locationMode ?? summary.lastLocationMode),
-            initialMetadataContext: summary.lastMetadataContext
+            initialMetadataContext: summary.lastMetadataContext,
+            initialProfileLocked: summary.photoCount > 0 || appState.fastRuntimeCaptureProfileShouldLock(propertyID: property.id)
         )
     }
 
@@ -4236,7 +4238,8 @@ struct SessionHubView: View {
                     storageRoot: result.tempStorageRoot,
                     isDraftResume: false,
                     initialLocationMode: .exterior,
-                    initialMetadataContext: nil
+                    initialMetadataContext: nil,
+                    initialProfileLocked: appState.fastRuntimeCaptureProfileShouldLock(propertyID: property.id)
                 )
             }
         }
@@ -13117,6 +13120,7 @@ private struct FastRuntimeCameraPreviewRequest: Identifiable {
     let isDraftResume: Bool
     let initialLocationMode: CameraChromeLocationMode?
     let initialMetadataContext: AppState.FastRuntimeCaptureMetadataContext?
+    let initialProfileLocked: Bool
 }
 
 private extension CameraChromeLocationMode {
@@ -13327,6 +13331,7 @@ private struct DebugFastRuntimePrototypeView: View {
                     isDraftResume: request.isDraftResume,
                     initialLocationMode: request.initialLocationMode,
                     initialMetadataContext: request.initialMetadataContext,
+                    initialProfileLocked: request.initialProfileLocked,
                     isDebugMode: true,
                     onDismiss: { closeResult in
                         previewCloseResult = closeResult
@@ -13394,7 +13399,8 @@ private struct DebugFastRuntimePrototypeView: View {
                     storageRoot: prototypeResult.tempStorageRoot,
                     isDraftResume: false,
                     initialLocationMode: .exterior,
-                    initialMetadataContext: nil
+                    initialMetadataContext: nil,
+                    initialProfileLocked: appState.fastRuntimeCaptureProfileShouldLock(propertyID: selectedPropertyID)
                 )
                 isOpeningPrototypePreview = false
             }
@@ -13726,6 +13732,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
     let isDraftResume: Bool
     let initialLocationMode: CameraChromeLocationMode?
     let initialMetadataContext: AppState.FastRuntimeCaptureMetadataContext?
+    let initialProfileLocked: Bool
     let isDebugMode: Bool
     let onDismiss: (AppState.FastRuntimePrototypeCloseResult) -> Void
 
@@ -13737,6 +13744,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
     @State private var isSavingFastCapture: Bool = false
     @State private var captureFlashVisible: Bool = false
     @State private var capturedCount: Int = 0
+    @State private var fastLaneCaptureProfileHistoryLocked: Bool = false
     @State private var captureErrorMessage: String?
     @State private var lastCapture: FastRuntimePreviewCaptureTiming?
     @State private var fastStorageRoot: URL?
@@ -13907,6 +13915,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             if capturedCount < initialCapturedCount {
                 capturedCount = initialCapturedCount
             }
+            fastLaneCaptureProfileHistoryLocked = initialProfileLocked || initialCapturedCount > 0
             primeFastLaneSideControlSnapshot()
             reloadFastLaneGalleryAssets()
             shutterHaptic.prepare()
@@ -14309,7 +14318,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
     }
 
     private var isFastLaneCaptureProfileLocked: Bool {
-        capturedCount > 0
+        fastLaneCaptureProfileHistoryLocked || capturedCount > 0
     }
 
     private var fastLaneCaptureProfileAccentColor: Color {
@@ -15141,6 +15150,19 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                             saveResult: saveResult
                         )
                         if saveResult.success {
+                            if !fastLaneCaptureProfileHistoryLocked {
+                                let lockedProfile = fastLaneCaptureProfile
+                                _ = appState.setPropertyCaptureProfileDefault(
+                                    propertyID: context.propertyID,
+                                    profile: lockedProfile
+                                )
+                                _ = appState.setSessionCaptureProfileSnapshot(
+                                    propertyID: context.propertyID,
+                                    sessionID: context.sessionID,
+                                    profile: lockedProfile
+                                )
+                                fastLaneCaptureProfileHistoryLocked = true
+                            }
                             capturedCount += 1
                             fastStorageRoot = saveResult.storageRoot ?? fastStorageRoot
                             let nextBaseContext: AppState.FastRuntimeCaptureMetadataContext
@@ -15357,7 +15379,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
         reserveGuidedAngles(from: fastLaneSideControlPayload.guidedShots)
         reserveIssueAngles(from: fastLaneSideControlPayload.activeObservations)
         reserveIssueAngles(from: fastLaneSideControlPayload.resolutionRequiredObservations)
-        reserveAppStateAngles(appState.fastRuntimeIssueAngleReservations(propertyID: context.propertyID))
+        reserveAppStateAngles(appState.fastRuntimePropertyAngleReservations(propertyID: context.propertyID))
         let latestPayload = appState.fastRuntimePreviewSideControlPayload(
             propertyID: context.propertyID,
             sessionType: context.sessionType
@@ -17128,8 +17150,8 @@ private struct FastLaneSessionActionsSheet: View {
                             .foregroundColor(.white)
 
                         VStack(spacing: 8) {
+                            summaryRow(title: "Resolution Required Remaining", value: summary.resolutionRequiredRemainingCount)
                             summaryRow(title: "Flagged Remaining", value: summary.flaggedRemainingCount)
-                            summaryRow(title: "Resolution Required", value: summary.resolutionRequiredRemainingCount)
                             if !summary.isPunchlistVisit {
                                 summaryRow(title: "Guided Remaining", value: summary.guidedRemainingCount)
                             }
@@ -21279,6 +21301,7 @@ private struct DebugToolsView: View {
                     isDraftResume: request.isDraftResume,
                     initialLocationMode: request.initialLocationMode,
                     initialMetadataContext: request.initialMetadataContext,
+                    initialProfileLocked: request.initialProfileLocked,
                     isDebugMode: true,
                 onDismiss: { closeResult in
                     fastLaneLauncherCloseResult = closeResult
@@ -21576,7 +21599,8 @@ private struct DebugToolsView: View {
                     storageRoot: result.tempStorageRoot,
                     isDraftResume: false,
                     initialLocationMode: .exterior,
-                    initialMetadataContext: nil
+                    initialMetadataContext: nil,
+                    initialProfileLocked: appState.fastRuntimeCaptureProfileShouldLock(propertyID: propertyID)
                 )
             }
         }
