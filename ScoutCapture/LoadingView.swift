@@ -6,6 +6,7 @@ struct LoadingView: View {
     var showsProgressBar: Bool = true
     var showsLogo: Bool = true
     var message: String? = nil
+    var detailMessage: String? = nil
     var showsSpinner: Bool = false
 
     private var backgroundColor: Color {
@@ -40,27 +41,6 @@ struct LoadingView: View {
                         .frame(width: logoWidth)
                 }
 
-                if message != nil || showsSpinner {
-                    VStack(spacing: 10) {
-                        if showsSpinner {
-                            ProgressView()
-                                .progressViewStyle(.circular)
-                                .tint(fillColor)
-                                .scaleEffect(1.35)
-                                .padding(.bottom, 2)
-                        }
-
-                        if let message {
-                            Text(message)
-                                .font(.system(size: 16, weight: .bold))
-                                .foregroundColor(fillColor.opacity(0.90))
-                        }
-                    }
-                    .offset(y: progressOffsetY + (showsProgressBar ? 34 : 10))
-                    .accessibilityElement(children: .combine)
-                    .accessibilityLabel(message ?? "Loading")
-                }
-
                 ZStack(alignment: .leading) {
                     Capsule()
                         .fill(trackColor)
@@ -77,6 +57,36 @@ struct LoadingView: View {
                 .opacity(showsProgressBar ? 1 : 0)
                 .accessibilityLabel("Loading progress")
                 .accessibilityValue("In progress")
+
+                if message != nil || detailMessage != nil || showsSpinner {
+                    VStack(spacing: 8) {
+                        if let message {
+                            Text(message)
+                                .font(.system(size: 16, weight: .bold))
+                                .foregroundColor(fillColor.opacity(0.90))
+                        }
+
+                        if let detailMessage {
+                            Text(detailMessage)
+                                .font(.system(size: 13, weight: .medium))
+                                .multilineTextAlignment(.center)
+                                .foregroundColor(fillColor.opacity(0.66))
+                                .lineLimit(2)
+                                .frame(maxWidth: min(proxy.size.width * 0.72, 360))
+                        }
+
+                        if showsSpinner {
+                            ProgressView()
+                                .progressViewStyle(.circular)
+                                .tint(fillColor)
+                                .scaleEffect(1.20)
+                                .padding(.top, 6)
+                        }
+                    }
+                    .offset(y: progressOffsetY + (showsProgressBar ? 56 : 24))
+                    .accessibilityElement(children: .combine)
+                    .accessibilityLabel(message ?? "Loading")
+                }
             }
         }
         .ignoresSafeArea()

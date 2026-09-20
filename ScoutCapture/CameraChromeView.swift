@@ -735,26 +735,9 @@ struct CameraChromeView<PreviewContent: View, OverlayContent: View>: View {
     }
 
     private func hdQuickButton(size: CGFloat) -> some View {
-        Button(action: actions.onHDTapped) {
-            ZStack {
-                Circle()
-                    .fill(display.isHDEnabled ? Color.blue : Color.white.opacity(0.14))
-                    .frame(width: size, height: size)
-
-                Circle()
-                    .stroke(display.isHDEnabled ? Color.white.opacity(0.70) : Color.clear, lineWidth: 2)
-                    .frame(width: size + 6, height: size + 6)
-                    .opacity(display.isHDEnabled ? 1.0 : 0.0)
-
-                Text("HD")
-                    .font(.system(size: proportionalCircleTextSize(for: size), weight: .medium))
-                    .foregroundColor(display.isHDEnabled ? .white : .white.opacity(0.92))
-            }
+        Color.clear
             .frame(width: size, height: size)
-            .contentShape(Circle())
-        }
-        .buttonStyle(.plain)
-        .frame(width: size, height: size)
+            .accessibilityHidden(true)
     }
 
     private func detailNoteQuickButton(size: CGFloat) -> some View {

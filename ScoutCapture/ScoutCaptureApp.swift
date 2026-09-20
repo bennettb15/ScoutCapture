@@ -510,6 +510,7 @@ private struct AppRootView: View {
     @State private var didStartWarmup: Bool = false
     @State private var launchProgress: Double = 0
     @State private var showsProgressBar: Bool = false
+    @State private var startupLoadingDetail: String? = nil
     @State private var propertyListReadinessTimedOut: Bool = false
     @State private var homePropertyListReady: Bool = false
     @State private var didStartHomePropertyListReadiness: Bool = false
@@ -545,7 +546,8 @@ private struct AppRootView: View {
                     showsProgressBar: showsProgressBar,
                     showsLogo: true,
                     message: "Loading properties...",
-                    showsSpinner: false
+                    detailMessage: startupLoadingDetail,
+                    showsSpinner: true
                 )
             } else if appState.requiresAuthentication && !appState.isAuthenticationReady {
                 LoadingView(
@@ -566,8 +568,9 @@ private struct AppRootView: View {
                     progress: launchProgress,
                     showsProgressBar: true,
                     showsLogo: true,
-                    message: "Loading properties...",
-                    showsSpinner: false
+                    message: "Preparing property list...",
+                    detailMessage: startupLoadingDetail,
+                    showsSpinner: true
                 )
             } else {
                 SessionHubView(initialPropertyListTimedOut: shouldShowInitialPropertyListUpdatingBanner)
@@ -610,6 +613,7 @@ private struct AppRootView: View {
             withAnimation(.easeOut(duration: 0.16)) {
                 showsProgressBar = true
             }
+            scheduleStartupLoadingFeedback()
 
             advanceLaunchProgress(to: 0.22)
             async let minDelay: Void = {
@@ -648,12 +652,25 @@ private struct AppRootView: View {
 
             _ = await minDelay
             advanceLaunchProgress(to: 0.96)
+            startupLoadingDetail = "Finalizing local row status before showing home."
             AddPropertyWarmup.prewarm()
             OptionalDetailNoteWarmup.prewarm()
             try? await Task.sleep(nanoseconds: 60_000_000)
             minimumLaunchDelayMet = true
             startHomePropertyListReadinessIfNeeded()
             onInitialLaunchCompleted()
+        }
+    }
+
+    private func scheduleStartupLoadingFeedback() {
+        startupLoadingDetail = "Preparing local property data."
+        DispatchQueue.main.asyncAfter(deadline: .now() + 4.0) {
+            guard !homePropertyListReady else { return }
+            startupLoadingDetail = "First launch can take longer while Scout prepares local data."
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 10.0) {
+            guard !homePropertyListReady else { return }
+            startupLoadingDetail = "Still working. This keeps the home list smooth once it opens."
         }
     }
 
@@ -13900,10 +13917,12 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             loadFastLaneMetadataOptionsIfNeeded()
             warmFastLaneMetadataListsIfNeeded()
             if !didApplyInitialLocationMode {
-                let initialContext = AppState.normalizedFastRuntimeMetadataContext(
-                    initialMetadataContext,
-                    fallbackLocationMode: initialLocationMode?.rawValue,
-                    fallbackPosition: 1
+                let initialContext = fastLaneFreeMetadataContextIfNeeded(
+                    AppState.normalizedFastRuntimeMetadataContext(
+                        initialMetadataContext,
+                        fallbackLocationMode: initialLocationMode?.rawValue,
+                        fallbackPosition: 1
+                    )
                 )
                 fastLaneCaptureProfileState =
                     CaptureProfile(storedValue: initialContext.captureProfile) ??
@@ -16183,19 +16202,38 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
     private func clearFastLaneArmedCapture() {
         fastLaneCaptureIntent = .free
         clearFastLaneArmedReferenceState()
-        let clearedContext = AppState.FastRuntimeCaptureMetadataContext(
-            captureProfile: fastLaneCaptureProfile.rawValue,
-            locationMode: fastMetadataContext.locationMode,
-            building: fastMetadataContext.building,
-            elevation: fastMetadataContext.elevation,
-            detailType: fastMetadataContext.detailType,
-            trade: fastMetadataContext.trade,
-            detailNote: nil,
-            priority: nil,
-            angleIndex: max(1, fastMetadataContext.angleIndex)
-        )
+        let clearedContext = fastLaneFreeMetadataContext(from: fastMetadataContext)
         fastMetadataContext = clearedContext.withAngleIndex(
             fastLaneAngleIndexForNextCapture(clearedContext)
+        )
+    }
+
+    private func fastLaneFreeMetadataContextIfNeeded(
+        _ context: AppState.FastRuntimeCaptureMetadataContext
+    ) -> AppState.FastRuntimeCaptureMetadataContext {
+        guard context.captureIntentSource != nil ||
+            context.issueID != nil ||
+            context.issueStatus != nil ||
+            context.isFlagged == true else {
+            return context
+        }
+        let freeContext = fastLaneFreeMetadataContext(from: context)
+        return freeContext.withAngleIndex(fastLaneAngleIndexForNextCapture(freeContext))
+    }
+
+    private func fastLaneFreeMetadataContext(
+        from context: AppState.FastRuntimeCaptureMetadataContext
+    ) -> AppState.FastRuntimeCaptureMetadataContext {
+        AppState.FastRuntimeCaptureMetadataContext(
+            captureProfile: context.captureProfile ?? fastLaneCaptureProfile.rawValue,
+            locationMode: context.locationMode,
+            building: context.building,
+            elevation: context.elevation,
+            detailType: context.detailType,
+            trade: context.trade,
+            detailNote: nil,
+            priority: nil,
+            angleIndex: max(1, context.angleIndex)
         )
     }
 
@@ -16696,7 +16734,9 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                 context: context,
                 tempStorageRoot: fastStorageRoot ?? prototypeResult.tempStorageRoot,
                 capturedPhotoCount: capturedCount,
-                lastMetadataContext: fastMetadataContext
+                lastMetadataContext: isFastLaneCaptureIntentArmed
+                    ? fastLaneFreeMetadataContext(from: fastMetadataContext)
+                    : fastLaneFreeMetadataContextIfNeeded(fastMetadataContext)
             )
             await MainActor.run {
                 releaseFinishedAt = Date()
