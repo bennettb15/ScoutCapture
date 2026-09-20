@@ -13830,6 +13830,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
     @StateObject private var fastLaneGalleryImageCache = AssetImageCache()
     @State private var showFastLaneGallery: Bool = false
     @State private var fastLaneGalleryAssets: [ReportAsset] = []
+    @State private var fastLaneGalleryMetadataByAssetID: [String: FastLaneGalleryMetadata] = [:]
     @State private var fastLaneGalleryThumbnail: UIImage?
     @State private var fastLaneGalleryThumbnailAssetID: String = ""
     @State private var fastLaneGalleryRefreshToken = UUID()
@@ -14043,6 +14044,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             FastLanePhotoLibraryFullscreen(
                 title: propertyName,
                 assets: fastLaneGalleryAssets,
+                metadataByAssetID: fastLaneGalleryMetadataByAssetID,
                 cache: fastLaneGalleryImageCache,
                 thumbnailRefreshToken: fastLaneGalleryRefreshToken
             )
@@ -14069,6 +14071,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                 mode: .activeIssues,
                 observations: fastLaneSideControlPayload.activeObservations,
                 thumbnailPathByID: fastLaneIssueThumbnailPathByID,
+                handledObservationIDs: fastLaneHandledIssueIDsInCurrentSession(),
                 imageCache: fastLaneGalleryImageCache,
                 isLoading: isLoadingFastLaneSideControlSheet,
                 onSelect: { observation in
@@ -14086,6 +14089,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                 mode: .resolutionRequired,
                 observations: fastLaneSideControlPayload.resolutionRequiredObservations,
                 thumbnailPathByID: fastLaneIssueThumbnailPathByID,
+                handledObservationIDs: fastLaneHandledIssueIDsInCurrentSession(),
                 imageCache: fastLaneGalleryImageCache,
                 isLoading: isLoadingFastLaneSideControlSheet,
                 onSelect: { observation in
@@ -15169,6 +15173,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                             saveResult: saveResult
                         )
                         if saveResult.success {
+                            let completedIntent = capturePreparation.intent
                             if !fastLaneCaptureProfileHistoryLocked {
                                 let lockedProfile = fastLaneCaptureProfile
                                 _ = appState.setPropertyCaptureProfileDefault(
@@ -15219,6 +15224,9 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                             )
                             reloadFastLaneGalleryAssets()
                             refreshFastLaneSideControlCounts(force: true)
+                            if let feedback = fastLanePostCaptureFeedback(for: completedIntent) {
+                                showFastLaneSideControlToast(feedback)
+                            }
                         } else {
                             captureErrorMessage = saveResult.errorMessage ?? "Capture save failed."
                         }
@@ -15445,6 +15453,19 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
         let existingResolutionIDs = Set(payload.resolutionRequiredObservations.map(\.id))
         let existingActiveIDs = Set(payload.activeObservations.map(\.id))
         let localIssues = localShots.compactMap(fastLaneObservationRow)
+        let localIssuesByID = Dictionary(uniqueKeysWithValues: localIssues.map { ($0.id, $0) })
+        let scopedResolution = payload.resolutionRequiredObservations.map { observation in
+            fastLaneObservationScopedToCurrentSession(
+                observation,
+                localObservation: localIssuesByID[observation.id]
+            )
+        }
+        let scopedActive = payload.activeObservations.map { observation in
+            fastLaneObservationScopedToCurrentSession(
+                observation,
+                localObservation: localIssuesByID[observation.id]
+            )
+        }
         let localResolution = localIssues.filter {
             $0.status == .resolutionRequired && !existingResolutionIDs.contains($0.id)
         }
@@ -15452,8 +15473,8 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             $0.status != .resolutionRequired && !existingActiveIDs.contains($0.id)
         }
         return AppState.FastRuntimePreviewSideControlPayload(
-            resolutionRequiredObservations: payload.resolutionRequiredObservations + localResolution,
-            activeObservations: payload.activeObservations + localActive,
+            resolutionRequiredObservations: scopedResolution + localResolution,
+            activeObservations: scopedActive + localActive,
             guidedShots: guided + currentSessionGuidedRows,
             retiredGuidedShots: retired
         )
@@ -15525,6 +15546,43 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                     note: metadata.detailNote
                 )
             ]
+        )
+    }
+
+    private func fastLaneObservationScopedToCurrentSession(
+        _ observation: Observation,
+        localObservation: Observation?
+    ) -> Observation {
+        guard let localObservation else { return observation }
+        var scoped = observation
+        scoped.linkedShotID = localObservation.linkedShotID ?? scoped.linkedShotID
+        scoped.updatedInSessionID = localObservation.updatedInSessionID ?? scoped.updatedInSessionID
+        scoped.resolvedInSessionID = localObservation.resolvedInSessionID ?? scoped.resolvedInSessionID
+        scoped.resolutionPhotoRef = localObservation.resolutionPhotoRef ?? scoped.resolutionPhotoRef
+        scoped.resolutionStatement = localObservation.resolutionStatement ?? scoped.resolutionStatement
+        scoped.currentReason = localObservation.currentReason ?? scoped.currentReason
+        scoped.note = localObservation.note ?? scoped.note
+        scoped.priority = localObservation.priority ?? scoped.priority
+        scoped.trade = localObservation.trade ?? scoped.trade
+        scoped.updatedAt = max(scoped.updatedAt, localObservation.updatedAt)
+
+        let existingShotIDs = Set(scoped.shots.map(\.id))
+        for shot in localObservation.shots where !existingShotIDs.contains(shot.id) {
+            scoped.shots.append(shot)
+        }
+        let existingGuidedIDs = Set(scoped.guidedShots.map(\.id))
+        for guided in localObservation.guidedShots where !existingGuidedIDs.contains(guided.id) {
+            scoped.guidedShots.append(guided)
+        }
+        return scoped
+    }
+
+    private func fastLaneHandledIssueIDsInCurrentSession() -> Set<UUID> {
+        Set(
+            fastLaneLocalShotRecords().compactMap { shot -> UUID? in
+                guard shot.metadataContext?.isFlagged == true else { return nil }
+                return shot.metadataContext?.issueID
+            }
         )
     }
 
@@ -16247,6 +16305,17 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
         }
     }
 
+    private func fastLanePostCaptureFeedback(for intent: FastLaneCaptureIntent) -> String? {
+        switch intent {
+        case .flagged:
+            return "Flagged photo captured"
+        case .resolution:
+            return "Resolution photo captured"
+        default:
+            return nil
+        }
+    }
+
     private func refreshFastLaneCoreChecklistRows() {
         let root = fastStorageRoot ?? storageRoot ?? prototypeResult.tempStorageRoot
         guard let root else {
@@ -16295,6 +16364,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
     private func reloadFastLaneGalleryAssets() {
         guard let root = fastStorageRoot ?? storageRoot ?? prototypeResult.tempStorageRoot else {
             fastLaneGalleryAssets = []
+            fastLaneGalleryMetadataByAssetID = [:]
             fastLaneGalleryThumbnail = nil
             fastLaneGalleryThumbnailAssetID = ""
             fastLaneGalleryRefreshToken = UUID()
@@ -16305,25 +16375,30 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             .appendingPathComponent("Metadata", isDirectory: true)
             .appendingPathComponent("fast-lane-shots.json", isDirectory: false)
         DispatchQueue.global(qos: .utility).async {
-            let assets: [ReportAsset] = {
-                guard let data = try? Data(contentsOf: metadataURL) else { return [] }
+            let gallery: (assets: [ReportAsset], metadata: [String: FastLaneGalleryMetadata]) = {
+                guard let data = try? Data(contentsOf: metadataURL) else { return ([], [:]) }
                 let decoder = JSONDecoder()
                 decoder.dateDecodingStrategy = .iso8601
                 guard let shots = try? decoder.decode([AppState.FastRuntimePrototypeShotRecord].self, from: data) else {
-                    return []
+                    return ([], [:])
                 }
 
-                return shots
+                var metadataByID: [String: FastLaneGalleryMetadata] = [:]
+                let assets = shots
                     .filter { $0.sessionID == context.sessionID && $0.propertyID == context.propertyID }
                     .sorted {
                         if $0.capturedAt != $1.capturedAt { return $0.capturedAt < $1.capturedAt }
                         return $0.id.uuidString < $1.id.uuidString
                     }
-                    .compactMap { shot in
+                    .compactMap { shot -> ReportAsset? in
                         let directURL = URL(fileURLWithPath: shot.localFilePath, isDirectory: false)
                         let relativeURL = root.appendingPathComponent(shot.originalRelativePath, isDirectory: false)
                         let url = FileManager.default.fileExists(atPath: directURL.path) ? directURL : relativeURL
                         guard FileManager.default.fileExists(atPath: url.path) else { return nil }
+                        metadataByID[url.path] = FastLaneGalleryMetadata(
+                            propertyName: propertyName,
+                            metadataContext: shot.metadataContext
+                        )
                         return ReportAsset(
                             localIdentifier: url.path,
                             fileURL: url,
@@ -16333,12 +16408,14 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                             originalFilename: url.lastPathComponent
                         )
                     }
+                return (assets, metadataByID)
             }()
 
             DispatchQueue.main.async {
-                fastLaneGalleryAssets = assets
+                fastLaneGalleryAssets = gallery.assets
+                fastLaneGalleryMetadataByAssetID = gallery.metadata
                 fastLaneGalleryRefreshToken = UUID()
-                refreshFastLaneGalleryThumbnail(from: assets)
+                refreshFastLaneGalleryThumbnail(from: gallery.assets)
             }
         }
     }
@@ -17375,6 +17452,7 @@ private struct FastLaneIssueListSheet: View {
     let mode: Mode
     let observations: [Observation]
     let thumbnailPathByID: [UUID: String]
+    let handledObservationIDs: Set<UUID>
     @ObservedObject var imageCache: AssetImageCache
     let isLoading: Bool
     let onSelect: (Observation) -> Void
@@ -17420,8 +17498,10 @@ private struct FastLaneIssueListSheet: View {
                                 observation: observation,
                                 mode: mode,
                                 thumbnailPath: thumbnailPathByID[observation.id],
+                                isHandledInCurrentSession: handledObservationIDs.contains(observation.id),
                                 imageCache: imageCache,
                                 onTap: {
+                                    guard !handledObservationIDs.contains(observation.id) else { return }
                                     onSelect(observation)
                                 },
                                 onOpenImage: {
@@ -17634,6 +17714,7 @@ private struct FastLaneIssueListRow: View {
     let observation: Observation
     let mode: FastLaneIssueListSheet.Mode
     let thumbnailPath: String?
+    let isHandledInCurrentSession: Bool
     @ObservedObject var imageCache: AssetImageCache
     let onTap: () -> Void
     let onOpenImage: () -> Void
@@ -17644,7 +17725,9 @@ private struct FastLaneIssueListRow: View {
             elevation: observation.targetElevation,
             detailType: observation.detailType
         )
-        return composed.isEmpty ? "Flagged Issue" : composed
+        let base = composed.isEmpty ? "Flagged Issue" : composed
+        guard let angle = fastLaneObservationDisplayAngleIndex(observation) else { return base }
+        return "\(base) - Angle \(max(1, angle))"
     }
 
     private var reasonText: String {
@@ -17670,19 +17753,25 @@ private struct FastLaneIssueListRow: View {
     }
 
     private var statusLabel: String {
+        if isHandledInCurrentSession {
+            return "Captured"
+        }
         switch observation.status {
         case .resolutionRequired:
-            return "Resolution Required"
+            return mode == .resolutionRequired ? "" : "Resolution Required"
         case .pendingReview:
             return "Pending Review"
         case .resolved:
             return "Resolved"
         case .active:
-            return "Active"
+            return ""
         }
     }
 
     private var statusColor: Color {
+        if isHandledInCurrentSession {
+            return .green
+        }
         switch observation.status {
         case .resolutionRequired, .resolved:
             return .green
@@ -17712,6 +17801,15 @@ private struct FastLaneIssueListRow: View {
                 )
             }
             .buttonStyle(.borderless)
+            .overlay(alignment: .topTrailing) {
+                if isHandledInCurrentSession {
+                    Image(systemName: "checkmark.circle.fill")
+                        .font(.system(size: 16, weight: .semibold))
+                        .foregroundColor(.white)
+                        .shadow(color: .black.opacity(0.45), radius: 1.5, x: 0, y: 1)
+                        .padding(4)
+                }
+            }
 
             VStack(alignment: .leading, spacing: 4) {
                 Text(contextLabel)
@@ -17719,9 +17817,11 @@ private struct FastLaneIssueListRow: View {
                     .foregroundColor(observation.status == .resolved ? .secondary : .primary)
                     .lineLimit(1)
 
-                Text(statusLabel)
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundColor(statusColor)
+                if !statusLabel.isEmpty {
+                    Text(statusLabel)
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundColor(statusColor)
+                }
 
                 if !priorityText.isEmpty || !tradeText.isEmpty {
                     HStack(spacing: 8) {
@@ -17983,7 +18083,8 @@ private struct FastLaneGuidedChecklistRow: View {
             elevation: guidedShot.targetElevation,
             detailType: guidedShot.detailType
         )
-        return composed.isEmpty ? fallbackTitleLabel : composed
+        let base = composed.isEmpty ? fallbackTitleLabel : composed
+        return "\(base) - Angle \(max(1, guidedShot.angleIndex ?? 1))"
     }
 
     private var statusLabel: String {
@@ -18049,10 +18150,6 @@ private struct FastLaneGuidedChecklistRow: View {
                     .font(.system(size: 15, weight: .medium))
                     .foregroundColor(.primary)
                     .lineLimit(1)
-
-                Text("Angle \(max(1, guidedShot.angleIndex ?? 1))")
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundColor(.white.opacity(0.86))
 
                 Text(statusLabel)
                     .font(.system(size: 12, weight: .medium))
@@ -18223,9 +18320,42 @@ private struct FastLaneCoreChecklistSheet: View {
     }
 }
 
+private struct FastLaneGalleryMetadata: Equatable {
+    let propertyName: String
+    let shotLabel: String
+    let flaggedNote: String
+
+    init(
+        propertyName: String,
+        metadataContext: AppState.FastRuntimeCaptureMetadataContext?
+    ) {
+        self.propertyName = propertyName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let metadataContext else {
+            self.shotLabel = "Shot"
+            self.flaggedNote = ""
+            return
+        }
+
+        var parts: [String] = []
+        let building = metadataContext.building.trimmingCharacters(in: .whitespacesAndNewlines)
+        let elevation = (CanonicalElevation.normalize(metadataContext.elevation) ?? metadataContext.elevation)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let detail = metadataContext.detailType.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !building.isEmpty { parts.append(building) }
+        if !elevation.isEmpty { parts.append(elevation) }
+        if !detail.isEmpty { parts.append(detail) }
+        parts.append("Angle \(max(1, metadataContext.angleIndex))")
+        self.shotLabel = parts.isEmpty ? "Shot" : parts.joined(separator: " | ")
+        self.flaggedNote = metadataContext.isFlagged == true
+            ? (metadataContext.detailNote ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            : ""
+    }
+}
+
 private struct FastLanePhotoLibraryFullscreen: View {
     let title: String
     let assets: [ReportAsset]
+    let metadataByAssetID: [String: FastLaneGalleryMetadata]
     @ObservedObject var cache: AssetImageCache
     let thumbnailRefreshToken: UUID
 
@@ -18324,6 +18454,7 @@ private struct FastLanePhotoLibraryFullscreen: View {
                 title: title,
                 assets: assets,
                 startIndex: state.startIndex,
+                metadataByAssetID: metadataByAssetID,
                 cache: cache,
                 viewerToken: state.startIndex
             )
@@ -18468,6 +18599,7 @@ private struct FastLanePhotoViewer: View {
     let title: String
     let assets: [ReportAsset]
     let startIndex: Int
+    let metadataByAssetID: [String: FastLaneGalleryMetadata]
     @ObservedObject var cache: AssetImageCache
     let viewerToken: Int
 
@@ -18481,12 +18613,14 @@ private struct FastLanePhotoViewer: View {
         title: String,
         assets: [ReportAsset],
         startIndex: Int,
+        metadataByAssetID: [String: FastLaneGalleryMetadata] = [:],
         cache: AssetImageCache,
         viewerToken: Int
     ) {
         self.title = title
         self.assets = assets
         self.startIndex = startIndex
+        self.metadataByAssetID = metadataByAssetID
         self.cache = cache
         self.viewerToken = viewerToken
         _index = State(initialValue: min(max(0, startIndex), max(0, assets.count - 1)))
@@ -18584,6 +18718,13 @@ private struct FastLanePhotoViewer: View {
 
     @ViewBuilder
     private func headerOverlay() -> some View {
+        let safeIndex = min(max(0, index), max(0, assets.count - 1))
+        let asset = assets.isEmpty ? nil : assets[safeIndex]
+        let metadata = asset.flatMap { metadataByAssetID[$0.localIdentifier] }
+        let propertyName = metadata?.propertyName.isEmpty == false ? (metadata?.propertyName ?? title) : title
+        let shotLabel = metadata?.shotLabel ?? "Shot"
+        let flaggedNote = metadata?.flaggedNote ?? ""
+
         VStack(spacing: 0) {
             ZStack(alignment: .top) {
                 LinearGradient(
@@ -18618,13 +18759,24 @@ private struct FastLanePhotoViewer: View {
                     .buttonStyle(.plain)
 
                     VStack(alignment: .leading, spacing: 2) {
-                        Text(title)
-                            .font(.system(size: 24, weight: .semibold))
+                        Text(propertyName)
+                            .font(.system(size: 19, weight: .medium))
                             .foregroundColor(.white)
                             .lineLimit(1)
-                            .minimumScaleFactor(0.6)
+                            .minimumScaleFactor(0.75)
+                        Text(shotLabel)
+                            .font(.system(size: 15, weight: .medium))
+                            .foregroundColor(.white.opacity(0.92))
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.75)
+                        Text(flaggedNote)
+                            .font(.system(size: 15, weight: .medium))
+                            .foregroundColor(.red)
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.75)
+                            .frame(height: 18, alignment: .leading)
                         Text("Photo \(min(index + 1, max(assets.count, 1))) of \(max(assets.count, 1))")
-                            .font(.system(size: 13, weight: .medium))
+                            .font(.system(size: 12, weight: .regular))
                             .foregroundColor(.white.opacity(0.78))
                     }
 
@@ -19966,6 +20118,13 @@ private func fastLaneConciseContextLabel(building: String?, elevation: String?, 
     ]
     .compactMap { $0 }
     .joined(separator: " ")
+}
+
+private func fastLaneObservationDisplayAngleIndex(_ observation: Observation) -> Int? {
+    observation.guidedShots
+        .compactMap { $0.angleIndex.map { max(1, $0) } }
+        .sorted()
+        .first
 }
 
 private func fastLaneFormatPanelTimestamp(_ date: Date) -> String {

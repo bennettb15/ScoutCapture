@@ -45640,6 +45640,10 @@ final class AppState: ObservableObject {
         existingShots: [FastRuntimePrototypeShotRecord]
     ) -> FastRuntimeCaptureMetadataContext {
         let normalized = normalizedFastRuntimeMetadataContext(value)
+        if let source = normalized.captureIntentSource?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
+           source != "free" {
+            return normalized
+        }
         let maxExistingAngle = existingShots.compactMap { shot -> Int? in
             let shotContext = normalizedFastRuntimeMetadataContext(
                 shot.metadataContext,
