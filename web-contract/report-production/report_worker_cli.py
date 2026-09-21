@@ -37,6 +37,8 @@ REPORT_CONTRACT_VERSION = "phase1-report-input-1"
 REPORT_READY_NOTIFICATION_TYPE = "report_package_ready"
 REPORT_READY_NOTIFICATION_ROLES = ("owner", "manager", "field", "viewer")
 REPORT_READY_NOTIFICATION_TABLE = "report_package_email_notifications"
+REPORT_EMAIL_ORG_SETTINGS_TABLE = "report_email_org_settings"
+REPORT_EMAIL_USER_PREFERENCES_TABLE = "report_email_user_preferences"
 REPORT_READY_RESEND_USER_AGENT = "ScoutCaptureReportWorker/1.0 (+https://scoutclear.com)"
 REPORT_READY_EMAIL_LOGO_URL = "https://www.scoutclear.com/scout-logo-email.png"
 REPORT_DELIVERED_STATUS_REASON = "report_package_ready_email_sent"
@@ -814,6 +816,10 @@ def eligible_report_ready_recipients(
 ) -> list[dict[str, Any]]:
     org_id = str(package["org_id"])
     property_id = str(package["property_id"])
+    if not report_email_notifications_enabled():
+        return []
+    if not org_report_email_enabled(client, org_id):
+        return []
     memberships = client.select(
         "org_memberships",
         {
@@ -829,6 +835,7 @@ def eligible_report_ready_recipients(
     user_ids = sorted({str(row.get("user_id") or "") for row in memberships if row.get("user_id")})
     if not user_ids:
         return []
+    enabled_user_ids = report_email_enabled_user_ids(client, org_id, user_ids)
 
     profiles = client.select(
         "users_profile",
@@ -863,12 +870,15 @@ def eligible_report_ready_recipients(
         )
         property_grants = {str(row.get("user_id")) for row in grants if row.get("user_id")}
 
+    allowlist = report_email_allowlist()
     recipients = []
     seen_emails: set[str] = set()
     for membership in memberships:
         user_id = str(membership.get("user_id") or "")
         role = str(membership.get("role") or "")
         access_scope = str(membership.get("access_scope") or "org")
+        if user_id not in enabled_user_ids:
+            continue
         if role != "owner" and access_scope == "property" and user_id not in property_grants:
             continue
         profile = profiles_by_id.get(user_id)
@@ -876,6 +886,8 @@ def eligible_report_ready_recipients(
             continue
         email = normalize_email(profile.get("email"))
         if not email or email in seen_emails:
+            continue
+        if allowlist is not None and email not in allowlist:
             continue
         seen_emails.add(email)
         recipients.append(
@@ -888,6 +900,69 @@ def eligible_report_ready_recipients(
             }
         )
     return recipients
+
+
+def report_email_notifications_enabled() -> bool:
+    value = os.environ.get("REPORT_EMAIL_NOTIFICATIONS_ENABLED", "").strip().lower()
+    return value not in {"0", "false", "no", "off", "disabled"}
+
+
+def report_email_allowlist() -> set[str] | None:
+    raw = os.environ.get("REPORT_EMAIL_ALLOWLIST", "").strip()
+    if not raw:
+        return None
+    emails = {
+        normalize_email(item)
+        for item in raw.replace(";", ",").split(",")
+    }
+    return {email for email in emails if email}
+
+
+def org_report_email_enabled(client: SupabaseServiceClient, org_id: str) -> bool:
+    try:
+        rows = client.select(
+            REPORT_EMAIL_ORG_SETTINGS_TABLE,
+            {
+                "select": "report_ready_enabled",
+                "org_id": f"eq.{org_id}",
+                "limit": "1",
+            },
+        )
+    except Exception:
+        return True
+    if not rows:
+        return True
+    return bool(rows[0].get("report_ready_enabled", True))
+
+
+def report_email_enabled_user_ids(
+    client: SupabaseServiceClient,
+    org_id: str,
+    user_ids: list[str],
+) -> set[str]:
+    enabled_user_ids = set(user_ids)
+    if not user_ids:
+        return enabled_user_ids
+    try:
+        rows = client.select(
+            REPORT_EMAIL_USER_PREFERENCES_TABLE,
+            {
+                "select": "user_id,report_ready_enabled",
+                "org_id": f"eq.{org_id}",
+                "user_id": f"in.({','.join(user_ids)})",
+            },
+        )
+    except Exception:
+        return enabled_user_ids
+    for row in rows:
+        user_id = str(row.get("user_id") or "")
+        if not user_id:
+            continue
+        if bool(row.get("report_ready_enabled", True)):
+            enabled_user_ids.add(user_id)
+        else:
+            enabled_user_ids.discard(user_id)
+    return enabled_user_ids
 
 
 class ResendEmailClient:

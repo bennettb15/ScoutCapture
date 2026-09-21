@@ -39,6 +39,8 @@ jobs:
       REPORT_EMAIL_FROM: ${{ secrets.REPORT_EMAIL_FROM }}
       REPORTS_PORTAL_BASE_URL: ${{ secrets.REPORTS_PORTAL_BASE_URL }}
       REPORT_EMAIL_REPLY_TO: ${{ secrets.REPORT_EMAIL_REPLY_TO }}
+      REPORT_EMAIL_NOTIFICATIONS_ENABLED: ${{ vars.REPORT_EMAIL_NOTIFICATIONS_ENABLED || 'true' }}
+      REPORT_EMAIL_ALLOWLIST: ${{ vars.REPORT_EMAIL_ALLOWLIST || '' }}
       REPORT_WORKER_SESSION_ID: ${{ inputs.session_id || '' }}
       REPORT_WORKER_SNAPSHOT_ID: ${{ inputs.snapshot_id || '' }}
       REPORT_WORKER_TRIGGER_SOURCE: ${{ inputs.trigger_source || github.event_name }}
@@ -88,5 +90,7 @@ jobs:
             -e REPORT_EMAIL_FROM \
             -e REPORTS_PORTAL_BASE_URL \
             -e REPORT_EMAIL_REPLY_TO \
+            -e REPORT_EMAIL_NOTIFICATIONS_ENABLED \
+            -e REPORT_EMAIL_ALLOWLIST \
             scoutcapture-report-worker:report-package \
               "${worker_args[@]}"

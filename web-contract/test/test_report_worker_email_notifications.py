@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import pathlib
 import tempfile
 import unittest
@@ -92,6 +93,8 @@ class FakeSupabaseClient:
             "report_packages": [],
             "report_package_files": [],
             worker.REPORT_READY_NOTIFICATION_TABLE: [],
+            worker.REPORT_EMAIL_ORG_SETTINGS_TABLE: [],
+            worker.REPORT_EMAIL_USER_PREFERENCES_TABLE: [],
         }
         self.uploads: list[dict[str, Any]] = []
 
@@ -136,6 +139,23 @@ class FakeSupabaseClient:
                 "org_id": org_id,
                 "property_id": property_id,
                 "deleted_at": "2026-01-01T00:00:00Z" if deleted else None,
+            }
+        )
+
+    def set_org_report_email_enabled(self, enabled: bool, org_id: str = ORG_ID) -> None:
+        self.tables[worker.REPORT_EMAIL_ORG_SETTINGS_TABLE].append(
+            {
+                "org_id": org_id,
+                "report_ready_enabled": enabled,
+            }
+        )
+
+    def set_user_report_email_enabled(self, user_id: str, enabled: bool, org_id: str = ORG_ID) -> None:
+        self.tables[worker.REPORT_EMAIL_USER_PREFERENCES_TABLE].append(
+            {
+                "org_id": org_id,
+                "user_id": user_id,
+                "report_ready_enabled": enabled,
             }
         )
 
@@ -591,6 +611,62 @@ class ReportWorkerEmailNotificationTests(unittest.TestCase):
         recipients = worker.eligible_report_ready_recipients(client, package())
 
         self.assertEqual(["owner@example.test", "field@example.test"], [row["email"] for row in recipients])
+
+    def test_global_email_disable_env_suppresses_recipients(self) -> None:
+        client = FakeSupabaseClient()
+        client.add_profile("owner-user", "owner@example.test")
+        client.add_membership("owner-user", "owner")
+        prior = os.environ.get("REPORT_EMAIL_NOTIFICATIONS_ENABLED")
+        os.environ["REPORT_EMAIL_NOTIFICATIONS_ENABLED"] = "false"
+        try:
+            recipients = worker.eligible_report_ready_recipients(client, package())
+        finally:
+            if prior is None:
+                os.environ.pop("REPORT_EMAIL_NOTIFICATIONS_ENABLED", None)
+            else:
+                os.environ["REPORT_EMAIL_NOTIFICATIONS_ENABLED"] = prior
+
+        self.assertEqual([], recipients)
+
+    def test_email_allowlist_limits_recipients(self) -> None:
+        client = FakeSupabaseClient()
+        client.add_profile("owner-user", "owner@example.test")
+        client.add_profile("field-user", "field@example.test")
+        client.add_membership("owner-user", "owner")
+        client.add_membership("field-user", "field")
+        prior = os.environ.get("REPORT_EMAIL_ALLOWLIST")
+        os.environ["REPORT_EMAIL_ALLOWLIST"] = "field@example.test"
+        try:
+            recipients = worker.eligible_report_ready_recipients(client, package())
+        finally:
+            if prior is None:
+                os.environ.pop("REPORT_EMAIL_ALLOWLIST", None)
+            else:
+                os.environ["REPORT_EMAIL_ALLOWLIST"] = prior
+
+        self.assertEqual(["field@example.test"], [row["email"] for row in recipients])
+
+    def test_org_email_disable_suppresses_recipients(self) -> None:
+        client = FakeSupabaseClient()
+        client.add_profile("owner-user", "owner@example.test")
+        client.add_membership("owner-user", "owner")
+        client.set_org_report_email_enabled(False)
+
+        recipients = worker.eligible_report_ready_recipients(client, package())
+
+        self.assertEqual([], recipients)
+
+    def test_user_email_preference_excludes_disabled_member(self) -> None:
+        client = FakeSupabaseClient()
+        client.add_profile("owner-user", "owner@example.test")
+        client.add_profile("field-user", "field@example.test")
+        client.add_membership("owner-user", "owner")
+        client.add_membership("field-user", "field")
+        client.set_user_report_email_enabled("field-user", False)
+
+        recipients = worker.eligible_report_ready_recipients(client, package())
+
+        self.assertEqual(["owner@example.test"], [row["email"] for row in recipients])
 
     def test_property_access_scope_is_respected(self) -> None:
         client = FakeSupabaseClient()
