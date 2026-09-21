@@ -27,6 +27,13 @@ FILLED_FLAG_PATH = (
     ("Z", ()),
 )
 
+# Scout resolved marker, drawn as a stroked check in the same 24x24 icon box.
+CHECK_MARK_PATH = (
+    ("M", (5.2, 12.6)),
+    ("L", (9.4, 16.8)),
+    ("L", (18.8, 7.2)),
+)
+
 
 def visual_state_rgb(state: str) -> tuple[int, int, int]:
     return RESOLVED_RGB if state == "resolved" else FLAGGED_RGB

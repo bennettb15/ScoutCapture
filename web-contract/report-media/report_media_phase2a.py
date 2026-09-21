@@ -44,6 +44,7 @@ except Exception:
     HEIF_DECODER = None
 
 from scout_report_visuals import (
+    CHECK_MARK_PATH,
     filled_flag_polygon,
     visual_state_rgb,
 )
@@ -314,11 +315,17 @@ def scale_size(width: int, height: int) -> tuple[int, int]:
 
 def draw_flag(draw: ImageDraw.ImageDraw, x: float, y: float, size: float, state: str) -> None:
     color = (*visual_state_rgb(state), 255)
-    points = filled_flag_polygon()
 
     def transform(point: tuple[float, float]) -> tuple[float, float]:
         return x + (point[0] / 24.0) * size, y + (point[1] / 24.0) * size
 
+    if state == "resolved":
+        points = [transform(point) for command, point in CHECK_MARK_PATH if command in {"M", "L"}]
+        width = max(3, round(size * 0.16))
+        draw.line(points, fill=color, width=width, joint="curve")
+        return
+
+    points = filled_flag_polygon()
     draw.polygon([transform(point) for point in points], fill=color)
 
 

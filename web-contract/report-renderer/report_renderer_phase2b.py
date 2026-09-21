@@ -39,6 +39,7 @@ from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfgen import canvas
 
 from scout_report_visuals import (
+    CHECK_MARK_PATH,
     FILLED_FLAG_BOUNDS,
     FILLED_FLAG_PATH,
     filled_flag_metadata,
@@ -1119,13 +1120,14 @@ def build_priority_plan(validation: dict[str, Any], lookup: MediaLookup, report_
             continue
         media = media_for(lookup, "current", shot.get("shot_id"))
         level = priority_level(shot.get("normalized_priority") or shot.get("priority"))
+        state = visual_state(shot)
         entry = {
             **shot,
             "kind": "photo",
             "media": media,
             "media_path": trim(media.get("temporary_prepared_path")) if media else None,
             "caption": caption_identity(shot),
-            "visual_state": "flagged",
+            "visual_state": state if state != "none" else "flagged",
             "captured_at_display": display_datetime(shot.get("captured_at_utc")) or "Unknown",
             "normalized_priority": level,
         }
@@ -1173,7 +1175,7 @@ def build_priority_plan(validation: dict[str, Any], lookup: MediaLookup, report_
                         "text": f"{entry['caption']} | {label} (Priority)",
                         "page_number": page_num,
                         "is_flagged": True,
-                        "visual_state": "flagged",
+                        "visual_state": entry.get("visual_state") or "flagged",
                     }
                 )
         index_pages = index_page_plans(lines, line_offset=28.0)
@@ -1317,11 +1319,7 @@ def build_comparison_plan(
         has_previous_photo = bool(previous_shot_id or previous_media)
         if previous_shot_id and not previous_shot and not previous_display_date:
             comparison_warnings.append("previous_comparison_metadata_unavailable_in_local_validation_lookup")
-        previous_visual_state = (
-            visual_state(previous_shot)
-            if previous_shot
-            else trim(previous_media.get("flag_resolved_state_applied")) if previous_media else "none"
-        )
+        previous_visual_state = "flagged" if has_previous_photo else "none"
         previous_stub = {
             "session_id": previous_session_id,
             "shot_id": previous_shot_id,
@@ -1870,6 +1868,22 @@ def draw_state_marker(c: canvas.Canvas, x: float, y: float, size: float, state: 
         return x + (point[0] / 24.0) * size, y + ((24.0 - point[1]) / 24.0) * size
 
     c.saveState()
+    if state == "resolved":
+        c.setStrokeColor(color_tuple(color))
+        c.setLineWidth(max(1.8, size * 0.16))
+        c.setLineCap(1)
+        c.setLineJoin(1)
+        path = c.beginPath()
+        for command, values in CHECK_MARK_PATH:
+            point = transform((values[0], values[1]))
+            if command == "M":
+                path.moveTo(*point)
+            elif command == "L":
+                path.lineTo(*point)
+        c.drawPath(path, stroke=1, fill=0)
+        c.restoreState()
+        return
+
     c.setFillColor(color_tuple(color))
     path = c.beginPath()
     for command, values in FILLED_FLAG_PATH:
@@ -2153,9 +2167,10 @@ def draw_comparison_page(c: canvas.Canvas, plan: dict[str, Any], page: dict[str,
         draw_image_slot(c, entry.get("media_path"), image_rect, slot.get("placeholder_reason"), state, border, work_dir, f"{page['number']}-{index}", warnings)
         top_y = slot["caption_rect"]["y"] + slot["caption_rect"]["height"] - 14
         draw_text(c, entry.get("caption") or "", {"x": slot["caption_rect"]["x"], "y": top_y, "width": slot["caption_rect"]["width"], "height": 14}, "Helvetica-Bold", 11, align="center")
-        if state != "none" and trim(entry.get("flagged_reason")):
-            prefix = "Resolved - " if state == "resolved" else ""
-            draw_note(c, prefix + trim(entry.get("flagged_reason")), {"x": slot["caption_rect"]["x"], "y": top_y - 14, "width": slot["caption_rect"]["width"], "height": 14}, state)
+        if state != "none":
+            reason = trim(entry.get("flagged_reason"))
+            note = f"Resolved - {reason}" if state == "resolved" and reason else ("Resolved" if state == "resolved" else (reason or "Flagged"))
+            draw_note(c, note, {"x": slot["caption_rect"]["x"], "y": top_y - 14, "width": slot["caption_rect"]["width"], "height": 14}, state)
             session_y = top_y - 28
         else:
             session_y = top_y - 14
