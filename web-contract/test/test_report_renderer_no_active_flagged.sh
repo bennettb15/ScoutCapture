@@ -112,9 +112,9 @@ import sys
 summary = json.load(open(sys.argv[1], encoding="utf-8"))
 reports = summary.get("reports") or []
 skipped = summary.get("skipped_reports") or []
-assert [report.get("report_type") for report in reports] == ["property"], reports
+assert [report.get("report_type") for report in reports] == ["property", "priority"], reports
 assert not reports[0].get("validation_failures"), reports[0]
-assert {item.get("report_type") for item in skipped} == {"priority", "comparison"}, skipped
-assert any("no flagged shots" in item.get("reason", "") for item in skipped), skipped
+assert not reports[1].get("validation_failures"), reports[1]
+assert {item.get("report_type") for item in skipped} == {"comparison"}, skipped
 print("no-active-flagged renderer skip test passed")
 PY

@@ -366,9 +366,24 @@ def slot_key(item: dict[str, Any]) -> str:
 def visual_state(item: dict[str, Any]) -> str:
     if boolish(item.get("is_resolved_in_session")):
         return "resolved"
+    if (trim(item.get("issue_status")) or "").lower() in {"resolved", "pending_review"} and (
+        trim(item.get("capture_kind")) or ""
+    ).lower() == "resolved_capture":
+        return "resolved"
     if boolish(item.get("is_flagged")):
         return "flagged"
     return "none"
+
+
+def is_overview_material_shot(item: dict[str, Any]) -> bool:
+    return (trim(item.get("detail_type")) or "").strip().lower() == "overview" and visual_state(item) == "none"
+
+
+def cover_candidate_score(item: dict[str, Any]) -> tuple[int, int, dt.datetime, str]:
+    media_rank = 0 if trim(item.get("media_path")) else 1
+    overview_rank = 0 if is_overview_material_shot(item) else 1
+    captured = parse_date(item.get("captured_at_utc")) or dt.datetime.max.replace(tzinfo=dt.timezone.utc)
+    return (media_rank, overview_rank, captured, trim(item.get("original_filename")) or "")
 
 
 def priority_level(value: Any) -> str:
@@ -1116,11 +1131,11 @@ def build_priority_plan(validation: dict[str, Any], lookup: MediaLookup, report_
     shots = validation.get("inputs", {}).get("ordered_shots") or []
     entries = []
     for shot in shots:
-        if not boolish(shot.get("is_flagged")):
+        state = visual_state(shot)
+        if state == "none":
             continue
         media = media_for(lookup, "current", shot.get("shot_id"))
         level = priority_level(shot.get("normalized_priority") or shot.get("priority"))
-        state = visual_state(shot)
         entry = {
             **shot,
             "kind": "photo",
@@ -1169,13 +1184,15 @@ def build_priority_plan(validation: dict[str, Any], lookup: MediaLookup, report_
             lines.append({"kind": "sectionHeader", "text": header, "page_number": None, "is_flagged": False, "visual_state": "none"})
             for index, entry in enumerate(section["entries"]):
                 page_num = chunk_pages[index // 2] if chunk_pages else section_page
+                state = entry.get("visual_state") or "none"
+                state_suffix = " | Resolved" if state == "resolved" else ""
                 lines.append(
                     {
                         "kind": "photoItem",
-                        "text": f"{entry['caption']} | {label} (Priority)",
+                        "text": f"{entry['caption']} | {label} (Priority){state_suffix}",
                         "page_number": page_num,
                         "is_flagged": True,
-                        "visual_state": entry.get("visual_state") or "flagged",
+                        "visual_state": state,
                     }
                 )
         index_pages = index_page_plans(lines, line_offset=28.0)
@@ -1183,7 +1200,14 @@ def build_priority_plan(validation: dict[str, Any], lookup: MediaLookup, report_
         if resolved == assumed_index_pages:
             break
         assumed_index_pages = resolved
-    cover_shot = next((shot for shot in shots if media_for(lookup, "current", shot.get("shot_id"))), None)
+    cover_entries = [
+        {
+            **shot,
+            "media_path": trim((media_for(lookup, "current", shot.get("shot_id")) or {}).get("temporary_prepared_path")),
+        }
+        for shot in shots
+    ]
+    cover_shot = next((shot for shot in sorted(cover_entries, key=cover_candidate_score) if shot.get("media_path")), None)
     cover_media = media_for(lookup, "current", cover_shot.get("shot_id")) if cover_shot else None
     pages = [
         {
@@ -1382,7 +1406,14 @@ def build_comparison_plan(
     index_pages = index_page_plans(lines)
     if not index_pages:
         index_pages = [[]]
-    cover_shot = next((shot for shot in shots if not boolish(shot.get("is_flagged")) and media_for(lookup, "current", shot.get("shot_id"))), None)
+    cover_entries = [
+        {
+            **shot,
+            "media_path": trim((media_for(lookup, "current", shot.get("shot_id")) or {}).get("temporary_prepared_path")),
+        }
+        for shot in shots
+    ]
+    cover_shot = next((shot for shot in sorted(cover_entries, key=cover_candidate_score) if shot.get("media_path")), None)
     cover_media = media_for(lookup, "current", cover_shot.get("shot_id")) if cover_shot else None
     pages = [
         {"number": 1, "kind": "cover", "title": "Flagged Comparison Report", "cover_media_path": trim(cover_media.get("temporary_prepared_path")) if cover_media else None},
@@ -1954,11 +1985,16 @@ def draw_priority_note(c: canvas.Canvas, priority: str, reason: str | None, rect
 def draw_metadata(c: canvas.Canvas, entry: dict[str, Any], rect: dict[str, float], priority: str | None = None) -> None:
     top_y = rect["y"] + rect["height"] - 14
     draw_text(c, entry.get("caption") or "", {"x": rect["x"], "y": top_y, "width": rect["width"], "height": 14}, "Helvetica-Bold", 11, align="center")
+    state = entry.get("visual_state") or "none"
     if priority:
-        draw_priority_note(c, priority, entry.get("flagged_reason"), {"x": rect["x"], "y": top_y - 14, "width": rect["width"], "height": 14})
+        if state == "resolved":
+            reason = trim(entry.get("flagged_reason"))
+            note = f"Resolved - {reason}" if reason else "Resolved"
+            draw_note(c, note, {"x": rect["x"], "y": top_y - 14, "width": rect["width"], "height": 14}, state)
+        else:
+            draw_priority_note(c, priority, entry.get("flagged_reason"), {"x": rect["x"], "y": top_y - 14, "width": rect["width"], "height": 14})
         draw_text(c, entry.get("captured_at_display") or "Unknown", {"x": rect["x"], "y": top_y - 28, "width": rect["width"], "height": 14}, size=10, align="center")
         return
-    state = entry.get("visual_state") or "none"
     if state != "none":
         reason = trim(entry.get("flagged_reason"))
         note = f"Resolved - {reason}" if state == "resolved" and reason else ("Resolved" if state == "resolved" else (reason or "Flagged"))
@@ -2124,12 +2160,12 @@ def draw_photo_page(c: canvas.Canvas, plan: dict[str, Any], page: dict[str, Any]
         entry = slot["entry"]
         state = entry.get("visual_state") or "none"
         border = None
-        if priority:
+        if state == "resolved":
+            border = RESOLVED_COLOR
+        elif priority:
             border = PRIORITY_COLORS[priority]
         elif state == "flagged":
             border = FLAG_COLOR
-        elif state == "resolved":
-            border = RESOLVED_COLOR
         draw_image_slot(c, entry.get("media_path"), slot.get("image_rect"), slot.get("placeholder_reason"), state, border, work_dir, f"{page['number']}-{index}", warnings)
         draw_metadata(c, entry, slot["caption_rect"], priority=priority)
     extra = PRIORITY_FOOTER if priority else None
