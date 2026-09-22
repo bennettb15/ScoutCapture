@@ -97,6 +97,8 @@ class FakeSupabaseClient:
             worker.REPORT_EMAIL_USER_PREFERENCES_TABLE: [],
         }
         self.uploads: list[dict[str, Any]] = []
+        self.objects: set[tuple[str, str]] = set()
+        self.upload_failures_remaining = 0
 
     def add_profile(self, user_id: str, email: str | None, full_name: str | None = None, deleted: bool = False) -> None:
         self.tables["users_profile"].append(
@@ -224,6 +226,9 @@ class FakeSupabaseClient:
         return dict(stored)
 
     def upload_object(self, bucket: str, path: str, source_path: pathlib.Path, content_type: str) -> None:
+        if self.upload_failures_remaining > 0:
+            self.upload_failures_remaining -= 1
+            raise TimeoutError("The read operation timed out")
         self.uploads.append(
             {
                 "bucket": bucket,
@@ -232,6 +237,10 @@ class FakeSupabaseClient:
                 "content_type": content_type,
             }
         )
+        self.objects.add((bucket, path))
+
+    def object_exists(self, bucket: str, path: str) -> bool:
+        return (bucket, path) in self.objects
 
     def delete_object(self, bucket: str, path: str) -> None:
         return None
@@ -594,6 +603,76 @@ class ReportWorkerEmailNotificationTests(unittest.TestCase):
             ["property_report", "flagged_observations", "flagged_comparison"],
             [item["report_type"] for item in summary["uploaded_files"]],
         )
+
+    def test_pdf_upload_retries_transient_timeout(self) -> None:
+        client = FakeSupabaseClient()
+        client.upload_failures_remaining = 2
+        with tempfile.TemporaryDirectory() as tmp:
+            pdf_path = pathlib.Path(tmp) / "property.pdf"
+            pdf_path.write_bytes(b"%PDF-1.4\n")
+            worker.upload_pdf_with_retry(
+                client,
+                worker.DELIVERABLES_BUCKET,
+                "orgs/test/properties/test/sessions/test/packages/test/pdfs/property_report.pdf",
+                pdf_path,
+                attempts=3,
+                sleep_func=lambda _delay: None,
+            )
+
+        self.assertEqual(1, len(client.uploads))
+        self.assertEqual(0, client.upload_failures_remaining)
+
+    def test_pdf_upload_fails_only_after_retry_budget(self) -> None:
+        client = FakeSupabaseClient()
+        client.upload_failures_remaining = 3
+        with tempfile.TemporaryDirectory() as tmp:
+            pdf_path = pathlib.Path(tmp) / "property.pdf"
+            pdf_path.write_bytes(b"%PDF-1.4\n")
+            with self.assertRaisesRegex(worker.WorkerError, "PDF upload failed after 3 attempts"):
+                worker.upload_pdf_with_retry(
+                    client,
+                    worker.DELIVERABLES_BUCKET,
+                    "orgs/test/properties/test/sessions/test/packages/test/pdfs/property_report.pdf",
+                    pdf_path,
+                    attempts=3,
+                    sleep_func=lambda _delay: None,
+                )
+
+        self.assertEqual(0, len(client.uploads))
+
+    def test_ready_package_exists_requires_active_file_row_and_storage_object(self) -> None:
+        client = FakeSupabaseClient()
+        client.tables["report_packages"].append(package())
+
+        self.assertFalse(worker.ready_package_exists(client, SNAPSHOT_ID))
+
+        storage_path = worker.path_for_pdf(
+            ORG_ID,
+            PROPERTY_ID,
+            SESSION_ID,
+            PACKAGE_ID,
+            "property_report",
+        )
+        client.tables["report_package_files"].append(
+            {
+                "id": "file-1",
+                "package_id": PACKAGE_ID,
+                "org_id": ORG_ID,
+                "property_id": PROPERTY_ID,
+                "session_id": SESSION_ID,
+                "snapshot_id": SNAPSHOT_ID,
+                "report_type": "property_report",
+                "storage_bucket": worker.DELIVERABLES_BUCKET,
+                "storage_path": storage_path,
+                "mime_type": "application/pdf",
+                "storage_deleted_at": None,
+                "deleted_at": None,
+            }
+        )
+
+        self.assertFalse(worker.ready_package_exists(client, SNAPSHOT_ID))
+        client.objects.add((worker.DELIVERABLES_BUCKET, storage_path))
+        self.assertTrue(worker.ready_package_exists(client, SNAPSHOT_ID))
 
     def test_recipient_scoping_excludes_inactive_and_unrelated_users(self) -> None:
         client = FakeSupabaseClient()

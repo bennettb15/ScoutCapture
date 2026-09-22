@@ -20,6 +20,7 @@ import platform
 import shutil
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -34,6 +35,9 @@ MEDIA_PREPARER_VERSION = "phase2a-shadow-media-prep-2-local-date"
 STAMPED_ZIP_EXPORT_VERSION = "stamped-zip-export-2-friendly-filename"
 ORIGINAL_JPG_PREVIEW_VERSION = "original-jpg-preview-1"
 REPORT_CONTRACT_VERSION = "phase1-report-input-1"
+PDF_UPLOAD_RETRY_ATTEMPTS = 4
+PDF_UPLOAD_RETRY_BASE_DELAY_SECONDS = 1.0
+PDF_UPLOAD_RETRY_MAX_DELAY_SECONDS = 8.0
 REPORT_READY_NOTIFICATION_TYPE = "report_package_ready"
 REPORT_READY_NOTIFICATION_ROLES = ("owner", "manager", "field", "viewer")
 REPORT_READY_NOTIFICATION_TABLE = "report_package_email_notifications"
@@ -1667,6 +1671,96 @@ def upsert_file_row(
     return client.insert("report_package_files", row)
 
 
+def transient_upload_error(error: BaseException) -> bool:
+    if isinstance(error, (TimeoutError, urllib.error.URLError, ConnectionError)):
+        return True
+    if isinstance(error, WorkerError):
+        message = str(error).lower()
+        return any(
+            token in message
+            for token in (
+                " timed out",
+                "timeout",
+                "temporarily unavailable",
+                "connection reset",
+                "connection aborted",
+                "502 ",
+                "503 ",
+                "504 ",
+            )
+        )
+    return False
+
+
+def upload_pdf_with_retry(
+    client: SupabaseServiceClient,
+    bucket: str,
+    storage_path: str,
+    pdf_path: pathlib.Path,
+    mime_type: str = "application/pdf",
+    attempts: int = PDF_UPLOAD_RETRY_ATTEMPTS,
+    sleep_func: Any = time.sleep,
+) -> None:
+    attempts = max(1, int(attempts or 1))
+    last_error: BaseException | None = None
+    for attempt in range(1, attempts + 1):
+        try:
+            client.upload_object(bucket, storage_path, pdf_path, mime_type)
+            if attempt > 1:
+                print(
+                    stable_json(
+                        {
+                            "upload": "retry_succeeded",
+                            "bucket": bucket,
+                            "path": storage_path,
+                            "attempt": attempt,
+                            "attempts": attempts,
+                        },
+                        False,
+                    ).strip(),
+                    file=sys.stderr,
+                )
+            return
+        except Exception as error:
+            last_error = error
+            if attempt >= attempts or not transient_upload_error(error):
+                break
+            delay = min(PDF_UPLOAD_RETRY_MAX_DELAY_SECONDS, PDF_UPLOAD_RETRY_BASE_DELAY_SECONDS * (2 ** (attempt - 1)))
+            print(
+                stable_json(
+                    {
+                        "upload": "retrying",
+                        "bucket": bucket,
+                        "path": storage_path,
+                        "attempt": attempt,
+                        "attempts": attempts,
+                        "delay_seconds": delay,
+                        "error": str(error)[:300],
+                    },
+                    False,
+                ).strip(),
+                file=sys.stderr,
+            )
+            sleep_func(delay)
+    raise WorkerError(f"PDF upload failed after {attempts} attempts: {last_error}") from last_error
+
+
+def report_file_storage_is_valid(client: SupabaseServiceClient, file_row: dict[str, Any]) -> bool:
+    required = ["org_id", "property_id", "session_id", "package_id", "report_type", "storage_bucket", "storage_path"]
+    if any(not trim(file_row.get(key)) for key in required):
+        return False
+    expected_path = path_for_pdf(
+        str(file_row["org_id"]),
+        str(file_row["property_id"]),
+        str(file_row["session_id"]),
+        str(file_row["package_id"]),
+        str(file_row["report_type"]),
+    )
+    if file_row.get("storage_bucket") != DELIVERABLES_BUCKET or file_row.get("storage_path") != expected_path:
+        return False
+    return client.object_exists(file_row["storage_bucket"], file_row["storage_path"])
+
+
 def select_ready_package(client: SupabaseServiceClient, package_id: str) -> dict[str, Any]:
     rows = client.select(
         "report_packages",
@@ -2182,15 +2276,17 @@ def ready_package_exists(client: SupabaseServiceClient, snapshot_id: str) -> boo
         files = client.select(
             "report_package_files",
             {
-                "select": "id",
+                "select": "id,org_id,property_id,session_id,package_id,report_type,storage_bucket,storage_path,mime_type,storage_deleted_at,deleted_at",
                 "package_id": f"eq.{package['id']}",
                 "mime_type": "eq.application/pdf",
                 "storage_deleted_at": "is.null",
                 "deleted_at": "is.null",
-                "limit": "1",
+                "limit": "10",
             },
         )
-        if files:
+        if not files:
+            continue
+        if all(report_file_storage_is_valid(client, file_row) for file_row in files):
             return True
     return False
 
@@ -2545,7 +2641,7 @@ def process_session(
             if sha256_file(pdf_path) != pdf_sha:
                 raise WorkerError(f"PDF hash mismatch before upload: {pdf_path}")
             storage_path = path_for_pdf(package["org_id"], package["property_id"], package["session_id"], package["id"], report_type)
-            client.upload_object(DELIVERABLES_BUCKET, storage_path, pdf_path, "application/pdf")
+            upload_pdf_with_retry(client, DELIVERABLES_BUCKET, storage_path, pdf_path)
             file_row = upsert_file_row(
                 client,
                 package,

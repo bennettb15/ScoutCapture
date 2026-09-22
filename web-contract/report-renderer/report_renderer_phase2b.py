@@ -366,9 +366,10 @@ def slot_key(item: dict[str, Any]) -> str:
 def visual_state(item: dict[str, Any]) -> str:
     if boolish(item.get("is_resolved_in_session")):
         return "resolved"
-    if (trim(item.get("issue_status")) or "").lower() in {"resolved", "pending_review"} and (
-        trim(item.get("capture_kind")) or ""
-    ).lower() == "resolved_capture":
+    issue_status = (trim(item.get("issue_status")) or "").lower()
+    if issue_status in {"resolved", "pending_review"}:
+        return "resolved"
+    if (trim(item.get("capture_kind")) or "").lower() == "resolved_capture":
         return "resolved"
     if boolish(item.get("is_flagged")):
         return "flagged"
@@ -1353,7 +1354,7 @@ def build_comparison_plan(
             "angle_index": (previous_shot or {}).get("angle_index") or current.get("angle_index"),
             "shot_key": (previous_shot or {}).get("shot_key") or current.get("shot_key"),
             "visual_state": previous_visual_state,
-            "flagged_reason": (previous_shot or {}).get("flagged_reason"),
+            "flagged_reason": (previous_shot or {}).get("flagged_reason") or current.get("flagged_reason"),
             "captured_at_utc": previous_captured_date,
             "session_date_utc": previous_session_date,
         }
