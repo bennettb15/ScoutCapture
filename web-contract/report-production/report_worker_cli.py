@@ -2141,17 +2141,32 @@ def snapshot_is_allowlisted(
 
 
 def ready_package_exists(client: SupabaseServiceClient, snapshot_id: str) -> bool:
-    rows = client.select(
+    packages = client.select(
         "report_packages",
         {
             "select": "id",
             "snapshot_id": f"eq.{snapshot_id}",
             "status": "eq.ready",
             "deleted_at": "is.null",
-            "limit": "1",
+            "order": "completed_at.desc",
+            "limit": "5",
         },
     )
-    return bool(rows)
+    for package in packages:
+        files = client.select(
+            "report_package_files",
+            {
+                "select": "id",
+                "package_id": f"eq.{package['id']}",
+                "mime_type": "eq.application/pdf",
+                "storage_deleted_at": "is.null",
+                "deleted_at": "is.null",
+                "limit": "1",
+            },
+        )
+        if files:
+            return True
+    return False
 
 
 def extension_for_storage_path(path: str) -> str:
