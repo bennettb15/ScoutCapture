@@ -10904,6 +10904,7 @@ final class AppState: ObservableObject {
         let scopedPending = allPendingExportSessionByProperty.filter { scopedPropertyIDs.contains($0.key) && $0.value.deletedAt == nil }
         let scopedMeta = allHubMetaByProperty.filter { scopedPropertyIDs.contains($0.key) }
         let scopedSessionIDs = Set(scopedSessionIndex.values.flatMap { $0.map(\.id) })
+        refreshLightweightPropertyRowCloudStatusCache(downloadTimeout: 0)
         refreshPropertyRowSubtitleCache(
             properties: scopedProperties,
             organizations: scopedOrganizations
@@ -10967,6 +10968,7 @@ final class AppState: ObservableObject {
         if !propertyRowSnapshotCloudStatusByPropertyID.isEmpty {
             propertyRowSnapshotCloudStatusByPropertyID = propertyRowSnapshotCloudStatusByPropertyID.filter { scopedPropertyIDs.contains($0.key) }
         }
+        refreshPropertyRowCloudGlyphCache()
 
         if let selectedPropertyID,
            !scopedPropertyIDs.contains(selectedPropertyID) {
@@ -34126,21 +34128,45 @@ final class AppState: ObservableObject {
         relativePathOverride: String? = nil
     ) async {
         guard let client = supabaseClient else { return }
-        guard let metadata = try? localStore.loadSessionMetadata(propertyID: propertyID, sessionID: sessionID),
-              let shot = metadata.shots.first(where: { $0.shotID == shotID }) else {
-            return
-        }
+        let localShot = (try? localStore.loadSessionMetadata(propertyID: propertyID, sessionID: sessionID))?
+            .shots
+            .first(where: { $0.shotID == shotID })
         guard canAccessProperty(propertyID) else {
             print("[SupabaseMediaDownload] skipped reason=inactiveOrg propertyID=\(propertyID.uuidString)")
             return
         }
 
-        let resolvedShot = await resolveShotStorageMetadata(
-            propertyID: propertyID,
-            sessionID: sessionID,
-            shot: shot,
-            allowRelaxedLookupFallback: allowRelaxedRemoteLookupFallback
-        )
+        let remoteFallback: SupabaseShotStorageRecord?
+        if localShot == nil, allowRelaxedRemoteLookupFallback {
+            remoteFallback = try? await fetchShotStorageMetadataFromSupabaseForBackfillRepair(shotID: shotID)
+        } else {
+            remoteFallback = nil
+        }
+
+        if let remotePropertyID = remoteFallback?.propertyID, remotePropertyID != propertyID {
+            return
+        }
+
+        let resolvedShot: ShotMetadata?
+        if let localShot {
+            resolvedShot = await resolveShotStorageMetadata(
+                propertyID: propertyID,
+                sessionID: sessionID,
+                shot: localShot,
+                allowRelaxedLookupFallback: allowRelaxedRemoteLookupFallback
+            )
+        } else if let remoteFallback {
+            resolvedShot = fastRuntimeHydrationShotMetadata(
+                propertyID: propertyID,
+                sessionID: remoteFallback.sessionID ?? sessionID,
+                shotID: shotID,
+                remote: remoteFallback,
+                relativePathOverride: relativePathOverride
+            )
+        } else {
+            resolvedShot = nil
+        }
+        guard let resolvedShot else { return }
 
         let relativePath = {
             let resolved = resolvedShot.originalRelativePath.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -34219,6 +34245,93 @@ final class AppState: ObservableObject {
                 "error=\(error.localizedDescription)"
             )
         }
+    }
+
+    private func fastRuntimeHydrationShotMetadata(
+        propertyID: UUID,
+        sessionID: UUID,
+        shotID: UUID,
+        remote: SupabaseShotStorageRecord,
+        relativePathOverride: String?
+    ) -> ShotMetadata {
+        let storagePath = remote.storagePath?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let relativePath = fastRuntimeHydrationRelativePath(
+            relativePathOverride: relativePathOverride,
+            storagePath: storagePath,
+            shotID: shotID
+        )
+        let filename = URL(fileURLWithPath: relativePath).lastPathComponent
+        let createdAt = remote.createdAt ?? Date()
+        return ShotMetadata(
+            shotID: shotID,
+            propertyID: propertyID,
+            sessionID: sessionID,
+            createdAt: createdAt,
+            capturedAtLocal: nil,
+            updatedAt: remote.updatedAt ?? createdAt,
+            capturedByUserID: nil,
+            capturedByEmail: nil,
+            uploadedByUserID: nil,
+            uploadedByEmail: nil,
+            building: remote.building ?? "",
+            elevation: remote.elevation ?? "",
+            detailType: remote.detailType ?? "",
+            angleIndex: max(1, remote.angleIndex ?? 1),
+            trade: remote.trade,
+            priority: remote.priority,
+            shotKey: remote.shotKey ?? "",
+            isGuided: remote.isGuided ?? false,
+            isFlagged: remote.isFlagged ?? false,
+            issueID: remote.issueID,
+            issueStatus: remote.issueStatus,
+            captureKind: remote.captureKind,
+            firstCaptureKind: remote.firstCaptureKind,
+            noteText: remote.reason,
+            noteCategory: nil,
+            originalFilename: filename.isEmpty ? "\(shotID.uuidString).jpg" : filename,
+            originalRelativePath: relativePath,
+            originalByteSize: remote.byteSize,
+            storageBucket: remote.storageBucket,
+            storagePath: storagePath,
+            checksumSHA256: remote.checksumSHA256,
+            byteSize: remote.byteSize,
+            uploadState: remote.uploadState,
+            uploadAttempts: remote.uploadAttempts,
+            lastUploadError: remote.lastUploadError,
+            stampedFilename: nil,
+            stampedRelativePath: nil,
+            captureMode: remote.captureMode,
+            lens: remote.lens,
+            exifOrientation: nil,
+            latitude: remote.latitude,
+            longitude: remote.longitude,
+            accuracyMeters: remote.accuracyMeters,
+            imageWidth: remote.imageWidth,
+            imageHeight: remote.imageHeight
+        )
+    }
+
+    private func fastRuntimeHydrationRelativePath(
+        relativePathOverride: String?,
+        storagePath: String?,
+        shotID: UUID
+    ) -> String {
+        let override = relativePathOverride?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !override.isEmpty, !override.hasPrefix("/") {
+            return override
+        }
+        let filenameCandidates = [
+            override,
+            storagePath ?? ""
+        ]
+        for candidate in filenameCandidates {
+            let filename = URL(fileURLWithPath: candidate).lastPathComponent
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if !filename.isEmpty {
+                return "Originals/\(filename)"
+            }
+        }
+        return "Originals/\(shotID.uuidString).jpg"
     }
 
     private func ensureSupabaseSessionPrerequisites(
@@ -43466,6 +43579,24 @@ final class AppState: ObservableObject {
         let direct = shot.localFilePath.trimmingCharacters(in: .whitespacesAndNewlines)
         if !direct.isEmpty, FileManager.default.fileExists(atPath: direct) {
             return direct
+        }
+        let relativePath = shot.originalRelativePath.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let resolved = localStore.resolveSessionRelativeFileURL(
+            propertyID: shot.propertyID,
+            sessionID: shot.sessionID,
+            relativePath: relativePath
+        ) {
+            return resolved.path
+        }
+        let filename = URL(fileURLWithPath: relativePath.isEmpty ? direct : relativePath).lastPathComponent
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if !filename.isEmpty {
+            let originalsFallback = localStore
+                .originalsFolderURL(propertyID: shot.propertyID, sessionID: shot.sessionID)
+                .appendingPathComponent(filename, isDirectory: false)
+            if FileManager.default.fileExists(atPath: originalsFallback.path) {
+                return originalsFallback.path
+            }
         }
         return direct.isEmpty ? nil : direct
     }
@@ -53379,6 +53510,21 @@ final class AppState: ObservableObject {
 
         var requests = Set<OperationalMediaHydrationRequest>()
         for guidedShot in guidedShots {
+            if let shot = guidedShot.shot,
+               let request = fastRuntimePanelMediaHydrationRequest(
+                propertyID: propertyID,
+                shotID: shot.id,
+                explicitSessionIDs: [],
+                pathCandidates: [
+                    shot.imageLocalIdentifier,
+                    guidedShot.referenceImagePath,
+                    guidedShot.referenceImageLocalIdentifier
+                ]
+               ) {
+                requests.insert(request)
+                continue
+            }
+
             let building = fastRuntimeComparable(guidedShot.building)
             let elevation = fastRuntimeComparable(CanonicalElevation.normalize(guidedShot.targetElevation ?? "") ?? guidedShot.targetElevation)
             let detail = fastRuntimeComparable(guidedShot.detailType)
@@ -53434,6 +53580,66 @@ final class AppState: ObservableObject {
 
         var requests = Set<OperationalMediaHydrationRequest>()
         for observation in observations {
+            let explicitSessionIDs = [
+                observation.sessionID,
+                observation.updatedInSessionID,
+                observation.resolvedInSessionID
+            ]
+            if let linkedShotID = observation.linkedShotID,
+               let linkedShot = observation.shots.first(where: { $0.id == linkedShotID }),
+               let request = fastRuntimePanelMediaHydrationRequest(
+                propertyID: propertyID,
+                shotID: linkedShotID,
+                explicitSessionIDs: explicitSessionIDs,
+                pathCandidates: [
+                    linkedShot.imageLocalIdentifier,
+                    observation.resolutionPhotoRef
+                ]
+               ) {
+                requests.insert(request)
+                continue
+            }
+            if let shot = observation.shots
+                .sorted(by: { lhs, rhs in
+                    if lhs.capturedAt != rhs.capturedAt { return lhs.capturedAt > rhs.capturedAt }
+                    return lhs.id.uuidString < rhs.id.uuidString
+                })
+                .first,
+               let request = fastRuntimePanelMediaHydrationRequest(
+                propertyID: propertyID,
+                shotID: shot.id,
+                explicitSessionIDs: explicitSessionIDs,
+                pathCandidates: [
+                    shot.imageLocalIdentifier,
+                    observation.resolutionPhotoRef
+                ]
+               ) {
+                requests.insert(request)
+                continue
+            }
+            if let guidedShot = observation.guidedShots
+                .sorted(by: { lhs, rhs in
+                    if (lhs.shot?.capturedAt ?? .distantPast) != (rhs.shot?.capturedAt ?? .distantPast) {
+                        return (lhs.shot?.capturedAt ?? .distantPast) > (rhs.shot?.capturedAt ?? .distantPast)
+                    }
+                    return lhs.id.uuidString < rhs.id.uuidString
+                })
+                .first,
+               let request = fastRuntimePanelMediaHydrationRequest(
+                propertyID: propertyID,
+                shotID: guidedShot.shot?.id ?? guidedShot.id,
+                explicitSessionIDs: explicitSessionIDs,
+                pathCandidates: [
+                    guidedShot.shot?.imageLocalIdentifier,
+                    guidedShot.referenceImagePath,
+                    guidedShot.referenceImageLocalIdentifier,
+                    observation.resolutionPhotoRef
+                ]
+               ) {
+                requests.insert(request)
+                continue
+            }
+
             for session in sessions {
                 guard let metadata = try? localStore.loadSessionMetadata(propertyID: propertyID, sessionID: session.id) else {
                     continue
@@ -53467,6 +53673,116 @@ final class AppState: ObservableObject {
                 ))
                 break
             }
+        }
+        return Array(requests)
+    }
+
+    private func fastRuntimePanelMediaHydrationRequest(
+        propertyID: UUID,
+        shotID: UUID,
+        explicitSessionIDs: [UUID?],
+        pathCandidates: [String?]
+    ) -> OperationalMediaHydrationRequest? {
+        if pathCandidates.contains(where: fastRuntimePathExists) {
+            return nil
+        }
+
+        var sessionIDs: [UUID] = []
+        for explicit in explicitSessionIDs.compactMap({ $0 }) {
+            if !sessionIDs.contains(explicit) {
+                sessionIDs.append(explicit)
+            }
+        }
+        for candidate in pathCandidates {
+            if let sessionID = fastRuntimeSessionID(fromStoredPath: candidate),
+               !sessionIDs.contains(sessionID) {
+                sessionIDs.append(sessionID)
+            }
+        }
+        if sessionIDs.isEmpty,
+           let session = ((try? localStore.fetchSessions(propertyID: propertyID)) ?? [])
+            .sorted(by: { $0.startedAt > $1.startedAt })
+            .first {
+            sessionIDs.append(session.id)
+        }
+        guard let sessionID = sessionIDs.first else { return nil }
+
+        return OperationalMediaHydrationRequest(
+            propertyID: propertyID,
+            sessionID: sessionID,
+            shotID: shotID,
+            relativePathOverride: fastRuntimeRelativePath(fromStoredPaths: pathCandidates)
+        )
+    }
+
+    private func fastRuntimePathExists(_ candidate: String?) -> Bool {
+        guard let trimmed = candidate?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !trimmed.isEmpty else {
+            return false
+        }
+        return FileManager.default.fileExists(atPath: trimmed)
+    }
+
+    private func fastRuntimeSessionID(fromStoredPath candidate: String?) -> UUID? {
+        guard let trimmed = candidate?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !trimmed.isEmpty else {
+            return nil
+        }
+        let components = URL(fileURLWithPath: trimmed).pathComponents
+        for (index, component) in components.enumerated() where component == "Sessions" {
+            let nextIndex = components.index(after: index)
+            guard components.indices.contains(nextIndex),
+                  let sessionID = UUID(uuidString: components[nextIndex]) else {
+                continue
+            }
+            return sessionID
+        }
+        return nil
+    }
+
+    private func fastRuntimeRelativePath(fromStoredPaths candidates: [String?]) -> String? {
+        for candidate in candidates {
+            guard let trimmed = candidate?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !trimmed.isEmpty else {
+                continue
+            }
+            if !trimmed.hasPrefix("/") {
+                return trimmed
+            }
+            let components = URL(fileURLWithPath: trimmed).pathComponents
+            if let originalsIndex = components.firstIndex(of: "Originals") {
+                let relativeComponents = components[originalsIndex...]
+                let relative = relativeComponents.joined(separator: "/")
+                    .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+                if !relative.isEmpty {
+                    return relative
+                }
+            }
+        }
+        return nil
+    }
+
+    func fastRuntimeGalleryMediaHydrationRequests(
+        propertyID: UUID,
+        sessionID: UUID,
+        shots: [FastRuntimePrototypeShotRecord]
+    ) -> [OperationalMediaHydrationRequest] {
+        guard canAccessProperty(propertyID), !shots.isEmpty else { return [] }
+
+        var requests = Set<OperationalMediaHydrationRequest>()
+        for shot in shots where shot.propertyID == propertyID && shot.sessionID == sessionID {
+            let relativePath = shot.originalRelativePath.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !relativePath.isEmpty else { continue }
+            if let resolved = fastRuntimeResolvedLocalPath(for: shot),
+               FileManager.default.fileExists(atPath: resolved) {
+                continue
+            }
+            requests.insert(OperationalMediaHydrationRequest(
+                propertyID: propertyID,
+                sessionID: sessionID,
+                shotID: shot.id,
+                relativePathOverride: relativePath
+            ))
         }
         return Array(requests)
     }

@@ -16237,12 +16237,30 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
         if !direct.isEmpty, FileManager.default.fileExists(atPath: direct) {
             return direct
         }
+        let relativePath = shot.originalRelativePath.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let resolved = appState.sharedLocalStore.resolveSessionRelativeFileURL(
+            propertyID: shot.propertyID,
+            sessionID: shot.sessionID,
+            relativePath: relativePath
+        ) {
+            return resolved.path
+        }
         guard let root = fastStorageRoot ?? storageRoot ?? prototypeResult.tempStorageRoot else {
             return direct.isEmpty ? nil : direct
         }
-        let relativeURL = root.appendingPathComponent(shot.originalRelativePath, isDirectory: false)
+        let relativeURL = root.appendingPathComponent(relativePath, isDirectory: false)
         if FileManager.default.fileExists(atPath: relativeURL.path) {
             return relativeURL.path
+        }
+        let filename = URL(fileURLWithPath: relativePath.isEmpty ? direct : relativePath).lastPathComponent
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if !filename.isEmpty {
+            let originalsFallback = appState.sharedLocalStore
+                .originalsFolderURL(propertyID: shot.propertyID, sessionID: shot.sessionID)
+                .appendingPathComponent(filename, isDirectory: false)
+            if FileManager.default.fileExists(atPath: originalsFallback.path) {
+                return originalsFallback.path
+            }
         }
         return direct.isEmpty ? nil : direct
     }
@@ -16700,10 +16718,54 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
 
     private func fastLaneExistingLocalPath(_ candidate: String?) -> String? {
         guard let trimmed = fastLaneTrimmedNonEmpty(candidate),
-              FileManager.default.fileExists(atPath: trimmed) else {
+              !trimmed.isEmpty else {
             return nil
         }
-        return trimmed
+        if FileManager.default.fileExists(atPath: trimmed) {
+            return trimmed
+        }
+        if !trimmed.hasPrefix("/"),
+           let resolved = appState.sharedLocalStore.resolveSessionRelativeFileURL(
+            propertyID: context.propertyID,
+            sessionID: context.sessionID,
+            relativePath: trimmed
+           ) {
+            return resolved.path
+        }
+        return fastLaneRepairedPanelImagePath(fromStoredPath: trimmed)
+    }
+
+    private func fastLaneRepairedPanelImagePath(fromStoredPath storedPath: String) -> String? {
+        let filename = URL(fileURLWithPath: storedPath).lastPathComponent
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !filename.isEmpty else {
+            return nil
+        }
+
+        let sessionIDs: [UUID] = {
+            let components = URL(fileURLWithPath: storedPath).pathComponents
+            for (index, component) in components.enumerated() where component == "Sessions" {
+                let nextIndex = components.index(after: index)
+                guard components.indices.contains(nextIndex),
+                      let sessionID = UUID(uuidString: components[nextIndex]) else {
+                    continue
+                }
+                return [sessionID]
+            }
+            return ((try? appState.sharedLocalStore.fetchSessions(propertyID: context.propertyID)) ?? [])
+                .sorted { $0.startedAt > $1.startedAt }
+                .map(\.id)
+        }()
+
+        for sessionID in sessionIDs {
+            let candidate = appState.sharedLocalStore
+                .originalsFolderURL(propertyID: context.propertyID, sessionID: sessionID)
+                .appendingPathComponent(filename, isDirectory: false)
+            if FileManager.default.fileExists(atPath: candidate.path) {
+                return candidate.path
+            }
+        }
+        return nil
     }
 
     private func fastLaneReportAsset(forLocalPath path: String, creationDate: Date?) -> ReportAsset? {
@@ -17441,26 +17503,32 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                 partial[observation.id] = observation
             }
         DispatchQueue.global(qos: .utility).async {
-            let gallery: (assets: [ReportAsset], metadata: [String: FastLaneGalleryMetadata]) = {
-                guard let data = try? Data(contentsOf: metadataURL) else { return ([], [:]) }
+            let gallery: (
+                assets: [ReportAsset],
+                metadata: [String: FastLaneGalleryMetadata],
+                shots: [AppState.FastRuntimePrototypeShotRecord]
+            ) = {
+                guard let data = try? Data(contentsOf: metadataURL) else { return ([], [:], []) }
                 let decoder = JSONDecoder()
                 decoder.dateDecodingStrategy = .iso8601
                 guard let shots = try? decoder.decode([AppState.FastRuntimePrototypeShotRecord].self, from: data) else {
-                    return ([], [:])
+                    return ([], [:], [])
                 }
 
                 var metadataByID: [String: FastLaneGalleryMetadata] = [:]
-                let assets = shots
+                let scopedShots = shots
                     .filter { $0.sessionID == context.sessionID && $0.propertyID == context.propertyID }
                     .sorted {
                         if $0.capturedAt != $1.capturedAt { return $0.capturedAt < $1.capturedAt }
                         return $0.id.uuidString < $1.id.uuidString
                     }
+                let assets = scopedShots
                     .compactMap { shot -> ReportAsset? in
-                        let directURL = URL(fileURLWithPath: shot.localFilePath, isDirectory: false)
-                        let relativeURL = root.appendingPathComponent(shot.originalRelativePath, isDirectory: false)
-                        let url = FileManager.default.fileExists(atPath: directURL.path) ? directURL : relativeURL
-                        guard FileManager.default.fileExists(atPath: url.path) else { return nil }
+                        guard let resolvedPath = fastLaneResolvedLocalPath(for: shot),
+                              FileManager.default.fileExists(atPath: resolvedPath) else {
+                            return nil
+                        }
+                        let url = URL(fileURLWithPath: resolvedPath, isDirectory: false)
                         metadataByID[url.path] = FastLaneGalleryMetadata(
                             propertyName: propertyName,
                             metadataContext: shot.metadataContext,
@@ -17475,7 +17543,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                             originalFilename: url.lastPathComponent
                         )
                     }
-                return (assets, metadataByID)
+                return (assets, metadataByID, scopedShots)
             }()
 
             DispatchQueue.main.async {
@@ -17484,6 +17552,32 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                 fastLaneGalleryDisplayCount = gallery.assets.count
                 fastLaneGalleryRefreshToken = UUID()
                 refreshFastLaneGalleryThumbnail(from: gallery.assets)
+                scheduleFastLaneGalleryMediaHydrationIfNeeded(localShots: gallery.shots)
+            }
+        }
+    }
+
+    private func scheduleFastLaneGalleryMediaHydrationIfNeeded(
+        localShots: [AppState.FastRuntimePrototypeShotRecord]
+    ) {
+        let requests = appState.fastRuntimeGalleryMediaHydrationRequests(
+            propertyID: context.propertyID,
+            sessionID: context.sessionID,
+            shots: localShots
+        )
+        let pending = requests.filter { request in
+            !fastLaneMediaHydrationAttemptedKeys.contains(fastLaneHydrationKey(for: request))
+        }
+        guard !pending.isEmpty else { return }
+        for request in pending {
+            fastLaneMediaHydrationAttemptedKeys.insert(fastLaneHydrationKey(for: request))
+        }
+
+        Task {
+            let didStart = await appState.ensureGalleryMediaAvailableForRequests(pending)
+            guard didStart else { return }
+            await MainActor.run {
+                reloadFastLaneGalleryAssets()
             }
         }
     }

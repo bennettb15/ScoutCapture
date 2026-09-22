@@ -723,6 +723,7 @@ final class LocalStore {
 
     private let activeRootURL: URL
     private let scoutRootURL: URL
+    private let scoutRootStatusReadCandidates: [URL]
     private let propertiesURL: URL
     private let organizationsURL: URL
     private let hubIndexURL: URL
@@ -753,6 +754,7 @@ final class LocalStore {
         let scoutRoot = appRoot.appendingPathComponent("SCOUT", isDirectory: true)
         self.activeRootURL = appRoot
         self.scoutRootURL = scoutRoot
+        self.scoutRootStatusReadCandidates = StorageRoot.scoutRootCandidates()
         self.propertiesURL = scoutRoot.appendingPathComponent("properties.json")
         self.organizationsURL = scoutRoot.appendingPathComponent("organizations.json")
         self.hubIndexURL = scoutRoot.appendingPathComponent("hub-index.json")
@@ -800,6 +802,7 @@ final class LocalStore {
         let scoutRoot = appRoot.appendingPathComponent("SCOUT", isDirectory: true)
         self.activeRootURL = appRoot
         self.scoutRootURL = scoutRoot
+        self.scoutRootStatusReadCandidates = [scoutRoot]
         self.propertiesURL = scoutRoot.appendingPathComponent("properties.json")
         self.organizationsURL = scoutRoot.appendingPathComponent("organizations.json")
         self.hubIndexURL = scoutRoot.appendingPathComponent("hub-index.json")
@@ -1954,16 +1957,95 @@ final class LocalStore {
         downloadTimeout: TimeInterval = 0,
         requireCurrentIfUbiquitous: Bool = false
     ) throws -> [SessionSnapshotUploadStatusRecord] {
-        guard prepareUbiquitousStatusFileRead(
+        let primaryRecords = try readSessionSnapshotUploadStatusRecords(
             at: sessionSnapshotUploadStatusURL,
+            downloadTimeout: downloadTimeout,
+            requireCurrentIfUbiquitous: requireCurrentIfUbiquitous
+        )
+        let legacyRecords = sessionSnapshotUploadStatusCandidateURLs()
+            .filter { $0 != sessionSnapshotUploadStatusURL }
+            .compactMap { url -> [SessionSnapshotUploadStatusRecord]? in
+                try? readSessionSnapshotUploadStatusRecords(
+                    at: url,
+                    downloadTimeout: downloadTimeout,
+                    requireCurrentIfUbiquitous: requireCurrentIfUbiquitous
+                )
+            }
+            .flatMap { $0 }
+        guard !legacyRecords.isEmpty else {
+            return primaryRecords
+        }
+
+        let mergedRecords = Self.mergedSessionSnapshotUploadStatusRecords(primaryRecords + legacyRecords)
+        if mergedRecords != primaryRecords {
+            try? writeSessionSnapshotUploadStatusRecords(mergedRecords)
+        }
+        return mergedRecords
+    }
+
+    private func readSessionSnapshotUploadStatusRecords(
+        at url: URL,
+        downloadTimeout: TimeInterval,
+        requireCurrentIfUbiquitous: Bool
+    ) throws -> [SessionSnapshotUploadStatusRecord] {
+        guard prepareUbiquitousStatusFileRead(
+            at: url,
             timeout: downloadTimeout,
             requireCurrentIfUbiquitous: requireCurrentIfUbiquitous
         ) else {
             return []
         }
-        guard fileManager.fileExists(atPath: sessionSnapshotUploadStatusURL.path) else { return [] }
-        let data = try Data(contentsOf: sessionSnapshotUploadStatusURL)
+        guard fileManager.fileExists(atPath: url.path) else { return [] }
+        let data = try Data(contentsOf: url)
         return try decoder.decode([SessionSnapshotUploadStatusRecord].self, from: data)
+    }
+
+    private func sessionSnapshotUploadStatusCandidateURLs() -> [URL] {
+        scoutRootStatusReadCandidates
+            .map { $0.appendingPathComponent("session_snapshot_upload_status.json") }
+            .reduce(into: [URL]()) { urls, url in
+                if !urls.contains(url) {
+                    urls.append(url)
+                }
+            }
+    }
+
+    private static func mergedSessionSnapshotUploadStatusRecords(
+        _ records: [SessionSnapshotUploadStatusRecord]
+    ) -> [SessionSnapshotUploadStatusRecord] {
+        var mergedByKey: [String: SessionSnapshotUploadStatusRecord] = [:]
+        for record in records {
+            if let existing = mergedByKey[record.idempotencyKey] {
+                mergedByKey[record.idempotencyKey] = preferredSessionSnapshotUploadStatusRecord(
+                    existing,
+                    over: record
+                )
+            } else {
+                mergedByKey[record.idempotencyKey] = record
+            }
+        }
+        return mergedByKey.values.sorted { lhs, rhs in
+            if lhs.updatedAt != rhs.updatedAt {
+                return lhs.updatedAt < rhs.updatedAt
+            }
+            return lhs.idempotencyKey < rhs.idempotencyKey
+        }
+    }
+
+    private static func preferredSessionSnapshotUploadStatusRecord(
+        _ lhs: SessionSnapshotUploadStatusRecord,
+        over rhs: SessionSnapshotUploadStatusRecord
+    ) -> SessionSnapshotUploadStatusRecord {
+        if lhs.status == .uploaded && rhs.status != .uploaded {
+            return lhs
+        }
+        if rhs.status == .uploaded && lhs.status != .uploaded {
+            return rhs
+        }
+        if lhs.updatedAt != rhs.updatedAt {
+            return lhs.updatedAt > rhs.updatedAt ? lhs : rhs
+        }
+        return lhs
     }
 
     private func prepareUbiquitousStatusFileRead(

@@ -71,6 +71,35 @@ final class CloudBackupRestoreRegressionTests: XCTestCase {
         return manager
     }
 
+    func testAutomaticICloudBackupsDefaultOffWhenSupabaseIsCanonical() {
+        let suite = "CloudBackupRestoreRegressionTests-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite) ?? .standard
+        defaults.removePersistentDomain(forName: suite)
+        defer { defaults.removePersistentDomain(forName: suite) }
+
+        let manager = CloudBackupManager(userDefaults: defaults)
+        managedBackupManagers.append(manager)
+
+        XCTAssertFalse(manager.automaticBackupsEnabled)
+        XCTAssertEqual(defaults.bool(forKey: "scout.backup.automaticEnabled"), false)
+        XCTAssertTrue(defaults.bool(forKey: "scout.backup.supabaseCanonicalAutomaticDisabled.v1"))
+    }
+
+    func testExistingAutomaticICloudBackupsAreDisabledOnceWhenSupabaseIsCanonical() {
+        let suite = "CloudBackupRestoreRegressionTests-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite) ?? .standard
+        defaults.removePersistentDomain(forName: suite)
+        defaults.set(true, forKey: "scout.backup.automaticEnabled")
+        defer { defaults.removePersistentDomain(forName: suite) }
+
+        let manager = CloudBackupManager(userDefaults: defaults)
+        managedBackupManagers.append(manager)
+
+        XCTAssertFalse(manager.automaticBackupsEnabled)
+        XCTAssertEqual(defaults.bool(forKey: "scout.backup.automaticEnabled"), false)
+        XCTAssertTrue(defaults.bool(forKey: "scout.backup.supabaseCanonicalAutomaticDisabled.v1"))
+    }
+
     func testRestoreMaterializationUsesBlobContentPathForSchemaV2() throws {
         let fileManager = FileManager.default
         let backupRoot = try makeTempDirectory()

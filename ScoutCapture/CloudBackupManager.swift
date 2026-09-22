@@ -164,6 +164,7 @@ final class CloudBackupManager: ObservableObject {
         static let lastRunChangedPathsSampleKey = "scout.backup.lastRunChangedPathsSample"
         static let lastRunPrunedPathsSampleKey = "scout.backup.lastRunPrunedPathsSample"
         static let automaticBackupsEnabledKey = "scout.backup.automaticEnabled"
+        static let supabaseCanonicalAutomaticBackupsDisabledKey = "scout.backup.supabaseCanonicalAutomaticDisabled.v1"
         static let safetyPauseUntilKey = "scout.backup.safetyPauseUntil"
         static let safetyPauseReasonKey = "scout.backup.safetyPauseReason"
     }
@@ -203,7 +204,11 @@ final class CloudBackupManager: ObservableObject {
         self.userDefaults = userDefaults
         self.backupQueue.setSpecific(key: backupQueueSpecificKey, value: backupQueueSpecificValue)
         if userDefaults.object(forKey: Constants.automaticBackupsEnabledKey) == nil {
-            userDefaults.set(true, forKey: Constants.automaticBackupsEnabledKey)
+            userDefaults.set(false, forKey: Constants.automaticBackupsEnabledKey)
+        }
+        if !userDefaults.bool(forKey: Constants.supabaseCanonicalAutomaticBackupsDisabledKey) {
+            userDefaults.set(false, forKey: Constants.automaticBackupsEnabledKey)
+            userDefaults.set(true, forKey: Constants.supabaseCanonicalAutomaticBackupsDisabledKey)
         }
         self.status = CloudBackupStatus(
             state: .unavailable,

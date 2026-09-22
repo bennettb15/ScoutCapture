@@ -12,14 +12,13 @@ enum StorageRoot {
         let localRoot: URL
 
         nonisolated var activeRoot: URL {
-            cloudRoot ?? localRoot
+            localRoot
         }
     }
 
     private nonisolated(unsafe) static let fileManager = FileManager.default
     private nonisolated static let lock = NSLock()
     private nonisolated(unsafe) static var cachedResolution: Resolution?
-    private nonisolated(unsafe) static var didPrepareStorage = false
     private nonisolated(unsafe) static var didLogStatus = false
 
     nonisolated static func activeRootURL() -> URL {
@@ -62,20 +61,8 @@ enum StorageRoot {
         let resolution = cachedResolution ?? makeResolution(timeout: timeout)
         cachedResolution = resolution
 
-        let cloudAvailable = resolution.cloudRoot != nil
         let activeRoot = resolution.activeRoot
-        let didAttemptMigration: Bool
-        let migrationResult: String
-
-        if didPrepareStorage {
-            didAttemptMigration = false
-            migrationResult = "skipped"
-        } else {
-            let outcome = migrateLocalSCOUTToCloudIfNeeded(using: resolution)
-            didAttemptMigration = outcome.attempted
-            migrationResult = outcome.result
-            didPrepareStorage = true
-        }
+        let cloudAvailable = resolution.cloudRoot != nil
 
         do {
             try fileManager.createDirectory(at: activeRoot, withIntermediateDirectories: true)
@@ -92,8 +79,7 @@ enum StorageRoot {
         if !didLogStatus {
             print("[iCloud] cloudAvailable=\(cloudAvailable)")
             print("[iCloud] activeRoot=\(activeRoot.path)")
-            print("[iCloud] migration attempted=\(didAttemptMigration)")
-            print("[iCloud] migration result=\(migrationResult)")
+            print("[iCloud] operationalStorage=local_app_support")
             didLogStatus = true
         }
 
@@ -134,41 +120,6 @@ enum StorageRoot {
         return fileManager.url(forUbiquityContainerIdentifier: nil)?
             .appendingPathComponent("Documents", isDirectory: true)
             .appendingPathComponent("ScoutCapture", isDirectory: true)
-    }
-
-    private nonisolated static func migrateLocalSCOUTToCloudIfNeeded(using resolution: Resolution) -> (attempted: Bool, result: String) {
-        guard let cloudRoot = resolution.cloudRoot else {
-            return (false, "skipped")
-        }
-
-        let localScoutRoot = resolution.localRoot.appendingPathComponent("SCOUT", isDirectory: true)
-        let cloudScoutRoot = cloudRoot.appendingPathComponent("SCOUT", isDirectory: true)
-
-        guard fileManager.fileExists(atPath: localScoutRoot.path) else {
-            return (false, "skipped")
-        }
-
-        if fileManager.fileExists(atPath: cloudScoutRoot.path) {
-            return (true, "alreadyPresent")
-        }
-
-        do {
-            try fileManager.createDirectory(at: cloudRoot, withIntermediateDirectories: true)
-            try fileManager.copyItem(at: localScoutRoot, to: cloudScoutRoot)
-
-            guard fileManager.fileExists(atPath: cloudScoutRoot.path) else {
-                return (true, "failed(copyVerifyMissing)")
-            }
-
-            do {
-                try fileManager.removeItem(at: localScoutRoot)
-                return (true, "deletedLocal")
-            } catch {
-                return (true, "copied")
-            }
-        } catch {
-            return (true, "failed(\(error.localizedDescription))")
-        }
     }
 
     nonisolated static func makeSessionExportRootFolder(propertyFolderName: String, sessionID: UUID) throws -> URL {
