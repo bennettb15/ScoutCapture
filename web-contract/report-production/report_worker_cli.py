@@ -1413,6 +1413,32 @@ def mark_fast_lane_report_delivered(
                 result["action"] = "already_exported"
                 result["property_status"] = "exported"
                 return result
+            if current.get("status") in {"idle", "pending_export", "exported"}:
+                fallback_rows = client.patch(
+                    "property_status",
+                    {
+                        "property_id": f"eq.{property_id}",
+                        "org_id": f"eq.{org_id}",
+                        "status": f"in.(idle,pending_export,exported)",
+                    },
+                    {
+                        "status": "exported",
+                        "active_session_id": None,
+                        "draft_session_id": None,
+                        "pending_export_session_id": None,
+                        "last_exported_session_id": session_id,
+                        "owner_user_id": None,
+                        "owner_device_id": None,
+                        "heartbeat_at": None,
+                        "status_reason": f"{REPORT_DELIVERED_STATUS_REASON}:fallback",
+                    },
+                )
+                result["property_status_rows_updated"] = len(fallback_rows)
+                if fallback_rows:
+                    result["success"] = True
+                    result["action"] = "marked_exported_fallback"
+                    result["property_status"] = fallback_rows[0].get("status")
+                    return result
             result["property_status"] = current.get("status")
             result["pending_export_session_id"] = current.get("pending_export_session_id")
             result["last_exported_session_id"] = current.get("last_exported_session_id")

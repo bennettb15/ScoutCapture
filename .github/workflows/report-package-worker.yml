@@ -68,7 +68,6 @@ jobs:
         run: |
           set -euo pipefail
           worker_args=(
-            --poll-once
             --allow-remote-validation
             --expected-project-ref chlvazmtucoszicehtnm
             --retention-mode dry-run
@@ -76,11 +75,16 @@ jobs:
           )
           if [[ -n "${REPORT_WORKER_SESSION_ID}" ]]; then
             echo "Report worker trigger source: ${REPORT_WORKER_TRIGGER_SOURCE}"
-            echo "Restricting poll to session_id=${REPORT_WORKER_SESSION_ID}"
-            echo "Trigger snapshot_id=${REPORT_WORKER_SNAPSHOT_ID:-none}; worker will process the latest completed sealed snapshot for the session."
-            worker_args+=(--allow-session-id "${REPORT_WORKER_SESSION_ID}")
+            echo "Restricting worker to session_id=${REPORT_WORKER_SESSION_ID}"
+            echo "Trigger snapshot_id=${REPORT_WORKER_SNAPSHOT_ID:-none}; worker will process the explicit completed sealed snapshot."
+            if [[ -z "${REPORT_WORKER_SNAPSHOT_ID:-}" ]]; then
+              echo "::error::REPORT_WORKER_SNAPSHOT_ID is required when REPORT_WORKER_SESSION_ID is supplied."
+              exit 1
+            fi
+            worker_args+=(--session-id "${REPORT_WORKER_SESSION_ID}" --snapshot-id "${REPORT_WORKER_SNAPSHOT_ID}" --allow-session-id "${REPORT_WORKER_SESSION_ID}")
           else
             echo "No session_id input supplied; running all-org completed sealed snapshot poll."
+            worker_args+=(--poll-once)
           fi
 
           docker run --rm \
