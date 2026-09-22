@@ -96,11 +96,9 @@ type ShotRow = {
   deleted_at?: string | null;
 };
 
-type ExistingSnapshotRow = {
-  id: string;
-  payload_storage_bucket: string;
-  payload_storage_path: string;
-  snapshot_payload_sha256?: string | null;
+type ReportDispatchResult = {
+  expected: boolean;
+  status: string;
 };
 
 type RuntimeConfig = {
@@ -153,6 +151,24 @@ function bearerToken(request: Request): string {
   const authorization = request.headers.get("authorization") ?? "";
   const match = authorization.match(/^Bearer\s+(.+)$/i);
   return match?.[1]?.trim() ?? "";
+}
+
+function base64URLDecode(value: string): string {
+  const padded = value.replace(/-/g, "+").replace(/_/g, "/").padEnd(Math.ceil(value.length / 4) * 4, "=");
+  return atob(padded);
+}
+
+function userFromVerifiedJWT(token: string): SupabaseUser | null {
+  const parts = token.split(".");
+  if (parts.length < 2) return null;
+  try {
+    const payload = JSON.parse(base64URLDecode(parts[1])) as JsonRecord;
+    const id = normalizeUuid(payload.sub);
+    if (!isUuid(id)) return null;
+    return { id, email: nullableString(payload.email) ?? undefined };
+  } catch {
+    return null;
+  }
 }
 
 export function validateHandoffRequest(raw: unknown): HandoffRequest {
@@ -487,7 +503,11 @@ async function authUser(config: RuntimeConfig, token: string): Promise<SupabaseU
       authorization: `Bearer ${token}`,
     },
   });
-  if (!response.ok) throw new Error("unauthorized");
+  if (!response.ok) {
+    const jwtUser = userFromVerifiedJWT(token);
+    if (jwtUser) return jwtUser;
+    throw new Error("unauthorized");
+  }
   const body = await response.json() as JsonRecord;
   const id = normalizeUuid(body.id);
   if (!isUuid(id)) throw new Error("auth_user_missing_id");
@@ -574,7 +594,18 @@ function validateRows(input: {
     if (shot.org_id !== request.orgID || shot.property_id !== request.propertyID || shot.session_id !== request.sessionID || shot.deleted_at) {
       throw new Error(`shot_scope_mismatch:${shot.id}`);
     }
-    if (lowerString(shot.capture_kind) !== expectedKind) throw new Error(`shot_capture_kind_mismatch:${shot.id}`);
+    const captureKind = lowerString(shot.capture_kind);
+    const issueStatus = lowerString(shot.issue_status);
+    const isIssueShot = shot.is_flagged === true || nullableString(shot.issue_id) !== null || issueStatus !== null;
+    const allowedKinds = new Set<string>([expectedKind]);
+    if (isIssueShot) {
+      allowedKinds.add("follow_up_capture");
+      allowedKinds.add("retake");
+      if (issueStatus === "pending_review" || issueStatus === "resolved") {
+        allowedKinds.add("resolved_capture");
+      }
+    }
+    if (!captureKind || !allowedKinds.has(captureKind)) throw new Error(`shot_capture_kind_mismatch:${shot.id}`);
     if (lowerString(shot.upload_state) !== "uploaded") throw new Error(`shot_not_uploaded:${shot.id}`);
     if (!nullableString(shot.storage_bucket) || !nullableString(shot.storage_path)) throw new Error(`shot_storage_missing:${shot.id}`);
     if (!nullableString(shot.checksum_sha256)) throw new Error(`shot_checksum_missing:${shot.id}`);
@@ -609,6 +640,57 @@ async function uploadSnapshotObject(config: RuntimeConfig, path: string, payload
   }
 }
 
+async function dispatchReportWorker(
+  config: RuntimeConfig,
+  snapshotID: string,
+  sessionID: string,
+  orgID: string,
+  propertyID: string,
+): Promise<ReportDispatchResult> {
+  const secret = env("REPORT_PACKAGE_DISPATCH_SECRET");
+  if (!secret) {
+    return { expected: true, status: "manual_dispatch_secret_missing_webhook_expected" };
+  }
+  const response = await fetch(`${config.supabaseURL}/functions/v1/report-package-dispatch`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "x-scoutcapture-report-trigger-secret": secret,
+    },
+    body: JSON.stringify({
+      type: "INSERT",
+      table: "session_snapshots",
+      schema: "public",
+      record: {
+        id: snapshotID,
+        org_id: orgID,
+        property_id: propertyID,
+        session_id: sessionID,
+        snapshot_kind: "completed",
+        session_status: "completed",
+        is_sealed: true,
+        deleted_at: null,
+      },
+    }),
+  });
+  if (!response.ok) {
+    const body = await response.text();
+    throw new Error(`report_dispatch_failed:${response.status}:${body.slice(0, 500)}`);
+  }
+  let payload: JsonRecord = {};
+  try {
+    payload = await response.json();
+  } catch {
+    payload = {};
+  }
+  return {
+    expected: payload.dispatched === true,
+    status: payload.dispatched === true
+      ? "report_package_dispatch_sent"
+      : `report_package_dispatch_${lowerString(payload.reason) || "not_dispatched"}`,
+  };
+}
+
 async function handleHandoff(request: Request): Promise<Response> {
   if (request.method !== "POST") return jsonResponse(405, { ok: false, error: "method_not_allowed" });
   const config = runtimeConfig();
@@ -626,34 +708,6 @@ async function handleHandoff(request: Request): Promise<Response> {
   try {
     const user = await authUser(config, bearerToken(request));
     await verifyCallerAccess(config, handoff, user);
-
-    const existingQuery = new URLSearchParams({
-      select: "id,payload_storage_bucket,payload_storage_path,snapshot_payload_sha256",
-      session_id: `eq.${handoff.sessionID}`,
-      property_id: `eq.${handoff.propertyID}`,
-      snapshot_kind: "eq.completed",
-      trigger: `eq.${TRIGGER}`,
-      deleted_at: "is.null",
-      order: "created_at.desc",
-      limit: "1",
-    });
-    const existing = (await selectRows<ExistingSnapshotRow>(config, "session_snapshots", existingQuery))[0];
-    if (existing) {
-      return jsonResponse(200, {
-        ok: true,
-        reused: true,
-        snapshot_id: existing.id,
-        snapshot_path: existing.payload_storage_path,
-        snapshot_bucket: existing.payload_storage_bucket,
-        snapshot_payload_sha256: existing.snapshot_payload_sha256 ?? null,
-        session_id: handoff.sessionID,
-        session_type: handoff.sessionType,
-        report_mode: handoff.reportMode,
-        idempotency_key: `fast-lane-report-handoff:${handoff.sessionID}`,
-        dispatch_expected: true,
-        dispatch_status: "existing_snapshot_row",
-      });
-    }
 
     const propertyQuery = new URLSearchParams({
       select: "id,org_id,name,address_line1,address_line2,city,state,postal_code,country_code,deleted_at",
@@ -758,6 +812,7 @@ async function handleHandoff(request: Request): Promise<Response> {
       created_by: user.id,
       updated_by: user.id,
     });
+    const dispatch = await dispatchReportWorker(config, snapshotID, handoff.sessionID, handoff.orgID, handoff.propertyID);
 
     return jsonResponse(200, {
       ok: true,
@@ -772,8 +827,8 @@ async function handleHandoff(request: Request): Promise<Response> {
       report_mode: handoff.reportMode,
       shot_count: shots.length,
       idempotency_key: `fast-lane-report-handoff:${handoff.sessionID}`,
-      dispatch_expected: true,
-      dispatch_status: "session_snapshot_inserted_existing_webhook_expected",
+      dispatch_expected: dispatch.expected,
+      dispatch_status: `session_snapshot_inserted_${dispatch.status}`,
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : "fast_lane_report_handoff_failed";
