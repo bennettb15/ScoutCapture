@@ -2507,6 +2507,45 @@ final class LocalStore {
             }
 
             guard let index = matchIndex else {
+                if let issueID = overlay.issueID,
+                   let status = overlay.status {
+                    let timestamp = overlay.updatedAt ?? Date()
+                    let statement = trimmedNonEmpty(overlay.detailType) ??
+                        trimmedNonEmpty(overlay.shotKey) ??
+                        "Flagged issue"
+                    var observation = Observation(
+                        id: issueID,
+                        propertyID: propertyID,
+                        sessionID: nil,
+                        createdAt: timestamp,
+                        updatedAt: timestamp,
+                        statement: statement,
+                        status: status,
+                        linkedShotID: overlay.shotID,
+                        building: overlay.building,
+                        targetElevation: overlay.targetElevation,
+                        detailType: overlay.detailType,
+                        priority: overlay.priority,
+                        trade: overlay.trade,
+                        currentReason: statement,
+                        note: statement
+                    )
+                    if status == .pendingReview || status == .resolved {
+                        observation.resolvedInSessionID = nil
+                    }
+                    observations.append(observation)
+                    let insertedIndex = observations.count - 1
+                    observationIndexByID[issueID] = insertedIndex
+                    appliedCount += 1
+#if DEBUG
+                    print(
+                        "[PortalPunchlistOverlay] propertyID=\(propertyID.uuidString) " +
+                        "result=created match=issue_id issueID=\(issueID.uuidString) " +
+                        "key=\(locationKey ?? "none") status=\(status.issueStatusValue) persisted=true"
+                    )
+#endif
+                    continue
+                }
                 skippedNoMatchCount += 1
 #if DEBUG
                 print(
@@ -2532,39 +2571,53 @@ final class LocalStore {
 
             let before = observations[index]
             if let status = overlay.status,
-               observations[index].status != .resolutionRequired,
-               shouldApplyPortalPunchlistStatusOverlay(
-                status,
-                updatedAt: overlay.updatedAt,
-                to: observations[index]
-               ) {
-                observations[index].status = status
-                switch status {
-                case .active:
-                    if before.status == .pendingReview {
-                        observations[index].resolutionPhotoRef = nil
-                        observations[index].resolutionStatement = nil
-                        observations[index].historyEvents.append(
-                            ObservationHistoryEvent(
-                                timestamp: overlay.updatedAt ?? Date(),
-                                sessionID: nil,
-                                kind: .reopened,
-                                beforeValue: Observation.Status.pendingReview.issueStatusValue,
-                                afterValue: Observation.Status.active.issueStatusValue,
-                                field: "status",
-                                shotID: overlay.shotID ?? before.linkedShotID
+               observations[index].status != .resolutionRequired {
+                let remoteActiveIsNewer = overlay.updatedAt.map { $0 > observations[index].updatedAt } ?? false
+                let exactIssueReopenedFromReview = matchMethod == "issue_id" &&
+                    observations[index].status == .pendingReview &&
+                    status == .active &&
+                    remoteActiveIsNewer
+                let exactIssueSubmittedForReview = matchMethod == "issue_id" &&
+                    observations[index].status == .active &&
+                    status == .pendingReview
+                let shouldPreservePendingReview = observations[index].status == .pendingReview &&
+                    status == .active &&
+                    !overlay.reopensResolved &&
+                    !remoteActiveIsNewer
+                if !shouldPreservePendingReview &&
+                    (overlay.reopensResolved || exactIssueReopenedFromReview || exactIssueSubmittedForReview || shouldApplyPortalPunchlistStatusOverlay(
+                        status,
+                        updatedAt: overlay.updatedAt,
+                        to: observations[index]
+                    )) {
+                    observations[index].status = status
+                    switch status {
+                    case .active:
+                        if before.status == .pendingReview || overlay.reopensResolved {
+                            observations[index].resolutionPhotoRef = nil
+                            observations[index].resolutionStatement = nil
+                            observations[index].historyEvents.append(
+                                ObservationHistoryEvent(
+                                    timestamp: overlay.updatedAt ?? Date(),
+                                    sessionID: nil,
+                                    kind: .reopened,
+                                    beforeValue: Observation.Status.pendingReview.issueStatusValue,
+                                    afterValue: Observation.Status.active.issueStatusValue,
+                                    field: "status",
+                                    shotID: overlay.shotID ?? before.linkedShotID
+                                )
                             )
-                        )
+                        }
+                        observations[index].resolvedInSessionID = nil
+                    case .resolutionRequired:
+                        observations[index].resolvedInSessionID = nil
+                    case .pendingReview:
+                        break
+                    case .resolved:
+                        observations[index].resolvedInSessionID =
+                            observations[index].resolvedInSessionID ??
+                            observations[index].updatedInSessionID
                     }
-                    observations[index].resolvedInSessionID = nil
-                case .resolutionRequired:
-                    observations[index].resolvedInSessionID = nil
-                case .pendingReview:
-                    break
-                case .resolved:
-                    observations[index].resolvedInSessionID =
-                        observations[index].resolvedInSessionID ??
-                        observations[index].updatedInSessionID
                 }
             }
             if let priority = overlay.priority {
@@ -2628,6 +2681,7 @@ final class LocalStore {
     private func preservedLocalWorkflowStatus(
         existing: Observation?,
         incoming: Observation.Status,
+        incomingUpdatedAt: Date?,
         representsResolvedDocumentation: Bool
     ) -> Observation.Status {
         if isTerminalResolvedSupportingDocumentation(existing),
@@ -2638,7 +2692,11 @@ final class LocalStore {
            incoming == .active {
             return .pendingReview
         }
-        if shouldPreservePortalRejectedActive(existing: existing, incoming: incoming) {
+        if shouldPreservePortalRejectedActive(
+            existing: existing,
+            incoming: incoming,
+            incomingUpdatedAt: incomingUpdatedAt
+        ) {
             return .active
         }
         guard existing?.status == .resolutionRequired else { return incoming }
@@ -2647,20 +2705,32 @@ final class LocalStore {
 
     private func shouldPreservePortalRejectedActive(
         existing: Observation?,
-        incoming: Observation.Status
+        incoming: Observation.Status,
+        incomingUpdatedAt: Date? = nil
     ) -> Bool {
-        existing?.status == .active &&
-            incoming == .pendingReview &&
-            observationHasPortalRejectedPendingReviewReopen(existing)
+        guard let existing,
+              existing.status == .active,
+              incoming == .pendingReview,
+              let latestReopenAt = latestPortalRejectedPendingReviewReopenAt(existing) else {
+            return false
+        }
+        if let incomingUpdatedAt,
+           incomingUpdatedAt > latestReopenAt {
+            return false
+        }
+        return true
     }
 
-    private func observationHasPortalRejectedPendingReviewReopen(_ observation: Observation?) -> Bool {
-        guard let observation else { return false }
-        return observation.historyEvents.contains { event in
-            event.kind == .reopened &&
+    private func latestPortalRejectedPendingReviewReopenAt(_ observation: Observation?) -> Date? {
+        guard let observation else { return nil }
+        return observation.historyEvents.compactMap { event -> Date? in
+            guard event.kind == .reopened &&
                 event.beforeValue == Observation.Status.pendingReview.issueStatusValue &&
-                event.afterValue == Observation.Status.active.issueStatusValue
-        }
+                event.afterValue == Observation.Status.active.issueStatusValue else {
+                return nil
+            }
+            return event.timestamp
+        }.max()
     }
 
     private func mergedObservationShots(
@@ -3378,13 +3448,13 @@ final class LocalStore {
         let normalizedPriority = normalizedSessionPriority(observation.priority)
         let normalizedTrade = trimmedNonEmpty(trade)
         let isResolved = observation.status == .resolved
-        let isActiveFieldWork = observation.status.isActiveFieldWork
+        let shouldRemainInIssueLane = observation.status != .resolutionRequired
         let issueStatus = observation.status.issueStatusValue
         let captureKindForActiveUpdate = trimmedNonEmpty(activeCaptureKind) ?? "follow_up_capture"
 
         var syncedShot: ShotMetadata?
         if let shotIndex = metadata.shots.firstIndex(where: { $0.shotID == shotID }) {
-            metadata.shots[shotIndex].isFlagged = isActiveFieldWork
+            metadata.shots[shotIndex].isFlagged = shouldRemainInIssueLane
             metadata.shots[shotIndex].issueID = observation.id
             metadata.shots[shotIndex].issueStatus = issueStatus
             if let reason {
@@ -4751,20 +4821,21 @@ final class LocalStore {
                         imageLocalIdentifier: shotPath(for: shot),
                         note: shot.noteText
                     )
-                }
+            }
 
             let snapshotStatus = Observation.Status.status(from: issue.issueStatus)
             let existing = existingObservationsByID[issue.issueID]
+            let createdAt = issue.firstSeenAt ?? issue.lastSeenAt ?? metadata.startedAt
+            let updatedAt = issue.lastSeenAt ?? issue.resolvedAt ?? createdAt
             let preservePortalRejectedActive = shouldPreservePortalRejectedActive(
                 existing: existing,
-                incoming: snapshotStatus
+                incoming: snapshotStatus,
+                incomingUpdatedAt: updatedAt
             )
             let linkedShot = preservePortalRejectedActive
                 ? existing?.linkedShotID
                 : currentMetaShot?.shotID ?? shots.last?.id
             let latestMetaShot = currentMetaShot
-            let createdAt = issue.firstSeenAt ?? issue.lastSeenAt ?? metadata.startedAt
-            let updatedAt = issue.lastSeenAt ?? issue.resolvedAt ?? createdAt
             let observationUpdatedAt = preservePortalRejectedActive
                 ? max(existing?.updatedAt ?? updatedAt, updatedAt)
                 : updatedAt
@@ -4776,6 +4847,7 @@ final class LocalStore {
             let status = preservedLocalWorkflowStatus(
                 existing: existing,
                 incoming: snapshotStatus,
+                incomingUpdatedAt: updatedAt,
                 representsResolvedDocumentation: snapshotStatus == .resolved &&
                     (issue.lastCaptureSessionId == sessionID || issue.resolvedAt != nil)
             )
@@ -4912,7 +4984,8 @@ final class LocalStore {
                 let existing = observationsByID[issueID]
                 let preservePortalRejectedActive = shouldPreservePortalRejectedActive(
                     existing: existing,
-                    incoming: metadataStatus
+                    incoming: metadataStatus,
+                    incomingUpdatedAt: updatedAt
                 )
                 if isTerminalResolvedSupportingDocumentation(existing),
                    metadataStatus != .resolved {
@@ -4932,6 +5005,7 @@ final class LocalStore {
                 let status = preservedLocalWorkflowStatus(
                     existing: observationsByID[issueID],
                     incoming: metadataStatus,
+                    incomingUpdatedAt: updatedAt,
                     representsResolvedDocumentation: resolvedByThisSnapshot
                 )
                 if next.updatedAt > updatedAt,

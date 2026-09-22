@@ -13476,13 +13476,11 @@ private enum FastRuntimeProductionCompleteState: Equatable {
 
 private enum FastLaneSideControlSheetMode: Identifiable {
     case activeIssues
-    case resolutionRequired
     case guided
 
     var id: String {
         switch self {
         case .activeIssues: return "active_issues"
-        case .resolutionRequired: return "resolution_required"
         case .guided: return "guided"
         }
     }
@@ -13615,6 +13613,45 @@ private enum FastLaneCaptureIntent: Equatable {
         default:
             return nil
         }
+    }
+}
+
+private struct FastLanePendingFlaggedDecision: Equatable, Identifiable {
+    let id = UUID()
+    let issueID: UUID
+    let shotID: UUID
+    let reason: String
+    let priority: String
+}
+
+private enum FastLaneFlaggedDecisionStage: Equatable {
+    case primary
+    case reviseObservation
+}
+
+private struct FastLanePostCaptureActionButtonStyle: ButtonStyle {
+    let cornerRadius: CGFloat
+
+    func makeBody(configuration: Configuration) -> some View {
+        let isPressed = configuration.isPressed
+
+        configuration.label
+            .scaleEffect(isPressed ? 0.97 : 1.0)
+            .brightness(isPressed ? -0.08 : 0)
+            .overlay {
+                if isPressed {
+                    RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                        .fill(Color.white.opacity(0.16))
+                        .allowsHitTesting(false)
+                }
+            }
+            .overlay {
+                if isPressed {
+                    RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                        .stroke(Color.white.opacity(0.65), lineWidth: 1.5)
+                        .allowsHitTesting(false)
+                }
+            }
     }
 }
 
@@ -13778,6 +13815,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
     @State private var reportHandoffResult: AppState.FastRuntimeReportHandoffResult?
     @State private var chromeLocationMode: CameraChromeLocationMode = .exterior
     @StateObject private var fastDetailTypesModel = FastLaneDetailTypesModel()
+    @StateObject private var fastPanelDetailTypesModel = DetailTypesModel()
     @StateObject private var locationManager = LocationManager()
     @State private var fastLaneCaptureProfileState: CaptureProfile = .residential
     @State private var fastMetadataContext: AppState.FastRuntimeCaptureMetadataContext = AppState.FastRuntimeCaptureMetadataContext(
@@ -13825,8 +13863,18 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
     @State private var didRefreshFastLaneSideControlCounts: Bool = false
     @State private var didRefreshFastLaneIssuePayload: Bool = false
     @State private var isRefreshingFastLaneSideControlCounts: Bool = false
+    @State private var isSyncingFastLanePortalIssueState: Bool = false
+    @State private var didSyncFastLanePortalIssueStateAfterPreview: Bool = false
+    @State private var didScheduleFastLanePortalIssueFollowUpRefresh: Bool = false
     @State private var fastLaneSideControlToastText: String?
     @State private var fastLaneSideControlToastToken: Int = 0
+    @State private var fastLanePendingFlaggedDecision: FastLanePendingFlaggedDecision?
+    @State private var fastLaneFlaggedDecisionStage: FastLaneFlaggedDecisionStage = .primary
+    @State private var fastLaneFlaggedRevisionText: String = ""
+    @State private var fastLaneFlaggedRevisionPriority: String = "Medium"
+    @State private var fastLaneRetakeIssueID: UUID?
+    @State private var fastLaneRetakeGuidedID: UUID?
+    @State private var fastLaneGalleryDisplayCount: Int = 0
     @StateObject private var fastLaneGalleryImageCache = AssetImageCache()
     @State private var showFastLaneGallery: Bool = false
     @State private var fastLaneGalleryAssets: [ReportAsset] = []
@@ -13911,6 +13959,11 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                 .padding(.horizontal, 18)
                 .zIndex(525)
             }
+
+            if let pending = fastLanePendingFlaggedDecision {
+                fastLaneFlaggedDecisionOverlay(pending)
+                    .zIndex(540)
+            }
         }
         .onAppear {
             UIDevice.current.beginGeneratingDeviceOrientationNotifications()
@@ -13945,6 +13998,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             if camera.isPreviewRunning, previewRunningAt == nil {
                 previewRunningAt = Date()
                 refreshFastLaneSideControlCountsIfNeeded()
+                scheduleFastLanePortalIssueFollowUpRefreshIfNeeded()
             }
         }
         .onReceive(NotificationCenter.default.publisher(for: UIDevice.orientationDidChangeNotification)) { _ in
@@ -13954,6 +14008,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             guard isRunning, previewRunningAt == nil else { return }
             previewRunningAt = Date()
             refreshFastLaneSideControlCountsIfNeeded()
+            scheduleFastLanePortalIssueFollowUpRefreshIfNeeded()
         }
         .onDisappear {
             UIDevice.current.endGeneratingDeviceOrientationNotifications()
@@ -14067,58 +14122,256 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
     private func fastLaneSideControlSheet(for mode: FastLaneSideControlSheetMode) -> some View {
         switch mode {
         case .activeIssues:
-            FastLaneIssueListSheet(
+            ActiveIssuesSheet(
                 mode: .activeIssues,
                 observations: fastLaneSideControlPayload.activeObservations,
-                thumbnailPathByID: fastLaneIssueThumbnailPathByID,
-                handledObservationIDs: fastLaneHandledIssueIDsInCurrentSession(),
-                imageCache: fastLaneGalleryImageCache,
-                isLoading: isLoadingFastLaneSideControlSheet,
-                onSelect: { observation in
+                isHydrating: isLoadingFastLaneSideControlSheet,
+                currentSessionID: context.sessionID,
+                sessionShotIDs: fastLaneCurrentSessionShotIDs(),
+                resolvedThumbnailPathByID: fastLaneIssueThumbnailPathByID,
+                referencePathByID: fastLaneIssueThumbnailPathByID,
+                angleIndexByIssueID: fastLaneIssueAngleIndexByID(
+                    for: fastLaneSideControlPayload.activeObservations
+                ),
+                allowReferenceFallback: true,
+                captureProfile: fastLaneCaptureProfile,
+                tradeOptions: FastLaneMetadataOptions.canonicalTradeOptions(
+                    fastTradeOptions,
+                    selectedTrade: fastMetadataContext.trade
+                ),
+                buildingOptions: $fastBuildingOptions,
+                detailTypesModel: fastPanelDetailTypesModel,
+                buildingCodeForOption: FastLaneMetadataOptions.buildingCode(from:),
+                buildingDisplayNameForOption: FastLaneMetadataOptions.buildingDisplayName(for:),
+                cache: fastLaneGalleryImageCache,
+                compactContextAngle: true,
+                selectionDisabledIssueIDs: fastLaneHandledIssueIDsInCurrentSession(),
+                onClose: {
+                    fastLaneSideControlSheetMode = nil
+                },
+                onSelectIssue: { observation in
                     armFastLaneIssueCapture(observation, mode: .activeIssues)
                 },
-                onOpenImage: { observation in
-                    openFastLaneIssueImage(observation)
+                onRetakeIssue: { observation in
+                    retakeFastLaneIssueCapture(observation, mode: .activeIssues)
                 },
-                onClose: {
-                    fastLaneSideControlSheetMode = nil
-                }
-            )
-        case .resolutionRequired:
-            FastLaneIssueListSheet(
-                mode: .resolutionRequired,
-                observations: fastLaneSideControlPayload.resolutionRequiredObservations,
-                thumbnailPathByID: fastLaneIssueThumbnailPathByID,
-                handledObservationIDs: fastLaneHandledIssueIDsInCurrentSession(),
-                imageCache: fastLaneGalleryImageCache,
-                isLoading: isLoadingFastLaneSideControlSheet,
-                onSelect: { observation in
-                    armFastLaneIssueCapture(observation, mode: .resolutionRequired)
+                onReclassifyIssue: { observation, building, elevation, detailType in
+                    updateFastLaneObservationClassification(
+                        observation,
+                        building: building,
+                        elevation: elevation,
+                        detailType: detailType
+                    )
                 },
-                onOpenImage: { observation in
-                    openFastLaneIssueImage(observation)
-                },
-                onClose: {
-                    fastLaneSideControlSheetMode = nil
+                loadPortalNotes: { observations, angleIndexByIssueID in
+                    await fastLaneLoadPortalNotes(
+                        observations: observations,
+                        angleIndexByIssueID: angleIndexByIssueID
+                    )
                 }
             )
         case .guided:
-            FastLaneGuidedChecklistSheet(
+            GuidedChecklistOverlay(
                 guidedShots: fastLaneSideControlPayload.guidedShots,
                 retiredGuidedShots: fastLaneSideControlPayload.retiredGuidedShots,
-                thumbnailPathByID: fastLaneGuidedThumbnailPathByID,
-                imageCache: fastLaneGalleryImageCache,
-                isLoading: isLoadingFastLaneSideControlSheet,
+                resolvedThumbnailPathByID: fastLaneGuidedThumbnailPathByID,
+                referencePathByID: fastLaneGuidedThumbnailPathByID,
+                currentSessionID: context.sessionID,
+                currentSessionStartedAt: context.createdAt,
+                currentSessionEndedAt: nil,
+                currentSessionShotIDs: fastLaneCurrentSessionShotIDs(),
+                canChangeShotLifecycle: context.canCapture,
+                isBaselineSession: false,
+                allowReferenceFallback: true,
+                captureProfile: fastLaneCaptureProfile,
+                buildingOptions: $fastBuildingOptions,
+                detailTypesModel: fastPanelDetailTypesModel,
+                buildingCodeForOption: FastLaneMetadataOptions.buildingCode(from:),
+                buildingDisplayNameForOption: FastLaneMetadataOptions.buildingDisplayName(for:),
+                refreshToken: fastLaneGalleryRefreshToken,
+                cache: fastLaneGalleryImageCache,
+                compactContextAngle: true,
                 onClose: {
                     fastLaneSideControlSheetMode = nil
                 },
                 onSelectGuided: { guidedShot in
                     armFastLaneGuidedShot(guidedShot)
                 },
-                onOpenImage: { guidedShot in
-                    openFastLaneGuidedImage(guidedShot)
+                onSkip: { guidedShot, reason, otherNote in
+                    updateFastLaneGuidedSkip(guidedShot, reason: reason, otherNote: otherNote)
+                },
+                onUndoSkip: { guidedShot in
+                    undoFastLaneGuidedSkip(guidedShot)
+                },
+                onRetake: { guidedShot in
+                    retakeFastLaneGuidedShot(guidedShot)
+                },
+                onRetire: { guidedShot, reason in
+                    retireFastLaneGuidedShot(guidedShot, reason: reason)
+                },
+                onRestoreRetired: { guidedShot in
+                    restoreFastLaneGuidedShot(guidedShot)
+                },
+                onReclassify: { guidedShot, building, elevation, detailType in
+                    updateFastLaneGuidedClassification(
+                        guidedShot,
+                        building: building,
+                        elevation: elevation,
+                        detailType: detailType
+                    )
                 }
             )
+        }
+    }
+
+    private func fastLaneCurrentSessionShotIDs() -> Set<UUID> {
+        Set(fastLaneLocalShotRecords().map(\.id))
+    }
+
+    private func fastLaneIssueAngleIndexByID(for observations: [Observation]) -> [UUID: Int] {
+        observations.reduce(into: [UUID: Int]()) { partial, observation in
+            if let angle = fastLaneObservationDisplayAngleIndex(observation) {
+                partial[observation.id] = angle
+            }
+        }
+    }
+
+    private func reloadFastLaneSideControlPayloadFromLocalStore() {
+        let payload = appState.fastRuntimePreviewSideControlPayload(
+            propertyID: context.propertyID,
+            sessionType: context.sessionType
+        )
+        let scopedPayload = fastLanePayloadScopedToCurrentFastSession(payload)
+        fastLaneSideControlPayload = scopedPayload
+        fastLaneSideControlCounts = fastLaneSideControlCounts(from: scopedPayload)
+        refreshFastLaneSideControlMediaMaps(for: scopedPayload)
+    }
+
+    private func fastLaneLoadPortalNotes(
+        observations: [Observation],
+        angleIndexByIssueID: [UUID: Int]
+    ) async -> [UUID: [PortalPunchlistNote]] {
+        guard let activeOrganizationID = appState.activeOrganizationID else {
+            return [:]
+        }
+        return await appState.fetchPortalPunchlistNotes(
+            propertyID: context.propertyID,
+            activeOrganizationID: activeOrganizationID,
+            observations: observations,
+            angleIndexByIssueID: angleIndexByIssueID
+        )
+    }
+
+    private func updateFastLaneGuidedSkip(
+        _ guidedShot: GuidedShot,
+        reason: SkipReason,
+        otherNote: String?
+    ) {
+        if appState.fastRuntimeSetGuidedSkip(
+            propertyID: context.propertyID,
+            sessionID: context.sessionID,
+            guidedShotID: guidedShot.id,
+            reason: reason,
+            otherNote: otherNote
+        ) {
+            reloadFastLaneSideControlPayloadFromLocalStore()
+        } else {
+            showFastLaneSideControlToast("Unable to skip guided photo")
+        }
+    }
+
+    private func undoFastLaneGuidedSkip(_ guidedShot: GuidedShot) {
+        if appState.fastRuntimeUndoGuidedSkip(
+            propertyID: context.propertyID,
+            guidedShotID: guidedShot.id
+        ) {
+            reloadFastLaneSideControlPayloadFromLocalStore()
+        } else {
+            showFastLaneSideControlToast("Unable to undo skip")
+        }
+    }
+
+    private func retireFastLaneGuidedShot(_ guidedShot: GuidedShot, reason: String) {
+        if appState.fastRuntimeRetireGuidedShot(
+            propertyID: context.propertyID,
+            sessionID: context.sessionID,
+            guidedShotID: guidedShot.id,
+            reason: reason
+        ) {
+            if fastLaneCaptureIntent.guidedID == guidedShot.id {
+                clearFastLaneArmedCapture()
+            }
+            reloadFastLaneSideControlPayloadFromLocalStore()
+        } else {
+            showFastLaneSideControlToast("Unable to retire guided photo")
+        }
+    }
+
+    private func restoreFastLaneGuidedShot(_ guidedShot: GuidedShot) {
+        if appState.fastRuntimeRestoreGuidedShot(
+            propertyID: context.propertyID,
+            sessionID: context.sessionID,
+            guidedShotID: guidedShot.id
+        ) {
+            reloadFastLaneSideControlPayloadFromLocalStore()
+        } else {
+            showFastLaneSideControlToast("Unable to restore guided photo")
+        }
+    }
+
+    private func updateFastLaneGuidedClassification(
+        _ guidedShot: GuidedShot,
+        building: String,
+        elevation: String,
+        detailType: String
+    ) {
+        if appState.fastRuntimeReclassifyGuidedShot(
+            propertyID: context.propertyID,
+            sessionID: context.sessionID,
+            guidedShotID: guidedShot.id,
+            building: building,
+            elevation: elevation,
+            detailType: detailType,
+            angleIndex: fastLaneAngleIndexForContext(
+                building: building,
+                elevation: elevation,
+                detailType: detailType,
+                excludingGuidedShotID: guidedShot.id
+            )
+        ) {
+            reloadFastLaneSideControlPayloadFromLocalStore()
+        } else {
+            showFastLaneSideControlToast("Unable to reclassify guided photo")
+        }
+    }
+
+    private func updateFastLaneObservationClassification(
+        _ observation: Observation,
+        building: String,
+        elevation: String,
+        detailType: String
+    ) {
+        if appState.fastRuntimeReclassifyObservation(
+            propertyID: context.propertyID,
+            observationID: observation.id,
+            building: building,
+            elevation: elevation,
+            detailType: detailType
+        ) {
+            reloadFastLaneSideControlPayloadFromLocalStore()
+        } else {
+            showFastLaneSideControlToast("Unable to reclassify issue")
+        }
+    }
+
+    private func reopenFastLaneResolutionObservation(_ observation: Observation) {
+        if appState.fastRuntimeReopenObservation(
+            propertyID: context.propertyID,
+            observationID: observation.id
+        ) {
+            reloadFastLaneSideControlPayloadFromLocalStore()
+        } else {
+            showFastLaneSideControlToast("Unable to reopen issue")
         }
     }
 
@@ -14152,7 +14405,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             locationMode: chromeLocationMode,
             isLocationModeEnabled: !isFastLaneCaptureIntentArmed,
             sideControls: fastLaneChromeSideControls,
-            savedCount: capturedCount,
+            savedCount: fastLaneGalleryDisplayCount,
             thumbnail: fastLaneGalleryThumbnail,
             ellipsisEnabled: true,
             hasDetailNote: fastMetadataContext.detailNote != nil,
@@ -14297,8 +14550,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
         FastLaneSessionActionsSummary(
             guidedRemainingCount: fastLaneSideControlCounts.guidedRemainingCount,
             flaggedRemainingCount: fastLaneSideControlCounts.activeIssueCount,
-            resolutionRequiredRemainingCount: fastLaneSideControlCounts.resolutionRequiredCount,
-            currentSessionCaptureCount: capturedCount,
+            currentSessionCaptureCount: max(capturedCount, fastLaneGalleryDisplayCount),
             sessionType: context.sessionType,
             canComplete: canRunProductionComplete,
             isComplete: productionCompleteState.isComplete || didCompleteUpload,
@@ -14307,7 +14559,20 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
     }
 
     private var fastLaneEndingProgressTitle: String {
-        capturedCount > 0 ? "Closing Draft..." : "Closing..."
+        fastLaneCompletionCapturedPhotoCount() > 0 ? "Closing Draft..." : "Closing..."
+    }
+
+    private var fastLaneCompletionRemainingCounts: (flagged: Int, guided: Int) {
+        let guided = context.sessionType == .punchlistVisit ? 0 : fastLaneSideControlCounts.guidedRemainingCount
+        return (
+            flagged: fastLaneSideControlCounts.activeIssueCount,
+            guided: guided
+        )
+    }
+
+    private var hasFastLaneCompletionRemainingDebt: Bool {
+        let counts = fastLaneCompletionRemainingCounts
+        return counts.flagged > 0 || counts.guided > 0
     }
 
     private var fastLaneSessionActionsCompleteDisabledReason: String? {
@@ -14323,8 +14588,19 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
         if isSavingFastCapture || camera.isCapturing {
             return "Complete is disabled while the current photo is saving."
         }
-        if capturedCount == 0 {
+        if fastLaneCompletionCapturedPhotoCount() == 0 {
             return "\(AppState.sessionCompletionActionTitle(sessionType: context.sessionType)) is disabled until at least one photo is captured."
+        }
+        if hasFastLaneCompletionRemainingDebt {
+            let counts = fastLaneCompletionRemainingCounts
+            var parts: [String] = []
+            if counts.flagged > 0 {
+                parts.append("\(counts.flagged) flagged")
+            }
+            if counts.guided > 0 {
+                parts.append("\(counts.guided) guided")
+            }
+            return "Complete is disabled until remaining \(parts.joined(separator: ", ")) items are handled."
         }
         return nil
     }
@@ -14380,18 +14656,9 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
     }
 
     private var fastLaneChromeSideControls: [CameraChromeSideControl] {
-        let resolutionCount = fastLaneSideControlCounts.resolutionRequiredCount
         let activeIssueCount = fastLaneSideControlCounts.activeIssueCount
         let guidedCount = fastLaneSideControlCounts.guidedRemainingCount
         return [
-            CameraChromeSideControl(
-                id: "resolution_required",
-                systemImage: "flag.checkered",
-                color: resolutionCount > 0 ? .green : .white,
-                badgeText: resolutionCount > 0 ? "\(resolutionCount)" : nil,
-                accessibilityLabel: "Resolution required",
-                isEnabled: true
-            ),
             CameraChromeSideControl(
                 id: "active_issues",
                 systemImage: "flag.fill",
@@ -14815,7 +15082,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
 
             HStack(spacing: 8) {
                 statusBadge(previewStatusTitle, color: previewStatusColor)
-                statusBadge("Saved \(capturedCount)", color: .white.opacity(0.82))
+                statusBadge("Saved \(fastLaneGalleryDisplayCount)", color: .white.opacity(0.82))
                 if didCompleteUpload {
                     statusBadge("Uploaded", color: .green)
                 }
@@ -14933,7 +15200,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             }
 
             HStack(spacing: 18) {
-                Text("Saved \(capturedCount)")
+                Text("Saved \(fastLaneGalleryDisplayCount)")
                     .font(.system(size: 13, weight: .semibold))
                     .foregroundColor(.white.opacity(0.88))
                     .frame(width: 92, alignment: .leading)
@@ -15103,7 +15370,8 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
     }
 
     private var canRunProductionComplete: Bool {
-        capturedCount > 0 &&
+        fastLaneCompletionCapturedPhotoCount() > 0 &&
+            !hasFastLaneCompletionRemainingDebt &&
             !productionCompleteState.isRunning &&
             !productionCompleteState.isComplete &&
             !isFastLaneExiting &&
@@ -15147,7 +15415,9 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                     let capturePreparation = await MainActor.run {
                         (
                             metadata: fastLaneMetadataContextForNextCapture(),
-                            intent: fastLaneCaptureIntent
+                            intent: fastLaneCaptureIntent,
+                            retakeGuidedID: fastLaneRetakeGuidedID,
+                            retakeIssueID: fastLaneRetakeIssueID
                         )
                     }
                     let saveResult = await appState.saveFastRuntimePrototypeCapture(
@@ -15163,6 +15433,20 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                             shot: savedShot,
                             guidedID: capturePreparation.intent.guidedID
                         )
+                        if let retakeIssueID = capturePreparation.retakeIssueID {
+                            await pruneFastLaneRetakenIssueRecords(
+                                issueID: retakeIssueID,
+                                keepingShotID: savedShot.id,
+                                storageRoot: saveResult.storageRoot
+                            )
+                        }
+                        if let retakeGuidedID = capturePreparation.retakeGuidedID {
+                            await pruneFastLaneRetakenGuidedRecords(
+                                guidedID: retakeGuidedID,
+                                keepingShot: savedShot,
+                                storageRoot: saveResult.storageRoot
+                            )
+                        }
                     }
                     await MainActor.run {
                         lastCapture = FastRuntimePreviewCaptureTiming(
@@ -15174,6 +15458,8 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                         )
                         if saveResult.success {
                             let completedIntent = capturePreparation.intent
+                            fastLaneRetakeGuidedID = nil
+                            fastLaneRetakeIssueID = nil
                             if !fastLaneCaptureProfileHistoryLocked {
                                 let lockedProfile = fastLaneCaptureProfile
                                 _ = appState.setPropertyCaptureProfileDefault(
@@ -15224,7 +15510,10 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                             )
                             reloadFastLaneGalleryAssets()
                             refreshFastLaneSideControlCounts(force: true)
-                            if let feedback = fastLanePostCaptureFeedback(for: completedIntent) {
+                            if case .flagged(let issueID) = completedIntent,
+                               let savedShotID = saveResult.shot?.id {
+                                presentFastLaneFlaggedDecision(issueID: issueID, shotID: savedShotID)
+                            } else if let feedback = fastLanePostCaptureFeedback(for: completedIntent) {
                                 showFastLaneSideControlToast(feedback)
                             }
                         } else {
@@ -15245,12 +15534,26 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
         guard !isFastLaneExiting else { return }
         showFastLaneControlsMenu = false
         showFastLaneDetailNoteOverlay = false
+        primeFastLaneSideControlSnapshot()
         showFastLaneSessionActionsSheet = true
     }
 
     private func refreshFastLaneSideControlCountsIfNeeded() {
-        guard !didRefreshFastLaneSideControlCounts, !isRefreshingFastLaneSideControlCounts else { return }
+        guard !isRefreshingFastLaneSideControlCounts else { return }
+        guard !didRefreshFastLaneSideControlCounts || !didSyncFastLanePortalIssueStateAfterPreview else { return }
         refreshFastLaneSideControlCounts(force: false)
+    }
+
+    private func scheduleFastLanePortalIssueFollowUpRefreshIfNeeded() {
+        guard !didScheduleFastLanePortalIssueFollowUpRefresh else { return }
+        didScheduleFastLanePortalIssueFollowUpRefresh = true
+        Task {
+            try? await Task.sleep(nanoseconds: 4_000_000_000)
+            await MainActor.run {
+                guard !isFastLaneExiting else { return }
+                refreshFastLaneSideControlCounts(force: true)
+            }
+        }
     }
 
     private func primeFastLaneSideControlSnapshot() {
@@ -15272,21 +15575,19 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
         }
         isRefreshingFastLaneSideControlCounts = true
         Task {
+            await syncFastLanePortalIssueStateIfAvailable(force: force)
             let issuePayload = appState.fastRuntimePreviewIssueSideControlPayload(propertyID: context.propertyID)
             await MainActor.run {
-                fastLaneSideControlPayload = AppState.FastRuntimePreviewSideControlPayload(
-                    resolutionRequiredObservations: issuePayload.resolutionRequiredObservations,
+                let rawPayload = AppState.FastRuntimePreviewSideControlPayload(
+                    resolutionRequiredObservations: [],
                     activeObservations: issuePayload.activeObservations,
                     guidedShots: fastLaneSideControlPayload.guidedShots,
                     retiredGuidedShots: fastLaneSideControlPayload.retiredGuidedShots
                 )
-                refreshFastLaneSideControlMediaMaps(for: fastLaneSideControlPayload)
-                fastLaneSideControlCounts = AppState.FastRuntimePreviewSideControlCounts(
-                    resolutionRequiredCount: issuePayload.resolutionRequiredObservations.count,
-                    activeIssueCount: issuePayload.activeObservations.count,
-                    guidedRemainingCount: fastLaneSideControlCounts.guidedRemainingCount,
-                    checklistCount: fastLaneSideControlCounts.checklistCount
-                )
+                let scopedPayload = fastLanePayloadScopedToCurrentFastSession(rawPayload)
+                fastLaneSideControlPayload = scopedPayload
+                refreshFastLaneSideControlMediaMaps(for: scopedPayload)
+                fastLaneSideControlCounts = fastLaneSideControlCounts(from: scopedPayload)
                 didRefreshFastLaneSideControlCounts = true
                 didRefreshFastLaneIssuePayload = true
             }
@@ -15317,21 +15618,43 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
         }
     }
 
+    private func syncFastLanePortalIssueStateIfAvailable(force: Bool) async {
+        let activeOrganizationID: UUID? = await MainActor.run {
+            guard force || !didSyncFastLanePortalIssueStateAfterPreview else { return nil }
+            guard !isSyncingFastLanePortalIssueState else { return nil }
+            guard let activeOrganizationID = appState.activeOrganizationID else { return nil }
+            isSyncingFastLanePortalIssueState = true
+            return activeOrganizationID
+        }
+
+        guard let activeOrganizationID else { return }
+        _ = await appState.syncPortalPunchlistOperationalOverlaysForPropertyOpen(
+            propertyID: context.propertyID,
+            activeOrganizationID: activeOrganizationID
+        )
+
+        await MainActor.run {
+            didSyncFastLanePortalIssueStateAfterPreview = true
+            isSyncingFastLanePortalIssueState = false
+        }
+    }
+
     private func fastLaneSideControlCounts(
         from payload: AppState.FastRuntimePreviewSideControlPayload
     ) -> AppState.FastRuntimePreviewSideControlCounts {
+        let localShots = fastLaneLocalShotRecords()
         let handledIssueIDs = Set(
-            fastLaneLocalShotRecords().compactMap { shot -> UUID? in
+            localShots.compactMap { shot -> UUID? in
                 guard shot.metadataContext?.isFlagged == true else { return nil }
                 return shot.metadataContext?.issueID
             }
         )
         return AppState.FastRuntimePreviewSideControlCounts(
-            resolutionRequiredCount: payload.resolutionRequiredObservations.filter {
-                !handledIssueIDs.contains($0.id)
-            }.count,
+            resolutionRequiredCount: 0,
             activeIssueCount: payload.activeObservations.filter {
-                !handledIssueIDs.contains($0.id)
+                ($0.status == .active || $0.status == .resolutionRequired) &&
+                    !handledIssueIDs.contains($0.id) &&
+                    !fastLaneObservationHandledByCurrentDraft($0, localShots: localShots)
             }.count,
             guidedRemainingCount: payload.guidedShots.filter {
                 !$0.isRetired &&
@@ -15341,6 +15664,176 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             }.count,
             checklistCount: 0
         )
+    }
+
+    private func fastLaneObservationHandledByCurrentDraft(
+        _ observation: Observation,
+        localShots: [AppState.FastRuntimePrototypeShotRecord]
+    ) -> Bool {
+        for shot in localShots {
+            if shot.id == observation.linkedShotID { return true }
+            if observation.shots.contains(where: { $0.id == shot.id }) { return true }
+            guard let metadata = shot.metadataContext else { continue }
+            if metadata.issueID == observation.id { return true }
+            guard fastLaneShotCanRepresentIssueHandling(metadata) else { continue }
+            if fastLaneShot(metadata, matchesObservation: observation) {
+                return true
+            }
+        }
+        return false
+    }
+
+    private func fastLaneShotCanRepresentIssueHandling(
+        _ metadata: AppState.FastRuntimeCaptureMetadataContext
+    ) -> Bool {
+        if metadata.isFlagged == true { return true }
+        if let source = metadata.captureIntentSource?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
+           ["flagged", "resolution", "retake"].contains(source) {
+            return true
+        }
+        return fastLaneTrimmedNonEmpty(metadata.detailNote) != nil ||
+            fastLaneTrimmedNonEmpty(metadata.priority) != nil
+    }
+
+    private func fastLaneShot(
+        _ metadata: AppState.FastRuntimeCaptureMetadataContext,
+        matchesObservation observation: Observation
+    ) -> Bool {
+        if !fastLaneMaterialContextMatches(
+            shotBuilding: metadata.building,
+            shotElevation: metadata.elevation,
+            shotDetailType: metadata.detailType,
+            rowBuilding: observation.building,
+            rowElevation: observation.targetElevation,
+            rowDetailType: observation.detailType
+        ) {
+            return false
+        }
+
+        let matchingGuidedAngles = observation.guidedShots
+            .filter {
+                fastLaneMaterialContextMatches(
+                    shotBuilding: metadata.building,
+                    shotElevation: metadata.elevation,
+                    shotDetailType: metadata.detailType,
+                    rowBuilding: $0.building ?? observation.building,
+                    rowElevation: $0.targetElevation ?? observation.targetElevation,
+                    rowDetailType: $0.detailType ?? observation.detailType
+                )
+            }
+            .compactMap(\.angleIndex)
+            .map { max(1, $0) }
+        if !matchingGuidedAngles.isEmpty {
+            return matchingGuidedAngles.contains(max(1, metadata.angleIndex))
+        }
+
+        let shotNote = fastLaneNormalizedComparableText(metadata.detailNote)
+        let observationNotes = [
+            observation.currentReason,
+            observation.note,
+            observation.resolutionStatement,
+            observation.statement
+        ]
+            .map(fastLaneNormalizedComparableText)
+            .filter { !$0.isEmpty }
+        return observationNotes.isEmpty || observationNotes.contains(shotNote)
+    }
+
+    private func fastLaneMaterialContextMatches(
+        shotBuilding: String?,
+        shotElevation: String?,
+        shotDetailType: String?,
+        rowBuilding: String?,
+        rowElevation: String?,
+        rowDetailType: String?
+    ) -> Bool {
+        let shotBuildingKey = normalizedFastLaneComparable(shotBuilding)
+        let shotElevationKey = normalizedFastLaneComparable(CanonicalElevation.normalize(shotElevation ?? "") ?? shotElevation)
+        let shotDetailKey = normalizedFastLaneComparable(shotDetailType)
+        guard !shotBuildingKey.isEmpty, !shotElevationKey.isEmpty, !shotDetailKey.isEmpty else {
+            return false
+        }
+        return shotBuildingKey == normalizedFastLaneComparable(rowBuilding) &&
+            shotElevationKey == normalizedFastLaneComparable(CanonicalElevation.normalize(rowElevation ?? "") ?? rowElevation) &&
+            shotDetailKey == normalizedFastLaneComparable(rowDetailType)
+    }
+
+    private func fastLaneNormalizedComparableText(_ value: String?) -> String {
+        (value ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            .lowercased()
+    }
+
+    private func fastLaneAngleIndexForContext(
+        building rawBuilding: String,
+        elevation rawElevation: String,
+        detailType rawDetailType: String,
+        excludingGuidedShotID: UUID? = nil
+    ) -> Int {
+        let building = normalizedFastLaneComparable(rawBuilding)
+        let elevation = normalizedFastLaneComparable(CanonicalElevation.normalize(rawElevation) ?? rawElevation)
+        let detail = normalizedFastLaneComparable(rawDetailType)
+        guard !building.isEmpty, !elevation.isEmpty, !detail.isEmpty else { return 1 }
+
+        var usedAngles = Set<Int>()
+        func reserve(
+            building reserveBuilding: String?,
+            elevation reserveElevation: String?,
+            detailType reserveDetailType: String?,
+            angleIndex reserveAngle: Int?
+        ) {
+            guard normalizedFastLaneComparable(reserveBuilding) == building,
+                  normalizedFastLaneComparable(CanonicalElevation.normalize(reserveElevation ?? "") ?? reserveElevation) == elevation,
+                  normalizedFastLaneComparable(reserveDetailType) == detail else {
+                return
+            }
+            usedAngles.insert(max(1, reserveAngle ?? 1))
+        }
+
+        for shot in fastLaneLocalShotRecords() {
+            guard let metadata = shot.metadataContext else { continue }
+            reserve(
+                building: metadata.building,
+                elevation: metadata.elevation,
+                detailType: metadata.detailType,
+                angleIndex: metadata.angleIndex
+            )
+        }
+
+        let payload = fastLaneSideControlPayload
+        for guided in payload.guidedShots + payload.retiredGuidedShots where guided.id != excludingGuidedShotID {
+            reserve(
+                building: guided.building,
+                elevation: guided.targetElevation,
+                detailType: guided.detailType,
+                angleIndex: guided.angleIndex
+            )
+        }
+        for observation in payload.activeObservations {
+            for guided in observation.guidedShots {
+                reserve(
+                    building: guided.building ?? observation.building,
+                    elevation: guided.targetElevation ?? observation.targetElevation,
+                    detailType: guided.detailType ?? observation.detailType,
+                    angleIndex: guided.angleIndex
+                )
+            }
+        }
+        for reservation in appState.fastRuntimePropertyAngleReservations(propertyID: context.propertyID) {
+            reserve(
+                building: reservation.building,
+                elevation: reservation.elevation,
+                detailType: reservation.detailType,
+                angleIndex: reservation.angleIndex
+            )
+        }
+
+        var nextAngle = 1
+        while usedAngles.contains(nextAngle) {
+            nextAngle += 1
+        }
+        return nextAngle
     }
 
     private func fastLaneAngleIndexForNextCapture(
@@ -15405,7 +15898,6 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
 
         reserveGuidedAngles(from: fastLaneSideControlPayload.guidedShots)
         reserveIssueAngles(from: fastLaneSideControlPayload.activeObservations)
-        reserveIssueAngles(from: fastLaneSideControlPayload.resolutionRequiredObservations)
         reserveAppStateAngles(appState.fastRuntimePropertyAngleReservations(propertyID: context.propertyID))
         let latestPayload = appState.fastRuntimePreviewSideControlPayload(
             propertyID: context.propertyID,
@@ -15414,7 +15906,6 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
         let latestScopedPayload = fastLanePayloadScopedToCurrentFastSession(latestPayload)
         reserveGuidedAngles(from: latestScopedPayload.guidedShots)
         reserveIssueAngles(from: latestScopedPayload.activeObservations)
-        reserveIssueAngles(from: latestScopedPayload.resolutionRequiredObservations)
 
         var nextAngle = 1
         while usedAngles.contains(nextAngle) {
@@ -15428,7 +15919,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
     ) -> AppState.FastRuntimePreviewSideControlPayload {
         guard context.sessionType != .punchlistVisit else {
             return AppState.FastRuntimePreviewSideControlPayload(
-                resolutionRequiredObservations: payload.resolutionRequiredObservations,
+                resolutionRequiredObservations: [],
                 activeObservations: payload.activeObservations,
                 guidedShots: [],
                 retiredGuidedShots: []
@@ -15450,15 +15941,10 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
         let retired = payload.retiredGuidedShots.map { guidedShot in
             fastLaneGuidedShotScopedToCurrentSession(guidedShot, localShots: localShots)
         }
-        let existingResolutionIDs = Set(payload.resolutionRequiredObservations.map(\.id))
         let existingActiveIDs = Set(payload.activeObservations.map(\.id))
-        let localIssues = localShots.compactMap(fastLaneObservationRow)
-        let localIssuesByID = Dictionary(uniqueKeysWithValues: localIssues.map { ($0.id, $0) })
-        let scopedResolution = payload.resolutionRequiredObservations.map { observation in
-            fastLaneObservationScopedToCurrentSession(
-                observation,
-                localObservation: localIssuesByID[observation.id]
-            )
+        let localIssues = fastLaneMergedObservationRows(from: localShots.compactMap(fastLaneObservationRow))
+        let localIssuesByID = localIssues.reduce(into: [UUID: Observation]()) { partial, observation in
+            partial[observation.id] = observation
         }
         let scopedActive = payload.activeObservations.map { observation in
             fastLaneObservationScopedToCurrentSession(
@@ -15466,14 +15952,11 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                 localObservation: localIssuesByID[observation.id]
             )
         }
-        let localResolution = localIssues.filter {
-            $0.status == .resolutionRequired && !existingResolutionIDs.contains($0.id)
-        }
         let localActive = localIssues.filter {
-            $0.status != .resolutionRequired && !existingActiveIDs.contains($0.id)
+            !existingActiveIDs.contains($0.id)
         }
         return AppState.FastRuntimePreviewSideControlPayload(
-            resolutionRequiredObservations: scopedResolution + localResolution,
+            resolutionRequiredObservations: [],
             activeObservations: scopedActive + localActive,
             guidedShots: guided + currentSessionGuidedRows,
             retiredGuidedShots: retired
@@ -15545,8 +16028,86 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                     imageLocalIdentifier: fastLaneResolvedLocalPath(for: shot),
                     note: metadata.detailNote
                 )
+            ],
+            guidedShots: [
+                GuidedShot(
+                    id: shot.id,
+                    title: fastLaneConciseContextLabel(
+                        building: metadata.building,
+                        elevation: metadata.elevation,
+                        detailType: metadata.detailType
+                    ),
+                    building: metadata.building,
+                    targetElevation: metadata.elevation,
+                    detailType: metadata.detailType,
+                    angleIndex: metadata.angleIndex,
+                    referenceImageLocalIdentifier: fastLaneResolvedLocalPath(for: shot),
+                    referenceImagePath: fastLaneResolvedLocalPath(for: shot),
+                    shot: Shot(
+                        id: shot.id,
+                        capturedAt: shot.capturedAt,
+                        imageLocalIdentifier: fastLaneResolvedLocalPath(for: shot),
+                        note: metadata.detailNote
+                    ),
+                    isCompleted: true
+                )
             ]
         )
+    }
+
+    private func fastLaneMergedObservationRows(from observations: [Observation]) -> [Observation] {
+        var mergedByID: [UUID: Observation] = [:]
+        for observation in observations {
+            guard var existing = mergedByID[observation.id] else {
+                mergedByID[observation.id] = observation
+                continue
+            }
+            if observation.updatedAt > existing.updatedAt {
+                let oldShots = existing.shots
+                let oldGuided = existing.guidedShots
+                let oldStatus = existing.status
+                existing = observation
+                existing.status = fastLanePreferredObservationWorkflowStatus(oldStatus, observation.status)
+                for shot in oldShots where !existing.shots.contains(where: { $0.id == shot.id }) {
+                    existing.shots.append(shot)
+                }
+                for guided in oldGuided where !existing.guidedShots.contains(where: { $0.id == guided.id }) {
+                    existing.guidedShots.append(guided)
+                }
+            } else {
+                for shot in observation.shots where !existing.shots.contains(where: { $0.id == shot.id }) {
+                    existing.shots.append(shot)
+                }
+                for guided in observation.guidedShots where !existing.guidedShots.contains(where: { $0.id == guided.id }) {
+                    existing.guidedShots.append(guided)
+                }
+                existing.updatedAt = max(existing.updatedAt, observation.updatedAt)
+                existing.status = fastLanePreferredObservationWorkflowStatus(existing.status, observation.status)
+            }
+            existing.shots.sort { $0.capturedAt < $1.capturedAt }
+            existing.guidedShots.sort { lhs, rhs in
+                if (lhs.shot?.capturedAt ?? .distantPast) != (rhs.shot?.capturedAt ?? .distantPast) {
+                    return (lhs.shot?.capturedAt ?? .distantPast) < (rhs.shot?.capturedAt ?? .distantPast)
+                }
+                return lhs.id.uuidString < rhs.id.uuidString
+            }
+            mergedByID[observation.id] = existing
+        }
+        return Array(mergedByID.values).sorted {
+            if $0.updatedAt != $1.updatedAt { return $0.updatedAt > $1.updatedAt }
+            return $0.id.uuidString < $1.id.uuidString
+        }
+    }
+
+    private func fastLanePreferredObservationWorkflowStatus(
+        _ lhs: Observation.Status,
+        _ rhs: Observation.Status
+    ) -> Observation.Status {
+        if lhs == rhs { return lhs }
+        if lhs == .pendingReview || rhs == .pendingReview { return .pendingReview }
+        if lhs == .resolved || rhs == .resolved { return .resolved }
+        if lhs == .resolutionRequired || rhs == .resolutionRequired { return .resolutionRequired }
+        return .active
     }
 
     private func fastLaneObservationScopedToCurrentSession(
@@ -15555,15 +16116,28 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
     ) -> Observation {
         guard let localObservation else { return observation }
         var scoped = observation
+        if localObservation.status != .active || scoped.status == .active {
+            scoped.status = localObservation.status
+        }
         scoped.linkedShotID = localObservation.linkedShotID ?? scoped.linkedShotID
         scoped.updatedInSessionID = localObservation.updatedInSessionID ?? scoped.updatedInSessionID
         scoped.resolvedInSessionID = localObservation.resolvedInSessionID ?? scoped.resolvedInSessionID
         scoped.resolutionPhotoRef = localObservation.resolutionPhotoRef ?? scoped.resolutionPhotoRef
-        scoped.resolutionStatement = localObservation.resolutionStatement ?? scoped.resolutionStatement
-        scoped.currentReason = localObservation.currentReason ?? scoped.currentReason
-        scoped.note = localObservation.note ?? scoped.note
-        scoped.priority = localObservation.priority ?? scoped.priority
-        scoped.trade = localObservation.trade ?? scoped.trade
+        if fastLaneTrimmedNonEmpty(scoped.resolutionStatement) == nil {
+            scoped.resolutionStatement = localObservation.resolutionStatement
+        }
+        if fastLaneTrimmedNonEmpty(scoped.currentReason) == nil {
+            scoped.currentReason = localObservation.currentReason
+        }
+        if fastLaneTrimmedNonEmpty(scoped.note) == nil {
+            scoped.note = localObservation.note
+        }
+        if fastLaneTrimmedNonEmpty(scoped.priority) == nil {
+            scoped.priority = localObservation.priority
+        }
+        if fastLaneTrimmedNonEmpty(scoped.trade) == nil {
+            scoped.trade = localObservation.trade
+        }
         scoped.updatedAt = max(scoped.updatedAt, localObservation.updatedAt)
 
         let existingShotIDs = Set(scoped.shots.map(\.id))
@@ -15653,6 +16227,11 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             }
     }
 
+    private func fastLaneCompletionCapturedPhotoCount() -> Int {
+        let savedShotCount = fastLaneLocalShotRecords().count
+        return savedShotCount > 0 ? savedShotCount : capturedCount
+    }
+
     private func fastLaneResolvedLocalPath(for shot: AppState.FastRuntimePrototypeShotRecord) -> String? {
         let direct = shot.localFilePath.trimmingCharacters(in: .whitespacesAndNewlines)
         if !direct.isEmpty, FileManager.default.fileExists(atPath: direct) {
@@ -15696,8 +16275,6 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
         refreshFastLaneSideControlCountsIfNeeded()
 
         switch controlID {
-        case "resolution_required":
-            presentFastLaneIssueList(.resolutionRequired)
         case "active_issues":
             presentFastLaneIssueList(.activeIssues)
         case "guided":
@@ -15718,13 +16295,9 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
     }
 
     private func presentFastLaneIssueList(_ mode: FastLaneSideControlSheetMode) {
-        let expectedEmptyText = mode == .resolutionRequired ? "No resolution required" : "No active flagged issues"
-        let knownCount = mode == .resolutionRequired
-            ? fastLaneSideControlCounts.resolutionRequiredCount
-            : fastLaneSideControlCounts.activeIssueCount
-        let cachedRows = mode == .resolutionRequired
-            ? fastLaneSideControlPayload.resolutionRequiredObservations
-            : fastLaneSideControlPayload.activeObservations
+        let expectedEmptyText = "No active flagged issues"
+        let knownCount = fastLaneSideControlCounts.activeIssueCount
+        let cachedRows = fastLaneSideControlPayload.activeObservations
 
         if !cachedRows.isEmpty || knownCount > 0 || !didRefreshFastLaneIssuePayload {
             fastLaneSideControlSheetMode = mode
@@ -15735,9 +16308,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
         }
 
         refreshFastLaneIssueSideControlPayload { payload in
-            let rows = mode == .resolutionRequired
-                ? payload.resolutionRequiredObservations
-                : payload.activeObservations
+            let rows = payload.activeObservations
             if rows.isEmpty {
                 if fastLaneSideControlSheetMode == mode {
                     fastLaneSideControlSheetMode = nil
@@ -15786,6 +16357,16 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             showFastLaneSideControlToast("Guided photo already captured")
             return
         }
+        fastLaneRetakeGuidedID = nil
+        armFastLaneGuidedShotUnchecked(guidedShot)
+    }
+
+    private func retakeFastLaneGuidedShot(_ guidedShot: GuidedShot) {
+        fastLaneRetakeGuidedID = guidedShot.id
+        armFastLaneGuidedShotUnchecked(guidedShot)
+    }
+
+    private func armFastLaneGuidedShotUnchecked(_ guidedShot: GuidedShot) {
         clearFastLaneArmedReferenceState()
         fastLaneCaptureIntent = .guided(guidedShot.id)
         let building = fastLaneTrimmedNonEmpty(guidedShot.building) ?? fastMetadataContext.building
@@ -15801,7 +16382,11 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             trade: fastMetadataContext.trade,
             detailNote: fastMetadataContext.detailNote,
             priority: fastMetadataContext.priority,
-            angleIndex: max(1, guidedShot.angleIndex ?? 1)
+            angleIndex: max(1, guidedShot.angleIndex ?? 1),
+            isGuided: true,
+            captureIntentSource: fastLaneRetakeGuidedID == guidedShot.id
+                ? FastLaneCaptureIntent.retake(guidedShot.shot?.id ?? guidedShot.id).source
+                : FastLaneCaptureIntent.guided(guidedShot.id).source
         ))
         loadFastLaneArmedReference(
             from: fastLaneGuidedThumbnailPathByID[guidedShot.id] ?? fastLaneGuidedDisplayImagePath(for: guidedShot)
@@ -15811,11 +16396,34 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
 
     private func armFastLaneIssueCapture(
         _ observation: Observation,
-        mode: FastLaneIssueListSheet.Mode
+        mode: ActiveIssuesSheet.Mode
     ) {
-        let intent: FastLaneCaptureIntent = mode == .resolutionRequired
-            ? .resolution(observation.id)
-            : .flagged(observation.id)
+        fastLaneRetakeIssueID = nil
+        armFastLaneIssueCapture(
+            observation,
+            mode: mode,
+            intentSourceOverride: nil
+        )
+    }
+
+    private func retakeFastLaneIssueCapture(
+        _ observation: Observation,
+        mode: ActiveIssuesSheet.Mode
+    ) {
+        fastLaneRetakeIssueID = observation.id
+        armFastLaneIssueCapture(
+            observation,
+            mode: mode,
+            intentSourceOverride: FastLaneCaptureIntent.retake(observation.linkedShotID ?? observation.id).source
+        )
+    }
+
+    private func armFastLaneIssueCapture(
+        _ observation: Observation,
+        mode: ActiveIssuesSheet.Mode,
+        intentSourceOverride: String?
+    ) {
+        let intent: FastLaneCaptureIntent = .flagged(observation.id)
         clearFastLaneArmedReferenceState()
         fastLaneCaptureIntent = intent
 
@@ -15845,7 +16453,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             isFlagged: true,
             issueID: observation.id,
             issueStatus: observation.status.issueStatusValue,
-            captureIntentSource: intent.source
+            captureIntentSource: intentSourceOverride ?? intent.source
         ))
         loadFastLaneArmedReference(
             from: fastLaneIssueThumbnailPathByID[observation.id] ?? fastLaneIssueDisplayImagePath(for: observation)
@@ -15899,8 +16507,6 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
         }()
         let issueStatus: String? = {
             switch fastLaneCaptureIntent {
-            case .resolution:
-                return Observation.Status.resolutionRequired.issueStatusValue
             case .flagged:
                 return Observation.Status.active.issueStatusValue
             default:
@@ -15924,7 +16530,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             isFlagged: isFlagged,
             issueID: captureIssueID,
             issueStatus: issueStatus,
-            captureIntentSource: fastLaneCaptureIntent.source
+            captureIntentSource: current.captureIntentSource ?? fastLaneCaptureIntent.source
         )
     }
 
@@ -15954,10 +16560,11 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
     private func refreshFastLaneIssueSideControlPayload(completion: @escaping (AppState.FastRuntimePreviewSideControlPayload) -> Void) {
         isLoadingFastLaneSideControlSheet = true
         Task {
+            await syncFastLanePortalIssueStateIfAvailable(force: true)
             let issuePayload = appState.fastRuntimePreviewIssueSideControlPayload(propertyID: context.propertyID)
             await MainActor.run {
                 let rawPayload = AppState.FastRuntimePreviewSideControlPayload(
-                    resolutionRequiredObservations: issuePayload.resolutionRequiredObservations,
+                    resolutionRequiredObservations: [],
                     activeObservations: issuePayload.activeObservations,
                     guidedShots: fastLaneSideControlPayload.guidedShots,
                     retiredGuidedShots: fastLaneSideControlPayload.retiredGuidedShots
@@ -15980,7 +16587,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             }
         }
 
-        let issueRows = payload.activeObservations + payload.resolutionRequiredObservations
+        let issueRows = payload.activeObservations
         fastLaneIssueThumbnailPathByID = issueRows.reduce(into: [UUID: String]()) { partial, observation in
             if let path = fastLaneIssueDisplayImagePath(for: observation) {
                 partial[observation.id] = path
@@ -16038,8 +16645,6 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
         switch mode {
         case .activeIssues:
             observations = fastLaneSideControlPayload.activeObservations
-        case .resolutionRequired:
-            observations = fastLaneSideControlPayload.resolutionRequiredObservations
         case .guided:
             return
         }
@@ -16259,6 +16864,8 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
 
     private func clearFastLaneArmedCapture() {
         fastLaneCaptureIntent = .free
+        fastLaneRetakeGuidedID = nil
+        fastLaneRetakeIssueID = nil
         clearFastLaneArmedReferenceState()
         let clearedContext = fastLaneFreeMetadataContext(from: fastMetadataContext)
         fastMetadataContext = clearedContext.withAngleIndex(
@@ -16295,6 +16902,284 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
         )
     }
 
+    @ViewBuilder
+    private func fastLaneFlaggedDecisionOverlay(_ pending: FastLanePendingFlaggedDecision) -> some View {
+        ZStack {
+            Color.black.opacity(0.62)
+                .ignoresSafeArea()
+
+            VStack(spacing: 12) {
+                Text(fastLaneFlaggedDecisionTitle)
+                    .font(.system(size: 18, weight: .semibold))
+                    .foregroundColor(.white)
+
+                Text(fastLaneFlaggedDecisionMessage)
+                    .font(.system(size: 14, weight: .medium))
+                    .foregroundColor(.white.opacity(0.9))
+                    .multilineTextAlignment(.center)
+
+                if fastLaneFlaggedDecisionStage != .reviseObservation, !pending.reason.isEmpty {
+                    Text(pending.reason)
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundColor(.white.opacity(0.95))
+                        .lineLimit(3)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 8)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(Color.white.opacity(0.08))
+                        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                }
+
+                if fastLaneFlaggedDecisionStage == .reviseObservation {
+                    TextEditor(text: $fastLaneFlaggedRevisionText)
+                        .font(.system(size: 15, weight: .medium))
+                        .foregroundColor(.white)
+                        .scrollContentBackground(.hidden)
+                        .padding(10)
+                        .frame(minHeight: 112, maxHeight: 132)
+                        .background(Color.white.opacity(0.08))
+                        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                .stroke(Color.white.opacity(0.14), lineWidth: 1)
+                        )
+
+                    HStack(spacing: 10) {
+                        Text("Priority")
+                            .font(.system(size: 14, weight: .medium))
+                            .foregroundColor(.white.opacity(0.90))
+                            .frame(width: 62, alignment: .leading)
+
+                        Menu {
+                            ForEach(Self.priorityOptions, id: \.self) { option in
+                                Button(option) {
+                                    fastLaneFlaggedRevisionPriority = option
+                                }
+                            }
+                        } label: {
+                            HStack(spacing: 8) {
+                                let normalizedPriority = normalizedFastLaneDetailPriority(fastLaneFlaggedRevisionPriority)
+                                if !normalizedPriority.isEmpty {
+                                    Circle()
+                                        .fill(fastLaneDetailPriorityColor(normalizedPriority))
+                                        .frame(width: 10, height: 10)
+                                }
+                                Text(normalizedPriority.isEmpty ? "Required" : normalizedPriority)
+                                    .foregroundColor(.white.opacity(normalizedPriority.isEmpty ? 0.75 : 0.95))
+                                    .lineLimit(1)
+                                Spacer(minLength: 0)
+                                Image(systemName: "chevron.down")
+                                    .font(.system(size: 12, weight: .semibold))
+                                    .foregroundColor(.white.opacity(0.72))
+                            }
+                            .padding(.horizontal, 12)
+                            .frame(height: 42)
+                            .background(Color.white.opacity(0.10))
+                            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+
+                VStack(spacing: 10) {
+                    switch fastLaneFlaggedDecisionStage {
+                    case .primary:
+                        fastLaneFlaggedPopupActionButton(
+                            "Confirm",
+                            fill: Color.blue,
+                            stroke: nil
+                        ) {
+                            applyFastLaneFlaggedUpdateDecision(
+                                pending,
+                                revisedReason: nil,
+                                revisedPriority: nil
+                            )
+                        }
+
+                        fastLaneFlaggedPopupActionButton(
+                            "Revise",
+                            fill: Color.white.opacity(0.10),
+                            stroke: Color.white.opacity(0.16)
+                        ) {
+                            fastLaneFlaggedRevisionText = pending.reason
+                            fastLaneFlaggedRevisionPriority = pending.priority
+                            fastLaneFlaggedDecisionStage = .reviseObservation
+                        }
+
+                        fastLaneFlaggedPopupActionButton(
+                            "Resolve",
+                            fill: Color.white.opacity(0.10),
+                            stroke: Color.white.opacity(0.16)
+                        ) {
+                            applyFastLaneFlaggedResolveDecision(pending)
+                        }
+                    case .reviseObservation:
+                        let revised = fastLaneFlaggedRevisionText.trimmingCharacters(in: .whitespacesAndNewlines)
+                        fastLaneFlaggedPopupActionButton(
+                            "Update",
+                            fill: Color.blue,
+                            stroke: nil,
+                            isEnabled: !revised.isEmpty
+                        ) {
+                            applyFastLaneFlaggedUpdateDecision(
+                                pending,
+                                revisedReason: revised,
+                                revisedPriority: fastLaneFlaggedRevisionPriority
+                            )
+                        }
+
+                        fastLaneFlaggedPopupActionButton(
+                            "Back",
+                            fill: Color.white.opacity(0.10),
+                            stroke: Color.white.opacity(0.16)
+                        ) {
+                            fastLaneFlaggedDecisionStage = .primary
+                        }
+                    }
+                }
+            }
+            .padding(.horizontal, 20)
+            .padding(.vertical, 18)
+            .background(Color.black.opacity(0.76))
+            .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .stroke(Color.white.opacity(0.18), lineWidth: 1)
+            )
+            .frame(maxWidth: 330)
+            .padding(.horizontal, 24)
+            .rotationEffect(.degrees(glyphAngleDegrees))
+        }
+    }
+
+    @ViewBuilder
+    private func fastLaneFlaggedPopupActionButton(
+        _ title: String,
+        fontSize: CGFloat = 18,
+        fill: Color,
+        stroke: Color?,
+        isEnabled: Bool = true,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            Text(title)
+                .font(.system(size: fontSize, weight: .semibold))
+                .foregroundColor(.white.opacity(isEnabled ? 1.0 : 0.55))
+                .frame(maxWidth: .infinity, minHeight: 50)
+                .background(fill)
+                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                .overlay {
+                    if let stroke {
+                        RoundedRectangle(cornerRadius: 14, style: .continuous)
+                            .stroke(stroke.opacity(isEnabled ? 1.0 : 0.55), lineWidth: 1)
+                    }
+                }
+                .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+        }
+        .buttonStyle(FastLanePostCaptureActionButtonStyle(cornerRadius: 14))
+        .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .disabled(!isEnabled)
+    }
+
+    private var fastLaneFlaggedDecisionTitle: String {
+        switch fastLaneFlaggedDecisionStage {
+        case .primary:
+            return "Flagged Capture"
+        case .reviseObservation:
+            return "Update Observation"
+        }
+    }
+
+    private var fastLaneFlaggedDecisionMessage: String {
+        switch fastLaneFlaggedDecisionStage {
+        case .primary:
+            return "Confirm this capture, revise the observation, or resolve it?"
+        case .reviseObservation:
+            return "Update the reason and priority for this observation."
+        }
+    }
+
+    private func presentFastLaneFlaggedDecision(issueID: UUID, shotID: UUID) {
+        let observation = fastLaneSideControlPayload.activeObservations.first(where: { $0.id == issueID }) ??
+            appState.fastRuntimePreviewIssueSideControlPayload(propertyID: context.propertyID)
+                .activeObservations
+                .first(where: { $0.id == issueID })
+        let reason = observation.map(fastLaneObservationReasonText) ?? "Flagged issue"
+        let priority = normalizedFastLaneDetailPriority(observation?.priority)
+        let displayPriority = priority.isEmpty ? "Medium" : priority
+        fastLaneFlaggedDecisionStage = .primary
+        fastLaneFlaggedRevisionText = ""
+        fastLaneFlaggedRevisionPriority = displayPriority
+        fastLanePendingFlaggedDecision = FastLanePendingFlaggedDecision(
+            issueID: issueID,
+            shotID: shotID,
+            reason: reason,
+            priority: displayPriority
+        )
+    }
+
+    private func fastLaneObservationReasonText(_ observation: Observation) -> String {
+        Observation.inferredCurrentReason(
+            note: observation.currentReason ?? observation.note,
+            statement: observation.statement
+        )
+        ?? fastLaneTrimmedNonEmpty(observation.resolutionStatement)
+        ?? fastLaneTrimmedNonEmpty(observation.previousReason)
+        ?? observation.statement
+    }
+
+    private func applyFastLaneFlaggedUpdateDecision(
+        _ pending: FastLanePendingFlaggedDecision,
+        revisedReason: String?,
+        revisedPriority: String?
+    ) {
+        guard fastLanePendingFlaggedDecision?.id == pending.id else { return }
+        let didUpdate = appState.fastRuntimeApplyFlaggedObservationUpdateAfterCapture(
+            propertyID: context.propertyID,
+            sessionID: context.sessionID,
+            observationID: pending.issueID,
+            shotID: pending.shotID,
+            revisedReason: revisedReason,
+            revisedPriority: revisedPriority
+        )
+        fastLanePendingFlaggedDecision = nil
+        fastLaneFlaggedDecisionStage = .primary
+        fastLaneFlaggedRevisionText = ""
+        fastLaneFlaggedRevisionPriority = "Medium"
+        refreshFastLaneIssueShotRecordFromLocalObservation(
+            issueID: pending.issueID,
+            shotID: pending.shotID,
+            captureKind: "follow_up_capture"
+        )
+        reloadFastLaneSideControlPayloadFromLocalStore()
+        refreshFastLaneSideControlCounts(force: true)
+        showFastLaneSideControlToast(didUpdate ? "Update captured" : "Could not save update")
+    }
+
+    private func applyFastLaneFlaggedResolveDecision(_ pending: FastLanePendingFlaggedDecision) {
+        guard fastLanePendingFlaggedDecision?.id == pending.id else { return }
+        let didResolve = appState.fastRuntimeResolveFlaggedObservationAfterCapture(
+            propertyID: context.propertyID,
+            sessionID: context.sessionID,
+            observationID: pending.issueID,
+            shotID: pending.shotID
+        )
+        fastLanePendingFlaggedDecision = nil
+        fastLaneFlaggedDecisionStage = .primary
+        fastLaneFlaggedRevisionText = ""
+        fastLaneFlaggedRevisionPriority = "Medium"
+        refreshFastLaneIssueShotRecordFromLocalObservation(
+            issueID: pending.issueID,
+            shotID: pending.shotID,
+            captureKind: "resolved_capture",
+            issueStatusOverride: Observation.Status.pendingReview.issueStatusValue,
+            reasonOverride: pending.reason,
+            priorityOverride: pending.priority
+        )
+        reloadFastLaneSideControlPayloadFromLocalStore()
+        showFastLaneSideControlToast(didResolve ? "Issue submitted for review" : "Could not resolve issue")
+    }
+
     private func showFastLaneSideControlToast(_ text: String) {
         fastLaneSideControlToastToken += 1
         let token = fastLaneSideControlToastToken
@@ -16303,6 +17188,86 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             guard token == fastLaneSideControlToastToken else { return }
             fastLaneSideControlToastText = nil
         }
+    }
+
+    private func refreshFastLaneIssueShotRecordFromLocalObservation(
+        issueID: UUID,
+        shotID: UUID,
+        captureKind: String,
+        issueStatusOverride: String? = nil,
+        reasonOverride: String? = nil,
+        priorityOverride: String? = nil
+    ) {
+        let issuePayload = appState.fastRuntimePreviewIssueSideControlPayload(propertyID: context.propertyID)
+        let observation = (issuePayload.activeObservations + issuePayload.resolutionRequiredObservations)
+            .first(where: { $0.id == issueID })
+        let root = fastStorageRoot ?? storageRoot ?? prototypeResult.tempStorageRoot
+        guard let root else { return }
+        let metadataURL = root
+            .appendingPathComponent("Metadata", isDirectory: true)
+            .appendingPathComponent("fast-lane-shots.json", isDirectory: false)
+        let propertyID = context.propertyID
+        let sessionID = context.sessionID
+        let reason = fastLaneTrimmedNonEmpty(reasonOverride) ??
+            observation.map(fastLaneObservationReasonText)
+        let priority = normalizedFastLaneDetailPriority(priorityOverride ?? observation?.priority)
+        let issueStatus = fastLaneTrimmedNonEmpty(issueStatusOverride) ??
+            observation?.status.issueStatusValue
+
+        guard let data = try? Data(contentsOf: metadataURL) else { return }
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        guard var shots = try? decoder.decode([AppState.FastRuntimePrototypeShotRecord].self, from: data),
+              let index = shots.firstIndex(where: {
+                  $0.id == shotID &&
+                      $0.propertyID == propertyID &&
+                      $0.sessionID == sessionID
+              }) else {
+            return
+        }
+
+        let existing = shots[index]
+        let existingMetadata = AppState.normalizedFastRuntimeMetadataContext(
+            existing.metadataContext,
+            fallbackLocationMode: existing.captureLocationMode
+        )
+        let updatedMetadata = AppState.FastRuntimeCaptureMetadataContext(
+            captureProfile: existingMetadata.captureProfile,
+            locationMode: existingMetadata.locationMode,
+            building: existingMetadata.building,
+            elevation: existingMetadata.elevation,
+            detailType: existingMetadata.detailType,
+            trade: observation?.trade ?? existingMetadata.trade,
+            detailNote: reason ?? existingMetadata.detailNote,
+            priority: priority.isEmpty ? existingMetadata.priority : priority,
+            angleIndex: existingMetadata.angleIndex,
+            shotKey: existingMetadata.shotKey,
+            isGuided: existingMetadata.isGuided,
+            isFlagged: true,
+            issueID: issueID,
+            issueStatus: issueStatus ?? existingMetadata.issueStatus,
+            captureIntentSource: existingMetadata.captureIntentSource
+        )
+        shots[index] = AppState.FastRuntimePrototypeShotRecord(
+            id: existing.id,
+            sessionID: existing.sessionID,
+            propertyID: existing.propertyID,
+            orgID: existing.orgID,
+            sessionType: existing.sessionType,
+            capturedAt: existing.capturedAt,
+            localFilePath: existing.localFilePath,
+            originalRelativePath: existing.originalRelativePath,
+            captureKind: captureKind,
+            firstCaptureKind: existing.firstCaptureKind,
+            captureLocationMode: existing.captureLocationMode,
+            metadataContext: updatedMetadata
+        )
+
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        guard let updated = try? encoder.encode(shots) else { return }
+        try? updated.write(to: metadataURL, options: .atomic)
     }
 
     private func fastLanePostCaptureFeedback(for intent: FastLaneCaptureIntent) -> String? {
@@ -16361,12 +17326,108 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
         FastLaneCoreChecklistCategory.allCases.map { FastLaneCoreChecklistRowState(category: $0, count: 0) }
     }
 
+    private func pruneFastLaneRetakenIssueRecords(
+        issueID: UUID,
+        keepingShotID: UUID,
+        storageRoot: URL?
+    ) async {
+        let root = storageRoot ?? fastStorageRoot ?? self.storageRoot ?? prototypeResult.tempStorageRoot
+        guard let root else { return }
+        let metadataURL = root
+            .appendingPathComponent("Metadata", isDirectory: true)
+            .appendingPathComponent("fast-lane-shots.json", isDirectory: false)
+        let propertyID = context.propertyID
+        let sessionID = context.sessionID
+
+        await Task.detached(priority: .utility) {
+            guard let data = try? Data(contentsOf: metadataURL) else { return }
+            let decoder = JSONDecoder()
+            decoder.dateDecodingStrategy = .iso8601
+            guard var shots = try? decoder.decode([AppState.FastRuntimePrototypeShotRecord].self, from: data) else {
+                return
+            }
+
+            let originalCount = shots.count
+            shots.removeAll { shot in
+                guard shot.id != keepingShotID,
+                      shot.propertyID == propertyID,
+                      shot.sessionID == sessionID,
+                      shot.metadataContext?.isFlagged == true,
+                      shot.metadataContext?.issueID == issueID else {
+                    return false
+                }
+                return true
+            }
+            guard shots.count != originalCount else { return }
+
+            let encoder = JSONEncoder()
+            encoder.dateEncodingStrategy = .iso8601
+            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+            guard let updated = try? encoder.encode(shots) else { return }
+            try? updated.write(to: metadataURL, options: .atomic)
+        }.value
+    }
+
+    private func pruneFastLaneRetakenGuidedRecords(
+        guidedID: UUID,
+        keepingShot: AppState.FastRuntimePrototypeShotRecord,
+        storageRoot: URL?
+    ) async {
+        let root = storageRoot ?? fastStorageRoot ?? self.storageRoot ?? prototypeResult.tempStorageRoot
+        guard let root,
+              let metadata = keepingShot.metadataContext else {
+            return
+        }
+        let metadataURL = root
+            .appendingPathComponent("Metadata", isDirectory: true)
+            .appendingPathComponent("fast-lane-shots.json", isDirectory: false)
+        let propertyID = context.propertyID
+        let sessionID = context.sessionID
+        let building = normalizedFastLaneComparable(metadata.building)
+        let elevation = normalizedFastLaneComparable(CanonicalElevation.normalize(metadata.elevation) ?? metadata.elevation)
+        let detail = normalizedFastLaneComparable(metadata.detailType)
+        let angle = max(1, metadata.angleIndex)
+
+        await Task.detached(priority: .utility) {
+            guard let data = try? Data(contentsOf: metadataURL) else { return }
+            let decoder = JSONDecoder()
+            decoder.dateDecodingStrategy = .iso8601
+            guard var shots = try? decoder.decode([AppState.FastRuntimePrototypeShotRecord].self, from: data) else {
+                return
+            }
+
+            let originalCount = shots.count
+            shots.removeAll { shot in
+                guard shot.id != keepingShot.id,
+                      shot.propertyID == propertyID,
+                      shot.sessionID == sessionID,
+                      shot.metadataContext?.isGuided == true,
+                      shot.metadataContext?.issueID == nil,
+                      normalizedFastLaneComparable(shot.metadataContext?.building) == building,
+                      normalizedFastLaneComparable(CanonicalElevation.normalize(shot.metadataContext?.elevation ?? "") ?? shot.metadataContext?.elevation) == elevation,
+                      normalizedFastLaneComparable(shot.metadataContext?.detailType) == detail,
+                      max(1, shot.metadataContext?.angleIndex ?? 1) == angle else {
+                    return false
+                }
+                return true
+            }
+            guard shots.count != originalCount else { return }
+
+            let encoder = JSONEncoder()
+            encoder.dateEncodingStrategy = .iso8601
+            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+            guard let updated = try? encoder.encode(shots) else { return }
+            try? updated.write(to: metadataURL, options: .atomic)
+        }.value
+    }
+
     private func reloadFastLaneGalleryAssets() {
         guard let root = fastStorageRoot ?? storageRoot ?? prototypeResult.tempStorageRoot else {
             fastLaneGalleryAssets = []
             fastLaneGalleryMetadataByAssetID = [:]
             fastLaneGalleryThumbnail = nil
             fastLaneGalleryThumbnailAssetID = ""
+            fastLaneGalleryDisplayCount = 0
             fastLaneGalleryRefreshToken = UUID()
             return
         }
@@ -16374,6 +17435,11 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
         let metadataURL = root
             .appendingPathComponent("Metadata", isDirectory: true)
             .appendingPathComponent("fast-lane-shots.json", isDirectory: false)
+        let issuePayload = appState.fastRuntimePreviewIssueSideControlPayload(propertyID: context.propertyID)
+        let observationByIssueID = (issuePayload.activeObservations + issuePayload.resolutionRequiredObservations)
+            .reduce(into: [UUID: Observation]()) { partial, observation in
+                partial[observation.id] = observation
+            }
         DispatchQueue.global(qos: .utility).async {
             let gallery: (assets: [ReportAsset], metadata: [String: FastLaneGalleryMetadata]) = {
                 guard let data = try? Data(contentsOf: metadataURL) else { return ([], [:]) }
@@ -16397,7 +17463,8 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
                         guard FileManager.default.fileExists(atPath: url.path) else { return nil }
                         metadataByID[url.path] = FastLaneGalleryMetadata(
                             propertyName: propertyName,
-                            metadataContext: shot.metadataContext
+                            metadataContext: shot.metadataContext,
+                            observation: shot.metadataContext?.issueID.flatMap { observationByIssueID[$0] }
                         )
                         return ReportAsset(
                             localIdentifier: url.path,
@@ -16414,6 +17481,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             DispatchQueue.main.async {
                 fastLaneGalleryAssets = gallery.assets
                 fastLaneGalleryMetadataByAssetID = gallery.metadata
+                fastLaneGalleryDisplayCount = gallery.assets.count
                 fastLaneGalleryRefreshToken = UUID()
                 refreshFastLaneGalleryThumbnail(from: gallery.assets)
             }
@@ -16441,13 +17509,14 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
     }
 
     private func runCompleteDryRun() {
-        guard capturedCount > 0, !isRunningCompleteDryRun else { return }
+        let photoCount = fastLaneCompletionCapturedPhotoCount()
+        guard photoCount > 0, !isRunningCompleteDryRun else { return }
         isRunningCompleteDryRun = true
         Task {
             let result = await appState.runFastRuntimeCompleteDryRun(
                 context: context,
                 storageRoot: fastStorageRoot ?? prototypeResult.tempStorageRoot,
-                capturedPhotoCount: capturedCount
+                capturedPhotoCount: photoCount
             )
             await MainActor.run {
                 completeDryRunResult = result
@@ -16457,13 +17526,14 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
     }
 
     private func runCompleteUpload() {
-        guard capturedCount > 0, !isRunningCompleteUpload else { return }
+        let photoCount = fastLaneCompletionCapturedPhotoCount()
+        guard photoCount > 0, !isRunningCompleteUpload else { return }
         isRunningCompleteUpload = true
         Task {
             let result = await appState.runFastRuntimeCompleteUpload(
                 context: context,
                 storageRoot: fastStorageRoot ?? prototypeResult.tempStorageRoot,
-                capturedPhotoCount: capturedCount
+                capturedPhotoCount: photoCount
             )
             await MainActor.run {
                 completeUploadResult = result
@@ -16503,6 +17573,8 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
     }
 
     private func runProductionComplete() {
+        primeFastLaneSideControlSnapshot()
+        let photoCount = fastLaneCompletionCapturedPhotoCount()
         guard canRunProductionComplete else { return }
         productionCompleteState = .validating
         captureErrorMessage = nil
@@ -16510,7 +17582,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             let dryRun = await appState.runFastRuntimeCompleteDryRun(
                 context: context,
                 storageRoot: fastStorageRoot ?? prototypeResult.tempStorageRoot,
-                capturedPhotoCount: capturedCount
+                capturedPhotoCount: photoCount
             )
             guard dryRun.isValid else {
                 let message = dryRun.missingFields.first.map { "Missing \($0)." } ??
@@ -16532,7 +17604,7 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
             let upload = await appState.runFastRuntimeCompleteUpload(
                 context: context,
                 storageRoot: fastStorageRoot ?? prototypeResult.tempStorageRoot,
-                capturedPhotoCount: capturedCount
+                capturedPhotoCount: photoCount
             )
             guard upload.success else {
                 await MainActor.run {
@@ -16783,6 +17855,12 @@ private struct DebugFastRuntimePrototypeCameraPreviewView: View {
         guard !isClosing else { return }
         fastLaneExitIntentActive = true
         isClosing = true
+        fastLanePendingFlaggedDecision = nil
+        fastLaneFlaggedDecisionStage = .primary
+        fastLaneFlaggedRevisionText = ""
+        fastLaneFlaggedRevisionPriority = "Medium"
+        fastLaneRetakeGuidedID = nil
+        fastLaneRetakeIssueID = nil
         releaseStartedAt = Date()
         camera.stopPreviewAsync()
         if didCompleteUpload {
@@ -17200,7 +18278,6 @@ private final class FastLaneDetailTypesModel: ObservableObject {
 private struct FastLaneSessionActionsSummary: Equatable {
     let guidedRemainingCount: Int
     let flaggedRemainingCount: Int
-    let resolutionRequiredRemainingCount: Int
     let currentSessionCaptureCount: Int
     let sessionType: SessionType
     let canComplete: Bool
@@ -17267,7 +18344,6 @@ private struct FastLaneSessionActionsSheet: View {
                             .foregroundColor(.white)
 
                         VStack(spacing: 8) {
-                            summaryRow(title: "Resolution Required Remaining", value: summary.resolutionRequiredRemainingCount)
                             summaryRow(title: "Flagged Remaining", value: summary.flaggedRemainingCount)
                             if !summary.isPunchlistVisit {
                                 summaryRow(title: "Guided Remaining", value: summary.guidedRemainingCount)
@@ -17753,9 +18829,6 @@ private struct FastLaneIssueListRow: View {
     }
 
     private var statusLabel: String {
-        if isHandledInCurrentSession {
-            return "Captured"
-        }
         switch observation.status {
         case .resolutionRequired:
             return mode == .resolutionRequired ? "" : "Resolution Required"
@@ -17764,21 +18837,18 @@ private struct FastLaneIssueListRow: View {
         case .resolved:
             return "Resolved"
         case .active:
-            return ""
+            return isHandledInCurrentSession ? "Captured" : ""
         }
     }
 
     private var statusColor: Color {
-        if isHandledInCurrentSession {
-            return .green
-        }
         switch observation.status {
         case .resolutionRequired, .resolved:
             return .green
         case .pendingReview:
             return .blue
         case .active:
-            return .orange
+            return isHandledInCurrentSession ? .green : .orange
         }
     }
 
@@ -18327,7 +19397,8 @@ private struct FastLaneGalleryMetadata: Equatable {
 
     init(
         propertyName: String,
-        metadataContext: AppState.FastRuntimeCaptureMetadataContext?
+        metadataContext: AppState.FastRuntimeCaptureMetadataContext?,
+        observation: Observation? = nil
     ) {
         self.propertyName = propertyName.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let metadataContext else {
@@ -18347,7 +19418,11 @@ private struct FastLaneGalleryMetadata: Equatable {
         parts.append("Angle \(max(1, metadataContext.angleIndex))")
         self.shotLabel = parts.isEmpty ? "Shot" : parts.joined(separator: " | ")
         self.flaggedNote = metadataContext.isFlagged == true
-            ? (metadataContext.detailNote ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            ? (
+                observation.flatMap {
+                    Observation.inferredCurrentReason(note: $0.currentReason ?? $0.note, statement: $0.statement)
+                } ?? metadataContext.detailNote ?? ""
+            ).trimmingCharacters(in: .whitespacesAndNewlines)
             : ""
     }
 }

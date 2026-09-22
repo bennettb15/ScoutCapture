@@ -388,6 +388,7 @@ struct GuidedChecklistOverlay: View {
     let buildingDisplayNameForOption: (String) -> String
     let refreshToken: UUID
     @ObservedObject var cache: AssetImageCache
+    var compactContextAngle: Bool = false
     @Environment(\.colorScheme) private var colorScheme
     private var theme: ContentView.SheetControlTheme { .forScheme(colorScheme) }
     let onClose: () -> Void
@@ -487,7 +488,8 @@ struct GuidedChecklistOverlay: View {
                                     },
                                     onTapReclassify: {
                                         reclassifyTarget = item
-                                    }
+                                    },
+                                    compactContextAngle: compactContextAngle
                                 )
                             }
                         }
@@ -1255,6 +1257,7 @@ struct GuidedChecklistRow: View {
     let onTapViewCapturedImage: () -> Void
     let onTapRetire: () -> Void
     let onTapReclassify: () -> Void
+    var compactContextAngle: Bool = false
 
     @State private var thumbnail: UIImage? = nil
     @State private var loadedID: String = ""
@@ -1301,6 +1304,11 @@ struct GuidedChecklistRow: View {
 
     private var angleLabel: String {
         "Angle \(max(1, guidedShot.angleIndex ?? 1))"
+    }
+
+    private var primaryContextLabel: String {
+        guard compactContextAngle else { return fullContextLabel }
+        return "\(fullContextLabel) - \(angleLabel)"
     }
 
     private var hasReferenceImage: Bool {
@@ -1472,14 +1480,16 @@ struct GuidedChecklistRow: View {
 
     private var textView: some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text(fullContextLabel)
+            Text(primaryContextLabel)
                 .font(.system(size: 15, weight: .medium))
                 .foregroundColor(.primary)
                 .lineLimit(1)
 
-            Text(angleLabel)
-                .font(.system(size: 12, weight: .medium))
-                .foregroundColor(.white.opacity(0.86))
+            if !compactContextAngle {
+                Text(angleLabel)
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundColor(.white.opacity(0.86))
+            }
 
             Text(statusLabel)
                 .font(.system(size: 12, weight: .medium))
@@ -1661,6 +1671,8 @@ struct ActiveIssuesSheet: View {
     let buildingCodeForOption: (String) -> String
     let buildingDisplayNameForOption: (String) -> String
     let cache: AssetImageCache
+    var compactContextAngle: Bool = false
+    var selectionDisabledIssueIDs: Set<UUID> = []
     let onClose: () -> Void
     let onSelectIssue: (Observation) -> Void
     let onRetakeIssue: (Observation) -> Void
@@ -1757,6 +1769,8 @@ struct ActiveIssuesSheet: View {
                                 hasReferenceImage: referenceImageLocalID(for: observation) != nil,
                                 hasCapturedImage: capturedImageLocalID(for: observation) != nil,
                                 canRetake: canRetakeObservation(observation),
+                                isSelectionDisabled: selectionDisabledIssueIDs.contains(observation.id),
+                                compactContextAngle: compactContextAngle,
                                 onTapRow: {
                                     closeImmediately()
                                     DispatchQueue.main.async {
@@ -2428,6 +2442,8 @@ struct ActiveIssuesSheet: View {
         let hasReferenceImage: Bool
         let hasCapturedImage: Bool
         let canRetake: Bool
+        let isSelectionDisabled: Bool
+        let compactContextAngle: Bool
         let onTapRow: () -> Void
         let onTapRetake: () -> Void
         let onTapViewReferenceImage: () -> Void
@@ -2447,10 +2463,24 @@ struct ActiveIssuesSheet: View {
                 elevation: observation.targetElevation,
                 detailType: observation.detailType
             )
-            return composed.isEmpty ? "Flagged Issue" : composed
+            let base = composed.isEmpty ? "Flagged Issue" : composed
+            guard compactContextAngle, let angleIndex else { return base }
+            return "\(base) - Angle \(max(1, angleIndex))"
         }
 
         private var statusLabel: String {
+            if compactContextAngle {
+                if observation.status == .pendingReview {
+                    return "Pending Review"
+                }
+                if observation.resolvedInSessionID == currentSessionID || canRetake || isSelectionDisabled {
+                    return "Captured"
+                }
+                if observation.status == .resolved {
+                    return "Resolved"
+                }
+                return ""
+            }
             let angleSuffix: String = {
                 guard let angleIndex else { return "" }
                 return " - Angle \(max(1, angleIndex))"
@@ -2501,6 +2531,9 @@ struct ActiveIssuesSheet: View {
             if observation.updatedInSessionID == currentSessionID && hasCurrentSessionCaptureEvent {
                 return .green
             }
+            if compactContextAngle && isSelectionDisabled {
+                return .green
+            }
             return .orange
         }
 
@@ -2526,9 +2559,11 @@ struct ActiveIssuesSheet: View {
                         .foregroundColor(observation.status == .resolved ? .secondary : .primary)
                         .lineLimit(1)
 
-                    Text(statusLabel)
-                        .font(.system(size: 12, weight: .medium))
-                        .foregroundColor(statusColor)
+                    if !statusLabel.isEmpty {
+                        Text(statusLabel)
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundColor(statusColor)
+                    }
 
                     if !normalizedPriority.isEmpty || !normalizedTrade.isEmpty {
                         HStack(spacing: 8) {
@@ -2585,6 +2620,7 @@ struct ActiveIssuesSheet: View {
             .listRowBackground(Color.clear)
             .onTapGesture {
                 guard observation.status == .active || observation.status == .resolutionRequired else { return }
+                guard !isSelectionDisabled else { return }
                 guard mode == .resolutionRequired || !canRetake else { return }
                 onTapRow()
             }
@@ -2613,7 +2649,7 @@ struct ActiveIssuesSheet: View {
                 }
             }
             .swipeActions(edge: .trailing, allowsFullSwipe: false) {
-                if mode == .resolutionRequired {
+                if mode == .resolutionRequired, !isSelectionDisabled {
                     Button {
                         onTapRow()
                     } label: {
