@@ -301,9 +301,9 @@ def is_resolved_in_session(metadata: dict[str, Any], shot: dict[str, Any], issue
         status = (trim(issue.get("issueStatus") or issue.get("status")) or "").lower()
         resolved_at = trim(issue.get("resolvedAt") or issue.get("resolved_at"))
         last_capture = trim(issue.get("lastCaptureSessionId") or issue.get("last_capture_session_id")) or sid
-        return (bool(resolved_at) or status == "resolved") and last_capture.lower() == sid.lower()
+        return (bool(resolved_at) or status in {"resolved", "pending_review"}) and last_capture.lower() == sid.lower()
     status = (trim(shot.get("issueStatus")) or "").lower()
-    return status == "resolved"
+    return status in {"resolved", "pending_review"}
 
 
 def flagged_reason(shot: dict[str, Any], issues: dict[str, dict[str, Any]]) -> str | None:
@@ -342,6 +342,9 @@ def report_shot(
     captured_actor = merge_actor_identity(actor_identity(shot, "captured"), session_actor)
     uploaded_actor = merge_actor_identity(actor_identity(shot, "uploaded"), session_actor)
     shot_actor = merge_actor_identity(actor_identity(shot), captured_actor)
+    raw_issue_status = trim(shot.get("issueStatus") or shot.get("issue_status"))
+    raw_capture_kind = trim(shot.get("captureKind") or shot.get("capture_kind") or shot.get("kind"))
+    raw_first_capture_kind = trim(shot.get("firstCaptureKind") or shot.get("first_capture_kind"))
     return {
         "shot_id": sid_shot,
         "session_id": sid,
@@ -367,6 +370,9 @@ def report_shot(
         "stamped_jpeg_filename": trim(shot.get("stampedFilename")),
         "is_flagged": bool_value(shot.get("isFlagged")),
         "is_resolved_in_session": is_resolved_in_session(metadata, shot, issues),
+        "issue_status": raw_issue_status,
+        "capture_kind": raw_capture_kind,
+        "first_capture_kind": raw_first_capture_kind,
         "flagged_reason": flagged_reason(shot, issues),
         "priority": trim(shot.get("priority")),
         "normalized_priority": normalized_priority(trim(shot.get("priority"))),

@@ -363,15 +363,81 @@ def slot_key(item: dict[str, Any]) -> str:
     )
 
 
+def normalized_token(value: Any) -> str:
+    text = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", trim(value) or "")
+    return text.replace("-", "_").strip().lower()
+
+
+def first_trimmed(item: dict[str, Any], keys: list[str]) -> str | None:
+    for key in keys:
+        value = trim(item.get(key))
+        if value:
+            return value
+    return None
+
+
+def resolved_signal(item: dict[str, Any]) -> bool:
+    if any(
+        boolish(item.get(key))
+        for key in [
+            "is_resolved_in_session",
+            "isResolvedInSession",
+            "resolvedInSession",
+            "resolved_in_session",
+        ]
+    ):
+        return True
+    issue_status = normalized_token(
+        first_trimmed(
+            item,
+            [
+                "issue_status",
+                "issueStatus",
+                "snapshot_issue_status",
+                "snapshotIssueStatus",
+                "status",
+                "operational_status",
+                "operationalStatus",
+            ],
+        )
+    )
+    if issue_status in {"resolved", "pending_review", "pending"}:
+        return True
+    capture_kind = normalized_token(
+        first_trimmed(
+            item,
+            [
+                "capture_kind",
+                "captureKind",
+                "first_capture_kind",
+                "firstCaptureKind",
+                "kind",
+            ],
+        )
+    )
+    if capture_kind == "resolved_capture":
+        return True
+    return bool(
+        first_trimmed(
+            item,
+            [
+                "resolved_issue_id",
+                "resolvedIssueID",
+                "resolvedIssueId",
+            ],
+        )
+    )
+
+
 def visual_state(item: dict[str, Any]) -> str:
-    if boolish(item.get("is_resolved_in_session")):
+    if resolved_signal(item):
         return "resolved"
-    issue_status = (trim(item.get("issue_status")) or "").lower()
-    if issue_status in {"resolved", "pending_review"}:
+    declared = normalized_token(item.get("visual_state") or item.get("visualState"))
+    if declared == "resolved":
         return "resolved"
-    if (trim(item.get("capture_kind")) or "").lower() == "resolved_capture":
-        return "resolved"
-    if boolish(item.get("is_flagged")):
+    if any(boolish(item.get(key)) for key in ["is_flagged", "isFlagged", "flagged"]):
+        return "flagged"
+    if declared == "flagged":
         return "flagged"
     return "none"
 
@@ -828,7 +894,14 @@ def image_size_from_media(media: dict[str, Any] | None) -> tuple[float, float] |
         width_f = float(width)
         height_f = float(height)
     except (TypeError, ValueError):
-        return None
+        prepared_path = trim(media.get("temporary_prepared_path"))
+        if not prepared_path or not pathlib.Path(prepared_path).exists():
+            return None
+        try:
+            with Image.open(prepared_path) as image:
+                width_f, height_f = image.size
+        except Exception:
+            return None
     if width_f <= 0 or height_f <= 0:
         return None
     return width_f, height_f
@@ -1055,7 +1128,26 @@ def compact_entry(entry: dict[str, Any]) -> dict[str, Any]:
         "flagged_reason",
         "priority",
         "normalized_priority",
+        "issue_status",
+        "issueStatus",
+        "snapshot_issue_status",
+        "snapshotIssueStatus",
+        "status",
+        "capture_kind",
+        "captureKind",
+        "first_capture_kind",
+        "firstCaptureKind",
+        "is_flagged",
+        "isFlagged",
+        "is_resolved_in_session",
+        "isResolvedInSession",
+        "resolvedInSession",
+        "resolved_in_session",
+        "resolved_issue_id",
+        "resolvedIssueID",
+        "resolvedIssueId",
         "visual_state",
+        "visualState",
         "media_path",
         "original_filename",
         "suppress_session_label",
@@ -1853,7 +1945,7 @@ def draw_image_slot(c: canvas.Canvas, image_path: str | None, rect: dict[str, fl
     c.saveState()
     c.setFillColor(white)
     c.roundRect(box["x"], box["y"], box["width"], box["height"], 12, stroke=0, fill=1)
-    c.setStrokeColor(black)
+    c.setStrokeColor(color_tuple(border_color) if border_color else black)
     c.setLineWidth(3)
     c.roundRect(box["x"], box["y"], box["width"], box["height"], 12, stroke=1, fill=0)
     c.restoreState()
@@ -2159,7 +2251,8 @@ def draw_photo_page(c: canvas.Canvas, plan: dict[str, Any], page: dict[str, Any]
         draw_text(c, f"{PRIORITY_LABELS[priority or 'medium']} Priority Observations", {"x": 18, "y": PAGE_HEIGHT - 34, "width": PAGE_WIDTH - 36, "height": 16}, "Helvetica-Bold", 11, fill=color_tuple(PRIORITY_COLORS[priority or "medium"]))
     for index, slot in enumerate(page.get("slots") or []):
         entry = slot["entry"]
-        state = entry.get("visual_state") or "none"
+        state = visual_state(entry)
+        entry["visual_state"] = state
         border = None
         if state == "resolved":
             border = RESOLVED_COLOR
@@ -2198,7 +2291,8 @@ def draw_comparison_page(c: canvas.Canvas, plan: dict[str, Any], page: dict[str,
     draw_logo(c, logo_png)
     for index, slot in enumerate(page["slots"]):
         entry = slot["entry"]
-        state = entry.get("visual_state") or "none"
+        state = visual_state(entry)
+        entry["visual_state"] = state
         border = FLAG_COLOR if state == "flagged" else RESOLVED_COLOR if state == "resolved" else None
         image_rect = slot.get("image_rect") or (slot.get("photo_available_rect") if slot.get("placeholder_reason") else None)
         draw_image_slot(c, entry.get("media_path"), image_rect, slot.get("placeholder_reason"), state, border, work_dir, f"{page['number']}-{index}", warnings)

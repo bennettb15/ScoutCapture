@@ -88,9 +88,10 @@ def validation() -> dict:
         "shot_key": "A1",
         "captured_at_utc": "2026-09-22T14:30:00Z",
         "original_filename": "resolved-current.jpg",
-        "is_flagged": False,
-        "is_resolved_in_session": True,
-        "issue_status": "pending_review",
+        "is_flagged": True,
+        "is_resolved_in_session": False,
+        "issueStatus": "pending_review",
+        "captureKind": "resolvedCapture",
         "flagged_reason": "Paint touched up",
         "normalized_priority": "high",
     }
@@ -133,10 +134,20 @@ class ReportRendererResolvedParityTests(unittest.TestCase):
             "resolved",
             renderer.visual_state(
                 {
-                    "issue_status": "pending_review",
+                    "issueStatus": "pending_review",
                     "is_resolved_in_session": False,
-                    "capture_kind": "follow_up_capture",
-                    "is_flagged": False,
+                    "captureKind": "followUpCapture",
+                    "isFlagged": True,
+                }
+            ),
+        )
+        self.assertEqual(
+            "resolved",
+            renderer.visual_state(
+                {
+                    "captureKind": "resolvedCapture",
+                    "isResolvedInSession": "false",
+                    "isFlagged": True,
                 }
             ),
         )
@@ -170,6 +181,142 @@ class ReportRendererResolvedParityTests(unittest.TestCase):
         slots_by_role = {slot["role"]: slot for slot in comparison_page["slots"]}
         self.assertEqual("resolved", slots_by_role["current"]["entry"]["visual_state"])
         self.assertEqual("flagged", slots_by_role["previous"]["entry"]["visual_state"])
+
+    def test_photo_page_draw_recomputes_resolved_border_from_pending_review(self) -> None:
+        calls = []
+        metadata_states = []
+        original_draw_image_slot = renderer.draw_image_slot
+        original_draw_metadata = renderer.draw_metadata
+        original_draw_logo = renderer.draw_logo
+        original_draw_footer = renderer.draw_footer
+        original_draw_text = renderer.draw_text
+        try:
+            renderer.draw_image_slot = lambda _c, _image_path, _rect, _placeholder, state, border, _work_dir, _key, _warnings: calls.append(
+                {"state": state, "border": border}
+            )
+            renderer.draw_metadata = lambda _c, entry, _rect, priority=None: metadata_states.append(
+                {"state": entry.get("visual_state"), "priority": priority}
+            )
+            renderer.draw_logo = lambda *_args, **_kwargs: None
+            renderer.draw_footer = lambda *_args, **_kwargs: None
+            renderer.draw_text = lambda *_args, **_kwargs: None
+            page = {
+                "number": 9,
+                "kind": "priority_photo",
+                "slots": [
+                    {
+                        "entry": {
+                            "caption": "Building 1 | North | Door | A1",
+                            "visual_state": "flagged",
+                            "issueStatus": "pending_review",
+                            "captureKind": "resolvedCapture",
+                            "isFlagged": True,
+                            "flagged_reason": "Paint touched up",
+                        },
+                        "image_rect": {"x": 1, "y": 2, "width": 3, "height": 4},
+                        "caption_rect": {"x": 1, "y": 2, "width": 3, "height": 4},
+                    }
+                ],
+            }
+
+            renderer.draw_photo_page(
+                None,
+                {"session": {"property_address": "123 Green Check Way"}},
+                page,
+                pathlib.Path("."),
+                [],
+                None,
+                priority="high",
+            )
+        finally:
+            renderer.draw_image_slot = original_draw_image_slot
+            renderer.draw_metadata = original_draw_metadata
+            renderer.draw_logo = original_draw_logo
+            renderer.draw_footer = original_draw_footer
+            renderer.draw_text = original_draw_text
+
+        self.assertEqual([{"state": "resolved", "border": renderer.RESOLVED_COLOR}], calls)
+        self.assertEqual([{"state": "resolved", "priority": "high"}], metadata_states)
+
+    def test_comparison_draw_keeps_previous_red_and_current_resolved_green(self) -> None:
+        image_calls = []
+        notes = []
+        original_draw_image_slot = renderer.draw_image_slot
+        original_draw_note = renderer.draw_note
+        original_draw_logo = renderer.draw_logo
+        original_draw_footer = renderer.draw_footer
+        original_draw_text = renderer.draw_text
+        try:
+            renderer.draw_image_slot = lambda _c, _image_path, _rect, _placeholder, state, border, _work_dir, _key, _warnings: image_calls.append(
+                {"state": state, "border": border}
+            )
+            renderer.draw_note = lambda _c, text, _rect, state, **_kwargs: notes.append(
+                {"text": text, "state": state}
+            )
+            renderer.draw_logo = lambda *_args, **_kwargs: None
+            renderer.draw_footer = lambda *_args, **_kwargs: None
+            renderer.draw_text = lambda *_args, **_kwargs: None
+            base_slot = {
+                "image_rect": {"x": 1, "y": 2, "width": 3, "height": 4},
+                "caption_rect": {"x": 1, "y": 2, "width": 120, "height": 40},
+            }
+            page = {
+                "number": 10,
+                "kind": "comparison_photo",
+                "slots": [
+                    {
+                        **base_slot,
+                        "role": "current",
+                        "entry": {
+                            "caption": "Current",
+                            "visual_state": "flagged",
+                            "issueStatus": "pending_review",
+                            "captureKind": "resolvedCapture",
+                            "isFlagged": True,
+                            "flagged_reason": "Paint touched up",
+                        },
+                    },
+                    {
+                        **base_slot,
+                        "role": "previous",
+                        "entry": {
+                            "caption": "Previous",
+                            "visual_state": "flagged",
+                            "flagged_reason": "Paint touched up",
+                        },
+                    },
+                ],
+            }
+
+            renderer.draw_comparison_page(
+                None,
+                {"session": {"property_address": "123 Green Check Way"}},
+                page,
+                pathlib.Path("."),
+                [],
+                None,
+            )
+        finally:
+            renderer.draw_image_slot = original_draw_image_slot
+            renderer.draw_note = original_draw_note
+            renderer.draw_logo = original_draw_logo
+            renderer.draw_footer = original_draw_footer
+            renderer.draw_text = original_draw_text
+
+        self.assertEqual(
+            [
+                {"state": "resolved", "border": renderer.RESOLVED_COLOR},
+                {"state": "flagged", "border": renderer.FLAG_COLOR},
+            ],
+            image_calls,
+        )
+        self.assertEqual(
+            [
+                {"text": "Resolved - Paint touched up", "state": "resolved"},
+                {"text": "Paint touched up", "state": "flagged"},
+            ],
+            notes,
+        )
 
 
 if __name__ == "__main__":

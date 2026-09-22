@@ -154,6 +154,71 @@ def trim(value: Any) -> str | None:
     return text or None
 
 
+def boolish(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+    if isinstance(value, (int, float)):
+        return value != 0
+    return str(value).strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def normalized_token(value: Any) -> str:
+    text = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", trim(value) or "")
+    return text.replace("-", "_").strip().lower()
+
+
+def first_trimmed(item: dict[str, Any], keys: list[str]) -> str | None:
+    for key in keys:
+        value = trim(item.get(key))
+        if value:
+            return value
+    return None
+
+
+def is_current_resolved_for_media(shot: dict[str, Any]) -> bool:
+    if any(
+        boolish(shot.get(key))
+        for key in [
+            "is_resolved_in_session",
+            "isResolvedInSession",
+            "resolvedInSession",
+            "resolved_in_session",
+        ]
+    ):
+        return True
+    issue_status = normalized_token(
+        first_trimmed(
+            shot,
+            [
+                "issue_status",
+                "issueStatus",
+                "snapshot_issue_status",
+                "snapshotIssueStatus",
+                "status",
+            ],
+        )
+    )
+    if issue_status in {"resolved", "pending_review", "pending"}:
+        return True
+    capture_kind = normalized_token(
+        first_trimmed(
+            shot,
+            [
+                "capture_kind",
+                "captureKind",
+                "first_capture_kind",
+                "firstCaptureKind",
+                "kind",
+            ],
+        )
+    )
+    if capture_kind == "resolved_capture":
+        return True
+    return bool(first_trimmed(shot, ["resolved_issue_id", "resolvedIssueID", "resolvedIssueId"]))
+
+
 def safe_int(value: Any) -> int | None:
     if value is None:
         return None
@@ -430,7 +495,7 @@ def current_media_items(validation: dict[str, Any]) -> list[MediaItem]:
                 session_exported_at_utc=session.get("exported_at_utc"),
                 session_ended_at_utc=session.get("ended_at_utc"),
                 is_flagged=bool(shot.get("is_flagged")),
-                is_resolved_in_session=bool(shot.get("is_resolved_in_session")),
+                is_resolved_in_session=is_current_resolved_for_media(shot),
             )
         )
     return result

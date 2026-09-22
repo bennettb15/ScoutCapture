@@ -62,6 +62,24 @@ assert first["prepared_height"] == 480
 assert first["flag_resolved_state_applied"] == "flagged"
 assert first["prepared_media_mime_type"] == "image/jpeg"
 assert first["deterministic_content_hash"] == second["deterministic_content_hash"]
+resolved_items = phase2a.current_media_items(
+    {
+        "inputs": {
+            "session": {},
+            "ordered_shots": [
+                {
+                    "shot_id": "resolved-shot",
+                    "session_id": "fixture-session",
+                    "media": {"bucket": "fixture", "path": "fixture/resolved.jpg"},
+                    "issueStatus": "pending_review",
+                    "captureKind": "resolvedCapture",
+                    "is_flagged": True,
+                }
+            ],
+        }
+    }
+)
+assert resolved_items[0].is_resolved_in_session is True
 assert phase2a.format_local_date("2026-08-24T01:51:00Z") == "Aug 23, 2026"
 stamp_text, stamp_warnings = phase2a.make_stamp_text(
     phase2a.MediaItem(
